@@ -1,0 +1,137 @@
+# Rust Analyzer configuration
+# https://rust-analyzer.github.io/manual.html#configuration
+
+[cargo]
+# Analyze with all features enabled
+features = "all"
+
+# Build scripts and proc-macros
+buildScripts.enable = true
+
+# Target directory to avoid conflicts with cargo build
+# targetDir = true
+
+[check]
+# Use clippy instead of cargo check for on-save diagnostics
+command = "clippy"
+
+# Pass all targets and features to clippy
+allTargets = true
+features = "all"
+
+# Extra arguments for clippy
+extraArgs = ["--", "-W", "clippy::all"]
+
+[diagnostics]
+# Enable all diagnostics
+enable = true
+
+# Experimental diagnostics
+experimental.enable = true
+
+# Disabled diagnostics (if any become too noisy)
+disabled = []
+
+[hover]
+# Show documentation on hover
+documentation.enable = true
+documentation.keywords.enable = true
+
+# Show action links
+actions.enable = true
+
+[inlayHints]
+# Type hints for bindings
+bindingModeHints.enable = true
+
+# Chaining hints (e.g., for iterator chains)
+chainingHints.enable = true
+
+# Closure return type hints
+closureReturnTypeHints.enable = "with_block"
+
+# Discriminant hints for enums
+discriminantHints.enable = "fieldless"
+
+# Expression adjustment hints (e.g., &, *)
+expressionAdjustmentHints.enable = "reborrow"
+
+# Lifetime elision hints
+lifetimeElisionHints.enable = "skip_trivial"
+
+# Max length for inlay hints
+maxLength = 30
+
+# Parameter name hints
+parameterHints.enable = true
+
+# Type hints for closure captures
+closureCaptureHints.enable = true
+
+# Implicit drop hints
+implicitDrops.enable = false
+
+[lens]
+# Code lens for running tests
+enable = true
+
+# Show implementations
+implementations.enable = true
+
+# Show references
+references.adt.enable = true
+references.enumVariant.enable = true
+references.method.enable = true
+references.trait.enable = true
+
+# Run lens
+run.enable = true
+
+[completion]
+# Auto-import on completion
+autoimport.enable = true
+
+# Show call snippets
+callable.snippets = "fill_arguments"
+
+# Postfix completions
+postfix.enable = true
+
+# Add parentheses for function completions
+addSemicolon.enable = true
+
+[procMacro]
+# Enable procedural macro support
+enable = true
+
+# Ignored proc macros (if any cause issues)
+ignored = {}
+
+[rustfmt]
+# Use project rustfmt.toml
+extraArgs = []
+
+[semanticHighlighting]
+# Doc comment syntax highlighting
+doc.comment.inject.enable = true
+
+# Operator semantic highlighting
+operator.enable = true
+operator.specialization.enable = true
+
+# Punctuation highlighting
+punctuation.enable = true
+punctuation.separate.macro.bang = true
+punctuation.specialization.enable = true
+
+# String highlighting
+strings.enable = true
+
+[typing]
+# Auto-close angle brackets
+autoClosingAngleBrackets.enable = true
+
+[workspace]
+# Workspace symbol search
+symbol.search.kind = "all_symbols"
+symbol.search.scope = "workspace"

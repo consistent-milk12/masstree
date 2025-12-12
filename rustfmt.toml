@@ -1,0 +1,12 @@
+# Rustfmt configuration for consistent code formatting
+# https://rust-lang.github.io/rustfmt/
+#
+# Note: Only stable options are used here since we target stable Rust.
+# Most rustfmt options are unstable and require nightly.
+
+edition = "2024"
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Unix"
+use_small_heuristics = "Default"
