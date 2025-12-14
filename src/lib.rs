@@ -1,4 +1,4 @@
-//! # Masstree
+//! # `MassTree`
 //!
 //! A high-performance concurrent key-value store based on a trie of B+trees.
 //!

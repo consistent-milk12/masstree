@@ -27,7 +27,7 @@ pub const MAX_KEY_LENGTH: usize = 256;
 /// # Example
 ///
 /// ```rust
-/// use masstree::key::Key;
+/// use madtree::key::Key;
 ///
 /// let data = b"hello world!";
 /// let mut key = Key::new(data);
@@ -80,7 +80,7 @@ impl<'a> Key<'a> {
     /// # Example
     ///
     /// ```rust
-    /// use masstree::key::Key;
+    /// use madtree::key::Key;
     ///
     /// let key = Key::new(b"test");
     /// assert_eq!(key.len(), 4);

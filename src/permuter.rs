@@ -47,6 +47,7 @@ impl PermuterUtils {
 
         while i < WIDTH {
             let slot: u64 = (WIDTH - 1 - i) as u64;
+
             value |= slot << ((i * 4) + 4);
             i += 1;
         }
@@ -102,8 +103,8 @@ impl PermuterUtils {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use masstree::permuter::Permuter;
+/// ```rust,ignore
+/// use madtree::permuter::Permuter;
 ///
 /// // Default WIDTH=15
 /// let mut p = Permuter::empty();
@@ -117,6 +118,7 @@ impl PermuterUtils {
 /// let slot = p.insert_from_back(0);
 /// assert_eq!(p.size(), 1);
 /// assert_eq!(p.get(0), slot);
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Permuter<const WIDTH: usize = 15> {
     value: u64,
@@ -542,6 +544,7 @@ mod tests {
     #[test]
     fn test_default_is_empty() {
         let p: Permuter<15> = Permuter::default();
+
         assert_eq!(p.size(), 0);
         assert_eq!(p.value(), Permuter::<15>::empty().value());
     }
@@ -581,6 +584,7 @@ mod tests {
     fn test_make_sorted_zero() {
         let p: Permuter<15> = Permuter::make_sorted(0);
         assert_eq!(p.size(), 0);
+
         // back() should return 0 (first slot to allocate)
         assert_eq!(p.back(), 0);
     }
@@ -590,6 +594,7 @@ mod tests {
         let p: Permuter<15> = Permuter::make_sorted(1);
         assert_eq!(p.size(), 1);
         assert_eq!(p.get(0), 0);
+
         // back() should return 1 (next slot to allocate)
         assert_eq!(p.back(), 1);
     }
@@ -602,20 +607,20 @@ mod tests {
         assert_eq!(p.size(), 0);
 
         // Insert at position 0
-        let slot0 = p.insert_from_back(0);
+        let slot0: usize = p.insert_from_back(0);
         assert_eq!(slot0, 0); // First slot allocated is 0
         assert_eq!(p.size(), 1);
         assert_eq!(p.get(0), 0);
 
         // Insert at position 0 again (shifts previous to position 1)
-        let slot1 = p.insert_from_back(0);
+        let slot1: usize = p.insert_from_back(0);
         assert_eq!(slot1, 1); // Second slot allocated is 1
         assert_eq!(p.size(), 2);
         assert_eq!(p.get(0), 1); // New slot at position 0
         assert_eq!(p.get(1), 0); // Old slot shifted to position 1
 
         // Insert at position 1 (between the two)
-        let slot2 = p.insert_from_back(1);
+        let slot2: usize = p.insert_from_back(1);
         assert_eq!(slot2, 2);
         assert_eq!(p.size(), 3);
         assert_eq!(p.get(0), 1);
@@ -628,9 +633,9 @@ mod tests {
         let mut p: Permuter<15> = Permuter::empty();
 
         // Insert at end positions
-        let slot0 = p.insert_from_back(0);
-        let slot1 = p.insert_from_back(1); // Insert at end
-        let slot2 = p.insert_from_back(2); // Insert at end
+        let slot0: usize = p.insert_from_back(0);
+        let slot1: usize = p.insert_from_back(1); // Insert at end
+        let slot2: usize = p.insert_from_back(2); // Insert at end
 
         assert_eq!(p.size(), 3);
         assert_eq!(p.get(0), slot0);
@@ -662,6 +667,7 @@ mod tests {
     fn test_remove_to_back() {
         // Start with a sorted permuter of size 5
         let mut p: Permuter<15> = Permuter::make_sorted(5);
+
         // Positions: 0→0, 1→1, 2→2, 3→3, 4→4
         assert_eq!(p.size(), 5);
 
@@ -764,6 +770,7 @@ mod tests {
 
         assert_eq!(p.get(0), 0);
         assert_eq!(p.get(1), 1);
+
         // Position 2 still has slot 2 (unchanged by fast path)
         assert_eq!(p.get(2), 2);
     }
@@ -789,7 +796,7 @@ mod tests {
     #[test]
     fn test_exchange_same() {
         let mut p: Permuter<15> = Permuter::make_sorted(5);
-        let original = p.value();
+        let original: u64 = p.value();
 
         // Exchange same position (no-op)
         p.exchange(2, 2);
@@ -840,7 +847,7 @@ mod tests {
     #[test]
     fn test_rotate_no_op() {
         let mut p: Permuter<15> = Permuter::make_sorted(5);
-        let original = p.value();
+        let original: u64 = p.value();
 
         // rotate(i, i) is a no-op
         p.rotate(2, 2);
@@ -900,12 +907,13 @@ mod tests {
         assert_eq!(p.size(), 0);
         assert_eq!(p.back(), 0);
 
-        let slot = p.insert_from_back(0);
+        let slot: usize = p.insert_from_back(0);
         assert_eq!(slot, 0);
         assert_eq!(p.size(), 1);
 
         let sorted: Permuter<7> = Permuter::make_sorted(7);
         assert_eq!(sorted.size(), 7);
+
         for i in 0..7 {
             assert_eq!(sorted.get(i), i);
         }
@@ -941,7 +949,7 @@ mod tests {
     #[test]
     fn test_value_accessor() {
         let p: Permuter<15> = Permuter::empty();
-        let v = p.value();
+        let v: u64 = p.value();
 
         // Create another permuter with same value
         let p2: Permuter<15> = Permuter::empty();
@@ -952,7 +960,7 @@ mod tests {
     #[test]
     fn test_clone_and_eq() {
         let p1: Permuter<15> = Permuter::make_sorted(5);
-        let p2 = p1; // Copy
+        let p2: Permuter = p1; // Copy
 
         assert_eq!(p1, p2);
         assert_eq!(p1.value(), p2.value());

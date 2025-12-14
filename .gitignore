@@ -6,6 +6,7 @@ target/
 generated_docs/
 *.md
 !README.md
+!Baseline.md
 *.lua
 *.cpp
 *.c
