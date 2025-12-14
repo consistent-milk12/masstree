@@ -40,9 +40,10 @@ pub enum ModState {
 /// `Arc<V>` allows cheap cloning (refcount) and decouples value
 /// lifetime from node lifetime (EBR handles node, `Arc` handles values).
 /// More details and rationale can be found in README.md
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum LeafValue<V> {
     /// Slot is empty (no key assigned).
+    #[default]
     Empty,
 
     /// Slot contains an Arc-wrapped value.
@@ -62,9 +63,10 @@ pub enum LeafValue<V> {
 ///
 /// # Type Parameter
 /// `V` - The value type stored inline (must be `Copy`)
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum LeafValueIndex<V: Copy> {
     /// Slot is empty (no key assigned).
+    #[default]
     Empty,
 
     /// Slot contains an inline value (copied on read).
@@ -143,6 +145,55 @@ impl<V> LeafValue<V> {
             Self::Layer(ptr) => Some(*ptr),
 
             _ => None,
+        }
+    }
+
+    // ============================================================================
+    //  Probable panicky but ergonomic internal use methods
+    // ============================================================================
+
+    /// Gets a reference to the Arc-wrapped value.
+    ///
+    ///  WARN: Prefer `try_as_value()`. This was added for internal use where the invariant is known.
+    ///
+    /// # Panics
+    /// Panics if ths is not a Value variant.
+    #[inline]
+    #[must_use]
+    #[expect(clippy::expect_used, reason = "Invariant ensured by caller")]
+    pub const fn as_value(&self) -> &Arc<V> {
+        self.try_as_value()
+            .expect("LeafValue::as_value called on non-Value variant")
+    }
+
+    /// Clone the Arc<V> (cheap reference counting increment)
+    ///
+    ///  WARN: Prefer `try_as_value()`. This was added for internal use where the invariant is known.
+    ///
+    /// # Panics
+    /// Panics if ths is not a Value variant.
+    #[inline]
+    #[must_use]
+    #[expect(clippy::expect_used, reason = "Invariant ensured by caller")]
+    pub fn clone_arc(&self) -> Arc<V> {
+        self.try_clone_arc()
+            .expect("LeafValue::as_value called on non-Value variant")
+    }
+
+    /// Get a mutable reference to the Arc-wrapped value.
+    ///
+    ///  WARN: Prefer checking `is_value()` first if using without invariant checks.
+    ///
+    /// # Panics
+    /// Panics if ths is not a Value variant.
+    #[inline]
+    #[must_use]
+    #[expect(clippy::panic, reason = "Invariant ensured by caller")]
+    pub fn as_value_mut(&mut self) -> &mut Arc<V> {
+        match self {
+            Self::Value(arc) => arc,
+
+            _ => panic!("LeafValue::as_value_mut called on non-value variant"),
         }
     }
 }
