@@ -93,6 +93,36 @@ bench:
 build-profile:
     cargo build --profile release-with-debug
 
+# Build the callgrind profiling example (with debug symbols)
+build-callgrind:
+    cargo build --profile release-with-debug --example profile
+
+# Run callgrind profiler (default: key workload)
+# Usage: just callgrind [key|permuter|all]
+callgrind workload="key":
+    @cargo build --profile release-with-debug --example profile
+    valgrind --tool=callgrind ./target/release-with-debug/examples/profile {{workload}}
+    @echo "Output: callgrind.out.*"
+    @echo "Analyze: just callgrind-annotate"
+    @echo "GUI:     just callgrind-view"
+
+# Run callgrind with cache simulation
+callgrind-cache workload="key":
+    @cargo build --profile release-with-debug --example profile
+    valgrind --tool=callgrind --cache-sim=yes --branch-sim=yes ./target/release-with-debug/examples/profile {{workload}}
+
+# Annotate the most recent callgrind output
+callgrind-annotate:
+    @callgrind_annotate $(ls -t callgrind.out.* | head -1) --auto=yes
+
+# Open most recent callgrind output in kcachegrind
+callgrind-view:
+    @kcachegrind $(ls -t callgrind.out.* | head -1)
+
+# Clean callgrind output files
+callgrind-clean:
+    rm -f callgrind.out.*
+
 # === Safety ===
 
 # Run address sanitizer (requires nightly)
