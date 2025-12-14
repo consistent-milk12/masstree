@@ -20,6 +20,4 @@
 //! - Updates: Lock only affected nodes
 //! - Cache-friendly: 8-byte key slices fit in registers
 
-// All lints configured in Cargo.toml [lints] section
-
 pub mod key;
