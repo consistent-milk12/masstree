@@ -81,6 +81,14 @@ impl PermuterUtils {
     }
 }
 
+/// Placeholder for suffix storage.
+/// Full implementation deferred until I get single threaded ops working.
+#[derive(Debug)]
+pub struct SuffixStorage {
+    // Will contain: capacity, used, data array
+    _placeholder: (),
+}
+
 /// A permutation of slot indices for a leaf node.
 ///
 /// Encodes which physical slot holds the key at each logical position.
