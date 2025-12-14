@@ -16,7 +16,7 @@ build-release:
 
 # Run all tests
 test:
-    cargo test
+    cargo test --message-format=short
 
 # Run tests with output
 test-verbose:
@@ -102,3 +102,35 @@ asan:
 # Run thread sanitizer (requires nightly)
 tsan:
     RUSTFLAGS="-Z sanitizer=thread" cargo +nightly test --target x86_64-unknown-linux-gnu
+
+# === Assembly Inspection (requires cargo-show-asm) ===
+
+# List all inspectable symbols in the crate
+asm:
+    @cargo asm --lib || true
+
+# View assembly for a function (use index from `just asm`)
+# Usage: just asm-view 0
+asm-view index:
+    cargo asm --lib --rust {{index}}
+
+# Side-by-side diff of two functions by index
+# Usage: just asm-diff 0 1
+asm-diff idx1 idx2:
+    @mkdir -p /tmp/asm-diff
+    @cargo asm --lib {{idx1}} > /tmp/asm-diff/a.asm 2>&1
+    @cargo asm --lib {{idx2}} > /tmp/asm-diff/b.asm 2>&1
+    @if command -v delta >/dev/null 2>&1; then \
+        delta /tmp/asm-diff/a.asm /tmp/asm-diff/b.asm; \
+    else \
+        diff -y --width=140 /tmp/asm-diff/a.asm /tmp/asm-diff/b.asm || true; \
+    fi
+
+# Analyze function throughput with llvm-mca
+# Usage: just asm-mca 0
+asm-mca index:
+    @if ! command -v llvm-mca >/dev/null 2>&1; then \
+        echo "Error: llvm-mca not found. Install: sudo apt install llvm"; \
+        exit 1; \
+    fi
+    cargo asm --lib {{index}} | llvm-mca -mcpu=native
