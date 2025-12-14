@@ -21,5 +21,6 @@
 //! - Cache-friendly: 8-byte key slices fit in registers
 
 pub mod key;
+pub mod leaf;
 pub mod nodeversion;
 pub mod permuter;
