@@ -5,3 +5,4 @@ target/
 .source_*
 generated_docs/
 *.md
+!README.md

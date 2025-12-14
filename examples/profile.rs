@@ -31,7 +31,7 @@ const ITERATIONS: usize = 10_000;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let workload = args.get(1).map(String::as_str).unwrap_or("key");
+    let workload = args.get(1).map_or("key", String::as_str);
 
     match workload {
         "key" => run_key_workload(),
