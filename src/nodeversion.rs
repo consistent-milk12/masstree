@@ -163,12 +163,14 @@ impl LockGuard<'_> {
     ///     v_ |= P::inserting_bit;
     ///     acquire_fence();
     /// }
+    /// ```
     ///
     /// This ensures subsequent structural modifications cannot be reordered
     /// before the dirty bit becomes visible. As I am still in early stages
     /// and only working on single-threaded cases, the current approach is sufficient.
     /// The concurrent mode will probably require `std::sync::atomic::fence(Ordering::Acquire)`,
     /// after the store.
+    #[inline]
     pub fn mark_insert(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version.value.load(Ordering::Relaxed);
@@ -187,6 +189,7 @@ impl LockGuard<'_> {
     /// # Memory Ordering (After single-threaded works)
     /// Same as `mark_insert()`: The C++ reference uses an acquire fence after
     /// setting the dirty bit. See `mark_insert` documentation for details.
+    #[inline]
     pub fn mark_split(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version.value.load(Ordering::Relaxed);
@@ -201,6 +204,7 @@ impl LockGuard<'_> {
     /// Mark the node as deleted.
     ///
     /// Also sets the splitting bit to bump version on unlock.
+    #[inline]
     pub fn mark_deleted(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version.value.load(Ordering::Relaxed);
@@ -211,6 +215,7 @@ impl LockGuard<'_> {
     }
 
     /// Clear the root bit.
+    #[inline]
     pub fn mark_nonroot(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version.value.load(Ordering::Relaxed);
