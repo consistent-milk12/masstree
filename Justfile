@@ -14,13 +14,33 @@ build:
 build-release:
     cargo build --release
 
-# Run all tests
+# Run all tests (unit + doc + integration)
 test:
+    cargo test
+
+# Run all tests with short output format
+test-short:
     cargo test --message-format=short
 
 # Run tests with output
 test-verbose:
     cargo test -- --nocapture
+
+# Run only unit tests (lib tests)
+test-unit:
+    cargo test --lib
+
+# Run only doc tests
+test-doc:
+    cargo test --doc
+
+# Run only integration tests (tests/ folder)
+test-integration:
+    cargo test --test '*'
+
+# Run a specific test by name
+test-one TEST:
+    cargo test {{TEST}} -- --nocapture
 
 # Run clippy lints
 lint:
@@ -61,9 +81,10 @@ clean:
 #     rustup toolchain install nightly --component miri
 #     rustup run nightly cargo miri setup
 
-# Run tests under Miri to detect undefined behavior
+# Run unit tests under Miri to detect undefined behavior
+# Note: Only runs --lib tests; proptest is too slow under Miri (~100x overhead)
 miri:
-    cargo +nightly miri test
+    cargo +nightly miri test --lib
 
 # Run a specific test under Miri
 miri-test TEST:
@@ -71,15 +92,20 @@ miri-test TEST:
 
 # Run Miri with stricter checks (Stacked Borrows)
 miri-strict:
-    MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test
+    MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test --lib
 
 # Run Miri checking for memory leaks
 miri-leaks:
-    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri test
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri test --lib
 
 # Run Miri with Tree Borrows (experimental, more permissive than Stacked Borrows)
 miri-tree-borrows:
-    MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test
+    MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test --lib
+
+# Run ALL tests under Miri (slow! includes proptest)
+# Note: -Zmiri-disable-isolation required for proptest (uses getcwd)
+miri-all:
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test
 
 # === Benchmarks ===
 
