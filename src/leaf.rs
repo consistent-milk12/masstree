@@ -5,6 +5,7 @@
 //! Leaf nodes store the actual key-value pairs, using a permutation array
 //! for logical ordering without data movement.
 
+use std::ptr as StdPtr;
 use std::sync::Arc;
 
 use crate::{
@@ -391,4 +392,92 @@ pub struct LeafNode<V, const WIDTH: usize = 15> {
 
     /// Parent internode pointer.
     parent: *mut u8, // Will be refined to InternodeNode type
+}
+
+// Compile-time assertion: WIDTH must be 1..=15
+impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
+    const WIDTH_CHECK: () = {
+        assert!(WIDTH > 0, "WIDTH must be at least 1");
+        assert!(WIDTH <= 15, "WIDTH must be at most 15 (u64 permuter limit)");
+    };
+}
+
+impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
+    // ============================================================================
+    //  Constructr Methods
+    // ============================================================================
+
+    /// Create a new leaf node.
+    ///
+    /// The node is initialized as a leaf + root with empty permutation.
+    /// All pointers are set to null.
+    ///
+    /// # Retruns
+    /// A boxed leaf node (heap-allocated).
+    #[must_use]
+    pub fn new() -> Box<Self> {
+        // Trigger compile-time WIDTH check
+        let _: () = Self::WIDTH_CHECK;
+
+        // SAFETY: We're initializing all fields to valid default values
+        Box::new(Self {
+            version: NodeVersion::new(true), // true = is_leaf
+            modstate: ModState::Insert,
+            keylenx: [0; WIDTH],
+            permutation: Permuter::empty(),
+            ikey0: [0; WIDTH],
+            lv: std::array::from_fn(|_| LeafValue::Empty),
+            ksuf: StdPtr::null_mut(),
+            next: StdPtr::null_mut(),
+            prev: StdPtr::null_mut(),
+            parent: StdPtr::null_mut(),
+        })
+    }
+
+    /// Create a new leaf node as the root of a tree/layer.
+    ///
+    /// Same as `new()` but explicitly marks the node as root.
+    #[must_use]
+    pub fn new_root() -> Box<Self> {
+        let node: Box<Self> = Self::new();
+        node.version.mark_root();
+
+        node
+    }
+
+    // ============================================================================
+    //  NodeVersion Accessors
+    // ============================================================================
+
+    /// Get a reference to the node's version.
+    #[inline]
+    pub const fn version(&self) -> &NodeVersion {
+        &self.version
+    }
+
+    /// Get a mutable reference to the nodes version.
+    #[inline]
+    pub const fn version_mut(&mut self) -> &mut NodeVersion {
+        &mut self.version
+    }
+
+    // ============================================================================
+    //  Key Accessors
+    // ============================================================================
+
+    // ============================================================================
+    //  Value Accessors
+    // ============================================================================
+
+    // ============================================================================
+    //  Permutation Accessors
+    // ============================================================================
+
+    // ============================================================================
+    //  Leaf Linking
+    // ============================================================================
+
+    // ============================================================================
+    //
+    // ============================================================================
 }
