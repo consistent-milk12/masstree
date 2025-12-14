@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_new_key() {
-        let key = Key::new(b"hello");
+        let key: Key<'_> = Key::new(b"hello");
 
         assert_eq!(key.len(), 5);
         assert_eq!(key.shift_count(), 0);
@@ -399,7 +399,8 @@ mod tests {
 
     #[test]
     fn test_empty_key() {
-        let key = Key::new(b"");
+        let key: Key<'_> = Key::new(b"");
+
         assert!(key.is_empty());
         assert_eq!(key.ikey(), 0);
         assert_eq!(key.len(), 0);
@@ -407,21 +408,24 @@ mod tests {
 
     #[test]
     fn test_ikey_extraction() {
-        let key = Key::new(b"hello world!");
-        let expected = u64::from_be_bytes(*b"hello wo");
+        let key: Key<'_> = Key::new(b"hello world!");
+        let expected: u64 = u64::from_be_bytes(*b"hello wo");
+
         assert_eq!(key.ikey(), expected);
     }
 
     #[test]
     fn test_short_key_padding() {
-        let key = Key::new(b"hi");
-        let expected = u64::from_be_bytes([b'h', b'i', 0, 0, 0, 0, 0, 0]);
+        let key: Key<'_> = Key::new(b"hi");
+        let expected: u64 = u64::from_be_bytes([b'h', b'i', 0, 0, 0, 0, 0, 0]);
+
         assert_eq!(key.ikey(), expected);
     }
 
     #[test]
     fn test_exact_8_bytes() {
-        let key = Key::new(b"12345678");
+        let key: Key<'_> = Key::new(b"12345678");
+
         assert_eq!(key.ikey(), u64::from_be_bytes(*b"12345678"));
         assert!(!key.has_suffix());
         assert_eq!(key.suffix_len(), 0);
@@ -429,7 +433,8 @@ mod tests {
 
     #[test]
     fn test_has_suffix() {
-        let key = Key::new(b"123456789"); // 9 bytes
+        let key: Key<'_> = Key::new(b"123456789"); // 9 bytes
+
         assert!(key.has_suffix());
         assert_eq!(key.suffix(), b"9");
         assert_eq!(key.suffix_len(), 1);
@@ -437,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_shift() {
-        let mut key = Key::new(b"hello world!!!!!");
+        let mut key: Key<'_> = Key::new(b"hello world!!!!!");
         assert_eq!(key.ikey(), u64::from_be_bytes(*b"hello wo"));
         assert_eq!(key.shift_count(), 0);
 
@@ -449,17 +454,18 @@ mod tests {
 
     #[test]
     fn test_shift_with_short_suffix() {
-        let mut key = Key::new(b"hello world!"); // 12 bytes
+        let mut key: Key<'_> = Key::new(b"hello world!"); // 12 bytes
         key.shift();
+
         // "rld!" padded with zeros
-        let expected = u64::from_be_bytes([b'r', b'l', b'd', b'!', 0, 0, 0, 0]);
+        let expected: u64 = u64::from_be_bytes([b'r', b'l', b'd', b'!', 0, 0, 0, 0]);
         assert_eq!(key.ikey(), expected);
     }
 
     #[test]
     fn test_unshift() {
-        let mut key = Key::new(b"hello world!!!!!");
-        let original_ikey = key.ikey();
+        let mut key: Key<'_> = Key::new(b"hello world!!!!!");
+        let original_ikey: u64 = key.ikey();
 
         key.shift();
         assert_ne!(key.ikey(), original_ikey);
@@ -471,8 +477,8 @@ mod tests {
 
     #[test]
     fn test_unshift_all() {
-        let mut key = Key::new(b"hello world!!!!!!!!!!!!!!");
-        let original_ikey = key.ikey();
+        let mut key: Key<'_> = Key::new(b"hello world!!!!!!!!!!!!!!");
+        let original_ikey: u64 = key.ikey();
 
         key.shift();
         key.shift();
@@ -485,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_current_len() {
-        let mut key = Key::new(b"hello world!"); // 12 bytes
+        let mut key: Key<'_> = Key::new(b"hello world!"); // 12 bytes
         assert_eq!(key.current_len(), 12);
 
         key.shift();
@@ -494,24 +500,27 @@ mod tests {
 
     #[test]
     fn test_compare_equal() {
-        let key = Key::new(b"hello");
-        let stored_ikey = u64::from_be_bytes([b'h', b'e', b'l', b'l', b'o', 0, 0, 0]);
+        let key: Key<'_> = Key::new(b"hello");
+        let stored_ikey: u64 = u64::from_be_bytes([b'h', b'e', b'l', b'l', b'o', 0, 0, 0]);
+
         // Same ikey, same length -> Equal
         assert_eq!(key.compare(stored_ikey, 5), Ordering::Equal);
     }
 
     #[test]
     fn test_compare_less_by_ikey() {
-        let key = Key::new(b"apple");
-        let stored_ikey = u64::from_be_bytes([b'b', b'a', b'n', b'a', b'n', b'a', 0, 0]);
+        let key: Key<'_> = Key::new(b"apple");
+        let stored_ikey: u64 = u64::from_be_bytes([b'b', b'a', b'n', b'a', b'n', b'a', 0, 0]);
+
         // ikey comparison: "apple" < "banana"
         assert_eq!(key.compare(stored_ikey, 6), Ordering::Less);
     }
 
     #[test]
     fn test_compare_greater_by_ikey() {
-        let key = Key::new(b"zebra");
-        let stored_ikey = u64::from_be_bytes([b'a', b'p', b'p', b'l', b'e', 0, 0, 0]);
+        let key: Key<'_> = Key::new(b"zebra");
+        let stored_ikey: u64 = u64::from_be_bytes([b'a', b'p', b'p', b'l', b'e', 0, 0, 0]);
+
         // ikey comparison: "zebra" > "apple"
         assert_eq!(key.compare(stored_ikey, 5), Ordering::Greater);
     }
@@ -519,8 +528,8 @@ mod tests {
     #[test]
     fn test_compare_by_length() {
         // Same ikey, different lengths
-        let key = Key::new(b"hello");
-        let stored_ikey = u64::from_be_bytes([b'h', b'e', b'l', b'l', b'o', 0, 0, 0]);
+        let key: Key<'_> = Key::new(b"hello");
+        let stored_ikey: u64 = u64::from_be_bytes([b'h', b'e', b'l', b'l', b'o', 0, 0, 0]);
 
         // Our key (5 bytes) vs stored key (3 bytes) -> Greater
         assert_eq!(key.compare(stored_ikey, 3), Ordering::Greater);
@@ -532,7 +541,7 @@ mod tests {
     #[test]
     fn test_compare_with_suffix() {
         // Key with suffix (> 8 bytes)
-        let key = Key::new(b"hello world!"); // 12 bytes
+        let key: Key<'_> = Key::new(b"hello world!"); // 12 bytes
         let stored_ikey = u64::from_be_bytes(*b"hello wo");
 
         // Our key has suffix, stored key has no suffix (length 8) -> Greater
@@ -546,7 +555,8 @@ mod tests {
     #[test]
     fn test_from_ikey() {
         let ikey = u64::from_be_bytes(*b"test\0\0\0\0");
-        let key = Key::from_ikey(ikey);
+        let key: Key<'_> = Key::from_ikey(ikey);
+
         assert_eq!(key.ikey(), ikey);
         assert_eq!(key.suffix_start(), 4);
     }
@@ -554,9 +564,9 @@ mod tests {
     #[test]
     fn test_lexicographic_ordering() {
         // Verify that u64 comparison equals lexicographic comparison
-        let key_a = Key::new(b"aaa");
-        let key_b = Key::new(b"aab");
-        let key_c = Key::new(b"baa");
+        let key_a: Key<'_> = Key::new(b"aaa");
+        let key_b: Key<'_> = Key::new(b"aab");
+        let key_c: Key<'_> = Key::new(b"baa");
 
         assert!(key_a.ikey() < key_b.ikey());
         assert!(key_b.ikey() < key_c.ikey());
@@ -564,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_suffix_after_multiple_shifts() {
-        let mut key = Key::new(b"0123456789ABCDEF01234567"); // 24 bytes
+        let mut key: Key<'_> = Key::new(b"0123456789ABCDEF01234567"); // 24 bytes
 
         assert!(key.has_suffix());
         assert_eq!(key.suffix_len(), 16);
@@ -581,15 +591,16 @@ mod tests {
     #[test]
     fn test_max_key_length() {
         // Exactly at the limit should succeed
-        let max_key = vec![b'x'; MAX_KEY_LENGTH];
-        let key = Key::new(&max_key);
+        let max_key: Vec<u8> = vec![b'x'; MAX_KEY_LENGTH];
+        let key: Key<'_> = Key::new(&max_key);
+
         assert_eq!(key.len(), MAX_KEY_LENGTH);
     }
 
     #[test]
     #[should_panic(expected = "key length 257 exceeds maximum 256")]
     fn test_key_length_overflow() {
-        let oversized = vec![b'x'; MAX_KEY_LENGTH + 1];
+        let oversized: Vec<u8> = vec![b'x'; MAX_KEY_LENGTH + 1];
 
         let _ = Key::new(&oversized);
     }
