@@ -100,3 +100,7 @@ harness = false
 [[bench]]
 name = "permuter"
 harness = false
+
+[[bench]]
+name = "nodeversion"
+harness = false

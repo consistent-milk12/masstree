@@ -440,6 +440,13 @@ impl Clone for NodeVersion {
     }
 }
 
+impl Default for NodeVersion {
+    /// Creates a new leaf node version.
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,7 +532,7 @@ mod tests {
         let stable_before: u32 = v.stable();
 
         {
-            let mut guard = v.lock();
+            let mut guard: LockGuard<'_> = v.lock();
             guard.mark_split();
 
             assert!(v.is_splitting());
