@@ -125,7 +125,7 @@ impl<V> LeafValue<V> {
         }
     }
 
-    /// Try to get the layer pinter, returning None if not a Layer variant.
+    /// Try to get the layer pointer, returning None if not a Layer variant.
     #[inline]
     #[must_use]
     pub const fn try_as_layer(&self) -> Option<*mut u8> {
@@ -139,6 +139,21 @@ impl<V> LeafValue<V> {
     // ============================================================================
     //  Probable panicky but ergonomic internal use methods
     // ============================================================================
+
+    /// Get the layer pointer.
+    ///
+    /// WARN: Prefer `try_as_layer()`. This method is
+    /// provided for internal use where the variant is known.
+    ///
+    /// # Panics
+    /// Panics if this is not a Layer variant.
+    #[inline]
+    #[must_use]
+    #[expect(clippy::expect_used, reason = "Invariant ensured by caller")]
+    pub const fn as_layer(&self) -> *mut u8 {
+        self.try_as_layer()
+            .expect("LeafValue::as_layer called on non-Layer variant")
+    }
 
     /// Gets a reference to the Arc-wrapped value.
     ///
@@ -175,7 +190,6 @@ impl<V> LeafValue<V> {
     /// # Panics
     /// Panics if ths is not a Value variant.
     #[inline]
-    #[must_use]
     #[expect(clippy::panic, reason = "Invariant ensured by caller")]
     pub fn as_value_mut(&mut self) -> &mut Arc<V> {
         match self {
@@ -338,7 +352,7 @@ impl<V: Copy> LeafValueIndex<V> {
 ///
 /// # Memory Layout
 /// The struct uses `#[repr(C)]` for predictable layout and `align(64)` for
-/// cache-line alignment. For WIDTH=15 with V=u64, total size is ~320 bytes.
+/// cache-line alignment. For WIDTH=15 with V=u64, total size is ~448 bytes (7 cache lines).
 #[repr(C, align(64))]
 #[derive(Debug)]
 pub struct LeafNode<V, const WIDTH: usize = 15> {
