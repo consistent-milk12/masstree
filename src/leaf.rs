@@ -338,7 +338,7 @@ impl<V: Copy> LeafValueIndex<V> {
 /// A leaf node in the [`MadTree`].
 ///
 /// Stores up to WIDTH key-value pairs, with keys sorted via a permutation array.
-/// Leaves are linke for efficient range scans.
+/// Leaves are linked for efficient range scans.
 ///
 /// # Type Params
 /// * `V` - The value type stored in the tree
@@ -404,7 +404,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
 
 impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     // ============================================================================
-    //  Constructr Methods
+    //  Constructor Methods
     // ============================================================================
 
     /// Create a new leaf node.
@@ -412,7 +412,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     /// The node is initialized as a leaf + root with empty permutation.
     /// All pointers are set to null.
     ///
-    /// # Retruns
+    /// # Returns
     /// A boxed leaf node (heap-allocated).
     #[must_use]
     pub fn new() -> Box<Self> {
@@ -547,7 +547,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     /// Get a reference to the value at the given physical slot.
     ///
     /// # Panics
-    /// Panics in debug mod if `slot >= WIDTH`.
+    /// Panics in debug mode if `slot >= WIDTH`.
     #[inline]
     #[expect(
         clippy::indexing_slicing,
@@ -600,6 +600,22 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     // ============================================================================
     //  Leaf Linking
     // ============================================================================
+
+    // NOTE: The next pointer uses LSB tagging (mark bit during splits).
+    // We use `ptr::map_addr` (stable in Rust 1.84+) to preserve pointer provenance
+    // when manipulating the address. This is important for Miri and strict provenance.
+    // See: https://doc.rust-lang.org/std/ptr/index.html#provenance
+
+    /// Get the next leaf pointer, masking the mark bit.
+    ///
+    /// The LSB of `next` is used as a mark during splits. This function
+    /// returns the actual pointer with the mark bit cleared.
+    #[inline]
+    #[must_use]
+    pub fn safe_next(&self) -> *mut Self {
+        // Use map_addr to preserve provenance while clearing the mark bit
+        self.next.map_addr(|addr: usize| addr & !1)
+    }
 
     // ============================================================================
     //  Parent Accessors
