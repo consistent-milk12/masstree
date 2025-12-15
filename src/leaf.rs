@@ -784,10 +784,10 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     /// Assign an already-Arc-wrapped value (for efficiency when Arc is pre-allocated).
     ///
     /// # Parameters
-    /// * `slot` - Physical slot index
-    /// * `ikey` - 8-byte key (big-endian)
-    /// * `key_len` - Actual key length (0-8)
-    /// * `arc_value` - The Arc-wrapped value to store
+    /// - `slot`: Physical slot index
+    /// - `ikey`: 8-byte key (big-endian)
+    /// - `key_len`: Actual key length (0-8)
+    /// - `value`: The Arc-wrapped value to store
     pub fn assign_arc(&mut self, slot: usize, ikey: u64, key_len: u8, arc_value: Arc<V>) {
         debug_assert!(
             key_len <= 8,
@@ -831,13 +831,20 @@ mod tests {
 
     #[test]
     fn test_leaf_value_layer() {
-        let ptr: *mut u8 = 0xDEAD_BEEF as *mut u8;
+        //  FIXED: Use a real allocation to get a pointer with valid provenance
+        let boxed: Box<u8> = Box::new(0xBE);
+        let ptr: *mut u8 = Box::into_raw(boxed);
+
         let lv: LeafValue<u64> = LeafValue::Layer(ptr);
 
         assert!(!lv.is_empty());
         assert!(!lv.is_value());
         assert!(lv.is_layer());
         assert_eq!(lv.as_layer(), ptr);
+
+        // Clean up the allocation
+        //  SAFETY: ptr came from Box::into_raw above
+        unsafe { drop(Box::from_raw(ptr)) };
     }
 
     #[test]
