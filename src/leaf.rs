@@ -335,7 +335,7 @@ impl<V: Copy> LeafValueIndex<V> {
     }
 }
 
-/// A leaf node in the [`MadTree`].
+/// A leaf node in the [`MassTree`].
 ///
 /// Stores up to WIDTH key-value pairs, with keys sorted via a permutation array.
 /// Leaves are linked for efficient range scans.
@@ -704,13 +704,98 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     //  Parent Accessors
     // ============================================================================
 
+    /// Get the parent pointer.
+    #[inline]
+    #[must_use]
+    pub const fn parent(&self) -> *mut u8 {
+        self.parent
+    }
+
+    /// Set the parent pointer.
+    #[inline]
+    pub const fn set_parent(&mut self, parent: *mut u8) {
+        self.parent = parent;
+    }
+
     // ============================================================================
     //  ModState Accessors
     // ============================================================================
 
+    /// Get the modification state.
+    #[inline]
+    #[must_use]
+    pub const fn modstate(&self) -> ModState {
+        self.modstate
+    }
+
+    /// Set the modification state.
+    #[inline]
+    pub const fn set_modstate(&mut self, state: ModState) {
+        self.modstate = state;
+    }
+
     // ============================================================================
     //  Slot Assignment
     // ============================================================================
+
+    /// Assign a key-value pair to a physical slot.
+    ///
+    /// This sets the ikey, keylenx, and value for the slot. It does not update
+    /// the permutation, the caller must do that seperately.
+    ///
+    /// # Parameters
+    /// - `slot`: Physical slot index
+    /// - `ikey`: 8-byte key (big-endian)
+    /// - `key_len`: Actual key length (0-8)
+    /// - `value`: The value to store
+    ///
+    /// # Panics
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter, valid by construction"
+    )]
+    pub fn assign(&mut self, slot: usize, ikey: u64, keylenx: u8, value: LeafValue<V>) {
+        debug_assert!(slot < WIDTH, "assign: slot out of bounds");
+
+        self.ikey0[slot] = ikey;
+        self.keylenx[slot] = keylenx;
+        self.leaf_values[slot] = value;
+    }
+
+    /// Assign a simple value (no suffix, no layer).
+    ///
+    /// The value is wrapped in `Arc::new()` for the default mode.
+    ///
+    /// # Parameters
+    /// - `slot`: Physical slot index
+    /// - `ikey`: 8-byte key (big-endian)
+    /// - `key_len`: Actual key length (0-8)
+    /// - `value`: The value to store (will be wrapped in Arc)
+    pub fn assign_value(&mut self, slot: usize, ikey: u64, key_len: u8, value: V) {
+        debug_assert!(
+            key_len <= 8,
+            "assign_value: key_len must be 0-8 for inline keys"
+        );
+
+        self.assign(slot, ikey, key_len, LeafValue::Value(Arc::new(value)));
+    }
+
+    /// Assign an already-Arc-wrapped value (for efficiency when Arc is pre-allocated).
+    ///
+    /// # Parameters
+    /// * `slot` - Physical slot index
+    /// * `ikey` - 8-byte key (big-endian)
+    /// * `key_len` - Actual key length (0-8)
+    /// * `arc_value` - The Arc-wrapped value to store
+    pub fn assign_arc(&mut self, slot: usize, ikey: u64, key_len: u8, arc_value: Arc<V>) {
+        debug_assert!(
+            key_len <= 8,
+            "assign_arc: key_len must be 0-8 for inline keys"
+        );
+
+        self.assign(slot, ikey, key_len, LeafValue::Value(arc_value));
+    }
 
     // ============================================================================
     //  Invariant Checker
