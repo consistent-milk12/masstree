@@ -617,6 +617,53 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         self.next.map_addr(|addr: usize| addr & !1)
     }
 
+    /// Get the raw next pointer (including mark bit).
+    #[inline]
+    #[must_use]
+    pub const fn next_raw(&self) -> *mut Self {
+        self.next
+    }
+
+    /// Check if the next pointer is marked (split in progress).
+    #[inline]
+    #[must_use]
+    pub fn next_is_marked(&self) -> bool {
+        // addr() extracts address without exposing provenance
+        (self.next.addr() & 1) != 0
+    }
+
+    /// Set the next leaf pointer.
+    #[inline]
+    pub const fn set_next(&mut self, next: *mut Self) {
+        self.next = next;
+    }
+
+    /// Mark the next pointer (during split).
+    #[inline]
+    pub fn mark_next(&mut self) {
+        // Use map_addr to preserve provenance while setting the mark bit
+        self.next = self.next.map_addr(|addr: usize| addr | 1);
+    }
+
+    /// Unmark the next pointer.
+    #[inline]
+    pub fn unmark_next(&mut self) {
+        self.next = self.safe_next();
+    }
+
+    /// Get the previous leaf pointer.
+    #[inline]
+    #[must_use]
+    pub const fn prev(&self) -> *mut Self {
+        self.prev
+    }
+
+    /// Set the previous leaf pointer.
+    #[inline]
+    pub const fn set_prev(&mut self, prev: *mut Self) {
+        self.prev = prev;
+    }
+
     // ============================================================================
     //  Parent Accessors
     // ============================================================================
