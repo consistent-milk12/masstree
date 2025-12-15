@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -10,7 +10,15 @@ repository = "https://github.com/consistent-milk12/masstree"
 keywords = ["data-structures", "concurrent", "trie", "btree", "key-value"]
 categories = ["data-structures", "concurrency", "database-implementations"]
 readme = "README.md"
-include = ["src/**/*", "benches/**/*", "tests/**/*", "examples/**/*", "Cargo.toml", "LICENSE", "README.md"]
+include = [
+	"src/**/*",
+	"benches/**/*",
+	"tests/**/*",
+	"examples/**/*",
+	"Cargo.toml",
+	"LICENSE",
+	"README.md",
+]
 
 [dependencies]
 crossbeam-epoch = "0.9.18"
