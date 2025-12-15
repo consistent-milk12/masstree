@@ -274,6 +274,65 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         self.value = (self.value & !SIZE_MASK) | (n as u64);
     }
 
+    /// Set the slot at a given position.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - Position index (0..WIDTH)
+    /// * `slot` - Slot value to store (0..WIDTH)
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if position or slot is out of range.
+    #[inline]
+    pub fn set(&mut self, i: usize, slot: usize) {
+        debug_assert!(i < WIDTH, "set: position {i} >= WIDTH {WIDTH}");
+        debug_assert!(slot < WIDTH, "set: slot {slot} >= WIDTH {WIDTH}");
+
+        let shift: usize = (i + 1) * 4;
+        let mask: u64 = 0xFu64 << shift;
+        self.value = (self.value & !mask) | ((slot as u64) << shift);
+    }
+
+    /// Swap two slots in the free region (positions >= size).
+    ///
+    /// Used to skip slot 0 when it can't be reused due to `ikey_bound` constraints.
+    /// The free region starts at position `size()` and extends to `WIDTH - 1`.
+    ///
+    /// # Arguments
+    ///
+    /// * `pos_i` - First position to swap (must be >= size)
+    /// * `pos_j` - Second position to swap (must be >= size)
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if positions are not in the free region.
+    pub fn swap_free_slots(&mut self, pos_i: usize, pos_j: usize) {
+        let size: usize = self.size();
+
+        debug_assert!(
+            pos_i >= size,
+            "swap_free_slots: pos_i ({pos_i}) must be >= size ({size})"
+        );
+        debug_assert!(
+            pos_j >= size,
+            "swap_free_slots: pos_j ({pos_j}) must be >= size ({size})"
+        );
+        debug_assert!(pos_i < WIDTH, "swap_free_slots: pos_i out of range");
+        debug_assert!(pos_j < WIDTH, "swap_free_slots: pos_j out of range");
+
+        if pos_i == pos_j {
+            return; // Nothing to swap
+        }
+
+        let slot_i: usize = self.get(pos_i);
+        let slot_j: usize = self.get(pos_j);
+
+        // Swap by setting each position to the other's value
+        self.set(pos_i, slot_j);
+        self.set(pos_j, slot_i);
+    }
+
     /// Allocate a slot from the back and insert it at position `i`.
     ///
     /// Returns the allocated slot index.
