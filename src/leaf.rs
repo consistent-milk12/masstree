@@ -35,6 +35,213 @@ pub enum ModState {
     DeletedLayer = 2,
 }
 
+// ============================================================================
+//  Split Types
+// ============================================================================
+
+/// Result of calculating a split point.
+///
+/// Contains the logical position where to split and the key that will
+/// become the first key of the new (right) leaf.
+#[derive(Debug, Clone, Copy)]
+pub struct SplitPoint {
+    /// Logical position where to split (in post-insert coordinates).
+    /// Entries from `pos` to end (in post-insert order) go to new leaf.
+    pub pos: usize,
+
+    /// The ikey that will be the first key of the new (right) leaf.
+    pub split_ikey: u64,
+}
+
+/// Which leaf to insert into after a split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertTarget {
+    /// Insert into the original (left) leaf.
+    Left,
+
+    /// Insert into the new (right) leaf.
+    Right,
+}
+
+/// Result of a leaf split operation.
+///
+/// Contains the new leaf and information about where to insert.
+#[derive(Debug)]
+pub struct LeafSplitResult<V, const WIDTH: usize = 15> {
+    /// The new leaf (right sibling).
+    pub new_leaf: Box<LeafNode<V, WIDTH>>,
+
+    /// The split key (first key of new leaf).
+    pub split_ikey: u64,
+
+    /// Which leaf the new key should go into.
+    pub insert_into: InsertTarget,
+}
+
+// ============================================================================
+//  Split Point Calculation Functions
+// ============================================================================
+
+/// Get the ikey at logical position `i` after the new key is inserted.
+///
+/// This is critical for correct split point adjustment: we must consider
+/// the post-insert key stream, not just existing keys.
+///
+/// # Arguments
+///
+/// * `leaf` - The leaf being split
+/// * `i` - Logical position in post-insert order
+/// * `insert_pos` - Where the new key will be inserted
+/// * `insert_ikey` - The ikey of the new key
+fn ikey_after_insert<V, const WIDTH: usize>(
+    leaf: &LeafNode<V, WIDTH>,
+    i: usize,
+    insert_pos: usize,
+    insert_ikey: u64,
+) -> u64 {
+    use std::cmp::Ordering;
+
+    let perm = leaf.permutation();
+
+    match i.cmp(&insert_pos) {
+        Ordering::Less => {
+            // Before insert point: use existing key at position i
+            leaf.ikey(perm.get(i))
+        }
+
+        Ordering::Equal => {
+            // At insert point: this is the new key
+            insert_ikey
+        }
+
+        Ordering::Greater => {
+            // After insert point: shifted by 1, so use position i-1
+            leaf.ikey(perm.get(i - 1))
+        }
+    }
+}
+
+/// Adjust split position to keep equal ikey0 values together.
+///
+/// Uses post-insert key stream to correctly handle the case where the
+/// inserted key affects which keys should stay together.
+///
+/// Returns None if all entries have the same ikey (layer case).
+fn adjust_split_for_equal_ikeys_post_insert<V, const WIDTH: usize>(
+    leaf: &LeafNode<V, WIDTH>,
+    mut pos: usize,
+    insert_pos: usize,
+    insert_ikey: u64,
+    post_insert_size: usize,
+) -> Option<usize> {
+    if post_insert_size <= 1 {
+        return Some(pos);
+    }
+
+    // Get ikey at current split position (post-insert)
+    let split_ikey: u64 = ikey_after_insert(leaf, pos, insert_pos, insert_ikey);
+
+    // Move left while previous entry has same ikey
+    while pos > 0 {
+        let prev_ikey: u64 = ikey_after_insert(leaf, pos - 1, insert_pos, insert_ikey);
+
+        if prev_ikey != split_ikey {
+            break;
+        }
+
+        pos -= 1;
+    }
+
+    // If we moved to position 0, all entries might have same ikey
+    // Try moving right instead
+    if pos == 0 {
+        let first_ikey: u64 = ikey_after_insert(leaf, 0, insert_pos, insert_ikey);
+        pos = 1;
+
+        while pos < post_insert_size {
+            let curr_ikey: u64 = ikey_after_insert(leaf, pos, insert_pos, insert_ikey);
+
+            if curr_ikey != first_ikey {
+                break;
+            }
+
+            pos += 1;
+        }
+
+        // If we reached the end, all entries have same ikey
+        if pos >= post_insert_size {
+            return None; // Layer case - can't split
+        }
+    }
+
+    Some(pos)
+}
+
+/// Calculate the split point for a leaf node.
+///
+/// Returns the logical position where to split. Entries from `pos` to `size`
+/// (in post-insert coordinates) will move to the new leaf.
+///
+/// # Arguments
+///
+/// * `leaf` - The leaf node to split
+/// * `insert_pos` - Where the new key would be inserted
+/// * `insert_ikey` - The ikey of the new key
+///
+/// # Returns
+///
+/// `SplitPoint` with position and split key, or None if split is not possible
+/// (e.g., all entries have same ikey - would need layer instead).
+pub fn calculate_split_point<V, const WIDTH: usize>(
+    leaf: &LeafNode<V, WIDTH>,
+    insert_pos: usize,
+    insert_ikey: u64,
+) -> Option<SplitPoint> {
+    let perm: Permuter<WIDTH> = leaf.permutation();
+    let size: usize = perm.size();
+
+    if size == 0 {
+        return None; // Can't split empty leaf
+    }
+
+    // Post-insert size is size + 1
+    let post_insert_size: usize = size + 1;
+
+    // Default: split in the middle (of post-insert size)
+    let mut split_pos: usize = post_insert_size.div_ceil(2);
+
+    // Sequential optimization heuristics
+    let is_rightmost: bool = leaf.safe_next().is_null();
+    let is_leftmost: bool = leaf.prev().is_null();
+    let inserting_at_end: bool = insert_pos >= size;
+    let inserting_at_start: bool = insert_pos == 0;
+
+    if is_rightmost && inserting_at_end {
+        // Right-sequential: keep left nearly full
+        split_pos = post_insert_size - 1;
+    } else if is_leftmost && inserting_at_start {
+        // Left-sequential: keep right nearly full
+        split_pos = 1;
+    }
+
+    // Adjust to keep equal ikey0 values together (using post-insert keys)
+    split_pos = adjust_split_for_equal_ikeys_post_insert(
+        leaf,
+        split_pos,
+        insert_pos,
+        insert_ikey,
+        post_insert_size,
+    )?;
+
+    // Get the split key (first key of right half, in post-insert order)
+    let split_ikey = ikey_after_insert(leaf, split_pos, insert_pos, insert_ikey);
+
+    Some(SplitPoint {
+        pos: split_pos,
+        split_ikey,
+    })
+}
+
 /// Value stored in a leaf slot (default mode with `Arc<V>`).
 ///
 /// Each slot can contain either an Arc-wrapped value or a pointer to a next-layer
@@ -400,6 +607,7 @@ pub struct LeafNode<V, const WIDTH: usize = 15> {
 impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     const WIDTH_CHECK: () = {
         assert!(WIDTH > 0, "WIDTH must be at least 1");
+
         assert!(WIDTH <= 15, "WIDTH must be at most 15 (u64 permuter limit)");
     };
 }
@@ -799,6 +1007,202 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         self.assign(slot, ikey, key_len, LeafValue::Value(arc_value));
     }
 
+    /// Check if slot 0 can be reused for a new key.
+    ///
+    /// Slot 0 stores the `ikey_bound` for B-link navigation.
+    /// **Correct Rule** (matching C++ reference):
+    /// - `prev` is null (no predecessor leaf), **OR**
+    /// - New ikey matches current `ikey_bound` (slot 0's ikey)
+    ///
+    /// # Arguments
+    ///
+    /// * `new_ikey` - The ikey of the key to insert
+    ///
+    /// # Returns
+    ///
+    /// `true` if slot 0 can be reused, `false` otherwise.
+    #[inline]
+    #[must_use]
+    pub const fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
+        // Rule 1: No predecessor leaf means slot 0 is always available
+        if self.prev().is_null() {
+            return true;
+        }
+
+        // Rule 2: Same ikey as current ikey_bound (slot 0) is safe
+        self.ikey0[0] == new_ikey
+    }
+
+    /// Swap a value at a slot, returning the old value.
+    ///
+    /// Used when updating an existing key.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index (0..WIDTH)
+    /// * `new_value` - The new Arc-wrapped value to store
+    ///
+    /// # Returns
+    ///
+    /// The previous value at the slot, or None if slot was empty/layer.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if slot >= WIDTH.
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
+    pub fn swap_value(&mut self, slot: usize, new_value: Arc<V>) -> Option<Arc<V>> {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+
+        // Plain field access with StdMem::replace
+        let old_value: LeafValue<V> =
+            StdMem::replace(&mut self.leaf_values[slot], LeafValue::Value(new_value));
+
+        match old_value {
+            LeafValue::Value(arc) => Some(arc),
+
+            LeafValue::Layer(_) | LeafValue::Empty => None,
+        }
+    }
+
+    // ============================================================================
+    //  Split Operations
+    // ============================================================================
+
+    /// Split this leaf, moving upper half to a new leaf.
+    ///
+    /// **Important:** The new leaf is returned in a Box. The caller
+    /// (`MassTree`) must store it in the arena to ensure pointer stability,
+    /// then link the leaves.
+    ///
+    /// After this operation:
+    /// - `self` contains entries from position 0 to split_pos-1
+    /// - returned leaf contains entries from `split_pos` to size-1
+    /// - Leaf chain pointers are NOT updated here (caller must do it after arena allocation)
+    ///
+    /// # Arguments
+    ///
+    /// * `split_pos` - Logical position where to split (in pre-insert coordinates)
+    ///
+    /// # Returns
+    ///
+    /// A new leaf containing the upper half, and the split key.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `split_pos` is 0 or >= size.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Indices from permuter, valid by construction"
+    )]
+    pub fn split_into(&mut self, split_pos: usize) -> LeafSplitResult<V, WIDTH> {
+        let mut new_leaf: Box<Self> = Self::new();
+        let old_perm: Permuter<WIDTH> = self.permutation();
+        let old_size: usize = old_perm.size();
+
+        debug_assert!(
+            split_pos > 0 && split_pos < old_size,
+            "invalid split_pos {split_pos} for size {old_size}"
+        );
+
+        // Copy entries from split_pos to end into new leaf
+        let entries_to_move: usize = old_size - split_pos;
+
+        for i in 0..entries_to_move {
+            let old_logical_pos: usize = split_pos + i;
+            let old_slot: usize = old_perm.get(old_logical_pos);
+
+            // Copy key metadata (plain field access, no atomics)
+            let ikey: u64 = self.ikey(old_slot);
+            let keylenx: u8 = self.keylenx(old_slot);
+
+            // Allocate slot in new leaf (using natural order for simplicity)
+            let new_slot: usize = i;
+
+            new_leaf.ikey0[new_slot] = ikey;
+            new_leaf.keylenx[new_slot] = keylenx;
+
+            // Move value (take ownership, leave Empty behind)
+            let old_value: LeafValue<V> =
+                StdMem::replace(&mut self.leaf_values[old_slot], LeafValue::Empty);
+            new_leaf.leaf_values[new_slot] = old_value;
+        }
+
+        // Build new leaf's permutation (sorted order, size = entries_to_move)
+        let new_perm: Permuter<WIDTH> = Permuter::make_sorted(entries_to_move);
+        new_leaf.set_permutation(new_perm);
+
+        // Update old leaf's permutation (just reduce size)
+        let mut old_perm_updated: Permuter<WIDTH> = old_perm;
+        old_perm_updated.set_size(split_pos);
+        self.set_permutation(old_perm_updated);
+
+        // Get split key (first key of new leaf)
+        let split_ikey = new_leaf.ikey(new_perm.get(0));
+
+        // Note: Leaf chain linking is done by the caller after arena allocation
+        // to ensure the pointer is stable.
+
+        LeafSplitResult {
+            new_leaf,
+            split_ikey,
+            insert_into: InsertTarget::Left, // Caller determines based on insert_pos
+        }
+    }
+
+    /// Move ALL entries from this leaf to a new right leaf.
+    ///
+    /// This is used for the left-sequential optimization edge case where
+    /// `split_pos == 0` in post-insert coordinates, meaning all existing entries
+    /// should go to the right leaf and the new key (being inserted at position 0)
+    /// should go into this (left) leaf.
+    ///
+    /// After this operation:
+    /// - `self` is empty (will receive the new key)
+    /// - returned leaf contains all entries from `self`
+    ///
+    /// # Returns
+    ///
+    /// A new leaf containing all entries, and the split key (first key of new leaf).
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Indices from permuter, valid by construction"
+    )]
+    pub fn split_all_to_right(&mut self) -> LeafSplitResult<V, WIDTH> {
+        use crate::permuter::Permuter;
+
+        let mut new_leaf = Self::new();
+        let old_perm = self.permutation();
+        let old_size = old_perm.size();
+
+        debug_assert!(old_size > 0, "Cannot split empty leaf");
+
+        // Move all entries to new leaf
+        for i in 0..old_size {
+            let old_slot = old_perm.get(i);
+
+            new_leaf.ikey0[i] = self.ikey0[old_slot];
+            new_leaf.keylenx[i] = self.keylenx[old_slot];
+            new_leaf.leaf_values[i] =
+                StdMem::replace(&mut self.leaf_values[old_slot], LeafValue::Empty);
+        }
+
+        // Set new leaf's permutation
+        let new_perm = Permuter::make_sorted(old_size);
+        new_leaf.set_permutation(new_perm);
+
+        // Clear this leaf's permutation (now empty)
+        self.set_permutation(Permuter::empty());
+
+        // Split key is first key of new leaf
+        let split_ikey = new_leaf.ikey(new_perm.get(0));
+
+        LeafSplitResult {
+            new_leaf,
+            split_ikey,
+            insert_into: InsertTarget::Left, // New key goes into empty left leaf
+        }
+    }
+
     // ============================================================================
     //  Invariant Checker
     // ============================================================================
@@ -945,6 +1349,10 @@ const _: () = {
 mod tests {
     use super::*;
 
+    // ============================================================================
+    //  Basic Tests
+    // ============================================================================
+
     #[test]
     fn test_leaf_value_empty() {
         let lv: LeafValue<u64> = LeafValue::empty();
@@ -1001,5 +1409,271 @@ mod tests {
         assert_eq!(left.safe_next(), right_ptr);
         assert_eq!(right.prev(), left_ptr);
         assert!(right.safe_next().is_null());
+    }
+
+    #[test]
+    fn test_leaf_node_new() {
+        let node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        assert!(node.version().is_leaf());
+        assert_eq!(node.size(), 0);
+        assert!(node.is_empty());
+        assert!(!node.is_full());
+        assert!(node.safe_next().is_null());
+        assert!(node.prev().is_null());
+        assert!(node.parent().is_null());
+    }
+
+    #[test]
+    fn test_leaf_node_new_root() {
+        let node: Box<LeafNode<u64, 15>> = LeafNode::new_root();
+
+        assert!(node.version().is_leaf());
+        assert!(node.version().is_root());
+    }
+
+    #[test]
+    fn test_leaf_node_assign() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Assign to slot 0 (value is wrapped in Arc internally)
+        node.assign_value(0, 0x1234_5678_0000_0000, 4, 100);
+
+        assert_eq!(node.ikey(0), 0x1234_5678_0000_0000);
+        assert_eq!(node.keylenx(0), 4);
+        assert!(node.leaf_value(0).is_value());
+        assert_eq!(**node.leaf_value(0).as_value(), 100); // Double deref for Arc<u64>
+
+        // Test clone_arc for optimistic reads
+        let cloned: Arc<u64> = node.leaf_value(0).clone_arc();
+        assert_eq!(*cloned, 100);
+    }
+
+    #[test]
+    fn test_leaf_node_permutation() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Initially empty
+        assert_eq!(node.permutation().size(), 0);
+
+        // Set a permutation with 3 elements
+        let perm: Permuter<15> = Permuter::make_sorted(3);
+        node.set_permutation(perm);
+
+        assert_eq!(node.size(), 3);
+        assert!(!node.is_empty());
+        assert!(!node.is_full());
+    }
+
+    #[test]
+    fn test_safe_next_masks_mark() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Use a real allocation to get valid provenance
+        let other_node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let fake_next: *mut LeafNode<u64> = Box::into_raw(other_node);
+
+        node.set_next(fake_next);
+        assert_eq!(node.safe_next(), fake_next);
+        assert!(!node.next_is_marked());
+
+        node.mark_next();
+        assert!(node.next_is_marked());
+        assert_eq!(node.safe_next(), fake_next); // Mark bit masked off
+
+        node.unmark_next();
+        assert!(!node.next_is_marked());
+
+        // Clean up the allocation
+        // SAFETY: fake_next came from Box::into_raw above
+        unsafe { drop(Box::from_raw(fake_next)) };
+    }
+
+    #[test]
+    fn test_keylenx_helpers() {
+        assert!(!LeafNode::<u64>::keylenx_is_layer(0));
+        assert!(!LeafNode::<u64>::keylenx_is_layer(8));
+        assert!(!LeafNode::<u64>::keylenx_is_layer(64));
+        assert!(!LeafNode::<u64>::keylenx_is_layer(127));
+        assert!(LeafNode::<u64>::keylenx_is_layer(128));
+        assert!(LeafNode::<u64>::keylenx_is_layer(255));
+
+        assert!(!LeafNode::<u64>::keylenx_has_ksuf(0));
+        assert!(!LeafNode::<u64>::keylenx_has_ksuf(8));
+        assert!(LeafNode::<u64>::keylenx_has_ksuf(64));
+        assert!(!LeafNode::<u64>::keylenx_has_ksuf(128));
+    }
+
+    #[test]
+    fn test_compact_leaf_node() {
+        let node: Box<LeafNodeCompact<u64>> = LeafNode::new();
+
+        assert_eq!(node.size(), 0);
+        // Compact node should work the same way
+    }
+
+    #[test]
+    fn test_ikey_bound() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // ikey_bound returns ikey0[0] - use assign_value to set it
+        node.assign_value(0, 0xABCD_0000_0000_0000, 4, 42);
+        assert_eq!(node.ikey_bound(), 0xABCD_0000_0000_0000);
+    }
+
+    #[test]
+    fn test_modstate() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        assert_eq!(node.modstate(), ModState::Insert);
+
+        node.set_modstate(ModState::Remove);
+        assert_eq!(node.modstate(), ModState::Remove);
+
+        node.set_modstate(ModState::DeletedLayer);
+        assert_eq!(node.modstate(), ModState::DeletedLayer);
+    }
+
+    // ============================================================================
+    //  WIDTH Edge Cases
+    // ============================================================================
+
+    #[test]
+    fn test_width_1_node() {
+        let node: Box<LeafNode<u64, 1>> = LeafNode::new();
+
+        assert_eq!(node.size(), 0);
+        assert!(node.is_empty());
+        assert!(!node.is_full());
+
+        // Verify single-slot operations work
+        assert_eq!(node.ikey(0), 0);
+        assert_eq!(node.keylenx(0), 0);
+    }
+
+    #[test]
+    fn test_width_15_full() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let perm = Permuter::make_sorted(15);
+        node.set_permutation(perm);
+
+        assert_eq!(node.size(), 15);
+        assert!(!node.is_empty());
+        assert!(node.is_full());
+    }
+
+    // ============================================================================
+    //  Invariant Tests
+    // ============================================================================
+
+    #[test]
+    #[should_panic(expected = "ikeys are not in sorted order")]
+    #[cfg(debug_assertions)]
+    fn test_invariant_unsorted_ikeys() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Set up unsorted keys
+        node.assign_value(0, 0x2000_0000_0000_0000, 2, 200);
+        node.assign_value(1, 0x1000_0000_0000_0000, 2, 100);
+
+        let mut perm = Permuter::empty();
+        let _ = perm.insert_from_back(0); // slot 0 at logical pos 0
+        let _ = perm.insert_from_back(1); // slot 1 at logical pos 1 (but ikey[1] < ikey[0]!)
+        node.set_permutation(perm);
+
+        node.debug_assert_invariants(); // Should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "has keylenx but non-Layer value")]
+    #[cfg(debug_assertions)]
+    fn test_invariant_layer_mismatch() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Set keylenx to indicate layer but lv is Value (deliberately invalid)
+        node.assign_raw_for_test(
+            0,
+            0x1000_0000_0000_0000,
+            LAYER_KEYLENX,
+            LeafValue::Value(Arc::new(42)),
+        );
+
+        let mut perm = Permuter::empty();
+        let _ = perm.insert_from_back(0);
+        node.set_permutation(perm);
+
+        node.debug_assert_invariants(); // Should panic
+    }
+
+    #[test]
+    fn test_invariant_valid_node() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Set up correctly sorted keys
+        node.assign_value(0, 0x1000_0000_0000_0000, 2, 100);
+        node.assign_value(1, 0x2000_0000_0000_0000, 2, 200);
+        node.assign_value(2, 0x3000_0000_0000_0000, 2, 300);
+
+        let mut perm = Permuter::empty();
+        let _ = perm.insert_from_back(0); // slot 0
+        let _ = perm.insert_from_back(1); // slot 1
+        let _ = perm.insert_from_back(2); // slot 2
+        node.set_permutation(perm);
+
+        // Should not panic
+        node.debug_assert_invariants();
+    }
+
+    // ============================================================================
+    //  LeafValueIndex Tests (Index Mode)
+    // ============================================================================
+
+    #[test]
+    fn test_leaf_value_index_empty() {
+        let lv: LeafValueIndex<u64> = LeafValueIndex::empty();
+        assert!(lv.is_empty());
+        assert!(!lv.is_value());
+        assert!(!lv.is_layer());
+    }
+
+    #[test]
+    fn test_leaf_value_index_value() {
+        let lv: LeafValueIndex<u64> = LeafValueIndex::Value(42);
+        assert!(!lv.is_empty());
+        assert!(lv.is_value());
+        assert!(!lv.is_layer());
+        assert_eq!(lv.value(), 42); // Direct copy, no Arc
+
+        // Copy semantics
+        let copied: u64 = lv.value();
+        assert_eq!(copied, 42);
+    }
+
+    #[test]
+    fn test_leaf_value_index_layer() {
+        // Use a real allocation to get a pointer with valid provenance
+        let boxed: Box<u8> = Box::new(0xBE);
+        let ptr: *mut u8 = Box::into_raw(boxed);
+
+        let lv: LeafValueIndex<u64> = LeafValueIndex::Layer(ptr);
+
+        assert!(!lv.is_empty());
+        assert!(!lv.is_value());
+        assert!(lv.is_layer());
+        assert_eq!(lv.as_layer(), ptr);
+
+        // Clean up the allocation
+        // SAFETY: ptr came from Box::into_raw above
+        unsafe { drop(Box::from_raw(ptr)) };
+    }
+
+    #[test]
+    fn test_leaf_value_index_is_copy() {
+        // LeafValueIndex<V: Copy> should itself be Copy
+        let lv: LeafValueIndex<u64> = LeafValueIndex::Value(42);
+        let lv2: LeafValueIndex<u64> = lv; // Copy, not move
+
+        assert_eq!(lv.value(), 42);
+        assert_eq!(lv2.value(), 42);
     }
 }
