@@ -471,7 +471,10 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     /// Panics in debug mode if `slot >= WIDTH`.
     #[inline]
     #[must_use]
-    #[expect(clippy::indexing_slicing, reason = "Caller must ensure invariant")]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter, valid by construction"
+    )]
     pub fn ikey(&self, slot: usize) -> u64 {
         debug_assert!(slot < WIDTH, "ikey: slot out of bounds");
 
@@ -484,7 +487,10 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     /// Panics in debug mode if `slot >= WIDTH`.
     #[inline]
     #[must_use]
-    #[expect(clippy::indexing_slicing, reason = "Caller must ensure invariant")]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter, valid by construction"
+    )]
     pub fn keylenx(&self, slot: usize) -> u8 {
         debug_assert!(slot < WIDTH, "keylenx: slot out of bounds");
 
@@ -543,7 +549,10 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     /// # Panics
     /// Panics in debug mod if `slot >= WIDTH`.
     #[inline]
-    #[expect(clippy::indexing_slicing, reason = "Caller must ensure invariant")]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter; valid by construction"
+    )]
     pub fn leaf_value(&self, slot: usize) -> &LeafValue<V> {
         debug_assert!(slot < WIDTH, "leaf_value: slot out of bounds");
 
