@@ -4,6 +4,7 @@ reference/
 target/
 .source_*
 generated_docs/
+docs/
 *.md
 !README.md
 !Baseline.md
