@@ -194,7 +194,10 @@ impl<'a> Key<'a> {
     ///
     /// Returns an empty slice if there is no suffix.
     #[must_use]
-    #[expect(clippy::indexing_slicing)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Guarded by length check, suffix_start <= data.len()"
+    )]
     pub fn suffix(&self) -> &'a [u8] {
         //  INVARIANT: suffix_start <= data.len()
         if self.suffix_start < self.data.len() {
@@ -374,7 +377,10 @@ impl<'a> Key<'a> {
         let mut bytes: [u8; 8] = [0u8; 8];
 
         //  INVARIANT: `read_ikey` only calls this when `remaining.len() < 8`.
-        #[expect(clippy::indexing_slicing)]
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "remaining.len() < 8 by caller, bytes is [u8; 8]"
+        )]
         bytes[..remaining.len()].copy_from_slice(remaining);
 
         u64::from_be_bytes(bytes)

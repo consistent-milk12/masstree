@@ -376,7 +376,7 @@ pub struct LeafNode<V, const WIDTH: usize = 15> {
     ikey0: [u64; WIDTH],
 
     /// Values or layer pointers for each slot.
-    lv: [LeafValue<V>; WIDTH],
+    leaf_values: [LeafValue<V>; WIDTH],
 
     /// Pointer to external suffix storage (null if no suffixes or using inline).
     ///
@@ -426,7 +426,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
             keylenx: [0; WIDTH],
             permutation: Permuter::empty(),
             ikey0: [0; WIDTH],
-            lv: std::array::from_fn(|_| LeafValue::Empty),
+            leaf_values: std::array::from_fn(|_| LeafValue::Empty),
             ksuf: StdPtr::null_mut(),
             next: StdPtr::null_mut(),
             prev: StdPtr::null_mut(),
@@ -465,19 +465,146 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     //  Key Accessors
     // ============================================================================
 
+    /// Get the ikey at the given physical slot.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[inline]
+    #[must_use]
+    #[expect(clippy::indexing_slicing, reason = "Caller must ensure invariant")]
+    pub fn ikey(&self, slot: usize) -> u64 {
+        debug_assert!(slot < WIDTH, "ikey: slot out of bounds");
+
+        self.ikey0[slot]
+    }
+
+    /// Get the keylenx at the given physical slot.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[inline]
+    #[must_use]
+    #[expect(clippy::indexing_slicing, reason = "Caller must ensure invariant")]
+    pub fn keylenx(&self, slot: usize) -> u8 {
+        debug_assert!(slot < WIDTH, "keylenx: slot out of bounds");
+
+        self.keylenx[slot]
+    }
+
+    /// Get the ikey bound (ikey at slot 0, used for B-link tree routing).
+    ///
+    /// This is the smallest key that could be in this leaf (after splits).
+    #[inline]
+    #[must_use]
+    pub const fn ikey_bound(&self) -> u64 {
+        self.ikey0[0]
+    }
+
+    /// Check if the given slot contains a layer pointer.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[inline]
+    #[must_use]
+    pub fn is_layer(&self, slot: usize) -> bool {
+        self.keylenx(slot) >= LAYER_KEYLENX
+    }
+
+    /// Check if the given slot has a suffix.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[inline]
+    #[must_use]
+    pub fn has_ksuf(&self, slot: usize) -> bool {
+        self.keylenx(slot) == KSUF_KEYLENX
+    }
+
+    /// Check if keylenx indicates a layer pointer (static helper).
+    #[inline]
+    #[must_use]
+    pub const fn keylenx_is_layer(keylenx: u8) -> bool {
+        keylenx >= LAYER_KEYLENX
+    }
+
+    /// Check if keylenx indicates suffix storage (static helper).
+    #[inline]
+    #[must_use]
+    pub const fn keylenx_has_ksuf(keylenx: u8) -> bool {
+        keylenx == KSUF_KEYLENX
+    }
+
     // ============================================================================
     //  Value Accessors
     // ============================================================================
 
+    /// Get a reference to the value at the given physical slot.
+    ///
+    /// # Panics
+    /// Panics in debug mod if `slot >= WIDTH`.
+    #[inline]
+    #[expect(clippy::indexing_slicing, reason = "Caller must ensure invariant")]
+    pub fn leaf_value(&self, slot: usize) -> &LeafValue<V> {
+        debug_assert!(slot < WIDTH, "leaf_value: slot out of bounds");
+
+        &self.leaf_values[slot]
+    }
+
     // ============================================================================
     //  Permutation Accessors
     // ============================================================================
+
+    /// Get the current permutation.
+    #[inline]
+    #[must_use]
+    pub const fn permutation(&self) -> Permuter<WIDTH> {
+        self.permutation
+    }
+
+    /// Set the permutation.
+    #[inline]
+    pub const fn set_permutation(&mut self, perm: Permuter<WIDTH>) {
+        self.permutation = perm;
+    }
+
+    /// Get the number of keys in this leaf.
+    #[inline]
+    #[must_use]
+    pub const fn size(&self) -> usize {
+        self.permutation.size()
+    }
+
+    /// Check if the leaf is empty.
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.size() == 0
+    }
+
+    /// Check if the leaf is full.
+    #[inline]
+    #[must_use]
+    pub const fn is_full(&self) -> bool {
+        self.size() >= WIDTH
+    }
 
     // ============================================================================
     //  Leaf Linking
     // ============================================================================
 
     // ============================================================================
-    //
+    //  Parent Accessors
+    // ============================================================================
+
+    // ============================================================================
+    //  ModState Accessors
+    // ============================================================================
+
+    // ============================================================================
+    //  Slot Assignment
+    // ============================================================================
+
+    // ============================================================================
+    //  Invariant Checker
     // ============================================================================
 }
