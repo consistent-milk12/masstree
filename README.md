@@ -87,6 +87,6 @@ Both implementations use epoch-based reclamation (EBR) for node memory safety—
 |--------|--------|-------|
 | `key` | Implemented | 8-byte ikey extraction, layer traversal, suffix handling |
 | `permuter` | Implemented | Const-generic WIDTH, u64-encoded slot permutation |
-| `nodeversion` | ✅ Complete | Versioned lock with type-state guard pattern (single-threaded) |
-| Leaf nodes | Design complete | Pending implementation |
+| `nodeversion` | Implemented | Versioned lock with type-state guard pattern (single-threaded) |
+| `leaf` | Implemented | LeafNode struct, LeafValue/LeafValueIndex enums, B-link pointers, slot assignment |
 | Tree operations | Planned | Get, insert, scan, remove |
