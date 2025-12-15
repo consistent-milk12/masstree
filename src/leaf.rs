@@ -664,6 +664,42 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         self.prev = prev;
     }
 
+    /// Link two leaves after a split (single-threaded version).
+    ///
+    ///  FIX: This is the single-threaded implementation.
+    ///  For concurrent version, this will be replaced with atomic CAS
+    ///  operations.
+    ///
+    /// After splitting `left` into `left` and `right`:
+    /// - `right.next` = old `left.next`
+    /// - `right.prev` = `left`
+    /// - `left.next` = `right`
+    /// - `old_next.prev` = `right` (if `old_next` exists)
+    ///
+    /// # Safety
+    /// Caller must ensure:
+    /// 1. `old_next` is a valid, non-null pointer to a live `LeafNode<V, WIDTH>`
+    /// 2. No concurrent access to any of the nodes (single-threaded guarantee)
+    /// 3. Caller holds mutable references to both `left` and `right`
+    /// 4. `old_next` is not being deallocated
+    pub fn link_split(left: &mut Self, right: &mut Self) {
+        let old_next = left.safe_next();
+
+        right.next = old_next;
+        right.prev = StdPtr::from_mut::<Self>(left);
+        left.next = StdPtr::from_mut::<Self>(right);
+
+        if !old_next.is_null() {
+            //  SAFETY:
+            //  1. old_next is from left.safe_next(), which came from a valid ptr
+            //  2. single-threaded exec ensures no concurrent mod
+            //  3. old_next is not being deallocated (caller's responsibility)
+            unsafe {
+                (*old_next).prev = StdPtr::from_mut::<Self>(right);
+            }
+        }
+    }
+
     // ============================================================================
     //  Parent Accessors
     // ============================================================================
@@ -679,4 +715,60 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     // ============================================================================
     //  Invariant Checker
     // ============================================================================
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_leaf_value_empty() {
+        let lv: LeafValue<u64> = LeafValue::empty();
+        assert!(lv.is_empty());
+        assert!(!lv.is_value());
+        assert!(!lv.is_layer());
+    }
+
+    #[test]
+    fn test_leaf_value_value() {
+        let lv: LeafValue<u64> = LeafValue::Value(Arc::new(42));
+        assert!(!lv.is_empty());
+        assert!(lv.is_value());
+        assert!(!lv.is_layer());
+        assert_eq!(**lv.as_value(), 42); // Double deref: &Arc<u64> -> u64
+
+        // Test clone_arc
+        let cloned: Arc<u64> = lv.clone_arc();
+
+        assert_eq!(*cloned, 42);
+        assert_eq!(Arc::strong_count(&cloned), 2); // Original + clone
+    }
+
+    #[test]
+    fn test_leaf_value_layer() {
+        let ptr: *mut u8 = 0xDEAD_BEEF as *mut u8;
+        let lv: LeafValue<u64> = LeafValue::Layer(ptr);
+
+        assert!(!lv.is_empty());
+        assert!(!lv.is_value());
+        assert!(lv.is_layer());
+        assert_eq!(lv.as_layer(), ptr);
+    }
+
+    #[test]
+    fn test_leaf_node_linking() {
+        let mut left: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut right: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Get raw pointers before linking
+        let left_ptr: *mut LeafNode<u64> = left.as_mut() as *mut LeafNode<u64, 15>;
+        let right_ptr: *mut LeafNode<u64> = right.as_mut() as *mut LeafNode<u64, 15>;
+
+        // Link them
+        LeafNode::link_split(&mut left, &mut right);
+
+        assert_eq!(left.safe_next(), right_ptr);
+        assert_eq!(right.prev(), left_ptr);
+        assert!(right.safe_next().is_null());
+    }
 }
