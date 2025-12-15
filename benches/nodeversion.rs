@@ -3,7 +3,7 @@
 //! Run with: `cargo bench --bench nodeversion`
 
 use divan::{Bencher, black_box};
-use madtree::nodeversion::NodeVersion;
+use masstree::nodeversion::NodeVersion;
 
 fn main() {
     divan::main();

@@ -112,7 +112,7 @@ pub struct SuffixStorage {
 /// # Example
 ///
 /// ```rust,ignore
-/// use madtree::permuter::Permuter;
+/// use masstree::permuter::Permuter;
 ///
 /// // Default WIDTH=15
 /// let mut p = Permuter::empty();

@@ -78,7 +78,7 @@ const UNLOCK_MASK: u32 = !(UNUSED1_BIT | (VINSERT_LOWBIT - 1));
 /// # Example
 ///
 /// ```rust
-/// use madtree::nodeversion::NodeVersion;
+/// use masstree::nodeversion::NodeVersion;
 ///
 /// // Create a leaf node version
 /// let v = NodeVersion::new(true);

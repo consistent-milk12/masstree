@@ -3,7 +3,7 @@
 //! Run with: `cargo bench --bench permuter`
 
 use divan::{Bencher, black_box};
-use madtree::permuter::Permuter;
+use masstree::permuter::Permuter;
 
 fn main() {
     divan::main();

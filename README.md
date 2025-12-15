@@ -1,14 +1,24 @@
-# madtree (Rust)
+# masstree
 
-After studying the C++ implementation, I decided to name this repository `madtree`, because actually implementing it by myself is, indeed, an insane thing to do. I still wanted to try and see how far I can go.
+An experimental Rust implementation of the Masstree algorithm, a high-performance concurrent key-value store based on a cache-friendly trie of B+trees.
 
-Masstree is a high-performance concurrent trie of B+ trees designed for in-memory key-value storage. It combines the cache efficiency of B+ trees with the no-rebalancing property of tries by slicing keys into 8-byte chunks, where each chunk navigates a separate B+ tree layer.
+This project **attempts to reimplement** the [original C++ Masstree](https://github.com/kohler/masstree-beta) developed at MIT in Rust, with planned divergences for safety, ergonomics, and Rust idioms. While the core algorithm remains the same, this implementation introduces value lifetime management via `Arc<V>`, type-state locking, and modern concurrency primitives.
 
-**Source:** <https://github.com/kohler/masstree-beta>
+**Status:** Early development - core structures implemented, tree operations in progress.
+
+## Overview
+
+Masstree is a high-performance concurrent trie of B+trees designed for in-memory key-value storage. It combines the cache efficiency of B+trees with the no-rebalancing property of tries by slicing keys into 8-byte chunks, where each chunk navigates a separate B+tree layer.
+
+## Disclaimer
+
+This is an **independent Rust implementation** of the Masstree data structure. It is **not affiliated with, endorsed by, or connected to** the original authors (Eddie Kohler, Yandong Mao, Robert Morris) or their institutions (Harvard College, MIT, University of California). This project is a study and reimplementation of the published algorithm for educational and practical use in Rust projects.
 
 ## Why Rust?
 
-The original Masstree is a very interesting and performant concurrent data structure, but its C++ implementation relies on manual memory management, platform-specific atomics, and subtle pointer tricks that make it difficult to extend or verify. Rust's ownership model and type system offer an opportunity to express the same algorithms with compile-time safety guarantees, eliminate entire classes of concurrency bugs, and produce a codebase that's easier to audit and maintain. This reimplementation aims to match/get close to the original's performance while leveraging Rust's strengths: safe abstractions over unsafe primitives, fearless™ concurrency, and a modern toolchain for testing and benchmarking support.
+The original Masstree is a very interesting and performant concurrent data structure, but its C++ implementation relies on manual memory management, platform-specific atomics, and subtle pointer tricks that make it difficult to extend or verify. Rust's ownership model and type system offer an opportunity to express similar algorithms with compile-time safety guarantees, eliminate entire classes of concurrency bugs, and produce a codebase that's easier to audit and maintain.
+
+**This is not a faithful port.** The implementation diverges in meaningful ways to leverage Rust's strengths and work within its constraints. Performance targets are aspirational—initial focus is on correctness, safety, and learning the algorithm deeply.
 
 ## Value Storage Strategy
 
@@ -50,18 +60,18 @@ For performance-critical use cases with small, copyable values (`u64` handles, p
 
 This dual-mode approach provides equivalent flexibility to the C++ implementation, expressed through Rust's type system rather than raw pointers.
 
-## Improvements Over The C++ Implementation
+## Divergences from the C++ Implementation
 
 Both implementations use epoch-based reclamation (EBR) for node memory safety—C++ via `threadinfo`, this implementation via `crossbeam-epoch` (if implemented as planned). The difference lies in **value lifetime management**:
 
-| Aspect | C++ Masstree | Rust MassTree |
+| Aspect | C++ Masstree | Rust Masstree |
 |--------|--------------|---------------|
 | Node safety | EBR (manual `threadinfo&` passing) | EBR (epoch pinning is internal) |
 | Value safety | User's responsibility | `Arc<V>` handles automatically |
 | Misuse | Silent undefined behavior | Compile error or safe behavior |
 | API burden | Must pass `threadinfo&` to every call | Clean API, no manual tracking |
 
-**Concrete improvements:**
+**Key differences:**
 
 1. **Values can't outlive their storage** — In C++, storing a `char*` to heap data, deleting the entry, then accessing the pointer is silent UB. With `Arc<V>`, the data lives until the last reference drops.
 
@@ -77,6 +87,6 @@ Both implementations use epoch-based reclamation (EBR) for node memory safety—
 |--------|--------|-------|
 | `key` | Implemented | 8-byte ikey extraction, layer traversal, suffix handling |
 | `permuter` | Implemented | Const-generic WIDTH, u64-encoded slot permutation |
-| `nodeversion` | In progress | Versioned lock with type-state guard pattern |
+| `nodeversion` | ✅ Complete | Versioned lock with type-state guard pattern (single-threaded) |
 | Leaf nodes | Design complete | Pending implementation |
 | Tree operations | Planned | Get, insert, scan, remove |

@@ -1,6 +1,14 @@
 MIT License
 
-Copyright (c) 2025
+Copyright (c) 2025 consistent-milk12 (Rust implementation)
+
+This software implements the Masstree data structure originally developed by:
+  Eddie Kohler (Harvard), Yandong Mao (MIT), Robert Morris (MIT)
+
+The original C++ implementation is:
+  (c) 2011-2019 President and Fellows of Harvard College
+  (c) 2010-2011 Regents of the University of California
+  (c) 2010-2013 Massachusetts Institute of Technology
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -11,6 +19,11 @@ furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
+
+The names and trademarks of the original copyright holders (Harvard College,
+University of California, Massachusetts Institute of Technology) may NOT be
+used in advertising or publicity pertaining to this Software without specific,
+written prior permission from those copyright holders.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,

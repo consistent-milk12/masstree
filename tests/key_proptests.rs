@@ -2,7 +2,7 @@
 //!
 //! These tests verify invariants and properties that should hold for all inputs.
 
-use madtree::key::{Key, IKEY_SIZE, MAX_KEY_LENGTH};
+use masstree::key::{Key, IKEY_SIZE, MAX_KEY_LENGTH};
 use proptest::prelude::*;
 use std::cmp::Ordering;
 

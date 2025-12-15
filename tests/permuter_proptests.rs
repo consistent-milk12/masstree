@@ -3,7 +3,7 @@
 //! These tests verify invariants and properties that should hold for all inputs.
 //! The permuter is a critical data structure that must maintain strict invariants.
 
-use madtree::permuter::{Permuter, MAX_WIDTH};
+use masstree::permuter::{Permuter, MAX_WIDTH};
 use proptest::prelude::*;
 
 // ============================================================================

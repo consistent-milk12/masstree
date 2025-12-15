@@ -3,7 +3,7 @@
 //! Run with: `cargo bench --bench key`
 
 use divan::{Bencher, black_box};
-use madtree::key::Key;
+use masstree::key::Key;
 
 fn main() {
     divan::main();

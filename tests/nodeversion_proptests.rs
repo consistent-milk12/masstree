@@ -2,7 +2,7 @@
 //!
 //! These tests verify invariants and properties that should hold for all inputs.
 
-use madtree::nodeversion::NodeVersion;
+use masstree::nodeversion::NodeVersion;
 use proptest::prelude::*;
 
 // ============================================================================

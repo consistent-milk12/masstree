@@ -24,8 +24,8 @@
 
 use std::hint::black_box;
 
-use madtree::key::Key;
-use madtree::permuter::Permuter;
+use masstree::key::Key;
+use masstree::permuter::Permuter;
 
 const ITERATIONS: usize = 10_000;
 
