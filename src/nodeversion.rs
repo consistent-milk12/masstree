@@ -16,7 +16,7 @@
 //!
 //! ```rust,ignore
 //! let mut guard = version.lock();
-//! gaurd.mark_insert();
+//! guard.mark_insert();
 //! // Lock released when guard drops
 //! ```
 
@@ -339,11 +339,13 @@ impl NodeVersion {
 
     /// Check if the version has changed since `old`.
     ///
-    /// Returns true if any version relevant bits changed (ignoreing lock bit).
+    /// Returns true if any version relevant bits changed (ignoring lock bit).
     ///
     /// # Implementation Note
     /// Uses `> LOCK_BIT` (i.e., `> 1`) because XOR of only the lock bit equals 1,
     /// which is NOT > 1, so lock-only changes return false.
+    #[inline]
+    #[must_use]
     pub fn has_changed(&self, old: u32) -> bool {
         // XOR the versions, change = differing bits above LOCK_BIT
         (old ^ self.value.load(Ordering::Acquire)) > LOCK_BIT
