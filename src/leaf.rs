@@ -5,6 +5,8 @@
 //! Leaf nodes store the actual key-value pairs, using a permutation array
 //! for logical ordering without data movement.
 
+use std::array as StdArray;
+use std::mem as StdMem;
 use std::ptr as StdPtr;
 use std::sync::Arc;
 
@@ -683,7 +685,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     /// 3. Caller holds mutable references to both `left` and `right`
     /// 4. `old_next` is not being deallocated
     pub fn link_split(left: &mut Self, right: &mut Self) {
-        let old_next = left.safe_next();
+        let old_next: *mut Self = left.safe_next();
 
         right.next = old_next;
         right.prev = StdPtr::from_mut::<Self>(left);
@@ -800,7 +802,144 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     // ============================================================================
     //  Invariant Checker
     // ============================================================================
+
+    /// Verify leaf node invariants (debug builds only).
+    ///
+    /// Checks:
+    /// - Permutation is valid
+    /// - keylenx values are consistent with lv variants
+    /// - ikeys are in sorted order (via permutation)
+    ///
+    /// # Panics
+    /// If any invariant is violated.
+    #[cfg(debug_assertions)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter, valid by construction"
+    )]
+    pub fn debug_assert_invariants(&self) {
+        // Check permutation validity
+        self.permutation.debug_assert_valid();
+
+        let size: usize = self.size();
+
+        // Check keylenx/leaf_values consistency for in-use slots
+        for i in 0..size {
+            let slot: usize = self.permutation.get(i);
+            let keylenx: u8 = self.keylenx[slot];
+            let leaf_value: &LeafValue<V> = &self.leaf_values[slot];
+
+            // Layer slots must have Layer values
+            if keylenx >= LAYER_KEYLENX {
+                assert!(
+                    leaf_value.is_layer(),
+                    "slot {slot} has keylenx but non-Layer value"
+                );
+            } else if (keylenx > 0) || !leaf_value.is_empty() {
+                assert!(
+                    leaf_value.is_value() || leaf_value.is_empty(),
+                    "slot {slot} has non-layer keylenx but Layer value"
+                );
+            }
+        }
+
+        // Check if ikey ordering (if size > 1)
+        if size > 1 {
+            for i in 1..size {
+                let prev_slot: usize = self.permutation.get(i - 1);
+                let curr_slot: usize = self.permutation.get(i);
+
+                let prev_ikey: u64 = self.ikey0[prev_slot];
+                let curr_ikey: u64 = self.ikey0[curr_slot];
+
+                assert!(
+                    prev_ikey <= curr_ikey,
+                    "ikeys are not in sorted order: slot {prev_slot} ({prev_ikey:#x}) > slot {curr_slot} ({curr_ikey:#x})"
+                );
+            }
+        }
+    }
+
+    /// No-op in release builds
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    pub fn debug_assert_invariants(&self) {}
+
+    // ============================================================================
+    //  Test Helpers
+    // ============================================================================
+
+    /// Assign raw values to a slot for testing (including invalid states).
+    ///
+    /// This allows setting up deliberately inconsistent states to test
+    /// invariant checking. NOT for production use.
+    #[cfg(test)]
+    #[expect(clippy::indexing_slicing, reason = "Only for tests")]
+    pub fn assign_raw_for_test(
+        &mut self,
+        slot: usize,
+        ikey: u64,
+        keylenx: u8,
+        value: LeafValue<V>,
+    ) {
+        debug_assert!(slot < WIDTH, "assign_raw_for_test: slot out of bounds");
+
+        self.ikey0[slot] = ikey;
+        self.keylenx[slot] = keylenx;
+        self.leaf_values[slot] = value;
+    }
 }
+
+impl<V, const WIDTH: usize> Default for LeafNode<V, WIDTH> {
+    fn default() -> Self {
+        // Trigger compile-time WIDTH check
+        let _: () = Self::WIDTH_CHECK;
+
+        Self {
+            version: NodeVersion::new(true),
+            modstate: ModState::Insert,
+            keylenx: [0; WIDTH],
+            permutation: Permuter::empty(),
+            ikey0: [0; WIDTH],
+            leaf_values: StdArray::from_fn(|_| LeafValue::Empty),
+            ksuf: StdPtr::null_mut(),
+            next: StdPtr::null_mut(),
+            prev: StdPtr::null_mut(),
+            parent: StdPtr::null_mut(),
+        }
+    }
+}
+
+// ============================================================================
+//  Type Aliases
+// ============================================================================
+
+/// Standard 15-slot leaf node (default mode with Arc<V>).
+pub type LeafNode15<V> = LeafNode<V, 15>;
+
+/// Compact 7-slot leaf node (fits in ~2 cache lines with small V).
+pub type LeafNodeCompact<V> = LeafNode<V, 7>;
+
+// ============================================================================
+//  Compile-time Size Assertions
+// ============================================================================
+
+/// Compile-time size check for `LeafNode<u64, 15>`.
+/// Should be around 448 bytes (7 cache lines) after alignment.
+///
+/// The enum discriminant adds overhead compared to C++ union approach, but keeps
+/// type safety. `LeafValue<u64>` is 16 bytes (Arc ptr + discriminant).
+const _: () = {
+    // Compile-time assertion: ensure node stays cache-friendly
+    const SIZE: usize = StdMem::size_of::<LeafNode<u64, 15>>();
+    const ALIGN: usize = StdMem::align_of::<LeafNode<u64, 15>>();
+
+    // Should fit in 8 cache lines (512 bytes) at most
+    assert!(SIZE <= 512, "LeafNode exceeds 8 cache lines");
+
+    // Should be cache cache-aligned
+    assert!(ALIGN == 64, "LeafNode not cache-line-aligned");
+};
 
 #[cfg(test)]
 mod tests {
