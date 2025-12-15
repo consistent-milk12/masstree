@@ -152,12 +152,24 @@ callgrind-clean:
 # === Safety ===
 
 # Run address sanitizer (requires nightly)
+# Note: --lib --tests excludes doc tests which don't support sanitizers
 asan:
-    RUSTFLAGS="-Z sanitizer=address" cargo +nightly test --target x86_64-unknown-linux-gnu
+    RUSTFLAGS="-Z sanitizer=address" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
+
+# Run address sanitizer then clean (avoids polluting normal builds)
+asan-clean:
+    RUSTFLAGS="-Z sanitizer=address" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
+    cargo clean
 
 # Run thread sanitizer (requires nightly)
+# Note: --lib --tests excludes doc tests which don't support sanitizers
 tsan:
-    RUSTFLAGS="-Z sanitizer=thread" cargo +nightly test --target x86_64-unknown-linux-gnu
+    RUSTFLAGS="-Z sanitizer=thread" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
+
+# Run thread sanitizer then clean (avoids polluting normal builds)
+tsan-clean:
+    RUSTFLAGS="-Z sanitizer=thread" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
+    cargo clean
 
 # === Assembly Inspection (requires cargo-show-asm) ===
 

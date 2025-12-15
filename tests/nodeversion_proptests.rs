@@ -26,8 +26,14 @@ const ISLEAF_BIT: u32 = 1 << 31;
 /// Strategy for generating valid initial version values (no lock/dirty bits).
 fn clean_version() -> impl Strategy<Value = u32> {
     // Generate versions with various flag combinations but no lock/dirty bits
-    (any::<bool>(), any::<bool>(), any::<bool>(), 0u32..64, 0u32..512).prop_map(
-        |(is_leaf, is_root, is_deleted, insert_ver, split_ver)| {
+    (
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        0u32..64,
+        0u32..512,
+    )
+        .prop_map(|(is_leaf, is_root, is_deleted, insert_ver, split_ver)| {
             let mut v = 0u32;
             if is_leaf {
                 v |= ISLEAF_BIT;
@@ -43,8 +49,7 @@ fn clean_version() -> impl Strategy<Value = u32> {
             // Split version in bits 9-27 (19 bits)
             v |= (split_ver & 0x7FFFF) << 9;
             v
-        },
-    )
+        })
 }
 
 /// Strategy for generating boolean flags.
@@ -619,7 +624,7 @@ proptest! {
 //  Sequence Properties
 // ============================================================================
 
-/// Operations to perform on NodeVersion.
+/// Operations to perform on `NodeVersion`.
 #[derive(Debug, Clone)]
 enum Op {
     Lock,

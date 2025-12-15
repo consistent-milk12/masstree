@@ -458,6 +458,26 @@ impl Default for NodeVersion {
 mod tests {
     use super::*;
 
+    // ========================================================================
+    // !Send/!Sync Verification
+    // ========================================================================
+    //
+    // LockGuard uses PhantomData<*mut ()> to be !Send and !Sync.
+    // Raw pointers (*mut T, *const T) are neither Send nor Sync in Rust,
+    // and PhantomData<T> inherits the auto-traits of T.
+    //
+    // To verify this works, uncomment the following and observe the compile error:
+    //
+    // ```
+    // fn require_send<T: Send>() {}
+    // fn require_sync<T: Sync>() {}
+    //
+    // fn test_would_fail() {
+    //     require_send::<LockGuard<'static>>();  // ERROR: LockGuard is !Send
+    //     require_sync::<LockGuard<'static>>();  // ERROR: LockGuard is !Sync
+    // }
+    // ```
+
     #[test]
     fn test_new_leaf() {
         let v = NodeVersion::new(true);

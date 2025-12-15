@@ -2,8 +2,9 @@
 //!
 //! These tests verify invariants and properties that should hold for all inputs.
 //! The permuter is a critical data structure that must maintain strict invariants.
+#![expect(clippy::indexing_slicing, reason = "fail fast in tests")]
 
-use masstree::permuter::{Permuter, MAX_WIDTH};
+use masstree::permuter::{MAX_WIDTH, Permuter};
 use proptest::prelude::*;
 
 // ============================================================================
@@ -28,7 +29,7 @@ fn insert_sequence(max_inserts: usize) -> impl Strategy<Value = Vec<usize>> {
 // ============================================================================
 
 /// Helper to verify the bijection property: all slots 0..WIDTH appear exactly once.
-fn verify_bijection<const WIDTH: usize>(perm: &Permuter<WIDTH>) -> bool {
+fn verify_bijection<const WIDTH: usize>(perm: Permuter<WIDTH>) -> bool {
     let mut seen = [false; MAX_WIDTH];
 
     for i in 0..WIDTH {
@@ -48,14 +49,14 @@ proptest! {
     #[test]
     fn empty_maintains_bijection(_dummy: u8) {
         let perm: Permuter<15> = Permuter::empty();
-        prop_assert!(verify_bijection(&perm));
+        prop_assert!(verify_bijection(perm));
     }
 
     /// make_sorted should maintain bijection property.
     #[test]
     fn make_sorted_maintains_bijection(n in 0usize..=15) {
         let perm: Permuter<15> = Permuter::make_sorted(n);
-        prop_assert!(verify_bijection(&perm));
+        prop_assert!(verify_bijection(perm));
     }
 
     /// insert_from_back should maintain bijection property.
@@ -68,7 +69,7 @@ proptest! {
                 break;
             }
             let _ = perm.insert_from_back(pos);
-            prop_assert!(verify_bijection(&perm), "Bijection broken after insert {} at pos {}", i, pos);
+            prop_assert!(verify_bijection(perm), "Bijection broken after insert {} at pos {}", i, pos);
         }
     }
 
@@ -86,7 +87,7 @@ proptest! {
             }
             let valid_idx = idx % perm.size();
             perm.remove_to_back(valid_idx);
-            prop_assert!(verify_bijection(&perm), "Bijection broken after remove_to_back({})", valid_idx);
+            prop_assert!(verify_bijection(perm), "Bijection broken after remove_to_back({})", valid_idx);
         }
     }
 
@@ -104,7 +105,7 @@ proptest! {
             }
             let valid_idx = idx % perm.size();
             perm.remove(valid_idx);
-            prop_assert!(verify_bijection(&perm), "Bijection broken after remove({})", valid_idx);
+            prop_assert!(verify_bijection(perm), "Bijection broken after remove({})", valid_idx);
         }
     }
 
@@ -117,7 +118,7 @@ proptest! {
     ) {
         let mut perm: Permuter<15> = Permuter::make_sorted(initial_size);
         perm.exchange(i, j);
-        prop_assert!(verify_bijection(&perm));
+        prop_assert!(verify_bijection(perm));
     }
 
     /// rotate should maintain bijection property.
@@ -131,7 +132,7 @@ proptest! {
         let (i, j) = if i <= j { (i, j) } else { (j, i) };
         let j = j.min(15);
         perm.rotate(i, j);
-        prop_assert!(verify_bijection(&perm));
+        prop_assert!(verify_bijection(perm));
     }
 }
 
@@ -272,7 +273,7 @@ proptest! {
         }
 
         // All allocated slots should be unique
-        allocated.sort();
+        allocated.sort_unstable();
         for (i, &slot) in allocated.iter().enumerate() {
             prop_assert_eq!(slot, i, "Expected sequential slots");
         }
@@ -374,7 +375,7 @@ proptest! {
         }
 
         prop_assert_eq!(perm.size(), n);
-        prop_assert!(verify_bijection_generic::<7>(&perm));
+        prop_assert!(verify_bijection_generic::<7>(perm));
     }
 
     /// WIDTH=3 permuter should work correctly.
@@ -388,7 +389,7 @@ proptest! {
         }
 
         prop_assert_eq!(perm.size(), n);
-        prop_assert!(verify_bijection_generic::<3>(&perm));
+        prop_assert!(verify_bijection_generic::<3>(perm));
     }
 
     /// WIDTH=1 permuter should work correctly.
@@ -408,7 +409,7 @@ proptest! {
 }
 
 /// Generic bijection verification for any WIDTH.
-fn verify_bijection_generic<const WIDTH: usize>(perm: &Permuter<WIDTH>) -> bool {
+fn verify_bijection_generic<const WIDTH: usize>(perm: Permuter<WIDTH>) -> bool {
     let mut seen = [false; MAX_WIDTH];
 
     for i in 0..WIDTH {
@@ -521,7 +522,7 @@ proptest! {
             }
 
             // Verify invariants after each operation
-            prop_assert!(verify_bijection(&perm), "Bijection broken after operation {:?}", op);
+            prop_assert!(verify_bijection(perm), "Bijection broken after operation {:?}", op);
             prop_assert!(perm.size() <= 15, "Size exceeded WIDTH");
         }
     }

@@ -2,7 +2,9 @@
 //!
 //! These tests verify invariants and properties that should hold for all inputs.
 
-use masstree::key::{Key, IKEY_SIZE, MAX_KEY_LENGTH};
+#![expect(clippy::indexing_slicing, reason = "fail fast in tests")]
+
+use masstree::key::{IKEY_SIZE, Key, MAX_KEY_LENGTH};
 use proptest::prelude::*;
 use std::cmp::Ordering;
 
@@ -10,7 +12,7 @@ use std::cmp::Ordering;
 //  Strategies
 // ============================================================================
 
-/// Strategy for generating valid key data (1 to MAX_KEY_LENGTH bytes).
+/// Strategy for generating valid key data (1 to `MAX_KEY_LENGTH` bytes).
 fn key_data() -> impl Strategy<Value = Vec<u8>> {
     prop::collection::vec(any::<u8>(), 1..=MAX_KEY_LENGTH)
 }
