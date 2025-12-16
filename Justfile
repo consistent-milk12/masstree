@@ -73,6 +73,32 @@ doc-private:
 clean:
     cargo clean
 
+# === Diagrams ===
+
+# Generate all SVG diagrams from mermaid sources
+diagrams:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd docs/diagrams
+    for f in *.mmd; do
+        svg="${f%.mmd}.svg"
+        echo "Generating $svg..."
+        mmdc -i "$f" -o "$svg" -b transparent -p puppeteer-config.json
+    done
+    echo "Done! Generated $(ls -1 *.svg | wc -l) diagrams."
+
+# Generate a single diagram by name (without extension)
+diagram name:
+    mmdc -i "docs/diagrams/{{name}}.mmd" -o "docs/diagrams/{{name}}.svg" -b transparent -p docs/diagrams/puppeteer-config.json
+
+# Watch and regenerate diagrams on change (requires entr)
+diagrams-watch:
+    ls docs/diagrams/*.mmd | entr -c just diagrams
+
+# Clean generated diagram SVGs
+diagrams-clean:
+    rm -f docs/diagrams/*.svg
+
 # === Miri commands (require nightly) ===
 
 # Install nightly toolchain with miri (run once)

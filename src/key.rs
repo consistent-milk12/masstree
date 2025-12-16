@@ -126,6 +126,15 @@ impl<'a> Key<'a> {
         }
     }
 
+    /// Create a [`Key`] from an existing suffix.
+    ///
+    /// Used when extracting the "remaining key" from a slot's suffix
+    /// to compare with the new key layer creation.
+    #[must_use]
+    pub fn from_suffix(suffix: &'a [u8]) -> Self {
+        Self::new(suffix)
+    }
+
     /// Return the current 8-byte slice as a big-endian u64.
     ///
     /// This value can be directly compared with other ikeys using standard
@@ -232,6 +241,26 @@ impl<'a> Key<'a> {
         self.suffix_start = std::cmp::min(suffix_start, self.data.len());
     }
 
+    /// Shift by a specific number of bytes (must be a multiple of 8).
+    ///
+    /// Used when descending into layers. The `bytes` parameter comes from
+    /// the negative return value of `ksuf_matches` (always 8 in current impl)
+    ///
+    /// # Panics
+    /// Panics if `bytes` is not a multiple of `IKEY_SIZE`
+    pub fn shift_by(&mut self, bytes: usize) {
+        debug_assert!(
+            bytes.is_multiple_of(IKEY_SIZE),
+            "shift_by must be multiple of 8"
+        );
+
+        let shifts: usize = bytes / IKEY_SIZE;
+
+        for _ in 0..shifts {
+            self.shift();
+        }
+    }
+
     /// Shift the key backward by 8 bytes (undo one shift).
     ///
     /// # Panics
@@ -304,7 +333,7 @@ impl<'a> Key<'a> {
         }
 
         // ikeys are equal, compare lengths (matching C++ reference)
-        let self_len = self.current_len();
+        let self_len: usize = self.current_len();
 
         if self_len > IKEY_SIZE {
             // We have a suffix: cmp = (keylenx <= IKEY_SIZE)
