@@ -5,16 +5,20 @@
 
 use crate::internode::InternodeNode;
 use crate::key::Key;
-use crate::ksearch::{KeyIndexPosition, lower_bound_leaf, upper_bound_internode_direct};
+use crate::ksearch::{KeyIndexPosition, lower_bound_leaf};
 use crate::leaf::{LAYER_KEYLENX, LeafNode, LeafSplitResult, SplitUtils};
 use crate::permuter::Permuter;
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
-use std::mem as StdMem;
 use std::ptr as StdPtr;
 use std::sync::Arc;
 
-pub mod layer;
+mod index;
+mod layer;
+mod split;
+mod traverse;
+
+pub use index::MassTreeIndex;
 
 // ============================================================================
 //  RootNode Enum
@@ -172,6 +176,10 @@ pub struct MassTree<V, const WIDTH: usize = 15> {
     /// Arena for internode nodes (ensures pointer stability).
     internode_arena: Vec<Box<InternodeNode<V, WIDTH>>>,
 
+    /// Number of key-value pairs in the tree.
+    /// Updated on insert (new key) and delete operations.
+    count: usize,
+
     /// Marker to make `MassTree` `!Send` and `!Sync`.
     ///
     /// `PhantomData<*const ()>` makes this type `!Send` and `!Sync` because
@@ -194,6 +202,7 @@ impl<V, const WIDTH: usize> StdFmt::Debug for MassTree<V, WIDTH> {
             .field("root", &self.root)
             .field("leaf_arena_len", &self.leaf_arena.len())
             .field("internode_arena_len", &self.internode_arena.len())
+            .field("count", &self.count)
             .finish()
     }
 }
@@ -208,6 +217,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             root: RootNode::Leaf(LeafNode::new_root()),
             leaf_arena: Vec::new(),
             internode_arena: Vec::new(),
+            count: 0,
             _not_send_sync: PhantomData,
         }
     }
@@ -242,411 +252,9 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
         }
     }
 
-    /// Find the index of a child pointer in an internode.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the child is not found. This indicates a bug in split propagation.
-    #[expect(
-        clippy::panic,
-        reason = "Intentional invariant check - child must exist during split propagation"
-    )]
-    fn find_child_index(internode: &InternodeNode<V, WIDTH>, child: *mut u8) -> usize {
-        let nkeys: usize = internode.size();
-
-        for i in 0..=nkeys {
-            if internode.child(i) == child {
-                return i;
-            }
-        }
-
-        // INVARIANT: This is only called during split propagation when we know
-        // the child was just inserted into this internode. If we reach here,
-        // there's a bug in the split logic. Fail loudly rather than silently
-        // returning an incorrect index that could corrupt the tree.
-        panic!(
-            "Internal invariant violation: child pointer {child:p} not found in internode \
-             (nkeys={nkeys}). This indicates a bug in split propagation logic."
-        );
-    }
-
     // ========================================================================
-    //  Split Propagation
+    //  Split Propagation (moved to split.rs)
     // ========================================================================
-
-    /// Create a new root internode when the root leaf splits.
-    ///
-    /// **Root ownership strategy:**
-    /// - Root is directly owned by `RootNode` (Box<T>)
-    /// - Non-root nodes are stored in arenas (raw pointers)
-    /// - When root changes: old root moves to arena, new root is Box in `RootNode`
-    ///
-    /// **Returns:** Arena-derived pointer to the left leaf (for proper Stacked Borrows provenance).
-    /// The caller should use this pointer for leaf linking instead of the original.
-    fn create_root_internode(
-        &mut self,
-        right_leaf: *mut LeafNode<V, WIDTH>,
-        split_ikey: u64,
-    ) -> *mut LeafNode<V, WIDTH> {
-        // Create new root internode with height=0 (children are leaves per CODE_005.md)
-        // Don't set children yet - we need arena-derived pointers for proper provenance
-        let mut new_root: Box<InternodeNode<V, WIDTH>> = InternodeNode::new_root(0);
-        new_root.set_ikey(0, split_ikey);
-        new_root.set_nkeys(1);
-
-        // Move old root leaf to arena FIRST to get proper provenance
-        // The old RootNode::Leaf is replaced, invalidating any pointers derived from it
-        let old_root: RootNode<V, WIDTH> =
-            StdMem::replace(&mut self.root, RootNode::Internode(new_root));
-
-        // Get arena-derived pointer for left leaf (proper Stacked Borrows provenance)
-        let arena_left_ptr: *mut LeafNode<V, WIDTH> = if let RootNode::Leaf(old_leaf_box) = old_root
-        {
-            self.leaf_arena.push(old_leaf_box);
-            let idx: usize = self.leaf_arena.len() - 1;
-
-            // SAFETY: We just pushed, so idx is valid
-            unsafe { StdPtr::from_mut(self.leaf_arena.get_unchecked_mut(idx).as_mut()) }
-        } else {
-            // This branch shouldn't happen - we only call this when root was a leaf
-            debug_assert!(false, "create_root_internode called with non-leaf root");
-            StdPtr::null_mut()
-        };
-
-        // Now set up children with arena-derived pointer (left) and already-arena pointer (right)
-        // Also get the new root pointer for parent updates
-        let RootNode::Internode(root_internode) = &mut self.root else {
-            unreachable!("We just set root to Internode")
-        };
-
-        root_internode.set_child(0, arena_left_ptr.cast::<u8>());
-        root_internode.set_child(1, right_leaf.cast::<u8>());
-
-        // Get raw pointer to new root for parent updates
-        let new_root_ptr: *mut u8 =
-            StdPtr::from_mut::<InternodeNode<V, WIDTH>>(root_internode.as_mut()).cast();
-
-        // Update leaves' parent pointers
-        // SAFETY: arena_left_ptr is valid (just derived from arena), right_leaf is arena-backed
-        unsafe {
-            (*arena_left_ptr).set_parent(new_root_ptr);
-            (*right_leaf).set_parent(new_root_ptr);
-        }
-
-        arena_left_ptr
-    }
-
-    /// Propagate a leaf split up the tree.
-    ///
-    /// Inserts the split key into the parent internode.
-    /// If parent is full, recursively splits.
-    /// If there's no parent (root was a leaf), creates new root internode.
-    ///
-    /// # Arguments
-    ///
-    /// * `left_leaf` - The original leaf (left sibling after split)
-    /// * `right_leaf_box` - The new leaf (right sibling), to be added to arena
-    /// * `split_ikey` - The split key to insert into parent
-    fn propagate_split(
-        &mut self,
-        left_leaf: *mut LeafNode<V, WIDTH>,
-        right_leaf_box: Box<LeafNode<V, WIDTH>>,
-        split_ikey: u64,
-    ) {
-        // Store the new leaf in the arena to get a stable pointer
-        let right_leaf_ptr: *mut LeafNode<V, WIDTH> = self.store_leaf_in_arena(right_leaf_box);
-
-        // Check if left_leaf was the root BEFORE linking (linking uses left_leaf which
-        // may have provenance that will be invalidated by create_root_internode)
-        let left_was_root: bool = if let RootNode::Leaf(root_leaf) = &self.root {
-            StdPtr::eq(root_leaf.as_ref(), &raw const *left_leaf)
-        } else {
-            false
-        };
-
-        if left_was_root {
-            // Root was a leaf - create_root_internode will give us arena-derived pointer
-            let arena_left_ptr: *mut LeafNode<V, WIDTH> =
-                self.create_root_internode(right_leaf_ptr, split_ikey);
-
-            // Link leaves using arena-derived pointer (proper provenance)
-            // SAFETY: arena_left_ptr is valid from arena, right_leaf_ptr is from arena
-            unsafe {
-                let old_next: *mut LeafNode<V, WIDTH> = (*arena_left_ptr).safe_next();
-
-                (*arena_left_ptr).set_next(right_leaf_ptr);
-                (*right_leaf_ptr).set_prev(arena_left_ptr);
-                (*right_leaf_ptr).set_next(old_next);
-
-                if !old_next.is_null() {
-                    (*old_next).set_prev(right_leaf_ptr);
-                }
-            }
-            return;
-        }
-
-        // Non-root case: left_leaf has valid provenance (from arena)
-        // Link leaves
-        // SAFETY: left_leaf is a valid arena pointer, right_leaf_ptr is from our arena
-        unsafe {
-            let old_next: *mut LeafNode<V, WIDTH> = (*left_leaf).safe_next();
-
-            (*left_leaf).set_next(right_leaf_ptr);
-            (*right_leaf_ptr).set_prev(left_leaf);
-            (*right_leaf_ptr).set_next(old_next);
-
-            if !old_next.is_null() {
-                (*old_next).set_prev(right_leaf_ptr);
-            }
-        }
-
-        // Get parent from left_leaf
-        // SAFETY: left_leaf is a valid pointer we just split
-        let parent_ptr: *mut u8 = unsafe { (*left_leaf).parent() };
-
-        // This shouldn't happen if tree invariants are maintained
-        assert!(!parent_ptr.is_null(), "Non-root leaf has null parent");
-
-        // Insert split key into parent
-        // SAFETY: parent_ptr is valid from leaf's parent pointer
-        let parent: &mut InternodeNode<V, WIDTH> =
-            unsafe { &mut *parent_ptr.cast::<InternodeNode<V, WIDTH>>() };
-
-        let child_idx: usize = Self::find_child_index(parent, left_leaf.cast::<u8>());
-
-        if parent.size() < WIDTH {
-            // Parent has room, just insert
-            parent.insert_key_and_child(child_idx, split_ikey, right_leaf_ptr.cast::<u8>());
-
-            // Update right_leaf's parent pointer
-            unsafe {
-                (*right_leaf_ptr).set_parent(parent_ptr);
-            }
-        } else {
-            // Parent is full, need to split it too (using split+insert API from CODE_005.md)
-            // Allocate new internode for the right half
-            let new_parent: Box<InternodeNode<V, WIDTH>> = InternodeNode::new(parent.height());
-            let new_parent_ptr: *mut InternodeNode<V, WIDTH> =
-                self.store_internode_in_arena(new_parent);
-
-            // Split parent AND insert the split_ikey/right_leaf simultaneously
-            let (popup_key, insert_went_left) = unsafe {
-                parent.split_into(
-                    &mut *new_parent_ptr,
-                    child_idx,
-                    split_ikey,
-                    right_leaf_ptr.cast::<u8>(),
-                )
-            };
-
-            // Set right_leaf's parent based on where the insert went
-            unsafe {
-                if insert_went_left {
-                    (*right_leaf_ptr).set_parent(parent_ptr);
-                } else {
-                    (*right_leaf_ptr).set_parent(new_parent_ptr.cast::<u8>());
-                }
-            }
-
-            // Recursively propagate the popup key
-            // parent_ptr points to arena-backed internode, safe to use
-            self.propagate_internode_split(parent_ptr.cast(), new_parent_ptr, popup_key);
-        }
-    }
-
-    /// Propagate an internode split up the tree.
-    ///
-    /// Called after splitting an internode to propagate the split to the parent.
-    /// Uses the correct C++ semantics where parent split includes insertion.
-    ///
-    /// # Arguments
-    /// * `left_internode_ptr` - Raw pointer to the left (original) internode after split
-    /// * `right_internode_ptr` - Raw pointer to the right sibling (already in arena)
-    /// * `popup_key` - The key to insert into the parent
-    ///
-    /// # Safety notes
-    /// Uses raw pointers to avoid Stacked Borrows aliasing issues when the left
-    /// internode is the root (we need to access both the internode and self.root).
-    #[expect(clippy::too_many_lines, reason = "Due to formatting")]
-    fn propagate_internode_split(
-        &mut self,
-        left_internode_ptr: *mut InternodeNode<V, WIDTH>,
-        right_internode_ptr: *mut InternodeNode<V, WIDTH>,
-        popup_key: u64,
-    ) {
-        // Update children's parent pointers in the new internode
-        // SAFETY: right_internode_ptr is valid from store_internode_in_arena
-        unsafe {
-            let right: &InternodeNode<V, WIDTH> = &*right_internode_ptr;
-
-            for i in 0..=right.size() {
-                let child: *mut u8 = right.child(i);
-
-                if !child.is_null() {
-                    // Update child's parent - height determines child type per CODE_005.md:
-                    // - height == 0 means children are leaves
-                    // - height > 0 means children are internodes
-                    if right.height() == 0 {
-                        // Children are leaves
-                        (*child.cast::<LeafNode<V, WIDTH>>())
-                            .set_parent(right_internode_ptr.cast::<u8>());
-                    } else {
-                        // Children are internodes
-                        (*child.cast::<InternodeNode<V, WIDTH>>())
-                            .set_parent(right_internode_ptr.cast::<u8>());
-                    }
-                }
-            }
-        }
-
-        // Check if left_internode is root (compare raw pointers without creating references)
-        let is_root: bool = if let RootNode::Internode(root) = &self.root {
-            StdPtr::eq(root.as_ref(), left_internode_ptr)
-        } else {
-            false
-        };
-
-        if is_root {
-            // Root internode split - similar to leaf root split, we need arena-derived pointers
-            // SAFETY: left_internode_ptr is valid
-            let left_height: u32 = unsafe { (*left_internode_ptr).height() };
-
-            // Create new root above both
-            // Height = left_internode.height + 1 (children are internodes, not leaves)
-            let mut new_root: Box<InternodeNode<V, WIDTH>> =
-                InternodeNode::new_root(left_height + 1);
-            new_root.set_ikey(0, popup_key);
-            new_root.set_nkeys(1);
-
-            // Move old root to arena FIRST to get proper provenance (same pattern as leaf)
-            let RootNode::Internode(old_root_box) =
-                StdMem::replace(&mut self.root, RootNode::Internode(new_root))
-            else {
-                unreachable!("We checked is_root above")
-            };
-
-            // Get arena-derived pointer for left internode
-            self.internode_arena.push(old_root_box);
-            let idx: usize = self.internode_arena.len() - 1;
-            // SAFETY: We just pushed, so idx is valid
-            let arena_left_ptr: *mut InternodeNode<V, WIDTH> =
-                unsafe { self.internode_arena.get_unchecked_mut(idx).as_mut() };
-
-            // CRITICAL: Refresh parent pointers for all children of the demoted root.
-            // These children had parent pointers derived from when their parent was
-            // in self.root. After demotion, we must update them with the arena-derived
-            // pointer to maintain Stacked Borrows provenance validity.
-            // SAFETY: arena_left_ptr is valid from arena, children are valid from prior operations
-            unsafe {
-                let demoted: &InternodeNode<V, WIDTH> = &*arena_left_ptr;
-                let arena_left_as_parent: *mut u8 = arena_left_ptr.cast::<u8>();
-
-                for i in 0..=demoted.size() {
-                    let child: *mut u8 = demoted.child(i);
-
-                    if !child.is_null() {
-                        if demoted.children_are_leaves() {
-                            // Children are leaves
-                            (*child.cast::<LeafNode<V, WIDTH>>()).set_parent(arena_left_as_parent);
-                        } else {
-                            // Children are internodes
-                            (*child.cast::<InternodeNode<V, WIDTH>>())
-                                .set_parent(arena_left_as_parent);
-                        }
-                    }
-                }
-            }
-
-            // Now set up children with arena-derived pointers
-            let RootNode::Internode(root_internode) = &mut self.root else {
-                unreachable!("We just set root to Internode")
-            };
-
-            root_internode.set_child(0, arena_left_ptr.cast::<u8>());
-            root_internode.set_child(1, right_internode_ptr.cast::<u8>());
-
-            // Get raw pointer to new root for parent updates
-            let new_root_ptr: *mut u8 =
-                StdPtr::from_mut::<InternodeNode<V, WIDTH>>(root_internode.as_mut()).cast();
-
-            // Update parent pointers for the two direct children
-            // SAFETY: arena_left_ptr is valid from arena, right_internode_ptr is arena-backed
-            unsafe {
-                (*arena_left_ptr).set_parent(new_root_ptr);
-                (*right_internode_ptr).set_parent(new_root_ptr);
-            }
-            return;
-        }
-
-        // Not root, insert popup_key into parent (recursive if needed)
-        // SAFETY: left_internode_ptr is valid
-        let parent_ptr: *mut u8 = unsafe { (*left_internode_ptr).parent() };
-        assert!(!parent_ptr.is_null(), "Non-root internode has null parent");
-
-        // SAFETY: parent_ptr is valid from the internode's parent pointer
-        let parent: &mut InternodeNode<V, WIDTH> =
-            unsafe { &mut *parent_ptr.cast::<InternodeNode<V, WIDTH>>() };
-        let child_idx: usize = Self::find_child_index(parent, left_internode_ptr.cast::<u8>());
-
-        if parent.size() < WIDTH {
-            // Parent has room - insert directly
-            parent.insert_key_and_child(child_idx, popup_key, right_internode_ptr.cast::<u8>());
-            unsafe {
-                (*right_internode_ptr).set_parent(parent_ptr);
-            }
-        } else {
-            // Parent is full - split with simultaneous insertion (per C++ reference)
-            let new_parent: Box<InternodeNode<V, WIDTH>> = InternodeNode::new(parent.height());
-            let new_parent_ptr: *mut InternodeNode<V, WIDTH> =
-                self.store_internode_in_arena(new_parent);
-
-            // Split parent AND insert the popup_key at child_idx simultaneously
-            // SAFETY: new_parent_ptr is valid from store_internode_in_arena
-            let (new_popup_key, insert_went_left) = unsafe {
-                parent.split_into(
-                    &mut *new_parent_ptr,
-                    child_idx,
-                    popup_key,
-                    right_internode_ptr.cast::<u8>(),
-                )
-            };
-
-            // Set right_internode's parent based on where the insert went
-            unsafe {
-                if insert_went_left {
-                    (*right_internode_ptr).set_parent(parent_ptr);
-                } else {
-                    (*right_internode_ptr).set_parent(new_parent_ptr.cast::<u8>());
-                }
-            }
-
-            // Update parent pointers for other children in new_parent
-            unsafe {
-                let new_parent_ref: &InternodeNode<V, WIDTH> = &*new_parent_ptr;
-
-                for i in 0..=new_parent_ref.size() {
-                    let child: *mut u8 = new_parent_ref.child(i);
-
-                    // Skip if this is the child we just set (avoid double-update)
-                    if !child.is_null() && child != right_internode_ptr.cast::<u8>() {
-                        if new_parent_ref.height() == 0 {
-                            // Children are leaves
-                            (*child.cast::<LeafNode<V, WIDTH>>())
-                                .set_parent(new_parent_ptr.cast::<u8>());
-                        } else {
-                            // Children are internodes
-                            (*child.cast::<InternodeNode<V, WIDTH>>())
-                                .set_parent(new_parent_ptr.cast::<u8>());
-                        }
-                    }
-                }
-            }
-
-            // Recursively propagate the new popup key
-            // parent_ptr points to arena-backed internode, safe to use
-            self.propagate_internode_split(parent_ptr.cast(), new_parent_ptr, new_popup_key);
-        }
-    }
 
     /// Check if the tree is empty.
     #[inline]
@@ -661,165 +269,16 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
 
     /// Get the number of keys in the tree.
     ///
-    /// Note: This is O(n) as it traverses all leaves.
-    /// For a size hint, track count separately.
+    /// This is O(1) as we track the count incrementally.
+    #[inline]
     #[must_use]
-    pub fn len(&self) -> usize {
-        match &self.root {
-            RootNode::Leaf(leaf) => leaf.size(),
-
-            RootNode::Internode(root) => {
-                // Traverse to leftmost leaf, then walk the leaf chain
-                let leftmost: *const LeafNode<V, WIDTH> = Self::find_leftmost_leaf(root.as_ref());
-                let mut count: usize = 0;
-                let mut current: *const LeafNode<V, WIDTH> = leftmost;
-
-                // SAFETY: Leaf pointers are valid from arena allocation and
-                // linked list structure is maintained by insert/split operations.
-                while !current.is_null() {
-                    let leaf: &LeafNode<V, WIDTH> = unsafe { &*current };
-                    count += leaf.size();
-                    current = leaf.safe_next().cast_const().cast::<LeafNode<V, WIDTH>>();
-                }
-
-                count
-            }
-        }
+    pub const fn len(&self) -> usize {
+        self.count
     }
 
-    /// Find the leftmost leaf node in the tree.
-    ///
-    /// Traverses down the leftmost path from the given internode to find
-    /// the first (leftmost) leaf in the tree.
-    fn find_leftmost_leaf(root: &InternodeNode<V, WIDTH>) -> *const LeafNode<V, WIDTH> {
-        let mut node: *const u8 = root.child(0);
-        let mut height: u32 = root.height();
-
-        // Traverse down the leftmost path
-        while height > 0 {
-            // SAFETY: Child pointers are valid from arena allocation.
-            // height > 0 means children are internodes.
-            let internode: &InternodeNode<V, WIDTH> =
-                unsafe { &*node.cast::<InternodeNode<V, WIDTH>>() };
-
-            node = internode.child(0);
-            height -= 1;
-        }
-
-        // height == 0 means node points to a leaf
-        node.cast::<LeafNode<V, WIDTH>>()
-    }
-
-    /// Reach the leaf node that should contain the given key.
-    ///
-    /// Traverses from root through internodes to find the target leaf.
-    /// For single-threaded mode, no version checking is needed.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to search for
-    ///
-    /// # Returns
-    ///
-    /// Reference to the leaf node that contains or should contain the key.
-    #[inline]
-    fn reach_leaf(&self, key: &Key<'_>) -> &LeafNode<V, WIDTH> {
-        match &self.root {
-            RootNode::Leaf(leaf) => leaf.as_ref(),
-
-            RootNode::Internode(internode) => {
-                // Traverse internodes to find leaf
-                self.reach_leaf_from_internode(internode.as_ref(), key)
-            }
-        }
-    }
-
-    /// Traverse from an internode to the target leaf.
-    #[expect(clippy::self_only_used_in_recursion)]
-    fn reach_leaf_from_internode(
-        &self,
-        internode: &InternodeNode<V, WIDTH>,
-        key: &Key<'_>,
-    ) -> &LeafNode<V, WIDTH> {
-        let ikey: u64 = key.ikey();
-        let child_idx: usize = upper_bound_internode_direct(ikey, internode);
-        let child_ptr: *mut u8 = internode.child(child_idx);
-
-        if internode.children_are_leaves() {
-            // Child is a leaf
-            // SAFETY: children_are_leaves() guarantees child is LeafNode
-            unsafe { &*(child_ptr as *const LeafNode<V, WIDTH>) }
-        } else {
-            // Child is another internode, recurse
-            // SAFETY: !children_are_leaves() guarantees child is InternodeNode
-            let child_internode: &InternodeNode<V, WIDTH> =
-                unsafe { &*(child_ptr as *const InternodeNode<V, WIDTH>) };
-
-            self.reach_leaf_from_internode(child_internode, key)
-        }
-    }
-
-    /// Reach the leaf node that should contain the given key (mutable).
-    #[inline]
-    fn reach_leaf_mut(&mut self, key: &Key<'_>) -> &mut LeafNode<V, WIDTH> {
-        // Check if root is a leaf first (immutable borrow to check)
-        let is_leaf: bool = self.root.is_leaf();
-
-        if is_leaf {
-            // Now we can borrow mutably
-            match &mut self.root {
-                RootNode::Leaf(leaf) => return leaf.as_mut(),
-                RootNode::Internode(_) => unreachable!(),
-            }
-        }
-
-        // Root is an internode - extract info with immutable borrow first
-        let (start_ptr, children_are_leaves, ikey) = match &self.root {
-            RootNode::Internode(internode) => {
-                let ikey: u64 = key.ikey();
-                let child_idx: usize = upper_bound_internode_direct(ikey, internode.as_ref());
-                (
-                    internode.child(child_idx),
-                    internode.children_are_leaves(),
-                    ikey,
-                )
-            }
-
-            RootNode::Leaf(_) => unreachable!(),
-        };
-
-        if children_are_leaves {
-            // SAFETY: children_are_leaves() guarantees child is LeafNode
-            return unsafe { &mut *start_ptr.cast::<LeafNode<V, WIDTH>>() };
-        }
-
-        // Iterative traversal for deeper trees
-        // SAFETY: The returned pointer is valid for the tree's lifetime (arena-backed)
-        unsafe { &mut *Self::reach_leaf_mut_iterative_static(start_ptr, ikey) }
-    }
-
-    /// Iterative leaf reach for deeply nested trees.
-    ///
-    /// # Safety
-    ///
-    /// The returned reference is valid for as long as the tree's arenas are not modified.
-    /// This is guaranteed by the single-threaded Phase 1 design.
-    fn reach_leaf_mut_iterative_static(mut current: *mut u8, ikey: u64) -> *mut LeafNode<V, WIDTH> {
-        loop {
-            // SAFETY: current is a valid internode pointer from traversal
-            let internode: &InternodeNode<V, WIDTH> =
-                unsafe { &*(current as *const InternodeNode<V, WIDTH>) };
-            let child_idx: usize = upper_bound_internode_direct(ikey, internode);
-            let child_ptr: *mut u8 = internode.child(child_idx);
-
-            if internode.children_are_leaves() {
-                // SAFETY: children_are_leaves() guarantees child is LeafNode
-                return child_ptr.cast::<LeafNode<V, WIDTH>>();
-            }
-
-            current = child_ptr;
-        }
-    }
+    // ========================================================================
+    //  Tree Traversal (moved to traverse.rs)
+    // ========================================================================
 
     /// Look up a value by key.
     ///
@@ -938,13 +397,34 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
         self.insert_internal(&key, value)
     }
 
-    /// Internal insert implementation with Key struct.
+    /// Internal insert implementation that wraps value in Arc.
+    ///
+    /// Delegates to `insert_impl` after wrapping the value.
+    fn insert_internal(&mut self, key: &Key<'_>, value: V) -> Result<Option<Arc<V>>, InsertError> {
+        self.insert_impl(key, Arc::new(value))
+    }
+
+    /// Insert with an existing Arc (avoids double-wrapping).
+    ///
+    /// Useful when you already have an `Arc<V>` and don't want to clone.
+    ///
+    /// # Errors
+    /// * [`InsertError::LeafFull`] - All keys have identical ikey (layer case, not yet supported)
+    pub fn insert_arc(&mut self, key: &[u8], value: Arc<V>) -> Result<Option<Arc<V>>, InsertError> {
+        let key: Key<'_> = Key::new(key);
+        self.insert_impl(&key, value)
+    }
+
+    /// Unified internal insert implementation.
     ///
     /// Uses a loop to handle splits: if the target leaf is full, we split it
     /// and then retry the insert. This matches the Masstree C++ design.
-    fn insert_internal(&mut self, key: &Key<'_>, value: V) -> Result<Option<Arc<V>>, InsertError> {
+    ///
+    /// Both `insert_internal` and `insert_arc` delegate here to avoid code duplication.
+    fn insert_impl(&mut self, key: &Key<'_>, value: Arc<V>) -> Result<Option<Arc<V>>, InsertError> {
         let ikey: u64 = key.ikey();
-        // Phase 1: key.current_len() is always <= 8 (checked in insert()), so cast is safe
+
+        // Phase 1: key.current_len() is always <= 8 (checked in public API), so cast is safe
         #[expect(
             clippy::cast_possible_truncation,
             reason = "key length validated <= 8 in public API"
@@ -960,9 +440,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             if pos.is_found() {
                 // Key exists, update value
                 let slot: usize = pos.slot();
-                let new_arc: Arc<V> = Arc::new(value);
-                let old_value: Option<Arc<V>> = leaf.swap_value(slot, new_arc);
-
+                let old_value: Option<Arc<V>> = leaf.swap_value(slot, value);
                 return Ok(old_value);
             }
 
@@ -970,19 +448,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             let insert_pos: usize = pos.i;
             let size: usize = leaf.size();
 
-            // Check if we can insert directly (has space and slot available)
-            let can_insert_directly: bool = if size < WIDTH {
-                let perm: Permuter<WIDTH> = leaf.permutation();
-                let next_free_slot: usize = perm.back();
-
-                // Can insert if slot 0 isn't at back, or if we can reuse slot 0,
-                // or if there are other free slots we can swap to
-                next_free_slot != 0 || leaf.can_reuse_slot0(ikey) || size < WIDTH - 1 // Have another free slot to swap with
-            } else {
-                false
-            };
-
-            if can_insert_directly {
+            if leaf.can_insert_directly(ikey) {
                 // Has space - insert directly
                 let mut perm: Permuter<WIDTH> = leaf.permutation();
 
@@ -1005,10 +471,13 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
                 let slot: usize = perm.insert_from_back(insert_pos);
 
                 // Assign key and value to the returned slot
-                leaf.assign_value(slot, ikey, keylenx, value);
+                leaf.assign_arc(slot, ikey, keylenx, value);
 
                 // Commit permutation update
                 leaf.set_permutation(perm);
+
+                // Track new entry
+                self.count += 1;
 
                 return Ok(None);
             }
@@ -1022,7 +491,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             // Convert from post-insert to pre-insert coordinates
             // If insert_pos < split_point.pos, the insert would go in left half
             // and split position needs adjustment since we haven't inserted yet
-            let pre_insert_split_pos = if insert_pos < split_point.pos {
+            let pre_insert_split_pos: usize = if insert_pos < split_point.pos {
                 split_point.pos - 1
             } else {
                 split_point.pos
@@ -1051,248 +520,9 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             // Loop continues - reach_leaf_mut will find the correct leaf for our key
         }
     }
-
-    /// Insert with an existing Arc (avoids double-wrapping).
-    ///
-    /// Useful when you already have an `Arc<V>` and don't want to clone.
-    ///
-    /// # Errors
-    /// * [`InsertError::LeafFull`] - All keys have identical ikey (layer case, not yet supported)
-    pub fn insert_arc(&mut self, key: &[u8], value: Arc<V>) -> Result<Option<Arc<V>>, InsertError> {
-        let key: Key<'_> = Key::new(key);
-        self.insert_arc_internal(&key, value)
-    }
-
-    /// Internal `insert_arc` implementation with split support.
-    fn insert_arc_internal(
-        &mut self,
-        key: &Key<'_>,
-        value: Arc<V>,
-    ) -> Result<Option<Arc<V>>, InsertError> {
-        let ikey: u64 = key.ikey();
-
-        // Phase 1: key.current_len() is always <= 8 (checked in insert_arc()), so cast is safe
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "key length validated <= 8 in public API"
-        )]
-        let keylenx: u8 = key.current_len() as u8;
-
-        loop {
-            let leaf: &mut LeafNode<V, WIDTH> = self.reach_leaf_mut(key);
-
-            let pos: KeyIndexPosition = lower_bound_leaf(ikey, keylenx, leaf);
-
-            if pos.is_found() {
-                let slot: usize = pos.slot();
-                let old_value: Option<Arc<V>> = leaf.swap_value(slot, value);
-                return Ok(old_value);
-            }
-
-            let insert_pos: usize = pos.i;
-            let size: usize = leaf.size();
-
-            // Check if we can insert directly (has space and slot available)
-            let can_insert_directly: bool = if size < WIDTH {
-                let perm: Permuter<WIDTH> = leaf.permutation();
-                let next_free_slot: usize = perm.back();
-
-                // Can insert if slot 0 isn't at back, or if we can reuse slot 0,
-                // or if there are other free slots we can swap to
-                next_free_slot != 0 || leaf.can_reuse_slot0(ikey) || size < WIDTH - 1 // Have another free slot to swap with
-            } else {
-                false
-            };
-
-            if can_insert_directly {
-                // Has space - insert directly
-                let mut perm: Permuter<WIDTH> = leaf.permutation();
-
-                // Check slot-0 rule BEFORE allocation (peek at which slot will be used)
-                let next_free_slot: usize = perm.back();
-
-                if next_free_slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                    // Can't use slot 0 - swap it out of the back position.
-                    debug_assert!(
-                        size < WIDTH - 1,
-                        "should have fallen through to split if only slot 0 is free"
-                    );
-                    perm.swap_free_slots(WIDTH - 1, size);
-                }
-
-                // Use return value of insert_from_back for assignment
-                let slot: usize = perm.insert_from_back(insert_pos);
-
-                leaf.assign_arc(slot, ikey, keylenx, value);
-                leaf.set_permutation(perm);
-
-                return Ok(None);
-            }
-
-            // Leaf is full (or slot 0 is the only free slot and can't be used)
-            // Calculate split point and split
-            let Some(split_point) = SplitUtils::calculate_split_point(leaf, insert_pos, ikey)
-            else {
-                return Err(InsertError::LeafFull);
-            };
-
-            let pre_insert_split_pos: usize = if insert_pos < split_point.pos {
-                split_point.pos - 1
-            } else {
-                split_point.pos
-            };
-
-            // Handle edge cases from sequential optimization
-            let leaf_ptr: *mut LeafNode<V, WIDTH> = leaf as *mut _;
-            let (new_leaf_box, split_ikey) = if pre_insert_split_pos >= size {
-                (LeafNode::new(), ikey)
-            } else if pre_insert_split_pos == 0 {
-                let split_result: LeafSplitResult<V, WIDTH> = leaf.split_all_to_right();
-                (split_result.new_leaf, split_result.split_ikey)
-            } else {
-                let split_result: LeafSplitResult<V, WIDTH> = leaf.split_into(pre_insert_split_pos);
-                (split_result.new_leaf, split_result.split_ikey)
-            };
-
-            self.propagate_split(leaf_ptr, new_leaf_box, split_ikey);
-
-            // Loop continues - reach_leaf_mut will find the correct leaf
-        }
-    }
 }
 
 impl<V, const WIDTH: usize> Default for MassTree<V, WIDTH> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ============================================================================
-//  MassTreeIndex (Index Mode with V: Copy)
-// ============================================================================
-
-/// Convenience wrapper for index-style workloads with copyable values.
-///
-/// Provides a simpler API that returns `V` directly instead of `Arc<V>`.
-/// Best for small, copyable values like `u64`, handles, or pointers.
-///
-/// # Implementation Note
-///
-/// **This is currently a wrapper around `MassTree<V>`, NOT true inline storage.**
-/// Values are still stored as `Arc<V>` internally; this type simply copies
-/// the value out on read. True inline storage is planned for a future release.
-///
-/// For performance-critical code where Arc overhead matters, use `MassTree<V>`
-/// directly and manage the Arc yourself.
-///
-/// # Type Parameters
-///
-/// * `V` - The value type to store (must be `Copy`)
-/// * `WIDTH` - Node width (default: 15, max: 15)
-///
-/// # Example
-///
-/// ```ignore
-/// use masstree::tree::MassTreeIndex;
-///
-/// let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
-/// tree.insert(b"hello", 42).unwrap();
-///
-/// let value = tree.get(b"hello");
-/// assert_eq!(value, Some(42));
-/// ```
-pub struct MassTreeIndex<V: Copy, const WIDTH: usize = 15> {
-    /// Wraps `MassTree` internally. True inline storage is planned for future.
-    inner: MassTree<V, WIDTH>,
-}
-
-impl<V: Copy, const WIDTH: usize> StdFmt::Debug for MassTreeIndex<V, WIDTH> {
-    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
-        f.debug_struct("MassTreeIndex")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH> {
-    /// Create a new empty `MassTreeIndex`.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            inner: MassTree::new(),
-        }
-    }
-
-    /// Check if the tree is empty.
-    #[inline]
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    /// Get the number of keys in the tree.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// Look up a value by key.
-    ///
-    /// Returns a copy of the value, or None if not found.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to look up (byte slice, max 8 bytes in Phase 1)
-    ///
-    /// # Returns
-    ///
-    /// * `Some(V)` - If the key was found (value is copied)
-    /// * `None` - If the key was not found or key is too long (>8 bytes)
-    #[must_use]
-    pub fn get(&self, key: &[u8]) -> Option<V> {
-        // For index mode, we dereference the Arc and copy
-        self.inner.get(key).map(|arc: Arc<V>| *arc)
-    }
-
-    /// Insert a key-value pair into the tree.
-    ///
-    /// If the key already exists, the value is updated and the old value returned.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key as a byte slice (max 8 bytes in Phase 1)
-    /// * `value` - The value to insert (copied)
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Some(old_value))` - Key existed, old value returned (copied)
-    /// * `Ok(None)` - Key inserted (new key)
-    ///
-    /// # Errors
-    ///
-    /// * [`InsertError::KeyTooLong`] - Key exceeds 8 bytes (Phase 1 limit)
-    /// * [`InsertError::LeafFull`] - All keys have identical ikey (layer case, not yet supported)
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
-    ///
-    /// // Insert new key
-    /// assert_eq!(tree.insert(b"hello", 42)?, None);
-    ///
-    /// // Update existing key
-    /// assert_eq!(tree.insert(b"hello", 100)?, Some(42));
-    /// ```
-    pub fn insert(&mut self, key: &[u8], value: V) -> Result<Option<V>, InsertError> {
-        // Use inner tree's insert, convert Arc<V> to V
-        self.inner
-            .insert(key, value)
-            .map(|opt: Option<Arc<V>>| opt.map(|arc: Arc<V>| *arc))
-    }
-}
-
-impl<V: Copy, const WIDTH: usize> Default for MassTreeIndex<V, WIDTH> {
     fn default() -> Self {
         Self::new()
     }
@@ -1794,8 +1024,6 @@ mod tests {
 
         let err = InsertError::AllocationFailed;
         assert_eq!(format!("{err}"), "memory allocation failed");
-
-        assert_eq!(format!("{err}"), "key exceeds maximum length");
     }
 
     #[test]

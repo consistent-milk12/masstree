@@ -1,0 +1,135 @@
+//! `MassTreeIndex` - convenience wrapper for copyable values.
+//!
+//! Provides a simpler API that returns `V` directly instead of `Arc<V>`.
+//! Best for small, copyable values like `u64`, handles, or pointers.
+
+use std::fmt as StdFmt;
+use std::sync::Arc;
+
+use super::{InsertError, MassTree};
+
+/// Convenience wrapper for index-style workloads with copyable values.
+///
+/// Provides a simpler API that returns `V` directly instead of `Arc<V>`.
+/// Best for small, copyable values like `u64`, handles, or pointers.
+///
+/// # Implementation Note
+///
+/// **This is currently a wrapper around `MassTree<V>`, NOT true inline storage.**
+/// Values are still stored as `Arc<V>` internally; this type simply copies
+/// the value out on read. True inline storage is planned for a future release.
+///
+/// For performance-critical code where Arc overhead matters, use `MassTree<V>`
+/// directly and manage the Arc yourself.
+///
+/// # Type Parameters
+///
+/// * `V` - The value type to store (must be `Copy`)
+/// * `WIDTH` - Node width (default: 15, max: 15)
+///
+/// # Example
+///
+/// ```ignore
+/// use masstree::tree::MassTreeIndex;
+///
+/// let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
+/// tree.insert(b"hello", 42).unwrap();
+///
+/// let value = tree.get(b"hello");
+/// assert_eq!(value, Some(42));
+/// ```
+pub struct MassTreeIndex<V: Copy, const WIDTH: usize = 15> {
+    /// Wraps `MassTree` internally. True inline storage is planned for future.
+    pub(crate) inner: MassTree<V, WIDTH>,
+}
+
+impl<V: Copy, const WIDTH: usize> StdFmt::Debug for MassTreeIndex<V, WIDTH> {
+    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
+        f.debug_struct("MassTreeIndex")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH> {
+    /// Create a new empty `MassTreeIndex`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: MassTree::new(),
+        }
+    }
+
+    /// Check if the tree is empty.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Get the number of keys in the tree.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Look up a value by key.
+    ///
+    /// Returns a copy of the value, or None if not found.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up (byte slice, max 8 bytes in Phase 1)
+    ///
+    /// # Returns
+    ///
+    /// * `Some(V)` - If the key was found (value is copied)
+    /// * `None` - If the key was not found or key is too long (>8 bytes)
+    #[must_use]
+    pub fn get(&self, key: &[u8]) -> Option<V> {
+        // For index mode, we dereference the Arc and copy
+        self.inner.get(key).map(|arc: Arc<V>| *arc)
+    }
+
+    /// Insert a key-value pair into the tree.
+    ///
+    /// If the key already exists, the value is updated and the old value returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key as a byte slice (max 8 bytes in Phase 1)
+    /// * `value` - The value to insert (copied)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(old_value))` - Key existed, old value returned (copied)
+    /// * `Ok(None)` - Key inserted (new key)
+    ///
+    /// # Errors
+    ///
+    /// * [`InsertError::LeafFull`] - All keys have identical ikey (layer case, not yet supported)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
+    ///
+    /// // Insert new key
+    /// assert_eq!(tree.insert(b"hello", 42)?, None);
+    ///
+    /// // Update existing key
+    /// assert_eq!(tree.insert(b"hello", 100)?, Some(42));
+    /// ```
+    pub fn insert(&mut self, key: &[u8], value: V) -> Result<Option<V>, InsertError> {
+        // Use inner tree's insert, convert Arc<V> to V
+        self.inner
+            .insert(key, value)
+            .map(|opt: Option<Arc<V>>| opt.map(|arc: Arc<V>| *arc))
+    }
+}
+
+impl<V: Copy, const WIDTH: usize> Default for MassTreeIndex<V, WIDTH> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
