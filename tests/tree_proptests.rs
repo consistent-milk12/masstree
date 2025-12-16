@@ -5,7 +5,7 @@
 
 #![expect(clippy::unwrap_used, reason = "fail fast in tests")]
 
-use masstree::tree::{InsertError, MAX_INLINE_KEY_LEN, MassTree, MassTreeIndex};
+use masstree::tree::{MAX_INLINE_KEY_LEN, MassTree, MassTreeIndex};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -106,14 +106,6 @@ proptest! {
         tree.insert(&inserted_key, value).unwrap();
 
         prop_assert!(tree.get(&missing_key).is_none());
-    }
-
-    /// Keys that are too long should be rejected.
-    #[test]
-    fn long_keys_rejected(key in invalid_key_too_long(), value: u64) {
-        let mut tree: MassTree<u64> = MassTree::new();
-        let result = tree.insert(&key, value);
-        prop_assert!(matches!(result, Err(InsertError::KeyTooLong)));
     }
 
     /// Get with too-long key returns None (not error).

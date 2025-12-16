@@ -407,7 +407,7 @@ impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
 // ============================================================================
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "Tests should fail fast")]
+#[expect(clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

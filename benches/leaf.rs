@@ -191,7 +191,7 @@ mod navigation {
 #[divan::bench_group]
 mod split {
     use super::{Bencher, LeafNode, black_box};
-    use masstree::leaf::calculate_split_point;
+    use masstree::leaf::SplitUtils;
 
     fn setup_full_leaf() -> Box<LeafNode<u64, 15>> {
         let mut leaf = LeafNode::<u64, 15>::new();
@@ -212,7 +212,7 @@ mod split {
         let insert_pos = 7;
         let insert_ikey = 0x0700_0000_0000_0000u64;
         bencher.bench_local(|| {
-            calculate_split_point(
+            SplitUtils::calculate_split_point(
                 black_box(&leaf),
                 black_box(insert_pos),
                 black_box(insert_ikey),
@@ -227,7 +227,7 @@ mod split {
         let insert_pos = 15;
         let insert_ikey = 0xFF00_0000_0000_0000u64;
         bencher.bench_local(|| {
-            calculate_split_point(
+            SplitUtils::calculate_split_point(
                 black_box(&leaf),
                 black_box(insert_pos),
                 black_box(insert_ikey),

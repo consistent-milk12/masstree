@@ -6,13 +6,15 @@
 use crate::internode::InternodeNode;
 use crate::key::Key;
 use crate::ksearch::{KeyIndexPosition, lower_bound_leaf, upper_bound_internode_direct};
-use crate::leaf::{LAYER_KEYLENX, LeafNode, LeafSplitResult, calculate_split_point};
+use crate::leaf::{LAYER_KEYLENX, LeafNode, LeafSplitResult, SplitUtils};
 use crate::permuter::Permuter;
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
 use std::mem as StdMem;
 use std::ptr as StdPtr;
 use std::sync::Arc;
+
+pub mod layer;
 
 // ============================================================================
 //  RootNode Enum
@@ -118,12 +120,6 @@ pub enum InsertError {
 
     /// Memory allocation failed.
     AllocationFailed,
-
-    /// Key is too long.
-    ///
-    /// Phase 1: Keys must be <= 8 bytes (single layer only).
-    /// Phase 2+: Keys can be up to 256 bytes (multi-layer support).
-    KeyTooLong,
 }
 
 impl StdFmt::Display for InsertError {
@@ -132,8 +128,6 @@ impl StdFmt::Display for InsertError {
             Self::LeafFull => write!(f, "leaf node is full"),
 
             Self::AllocationFailed => write!(f, "memory allocation failed"),
-
-            Self::KeyTooLong => write!(f, "key exceeds maximum length"),
         }
     }
 }
@@ -940,11 +934,6 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
     /// assert_eq!(*result.unwrap().unwrap(), 42); // Old value returned
     /// ```
     pub fn insert(&mut self, key: &[u8], value: V) -> Result<Option<Arc<V>>, InsertError> {
-        // Phase 1: Restrict to 8-byte keys
-        if key.len() > MAX_INLINE_KEY_LEN {
-            return Err(InsertError::KeyTooLong);
-        }
-
         let key: Key<'_> = Key::new(key);
         self.insert_internal(&key, value)
     }
@@ -1025,7 +1014,8 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             }
 
             // Leaf is full - calculate split point and split
-            let Some(split_point) = calculate_split_point(leaf, insert_pos, ikey) else {
+            let Some(split_point) = SplitUtils::calculate_split_point(leaf, insert_pos, ikey)
+            else {
                 return Err(InsertError::LeafFull);
             };
 
@@ -1067,16 +1057,9 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
     /// Useful when you already have an `Arc<V>` and don't want to clone.
     ///
     /// # Errors
-    ///
-    /// * [`InsertError::KeyTooLong`] - Key exceeds 8 bytes (Phase 1 limit)
     /// * [`InsertError::LeafFull`] - All keys have identical ikey (layer case, not yet supported)
     pub fn insert_arc(&mut self, key: &[u8], value: Arc<V>) -> Result<Option<Arc<V>>, InsertError> {
-        // Phase 1: Restrict to 8-byte keys
-        if key.len() > MAX_INLINE_KEY_LEN {
-            return Err(InsertError::KeyTooLong);
-        }
-
-        let key = Key::new(key);
+        let key: Key<'_> = Key::new(key);
         self.insert_arc_internal(&key, value)
     }
 
@@ -1148,7 +1131,8 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
 
             // Leaf is full (or slot 0 is the only free slot and can't be used)
             // Calculate split point and split
-            let Some(split_point) = calculate_split_point(leaf, insert_pos, ikey) else {
+            let Some(split_point) = SplitUtils::calculate_split_point(leaf, insert_pos, ikey)
+            else {
                 return Err(InsertError::LeafFull);
             };
 
@@ -1811,24 +1795,7 @@ mod tests {
         let err = InsertError::AllocationFailed;
         assert_eq!(format!("{err}"), "memory allocation failed");
 
-        let err = InsertError::KeyTooLong;
         assert_eq!(format!("{err}"), "key exceeds maximum length");
-    }
-
-    #[test]
-    fn test_insert_key_too_long() {
-        let mut tree: MassTree<u64> = MassTree::new();
-
-        // Phase 1: Keys > 8 bytes are rejected
-        let long_key = vec![b'x'; 9]; // 9 bytes > 8
-
-        let result = tree.insert(&long_key, 42);
-        assert!(matches!(result, Err(InsertError::KeyTooLong)));
-
-        // Even longer keys
-        let very_long = vec![b'y'; 100];
-        let result = tree.insert(&very_long, 42);
-        assert!(matches!(result, Err(InsertError::KeyTooLong)));
     }
 
     #[test]

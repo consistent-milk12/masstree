@@ -10,11 +10,9 @@ use std::mem as StdMem;
 use std::ptr as StdPtr;
 use std::sync::Arc;
 
-use crate::{
-    nodeversion::NodeVersion,
-    permuter::Permuter,
-    suffix::SuffixBag,
-};
+pub mod layer;
+
+use crate::{nodeversion::NodeVersion, permuter::Permuter, suffix::SuffixBag};
 
 /// Special keylenx value indicating key has a suffix.
 pub const KSUF_KEYLENX: u8 = 64;
@@ -83,164 +81,170 @@ pub struct LeafSplitResult<V, const WIDTH: usize = 15> {
 //  Split Point Calculation Functions
 // ============================================================================
 
-/// Get the ikey at logical position `i` after the new key is inserted.
-///
-/// This is critical for correct split point adjustment: we must consider
-/// the post-insert key stream, not just existing keys.
-///
-/// # Arguments
-///
-/// * `leaf` - The leaf being split
-/// * `i` - Logical position in post-insert order
-/// * `insert_pos` - Where the new key will be inserted
-/// * `insert_ikey` - The ikey of the new key
-fn ikey_after_insert<V, const WIDTH: usize>(
-    leaf: &LeafNode<V, WIDTH>,
-    i: usize,
-    insert_pos: usize,
-    insert_ikey: u64,
-) -> u64 {
-    use std::cmp::Ordering;
+/// Unit struct for split utilities.
+#[derive(Debug)]
+pub struct SplitUtils;
 
-    let perm = leaf.permutation();
+impl SplitUtils {
+    /// Get the ikey at logical position `i` after the new key is inserted.
+    ///
+    /// This is critical for correct split point adjustment: we must consider
+    /// the post-insert key stream, not just existing keys.
+    ///
+    /// # Arguments
+    ///
+    /// * `leaf` - The leaf being split
+    /// * `i` - Logical position in post-insert order
+    /// * `insert_pos` - Where the new key will be inserted
+    /// * `insert_ikey` - The ikey of the new key
+    fn ikey_after_insert<V, const WIDTH: usize>(
+        leaf: &LeafNode<V, WIDTH>,
+        i: usize,
+        insert_pos: usize,
+        insert_ikey: u64,
+    ) -> u64 {
+        use std::cmp::Ordering;
 
-    match i.cmp(&insert_pos) {
-        Ordering::Less => {
-            // Before insert point: use existing key at position i
-            leaf.ikey(perm.get(i))
-        }
+        let perm = leaf.permutation();
 
-        Ordering::Equal => {
-            // At insert point: this is the new key
-            insert_ikey
-        }
+        match i.cmp(&insert_pos) {
+            Ordering::Less => {
+                // Before insert point: use existing key at position i
+                leaf.ikey(perm.get(i))
+            }
 
-        Ordering::Greater => {
-            // After insert point: shifted by 1, so use position i-1
-            leaf.ikey(perm.get(i - 1))
+            Ordering::Equal => {
+                // At insert point: this is the new key
+                insert_ikey
+            }
+
+            Ordering::Greater => {
+                // After insert point: shifted by 1, so use position i-1
+                leaf.ikey(perm.get(i - 1))
+            }
         }
     }
-}
 
-/// Adjust split position to keep equal ikey0 values together.
-///
-/// Uses post-insert key stream to correctly handle the case where the
-/// inserted key affects which keys should stay together.
-///
-/// Returns None if all entries have the same ikey (layer case).
-fn adjust_split_for_equal_ikeys_post_insert<V, const WIDTH: usize>(
-    leaf: &LeafNode<V, WIDTH>,
-    mut pos: usize,
-    insert_pos: usize,
-    insert_ikey: u64,
-    post_insert_size: usize,
-) -> Option<usize> {
-    if post_insert_size <= 1 {
-        return Some(pos);
-    }
-
-    // Get ikey at current split position (post-insert)
-    let split_ikey: u64 = ikey_after_insert(leaf, pos, insert_pos, insert_ikey);
-
-    // Move left while previous entry has same ikey
-    while pos > 0 {
-        let prev_ikey: u64 = ikey_after_insert(leaf, pos - 1, insert_pos, insert_ikey);
-
-        if prev_ikey != split_ikey {
-            break;
+    /// Adjust split position to keep equal ikey0 values together.
+    ///
+    /// Uses post-insert key stream to correctly handle the case where the
+    /// inserted key affects which keys should stay together.
+    ///
+    /// Returns None if all entries have the same ikey (layer case).
+    fn adjust_split_for_equal_ikeys_post_insert<V, const WIDTH: usize>(
+        leaf: &LeafNode<V, WIDTH>,
+        mut pos: usize,
+        insert_pos: usize,
+        insert_ikey: u64,
+        post_insert_size: usize,
+    ) -> Option<usize> {
+        if post_insert_size <= 1 {
+            return Some(pos);
         }
 
-        pos -= 1;
-    }
+        // Get ikey at current split position (post-insert)
+        let split_ikey: u64 = Self::ikey_after_insert(leaf, pos, insert_pos, insert_ikey);
 
-    // If we moved to position 0, all entries might have same ikey
-    // Try moving right instead
-    if pos == 0 {
-        let first_ikey: u64 = ikey_after_insert(leaf, 0, insert_pos, insert_ikey);
-        pos = 1;
+        // Move left while previous entry has same ikey
+        while pos > 0 {
+            let prev_ikey: u64 = Self::ikey_after_insert(leaf, pos - 1, insert_pos, insert_ikey);
 
-        while pos < post_insert_size {
-            let curr_ikey: u64 = ikey_after_insert(leaf, pos, insert_pos, insert_ikey);
-
-            if curr_ikey != first_ikey {
+            if prev_ikey != split_ikey {
                 break;
             }
 
-            pos += 1;
+            pos -= 1;
         }
 
-        // If we reached the end, all entries have same ikey
-        if pos >= post_insert_size {
-            return None; // Layer case - can't split
+        // If we moved to position 0, all entries might have same ikey
+        // Try moving right instead
+        if pos == 0 {
+            let first_ikey: u64 = Self::ikey_after_insert(leaf, 0, insert_pos, insert_ikey);
+            pos = 1;
+
+            while pos < post_insert_size {
+                let curr_ikey: u64 = Self::ikey_after_insert(leaf, pos, insert_pos, insert_ikey);
+
+                if curr_ikey != first_ikey {
+                    break;
+                }
+
+                pos += 1;
+            }
+
+            // If we reached the end, all entries have same ikey
+            if pos >= post_insert_size {
+                return None; // Layer case - can't split
+            }
         }
+
+        Some(pos)
     }
 
-    Some(pos)
-}
+    /// Calculate the split point for a leaf node.
+    ///
+    /// Returns the logical position where to split. Entries from `pos` to `size`
+    /// (in post-insert coordinates) will move to the new leaf.
+    ///
+    /// # Arguments
+    ///
+    /// * `leaf` - The leaf node to split
+    /// * `insert_pos` - Where the new key would be inserted
+    /// * `insert_ikey` - The ikey of the new key
+    ///
+    /// # Returns
+    ///
+    /// `SplitPoint` with position and split key, or None if split is not possible
+    /// (e.g., all entries have same ikey - would need layer instead).
+    pub fn calculate_split_point<V, const WIDTH: usize>(
+        leaf: &LeafNode<V, WIDTH>,
+        insert_pos: usize,
+        insert_ikey: u64,
+    ) -> Option<SplitPoint> {
+        let perm: Permuter<WIDTH> = leaf.permutation();
+        let size: usize = perm.size();
 
-/// Calculate the split point for a leaf node.
-///
-/// Returns the logical position where to split. Entries from `pos` to `size`
-/// (in post-insert coordinates) will move to the new leaf.
-///
-/// # Arguments
-///
-/// * `leaf` - The leaf node to split
-/// * `insert_pos` - Where the new key would be inserted
-/// * `insert_ikey` - The ikey of the new key
-///
-/// # Returns
-///
-/// `SplitPoint` with position and split key, or None if split is not possible
-/// (e.g., all entries have same ikey - would need layer instead).
-pub fn calculate_split_point<V, const WIDTH: usize>(
-    leaf: &LeafNode<V, WIDTH>,
-    insert_pos: usize,
-    insert_ikey: u64,
-) -> Option<SplitPoint> {
-    let perm: Permuter<WIDTH> = leaf.permutation();
-    let size: usize = perm.size();
+        if size == 0 {
+            return None; // Can't split empty leaf
+        }
 
-    if size == 0 {
-        return None; // Can't split empty leaf
+        // Post-insert size is size + 1
+        let post_insert_size: usize = size + 1;
+
+        // Default: split in the middle (of post-insert size)
+        let mut split_pos: usize = post_insert_size.div_ceil(2);
+
+        // Sequential optimization heuristics
+        let is_rightmost: bool = leaf.safe_next().is_null();
+        let is_leftmost: bool = leaf.prev().is_null();
+        let inserting_at_end: bool = insert_pos >= size;
+        let inserting_at_start: bool = insert_pos == 0;
+
+        if is_rightmost && inserting_at_end {
+            // Right-sequential: keep left nearly full
+            split_pos = post_insert_size - 1;
+        } else if is_leftmost && inserting_at_start {
+            // Left-sequential: keep right nearly full
+            split_pos = 1;
+        }
+
+        // Adjust to keep equal ikey0 values together (using post-insert keys)
+        split_pos = Self::adjust_split_for_equal_ikeys_post_insert(
+            leaf,
+            split_pos,
+            insert_pos,
+            insert_ikey,
+            post_insert_size,
+        )?;
+
+        // Get the split key (first key of right half, in post-insert order)
+        let split_ikey = Self::ikey_after_insert(leaf, split_pos, insert_pos, insert_ikey);
+
+        Some(SplitPoint {
+            pos: split_pos,
+            split_ikey,
+        })
     }
-
-    // Post-insert size is size + 1
-    let post_insert_size: usize = size + 1;
-
-    // Default: split in the middle (of post-insert size)
-    let mut split_pos: usize = post_insert_size.div_ceil(2);
-
-    // Sequential optimization heuristics
-    let is_rightmost: bool = leaf.safe_next().is_null();
-    let is_leftmost: bool = leaf.prev().is_null();
-    let inserting_at_end: bool = insert_pos >= size;
-    let inserting_at_start: bool = insert_pos == 0;
-
-    if is_rightmost && inserting_at_end {
-        // Right-sequential: keep left nearly full
-        split_pos = post_insert_size - 1;
-    } else if is_leftmost && inserting_at_start {
-        // Left-sequential: keep right nearly full
-        split_pos = 1;
-    }
-
-    // Adjust to keep equal ikey0 values together (using post-insert keys)
-    split_pos = adjust_split_for_equal_ikeys_post_insert(
-        leaf,
-        split_pos,
-        insert_pos,
-        insert_ikey,
-        post_insert_size,
-    )?;
-
-    // Get the split key (first key of right half, in post-insert order)
-    let split_ikey = ikey_after_insert(leaf, split_pos, insert_pos, insert_ikey);
-
-    Some(SplitPoint {
-        pos: split_pos,
-        split_ikey,
-    })
 }
 
 /// Value stored in a leaf slot (default mode with `Arc<V>`).
