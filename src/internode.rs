@@ -465,11 +465,9 @@ impl<V, const WIDTH: usize> InternodeNode<V, WIDTH> {
                 new_right.ikey0[right_insert_pos] = insert_ikey;
                 new_right.set_child(right_insert_pos + 1, insert_child);
 
-                // Copy keys after insertion point
-                for i in insert_pos..WIDTH {
-                    new_right.ikey0[right_insert_pos + 1 + (i - insert_pos)] = self.ikey0[i];
-                    new_right.set_child(right_insert_pos + 2 + (i - insert_pos), self.child(i + 1));
-                }
+                // Copy keys after insertion point (using shift_from for consistency)
+                let count_after: usize = WIDTH - insert_pos;
+                new_right.shift_from(right_insert_pos + 1, self, insert_pos, count_after);
 
                 new_right.nkeys = (WIDTH - mid) as u8;
 

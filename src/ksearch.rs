@@ -308,20 +308,11 @@ pub fn lower_bound_leaf<V, const WIDTH: usize>(
     let size: usize = perm.size();
 
     lower_bound_by(size, perm, |slot: usize| {
-        // Compare ikey first
+        // Compare ikey first, then keylenx only if ikeys match
         let node_ikey: u64 = node.ikey(slot);
-
         match search_ikey.cmp(&node_ikey) {
-            Ordering::Less => Ordering::Less,
-
-            Ordering::Greater => Ordering::Greater,
-
-            Ordering::Equal => {
-                // ikeys equal, compare keylenx
-                let node_keylenx: u8 = node.keylenx(slot);
-
-                search_keylenx.cmp(&node_keylenx)
-            }
+            Ordering::Equal => search_keylenx.cmp(&node.keylenx(slot)),
+            other => other,
         }
     })
 }

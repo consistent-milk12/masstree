@@ -1244,6 +1244,34 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         self.ikey0[0] == new_ikey
     }
 
+    /// Check if a new key can be inserted without splitting.
+    ///
+    /// This considers both space availability and the slot-0 rule.
+    ///
+    /// # Arguments
+    ///
+    /// * `ikey` - The ikey of the key to insert
+    ///
+    /// # Returns
+    ///
+    /// `true` if the leaf has space and can accept the key, `false` otherwise.
+    #[inline]
+    #[must_use]
+    pub const fn can_insert_directly(&self, ikey: u64) -> bool {
+        let size: usize = self.size();
+        if size >= WIDTH {
+            return false;
+        }
+        let perm: Permuter<WIDTH> = self.permutation();
+        let next_free_slot: usize = perm.back();
+
+        // Can insert if:
+        // 1. Slot 0 isn't at the back of the free list, OR
+        // 2. We can reuse slot 0 (same ikey or no predecessor), OR
+        // 3. There are other free slots we can swap to
+        next_free_slot != 0 || self.can_reuse_slot0(ikey) || size < WIDTH - 1
+    }
+
     /// Swap a value at a slot, returning the old value.
     ///
     /// Used when updating an existing key.
@@ -1379,8 +1407,6 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         reason = "Indices from permuter, valid by construction"
     )]
     pub fn split_all_to_right(&mut self) -> LeafSplitResult<V, WIDTH> {
-        use crate::permuter::Permuter;
-
         let mut new_leaf = Self::new();
         let old_perm = self.permutation();
         let old_size = old_perm.size();

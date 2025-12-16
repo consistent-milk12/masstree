@@ -311,20 +311,28 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
                 continue;
             }
 
-            if let Some(suffix) = self.get(slot) {
-                let offset: usize = new_data.len();
-                new_data.extend_from_slice(suffix);
+            let meta: SlotMeta = self.slots[slot];
+            if !meta.has_suffix() {
+                continue;
+            }
 
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "offset bounded by new_capacity, len from existing valid suffix"
-                )]
-                {
-                    new_slots[slot] = SlotMeta {
-                        offset: offset as u32,
-                        len: suffix.len() as u16,
-                    };
-                }
+            // Direct slice access - bounds already validated by SlotMeta invariant
+            let start: usize = meta.offset as usize;
+            let end: usize = start + meta.len as usize;
+            let suffix: &[u8] = &self.data[start..end];
+
+            let new_offset: usize = new_data.len();
+            new_data.extend_from_slice(suffix);
+
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "new_offset bounded by new_capacity which fits in u32"
+            )]
+            {
+                new_slots[slot] = SlotMeta {
+                    offset: new_offset as u32,
+                    len: meta.len, // Reuse existing len instead of recomputing
+                };
             }
         }
 

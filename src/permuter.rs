@@ -320,12 +320,11 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
             return; // Nothing to swap
         }
 
-        let slot_i: usize = self.get(pos_i);
-        let slot_j: usize = self.get(pos_j);
-
-        // Swap by setting each position to the other's value
-        self.set(pos_i, slot_j);
-        self.set(pos_j, slot_i);
+        // XOR swap trick (same as exchange()) - single operation instead of 4
+        let i_shift: usize = (pos_i + 1) * 4;
+        let j_shift: usize = (pos_j + 1) * 4;
+        let diff: u64 = ((self.value >> i_shift) ^ (self.value >> j_shift)) & 0xF;
+        self.value ^= (diff << i_shift) | (diff << j_shift);
     }
 
     /// Allocate a slot from the back and insert it at position `i`.
