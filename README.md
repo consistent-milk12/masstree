@@ -4,7 +4,7 @@ An experimental Rust implementation of the Masstree algorithm, a high-performanc
 
 This project **attempts to reimplement** the [original C++ Masstree](https://github.com/kohler/masstree-beta) developed at MIT in Rust, with planned divergences for safety, ergonomics, and Rust idioms. While the core algorithm remains the same, this implementation introduces value lifetime management via `Arc<V>`, type-state locking, and modern concurrency primitives.
 
-**Status:** Early development - core structures implemented, tree operations in progress.
+**Status:** Phase 1 complete - single-threaded core with `get`/`insert`/split operations working. Multi-layer keys and concurrency planned for Phase 2-3.
 
 ## Overview
 
@@ -85,8 +85,18 @@ Both implementations use epoch-based reclamation (EBR) for node memory safety—
 
 | Module | Status | Notes |
 |--------|--------|-------|
-| `key` | Implemented | 8-byte ikey extraction, layer traversal, suffix handling |
-| `permuter` | Implemented | Const-generic WIDTH, u64-encoded slot permutation |
-| `nodeversion` | Implemented | Versioned lock with type-state guard pattern (single-threaded) |
-| `leaf` | Implemented | LeafNode struct, LeafValue/LeafValueIndex enums, B-link pointers, slot assignment |
-| Tree operations | Planned | Get, insert, scan, remove |
+| `key` | Complete | 8-byte ikey extraction, layer traversal, suffix handling |
+| `permuter` | Complete | Const-generic WIDTH, u64-encoded slot permutation |
+| `nodeversion` | Complete | Versioned lock with type-state guard pattern (single-threaded) |
+| `leaf` | Complete | LeafNode struct, split operations, B-link pointers, slot-0 rule |
+| `internode` | Complete | Routing nodes, split-with-insert, height-based child typing |
+| `ksearch` | Complete | Binary search for leaves and internodes |
+| `tree` | Complete | `MassTree` with `get`/`insert`, split propagation, arena allocation |
+| Scan/Remove | Planned | Range scans and key deletion not yet implemented |
+
+**Phase 1 Constraints:**
+- Keys limited to 0-8 bytes (single-layer only)
+- Single-threaded (no concurrent access)
+- Arena-based allocation (no node reclamation)
+
+**Note on `MassTreeIndex`:** The current `MassTreeIndex<V: Copy>` is a convenience wrapper that still uses `Arc<V>` internally. True inline storage for `V: Copy` values is planned but not yet implemented.

@@ -12,3 +12,5 @@ docs/
 *.cpp
 *.c
 .backup
+!Architecture.md
+!ArchitectureInline.md

@@ -21,11 +21,10 @@ include = [
 ]
 
 [dependencies]
-crossbeam-epoch = "0.9.18"
-indexmap = "2.12.1"
-parking_lot = "0.12.5"
-rand = "0.9.2"
-rayon = "1.11.0"
+# No dependencies for Phase 1 (single-threaded)
+# Future phases will add:
+# - crossbeam-epoch: Epoch-based memory reclamation (Phase 3)
+# - parking_lot: High-performance mutexes if needed (Phase 3)
 
 [dev-dependencies]
 divan = "0.1.21"
@@ -112,4 +111,20 @@ harness = false
 
 [[bench]]
 name = "nodeversion"
+harness = false
+
+[[bench]]
+name = "leaf"
+harness = false
+
+[[bench]]
+name = "internode"
+harness = false
+
+[[bench]]
+name = "ksearch"
+harness = false
+
+[[bench]]
+name = "tree"
 harness = false

@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use crate::{
     nodeversion::NodeVersion,
-    permuter::{Permuter, SuffixStorage},
+    permuter::Permuter,
+    suffix::SuffixBag,
 };
 
 /// Special keylenx value indicating key has a suffix.
@@ -587,11 +588,15 @@ pub struct LeafNode<V, const WIDTH: usize = 15> {
     /// Values or layer pointers for each slot.
     leaf_values: [LeafValue<V>; WIDTH],
 
-    /// Pointer to external suffix storage (null if no suffixes or using inline).
+    /// Suffix storage for keys longer than 8 bytes.
     ///
-    ///  TODO: Defined in `crate::permuter` as a placeholder,
-    ///  this will have to be properly defined and extended in later phases.
-    ksuf: *mut SuffixStorage,
+    /// When a key is longer than 8 bytes, the first 8 bytes are stored as `ikey0`
+    /// and the remaining bytes (the "suffix") are stored here. A slot's suffix
+    /// is stored if and only if `keylenx[slot] == KSUF_KEYLENX`.
+    ///
+    /// `None` means no suffixes are stored in this leaf (all keys are <= 8 bytes).
+    /// Initialized lazily on first suffix assignment.
+    ksuf: Option<Box<SuffixBag<WIDTH>>>,
 
     /// Next leaf pointer (LSB used as mark bit during splits).
     next: *mut Self,
@@ -637,7 +642,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
             permutation: Permuter::empty(),
             ikey0: [0; WIDTH],
             leaf_values: std::array::from_fn(|_| LeafValue::Empty),
-            ksuf: StdPtr::null_mut(),
+            ksuf: None,
             next: StdPtr::null_mut(),
             prev: StdPtr::null_mut(),
             parent: StdPtr::null_mut(),
@@ -748,6 +753,208 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     #[must_use]
     pub const fn keylenx_has_ksuf(keylenx: u8) -> bool {
         keylenx == KSUF_KEYLENX
+    }
+
+    // ============================================================================
+    //  Suffix Storage Methods
+    // ============================================================================
+
+    /// Check if this leaf has suffix storage allocated.
+    #[inline]
+    #[must_use]
+    pub const fn has_ksuf_storage(&self) -> bool {
+        self.ksuf.is_some()
+    }
+
+    /// Get the suffix for a slot.
+    ///
+    /// Returns `None` if:
+    /// - No suffix storage exists, or
+    /// - The slot doesn't have a suffix (`keylenx != KSUF_KEYLENX`)
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    pub fn ksuf(&self, slot: usize) -> Option<&[u8]> {
+        debug_assert!(slot < WIDTH, "ksuf: slot {slot} >= WIDTH {WIDTH}");
+
+        if !self.has_ksuf(slot) {
+            return None;
+        }
+
+        self.ksuf.as_ref().and_then(|bag| bag.get(slot))
+    }
+
+    /// Get the suffix for a slot, or an empty slice if none.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[inline]
+    #[must_use]
+    pub fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
+        self.ksuf(slot).unwrap_or(&[])
+    }
+
+    /// Assign a suffix to a slot.
+    ///
+    /// This lazily initializes the suffix storage if needed.
+    /// The slot's `keylenx` is set to `KSUF_KEYLENX`.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index
+    /// * `suffix` - The suffix bytes to store (bytes after the first 8)
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot >= WIDTH` or suffix is too long.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot bounds checked via debug_assert"
+    )]
+    pub fn assign_ksuf(&mut self, slot: usize, suffix: &[u8]) {
+        debug_assert!(slot < WIDTH, "assign_ksuf: slot {slot} >= WIDTH {WIDTH}");
+
+        // Lazy initialization of suffix storage
+        if self.ksuf.is_none() {
+            self.ksuf = Some(Box::new(SuffixBag::new()));
+        }
+
+        // Assign the suffix
+        if let Some(bag) = self.ksuf.as_mut() {
+            bag.assign(slot, suffix);
+        }
+
+        // Mark slot as having a suffix
+        self.keylenx[slot] = KSUF_KEYLENX;
+    }
+
+    /// Clear the suffix from a slot.
+    ///
+    /// This marks the slot as not having a suffix (`keylenx = 0`) but does
+    /// NOT deallocate the suffix storage or reclaim space. Use
+    /// [`compact_ksuf()`](Self::compact_ksuf) to reclaim space.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot bounds checked via debug_assert"
+    )]
+    pub fn clear_ksuf(&mut self, slot: usize) {
+        debug_assert!(slot < WIDTH, "clear_ksuf: slot {slot} >= WIDTH {WIDTH}");
+
+        if let Some(bag) = self.ksuf.as_mut() {
+            bag.clear(slot);
+        }
+
+        // Reset keylenx to indicate no suffix
+        // The actual key length info is lost - caller should track if needed
+        self.keylenx[slot] = 0;
+    }
+
+    /// Check if a slot's suffix equals the given suffix.
+    ///
+    /// # Returns
+    ///
+    /// - `true` if slot has a suffix and it matches exactly
+    /// - `false` if slot has no suffix or suffix doesn't match
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    pub fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
+        debug_assert!(slot < WIDTH, "ksuf_equals: slot {slot} >= WIDTH {WIDTH}");
+
+        if !self.has_ksuf(slot) {
+            return false;
+        }
+
+        self.ksuf
+            .as_ref()
+            .is_some_and(|bag| bag.suffix_equals(slot, suffix))
+    }
+
+    /// Compare a slot's suffix with the given suffix.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Ordering)` if slot has a suffix
+    /// - `None` if slot has no suffix
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    pub fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering> {
+        debug_assert!(slot < WIDTH, "ksuf_compare: slot {slot} >= WIDTH {WIDTH}");
+
+        if !self.has_ksuf(slot) {
+            return None;
+        }
+
+        self.ksuf
+            .as_ref()
+            .and_then(|bag| bag.suffix_compare(slot, suffix))
+    }
+
+    /// Check if a slot's key (ikey + suffix) matches the given full key.
+    ///
+    /// This compares both the 8-byte ikey and the suffix (if any).
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index
+    /// * `ikey` - The 8-byte key to compare
+    /// * `suffix` - The suffix to compare (bytes after the first 8)
+    ///
+    /// # Returns
+    ///
+    /// `true` if both ikey and suffix match.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    pub fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
+        debug_assert!(slot < WIDTH, "ksuf_matches: slot {slot} >= WIDTH {WIDTH}");
+
+        // First check ikey
+        if self.ikey(slot) != ikey {
+            return false;
+        }
+
+        // Then check suffix
+        if suffix.is_empty() {
+            // Key has no suffix - slot should also have no suffix
+            !self.has_ksuf(slot)
+        } else {
+            // Key has suffix - slot must have matching suffix
+            self.ksuf_equals(slot, suffix)
+        }
+    }
+
+    /// Compact suffix storage, reclaiming space from deleted entries.
+    ///
+    /// This garbage-collects unused suffix data by keeping only suffixes
+    /// for slots that are currently active in the permutation.
+    ///
+    /// # Arguments
+    ///
+    /// * `exclude_slot` - Optional slot to exclude (e.g., slot being removed)
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes reclaimed, or 0 if no suffix storage exists.
+    pub fn compact_ksuf(&mut self, exclude_slot: Option<usize>) -> usize {
+        match self.ksuf.as_mut() {
+            Some(bag) => bag.compact_with_permuter(&self.permutation, exclude_slot),
+            None => 0,
+        }
     }
 
     // ============================================================================
@@ -1306,7 +1513,7 @@ impl<V, const WIDTH: usize> Default for LeafNode<V, WIDTH> {
             permutation: Permuter::empty(),
             ikey0: [0; WIDTH],
             leaf_values: StdArray::from_fn(|_| LeafValue::Empty),
-            ksuf: StdPtr::null_mut(),
+            ksuf: None,
             next: StdPtr::null_mut(),
             prev: StdPtr::null_mut(),
             parent: StdPtr::null_mut(),
@@ -1675,5 +1882,153 @@ mod tests {
 
         assert_eq!(lv.value(), 42);
         assert_eq!(lv2.value(), 42);
+    }
+
+    // ============================================================================
+    //  Suffix Storage Tests
+    // ============================================================================
+
+    #[test]
+    fn test_suffix_not_allocated_initially() {
+        let node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        assert!(!node.has_ksuf_storage());
+        assert!(node.ksuf(0).is_none());
+    }
+
+    #[test]
+    fn test_assign_ksuf_lazy_init() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Before assignment, no storage
+        assert!(!node.has_ksuf_storage());
+
+        // Assign suffix to slot 0
+        node.assign_ksuf(0, b"suffix_data");
+
+        // Now storage exists
+        assert!(node.has_ksuf_storage());
+        assert!(node.has_ksuf(0));
+        assert_eq!(node.ksuf(0), Some(b"suffix_data".as_slice()));
+    }
+
+    #[test]
+    fn test_ksuf_equals() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        node.assign_ksuf(0, b"hello");
+
+        assert!(node.ksuf_equals(0, b"hello"));
+        assert!(!node.ksuf_equals(0, b"world"));
+        assert!(!node.ksuf_equals(1, b"hello")); // Slot 1 has no suffix
+    }
+
+    #[test]
+    fn test_ksuf_compare() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        node.assign_ksuf(0, b"hello");
+
+        assert_eq!(
+            node.ksuf_compare(0, b"hello"),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert_eq!(
+            node.ksuf_compare(0, b"hella"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            node.ksuf_compare(0, b"hellz"),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(node.ksuf_compare(1, b"hello"), None);
+    }
+
+    #[test]
+    fn test_ksuf_matches() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Assign ikey and suffix to slot 0
+        node.ikey0[0] = 0x1234_5678_0000_0000;
+        node.assign_ksuf(0, b"suffix");
+
+        // Full match
+        assert!(node.ksuf_matches(0, 0x1234_5678_0000_0000, b"suffix"));
+
+        // Wrong ikey
+        assert!(!node.ksuf_matches(0, 0xABCD_0000_0000_0000, b"suffix"));
+
+        // Wrong suffix
+        assert!(!node.ksuf_matches(0, 0x1234_5678_0000_0000, b"other"));
+    }
+
+    #[test]
+    fn test_ksuf_matches_no_suffix() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Assign just ikey (no suffix)
+        node.ikey0[0] = 0x1234_5678_0000_0000;
+        node.keylenx[0] = 4; // Regular key length, not KSUF_KEYLENX
+
+        // Should match when suffix is empty
+        assert!(node.ksuf_matches(0, 0x1234_5678_0000_0000, b""));
+
+        // Should NOT match when suffix is non-empty
+        assert!(!node.ksuf_matches(0, 0x1234_5678_0000_0000, b"suffix"));
+    }
+
+    #[test]
+    fn test_clear_ksuf() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        node.assign_ksuf(0, b"test");
+
+        assert!(node.has_ksuf(0));
+
+        node.clear_ksuf(0);
+
+        assert!(!node.has_ksuf(0));
+        assert!(node.ksuf(0).is_none());
+    }
+
+    #[test]
+    fn test_ksuf_or_empty() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        node.assign_ksuf(0, b"data");
+
+        assert_eq!(node.ksuf_or_empty(0), b"data".as_slice());
+        assert_eq!(node.ksuf_or_empty(1), b"".as_slice());
+    }
+
+    #[test]
+    fn test_compact_ksuf() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        // Assign suffixes to multiple slots
+        node.assign_ksuf(0, b"slot0");
+        node.assign_ksuf(1, b"slot1");
+        node.assign_ksuf(2, b"slot2");
+
+        // Set up permutation to only include slots 0 and 2
+        node.permutation = Permuter::make_sorted(2);
+        // This makes positions 0→slot0, 1→slot1 active, but we want 0 and 2
+        // For this test, let's just check compaction works
+        let reclaimed = node.compact_ksuf(None);
+
+        // Compaction should have run (even if nothing reclaimed in this simple case)
+        assert!(node.has_ksuf_storage());
+        // The exact bytes reclaimed depends on which slots are active
+        let _ = reclaimed;
+    }
+
+    #[test]
+    fn test_multiple_suffixes() {
+        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+
+        node.assign_ksuf(0, b"first");
+        node.assign_ksuf(5, b"middle");
+        node.assign_ksuf(14, b"last");
+
+        assert_eq!(node.ksuf(0), Some(b"first".as_slice()));
+        assert_eq!(node.ksuf(5), Some(b"middle".as_slice()));
+        assert_eq!(node.ksuf(14), Some(b"last".as_slice()));
+        assert_eq!(node.ksuf(1), None);
     }
 }

@@ -24,6 +24,8 @@ const SIZE_BITS: usize = 4;
 /// Mask for extracting size (lower 4 bits).
 const SIZE_MASK: u64 = 0xF;
 
+use crate::suffix::PermutationProvider;
+
 /// Utility functions for [`Permuter`].
 struct PermuterUtils;
 
@@ -81,13 +83,6 @@ impl PermuterUtils {
     }
 }
 
-/// Placeholder for suffix storage.
-/// Full implementation deferred until I get single threaded ops working.
-#[derive(Debug)]
-pub struct SuffixStorage {
-    // Will contain: capacity, used, data array
-    _placeholder: (),
-}
 
 /// A permutation of slot indices for a leaf node.
 ///
@@ -590,6 +585,22 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     #[inline]
     #[cfg(not(debug_assertions))]
     pub fn debug_assert_valid(&self) {}
+}
+
+// ============================================================================
+//  PermutationProvider Implementation
+// ============================================================================
+
+impl<const WIDTH: usize> PermutationProvider for Permuter<WIDTH> {
+    #[inline]
+    fn size(&self) -> usize {
+        self.size()
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> usize {
+        self.get(i)
+    }
 }
 
 #[cfg(test)]
