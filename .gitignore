@@ -13,4 +13,3 @@ docs/
 *.c
 .backup
 !Architecture.md
-!ArchitectureInline.md
