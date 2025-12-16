@@ -1,8 +1,11 @@
 //! Extending [`LeafNode`] implementation for layer descent
 
 use std::ptr as StdPtr;
+use std::sync::Arc;
 
-use super::{LAYER_KEYLENX, LeafNode, LeafValue};
+use crate::key::Key;
+
+use super::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode, LeafValue};
 
 impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     /// Convert this leaf into a layer root.
@@ -82,6 +85,39 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
             self.leaf_values[slot].try_as_layer()
         } else {
             None
+        }
+    }
+
+    /// Assigns a slot from a `Key` and optional value.
+    ///
+    /// If value is `Some`, assigns ikey, keylenx, value, and suffix (if any).
+    /// If value is `None`, initializes the slot for layer descent.
+    ///
+    /// This is the canonical way to populate a slot from key state during
+    /// layer creation or insertion.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index (0..WIDTH)
+    /// * `key` - The key containing ikey and suffix information
+    /// * `value` - Optional Arc-wrapped value; `None` means this slot will be a layer pointer
+    pub fn assign_from_key(&mut self, slot: usize, key: &Key<'_>, value: Option<Arc<V>>) {
+        if let Some(val) = value {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "current_len() is at most 8 (single ikey slice)"
+            )]
+            let keylenx: u8 = if key.has_suffix() {
+                KSUF_KEYLENX
+            } else {
+                key.current_len() as u8
+            };
+            self.assign_arc(slot, key.ikey(), keylenx, val);
+            if key.has_suffix() {
+                self.assign_ksuf(slot, key.suffix());
+            }
+        } else {
+            self.assign_initialize_for_layer(slot, key.ikey());
         }
     }
 }
