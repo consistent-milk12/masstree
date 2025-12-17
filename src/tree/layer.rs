@@ -24,8 +24,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
     /// A tuple of (`layer_root`, `insert_slot`) where:
     /// - `layer_root` is the new sublayer to continue insertion
     /// - `insert_slot` is the slot in that layer for the new key
-    #[expect(dead_code, reason = "Will be used in Phase 2 layer support")]
-    fn make_new_layer(
+    pub(super) fn make_new_layer(
         &mut self,
         leaf: &mut LeafNode<V, WIDTH>,
         slot: usize,
@@ -33,6 +32,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
         new_value: Arc<V>,
     ) -> (*mut LeafNode<V, WIDTH>, usize) {
         // 1. Extract existing key's suffix and create a Key from it
+        // Note: from_suffix creates a Key where the suffix bytes ARE the first ikey
         let existing_suffix: &[u8] = leaf.ksuf(slot).unwrap_or(&[]);
         let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
 
@@ -41,9 +41,13 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
         // Use leaf_value() accessor here.
         let existing_value: Option<Arc<V>> = leaf.leaf_value(slot).try_clone_arc();
 
-        // 3. Shift both keys to compare their next 8-byte slices
-        new_key.shift();
-        existing_key.shift();
+        // 3. Shift new_key to get to the suffix portion
+        // new_key has the full original key - shift advances past the ikey we matched on
+        // existing_key is already at the "next slice" since it was created from the suffix
+        if new_key.has_suffix() {
+            new_key.shift();
+        }
+        // Note: existing_key is created from suffix, its ikey IS the next slice - no shift needed
 
         let mut cmp: Ordering = existing_key.ikey().cmp(&new_key.ikey());
 
@@ -51,7 +55,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
         let mut twig_head: Option<*mut LeafNode<V, WIDTH>> = None;
         let mut twig_tail: *mut LeafNode<V, WIDTH> = StdPtr::null_mut();
 
-        while cmp.eq(&Ordering::Equal) {
+        while cmp.eq(&Ordering::Equal) && existing_key.has_suffix() && new_key.has_suffix() {
             // Create intermediate layer node (single entry)
             let mut twig: Box<LeafNode<V, WIDTH>> = LeafNode::<V, WIDTH>::new_layer_root();
             twig.assign_initialize_for_layer(0, existing_key.ikey());
@@ -130,6 +134,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             Some(ptr) => ptr,
             None => unreachable!("twig_head is always set before this point"),
         };
+
         leaf.set_layer(slot, layer_root.cast::<u8>());
 
         (final_ptr, new_slot)

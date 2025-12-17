@@ -32,6 +32,10 @@
 //!   Note: Currently wraps `MassTree<V>` internally; true inline storage is
 //!   planned for a future release.
 
+#![deny(missing_docs)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+
 pub mod internode;
 pub mod key;
 pub mod ksearch;

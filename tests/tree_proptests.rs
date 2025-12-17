@@ -5,38 +5,53 @@
 
 #![expect(clippy::unwrap_used, reason = "fail fast in tests")]
 
-use masstree::tree::{MAX_INLINE_KEY_LEN, MassTree, MassTreeIndex};
+use masstree::key::MAX_KEY_LENGTH;
+use masstree::tree::{MassTree, MassTreeIndex};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
+
+/// Max key length for short key tests (single layer, no layer descent).
+const SHORT_KEY_LEN: usize = 8;
 
 // ============================================================================
 //  Strategies
 // ============================================================================
 
-/// Strategy for generating valid Phase 1 keys (0-8 bytes).
+/// Strategy for generating short keys (0-8 bytes, no layer descent needed).
+fn short_key() -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec(any::<u8>(), 0..=SHORT_KEY_LEN)
+}
+
+/// Strategy for generating non-empty short keys (1-8 bytes).
+fn short_key_nonempty() -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec(any::<u8>(), 1..=SHORT_KEY_LEN)
+}
+
+/// Strategy for generating long keys (9-64 bytes, requires layer descent).
+fn long_key() -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec(any::<u8>(), 9..=64)
+}
+
+/// Strategy for generating any valid key (0-256 bytes).
+#[expect(dead_code, reason = "Available for future tests")]
 fn valid_key() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(any::<u8>(), 0..=MAX_INLINE_KEY_LEN)
+    prop::collection::vec(any::<u8>(), 0..=MAX_KEY_LENGTH)
 }
 
-/// Strategy for generating non-empty valid keys (1-8 bytes).
+/// Strategy for generating non-empty short keys (for compatibility with existing tests).
 fn valid_key_nonempty() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(any::<u8>(), 1..=MAX_INLINE_KEY_LEN)
+    short_key_nonempty()
 }
 
-/// Strategy for generating keys that are too long (9+ bytes).
-fn invalid_key_too_long() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(any::<u8>(), (MAX_INLINE_KEY_LEN + 1)..=32)
-}
-
-/// Strategy for generating a sequence of unique keys.
+/// Strategy for generating a sequence of unique short keys.
 fn unique_keys(max_count: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
-    prop::collection::hash_set(valid_key_nonempty(), 0..=max_count)
+    prop::collection::hash_set(short_key_nonempty(), 0..=max_count)
         .prop_map(|set| set.into_iter().collect())
 }
 
-/// Strategy for generating key-value pairs.
+/// Strategy for generating key-value pairs with short keys.
 fn key_value_pairs(max_count: usize) -> impl Strategy<Value = Vec<(Vec<u8>, u64)>> {
-    prop::collection::vec((valid_key(), any::<u64>()), 0..=max_count)
+    prop::collection::vec((short_key(), any::<u64>()), 0..=max_count)
 }
 
 /// Operations for random testing.
@@ -47,13 +62,13 @@ enum Op {
     Update(Vec<u8>, u64),
 }
 
-/// Strategy for generating random operations.
+/// Strategy for generating random operations with short keys.
 fn operations(max_ops: usize) -> impl Strategy<Value = Vec<Op>> {
     prop::collection::vec(
         prop_oneof![
-            3 => (valid_key(), any::<u64>()).prop_map(|(k, v)| Op::Insert(k, v)),
-            2 => valid_key().prop_map(Op::Get),
-            1 => (valid_key(), any::<u64>()).prop_map(|(k, v)| Op::Update(k, v)),
+            3 => (short_key(), any::<u64>()).prop_map(|(k, v)| Op::Insert(k, v)),
+            2 => short_key().prop_map(Op::Get),
+            1 => (short_key(), any::<u64>()).prop_map(|(k, v)| Op::Update(k, v)),
         ],
         0..=max_ops,
     )
@@ -66,9 +81,9 @@ fn operations(max_ops: usize) -> impl Strategy<Value = Vec<Op>> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 
-    /// Every inserted key should be retrievable.
+    /// Every inserted short key should be retrievable.
     #[test]
-    fn insert_then_get_returns_value(key in valid_key(), value: u64) {
+    fn insert_then_get_returns_value(key in short_key(), value: u64) {
         let mut tree: MassTree<u64> = MassTree::new();
         tree.insert(&key, value).unwrap();
 
@@ -79,7 +94,7 @@ proptest! {
 
     /// Inserting duplicate key should return the old value.
     #[test]
-    fn insert_duplicate_returns_old_value(key in valid_key_nonempty(), v1: u64, v2: u64) {
+    fn insert_duplicate_returns_old_value(key in short_key_nonempty(), v1: u64, v2: u64) {
         let mut tree: MassTree<u64> = MassTree::new();
 
         let old1 = tree.insert(&key, v1).unwrap();
@@ -96,8 +111,8 @@ proptest! {
     /// Get on non-existent key returns None.
     #[test]
     fn get_missing_returns_none(
-        inserted_key in valid_key_nonempty(),
-        missing_key in valid_key_nonempty(),
+        inserted_key in short_key_nonempty(),
+        missing_key in short_key_nonempty(),
         value: u64
     ) {
         prop_assume!(inserted_key != missing_key);
@@ -108,11 +123,15 @@ proptest! {
         prop_assert!(tree.get(&missing_key).is_none());
     }
 
-    /// Get with too-long key returns None (not error).
+    /// Long keys (requiring layers) should work.
     #[test]
-    fn get_long_key_returns_none(key in invalid_key_too_long()) {
-        let tree: MassTree<u64> = MassTree::new();
-        prop_assert!(tree.get(&key).is_none());
+    fn insert_long_key_works(key in long_key(), value: u64) {
+        let mut tree: MassTree<u64> = MassTree::new();
+        tree.insert(&key, value).unwrap();
+
+        let result = tree.get(&key);
+        prop_assert!(result.is_some(), "Long key {:?} not found after insert", key);
+        prop_assert_eq!(*result.unwrap(), value);
     }
 }
 
@@ -131,7 +150,7 @@ proptest! {
 
         for (key, value) in pairs {
             // Skip keys that are too long
-            if key.len() > MAX_INLINE_KEY_LEN {
+            if key.len() > SHORT_KEY_LEN {
                 continue;
             }
 
@@ -163,7 +182,7 @@ proptest! {
         for op in ops {
             match op {
                 Op::Insert(key, value) | Op::Update(key, value) => {
-                    if key.len() > MAX_INLINE_KEY_LEN {
+                    if key.len() > SHORT_KEY_LEN {
                         continue;
                     }
 
@@ -309,7 +328,7 @@ proptest! {
         let mut unique_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
         for (key, value) in pairs {
-            if key.len() > MAX_INLINE_KEY_LEN {
+            if key.len() > SHORT_KEY_LEN {
                 continue;
             }
 
@@ -330,7 +349,7 @@ proptest! {
 
         let mut count = 0;
         for (key, value) in pairs {
-            if key.len() > MAX_INLINE_KEY_LEN {
+            if key.len() > SHORT_KEY_LEN {
                 continue;
             }
 
@@ -361,7 +380,7 @@ proptest! {
         let mut index: MassTreeIndex<u64> = MassTreeIndex::new();
 
         for (key, value) in pairs {
-            if key.len() > MAX_INLINE_KEY_LEN {
+            if key.len() > SHORT_KEY_LEN {
                 continue;
             }
 
@@ -465,7 +484,7 @@ proptest! {
         let mut key = prefix;
         key.push(0x00); // null byte
         key.extend(suffix);
-        key.truncate(MAX_INLINE_KEY_LEN);
+        key.truncate(SHORT_KEY_LEN);
 
         let mut tree: MassTree<u64> = MassTree::new();
         tree.insert(&key, value).unwrap();
@@ -515,7 +534,7 @@ proptest! {
         for op in ops {
             match op {
                 Op::Insert(key, value) | Op::Update(key, value) => {
-                    if key.len() > MAX_INLINE_KEY_LEN {
+                    if key.len() > SHORT_KEY_LEN {
                         continue;
                     }
                     tree.insert(&key, value).unwrap();

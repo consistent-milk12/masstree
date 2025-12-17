@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 604e5c347e0d4c7ab5cdcd92b32e24a830bd546afa69b37d56350a7989956f2d # shrinks to ops = [Insert([0], 0), Insert([], 0)]
+cc 33cb9609bae782a5fa4e916907fff23fde49cd9066a39abf324bb969da6d42e9 # shrinks to pairs = [([0], 0), ([], 0)]
+cc f1d33f5eddcc49db44a4dd6cc7a74b1ae9667a13338c4b8afd197d6c4730f98e # shrinks to pairs = [([0], 0), ([], 0)]

@@ -942,6 +942,67 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         }
     }
 
+    /// Check if a slot matches the given key parameters, with layer detection.
+    ///
+    /// This is the layer-aware version of `ksuf_matches` that returns detailed
+    /// match information needed for layer traversal.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index
+    /// * `keylenx` - The keylenx of the search key (0-8 for inline, `KSUF_KEYLENX` for suffix)
+    /// * `suffix` - The suffix bytes to match (empty if inline key)
+    ///
+    /// # Returns
+    ///
+    /// * `1` - Exact match (ikey, keylenx, and suffix all match)
+    /// * `0` - Same ikey but different key (keylenx or suffix mismatch)
+    /// * `-8` - Slot is a layer pointer; caller should shift key by 8 bytes and descend
+    ///
+    /// # Note
+    ///
+    /// The ikey is assumed to already match (caller should check `leaf.ikey(slot) == ikey`
+    /// before calling this method).
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_wrap,
+        clippy::cast_possible_truncation,
+        reason = "IKEY_SIZE (8) fits in i32"
+    )]
+    pub fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
+        use crate::key::IKEY_SIZE;
+
+        debug_assert!(slot < WIDTH, "ksuf_match_result: slot {slot} >= WIDTH {WIDTH}");
+
+        let stored_keylenx: u8 = self.keylenx(slot);
+
+        // Check for layer pointer first
+        if Self::keylenx_is_layer(stored_keylenx) {
+            return -(IKEY_SIZE as i32);
+        }
+
+        // Check keylenx for inline keys (no suffix)
+        if !self.has_ksuf(slot) {
+            // Slot is an inline key - keylenx must match exactly
+            if stored_keylenx == keylenx && suffix.is_empty() {
+                return 1; // Exact match
+            }
+            return 0; // Different keylenx or search has suffix
+        }
+
+        // Slot has suffix - search key should also have suffix
+        if suffix.is_empty() {
+            return 0; // Slot has suffix but key doesn't
+        }
+
+        // Both have suffixes - compare them
+        i32::from(self.ksuf_equals(slot, suffix))
+    }
+
     /// Compact suffix storage, reclaiming space from deleted entries.
     ///
     /// This garbage-collects unused suffix data by keeping only suffixes
