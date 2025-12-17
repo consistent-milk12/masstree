@@ -8,6 +8,7 @@ use std::marker::PhantomData;
 use std::ptr as StdPtr;
 use std::sync::Arc;
 
+use crate::alloc::{ArenaAllocator, NodeAllocator};
 use crate::internode::InternodeNode;
 use crate::key::Key;
 use crate::leaf::{KSUF_KEYLENX, LeafNode, LeafSplitResult, SplitUtils};
@@ -139,24 +140,33 @@ impl std::error::Error for InsertError {}
 
 /// A high-performance trie of B+trees for key-value storage.
 ///
-/// Keys are byte slices up to 8 bytes in Phase 1. Values are stored
+/// Keys are byte slices of any length (0-256 bytes). Values are stored
 /// as `Arc<V>` for cheap cloning on read operations.
 ///
 /// # Type Parameters
 ///
 /// * `V` - The value type to store
 /// * `WIDTH` - Node width (default: 15, max: 15)
+/// * `A` - Node allocator (default: `ArenaAllocator`)
 ///
-/// # Phase 1 Limitations
+/// # Allocator
 ///
-/// - Keys must be 0-8 bytes (longer keys rejected with `KeyTooLong`)
-/// - Single layer only (no trie traversal)
-/// - Single-threaded access only
+/// The allocator determines how nodes are allocated and (eventually) freed:
+///
+/// - `ArenaAllocator` (default): Nodes live until tree is dropped. Simple,
+///   no overhead, but memory is not reclaimed until drop.
+///
+/// - Phase 3 will add an epoch-based allocator for concurrent access with
+///   deferred reclamation.
+///
+/// # Current Limitations
+///
+/// - Single-threaded access only (Phase 3 will add concurrency)
 ///
 /// # Example
 ///
 /// ```ignore
-/// use masstree::tree::MassTree;
+/// use masstree::MassTree;
 ///
 /// let mut tree: MassTree<u64> = MassTree::new();
 /// tree.insert(b"hello", 42).unwrap();
@@ -164,16 +174,13 @@ impl std::error::Error for InsertError {}
 /// let value = tree.get(b"hello");
 /// assert_eq!(value.map(|v| *v), Some(42));
 /// ```
-pub struct MassTree<V, const WIDTH: usize = 15> {
+pub struct MassTree<V, const WIDTH: usize = 15, A: NodeAllocator<V, WIDTH> = ArenaAllocator<V, WIDTH>>
+{
+    /// Node allocator for leaf and internode allocation.
+    allocator: A,
+
     /// Root of the tree.
     root: RootNode<V, WIDTH>,
-
-    /// Arena for leaf nodes (ensures pointer stability).
-    /// All leaves except the root leaf are stored here.
-    leaf_arena: Vec<Box<LeafNode<V, WIDTH>>>,
-
-    /// Arena for internode nodes (ensures pointer stability).
-    internode_arena: Vec<Box<InternodeNode<V, WIDTH>>>,
 
     /// Number of key-value pairs in the tree.
     /// Updated on insert (new key) and delete operations.
@@ -185,7 +192,7 @@ pub struct MassTree<V, const WIDTH: usize = 15> {
     /// raw pointers (`*const T`, `*mut T`) are neither `Send` nor `Sync` in Rust,
     /// and `PhantomData<T>` inherits the auto-traits of `T`.
     ///
-    /// Phase 1 is single-threaded only. The `NodeVersion` lock semantics
+    /// Phase 2 is single-threaded only. The `NodeVersion` lock semantics
     /// use load-then-store (not CAS), and raw pointers in arenas are not
     /// safe for concurrent access. This marker prevents accidental misuse.
     ///
@@ -195,61 +202,54 @@ pub struct MassTree<V, const WIDTH: usize = 15> {
     _not_send_sync: PhantomData<*const ()>,
 }
 
-impl<V, const WIDTH: usize> StdFmt::Debug for MassTree<V, WIDTH> {
+impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> StdFmt::Debug for MassTree<V, WIDTH, A> {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("MassTree")
             .field("root", &self.root)
-            .field("leaf_arena_len", &self.leaf_arena.len())
-            .field("internode_arena_len", &self.internode_arena.len())
             .field("count", &self.count)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
-    /// Create a new empty `MassTree`.
+impl<V, const WIDTH: usize> MassTree<V, WIDTH, ArenaAllocator<V, WIDTH>> {
+    /// Create a new empty `MassTree` with the default arena allocator.
     ///
     /// The tree starts with a single empty leaf as root.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_allocator(ArenaAllocator::new())
+    }
+}
+
+impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
+    /// Create a new empty `MassTree` with a custom allocator.
+    ///
+    /// The tree starts with a single empty leaf as root.
+    #[must_use]
+    pub fn with_allocator(allocator: A) -> Self {
         Self {
+            allocator,
             root: RootNode::Leaf(LeafNode::new_root()),
-            leaf_arena: Vec::new(),
-            internode_arena: Vec::new(),
             count: 0,
             _not_send_sync: PhantomData,
         }
     }
 
-    /// Store an existing leaf Box in the arena and return a raw pointer.
+    /// Store a leaf in the allocator and return a raw pointer.
     ///
     /// The pointer remains valid for the lifetime of the tree.
-    fn store_leaf_in_arena(&mut self, leaf: Box<LeafNode<V, WIDTH>>) -> *mut LeafNode<V, WIDTH> {
-        self.leaf_arena.push(leaf);
-        let idx: usize = self.leaf_arena.len() - 1;
-
-        //  SAFETY: We just pushed, so idx is valid. We derive the pointer AFTER storing
-        //  to maintain Stacked Borrows provenance.
-        unsafe {
-            StdPtr::from_mut::<LeafNode<V, WIDTH>>(self.leaf_arena.get_unchecked_mut(idx).as_mut())
-        }
+    #[inline]
+    fn alloc_leaf(&mut self, leaf: Box<LeafNode<V, WIDTH>>) -> *mut LeafNode<V, WIDTH> {
+        self.allocator.alloc_leaf(leaf)
     }
 
-    /// Store an existing internode Box in the arena and return a raw pointer.
-    fn store_internode_in_arena(
+    /// Store an internode in the allocator and return a raw pointer.
+    #[inline]
+    fn alloc_internode(
         &mut self,
         node: Box<InternodeNode<V, WIDTH>>,
     ) -> *mut InternodeNode<V, WIDTH> {
-        self.internode_arena.push(node);
-        let idx: usize = self.internode_arena.len() - 1;
-
-        //  SAFETY: We just pushed, so idx is valid. We derive the pointer AFTER storing
-        //  to maintain Stacked Borrows provenance.
-        unsafe {
-            StdPtr::from_mut::<InternodeNode<V, WIDTH>>(
-                self.internode_arena.get_unchecked_mut(idx).as_mut(),
-            )
-        }
+        self.allocator.alloc_internode(node)
     }
 
     // ========================================================================
@@ -688,7 +688,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
     }
 }
 
-impl<V, const WIDTH: usize> Default for MassTree<V, WIDTH> {
+impl<V, const WIDTH: usize> Default for MassTree<V, WIDTH, ArenaAllocator<V, WIDTH>> {
     fn default() -> Self {
         Self::new()
     }

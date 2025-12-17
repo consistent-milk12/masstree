@@ -7,23 +7,22 @@
 //! - B+tree at each trie node for the current 8-byte slice
 //! - Cache-friendly: 8-byte key slices fit in registers
 //!
-//! ## Current Status: Phase 1 (Single-Threaded)
+//! ## Current Status: Phase 2 (Single-Threaded with Trie Layering)
 //!
 //! This implementation is **single-threaded only**. The concurrent features
 //! (optimistic reads, CAS-based locking, epoch-based reclamation) are planned
 //! for Phase 3 but not yet implemented.
 //!
-//! **Phase 1 constraints:**
-//! - Keys must be 0-8 bytes (longer keys return `KeyTooLong` error)
-//! - Single-layer only (no trie traversal for multi-slice keys)
+//! **Current constraints:**
+//! - Keys can be any length from 0-256 bytes
+//! - Full trie layering for keys sharing common prefixes
 //! - `MassTree` is `!Send` and `!Sync` to prevent accidental concurrent use
 //!
 //! ## Design
 //!
 //! Keys are split into 8-byte slices. Each slice is handled by a B+tree.
 //! When a key is longer than 8 bytes, the B+tree leaf points to another
-//! layer (another B+tree for the next 8 bytes). Layer traversal will be
-//! implemented in Phase 2.
+//! layer (another B+tree for the next 8 bytes).
 //!
 //! ## Value Storage
 //!
@@ -36,6 +35,7 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
+pub mod alloc;
 pub mod internode;
 pub mod key;
 pub mod ksearch;
@@ -46,5 +46,6 @@ pub mod suffix;
 pub mod tree;
 
 // Re-export main types for convenience
+pub use alloc::{ArenaAllocator, NodeAllocator};
 pub use suffix::{PermutationProvider, SuffixBag};
 pub use tree::{MassTree, MassTreeIndex};

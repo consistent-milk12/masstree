@@ -2,9 +2,9 @@
 
 An experimental Rust implementation of the Masstree algorithm, a high-performance concurrent key-value store based on a cache-friendly trie of B+trees.
 
-This project **attempts to reimplement** the [original C++ Masstree](https://github.com/kohler/masstree-beta) developed at MIT in Rust, with planned divergences for safety, ergonomics, and Rust idioms. While the core algorithm remains the same, this implementation introduces value lifetime management via `Arc<V>`, type-state locking, and modern concurrency primitives.
+This project **attempts to reimplement** the [original C++ Masstree](https://github.com/kohler/masstree-beta)
 
-**Status:** Phase 1 complete - single-threaded core with `get`/`insert`/split operations working. Multi-layer keys and concurrency planned for Phase 2-3.
+**Status:** Phase 2 complete - single-threaded core with full trie layering. Keys of any length (0-256 bytes), `get`/`insert`/split operations, and allocation abstraction all working. Concurrency planned for Phase 3.
 
 ## Overview
 
@@ -18,7 +18,7 @@ This is an **independent Rust implementation** of the Masstree data structure. I
 
 The original Masstree is a very interesting and performant concurrent data structure, but its C++ implementation relies on manual memory management, platform-specific atomics, and subtle pointer tricks that make it difficult to extend or verify. Rust's ownership model and type system offer an opportunity to express similar algorithms with compile-time safety guarantees, eliminate entire classes of concurrency bugs, and produce a codebase that's easier to audit and maintain.
 
-**This is not a faithful port.** The implementation diverges in meaningful ways to leverage Rust's strengths and work within its constraints. Performance targets are aspirational—initial focus is on correctness, safety, and learning the algorithm deeply.
+**This is not a faithful port.** The implementation diverges in meaningful ways to leverage Rust's strengths and work within its constraints. The focus of this project is on correctness, safety, and learning the algorithm deeply.
 
 ## Value Storage Strategy
 
@@ -88,15 +88,18 @@ Both implementations use epoch-based reclamation (EBR) for node memory safety—
 | `key` | Complete | 8-byte ikey extraction, layer traversal, suffix handling |
 | `permuter` | Complete | Const-generic WIDTH, u64-encoded slot permutation |
 | `nodeversion` | Complete | Versioned lock with type-state guard pattern (single-threaded) |
-| `leaf` | Complete | LeafNode struct, split operations, B-link pointers, slot-0 rule |
+| `leaf` | Complete | LeafNode struct, split operations, B-link pointers, layer support |
 | `internode` | Complete | Routing nodes, split-with-insert, height-based child typing |
 | `ksearch` | Complete | Binary search for leaves and internodes |
-| `tree` | Complete | `MassTree` with `get`/`insert`, split propagation, arena allocation |
+| `tree` | Complete | `MassTree` with `get`/`insert`, split propagation, trie layering |
+| `suffix` | Complete | SuffixBag for keys > 8 bytes with per-slot metadata |
+| `alloc` | Complete | `NodeAllocator` trait, `ArenaAllocator` impl (Phase 3 ready) |
 | Scan/Remove | Planned | Range scans and key deletion not yet implemented |
 
-**Phase 1 Constraints:**
-- Keys limited to 0-8 bytes (single-layer only)
-- Single-threaded (no concurrent access)
-- Arena-based allocation (no node reclamation)
+**Current Capabilities:**
+- Keys from 0-256 bytes (full trie layering for long keys)
+- Single-threaded (no concurrent access yet)
+- Pluggable allocation via `NodeAllocator` trait (arena-based by default)
+- Miri-verified for strict pointer provenance
 
 **Note on `MassTreeIndex`:** The current `MassTreeIndex<V: Copy>` is a convenience wrapper that still uses `Arc<V>` internally. True inline storage for `V: Copy` values is planned but not yet implemented.

@@ -6,6 +6,7 @@
 use std::mem as StdMem;
 use std::ptr as StdPtr;
 
+use crate::alloc::NodeAllocator;
 use crate::internode::InternodeNode;
 use crate::leaf::LeafNode;
 
@@ -48,7 +49,7 @@ unsafe fn update_children_parent_pointers<V, const WIDTH: usize>(
     }
 }
 
-impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
+impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     /// Find the index of a child pointer in an internode.
     ///
     /// # Panics
@@ -105,14 +106,10 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
         let old_root: RootNode<V, WIDTH> =
             StdMem::replace(&mut self.root, RootNode::Internode(new_root));
 
-        // Get arena-derived pointer for left leaf (proper Stacked Borrows provenance)
+        // Get allocator-derived pointer for left leaf (proper Stacked Borrows provenance)
         let arena_left_ptr: *mut LeafNode<V, WIDTH> = if let RootNode::Leaf(old_leaf_box) = old_root
         {
-            self.leaf_arena.push(old_leaf_box);
-            let idx: usize = self.leaf_arena.len() - 1;
-
-            // SAFETY: We just pushed, so idx is valid
-            unsafe { StdPtr::from_mut(self.leaf_arena.get_unchecked_mut(idx).as_mut()) }
+            self.alloc_leaf(old_leaf_box)
         } else {
             // This branch shouldn't happen - we only call this when root was a leaf
             debug_assert!(false, "create_root_internode called with non-leaf root");
@@ -159,8 +156,8 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
         right_leaf_box: Box<LeafNode<V, WIDTH>>,
         split_ikey: u64,
     ) {
-        // Store the new leaf in the arena to get a stable pointer
-        let right_leaf_ptr: *mut LeafNode<V, WIDTH> = self.store_leaf_in_arena(right_leaf_box);
+        // Store the new leaf in the allocator to get a stable pointer
+        let right_leaf_ptr: *mut LeafNode<V, WIDTH> = self.alloc_leaf(right_leaf_box);
 
         // Check if left_leaf was the root BEFORE linking (linking uses left_leaf which
         // may have provenance that will be invalidated by create_root_internode)
@@ -233,7 +230,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             // Allocate new internode for the right half
             let new_parent: Box<InternodeNode<V, WIDTH>> = InternodeNode::new(parent.height());
             let new_parent_ptr: *mut InternodeNode<V, WIDTH> =
-                self.store_internode_in_arena(new_parent);
+                self.alloc_internode(new_parent);
 
             // Split parent AND insert the split_ikey/right_leaf simultaneously
             let (popup_key, insert_went_left) = unsafe {
@@ -333,12 +330,8 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             unreachable!("propagate_root_internode_split called with non-internode root")
         };
 
-        // Get arena-derived pointer for left internode
-        self.internode_arena.push(old_root_box);
-        let idx: usize = self.internode_arena.len() - 1;
-        // SAFETY: We just pushed, so idx is valid
-        let arena_left_ptr: *mut InternodeNode<V, WIDTH> =
-            unsafe { self.internode_arena.get_unchecked_mut(idx).as_mut() };
+        // Get allocator-derived pointer for left internode
+        let arena_left_ptr: *mut InternodeNode<V, WIDTH> = self.alloc_internode(old_root_box);
 
         // CRITICAL: Refresh parent pointers for all children of the demoted root.
         // These children had parent pointers derived from when their parent was
@@ -397,10 +390,10 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
         // Parent is full - split with simultaneous insertion (per C++ reference)
         let new_parent: Box<InternodeNode<V, WIDTH>> = InternodeNode::new(parent.height());
         let new_parent_ptr: *mut InternodeNode<V, WIDTH> =
-            self.store_internode_in_arena(new_parent);
+            self.alloc_internode(new_parent);
 
         // Split parent AND insert the popup_key at child_idx simultaneously
-        // SAFETY: new_parent_ptr is valid from store_internode_in_arena
+        // SAFETY: new_parent_ptr is valid from alloc_internode
         let (new_popup_key, insert_went_left) = unsafe {
             parent.split_into(
                 &mut *new_parent_ptr,

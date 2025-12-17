@@ -6,6 +6,8 @@
 use std::fmt as StdFmt;
 use std::sync::Arc;
 
+use crate::alloc::{ArenaAllocator, NodeAllocator};
+
 use super::{InsertError, MassTree};
 
 /// Convenience wrapper for index-style workloads with copyable values.
@@ -26,11 +28,12 @@ use super::{InsertError, MassTree};
 ///
 /// * `V` - The value type to store (must be `Copy`)
 /// * `WIDTH` - Node width (default: 15, max: 15)
+/// * `A` - Node allocator (default: `ArenaAllocator`)
 ///
 /// # Example
 ///
 /// ```ignore
-/// use masstree::tree::MassTreeIndex;
+/// use masstree::MassTreeIndex;
 ///
 /// let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
 /// tree.insert(b"hello", 42).unwrap();
@@ -38,12 +41,15 @@ use super::{InsertError, MassTree};
 /// let value = tree.get(b"hello");
 /// assert_eq!(value, Some(42));
 /// ```
-pub struct MassTreeIndex<V: Copy, const WIDTH: usize = 15> {
+pub struct MassTreeIndex<V: Copy, const WIDTH: usize = 15, A: NodeAllocator<V, WIDTH> = ArenaAllocator<V, WIDTH>>
+{
     /// Wraps `MassTree` internally. True inline storage is planned for future.
-    pub(crate) inner: MassTree<V, WIDTH>,
+    pub(crate) inner: MassTree<V, WIDTH, A>,
 }
 
-impl<V: Copy, const WIDTH: usize> StdFmt::Debug for MassTreeIndex<V, WIDTH> {
+impl<V: Copy, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> StdFmt::Debug
+    for MassTreeIndex<V, WIDTH, A>
+{
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("MassTreeIndex")
             .field("inner", &self.inner)
@@ -51,12 +57,22 @@ impl<V: Copy, const WIDTH: usize> StdFmt::Debug for MassTreeIndex<V, WIDTH> {
     }
 }
 
-impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH> {
-    /// Create a new empty `MassTreeIndex`.
+impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH, ArenaAllocator<V, WIDTH>> {
+    /// Create a new empty `MassTreeIndex` with the default arena allocator.
     #[must_use]
     pub fn new() -> Self {
         Self {
             inner: MassTree::new(),
+        }
+    }
+}
+
+impl<V: Copy, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTreeIndex<V, WIDTH, A> {
+    /// Create a new empty `MassTreeIndex` with a custom allocator.
+    #[must_use]
+    pub fn with_allocator(allocator: A) -> Self {
+        Self {
+            inner: MassTree::with_allocator(allocator),
         }
     }
 
@@ -79,12 +95,12 @@ impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH> {
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to look up (byte slice, max 8 bytes in Phase 1)
+    /// * `key` - The key to look up (byte slice, up to 256 bytes)
     ///
     /// # Returns
     ///
     /// * `Some(V)` - If the key was found (value is copied)
-    /// * `None` - If the key was not found or key is too long (>8 bytes)
+    /// * `None` - If the key was not found
     #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<V> {
         // For index mode, we dereference the Arc and copy
@@ -97,7 +113,7 @@ impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH> {
     ///
     /// # Arguments
     ///
-    /// * `key` - The key as a byte slice (max 8 bytes in Phase 1)
+    /// * `key` - The key as a byte slice (up to 256 bytes)
     /// * `value` - The value to insert (copied)
     ///
     /// # Returns
@@ -107,7 +123,7 @@ impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH> {
     ///
     /// # Errors
     ///
-    /// * [`InsertError::LeafFull`] - All keys have identical ikey (layer case, not yet supported)
+    /// * [`InsertError::LeafFull`] - Internal error (shouldn't happen with layer support)
     ///
     /// # Example
     ///
@@ -128,7 +144,7 @@ impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH> {
     }
 }
 
-impl<V: Copy, const WIDTH: usize> Default for MassTreeIndex<V, WIDTH> {
+impl<V: Copy, const WIDTH: usize> Default for MassTreeIndex<V, WIDTH, ArenaAllocator<V, WIDTH>> {
     fn default() -> Self {
         Self::new()
     }

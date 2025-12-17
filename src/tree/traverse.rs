@@ -3,6 +3,7 @@
 //! This module provides methods for navigating from the root to leaf nodes,
 //! supporting both immutable and mutable traversal patterns.
 
+use crate::alloc::NodeAllocator;
 use crate::internode::InternodeNode;
 use crate::key::Key;
 use crate::ksearch::upper_bound_internode_direct;
@@ -33,7 +34,7 @@ fn reach_leaf_from_internode<V, const WIDTH: usize>(
     }
 }
 
-impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
+impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     /// Find the leftmost leaf node in the tree.
     ///
     /// Traverses down the leftmost path from the given internode to find

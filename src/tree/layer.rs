@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::{cmp::Ordering, ptr as StdPtr};
 
+use crate::alloc::NodeAllocator;
 use crate::permuter::Permuter;
 use crate::{key::Key, leaf::LeafNode};
 
 use super::MassTree;
 
-impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
+impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     /// Create a new layer when two keys share the same ikey.
     ///
     /// This is called when inserting a key that has the same 8-byte prefix
@@ -61,7 +62,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
             twig.assign_initialize_for_layer(0, existing_key.ikey());
             twig.set_permutation(Permuter::make_sorted(1));
 
-            let twig_ptr: *mut LeafNode<V, WIDTH> = self.store_leaf_in_arena(twig);
+            let twig_ptr: *mut LeafNode<V, WIDTH> = self.alloc_leaf(twig);
 
             // Link to previous twig
             if twig_head.is_some() {
@@ -112,7 +113,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH> {
         perm.remove_to_back(new_slot); // Remove new slot from "visible" permutation
         final_leaf.set_permutation(perm);
 
-        let final_ptr: *mut LeafNode<V, WIDTH> = self.store_leaf_in_arena(final_leaf);
+        let final_ptr: *mut LeafNode<V, WIDTH> = self.alloc_leaf(final_leaf);
 
         // 6. Link twig chain to final leaf
         if twig_tail.is_null() {
