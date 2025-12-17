@@ -5,7 +5,11 @@
 
 use divan::{Bencher, black_box};
 use masstree::internode::InternodeNode;
+use masstree::leaf::LeafValue;
 use std::ptr;
+
+/// Type alias for the slot type used in benchmarks.
+type Slot = LeafValue<u64>;
 
 fn main() {
     divan::main();
@@ -17,21 +21,21 @@ fn main() {
 
 #[divan::bench_group]
 mod construction {
-    use super::InternodeNode;
+    use super::{InternodeNode, Slot};
 
     #[divan::bench]
-    fn new_height_0() -> Box<InternodeNode<u64, 15>> {
+    fn new_height_0() -> Box<InternodeNode<Slot, 15>> {
         InternodeNode::new(0)
     }
 
     #[divan::bench]
-    fn new_height_5() -> Box<InternodeNode<u64, 15>> {
+    fn new_height_5() -> Box<InternodeNode<Slot, 15>> {
         InternodeNode::new(5)
     }
 
     #[divan::bench]
-    fn default_internode() -> Box<InternodeNode<u64, 15>> {
-        Box::<InternodeNode<u64, 15>>::default()
+    fn default_internode() -> Box<InternodeNode<Slot, 15>> {
+        Box::<InternodeNode<Slot, 15>>::default()
     }
 }
 
@@ -41,10 +45,10 @@ mod construction {
 
 #[divan::bench_group]
 mod accessors {
-    use super::{Bencher, InternodeNode, black_box};
+    use super::{Bencher, InternodeNode, Slot, black_box};
 
-    fn setup_internode_with_keys(n: usize) -> Box<InternodeNode<u64, 15>> {
-        let mut node = InternodeNode::<u64, 15>::new(0);
+    fn setup_internode_with_keys(n: usize) -> Box<InternodeNode<Slot, 15>> {
+        let mut node = InternodeNode::<Slot, 15>::new(0);
 
         for i in 0..n {
             let ikey = ((i + 1) as u64) << 56;
@@ -106,10 +110,10 @@ mod accessors {
 
 #[divan::bench_group]
 mod compare {
-    use super::{Bencher, InternodeNode, black_box};
+    use super::{Bencher, InternodeNode, Slot, black_box};
 
-    fn setup_internode() -> Box<InternodeNode<u64, 15>> {
-        let mut node = InternodeNode::<u64, 15>::new(0);
+    fn setup_internode() -> Box<InternodeNode<Slot, 15>> {
+        let mut node = InternodeNode::<Slot, 15>::new(0);
         let keys: [u64; 5] = [
             0x1000_0000_0000_0000,
             0x2000_0000_0000_0000,
@@ -155,12 +159,12 @@ mod compare {
 
 #[divan::bench_group]
 mod modify {
-    use super::{Bencher, InternodeNode, black_box};
+    use super::{Bencher, InternodeNode, Slot, black_box};
 
     #[divan::bench]
     fn set_ikey(bencher: Bencher) {
         bencher
-            .with_inputs(|| InternodeNode::<u64, 15>::new(0))
+            .with_inputs(|| InternodeNode::<Slot, 15>::new(0))
             .bench_local_values(|mut node| {
                 node.set_ikey(7, black_box(0x1234_5678_9ABC_DEF0));
                 node
@@ -170,7 +174,7 @@ mod modify {
     #[divan::bench]
     fn set_child(bencher: Bencher) {
         bencher
-            .with_inputs(|| InternodeNode::<u64, 15>::new(0))
+            .with_inputs(|| InternodeNode::<Slot, 15>::new(0))
             .bench_local_values(|mut node| {
                 node.set_child(7, black_box(0xDEAD_BEEF as *mut u8));
                 node
@@ -181,7 +185,7 @@ mod modify {
     fn assign(bencher: Bencher) {
         bencher
             .with_inputs(|| {
-                let mut node = InternodeNode::<u64, 15>::new(0);
+                let mut node = InternodeNode::<Slot, 15>::new(0);
                 node.set_nkeys(5);
                 node
             })
@@ -198,7 +202,7 @@ mod modify {
     #[divan::bench]
     fn set_nkeys(bencher: Bencher) {
         bencher
-            .with_inputs(|| InternodeNode::<u64, 15>::new(0))
+            .with_inputs(|| InternodeNode::<Slot, 15>::new(0))
             .bench_local_values(|mut node| {
                 node.set_nkeys(black_box(10));
                 node
@@ -212,10 +216,10 @@ mod modify {
 
 #[divan::bench_group]
 mod insert {
-    use super::{Bencher, InternodeNode, black_box, ptr};
+    use super::{Bencher, InternodeNode, Slot, black_box, ptr};
 
-    fn setup_internode_with_space(n: usize) -> Box<InternodeNode<u64, 15>> {
-        let mut node = InternodeNode::<u64, 15>::new(0);
+    fn setup_internode_with_space(n: usize) -> Box<InternodeNode<Slot, 15>> {
+        let mut node = InternodeNode::<Slot, 15>::new(0);
 
         for i in 0..n {
             let ikey = ((i + 1) as u64) << 56;
@@ -276,10 +280,10 @@ mod insert {
 
 #[divan::bench_group]
 mod split {
-    use super::{Bencher, InternodeNode, black_box, ptr};
+    use super::{Bencher, InternodeNode, Slot, black_box, ptr};
 
-    fn setup_full_internode() -> Box<InternodeNode<u64, 15>> {
-        let mut node = InternodeNode::<u64, 15>::new(0);
+    fn setup_full_internode() -> Box<InternodeNode<Slot, 15>> {
+        let mut node = InternodeNode::<Slot, 15>::new(0);
 
         for i in 0..15 {
             let ikey = ((i + 1) as u64) << 56;
@@ -296,7 +300,7 @@ mod split {
         bencher
             .with_inputs(|| {
                 let left = setup_full_internode();
-                let right = InternodeNode::<u64, 15>::new(0);
+                let right = InternodeNode::<Slot, 15>::new(0);
                 (left, right)
             })
             .bench_local_values(|(mut left, mut right)| {
@@ -316,7 +320,7 @@ mod split {
         bencher
             .with_inputs(|| {
                 let left = setup_full_internode();
-                let right = InternodeNode::<u64, 15>::new(0);
+                let right = InternodeNode::<Slot, 15>::new(0);
                 (left, right)
             })
             .bench_local_values(|(mut left, mut right)| {
@@ -336,7 +340,7 @@ mod split {
         bencher
             .with_inputs(|| {
                 let left = setup_full_internode();
-                let right = InternodeNode::<u64, 15>::new(0);
+                let right = InternodeNode::<Slot, 15>::new(0);
                 (left, right)
             })
             .bench_local_values(|(mut left, mut right)| {
@@ -358,24 +362,24 @@ mod split {
 
 #[divan::bench_group]
 mod navigation {
-    use super::{Bencher, InternodeNode, black_box};
+    use super::{Bencher, InternodeNode, Slot, black_box};
 
     #[divan::bench]
     fn parent(bencher: Bencher) {
-        let node = InternodeNode::<u64, 15>::new(0);
+        let node = InternodeNode::<Slot, 15>::new(0);
         bencher.bench_local(|| black_box(&node).parent());
     }
 
     #[divan::bench]
     fn is_root(bencher: Bencher) {
-        let node = InternodeNode::<u64, 15>::new(0);
+        let node = InternodeNode::<Slot, 15>::new(0);
         bencher.bench_local(|| black_box(&node).is_root());
     }
 
     #[divan::bench]
     fn set_parent(bencher: Bencher) {
         bencher
-            .with_inputs(|| InternodeNode::<u64, 15>::new(0))
+            .with_inputs(|| InternodeNode::<Slot, 15>::new(0))
             .bench_local_values(|mut node| {
                 node.set_parent(black_box(0xDEAD_BEEF as *mut u8));
                 node
@@ -389,10 +393,10 @@ mod navigation {
 
 #[divan::bench_group]
 mod shift {
-    use super::{Bencher, InternodeNode};
+    use super::{Bencher, InternodeNode, Slot};
 
-    fn setup_source_internode() -> Box<InternodeNode<u64, 15>> {
-        let mut node = InternodeNode::<u64, 15>::new(0);
+    fn setup_source_internode() -> Box<InternodeNode<Slot, 15>> {
+        let mut node = InternodeNode::<Slot, 15>::new(0);
         for i in 0..10 {
             let ikey = ((i + 1) as u64) << 56;
             node.set_ikey(i, ikey);
@@ -408,7 +412,7 @@ mod shift {
         bencher
             .with_inputs(|| {
                 let src = setup_source_internode();
-                let dst = InternodeNode::<u64, 15>::new(0);
+                let dst = InternodeNode::<Slot, 15>::new(0);
                 (src, dst)
             })
             .bench_local_values(|(src, mut dst)| {

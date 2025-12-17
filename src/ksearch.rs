@@ -11,6 +11,7 @@
 use crate::internode::InternodeNode;
 use crate::leaf::LeafNode;
 use crate::permuter::Permuter;
+use crate::slot;
 use std::cmp::Ordering;
 
 // ============================================================================
@@ -299,10 +300,10 @@ where
 /// }
 /// ```
 #[inline]
-pub fn lower_bound_leaf<V, const WIDTH: usize>(
+pub fn lower_bound_leaf<S: slot::ValueSlot, const WIDTH: usize>(
     search_ikey: u64,
     search_keylenx: u8,
-    node: &LeafNode<V, WIDTH>,
+    node: &LeafNode<S, WIDTH>,
 ) -> KeyIndexPosition {
     let perm: Permuter<WIDTH> = node.permutation();
     let size: usize = perm.size();
@@ -322,9 +323,9 @@ pub fn lower_bound_leaf<V, const WIDTH: usize>(
 /// Simpler version that only compares ikeys, ignoring keylenx.
 /// Useful for finding the first slot with a given ikey prefix.
 #[inline]
-pub fn lower_bound_leaf_ikey<V, const WIDTH: usize>(
+pub fn lower_bound_leaf_ikey<S: slot::ValueSlot, const WIDTH: usize>(
     search_ikey: u64,
-    node: &LeafNode<V, WIDTH>,
+    node: &LeafNode<S, WIDTH>,
 ) -> KeyIndexPosition {
     let perm: Permuter<WIDTH> = node.permutation();
     let size: usize = perm.size();
@@ -355,9 +356,9 @@ pub fn lower_bound_leaf_ikey<V, const WIDTH: usize>(
 /// // Follow child_ptr to continue traversal
 /// ```
 #[inline]
-pub fn upper_bound_internode<V, const WIDTH: usize>(
+pub fn upper_bound_internode<S: slot::ValueSlot, const WIDTH: usize>(
     search_ikey: u64,
-    node: &InternodeNode<V, WIDTH>,
+    node: &InternodeNode<S, WIDTH>,
 ) -> usize {
     let size: usize = node.size();
 
@@ -375,9 +376,9 @@ pub fn upper_bound_internode<V, const WIDTH: usize>(
 ///
 /// Optimized version that doesn't create a permutation.
 #[inline]
-pub fn upper_bound_internode_direct<V, const WIDTH: usize>(
+pub fn upper_bound_internode_direct<S: slot::ValueSlot, const WIDTH: usize>(
     search_ikey: u64,
-    node: &InternodeNode<V, WIDTH>,
+    node: &InternodeNode<S, WIDTH>,
 ) -> usize {
     let size: usize = node.size();
     let mut l: usize = 0;

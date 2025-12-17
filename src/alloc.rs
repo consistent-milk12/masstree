@@ -1,4 +1,4 @@
-//! Node allocation abstraction for MassTree.
+//! Node allocation abstraction for `MassTree`.
 //!
 //! This module provides the [`NodeAllocator`] trait that abstracts how nodes
 //! are allocated and (eventually) deallocated. Phase 2 uses [`ArenaAllocator`]
@@ -9,6 +9,7 @@ use std::ptr as StdPtr;
 
 use crate::internode::InternodeNode;
 use crate::leaf::LeafNode;
+use crate::slot::ValueSlot;
 
 /// Trait for allocating and deallocating tree nodes.
 ///
@@ -25,7 +26,7 @@ use crate::leaf::LeafNode;
 ///
 /// # Type Parameters
 ///
-/// * `V` - The value type stored in leaf nodes
+/// * `S` - The slot type implementing [`ValueSlot`]
 /// * `WIDTH` - The node width (number of slots)
 ///
 /// # Safety
@@ -33,7 +34,7 @@ use crate::leaf::LeafNode;
 /// Implementors must ensure that pointers returned by `alloc_*` methods
 /// remain valid until the corresponding `dealloc_*` is called (or the
 /// allocator is dropped for arena-style allocators).
-pub trait NodeAllocator<V, const WIDTH: usize> {
+pub trait NodeAllocator<S: ValueSlot, const WIDTH: usize> {
     /// Allocate a leaf node and return a stable raw pointer.
     ///
     /// The returned pointer is valid for reads and writes until:
@@ -47,7 +48,7 @@ pub trait NodeAllocator<V, const WIDTH: usize> {
     /// # Returns
     ///
     /// A raw mutable pointer to the allocated node with valid provenance.
-    fn alloc_leaf(&mut self, node: Box<LeafNode<V, WIDTH>>) -> *mut LeafNode<V, WIDTH>;
+    fn alloc_leaf(&mut self, node: Box<LeafNode<S, WIDTH>>) -> *mut LeafNode<S, WIDTH>;
 
     /// Allocate an internode and return a stable raw pointer.
     ///
@@ -64,8 +65,8 @@ pub trait NodeAllocator<V, const WIDTH: usize> {
     /// A raw mutable pointer to the allocated node with valid provenance.
     fn alloc_internode(
         &mut self,
-        node: Box<InternodeNode<V, WIDTH>>,
-    ) -> *mut InternodeNode<V, WIDTH>;
+        node: Box<InternodeNode<S, WIDTH>>,
+    ) -> *mut InternodeNode<S, WIDTH>;
 
     /// Deallocate a leaf node.
     ///
@@ -80,7 +81,7 @@ pub trait NodeAllocator<V, const WIDTH: usize> {
     ///
     /// After this call, the pointer is invalid and must not be dereferenced.
     #[allow(unused_variables)]
-    fn dealloc_leaf(&mut self, ptr: *mut LeafNode<V, WIDTH>) {
+    fn dealloc_leaf(&mut self, ptr: *mut LeafNode<S, WIDTH>) {
         // Default: no-op for arena-style allocators
     }
 
@@ -97,7 +98,7 @@ pub trait NodeAllocator<V, const WIDTH: usize> {
     ///
     /// After this call, the pointer is invalid and must not be dereferenced.
     #[allow(unused_variables)]
-    fn dealloc_internode(&mut self, ptr: *mut InternodeNode<V, WIDTH>) {
+    fn dealloc_internode(&mut self, ptr: *mut InternodeNode<S, WIDTH>) {
         // Default: no-op for arena-style allocators
     }
 }
@@ -115,28 +116,34 @@ pub trait NodeAllocator<V, const WIDTH: usize> {
 /// - When `Vec` reallocates, only the `Box` pointers (8 bytes) move
 /// - The heap-allocated node contents never move
 ///
+/// # Type Parameters
+///
+/// * `S` - The slot type implementing [`ValueSlot`]
+/// * `WIDTH` - The node width (number of slots)
+///
 /// # Example
 ///
 /// ```ignore
 /// use masstree::alloc::ArenaAllocator;
+/// use masstree::leaf::LeafValue;
 /// use masstree::MassTree;
 ///
 /// // Explicit allocator type (usually inferred)
-/// let tree: MassTree<u64, 15, ArenaAllocator<u64, 15>> = MassTree::new();
+/// let tree: MassTree<u64, 15, ArenaAllocator<LeafValue<u64>, 15>> = MassTree::new();
 /// ```
 #[derive(Debug)]
-pub struct ArenaAllocator<V, const WIDTH: usize> {
+pub struct ArenaAllocator<S: ValueSlot, const WIDTH: usize> {
     /// Arena for leaf nodes.
-    leaf_arena: Vec<Box<LeafNode<V, WIDTH>>>,
+    leaf_arena: Vec<Box<LeafNode<S, WIDTH>>>,
 
     /// Arena for internode nodes.
-    internode_arena: Vec<Box<InternodeNode<V, WIDTH>>>,
+    internode_arena: Vec<Box<InternodeNode<S, WIDTH>>>,
 }
 
-impl<V, const WIDTH: usize> ArenaAllocator<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> ArenaAllocator<S, WIDTH> {
     /// Create a new arena allocator with default capacity.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             leaf_arena: Vec::new(),
             internode_arena: Vec::new(),
@@ -160,33 +167,33 @@ impl<V, const WIDTH: usize> ArenaAllocator<V, WIDTH> {
     /// Return the number of leaf nodes in the arena.
     #[inline]
     #[must_use]
-    pub fn leaf_count(&self) -> usize {
+    pub const fn leaf_count(&self) -> usize {
         self.leaf_arena.len()
     }
 
     /// Return the number of internodes in the arena.
     #[inline]
     #[must_use]
-    pub fn internode_count(&self) -> usize {
+    pub const fn internode_count(&self) -> usize {
         self.internode_arena.len()
     }
 
     /// Return the total number of nodes in the arena.
     #[inline]
     #[must_use]
-    pub fn total_count(&self) -> usize {
+    pub const fn total_count(&self) -> usize {
         self.leaf_arena.len() + self.internode_arena.len()
     }
 }
 
-impl<V, const WIDTH: usize> Default for ArenaAllocator<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> Default for ArenaAllocator<S, WIDTH> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<V, const WIDTH: usize> NodeAllocator<V, WIDTH> for ArenaAllocator<V, WIDTH> {
-    fn alloc_leaf(&mut self, leaf: Box<LeafNode<V, WIDTH>>) -> *mut LeafNode<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> NodeAllocator<S, WIDTH> for ArenaAllocator<S, WIDTH> {
+    fn alloc_leaf(&mut self, leaf: Box<LeafNode<S, WIDTH>>) -> *mut LeafNode<S, WIDTH> {
         self.leaf_arena.push(leaf);
         let idx: usize = self.leaf_arena.len() - 1;
 
@@ -195,21 +202,21 @@ impl<V, const WIDTH: usize> NodeAllocator<V, WIDTH> for ArenaAllocator<V, WIDTH>
         // stable heap address that won't move even if the Vec reallocates.
         #[allow(clippy::indexing_slicing)]
         unsafe {
-            StdPtr::from_mut::<LeafNode<V, WIDTH>>(self.leaf_arena.get_unchecked_mut(idx).as_mut())
+            StdPtr::from_mut::<LeafNode<S, WIDTH>>(self.leaf_arena.get_unchecked_mut(idx).as_mut())
         }
     }
 
     fn alloc_internode(
         &mut self,
-        node: Box<InternodeNode<V, WIDTH>>,
-    ) -> *mut InternodeNode<V, WIDTH> {
+        node: Box<InternodeNode<S, WIDTH>>,
+    ) -> *mut InternodeNode<S, WIDTH> {
         self.internode_arena.push(node);
         let idx: usize = self.internode_arena.len() - 1;
 
         // SAFETY: Same reasoning as alloc_leaf.
         #[allow(clippy::indexing_slicing)]
         unsafe {
-            StdPtr::from_mut::<InternodeNode<V, WIDTH>>(
+            StdPtr::from_mut::<InternodeNode<S, WIDTH>>(
                 self.internode_arena.get_unchecked_mut(idx).as_mut(),
             )
         }
@@ -225,10 +232,14 @@ impl<V, const WIDTH: usize> NodeAllocator<V, WIDTH> for ArenaAllocator<V, WIDTH>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::leaf::LeafValue;
+
+    /// Type alias for Arc-based allocator (default mode).
+    type ArcAllocator<V, const WIDTH: usize> = ArenaAllocator<LeafValue<V>, WIDTH>;
 
     #[test]
     fn test_arena_allocator_new() {
-        let alloc: ArenaAllocator<u64, 15> = ArenaAllocator::new();
+        let alloc: ArcAllocator<u64, 15> = ArenaAllocator::new();
 
         assert_eq!(alloc.leaf_count(), 0);
         assert_eq!(alloc.internode_count(), 0);
@@ -237,7 +248,7 @@ mod tests {
 
     #[test]
     fn test_arena_allocator_with_capacity() {
-        let alloc: ArenaAllocator<u64, 15> = ArenaAllocator::with_capacity(100, 50);
+        let alloc: ArcAllocator<u64, 15> = ArenaAllocator::with_capacity(100, 50);
 
         assert_eq!(alloc.leaf_count(), 0);
         assert!(alloc.leaf_arena.capacity() >= 100);
@@ -246,7 +257,7 @@ mod tests {
 
     #[test]
     fn test_alloc_leaf_returns_stable_pointer() {
-        let mut alloc: ArenaAllocator<u64, 15> = ArenaAllocator::new();
+        let mut alloc: ArcAllocator<u64, 15> = ArenaAllocator::new();
 
         // Allocate several leaves
         let leaf1 = LeafNode::new();
@@ -284,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_alloc_internode_returns_stable_pointer() {
-        let mut alloc: ArenaAllocator<u64, 15> = ArenaAllocator::new();
+        let mut alloc: ArcAllocator<u64, 15> = ArenaAllocator::new();
 
         let node1 = InternodeNode::new(0);
         let ptr1 = alloc.alloc_internode(node1);
@@ -305,13 +316,13 @@ mod tests {
 
     #[test]
     fn test_default_impl() {
-        let alloc: ArenaAllocator<u64, 15> = ArenaAllocator::default();
+        let alloc: ArcAllocator<u64, 15> = ArenaAllocator::default();
         assert_eq!(alloc.total_count(), 0);
     }
 
     #[test]
     fn test_mixed_allocations() {
-        let mut alloc: ArenaAllocator<u64, 15> = ArenaAllocator::new();
+        let mut alloc: ArcAllocator<u64, 15> = ArenaAllocator::new();
 
         // Interleave leaf and internode allocations
         let leaf_ptr = alloc.alloc_leaf(LeafNode::new());
@@ -334,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_dealloc_is_noop() {
-        let mut alloc: ArenaAllocator<u64, 15> = ArenaAllocator::new();
+        let mut alloc: ArcAllocator<u64, 15> = ArenaAllocator::new();
 
         let ptr = alloc.alloc_leaf(LeafNode::new());
         let count_before = alloc.leaf_count();

@@ -7,6 +7,7 @@ use std::fmt as StdFmt;
 use std::sync::Arc;
 
 use crate::alloc::{ArenaAllocator, NodeAllocator};
+use crate::leaf::LeafValue;
 
 use super::{InsertError, MassTree};
 
@@ -41,13 +42,13 @@ use super::{InsertError, MassTree};
 /// let value = tree.get(b"hello");
 /// assert_eq!(value, Some(42));
 /// ```
-pub struct MassTreeIndex<V: Copy, const WIDTH: usize = 15, A: NodeAllocator<V, WIDTH> = ArenaAllocator<V, WIDTH>>
+pub struct MassTreeIndex<V: Copy, const WIDTH: usize = 15, A: NodeAllocator<LeafValue<V>, WIDTH> = ArenaAllocator<LeafValue<V>, WIDTH>>
 {
     /// Wraps `MassTree` internally. True inline storage is planned for future.
     pub(crate) inner: MassTree<V, WIDTH, A>,
 }
 
-impl<V: Copy, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> StdFmt::Debug
+impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> StdFmt::Debug
     for MassTreeIndex<V, WIDTH, A>
 {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
@@ -57,7 +58,7 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> StdFmt::Debug
     }
 }
 
-impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH, ArenaAllocator<V, WIDTH>> {
+impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>> {
     /// Create a new empty `MassTreeIndex` with the default arena allocator.
     #[must_use]
     pub fn new() -> Self {
@@ -67,7 +68,7 @@ impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH, ArenaAllocator<V, WIDT
     }
 }
 
-impl<V: Copy, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTreeIndex<V, WIDTH, A> {
+impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTreeIndex<V, WIDTH, A> {
     /// Create a new empty `MassTreeIndex` with a custom allocator.
     #[must_use]
     pub fn with_allocator(allocator: A) -> Self {
@@ -144,7 +145,7 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTreeIndex<V, W
     }
 }
 
-impl<V: Copy, const WIDTH: usize> Default for MassTreeIndex<V, WIDTH, ArenaAllocator<V, WIDTH>> {
+impl<V: Copy, const WIDTH: usize> Default for MassTreeIndex<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>> {
     fn default() -> Self {
         Self::new()
     }

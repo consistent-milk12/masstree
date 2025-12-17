@@ -4,6 +4,17 @@
 //!
 //! Leaf nodes store the actual key-value pairs, using a permutation array
 //! for logical ordering without data movement.
+//!
+//! # Storage Modes
+//!
+//! `LeafNode<S, WIDTH>` is generic over the slot type `S: ValueSlot`:
+//!
+//! - [`LeafValue<V>`]: Arc-based storage (default mode) - values wrapped in `Arc<V>`
+//! - [`LeafValueIndex<V: Copy>`]: Inline storage (index mode) - values stored directly
+//!
+//! Use the type aliases for convenience:
+//! - [`ArcLeafNode<V>`]: Leaf with Arc-based storage
+//! - [`InlineLeafNode<V>`]: Leaf with inline storage for `V: Copy`
 
 use std::array as StdArray;
 use std::mem as StdMem;
@@ -12,6 +23,7 @@ use std::sync::Arc;
 
 pub mod layer;
 
+use crate::slot::ValueSlot;
 use crate::{nodeversion::NodeVersion, permuter::Permuter, suffix::SuffixBag};
 
 /// Special keylenx value indicating key has a suffix.
@@ -65,10 +77,15 @@ pub enum InsertTarget {
 /// Result of a leaf split operation.
 ///
 /// Contains the new leaf and information about where to insert.
+///
+/// # Type Parameters
+///
+/// * `S` - The slot type implementing [`ValueSlot`]
+/// * `WIDTH` - Node width (number of slots)
 #[derive(Debug)]
-pub struct LeafSplitResult<V, const WIDTH: usize = 15> {
+pub struct LeafSplitResult<S: ValueSlot, const WIDTH: usize = 15> {
     /// The new leaf (right sibling).
-    pub new_leaf: Box<LeafNode<V, WIDTH>>,
+    pub new_leaf: Box<LeafNode<S, WIDTH>>,
 
     /// The split key (first key of new leaf).
     pub split_ikey: u64,
@@ -97,8 +114,8 @@ impl SplitUtils {
     /// * `i` - Logical position in post-insert order
     /// * `insert_pos` - Where the new key will be inserted
     /// * `insert_ikey` - The ikey of the new key
-    fn ikey_after_insert<V, const WIDTH: usize>(
-        leaf: &LeafNode<V, WIDTH>,
+    fn ikey_after_insert<S: ValueSlot, const WIDTH: usize>(
+        leaf: &LeafNode<S, WIDTH>,
         i: usize,
         insert_pos: usize,
         insert_ikey: u64,
@@ -131,8 +148,8 @@ impl SplitUtils {
     /// inserted key affects which keys should stay together.
     ///
     /// Returns None if all entries have the same ikey (layer case).
-    fn adjust_split_for_equal_ikeys_post_insert<V, const WIDTH: usize>(
-        leaf: &LeafNode<V, WIDTH>,
+    fn adjust_split_for_equal_ikeys_post_insert<S: ValueSlot, const WIDTH: usize>(
+        leaf: &LeafNode<S, WIDTH>,
         mut pos: usize,
         insert_pos: usize,
         insert_ikey: u64,
@@ -196,8 +213,8 @@ impl SplitUtils {
     ///
     /// `SplitPoint` with position and split key, or None if split is not possible
     /// (e.g., all entries have same ikey - would need layer instead).
-    pub fn calculate_split_point<V, const WIDTH: usize>(
-        leaf: &LeafNode<V, WIDTH>,
+    pub fn calculate_split_point<S: ValueSlot, const WIDTH: usize>(
+        leaf: &LeafNode<S, WIDTH>,
         insert_pos: usize,
         insert_ikey: u64,
     ) -> Option<SplitPoint> {
@@ -555,8 +572,14 @@ impl<V: Copy> LeafValueIndex<V> {
 /// Leaves are linked for efficient range scans.
 ///
 /// # Type Params
-/// * `V` - The value type stored in the tree
+/// * `S` - The slot type implementing [`ValueSlot`] (determines storage strategy)
 /// * `WIDTH` - Number of slots (default: 15, max: 15 for u64 permuter)
+///
+/// # Storage Modes
+///
+/// The slot type `S` determines how values are stored:
+/// - [`LeafValue<V>`]: Arc-based storage - `Arc::new(value)` on insert
+/// - [`LeafValueIndex<V: Copy>`]: Inline storage - values copied directly
 ///
 /// # Invariants
 /// - For each slot `s` in `0..permutation.size()`:
@@ -570,7 +593,7 @@ impl<V: Copy> LeafValueIndex<V> {
 /// cache-line alignment. For WIDTH=15 with V=u64, total size is ~448 bytes (7 cache lines).
 #[repr(C, align(64))]
 #[derive(Debug)]
-pub struct LeafNode<V, const WIDTH: usize = 15> {
+pub struct LeafNode<S: ValueSlot, const WIDTH: usize = 15> {
     /// Version for optimistic concurrency control.
     version: NodeVersion,
 
@@ -590,7 +613,11 @@ pub struct LeafNode<V, const WIDTH: usize = 15> {
     ikey0: [u64; WIDTH],
 
     /// Values or layer pointers for each slot.
-    leaf_values: [LeafValue<V>; WIDTH],
+    ///
+    /// The slot type `S` determines storage strategy:
+    /// - `LeafValue<V>`: Values wrapped in `Arc<V>`
+    /// - `LeafValueIndex<V>`: Values stored inline (for `V: Copy`)
+    leaf_values: [S; WIDTH],
 
     /// Suffix storage for keys longer than 8 bytes.
     ///
@@ -613,7 +640,7 @@ pub struct LeafNode<V, const WIDTH: usize = 15> {
 }
 
 // Compile-time assertion: WIDTH must be 1..=15
-impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     const WIDTH_CHECK: () = {
         assert!(WIDTH > 0, "WIDTH must be at least 1");
 
@@ -621,7 +648,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     };
 }
 
-impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     // ============================================================================
     //  Constructor Methods
     // ============================================================================
@@ -638,14 +665,14 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         // Trigger compile-time WIDTH check
         let _: () = Self::WIDTH_CHECK;
 
-        // SAFETY: We're initializing all fields to valid default values
+        // Initialize all slot values to default (Empty for both LeafValue and LeafValueIndex)
         Box::new(Self {
             version: NodeVersion::new(true), // true = is_leaf
             modstate: ModState::Insert,
             keylenx: [0; WIDTH],
             permutation: Permuter::empty(),
             ikey0: [0; WIDTH],
-            leaf_values: std::array::from_fn(|_| LeafValue::Empty),
+            leaf_values: std::array::from_fn(|_| S::default()),
             ksuf: None,
             next: StdPtr::null_mut(),
             prev: StdPtr::null_mut(),
@@ -976,7 +1003,10 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     pub fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
         use crate::key::IKEY_SIZE;
 
-        debug_assert!(slot < WIDTH, "ksuf_match_result: slot {slot} >= WIDTH {WIDTH}");
+        debug_assert!(
+            slot < WIDTH,
+            "ksuf_match_result: slot {slot} >= WIDTH {WIDTH}"
+        );
 
         let stored_keylenx: u8 = self.keylenx(slot);
 
@@ -1018,6 +1048,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     pub fn compact_ksuf(&mut self, exclude_slot: Option<usize>) -> usize {
         match self.ksuf.as_mut() {
             Some(bag) => bag.compact_with_permuter(&self.permutation, exclude_slot),
+
             None => 0,
         }
     }
@@ -1026,7 +1057,13 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     //  Value Accessors
     // ============================================================================
 
-    /// Get a reference to the value at the given physical slot.
+    /// Get a reference to the slot at the given physical index.
+    ///
+    /// The slot type `S` determines what you can do with the returned reference:
+    /// - `LeafValue<V>`: Call `.try_clone_arc()` to get `Option<Arc<V>>`
+    /// - `LeafValueIndex<V>`: Call `.try_value()` to get `Option<V>`
+    ///
+    /// Or use the [`ValueSlot`] trait methods like `.try_get()` for generic code.
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
@@ -1035,10 +1072,25 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         clippy::indexing_slicing,
         reason = "Slot from Permuter; valid by construction"
     )]
-    pub fn leaf_value(&self, slot: usize) -> &LeafValue<V> {
+    pub fn leaf_value(&self, slot: usize) -> &S {
         debug_assert!(slot < WIDTH, "leaf_value: slot out of bounds");
 
         &self.leaf_values[slot]
+    }
+
+    /// Get a mutable reference to the slot at the given physical index.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[inline]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter; valid by construction"
+    )]
+    pub fn leaf_value_mut(&mut self, slot: usize) -> &mut S {
+        debug_assert!(slot < WIDTH, "leaf_value_mut: slot out of bounds");
+
+        &mut self.leaf_values[slot]
     }
 
     // ============================================================================
@@ -1220,16 +1272,16 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     //  Slot Assignment
     // ============================================================================
 
-    /// Assign a key-value pair to a physical slot.
+    /// Assign a key-slot pair to a physical slot.
     ///
-    /// This sets the ikey, keylenx, and value for the slot. It does not update
-    /// the permutation, the caller must do that seperately.
+    /// This sets the ikey, keylenx, and slot value. It does not update
+    /// the permutation, the caller must do that separately.
     ///
     /// # Parameters
     /// - `slot`: Physical slot index
     /// - `ikey`: 8-byte key (big-endian)
-    /// - `key_len`: Actual key length (0-8)
-    /// - `value`: The value to store
+    /// - `keylenx`: Key length/type indicator
+    /// - `value`: The slot value to store
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
@@ -1237,7 +1289,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         clippy::indexing_slicing,
         reason = "Slot from Permuter, valid by construction"
     )]
-    pub fn assign(&mut self, slot: usize, ikey: u64, keylenx: u8, value: LeafValue<V>) {
+    pub fn assign(&mut self, slot: usize, ikey: u64, keylenx: u8, value: S) {
         debug_assert!(slot < WIDTH, "assign: slot out of bounds");
 
         self.ikey0[slot] = ikey;
@@ -1245,38 +1297,31 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         self.leaf_values[slot] = value;
     }
 
-    /// Assign a simple value (no suffix, no layer).
+    /// Assign a value using an output handle (already converted via `into_output`).
     ///
-    /// The value is wrapped in `Arc::new()` for the default mode.
-    ///
-    /// # Parameters
-    /// - `slot`: Physical slot index
-    /// - `ikey`: 8-byte key (big-endian)
-    /// - `key_len`: Actual key length (0-8)
-    /// - `value`: The value to store (will be wrapped in Arc)
-    pub fn assign_value(&mut self, slot: usize, ikey: u64, key_len: u8, value: V) {
-        debug_assert!(
-            key_len <= 8,
-            "assign_value: key_len must be 0-8 for inline keys"
-        );
-
-        self.assign(slot, ikey, key_len, LeafValue::Value(Arc::new(value)));
-    }
-
-    /// Assign an already-Arc-wrapped value (for efficiency when Arc is pre-allocated).
+    /// This is the primary assignment method for inserts. The output has already
+    /// been converted (e.g., `Arc::new(value)` for Arc mode), so this can be
+    /// called across retries without re-allocating.
     ///
     /// # Parameters
     /// - `slot`: Physical slot index
     /// - `ikey`: 8-byte key (big-endian)
     /// - `key_len`: Actual key length (0-8)
-    /// - `value`: The Arc-wrapped value to store
-    pub fn assign_arc(&mut self, slot: usize, ikey: u64, key_len: u8, arc_value: Arc<V>) {
+    /// - `output`: The output handle (from `S::into_output`)
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter, valid by construction"
+    )]
+    pub fn assign_output(&mut self, slot: usize, ikey: u64, key_len: u8, output: S::Output) {
+        debug_assert!(slot < WIDTH, "assign_output: slot out of bounds");
         debug_assert!(
             key_len <= 8,
-            "assign_arc: key_len must be 0-8 for inline keys"
+            "assign_output: key_len must be 0-8 for inline keys"
         );
 
-        self.assign(slot, ikey, key_len, LeafValue::Value(arc_value));
+        self.ikey0[slot] = ikey;
+        self.keylenx[slot] = key_len;
+        self.leaf_values[slot] = S::from_output(output);
     }
 
     /// Check if slot 0 can be reused for a new key.
@@ -1333,35 +1378,29 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         next_free_slot != 0 || self.can_reuse_slot0(ikey) || size < WIDTH - 1
     }
 
-    /// Swap a value at a slot, returning the old value.
+    /// Swap a value at a slot, returning the old output.
     ///
-    /// Used when updating an existing key.
+    /// Used when updating an existing key. The output type depends on the slot type:
+    /// - `LeafValue<V>`: Returns `Option<Arc<V>>`
+    /// - `LeafValueIndex<V>`: Returns `Option<V>`
     ///
     /// # Arguments
     ///
     /// * `slot` - Physical slot index (0..WIDTH)
-    /// * `new_value` - The new Arc-wrapped value to store
+    /// * `new_output` - The new output to store (from `S::into_output`)
     ///
     /// # Returns
     ///
-    /// The previous value at the slot, or None if slot was empty/layer.
+    /// The previous output at the slot, or None if slot was empty/layer.
     ///
     /// # Panics
     ///
     /// Panics in debug mode if slot >= WIDTH.
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
-    pub fn swap_value(&mut self, slot: usize, new_value: Arc<V>) -> Option<Arc<V>> {
+    pub fn swap_output(&mut self, slot: usize, new_output: S::Output) -> Option<S::Output> {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
-        // Plain field access with StdMem::replace
-        let old_value: LeafValue<V> =
-            StdMem::replace(&mut self.leaf_values[slot], LeafValue::Value(new_value));
-
-        match old_value {
-            LeafValue::Value(arc) => Some(arc),
-
-            LeafValue::Layer(_) | LeafValue::Empty => None,
-        }
+        self.leaf_values[slot].swap_output(new_output)
     }
 
     // ============================================================================
@@ -1394,7 +1433,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         clippy::indexing_slicing,
         reason = "Indices from permuter, valid by construction"
     )]
-    pub fn split_into(&mut self, split_pos: usize) -> LeafSplitResult<V, WIDTH> {
+    pub fn split_into(&mut self, split_pos: usize) -> LeafSplitResult<S, WIDTH> {
         let mut new_leaf: Box<Self> = Self::new();
         let old_perm: Permuter<WIDTH> = self.permutation();
         let old_size: usize = old_perm.size();
@@ -1421,9 +1460,8 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
             new_leaf.ikey0[new_slot] = ikey;
             new_leaf.keylenx[new_slot] = keylenx;
 
-            // Move value (take ownership, leave Empty behind)
-            let old_value: LeafValue<V> =
-                StdMem::replace(&mut self.leaf_values[old_slot], LeafValue::Empty);
+            // Move value using ValueSlot::take (leaves default/Empty behind)
+            let old_value: S = self.leaf_values[old_slot].take();
             new_leaf.leaf_values[new_slot] = old_value;
         }
 
@@ -1467,7 +1505,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         clippy::indexing_slicing,
         reason = "Indices from permuter, valid by construction"
     )]
-    pub fn split_all_to_right(&mut self) -> LeafSplitResult<V, WIDTH> {
+    pub fn split_all_to_right(&mut self) -> LeafSplitResult<S, WIDTH> {
         let mut new_leaf = Self::new();
         let old_perm = self.permutation();
         let old_size = old_perm.size();
@@ -1480,8 +1518,8 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
 
             new_leaf.ikey0[i] = self.ikey0[old_slot];
             new_leaf.keylenx[i] = self.keylenx[old_slot];
-            new_leaf.leaf_values[i] =
-                StdMem::replace(&mut self.leaf_values[old_slot], LeafValue::Empty);
+            // Use ValueSlot::take to move value and leave default behind
+            new_leaf.leaf_values[i] = self.leaf_values[old_slot].take();
         }
 
         // Set new leaf's permutation
@@ -1529,13 +1567,13 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         for i in 0..size {
             let slot: usize = self.permutation.get(i);
             let keylenx: u8 = self.keylenx[slot];
-            let leaf_value: &LeafValue<V> = &self.leaf_values[slot];
+            let leaf_value: &S = &self.leaf_values[slot];
 
-            // Layer slots must have Layer values
+            // Layer slots must have Layer values (use ValueSlot trait)
             if keylenx >= LAYER_KEYLENX {
                 assert!(
                     leaf_value.is_layer(),
-                    "slot {slot} has keylenx but non-Layer value"
+                    "slot {slot} has layer keylenx but non-Layer value"
                 );
             } else if (keylenx > 0) || !leaf_value.is_empty() {
                 assert!(
@@ -1582,7 +1620,7 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
         slot: usize,
         ikey: u64,
         keylenx: u8,
-        value: LeafValue<V>,
+        value: S,
     ) {
         debug_assert!(slot < WIDTH, "assign_raw_for_test: slot out of bounds");
 
@@ -1592,7 +1630,96 @@ impl<V, const WIDTH: usize> LeafNode<V, WIDTH> {
     }
 }
 
-impl<V, const WIDTH: usize> Default for LeafNode<V, WIDTH> {
+// ============================================================================
+//  Mode-Specific Convenience Methods
+// ============================================================================
+
+/// Arc-mode specific methods for `LeafNode<LeafValue<V>, WIDTH>`.
+impl<V, const WIDTH: usize> LeafNode<LeafValue<V>, WIDTH> {
+    /// Assign a value, wrapping it in `Arc::new()`.
+    ///
+    /// Convenience method for Arc mode. For retry-safe inserts that avoid
+    /// re-allocating the Arc, use `assign_output` instead.
+    ///
+    /// # Parameters
+    /// - `slot`: Physical slot index
+    /// - `ikey`: 8-byte key (big-endian)
+    /// - `key_len`: Actual key length (0-8)
+    /// - `value`: The value to store (will be wrapped in Arc)
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
+    pub fn assign_value(&mut self, slot: usize, ikey: u64, key_len: u8, value: V) {
+        debug_assert!(slot < WIDTH, "assign_value: slot out of bounds");
+        debug_assert!(
+            key_len <= 8,
+            "assign_value: key_len must be 0-8 for inline keys"
+        );
+
+        self.ikey0[slot] = ikey;
+        self.keylenx[slot] = key_len;
+        self.leaf_values[slot] = LeafValue::Value(Arc::new(value));
+    }
+
+    /// Assign an already-Arc-wrapped value.
+    ///
+    /// Use this when the Arc has already been allocated (e.g., for retry-safe inserts).
+    ///
+    /// # Parameters
+    /// - `slot`: Physical slot index
+    /// - `ikey`: 8-byte key (big-endian)
+    /// - `key_len`: Actual key length (0-8)
+    /// - `arc_value`: The Arc-wrapped value to store
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
+    pub fn assign_arc(&mut self, slot: usize, ikey: u64, key_len: u8, arc_value: Arc<V>) {
+        debug_assert!(slot < WIDTH, "assign_arc: slot out of bounds");
+        debug_assert!(
+            key_len <= 8,
+            "assign_arc: key_len must be 0-8 for inline keys"
+        );
+
+        self.ikey0[slot] = ikey;
+        self.keylenx[slot] = key_len;
+        self.leaf_values[slot] = LeafValue::Value(arc_value);
+    }
+
+    /// Swap a value at a slot, returning the old Arc.
+    ///
+    /// Convenience wrapper around `swap_output` for Arc mode.
+    pub fn swap_value(&mut self, slot: usize, new_value: Arc<V>) -> Option<Arc<V>> {
+        self.swap_output(slot, new_value)
+    }
+}
+
+/// Inline-mode specific methods for `LeafNode<LeafValueIndex<V>, WIDTH>`.
+impl<V: Copy, const WIDTH: usize> LeafNode<LeafValueIndex<V>, WIDTH> {
+    /// Assign a value directly (inline storage).
+    ///
+    /// # Parameters
+    /// - `slot`: Physical slot index
+    /// - `ikey`: 8-byte key (big-endian)
+    /// - `key_len`: Actual key length (0-8)
+    /// - `value`: The value to store (copied directly)
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
+    pub fn assign_inline(&mut self, slot: usize, ikey: u64, key_len: u8, value: V) {
+        debug_assert!(slot < WIDTH, "assign_inline: slot out of bounds");
+        debug_assert!(
+            key_len <= 8,
+            "assign_inline: key_len must be 0-8 for inline keys"
+        );
+
+        self.ikey0[slot] = ikey;
+        self.keylenx[slot] = key_len;
+        self.leaf_values[slot] = LeafValueIndex::Value(value);
+    }
+
+    /// Swap a value at a slot, returning the old value.
+    ///
+    /// Convenience wrapper around `swap_output` for inline mode.
+    pub fn swap_inline(&mut self, slot: usize, new_value: V) -> Option<V> {
+        self.swap_output(slot, new_value)
+    }
+}
+
+impl<S: ValueSlot, const WIDTH: usize> Default for LeafNode<S, WIDTH> {
     fn default() -> Self {
         // Trigger compile-time WIDTH check
         let _: () = Self::WIDTH_CHECK;
@@ -1603,7 +1730,7 @@ impl<V, const WIDTH: usize> Default for LeafNode<V, WIDTH> {
             keylenx: [0; WIDTH],
             permutation: Permuter::empty(),
             ikey0: [0; WIDTH],
-            leaf_values: StdArray::from_fn(|_| LeafValue::Empty),
+            leaf_values: StdArray::from_fn(|_| S::default()),
             ksuf: None,
             next: StdPtr::null_mut(),
             prev: StdPtr::null_mut(),
@@ -1616,31 +1743,57 @@ impl<V, const WIDTH: usize> Default for LeafNode<V, WIDTH> {
 //  Type Aliases
 // ============================================================================
 
+/// Arc-based leaf node with standard 15 slots.
+///
+/// This is the default storage mode where values are wrapped in `Arc<V>`.
+/// Use this for general-purpose key-value storage.
+pub type ArcLeafNode<V, const WIDTH: usize = 15> = LeafNode<LeafValue<V>, WIDTH>;
+
+/// Inline leaf node with standard 15 slots.
+///
+/// This is the index mode where `V: Copy` values are stored directly.
+/// Use this for small, copyable values like `u64`, handles, or pointers.
+pub type InlineLeafNode<V, const WIDTH: usize = 15> = LeafNode<LeafValueIndex<V>, WIDTH>;
+
 /// Standard 15-slot leaf node (default mode with Arc<V>).
-pub type LeafNode15<V> = LeafNode<V, 15>;
+///
+/// Alias for backwards compatibility.
+pub type LeafNode15<V> = ArcLeafNode<V, 15>;
 
 /// Compact 7-slot leaf node (fits in ~2 cache lines with small V).
-pub type LeafNodeCompact<V> = LeafNode<V, 7>;
+///
+/// Alias for backwards compatibility.
+pub type LeafNodeCompact<V> = ArcLeafNode<V, 7>;
 
 // ============================================================================
 //  Compile-time Size Assertions
 // ============================================================================
 
-/// Compile-time size check for `LeafNode<u64, 15>`.
+/// Compile-time size check for `ArcLeafNode<u64, 15>`.
 /// Should be around 448 bytes (7 cache lines) after alignment.
 ///
 /// The enum discriminant adds overhead compared to C++ union approach, but keeps
 /// type safety. `LeafValue<u64>` is 16 bytes (Arc ptr + discriminant).
 const _: () = {
     // Compile-time assertion: ensure node stays cache-friendly
-    const SIZE: usize = StdMem::size_of::<LeafNode<u64, 15>>();
-    const ALIGN: usize = StdMem::align_of::<LeafNode<u64, 15>>();
+    const SIZE: usize = StdMem::size_of::<ArcLeafNode<u64, 15>>();
+    const ALIGN: usize = StdMem::align_of::<ArcLeafNode<u64, 15>>();
 
     // Should fit in 8 cache lines (512 bytes) at most
-    assert!(SIZE <= 512, "LeafNode exceeds 8 cache lines");
+    assert!(SIZE <= 512, "ArcLeafNode exceeds 8 cache lines");
 
-    // Should be cache cache-aligned
-    assert!(ALIGN == 64, "LeafNode not cache-line-aligned");
+    // Should be cache-aligned
+    assert!(ALIGN == 64, "ArcLeafNode not cache-line-aligned");
+};
+
+/// Compile-time size check for `InlineLeafNode<u64, 15>`.
+const _: () = {
+    const SIZE: usize = StdMem::size_of::<InlineLeafNode<u64, 15>>();
+    const ALIGN: usize = StdMem::align_of::<InlineLeafNode<u64, 15>>();
+
+    // Inline mode should be smaller since there's no Arc pointer
+    assert!(SIZE <= 512, "InlineLeafNode exceeds 8 cache lines");
+    assert!(ALIGN == 64, "InlineLeafNode not cache-line-aligned");
 };
 
 #[cfg(test)]
@@ -1694,15 +1847,15 @@ mod tests {
 
     #[test]
     fn test_leaf_node_linking() {
-        let mut left: Box<LeafNode<u64, 15>> = LeafNode::new();
-        let mut right: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut left: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
+        let mut right: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Get raw pointers before linking
-        let left_ptr: *mut LeafNode<u64> = left.as_mut() as *mut LeafNode<u64, 15>;
-        let right_ptr: *mut LeafNode<u64> = right.as_mut() as *mut LeafNode<u64, 15>;
+        let left_ptr: *mut ArcLeafNode<u64, 15> = left.as_mut();
+        let right_ptr: *mut ArcLeafNode<u64, 15> = right.as_mut();
 
         // Link them
-        LeafNode::link_split(&mut left, &mut right);
+        ArcLeafNode::link_split(&mut left, &mut right);
 
         assert_eq!(left.safe_next(), right_ptr);
         assert_eq!(right.prev(), left_ptr);
@@ -1711,7 +1864,7 @@ mod tests {
 
     #[test]
     fn test_leaf_node_new() {
-        let node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         assert!(node.version().is_leaf());
         assert_eq!(node.size(), 0);
@@ -1724,7 +1877,7 @@ mod tests {
 
     #[test]
     fn test_leaf_node_new_root() {
-        let node: Box<LeafNode<u64, 15>> = LeafNode::new_root();
+        let node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new_root();
 
         assert!(node.version().is_leaf());
         assert!(node.version().is_root());
@@ -1732,7 +1885,7 @@ mod tests {
 
     #[test]
     fn test_leaf_node_assign() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Assign to slot 0 (value is wrapped in Arc internally)
         node.assign_value(0, 0x1234_5678_0000_0000, 4, 100);
@@ -1749,7 +1902,7 @@ mod tests {
 
     #[test]
     fn test_leaf_node_permutation() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Initially empty
         assert_eq!(node.permutation().size(), 0);
@@ -1765,11 +1918,11 @@ mod tests {
 
     #[test]
     fn test_safe_next_masks_mark() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Use a real allocation to get valid provenance
-        let other_node: Box<LeafNode<u64, 15>> = LeafNode::new();
-        let fake_next: *mut LeafNode<u64> = Box::into_raw(other_node);
+        let other_node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
+        let fake_next: *mut ArcLeafNode<u64, 15> = Box::into_raw(other_node);
 
         node.set_next(fake_next);
         assert_eq!(node.safe_next(), fake_next);
@@ -1789,17 +1942,17 @@ mod tests {
 
     #[test]
     fn test_keylenx_helpers() {
-        assert!(!LeafNode::<u64>::keylenx_is_layer(0));
-        assert!(!LeafNode::<u64>::keylenx_is_layer(8));
-        assert!(!LeafNode::<u64>::keylenx_is_layer(64));
-        assert!(!LeafNode::<u64>::keylenx_is_layer(127));
-        assert!(LeafNode::<u64>::keylenx_is_layer(128));
-        assert!(LeafNode::<u64>::keylenx_is_layer(255));
+        assert!(!ArcLeafNode::<u64>::keylenx_is_layer(0));
+        assert!(!ArcLeafNode::<u64>::keylenx_is_layer(8));
+        assert!(!ArcLeafNode::<u64>::keylenx_is_layer(64));
+        assert!(!ArcLeafNode::<u64>::keylenx_is_layer(127));
+        assert!(ArcLeafNode::<u64>::keylenx_is_layer(128));
+        assert!(ArcLeafNode::<u64>::keylenx_is_layer(255));
 
-        assert!(!LeafNode::<u64>::keylenx_has_ksuf(0));
-        assert!(!LeafNode::<u64>::keylenx_has_ksuf(8));
-        assert!(LeafNode::<u64>::keylenx_has_ksuf(64));
-        assert!(!LeafNode::<u64>::keylenx_has_ksuf(128));
+        assert!(!ArcLeafNode::<u64>::keylenx_has_ksuf(0));
+        assert!(!ArcLeafNode::<u64>::keylenx_has_ksuf(8));
+        assert!(ArcLeafNode::<u64>::keylenx_has_ksuf(64));
+        assert!(!ArcLeafNode::<u64>::keylenx_has_ksuf(128));
     }
 
     #[test]
@@ -1812,7 +1965,7 @@ mod tests {
 
     #[test]
     fn test_ikey_bound() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // ikey_bound returns ikey0[0] - use assign_value to set it
         node.assign_value(0, 0xABCD_0000_0000_0000, 4, 42);
@@ -1821,7 +1974,7 @@ mod tests {
 
     #[test]
     fn test_modstate() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         assert_eq!(node.modstate(), ModState::Insert);
 
@@ -1838,7 +1991,7 @@ mod tests {
 
     #[test]
     fn test_width_1_node() {
-        let node: Box<LeafNode<u64, 1>> = LeafNode::new();
+        let node: Box<ArcLeafNode<u64, 1>> = ArcLeafNode::new();
 
         assert_eq!(node.size(), 0);
         assert!(node.is_empty());
@@ -1851,7 +2004,7 @@ mod tests {
 
     #[test]
     fn test_width_15_full() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
         let perm = Permuter::make_sorted(15);
         node.set_permutation(perm);
 
@@ -1868,7 +2021,7 @@ mod tests {
     #[should_panic(expected = "ikeys are not in sorted order")]
     #[cfg(debug_assertions)]
     fn test_invariant_unsorted_ikeys() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Set up unsorted keys
         node.assign_value(0, 0x2000_0000_0000_0000, 2, 200);
@@ -1883,10 +2036,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "has keylenx but non-Layer value")]
+    #[should_panic(expected = "has layer keylenx but non-Layer value")]
     #[cfg(debug_assertions)]
     fn test_invariant_layer_mismatch() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Set keylenx to indicate layer but lv is Value (deliberately invalid)
         node.assign_raw_for_test(
@@ -1905,7 +2058,7 @@ mod tests {
 
     #[test]
     fn test_invariant_valid_node() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Set up correctly sorted keys
         node.assign_value(0, 0x1000_0000_0000_0000, 2, 100);
@@ -1981,7 +2134,7 @@ mod tests {
 
     #[test]
     fn test_suffix_not_allocated_initially() {
-        let node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         assert!(!node.has_ksuf_storage());
         assert!(node.ksuf(0).is_none());
@@ -1989,7 +2142,7 @@ mod tests {
 
     #[test]
     fn test_assign_ksuf_lazy_init() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Before assignment, no storage
         assert!(!node.has_ksuf_storage());
@@ -2005,7 +2158,7 @@ mod tests {
 
     #[test]
     fn test_ksuf_equals() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
         node.assign_ksuf(0, b"hello");
 
         assert!(node.ksuf_equals(0, b"hello"));
@@ -2015,7 +2168,7 @@ mod tests {
 
     #[test]
     fn test_ksuf_compare() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
         node.assign_ksuf(0, b"hello");
 
         assert_eq!(
@@ -2035,7 +2188,7 @@ mod tests {
 
     #[test]
     fn test_ksuf_matches() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Assign ikey and suffix to slot 0
         node.ikey0[0] = 0x1234_5678_0000_0000;
@@ -2053,7 +2206,7 @@ mod tests {
 
     #[test]
     fn test_ksuf_matches_no_suffix() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Assign just ikey (no suffix)
         node.ikey0[0] = 0x1234_5678_0000_0000;
@@ -2068,7 +2221,7 @@ mod tests {
 
     #[test]
     fn test_clear_ksuf() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
         node.assign_ksuf(0, b"test");
 
         assert!(node.has_ksuf(0));
@@ -2081,7 +2234,7 @@ mod tests {
 
     #[test]
     fn test_ksuf_or_empty() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
         node.assign_ksuf(0, b"data");
 
         assert_eq!(node.ksuf_or_empty(0), b"data".as_slice());
@@ -2090,7 +2243,7 @@ mod tests {
 
     #[test]
     fn test_compact_ksuf() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         // Assign suffixes to multiple slots
         node.assign_ksuf(0, b"slot0");
@@ -2111,7 +2264,7 @@ mod tests {
 
     #[test]
     fn test_multiple_suffixes() {
-        let mut node: Box<LeafNode<u64, 15>> = LeafNode::new();
+        let mut node: Box<ArcLeafNode<u64, 15>> = ArcLeafNode::new();
 
         node.assign_ksuf(0, b"first");
         node.assign_ksuf(5, b"middle");

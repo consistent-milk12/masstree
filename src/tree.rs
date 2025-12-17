@@ -11,8 +11,9 @@ use std::sync::Arc;
 use crate::alloc::{ArenaAllocator, NodeAllocator};
 use crate::internode::InternodeNode;
 use crate::key::Key;
-use crate::leaf::{KSUF_KEYLENX, LeafNode, LeafSplitResult, SplitUtils};
+use crate::leaf::{KSUF_KEYLENX, LeafNode, LeafSplitResult, LeafValue, SplitUtils};
 use crate::permuter::Permuter;
+use crate::slot::ValueSlot;
 
 mod index;
 mod layer;
@@ -28,15 +29,20 @@ pub use index::MassTreeIndex;
 /// The root of a `MassTree` layer.
 ///
 /// Can be either a leaf (small tree) or an internode (larger tree).
-pub enum RootNode<V, const WIDTH: usize = 15> {
+///
+/// # Type Parameters
+///
+/// * `S` - The slot type implementing [`ValueSlot`]
+/// * `WIDTH` - Node width (number of slots)
+pub enum RootNode<S: ValueSlot, const WIDTH: usize = 15> {
     /// Root is a leaf node (tree has 0 or 1 level).
-    Leaf(Box<LeafNode<V, WIDTH>>),
+    Leaf(Box<LeafNode<S, WIDTH>>),
 
     /// Root is an internode (tree has multiple levels).
-    Internode(Box<InternodeNode<V, WIDTH>>),
+    Internode(Box<InternodeNode<S, WIDTH>>),
 }
 
-impl<V, const WIDTH: usize> RootNode<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> RootNode<S, WIDTH> {
     /// Check if root is a leaf.
     #[inline]
     #[must_use]
@@ -54,7 +60,7 @@ impl<V, const WIDTH: usize> RootNode<V, WIDTH> {
     /// Get leaf reference if root is a leaf.
     #[inline]
     #[must_use]
-    pub fn as_leaf(&self) -> Option<&LeafNode<V, WIDTH>> {
+    pub fn as_leaf(&self) -> Option<&LeafNode<S, WIDTH>> {
         match self {
             Self::Leaf(leaf) => Some(leaf.as_ref()),
 
@@ -64,7 +70,7 @@ impl<V, const WIDTH: usize> RootNode<V, WIDTH> {
 
     /// Get mutable leaf reference if root is a leaf.
     #[inline]
-    pub fn as_leaf_mut(&mut self) -> Option<&mut LeafNode<V, WIDTH>> {
+    pub fn as_leaf_mut(&mut self) -> Option<&mut LeafNode<S, WIDTH>> {
         match self {
             Self::Leaf(leaf) => Some(leaf.as_mut()),
 
@@ -75,7 +81,7 @@ impl<V, const WIDTH: usize> RootNode<V, WIDTH> {
     /// Get internode reference if root is an internode.
     #[inline]
     #[must_use]
-    pub fn as_internode(&self) -> Option<&InternodeNode<V, WIDTH>> {
+    pub fn as_internode(&self) -> Option<&InternodeNode<S, WIDTH>> {
         match self {
             Self::Leaf(_) => None,
 
@@ -85,7 +91,7 @@ impl<V, const WIDTH: usize> RootNode<V, WIDTH> {
 
     /// Get mutable internode reference if root is an internode.
     #[inline]
-    pub fn as_internode_mut(&mut self) -> Option<&mut InternodeNode<V, WIDTH>> {
+    pub fn as_internode_mut(&mut self) -> Option<&mut InternodeNode<S, WIDTH>> {
         match self {
             Self::Leaf(_) => None,
 
@@ -94,7 +100,7 @@ impl<V, const WIDTH: usize> RootNode<V, WIDTH> {
     }
 }
 
-impl<V, const WIDTH: usize> StdFmt::Debug for RootNode<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> StdFmt::Debug for RootNode<S, WIDTH> {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         match self {
             Self::Leaf(_) => f.debug_tuple("RootNode::Leaf").field(&"...").finish(),
@@ -174,13 +180,13 @@ impl std::error::Error for InsertError {}
 /// let value = tree.get(b"hello");
 /// assert_eq!(value.map(|v| *v), Some(42));
 /// ```
-pub struct MassTree<V, const WIDTH: usize = 15, A: NodeAllocator<V, WIDTH> = ArenaAllocator<V, WIDTH>>
+pub struct MassTree<V, const WIDTH: usize = 15, A: NodeAllocator<LeafValue<V>, WIDTH> = ArenaAllocator<LeafValue<V>, WIDTH>>
 {
     /// Node allocator for leaf and internode allocation.
     allocator: A,
 
     /// Root of the tree.
-    root: RootNode<V, WIDTH>,
+    root: RootNode<LeafValue<V>, WIDTH>,
 
     /// Number of key-value pairs in the tree.
     /// Updated on insert (new key) and delete operations.
@@ -202,7 +208,7 @@ pub struct MassTree<V, const WIDTH: usize = 15, A: NodeAllocator<V, WIDTH> = Are
     _not_send_sync: PhantomData<*const ()>,
 }
 
-impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> StdFmt::Debug for MassTree<V, WIDTH, A> {
+impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> StdFmt::Debug for MassTree<V, WIDTH, A> {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("MassTree")
             .field("root", &self.root)
@@ -211,7 +217,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> StdFmt::Debug for MassTr
     }
 }
 
-impl<V, const WIDTH: usize> MassTree<V, WIDTH, ArenaAllocator<V, WIDTH>> {
+impl<V, const WIDTH: usize> MassTree<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>> {
     /// Create a new empty `MassTree` with the default arena allocator.
     ///
     /// The tree starts with a single empty leaf as root.
@@ -221,7 +227,7 @@ impl<V, const WIDTH: usize> MassTree<V, WIDTH, ArenaAllocator<V, WIDTH>> {
     }
 }
 
-impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
+impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, WIDTH, A> {
     /// Create a new empty `MassTree` with a custom allocator.
     ///
     /// The tree starts with a single empty leaf as root.
@@ -239,7 +245,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     ///
     /// The pointer remains valid for the lifetime of the tree.
     #[inline]
-    fn alloc_leaf(&mut self, leaf: Box<LeafNode<V, WIDTH>>) -> *mut LeafNode<V, WIDTH> {
+    fn alloc_leaf(&mut self, leaf: Box<LeafNode<LeafValue<V>, WIDTH>>) -> *mut LeafNode<LeafValue<V>, WIDTH> {
         self.allocator.alloc_leaf(leaf)
     }
 
@@ -247,8 +253,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     #[inline]
     fn alloc_internode(
         &mut self,
-        node: Box<InternodeNode<V, WIDTH>>,
-    ) -> *mut InternodeNode<V, WIDTH> {
+        node: Box<InternodeNode<LeafValue<V>, WIDTH>>,
+    ) -> *mut InternodeNode<LeafValue<V>, WIDTH> {
         self.allocator.alloc_internode(node)
     }
 
@@ -320,7 +326,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
 
         loop {
             // Reach the leaf for current layer
-            let leaf: &LeafNode<V, WIDTH> = self.reach_leaf_from_ptr(current_root, key);
+            let leaf: &LeafNode<LeafValue<V>, WIDTH> = self.reach_leaf_from_ptr(current_root, key);
 
             // Search in leaf
             let perm: Permuter<WIDTH> = leaf.permutation();
@@ -394,7 +400,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     }
 
     /// Reach leaf from a raw pointer (for layer descent).
-    fn reach_leaf_from_ptr(&self, root_ptr: *const u8, key: &Key<'_>) -> &LeafNode<V, WIDTH> {
+    fn reach_leaf_from_ptr(&self, root_ptr: *const u8, key: &Key<'_>) -> &LeafNode<LeafValue<V>, WIDTH> {
         // Check if it's the main tree root first
         let main_root_ptr: *const u8 = match &self.root {
             RootNode::Leaf(leaf) => StdPtr::from_ref(leaf.as_ref()).cast::<u8>(),
@@ -408,7 +414,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
 
         // It's a layer root (always a leaf in current implementation)
         //  SAFETY: Layer roots are allocated in arena and remain valid
-        unsafe { &*(root_ptr.cast::<LeafNode<V, WIDTH>>()) }
+        unsafe { &*(root_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>()) }
     }
 
     // ========================================================================
@@ -490,7 +496,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
         value: Arc<V>,
     ) -> Result<Option<Arc<V>>, InsertError> {
         // Track current layer root (null means use main tree root)
-        let mut layer_root: *mut LeafNode<V, WIDTH> = std::ptr::null_mut();
+        let mut layer_root: *mut LeafNode<LeafValue<V>, WIDTH> = std::ptr::null_mut();
 
         loop {
             let ikey: u64 = key.ikey();
@@ -515,20 +521,20 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
             let store_keylenx: u8 = key.current_len().min(8) as u8;
 
             // Get the target leaf as a raw pointer to avoid borrow issues
-            let leaf_ptr: *mut LeafNode<V, WIDTH> = if layer_root.is_null() {
+            let leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = if layer_root.is_null() {
                 self.reach_leaf_mut(key) as *mut _
             } else {
                 layer_root
             };
 
             // SAFETY: leaf_ptr is valid (from reach_leaf_mut or layer_root which points to arena)
-            let leaf: &mut LeafNode<V, WIDTH> = unsafe { &mut *leaf_ptr };
+            let leaf: &mut LeafNode<LeafValue<V>, WIDTH> = unsafe { &mut *leaf_ptr };
 
             // Search for matching ikey in the leaf
             let perm: Permuter<WIDTH> = leaf.permutation();
             let mut found_slot: Option<usize> = None;
             let mut insert_pos: usize = perm.size();
-            let mut descend_layer: Option<*mut LeafNode<V, WIDTH>> = None;
+            let mut descend_layer: Option<*mut LeafNode<LeafValue<V>, WIDTH>> = None;
 
             for i in 0..perm.size() {
                 let slot: usize = perm.get(i);
@@ -553,7 +559,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
                                 reason = "match_result < 0, so -match_result > 0"
                             )]
                             key.shift_by((-match_result) as usize);
-                            descend_layer = Some(layer_ptr.cast::<LeafNode<V, WIDTH>>());
+                            descend_layer = Some(layer_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>());
                         } else {
                             return Err(InsertError::LeafFull); // Layer pointer invalid
                         }
@@ -595,14 +601,14 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
             if let Some(conflict_slot) = found_slot {
                 // Create new layer for the conflicting keys
                 //  SAFETY: leaf_ptr is valid and we're done reading from leaf
-                let leaf_ref: &mut LeafNode<V, WIDTH> = unsafe { &mut *leaf_ptr };
+                let leaf_ref: &mut LeafNode<LeafValue<V>, WIDTH> = unsafe { &mut *leaf_ptr };
                 let (final_leaf_ptr, new_slot) =
                     self.make_new_layer(leaf_ref, conflict_slot, key, Arc::clone(&value));
 
                 // Finish insert in the new layer leaf
                 //  SAFETY: make_new_layer returns valid pointer from arena
                 unsafe {
-                    let final_leaf: &mut LeafNode<V, WIDTH> = &mut *final_leaf_ptr;
+                    let final_leaf: &mut LeafNode<LeafValue<V>, WIDTH> = &mut *final_leaf_ptr;
                     let mut perm: Permuter<WIDTH> = final_leaf.permutation();
                     let _ = perm.insert_from_back(new_slot);
                     final_leaf.set_permutation(perm);
@@ -669,11 +675,11 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
                 (LeafNode::new(), ikey)
             } else if pre_insert_split_pos == 0 {
                 // Left-sequential: move ALL entries to right
-                let split_result: LeafSplitResult<V, WIDTH> = leaf.split_all_to_right();
+                let split_result: LeafSplitResult<LeafValue<V>, WIDTH> = leaf.split_all_to_right();
                 (split_result.new_leaf, split_result.split_ikey)
             } else {
                 // Normal split
-                let split_result: LeafSplitResult<V, WIDTH> = leaf.split_into(pre_insert_split_pos);
+                let split_result: LeafSplitResult<LeafValue<V>, WIDTH> = leaf.split_into(pre_insert_split_pos);
                 (split_result.new_leaf, split_result.split_ikey)
             };
 
@@ -688,7 +694,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     }
 }
 
-impl<V, const WIDTH: usize> Default for MassTree<V, WIDTH, ArenaAllocator<V, WIDTH>> {
+impl<V, const WIDTH: usize> Default for MassTree<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>> {
     fn default() -> Self {
         Self::new()
     }
@@ -790,7 +796,7 @@ mod tests {
         let tree: MassTree<u64> = MassTree::new();
         let key: Key<'_> = Key::new(b"test");
 
-        let leaf: &LeafNode<u64> = tree.reach_leaf(&key);
+        let leaf: &LeafNode<LeafValue<u64>> = tree.reach_leaf(&key);
 
         // Should return the root leaf
         assert!(leaf.is_empty());

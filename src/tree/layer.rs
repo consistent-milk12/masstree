@@ -2,12 +2,13 @@ use std::sync::Arc;
 use std::{cmp::Ordering, ptr as StdPtr};
 
 use crate::alloc::NodeAllocator;
+use crate::leaf::{LeafNode, LeafValue};
 use crate::permuter::Permuter;
-use crate::{key::Key, leaf::LeafNode};
+use crate::key::Key;
 
 use super::MassTree;
 
-impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
+impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, WIDTH, A> {
     /// Create a new layer when two keys share the same ikey.
     ///
     /// This is called when inserting a key that has the same 8-byte prefix
@@ -27,11 +28,11 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     /// - `insert_slot` is the slot in that layer for the new key
     pub(super) fn make_new_layer(
         &mut self,
-        leaf: &mut LeafNode<V, WIDTH>,
+        leaf: &mut LeafNode<LeafValue<V>, WIDTH>,
         slot: usize,
         new_key: &mut Key<'_>,
         new_value: Arc<V>,
-    ) -> (*mut LeafNode<V, WIDTH>, usize) {
+    ) -> (*mut LeafNode<LeafValue<V>, WIDTH>, usize) {
         // 1. Extract existing key's suffix and create a Key from it
         // Note: from_suffix creates a Key where the suffix bytes ARE the first ikey
         let existing_suffix: &[u8] = leaf.ksuf(slot).unwrap_or(&[]);
@@ -53,16 +54,16 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
         let mut cmp: Ordering = existing_key.ikey().cmp(&new_key.ikey());
 
         // 4. Create twig chain while ikeys match
-        let mut twig_head: Option<*mut LeafNode<V, WIDTH>> = None;
-        let mut twig_tail: *mut LeafNode<V, WIDTH> = StdPtr::null_mut();
+        let mut twig_head: Option<*mut LeafNode<LeafValue<V>, WIDTH>> = None;
+        let mut twig_tail: *mut LeafNode<LeafValue<V>, WIDTH> = StdPtr::null_mut();
 
         while cmp.eq(&Ordering::Equal) && existing_key.has_suffix() && new_key.has_suffix() {
             // Create intermediate layer node (single entry)
-            let mut twig: Box<LeafNode<V, WIDTH>> = LeafNode::<V, WIDTH>::new_layer_root();
+            let mut twig: Box<LeafNode<LeafValue<V>, WIDTH>> = LeafNode::<LeafValue<V>, WIDTH>::new_layer_root();
             twig.assign_initialize_for_layer(0, existing_key.ikey());
             twig.set_permutation(Permuter::make_sorted(1));
 
-            let twig_ptr: *mut LeafNode<V, WIDTH> = self.alloc_leaf(twig);
+            let twig_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = self.alloc_leaf(twig);
 
             // Link to previous twig
             if twig_head.is_some() {
@@ -84,7 +85,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
         }
 
         // 5. Create final leaf with both keys (they now have different ikeys)
-        let mut final_leaf = LeafNode::<V, WIDTH>::new_layer_root();
+        let mut final_leaf = LeafNode::<LeafValue<V>, WIDTH>::new_layer_root();
 
         // Determine ordering: existing vs new
         let (first_key, first_val, second_key, second_val, new_slot) = match cmp {
@@ -113,7 +114,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
         perm.remove_to_back(new_slot); // Remove new slot from "visible" permutation
         final_leaf.set_permutation(perm);
 
-        let final_ptr: *mut LeafNode<V, WIDTH> = self.alloc_leaf(final_leaf);
+        let final_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = self.alloc_leaf(final_leaf);
 
         // 6. Link twig chain to final leaf
         if twig_tail.is_null() {
@@ -131,7 +132,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
         // - Either the while loop ran at least once (setting twig_head), OR
         // - The loop didn't run and we set twig_head = Some(final_ptr) above
         #[expect(clippy::option_if_let_else, reason = "match is more readable for invariant")]
-        let layer_root: *mut LeafNode<V, WIDTH> = match twig_head {
+        let layer_root: *mut LeafNode<LeafValue<V>, WIDTH> = match twig_head {
             Some(ptr) => ptr,
             None => unreachable!("twig_head is always set before this point"),
         };

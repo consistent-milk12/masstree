@@ -11,9 +11,11 @@ use masstree::ksearch::{
     lower_bound_by, lower_bound_leaf, lower_bound_leaf_ikey, lower_bound_linear_by, upper_bound_by,
     upper_bound_internode, upper_bound_internode_direct, upper_bound_linear_by,
 };
-use masstree::leaf::LeafNode;
+use masstree::leaf::{LeafNode, LeafValue};
 use masstree::permuter::Permuter;
-use std::sync::Arc;
+
+/// Type alias for the slot type used in benchmarks.
+type Slot = LeafValue<u64>;
 
 fn main() {
     divan::main();
@@ -23,20 +25,20 @@ fn main() {
 // Setup Helpers
 // =============================================================================
 
-fn setup_leaf_with_keys(keys: &[u64]) -> Box<LeafNode<u64, 15>> {
-    let mut leaf = LeafNode::<u64, 15>::new();
+fn setup_leaf_with_keys(keys: &[u64]) -> Box<LeafNode<Slot, 15>> {
+    let mut leaf = LeafNode::<Slot, 15>::new();
     let mut perm = leaf.permutation();
 
     for (i, &ikey) in keys.iter().enumerate() {
         let slot = perm.insert_from_back(i);
-        leaf.assign_value(slot, ikey, 8, *Arc::new(i as u64));
+        leaf.assign_value(slot, ikey, 8, i as u64);
     }
     leaf.set_permutation(perm);
     leaf
 }
 
-fn setup_internode_with_keys(keys: &[u64]) -> Box<InternodeNode<u64, 15>> {
-    let mut node = InternodeNode::<u64, 15>::new(0);
+fn setup_internode_with_keys(keys: &[u64]) -> Box<InternodeNode<Slot, 15>> {
+    let mut node = InternodeNode::<Slot, 15>::new(0);
 
     for (i, &ikey) in keys.iter().enumerate() {
         node.set_ikey(i, ikey);

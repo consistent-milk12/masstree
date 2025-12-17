@@ -3,8 +3,11 @@
 //! Run with: `cargo bench --bench leaf`
 
 use divan::{Bencher, black_box};
-use masstree::leaf::LeafNode;
+use masstree::leaf::{LeafNode, LeafValue};
 use masstree::permuter::Permuter;
+
+/// Type alias for the slot type used in benchmarks.
+type Slot = LeafValue<u64>;
 
 fn main() {
     divan::main();
@@ -16,16 +19,16 @@ fn main() {
 
 #[divan::bench_group]
 mod construction {
-    use super::LeafNode;
+    use super::{LeafNode, Slot};
 
     #[divan::bench]
-    fn new_leaf() -> Box<LeafNode<u64, 15>> {
+    fn new_leaf() -> Box<LeafNode<Slot, 15>> {
         LeafNode::new()
     }
 
     #[divan::bench]
-    fn default_leaf() -> Box<LeafNode<u64, 15>> {
-        Box::<LeafNode<u64, 15>>::default()
+    fn default_leaf() -> Box<LeafNode<Slot, 15>> {
+        Box::<LeafNode<Slot, 15>>::default()
     }
 }
 
@@ -35,10 +38,10 @@ mod construction {
 
 #[divan::bench_group]
 mod accessors {
-    use super::{Bencher, LeafNode, black_box};
+    use super::{Bencher, LeafNode, Slot, black_box};
 
-    fn setup_leaf_with_entries(n: usize) -> Box<LeafNode<u64, 15>> {
-        let mut leaf = LeafNode::<u64, 15>::new();
+    fn setup_leaf_with_entries(n: usize) -> Box<LeafNode<Slot, 15>> {
+        let mut leaf = LeafNode::<Slot, 15>::new();
         let mut perm = leaf.permutation();
 
         for i in 0..n {
@@ -93,14 +96,14 @@ mod accessors {
 
 #[divan::bench_group]
 mod value_ops {
-    use super::{Bencher, LeafNode, black_box};
+    use super::{Bencher, LeafNode, Slot, black_box};
     use std::sync::Arc;
 
     #[divan::bench]
     fn assign_value(bencher: Bencher) {
         bencher
             .with_inputs(|| {
-                let mut leaf = LeafNode::<u64, 15>::new();
+                let mut leaf = LeafNode::<Slot, 15>::new();
                 let mut perm = leaf.permutation();
                 let slot = perm.insert_from_back(0);
                 leaf.set_permutation(perm);
@@ -116,7 +119,7 @@ mod value_ops {
     fn swap_value(bencher: Bencher) {
         bencher
             .with_inputs(|| {
-                let mut leaf = LeafNode::<u64, 15>::new();
+                let mut leaf = LeafNode::<Slot, 15>::new();
                 let mut perm = leaf.permutation();
                 let slot = perm.insert_from_back(0);
                 leaf.assign_value(slot, 0x1234_5678_9ABC_DEF0, 8, 1u64);
@@ -137,20 +140,20 @@ mod value_ops {
 
 #[divan::bench_group]
 mod permutation {
-    use super::{Bencher, LeafNode, Permuter};
+    use super::{Bencher, LeafNode, Permuter, Slot};
 
     #[divan::bench]
     fn set_permutation(bencher: Bencher) {
         bencher
             .with_inputs(|| {
-                let leaf = LeafNode::<u64, 15>::new();
+                let leaf = LeafNode::<Slot, 15>::new();
                 let mut perm = Permuter::<15>::empty();
                 for i in 0..10 {
                     let _ = perm.insert_from_back(i);
                 }
                 (leaf, perm)
             })
-            .bench_local_values(|(mut leaf, perm): (Box<LeafNode<u64, 15>>, Permuter<15>)| {
+            .bench_local_values(|(mut leaf, perm): (Box<LeafNode<Slot, 15>>, Permuter<15>)| {
                 leaf.set_permutation(perm);
                 leaf
             });
@@ -163,23 +166,23 @@ mod permutation {
 
 #[divan::bench_group]
 mod navigation {
-    use super::{Bencher, LeafNode, black_box};
+    use super::{Bencher, LeafNode, Slot, black_box};
 
     #[divan::bench]
     fn next_raw(bencher: Bencher) {
-        let leaf = LeafNode::<u64, 15>::new();
+        let leaf = LeafNode::<Slot, 15>::new();
         bencher.bench_local(|| black_box(&leaf).next_raw());
     }
 
     #[divan::bench]
     fn prev(bencher: Bencher) {
-        let leaf = LeafNode::<u64, 15>::new();
+        let leaf = LeafNode::<Slot, 15>::new();
         bencher.bench_local(|| black_box(&leaf).prev());
     }
 
     #[divan::bench]
     fn parent(bencher: Bencher) {
-        let leaf = LeafNode::<u64, 15>::new();
+        let leaf = LeafNode::<Slot, 15>::new();
         bencher.bench_local(|| black_box(&leaf).parent());
     }
 }
@@ -190,11 +193,11 @@ mod navigation {
 
 #[divan::bench_group]
 mod split {
-    use super::{Bencher, LeafNode, black_box};
+    use super::{Bencher, LeafNode, Slot, black_box};
     use masstree::leaf::SplitUtils;
 
-    fn setup_full_leaf() -> Box<LeafNode<u64, 15>> {
-        let mut leaf = LeafNode::<u64, 15>::new();
+    fn setup_full_leaf() -> Box<LeafNode<Slot, 15>> {
+        let mut leaf = LeafNode::<Slot, 15>::new();
         let mut perm = leaf.permutation();
 
         for i in 0..15 {
@@ -267,18 +270,18 @@ mod split {
 
 #[divan::bench_group]
 mod slot0_rule {
-    use super::{Bencher, LeafNode, black_box};
+    use super::{Bencher, LeafNode, Slot, black_box};
 
     #[divan::bench]
     fn can_reuse_slot0_no_prev(bencher: Bencher) {
-        let leaf = LeafNode::<u64, 15>::new();
+        let leaf = LeafNode::<Slot, 15>::new();
         let ikey = 0x1234_5678_9ABC_DEF0u64;
         bencher.bench_local(|| black_box(&leaf).can_reuse_slot0(black_box(ikey)));
     }
 
     #[divan::bench]
     fn can_reuse_slot0_with_prev(bencher: Bencher) {
-        let mut leaf = LeafNode::<u64, 15>::new();
+        let mut leaf = LeafNode::<Slot, 15>::new();
         // Simulate having a predecessor (non-null prev)
         leaf.set_prev(std::ptr::NonNull::dangling().as_ptr());
 

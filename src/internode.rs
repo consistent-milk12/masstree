@@ -6,7 +6,9 @@
 //! keys and child pointers, no values. Keys are always in sorted order
 //! (no permutation array needed).
 
+use crate::leaf::LeafValue;
 use crate::nodeversion::NodeVersion;
+use crate::slot::ValueSlot;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
@@ -23,7 +25,7 @@ use std::ptr as StdPtr;
 /// in sorted physical order (no permutation needed).
 ///
 /// # Type Parameters
-/// * `V` - The value type stored in leaf nodes (phantom, for type consistency)
+/// * `S` - The slot type implementing [`ValueSlot`] (phantom, for type consistency)
 /// * `WIDTH` - Number of key slots (default: 15, max: 15)
 ///
 /// # Invariants
@@ -37,7 +39,7 @@ use std::ptr as StdPtr;
 /// Uses `#[repr(C, align(64))]` for cache-line alignment.
 /// For WIDTH=15, total size is ~320 bytes (5 cache lines).
 #[repr(C, align(64))]
-pub struct InternodeNode<V, const WIDTH: usize = 15> {
+pub struct InternodeNode<S: ValueSlot, const WIDTH: usize = 15> {
     /// Version for optimistic concurrency control.
     version: NodeVersion,
 
@@ -66,11 +68,11 @@ pub struct InternodeNode<V, const WIDTH: usize = 15> {
     /// Cast to `*mut InternodeNode` at usage sites.
     parent: *mut u8,
 
-    /// Phantom data to hold V type parameter.
-    _marker: PhantomData<V>,
+    /// Phantom data to hold S type parameter for tree type consistency.
+    _marker: PhantomData<S>,
 }
 
-impl<V, const WIDTH: usize> StdFmt::Debug for InternodeNode<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> StdFmt::Debug for InternodeNode<S, WIDTH> {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("InternodeNode")
             .field("nkeys", &self.nkeys)
@@ -81,7 +83,7 @@ impl<V, const WIDTH: usize> StdFmt::Debug for InternodeNode<V, WIDTH> {
 }
 
 // Compile-time assertion: WIDTH must be 1..=15
-impl<V, const WIDTH: usize> InternodeNode<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     const WIDTH_CHECK: () = {
         assert!(WIDTH > 0, "WIDTH must be at least 1");
 
@@ -89,7 +91,7 @@ impl<V, const WIDTH: usize> InternodeNode<V, WIDTH> {
     };
 }
 
-impl<V, const WIDTH: usize> InternodeNode<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// Create a new internode at the given height.
     ///
     /// # Arguments
@@ -581,7 +583,7 @@ impl<V, const WIDTH: usize> InternodeNode<V, WIDTH> {
     pub fn debug_assert_invariants(&self) {}
 }
 
-impl<V, const WIDTH: usize> Default for InternodeNode<V, WIDTH> {
+impl<S: ValueSlot, const WIDTH: usize> Default for InternodeNode<S, WIDTH> {
     fn default() -> Self {
         // Trigger compile-time WIDTH check
         let _: () = Self::WIDTH_CHECK;
@@ -622,10 +624,10 @@ pub type InternodeNodeCompact<V> = InternodeNode<V, 7>;
 //  Size Assertions
 // ============================================================================
 
-/// Compile-time size check for `InternodeNode`<u64, 15>.
+/// Compile-time size check for `InternodeNode<LeafValue<u64>, 15>`.
 const _: () = {
-    const SIZE: usize = StdMem::size_of::<InternodeNode<u64, 15>>();
-    const ALIGN: usize = StdMem::align_of::<InternodeNode<u64, 15>>();
+    const SIZE: usize = StdMem::size_of::<InternodeNode<LeafValue<u64>, 15>>();
+    const ALIGN: usize = StdMem::align_of::<InternodeNode<LeafValue<u64>, 15>>();
 
     // Should fit in 5 cache lines (320 bytes)
     assert!(SIZE <= 320, "InternodeNode exceeds 5 cache lines");
@@ -646,7 +648,7 @@ mod tests {
 
     #[test]
     fn test_new_internode() {
-        let node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
+        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
 
         assert!(!node.version().is_leaf());
         assert!(!node.version().is_root());
@@ -660,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_new_root() {
-        let node: Box<InternodeNode<u64, 15>> = InternodeNode::new_root(1);
+        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new_root(1);
 
         assert!(!node.version().is_leaf());
         assert!(node.version().is_root());
@@ -670,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_key_accessors() {
-        let mut node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
+        let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
 
         node.set_ikey(0, 0x1000_0000_0000_0000);
         node.set_ikey(1, 0x2000_0000_0000_0000);
@@ -685,7 +687,7 @@ mod tests {
 
     #[test]
     fn test_child_accessors() {
-        let mut node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
+        let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
 
         let fake_child0: *mut u8 = std::ptr::without_provenance_mut(0x1000);
         let fake_child1: *mut u8 = std::ptr::without_provenance_mut(0x2000);
@@ -702,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_assign() {
-        let mut node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
+        let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
 
         let left_child: *mut u8 = std::ptr::without_provenance_mut(0x1000);
         let right_child: *mut u8 = std::ptr::without_provenance_mut(0x2000);
@@ -722,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_inc_nkeys() {
-        let mut node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
+        let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
 
         assert_eq!(node.nkeys(), 0);
 
@@ -735,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_is_full() {
-        let mut node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
+        let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
 
         assert!(!node.is_full());
 
@@ -745,10 +747,10 @@ mod tests {
 
     #[test]
     fn test_parent_accessors() {
-        let mut node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
-        let mut parent: Box<InternodeNode<u64, 15>> = InternodeNode::new(1);
+        let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
+        let mut parent: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(1);
 
-        let parent_ptr: *mut InternodeNode<u64> = parent.as_mut() as *mut InternodeNode<u64, 15>;
+        let parent_ptr: *mut InternodeNode<LeafValue<u64>> = parent.as_mut() as *mut InternodeNode<LeafValue<u64>, 15>;
 
         // set_parent takes *mut u8, so cast the pointer
         node.set_parent(parent_ptr.cast::<u8>());
@@ -757,7 +759,7 @@ mod tests {
 
     #[test]
     fn test_compare_key() {
-        let mut node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
+        let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
 
         node.set_ikey(0, 0x5000_0000_0000_0000);
         node.set_nkeys(1);
@@ -772,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_compact_internode() {
-        let node: Box<InternodeNodeCompact<u64>> = InternodeNode::new(0);
+        let node: Box<InternodeNodeCompact<LeafValue<u64>>> = InternodeNode::new(0);
 
         assert_eq!(node.size(), 0);
         assert!(!node.is_full());
@@ -780,7 +782,7 @@ mod tests {
 
     #[test]
     fn test_invariants_valid() {
-        let mut node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
+        let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
 
         // Set up correctly sorted keys
         node.set_ikey(0, 0x1000_0000_0000_0000);
@@ -796,7 +798,7 @@ mod tests {
     #[should_panic(expected = "keys not in ascending order")]
     #[cfg(debug_assertions)]
     fn test_invariant_unsorted_keys() {
-        let mut node: Box<InternodeNode<u64, 15>> = InternodeNode::new(0);
+        let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
 
         // Set up unsorted keys
         node.set_ikey(0, 0x3000_0000_0000_0000);

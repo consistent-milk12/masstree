@@ -7,7 +7,7 @@ use crate::alloc::NodeAllocator;
 use crate::internode::InternodeNode;
 use crate::key::Key;
 use crate::ksearch::upper_bound_internode_direct;
-use crate::leaf::LeafNode;
+use crate::leaf::{LeafNode, LeafValue};
 
 use super::{MassTree, RootNode};
 
@@ -15,9 +15,9 @@ use super::{MassTree, RootNode};
 ///
 /// Free function to avoid `self_only_used_in_recursion` lint.
 fn reach_leaf_from_internode<V, const WIDTH: usize>(
-    mut internode: &InternodeNode<V, WIDTH>,
+    mut internode: &InternodeNode<LeafValue<V>, WIDTH>,
     ikey: u64,
-) -> &LeafNode<V, WIDTH> {
+) -> &LeafNode<LeafValue<V>, WIDTH> {
     loop {
         let child_idx: usize = upper_bound_internode_direct(ikey, internode);
         let child_ptr: *mut u8 = internode.child(child_idx);
@@ -25,22 +25,22 @@ fn reach_leaf_from_internode<V, const WIDTH: usize>(
         if internode.children_are_leaves() {
             // Child is a leaf
             // SAFETY: children_are_leaves() guarantees child is LeafNode
-            return unsafe { &*(child_ptr as *const LeafNode<V, WIDTH>) };
+            return unsafe { &*(child_ptr as *const LeafNode<LeafValue<V>, WIDTH>) };
         }
 
         // Child is another internode, continue iteration
         // SAFETY: !children_are_leaves() guarantees child is InternodeNode
-        internode = unsafe { &*(child_ptr as *const InternodeNode<V, WIDTH>) };
+        internode = unsafe { &*(child_ptr as *const InternodeNode<LeafValue<V>, WIDTH>) };
     }
 }
 
-impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
+impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, WIDTH, A> {
     /// Find the leftmost leaf node in the tree.
     ///
     /// Traverses down the leftmost path from the given internode to find
     /// the first (leftmost) leaf in the tree.
     #[expect(dead_code, reason = "Will be used for iteration/range queries")]
-    pub(super) fn find_leftmost_leaf(root: &InternodeNode<V, WIDTH>) -> *const LeafNode<V, WIDTH> {
+    pub(super) fn find_leftmost_leaf(root: &InternodeNode<LeafValue<V>, WIDTH>) -> *const LeafNode<LeafValue<V>, WIDTH> {
         let mut node: *const u8 = root.child(0);
         let mut height: u32 = root.height();
 
@@ -48,15 +48,15 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
         while height > 0 {
             // SAFETY: Child pointers are valid from arena allocation.
             // height > 0 means children are internodes.
-            let internode: &InternodeNode<V, WIDTH> =
-                unsafe { &*node.cast::<InternodeNode<V, WIDTH>>() };
+            let internode: &InternodeNode<LeafValue<V>, WIDTH> =
+                unsafe { &*node.cast::<InternodeNode<LeafValue<V>, WIDTH>>() };
 
             node = internode.child(0);
             height -= 1;
         }
 
         // height == 0 means node points to a leaf
-        node.cast::<LeafNode<V, WIDTH>>()
+        node.cast::<LeafNode<LeafValue<V>, WIDTH>>()
     }
 
     /// Reach the leaf node that should contain the given key.
@@ -72,7 +72,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     ///
     /// Reference to the leaf node that contains or should contain the key.
     #[inline]
-    pub(super) fn reach_leaf(&self, key: &Key<'_>) -> &LeafNode<V, WIDTH> {
+    pub(super) fn reach_leaf(&self, key: &Key<'_>) -> &LeafNode<LeafValue<V>, WIDTH> {
         match &self.root {
             RootNode::Leaf(leaf) => leaf.as_ref(),
 
@@ -85,7 +85,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
 
     /// Reach the leaf node that should contain the given key (mutable).
     #[inline]
-    pub(super) fn reach_leaf_mut(&mut self, key: &Key<'_>) -> &mut LeafNode<V, WIDTH> {
+    pub(super) fn reach_leaf_mut(&mut self, key: &Key<'_>) -> &mut LeafNode<LeafValue<V>, WIDTH> {
         // Check if root is a leaf first (immutable borrow to check)
         let is_leaf: bool = self.root.is_leaf();
 
@@ -114,7 +114,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
 
         if children_are_leaves {
             // SAFETY: children_are_leaves() guarantees child is LeafNode
-            return unsafe { &mut *start_ptr.cast::<LeafNode<V, WIDTH>>() };
+            return unsafe { &mut *start_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>() };
         }
 
         // Iterative traversal for deeper trees
@@ -128,17 +128,17 @@ impl<V, const WIDTH: usize, A: NodeAllocator<V, WIDTH>> MassTree<V, WIDTH, A> {
     ///
     /// The returned reference is valid for as long as the tree's arenas are not modified.
     /// This is guaranteed by the single-threaded Phase 1 design.
-    fn reach_leaf_mut_iterative_static(mut current: *mut u8, ikey: u64) -> *mut LeafNode<V, WIDTH> {
+    fn reach_leaf_mut_iterative_static(mut current: *mut u8, ikey: u64) -> *mut LeafNode<LeafValue<V>, WIDTH> {
         loop {
             // SAFETY: current is a valid internode pointer from traversal
-            let internode: &InternodeNode<V, WIDTH> =
-                unsafe { &*(current as *const InternodeNode<V, WIDTH>) };
+            let internode: &InternodeNode<LeafValue<V>, WIDTH> =
+                unsafe { &*(current as *const InternodeNode<LeafValue<V>, WIDTH>) };
             let child_idx: usize = upper_bound_internode_direct(ikey, internode);
             let child_ptr: *mut u8 = internode.child(child_idx);
 
             if internode.children_are_leaves() {
                 // SAFETY: children_are_leaves() guarantees child is LeafNode
-                return child_ptr.cast::<LeafNode<V, WIDTH>>();
+                return child_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>();
             }
 
             current = child_ptr;
