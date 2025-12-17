@@ -224,7 +224,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     }
 
     /// Return the number of slots in use.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn size(&self) -> usize {
         (self.value & SIZE_MASK) as usize
@@ -234,7 +234,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `i >= WIDTH`.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn get(&self, i: usize) -> usize {
         debug_assert!(i < WIDTH, "get: index out of bounds");
@@ -245,7 +245,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// Return the slot at the back (position WIDTH - 1)
     ///
     /// This is the next slot to be allocated on `insert_from_back`.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn back(&self) -> usize {
         self.get(WIDTH - 1)

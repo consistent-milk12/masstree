@@ -316,6 +316,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     }
 
     /// Internal get implementation with layer descent support.
+    #[inline(always)]
     fn get_internal(&self, key: &mut Key<'_>) -> Option<Arc<V>> {
         // Start at tree root
         let mut current_root: *const u8 = match &self.root {
@@ -400,6 +401,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     }
 
     /// Reach leaf from a raw pointer (for layer descent).
+    #[inline(always)]
     fn reach_leaf_from_ptr(&self, root_ptr: *const u8, key: &Key<'_>) -> &LeafNode<LeafValue<V>, WIDTH> {
         // Check if it's the main tree root first
         let main_root_ptr: *const u8 = match &self.root {

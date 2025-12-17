@@ -375,7 +375,7 @@ pub fn upper_bound_internode<S: slot::ValueSlot, const WIDTH: usize>(
 /// Upper bound search in an internode (direct version).
 ///
 /// Optimized version that doesn't create a permutation.
-#[inline]
+#[inline(always)]
 pub fn upper_bound_internode_direct<S: slot::ValueSlot, const WIDTH: usize>(
     search_ikey: u64,
     node: &InternodeNode<S, WIDTH>,

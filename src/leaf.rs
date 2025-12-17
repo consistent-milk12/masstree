@@ -347,7 +347,7 @@ impl<V> LeafValue<V> {
     }
 
     /// Try to clone the Arc value, returning None if not a value variant.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub fn try_clone_arc(&self) -> Option<Arc<V>> {
         match self {
@@ -358,7 +358,7 @@ impl<V> LeafValue<V> {
     }
 
     /// Try to get the layer pointer, returning None if not a Layer variant.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn try_as_layer(&self) -> Option<*mut u8> {
         match self {
@@ -715,7 +715,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     #[expect(
         clippy::indexing_slicing,
@@ -731,7 +731,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     #[expect(
         clippy::indexing_slicing,
@@ -746,7 +746,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// Get the ikey bound (ikey at slot 0, used for B-link tree routing).
     ///
     /// This is the smallest key that could be in this leaf (after splits).
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn ikey_bound(&self) -> u64 {
         self.ikey0[0]
@@ -766,21 +766,21 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub fn has_ksuf(&self, slot: usize) -> bool {
         self.keylenx(slot) == KSUF_KEYLENX
     }
 
     /// Check if keylenx indicates a layer pointer (static helper).
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn keylenx_is_layer(keylenx: u8) -> bool {
         keylenx >= LAYER_KEYLENX
     }
 
     /// Check if keylenx indicates suffix storage (static helper).
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn keylenx_has_ksuf(keylenx: u8) -> bool {
         keylenx == KSUF_KEYLENX
@@ -994,6 +994,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Panics
     ///
     /// Panics in debug mode if `slot >= WIDTH`.
+    #[inline(always)]
     #[must_use]
     #[expect(
         clippy::cast_possible_wrap,
@@ -1067,7 +1068,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot from Permuter; valid by construction"
@@ -1082,7 +1083,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot from Permuter; valid by construction"
@@ -1098,27 +1099,27 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     // ============================================================================
 
     /// Get the current permutation.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn permutation(&self) -> Permuter<WIDTH> {
         self.permutation
     }
 
     /// Set the permutation.
-    #[inline]
+    #[inline(always)]
     pub const fn set_permutation(&mut self, perm: Permuter<WIDTH>) {
         self.permutation = perm;
     }
 
     /// Get the number of keys in this leaf.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn size(&self) -> usize {
         self.permutation.size()
     }
 
     /// Check if the leaf is empty.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.size() == 0
@@ -1396,6 +1397,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Panics
     ///
     /// Panics in debug mode if slot >= WIDTH.
+    #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn swap_output(&mut self, slot: usize, new_output: S::Output) -> Option<S::Output> {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
@@ -1683,9 +1685,28 @@ impl<V, const WIDTH: usize> LeafNode<LeafValue<V>, WIDTH> {
 
     /// Swap a value at a slot, returning the old Arc.
     ///
-    /// Convenience wrapper around `swap_output` for Arc mode.
+    /// This is a specialized hot-path method that avoids trait dispatch
+    /// by working directly with `LeafValue<V>`.
+    ///
+    /// # Panics
+    /// Debug-panics if slot is out of bounds or contains a layer pointer.
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn swap_value(&mut self, slot: usize, new_value: Arc<V>) -> Option<Arc<V>> {
-        self.swap_output(slot, new_value)
+        debug_assert!(slot < WIDTH, "swap_value: slot {slot} >= WIDTH {WIDTH}");
+        debug_assert!(
+            !matches!(self.leaf_values[slot], LeafValue::Layer(_)),
+            "swap_value called on Layer slot; layer pointer would be lost"
+        );
+
+        // Direct replacement without going through trait dispatch
+        let old: LeafValue<V> =
+            std::mem::replace(&mut self.leaf_values[slot], LeafValue::Value(new_value));
+
+        match old {
+            LeafValue::Value(arc) => Some(arc),
+            _ => None,
+        }
     }
 }
 
@@ -1713,9 +1734,28 @@ impl<V: Copy, const WIDTH: usize> LeafNode<LeafValueIndex<V>, WIDTH> {
 
     /// Swap a value at a slot, returning the old value.
     ///
-    /// Convenience wrapper around `swap_output` for inline mode.
+    /// This is a specialized hot-path method that avoids trait dispatch
+    /// by working directly with `LeafValueIndex<V>`.
+    ///
+    /// # Panics
+    /// Debug-panics if slot is out of bounds or contains a layer pointer.
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn swap_inline(&mut self, slot: usize, new_value: V) -> Option<V> {
-        self.swap_output(slot, new_value)
+        debug_assert!(slot < WIDTH, "swap_inline: slot {slot} >= WIDTH {WIDTH}");
+        debug_assert!(
+            !matches!(self.leaf_values[slot], LeafValueIndex::Layer(_)),
+            "swap_inline called on Layer slot; layer pointer would be lost"
+        );
+
+        // Direct replacement without going through trait dispatch
+        let old: LeafValueIndex<V> =
+            std::mem::replace(&mut self.leaf_values[slot], LeafValueIndex::Value(new_value));
+
+        match old {
+            LeafValueIndex::Value(v) => Some(v),
+            _ => None,
+        }
     }
 }
 

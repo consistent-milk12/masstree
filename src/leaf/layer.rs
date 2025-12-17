@@ -67,6 +67,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         clippy::indexing_slicing,
         reason = "slot from permuter, valid by construction"
     )]
+    #[inline(always)]
     pub fn set_layer(&mut self, slot: usize, layer: *mut u8) {
         self.leaf_values[slot] = S::layer(layer);
         self.keylenx[slot] = LAYER_KEYLENX;
@@ -76,6 +77,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Returns
     /// Some(pointer) if slot contains a layer, None otherwise.
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "slot from permuter, valid by construction"

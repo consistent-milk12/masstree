@@ -161,32 +161,32 @@ impl<V> ValueSlot for LeafValue<V> {
     type Value = V;
     type Output = Arc<V>;
 
-    #[inline]
+    #[inline(always)]
     fn into_output(value: V) -> Arc<V> {
         Arc::new(value)
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_output(output: Arc<V>) -> Self {
         Self::Value(output)
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_value(&self) -> bool {
         matches!(self, Self::Value(_))
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_layer(&self) -> bool {
         matches!(self, Self::Layer(_))
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_get(&self) -> Option<Arc<V>> {
         match self {
             Self::Value(arc) => Some(Arc::clone(arc)),
@@ -195,7 +195,7 @@ impl<V> ValueSlot for LeafValue<V> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_layer(&self) -> Option<*mut u8> {
         match self {
             Self::Layer(ptr) => Some(*ptr),
@@ -204,16 +204,17 @@ impl<V> ValueSlot for LeafValue<V> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn layer(ptr: *mut u8) -> Self {
         Self::Layer(ptr)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_layer(&mut self, ptr: *mut u8) {
         *self = Self::Layer(ptr);
     }
 
+    #[inline(always)]
     fn swap_output(&mut self, new_output: Arc<V>) -> Option<Arc<V>> {
         debug_assert!(
             !self.is_layer(),
@@ -238,32 +239,32 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
     type Value = V;
     type Output = V; // Returns V directly, no Arc!
 
-    #[inline]
+    #[inline(always)]
     fn into_output(value: V) -> V {
         value // Identity - no allocation!
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_output(output: V) -> Self {
         Self::Value(output)
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_value(&self) -> bool {
         matches!(self, Self::Value(_))
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_layer(&self) -> bool {
         matches!(self, Self::Layer(_))
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_get(&self) -> Option<V> {
         match self {
             Self::Value(v) => Some(*v),
@@ -272,7 +273,7 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn try_layer(&self) -> Option<*mut u8> {
         match self {
             Self::Layer(ptr) => Some(*ptr),
@@ -281,16 +282,17 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn layer(ptr: *mut u8) -> Self {
         Self::Layer(ptr)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_layer(&mut self, ptr: *mut u8) {
         *self = Self::Layer(ptr);
     }
 
+    #[inline(always)]
     fn swap_output(&mut self, new_output: V) -> Option<V> {
         debug_assert!(
             !self.is_layer(),
