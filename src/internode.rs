@@ -602,13 +602,13 @@ impl<S: ValueSlot, const WIDTH: usize> Default for InternodeNode<S, WIDTH> {
 }
 
 // NOTE: Send/Sync impls are intentionally omitted for now.
-// The current implementation is single-threaded. When concurrent access is
-// properly implemented with atomic operations on NodeVersion and proper
-// memory ordering, appropriate Send/Sync impls can be added with correct
-// SAFETY documentation.
+// Tree operations are single-threaded (Phase 3.2-3.3 pending). NodeVersion
+// has CAS-based locking but tree ops don't use it yet. When optimistic get
+// and locked insert are implemented, appropriate Send/Sync impls can be
+// added with correct SAFETY documentation.
 //
 // Until then, raw pointers make InternodeNode !Send + !Sync by default,
-// which is the correct conservative choice for single-threaded code.
+// which is the correct conservative choice.
 
 // ============================================================================
 //  Type Aliases

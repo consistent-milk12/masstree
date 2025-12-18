@@ -7,16 +7,17 @@
 //! - B+tree at each trie node for the current 8-byte slice
 //! - Cache-friendly: 8-byte key slices fit in registers
 //!
-//! ## Current Status: Phase 2 (Single-Threaded with Trie Layering)
+//! ## Current Status: Phase 3 In Progress
 //!
-//! This implementation is **single-threaded only**. The concurrent features
-//! (optimistic reads, CAS-based locking, epoch-based reclamation) are planned
-//! for Phase 3 but not yet implemented.
+//! - **Phase 1-2 complete**: Single-threaded core with trie layering
+//! - **Phase 3.1 complete**: `NodeVersion` has CAS-based locking with backoff
+//! - **Phase 3.2-3.3 pending**: Optimistic get and locked insert (specs ready)
 //!
 //! **Current constraints:**
 //! - Keys can be any length from 0-256 bytes
 //! - Full trie layering for keys sharing common prefixes
-//! - `MassTree` is `!Send` and `!Sync` to prevent accidental concurrent use
+//! - Tree operations are single-threaded (`MassTree` is `!Send`/`!Sync`)
+//! - `NodeVersion` locking is concurrent-ready but not yet used by tree ops
 //!
 //! ## Design
 //!

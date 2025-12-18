@@ -128,7 +128,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// # Safety
     ///
     /// The returned reference is valid for as long as the tree's arenas are not modified.
-    /// This is guaranteed by the single-threaded Phase 1 design.
+    /// Tree operations are single-threaded (Phase 3.2-3.3 will add concurrency).
     #[inline(always)]
     fn reach_leaf_mut_iterative_static(mut current: *mut u8, ikey: u64) -> *mut LeafNode<LeafValue<V>, WIDTH> {
         loop {

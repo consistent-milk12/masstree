@@ -1,8 +1,8 @@
 //! Node allocation abstraction for `MassTree`.
 //!
 //! This module provides the [`NodeAllocator`] trait that abstracts how nodes
-//! are allocated and (eventually) deallocated. Phase 2 uses [`ArenaAllocator`]
-//! which keeps nodes alive until the tree is dropped. Phase 3 will add
+//! are allocated and (eventually) deallocated. Currently uses [`ArenaAllocator`]
+//! which keeps nodes alive until the tree is dropped. Phase 3.4 will add
 //! an epoch-based allocator for concurrent access with deferred reclamation.
 
 use std::ptr as StdPtr;

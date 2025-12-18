@@ -1617,13 +1617,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// invariant checking. NOT for production use.
     #[cfg(test)]
     #[expect(clippy::indexing_slicing, reason = "Only for tests")]
-    pub fn assign_raw_for_test(
-        &mut self,
-        slot: usize,
-        ikey: u64,
-        keylenx: u8,
-        value: S,
-    ) {
+    pub fn assign_raw_for_test(&mut self, slot: usize, ikey: u64, keylenx: u8, value: S) {
         debug_assert!(slot < WIDTH, "assign_raw_for_test: slot out of bounds");
 
         self.ikey0[slot] = ikey;
@@ -1749,8 +1743,10 @@ impl<V: Copy, const WIDTH: usize> LeafNode<LeafValueIndex<V>, WIDTH> {
         );
 
         // Direct replacement without going through trait dispatch
-        let old: LeafValueIndex<V> =
-            std::mem::replace(&mut self.leaf_values[slot], LeafValueIndex::Value(new_value));
+        let old: LeafValueIndex<V> = std::mem::replace(
+            &mut self.leaf_values[slot],
+            LeafValueIndex::Value(new_value),
+        );
 
         match old {
             LeafValueIndex::Value(v) => Some(v),

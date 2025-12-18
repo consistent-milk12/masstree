@@ -198,13 +198,12 @@ pub struct MassTree<V, const WIDTH: usize = 15, A: NodeAllocator<LeafValue<V>, W
     /// raw pointers (`*const T`, `*mut T`) are neither `Send` nor `Sync` in Rust,
     /// and `PhantomData<T>` inherits the auto-traits of `T`.
     ///
-    /// Phase 2 is single-threaded only. The `NodeVersion` lock semantics
-    /// use load-then-store (not CAS), and raw pointers in arenas are not
-    /// safe for concurrent access. This marker prevents accidental misuse.
+    /// Tree operations are currently single-threaded. While `NodeVersion` has
+    /// CAS-based locking (Phase 3.1), tree operations don't use it yet.
+    /// This marker prevents accidental concurrent use of the tree.
     ///
-    /// When Phase 3 implements proper concurrent access with CAS-based locking
-    /// and atomic operations, this marker can be removed and proper `Send`/`Sync`
-    /// bounds added based on `V`'s bounds.
+    /// When Phase 3.2-3.3 implements optimistic get and locked insert,
+    /// this marker can be removed and proper `Send`/`Sync` bounds added.
     _not_send_sync: PhantomData<*const ()>,
 }
 
