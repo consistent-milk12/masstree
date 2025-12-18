@@ -1409,7 +1409,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     //  Split Operations
     // ============================================================================
 
-    /// Split this leaf, moving upper half to a new leaf.
+    /// Split this leaf at `split_pos`, moving entries from `split_pos..end` to a new leaf.
     ///
     /// **Important:** The new leaf is returned in a Box. The caller
     /// (`MassTree`) must store it in the arena to ensure pointer stability,
@@ -1421,16 +1421,17 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// - Leaf chain pointers are NOT updated here (caller must do it after arena allocation)
     ///
     /// # Arguments
-    ///
     /// * `split_pos` - Logical position where to split (in pre-insert coordinates)
     ///
     /// # Returns
-    ///
     /// A new leaf containing the upper half, and the split key.
     ///
     /// # Panics
-    ///
     /// Panics in debug mode if `split_pos` is 0 or >= size.
+    ///
+    /// FIX: Suffix Migration
+    /// This method now correctly migrates suffix data for keys with `keylenx == KSUF_KEYLENX`.
+    /// Previously, suffixes were lost during splits, causing lookup failures for long keys.
     #[expect(
         clippy::indexing_slicing,
         reason = "Indices from permuter, valid by construction"
@@ -1441,7 +1442,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         let old_size: usize = old_perm.size();
 
         debug_assert!(
-            split_pos > 0 && split_pos < old_size,
+            split_pos > 0 && (split_pos < old_size),
             "invalid split_pos {split_pos} for size {old_size}"
         );
 
@@ -1452,40 +1453,48 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             let old_logical_pos: usize = split_pos + i;
             let old_slot: usize = old_perm.get(old_logical_pos);
 
-            // Copy key metadata (plain field access, no atomics)
+            // Copy key metadata
             let ikey: u64 = self.ikey(old_slot);
             let keylenx: u8 = self.keylenx(old_slot);
 
-            // Allocate slot in new leaf (using natural order for simplicity)
+            // Allocate slot in new leaf
             let new_slot: usize = i;
 
             new_leaf.ikey0[new_slot] = ikey;
             new_leaf.keylenx[new_slot] = keylenx;
 
-            // Move value using ValueSlot::take (leaves default/Empty behind)
+            // Move value using ValueSlot::take
             let old_value: S = self.leaf_values[old_slot].take();
             new_leaf.leaf_values[new_slot] = old_value;
+
+            // FIX: Migrate suffix if present
+            if keylenx.eq(&KSUF_KEYLENX) {
+                if let Some(suffix) = self.ksuf(old_slot) {
+                    // Copy suffix to new leaf
+                    new_leaf.assign_ksuf(new_slot, suffix);
+                }
+
+                // Clear suffix from old slot
+                self.clear_ksuf(old_slot);
+            }
         }
 
-        // Build new leaf's permutation (sorted order, size = entries_to_move)
+        // Build new leaf's permutation
         let new_perm: Permuter<WIDTH> = Permuter::make_sorted(entries_to_move);
         new_leaf.set_permutation(new_perm);
 
-        // Update old leaf's permutation (just reduce size)
+        // Update old leaf's permutation
         let mut old_perm_updated: Permuter<WIDTH> = old_perm;
         old_perm_updated.set_size(split_pos);
         self.set_permutation(old_perm_updated);
 
-        // Get split key (first key of new leaf)
-        let split_ikey = new_leaf.ikey(new_perm.get(0));
-
-        // Note: Leaf chain linking is done by the caller after arena allocation
-        // to ensure the pointer is stable.
+        // Get split key
+        let split_ikey: u64 = new_leaf.ikey(new_perm.get(0));
 
         LeafSplitResult {
             new_leaf,
             split_ikey,
-            insert_into: InsertTarget::Left, // Caller determines based on insert_pos
+            insert_into: InsertTarget::Left,
         }
     }
 
@@ -1508,15 +1517,15 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         reason = "Indices from permuter, valid by construction"
     )]
     pub fn split_all_to_right(&mut self) -> LeafSplitResult<S, WIDTH> {
-        let mut new_leaf = Self::new();
-        let old_perm = self.permutation();
-        let old_size = old_perm.size();
+        let mut new_leaf: Box<Self> = Self::new();
+        let old_perm: Permuter<WIDTH> = self.permutation();
+        let old_size: usize = old_perm.size();
 
         debug_assert!(old_size > 0, "Cannot split empty leaf");
 
         // Move all entries to new leaf
         for i in 0..old_size {
-            let old_slot = old_perm.get(i);
+            let old_slot: usize = old_perm.get(i);
 
             new_leaf.ikey0[i] = self.ikey0[old_slot];
             new_leaf.keylenx[i] = self.keylenx[old_slot];
@@ -1525,14 +1534,14 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         }
 
         // Set new leaf's permutation
-        let new_perm = Permuter::make_sorted(old_size);
+        let new_perm: Permuter<WIDTH> = Permuter::make_sorted(old_size);
         new_leaf.set_permutation(new_perm);
 
         // Clear this leaf's permutation (now empty)
         self.set_permutation(Permuter::empty());
 
         // Split key is first key of new leaf
-        let split_ikey = new_leaf.ikey(new_perm.get(0));
+        let split_ikey: u64 = new_leaf.ikey(new_perm.get(0));
 
         LeafSplitResult {
             new_leaf,
