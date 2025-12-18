@@ -1429,7 +1429,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Panics
     /// Panics in debug mode if `split_pos` is 0 or >= size.
     ///
-    /// FIX: Suffix Migration
+    /// FIXED: Suffix Migration
     /// This method now correctly migrates suffix data for keys with `keylenx == KSUF_KEYLENX`.
     /// Previously, suffixes were lost during splits, causing lookup failures for long keys.
     #[expect(
@@ -1467,7 +1467,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             let old_value: S = self.leaf_values[old_slot].take();
             new_leaf.leaf_values[new_slot] = old_value;
 
-            // FIX: Migrate suffix if present
+            // FIXED: Migrate suffix if present
             if keylenx.eq(&KSUF_KEYLENX) {
                 if let Some(suffix) = self.ksuf(old_slot) {
                     // Copy suffix to new leaf
@@ -1510,8 +1510,10 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// - returned leaf contains all entries from `self`
     ///
     /// # Returns
-    ///
     /// A new leaf containing all entries, and the split key (first key of new leaf).
+    ///
+    /// FIXED: Suffix Migration
+    /// This method now correctly migrates suffix data for keys with `keylenx == KSUF_KEYLENX`.
     #[expect(
         clippy::indexing_slicing,
         reason = "Indices from permuter, valid by construction"
@@ -1527,17 +1529,27 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         for i in 0..old_size {
             let old_slot: usize = old_perm.get(i);
 
+            let keylenx: u8 = self.keylenx[old_slot];
+
             new_leaf.ikey0[i] = self.ikey0[old_slot];
-            new_leaf.keylenx[i] = self.keylenx[old_slot];
-            // Use ValueSlot::take to move value and leave default behind
+            new_leaf.keylenx[i] = keylenx;
             new_leaf.leaf_values[i] = self.leaf_values[old_slot].take();
+
+            // FIXED: Migrate suffix if present
+            if keylenx == KSUF_KEYLENX {
+                if let Some(suffix) = self.ksuf(old_slot) {
+                    new_leaf.assign_ksuf(i, suffix);
+                }
+
+                self.clear_ksuf(old_slot);
+            }
         }
 
         // Set new leaf's permutation
         let new_perm: Permuter<WIDTH> = Permuter::make_sorted(old_size);
         new_leaf.set_permutation(new_perm);
 
-        // Clear this leaf's permutation (now empty)
+        // Clear this leaf's permutation
         self.set_permutation(Permuter::empty());
 
         // Split key is first key of new leaf
@@ -1546,7 +1558,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         LeafSplitResult {
             new_leaf,
             split_ikey,
-            insert_into: InsertTarget::Left, // New key goes into empty left leaf
+            insert_into: InsertTarget::Left,
         }
     }
 
