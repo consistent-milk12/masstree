@@ -21,7 +21,8 @@
 //! ```
 
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering, fence};
+use std::time::{Duration, Instant};
 
 // ============================================================================
 //  Bit Constants (matching C++ nodeversion_parameters<uint32_t>)
@@ -62,6 +63,43 @@ const SPLIT_UNLOCK_MASK: u32 = !(ROOT_BIT | UNUSED1_BIT | (VSPLIT_LOWBIT - 1));
 
 /// Mask for unlock after insert: clears unused and version bits below vinsert.
 const UNLOCK_MASK: u32 = !(UNUSED1_BIT | (VINSERT_LOWBIT - 1));
+
+// ============================================================================
+//  Backoff (for spin loops)
+// ============================================================================
+
+/// Exponential backoff for spin loops.
+///
+/// Matches C++ `backoff_fence_function` from `reference/compiler.hh:133-143`.
+/// Each call to `spin()` executes `count+1` pause instructions, then doubles
+/// the count (capped at 15).
+///
+/// Sequence: 0 → 1 → 3 → 7 → 15 (capped)
+struct Backoff {
+    count: u32,
+}
+
+impl Backoff {
+    /// Create a new backoff with count = 0.
+    #[inline]
+    const fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    /// Spin for `count+1` iterations using CPU pause hints, then increase count.
+    ///
+    /// Uses `std::hint::spin_loop()` which maps to the x86 `PAUSE` instruction,
+    /// improving performance on hyper-threaded CPUs by hinting that we're in
+    /// a spin-wait loop.
+    #[inline]
+    fn spin(&mut self) {
+        for _ in 0..=self.count {
+            std::hint::spin_loop();
+        }
+        // Double count, cap at 15: 0 -> 1 -> 3 -> 7 -> 15 -> 15
+        self.count = ((self.count << 1) | 1) & 15;
+    }
+}
 
 // ============================================================================
 //  NodeVersion
@@ -151,25 +189,18 @@ impl LockGuard<'_> {
         self.locked_value
     }
 
-    /// Mark the node as being inserted into
+    /// Mark the node as being inserted into.
     ///
     /// Sets the inserting dirty bit. Version counter will increment on unlock.
     ///
-    /// # Memory Ordering (planned after single-threaded works)
-    /// The C++ reference uses an acquire fence AFTER setting the dirty bit:
+    /// # Memory Ordering
+    /// Uses Release store followed by Acquire fence to ensure:
+    /// 1. The dirty bit is visible to concurrent readers
+    /// 2. Subsequent structural modifications cannot be reordered before
+    ///    the dirty bit becomes visible
     ///
-    /// ```cpp
-    /// void mark_insert() {
-    ///     v_ |= P::inserting_bit;
-    ///     acquire_fence();
-    /// }
-    /// ```
-    ///
-    /// This ensures subsequent structural modifications cannot be reordered
-    /// before the dirty bit becomes visible. As I am still in early stages
-    /// and only working on single-threaded cases, the current approach is sufficient.
-    /// The concurrent mode will probably require `std::sync::atomic::fence(Ordering::Acquire)`,
-    /// after the store.
+    /// # Reference
+    /// C++ `nodeversion.hh:143-147` - `mark_insert()`
     #[inline]
     pub fn mark_insert(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
@@ -178,7 +209,10 @@ impl LockGuard<'_> {
             .value
             .store(value | INSERTING_BIT, Ordering::Release);
 
-        //  TODO: Add `std::sync::atomic::fence(Ordering::Acquire)` after single-threaded impl works.
+        // Acquire fence ensures subsequent structural modifications
+        // cannot be reordered before the dirty bit becomes visible.
+        fence(Ordering::Acquire);
+
         self.locked_value |= INSERTING_BIT;
     }
 
@@ -186,9 +220,11 @@ impl LockGuard<'_> {
     ///
     /// Sets the splitting dirty bit. Version counter will increment on unlock.
     ///
-    /// # Memory Ordering (After single-threaded works)
-    /// Same as `mark_insert()`: The C++ reference uses an acquire fence after
-    /// setting the dirty bit. See `mark_insert` documentation for details.
+    /// # Memory Ordering
+    /// Same as [`mark_insert()`]: Release store followed by Acquire fence.
+    ///
+    /// # Reference
+    /// C++ `nodeversion.hh:149-153` - `mark_split()`
     #[inline]
     pub fn mark_split(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
@@ -197,13 +233,19 @@ impl LockGuard<'_> {
             .value
             .store(value | SPLITTING_BIT, Ordering::Release);
 
-        //  TODO: Add `std::sync::atomic::fence(Ordering::Acquire)` after single-threaded impl works.
+        // Acquire fence ensures subsequent structural modifications
+        // cannot be reordered before the dirty bit becomes visible.
+        fence(Ordering::Acquire);
+
         self.locked_value |= SPLITTING_BIT;
     }
 
     /// Mark the node as deleted.
     ///
     /// Also sets the splitting bit to bump version on unlock.
+    ///
+    /// # Memory Ordering
+    /// Same as [`mark_insert()`]: Release store followed by Acquire fence.
     #[inline]
     pub fn mark_deleted(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
@@ -211,6 +253,11 @@ impl LockGuard<'_> {
         let new_value: u32 = value | DELETED_BIT | SPLITTING_BIT;
 
         self.version.value.store(new_value, Ordering::Release);
+
+        // Acquire fence ensures subsequent structural modifications
+        // cannot be reordered before the dirty bit becomes visible.
+        fence(Ordering::Acquire);
+
         self.locked_value = new_value;
     }
 
@@ -317,24 +364,36 @@ impl NodeVersion {
 
     /// Get a stable version value for optimistic reading.
     ///
-    /// In concurrent mode, this spins until dirty bits are clear.
-    /// In a single-threaded mode, this just returns the current value.
+    /// Spins while dirty bits (inserting or splitting) are set, then returns
+    /// a version with no dirty bits. Use with [`has_changed()`] after reading
+    /// to detect concurrent modifications.
+    ///
+    /// # Memory Ordering
+    /// Returns with an acquire fence to ensure subsequent reads see
+    /// modifications made by the writer who cleared the dirty bits.
+    ///
+    /// # Reference
+    /// C++ `nodeversion.hh:36-48` - `stable()` template method
     ///
     /// # Returns
-    /// A version value with no dirty bits set. Use with `has_changed()` after reading.
+    /// A version value with no dirty bits set.
     #[inline]
     #[must_use]
     pub fn stable(&self) -> u32 {
-        // For now, as we are only single-threaded, no spinning is needed.
-        // Later add: spin while (v & DIRTY_MASK) != 0
-        let value: u32 = self.value.load(Ordering::Acquire);
+        let mut backoff = Backoff::new();
 
-        debug_assert!(
-            (value & DIRTY_MASK) == 0,
-            "stable() called while dirty (single-threaded mode)"
-        );
+        loop {
+            let value = self.value.load(Ordering::Relaxed);
 
-        value
+            if (value & DIRTY_MASK) == 0 {
+                // Acquire fence after dirty check clears.
+                // Ensures we see all writes from the writer who set dirty bits.
+                fence(Ordering::Acquire);
+                return value;
+            }
+
+            backoff.spin();
+        }
     }
 
     /// Check if the version has changed since `old`.
@@ -366,63 +425,132 @@ impl NodeVersion {
 
     /// Acquire the lock and return a guard.
     ///
-    /// The returned [`LockGuard`] proves the lock is held. Operations that
-    /// require the lock take `&mut LockGuard` as proof. The lock is auto
-    /// released when the guard drops.
+    /// Spins until the lock is acquired. The lock bit AND dirty bits must
+    /// both be clear before acquisition succeeds.
     ///
-    /// # Panics
-    /// Panics in debug mode if already locked (currently).
-    /// In concurrent mode, this will spin instead.
+    /// # Liveness
+    /// This method may spin indefinitely if another thread holds the lock
+    /// or has dirty bits set. Use [`try_lock()`] or [`try_lock_for()`] if you
+    /// need a timeout.
     ///
-    /// # Note
-    /// Current implementation uses load-then-store which is NOT atomic.
-    /// For concurrent use, this must be replaced with a `compare_exchange_weak`
-    /// loop and proper `Acquire` ordering on success.
+    /// # Memory Ordering
+    /// Uses `Acquire` ordering on successful CAS to synchronize with the
+    /// `Release` store in [`Drop::drop`] of the previous lock holder.
+    ///
+    /// # Reference
+    /// C++ `nodeversion.hh:87-109` - `lock()` template method
     #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock(&self) -> LockGuard<'_> {
-        let value: u32 = self.value.load(Ordering::Relaxed);
+        let mut backoff = Backoff::new();
 
-        debug_assert!(
-            (value & LOCK_BIT) == 0,
-            "lock() called on already locked node"
-        );
-        debug_assert!((value & DIRTY_MASK) == 0, "lock called on dirty node");
+        loop {
+            let value = self.value.load(Ordering::Relaxed);
 
-        let locked: u32 = value | LOCK_BIT;
-        self.value.store(locked, Ordering::Release);
+            // Must wait for both lock bit AND dirty bits to clear.
+            // C++ reference: `!(expected.v_ & P::lock_bit)` but also checks dirty post-acquisition.
+            if (value & (LOCK_BIT | DIRTY_MASK)) == 0 {
+                let locked = value | LOCK_BIT;
 
-        LockGuard {
-            version: self,
-            locked_value: locked,
-            _marker: PhantomData,
+                // CAS to acquire lock.
+                // Acquire on success ensures we see all prior writes from previous holder.
+                // Relaxed on failure is fine, we'll retry.
+                if self
+                    .value
+                    .compare_exchange_weak(value, locked, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    // Invariant: dirty bits must be clear when we acquire.
+                    debug_assert!(
+                        (locked & DIRTY_MASK) == 0,
+                        "lock acquired with dirty bits set"
+                    );
+
+                    return LockGuard {
+                        version: self,
+                        locked_value: locked,
+                        _marker: PhantomData,
+                    };
+                }
+            }
+
+            backoff.spin();
         }
     }
 
     /// Try to acquire the lock without blocking.
     ///
-    /// # Returns
-    /// `Some(guard)` if lock acquired, `None` if already locked or dirty.
+    /// Returns `Some(guard)` if the lock was acquired, `None` if the lock
+    /// is held or dirty bits are set.
     ///
-    /// # Note
-    /// Current implementation uses load-then-store which is NOT atomic.
-    /// For concurrent use, this must be replaced with `compare_exchange_weak`
-    /// and proper `Acquire` ordering on success.
+    /// # Memory Ordering
+    /// Uses `Acquire` ordering on successful CAS.
+    ///
+    /// # Reference
+    /// C++ `nodeversion.hh:111-127` - `try_lock()` template method
     #[must_use]
     pub fn try_lock(&self) -> Option<LockGuard<'_>> {
-        let value: u32 = self.value.load(Ordering::Relaxed);
+        let value = self.value.load(Ordering::Relaxed);
 
+        // Fail fast if locked or dirty.
         if (value & (LOCK_BIT | DIRTY_MASK)) != 0 {
             return None;
         }
 
-        let locked: u32 = value | LOCK_BIT;
-        self.value.store(locked, Ordering::Release);
+        let locked = value | LOCK_BIT;
 
-        Some(LockGuard {
-            version: self,
-            locked_value: locked,
-            _marker: PhantomData,
-        })
+        // Single CAS attempt (use strong CAS for single-shot).
+        match self
+            .value
+            .compare_exchange(value, locked, Ordering::Acquire, Ordering::Relaxed)
+        {
+            Ok(_) => Some(LockGuard {
+                version: self,
+                locked_value: locked,
+                _marker: PhantomData,
+            }),
+            Err(_) => None,
+        }
+    }
+
+    /// Try to acquire the lock with a timeout.
+    ///
+    /// Returns `Some(guard)` if the lock was acquired within `timeout`,
+    /// `None` if the timeout expired.
+    ///
+    /// # Use Cases
+    /// - Deadlock detection in tests
+    /// - Bounded wait times in production
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use std::time::Duration;
+    /// use masstree::nodeversion::NodeVersion;
+    ///
+    /// let version = NodeVersion::new(true);
+    /// if let Some(guard) = version.try_lock_for(Duration::from_millis(100)) {
+    ///     // Lock acquired within 100ms
+    /// } else {
+    ///     // Timeout expired, lock not acquired
+    /// }
+    /// ```
+    #[must_use]
+    pub fn try_lock_for(&self, timeout: Duration) -> Option<LockGuard<'_>> {
+        let deadline = Instant::now() + timeout;
+        let mut backoff = Backoff::new();
+
+        loop {
+            // Try to acquire.
+            if let Some(guard) = self.try_lock() {
+                return Some(guard);
+            }
+
+            // Check timeout.
+            if Instant::now() >= deadline {
+                return None;
+            }
+
+            backoff.spin();
+        }
     }
 
     // ========================================================================
@@ -735,3 +863,13 @@ mod tests {
         assert_ne!(guard.locked_value() & INSERTING_BIT, 0);
     }
 }
+
+// Concurrent tests live in a submodule to keep this file lean.
+// Guarded with `#[cfg(not(miri))]` because Miri doesn't support multi-threading well.
+#[cfg(test)]
+#[cfg(not(miri))]
+mod concurrent_tests;
+
+// Loom tests for deterministic concurrency verification.
+#[cfg(all(test, loom))]
+mod loom_tests;

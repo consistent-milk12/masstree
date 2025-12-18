@@ -29,8 +29,12 @@ include = [
 [dev-dependencies]
 divan = "0.1.21"
 proptest = "1.9.0"
+loom = "0.7.2"
 
 [lints.rust]
+# Allow loom cfg for deterministic concurrency testing
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 # Safety and correctness
 unsafe_op_in_unsafe_fn = "warn"
 missing_docs = "deny"                                       # Enforce documentation for public API

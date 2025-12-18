@@ -34,6 +34,8 @@
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
+// We use extensive benchmarking to verify #[inline(always)] placement is correct.
+#![allow(clippy::inline_always)]
 
 pub mod alloc;
 pub mod internode;
