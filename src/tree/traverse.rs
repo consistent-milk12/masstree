@@ -14,6 +14,7 @@ use super::{MassTree, RootNode};
 /// Traverse from an internode to the target leaf (iterative).
 ///
 /// Free function to avoid `self_only_used_in_recursion` lint.
+#[allow(dead_code)]
 #[inline(always)]
 fn reach_leaf_from_internode<V, const WIDTH: usize>(
     mut internode: &InternodeNode<LeafValue<V>, WIDTH>,
@@ -41,7 +42,9 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// Traverses down the leftmost path from the given internode to find
     /// the first (leftmost) leaf in the tree.
     #[expect(dead_code, reason = "Will be used for iteration/range queries")]
-    pub(super) fn find_leftmost_leaf(root: &InternodeNode<LeafValue<V>, WIDTH>) -> *const LeafNode<LeafValue<V>, WIDTH> {
+    pub(super) fn find_leftmost_leaf(
+        root: &InternodeNode<LeafValue<V>, WIDTH>,
+    ) -> *const LeafNode<LeafValue<V>, WIDTH> {
         let mut node: *const u8 = root.child(0);
         let mut height: u32 = root.height();
 
@@ -72,6 +75,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// # Returns
     ///
     /// Reference to the leaf node that contains or should contain the key.
+    #[allow(dead_code)]
     #[inline(always)]
     pub(super) fn reach_leaf(&self, key: &Key<'_>) -> &LeafNode<LeafValue<V>, WIDTH> {
         match &self.root {
@@ -130,7 +134,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// The returned reference is valid for as long as the tree's arenas are not modified.
     /// Tree operations are single-threaded (Phase 3.2-3.3 will add concurrency).
     #[inline(always)]
-    fn reach_leaf_mut_iterative_static(mut current: *mut u8, ikey: u64) -> *mut LeafNode<LeafValue<V>, WIDTH> {
+    fn reach_leaf_mut_iterative_static(
+        mut current: *mut u8,
+        ikey: u64,
+    ) -> *mut LeafNode<LeafValue<V>, WIDTH> {
         loop {
             // SAFETY: current is a valid internode pointer from traversal
             let internode: &InternodeNode<LeafValue<V>, WIDTH> =

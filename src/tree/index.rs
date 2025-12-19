@@ -42,8 +42,11 @@ use super::{InsertError, MassTree};
 /// let value = tree.get(b"hello");
 /// assert_eq!(value, Some(42));
 /// ```
-pub struct MassTreeIndex<V: Copy, const WIDTH: usize = 15, A: NodeAllocator<LeafValue<V>, WIDTH> = ArenaAllocator<LeafValue<V>, WIDTH>>
-{
+pub struct MassTreeIndex<
+    V: Copy,
+    const WIDTH: usize = 15,
+    A: NodeAllocator<LeafValue<V>, WIDTH> = ArenaAllocator<LeafValue<V>, WIDTH>,
+> {
     /// Wraps `MassTree` internally. True inline storage is planned for future.
     pub(crate) inner: MassTree<V, WIDTH, A>,
 }
@@ -68,7 +71,9 @@ impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH, ArenaAllocator<LeafVal
     }
 }
 
-impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTreeIndex<V, WIDTH, A> {
+impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>>
+    MassTreeIndex<V, WIDTH, A>
+{
     /// Create a new empty `MassTreeIndex` with a custom allocator.
     #[must_use]
     pub fn with_allocator(allocator: A) -> Self {
@@ -145,7 +150,9 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTre
     }
 }
 
-impl<V: Copy, const WIDTH: usize> Default for MassTreeIndex<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>> {
+impl<V: Copy, const WIDTH: usize> Default
+    for MassTreeIndex<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>>
+{
     fn default() -> Self {
         Self::new()
     }

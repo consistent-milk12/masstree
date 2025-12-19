@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::{cmp::Ordering, ptr as StdPtr};
 
 use crate::alloc::NodeAllocator;
+use crate::key::Key;
 use crate::leaf::{LeafNode, LeafValue};
 use crate::permuter::Permuter;
-use crate::key::Key;
 
 use super::MassTree;
 
@@ -51,15 +51,21 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         }
         // Note: existing_key is created from suffix, its ikey IS the next slice - no shift needed
 
-        let mut cmp: Ordering = existing_key.ikey().cmp(&new_key.ikey());
+        // FIXED: Use length-aware comparison instead of ikey-only comparison.
+        // This correctly handles prefix-of-other cases where one key is exhausted
+        // before the other.
+        //
+        // C++ reference: masstree_insert.hh:64-83, masstree_key.hh:133-146
+        let mut cmp: Ordering = existing_key.compare(new_key.ikey(), new_key.current_len());
 
-        // 4. Create twig chain while ikeys match
+        // 4. Create twig chain while ikeys match AND both have more bytes
         let mut twig_head: Option<*mut LeafNode<LeafValue<V>, WIDTH>> = None;
         let mut twig_tail: *mut LeafNode<LeafValue<V>, WIDTH> = StdPtr::null_mut();
 
-        while cmp.eq(&Ordering::Equal) && existing_key.has_suffix() && new_key.has_suffix() {
+        while cmp == Ordering::Equal && existing_key.has_suffix() && new_key.has_suffix() {
             // Create intermediate layer node (single entry)
-            let mut twig: Box<LeafNode<LeafValue<V>, WIDTH>> = LeafNode::<LeafValue<V>, WIDTH>::new_layer_root();
+            let mut twig: Box<LeafNode<LeafValue<V>, WIDTH>> =
+                LeafNode::<LeafValue<V>, WIDTH>::new_layer_root();
             twig.assign_initialize_for_layer(0, existing_key.ikey());
             twig.set_permutation(Permuter::make_sorted(1));
 
@@ -81,13 +87,17 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             // Shift both keys again
             existing_key.shift();
             new_key.shift();
-            cmp = existing_key.ikey().cmp(&new_key.ikey());
+            cmp = existing_key.compare(new_key.ikey(), new_key.current_len());
         }
 
         // 5. Create final leaf with both keys (they now have different ikeys)
         let mut final_leaf = LeafNode::<LeafValue<V>, WIDTH>::new_layer_root();
 
         // Determine ordering: existing vs new
+        //
+        // FIXED: Handle Equal case for prefix-of-other scenarios.
+        // When cmp is Equal here, one key is a prefix of the other (same ikey,
+        // different remaining length). The shorter key (exhausted) is "less than".
         let (first_key, first_val, second_key, second_val, new_slot) = match cmp {
             Ordering::Less => {
                 // existing < new : existing at slot 0, new at slot 1
@@ -100,7 +110,15 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             }
 
             Ordering::Equal => {
-                unreachable!("ikeys should differ after twig chain")
+                // One key is prefix of other (same ikey, different remaining length)
+                // Shorter key (exhausted or shorter suffix) gets lower slot
+                if existing_key.current_len() <= new_key.current_len() {
+                    // existing is prefix of new (or equal length)
+                    (existing_key, existing_value, *new_key, Some(new_value), 1)
+                } else {
+                    // new is prefix of existing
+                    (*new_key, Some(new_value), existing_key, existing_value, 0)
+                }
             }
         };
 
@@ -131,7 +149,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         // INVARIANT: twig_head is always set because:
         // - Either the while loop ran at least once (setting twig_head), OR
         // - The loop didn't run and we set twig_head = Some(final_ptr) above
-        #[expect(clippy::option_if_let_else, reason = "match is more readable for invariant")]
+        #[expect(
+            clippy::option_if_let_else,
+            reason = "match is more readable for invariant"
+        )]
         let layer_root: *mut LeafNode<LeafValue<V>, WIDTH> = match twig_head {
             Some(ptr) => ptr,
             None => unreachable!("twig_head is always set before this point"),

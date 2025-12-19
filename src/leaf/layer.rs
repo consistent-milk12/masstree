@@ -120,8 +120,11 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         // INVARIANT: output must be Some - caller must ensure the source slot contains
         // a value, not a layer pointer. Layer creation only happens when an existing
         // VALUE conflicts with a new key, so try_clone_arc() should always succeed.
-        #[expect(clippy::expect_used, reason = "invariant: source slot must contain value")]
-        let value = output.expect(
+        #[expect(
+            clippy::expect_used,
+            reason = "invariant: source slot must contain value"
+        )]
+        let value: <S as ValueSlot>::Output = output.expect(
             "assign_from_key: output cannot be None (source slot was not a value); \
              use assign_initialize_for_layer for layer pointer setup",
         );
@@ -131,7 +134,13 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
 
         // If key has suffix, override keylenx and store suffix
         if key.has_suffix() {
-            self.keylenx[slot] = KSUF_KEYLENX;
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "slot is a physical slot index validated by caller to be < WIDTH"
+            )]
+            {
+                self.keylenx[slot] = KSUF_KEYLENX;
+            }
             self.assign_ksuf(slot, key.suffix());
         }
     }

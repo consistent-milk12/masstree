@@ -750,7 +750,8 @@ mod tests {
         let mut node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
         let mut parent: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(1);
 
-        let parent_ptr: *mut InternodeNode<LeafValue<u64>> = parent.as_mut() as *mut InternodeNode<LeafValue<u64>, 15>;
+        let parent_ptr: *mut InternodeNode<LeafValue<u64>> =
+            parent.as_mut() as *mut InternodeNode<LeafValue<u64>, 15>;
 
         // set_parent takes *mut u8, so cast the pointer
         node.set_parent(parent_ptr.cast::<u8>());

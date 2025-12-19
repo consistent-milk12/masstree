@@ -107,14 +107,14 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             StdMem::replace(&mut self.root, RootNode::Internode(new_root));
 
         // Get allocator-derived pointer for left leaf (proper Stacked Borrows provenance)
-        let arena_left_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = if let RootNode::Leaf(old_leaf_box) = old_root
-        {
-            self.alloc_leaf(old_leaf_box)
-        } else {
-            // This branch shouldn't happen - we only call this when root was a leaf
-            debug_assert!(false, "create_root_internode called with non-leaf root");
-            StdPtr::null_mut()
-        };
+        let arena_left_ptr: *mut LeafNode<LeafValue<V>, WIDTH> =
+            if let RootNode::Leaf(old_leaf_box) = old_root {
+                self.alloc_leaf(old_leaf_box)
+            } else {
+                // This branch shouldn't happen - we only call this when root was a leaf
+                debug_assert!(false, "create_root_internode called with non-leaf root");
+                StdPtr::null_mut()
+            };
 
         // Now set up children with arena-derived pointer (left) and already-arena pointer (right)
         // Also get the new root pointer for parent updates
@@ -203,6 +203,20 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             }
         }
 
+        // Check if this is a LAYER ROOT split (not main tree root)
+        // Layer roots have is_layer_root() == true (is_root flag + null parent)
+        // SAFETY: left_leaf is a valid pointer
+        let is_layer_root: bool = unsafe { (*left_leaf).is_layer_root() };
+
+        if is_layer_root {
+            // LAYER ROOT SPLIT
+            // Create internode to become new layer root.
+            // The `maybe_parent` pattern means we don't need to update the
+            // parent leaf's layer pointer - reach_leaf_from_ptr will handle it.
+            self.promote_layer_root(left_leaf, right_leaf_ptr, split_ikey);
+            return;
+        }
+
         // Get parent from left_leaf
         // SAFETY: left_leaf is a valid pointer we just split
         let parent_ptr: *mut u8 = unsafe { (*left_leaf).parent() };
@@ -228,7 +242,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         } else {
             // Parent is full, need to split it too (using split+insert API from CODE_005.md)
             // Allocate new internode for the right half
-            let new_parent: Box<InternodeNode<LeafValue<V>, WIDTH>> = InternodeNode::new(parent.height());
+            let new_parent: Box<InternodeNode<LeafValue<V>, WIDTH>> =
+                InternodeNode::new(parent.height());
             let new_parent_ptr: *mut InternodeNode<LeafValue<V>, WIDTH> =
                 self.alloc_internode(new_parent);
 
@@ -299,11 +314,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         }
 
         // Not root, insert popup_key into parent (recursive if needed)
-        self.propagate_non_root_internode_split(
-            left_internode_ptr,
-            right_internode_ptr,
-            popup_key,
-        );
+        self.propagate_non_root_internode_split(left_internode_ptr, right_internode_ptr, popup_key);
     }
 
     /// Handle root internode split - creates new root above both children.
@@ -331,7 +342,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         };
 
         // Get allocator-derived pointer for left internode
-        let arena_left_ptr: *mut InternodeNode<LeafValue<V>, WIDTH> = self.alloc_internode(old_root_box);
+        let arena_left_ptr: *mut InternodeNode<LeafValue<V>, WIDTH> =
+            self.alloc_internode(old_root_box);
 
         // CRITICAL: Refresh parent pointers for all children of the demoted root.
         // These children had parent pointers derived from when their parent was
@@ -388,7 +400,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         }
 
         // Parent is full - split with simultaneous insertion (per C++ reference)
-        let new_parent: Box<InternodeNode<LeafValue<V>, WIDTH>> = InternodeNode::new(parent.height());
+        let new_parent: Box<InternodeNode<LeafValue<V>, WIDTH>> =
+            InternodeNode::new(parent.height());
         let new_parent_ptr: *mut InternodeNode<LeafValue<V>, WIDTH> =
             self.alloc_internode(new_parent);
 
@@ -425,5 +438,70 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         // Recursively propagate the new popup key
         // parent_ptr points to arena-backed internode, safe to use
         self.propagate_internode_split(parent_ptr.cast(), new_parent_ptr, new_popup_key);
+    }
+
+    /// Promote a layer root leaf to an internode root.
+    ///
+    /// Called when a layer root leaf splits and needs to become an internode tree.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Create new internode with both leaves as children
+    /// 2. Update children's parent pointers to the new internode
+    /// 3. Clear root flag on both leaves (they're no longer layer roots)
+    ///
+    /// # `maybe_parent` Pattern
+    ///
+    /// The layer pointer in the parent leaf is NOT updated here. Instead:
+    ///
+    /// 1. The old layer pointer still points to `left_leaf`
+    /// 2. `left_leaf` now has `parent != null` (pointing to new internode)
+    /// 3. `reach_leaf_from_ptr()` detects this: if leaf has non-null parent,
+    ///    it follows the parent internode to find the correct leaf
+    ///
+    /// This matches the C++ `maybe_parent()` pattern from `masstree_struct.hh:83`.
+    ///
+    /// # Reference
+    ///
+    /// C++ `masstree_split.hh:218-226`, `masstree_struct.hh:83`
+    fn promote_layer_root(
+        &mut self,
+        left_leaf: *mut LeafNode<LeafValue<V>, WIDTH>,
+        right_leaf: *mut LeafNode<LeafValue<V>, WIDTH>,
+        split_ikey: u64,
+    ) {
+        // Create new internode root for this layer (height=0, children are leaves)
+        let mut new_inode: Box<InternodeNode<LeafValue<V>, WIDTH>> = InternodeNode::new(0);
+
+        // Set up children: [left_leaf] -split_ikey- [right_leaf]
+        new_inode.set_child(0, left_leaf.cast());
+        new_inode.set_ikey(0, split_ikey);
+        new_inode.set_child(1, right_leaf.cast());
+        new_inode.set_nkeys(1);
+
+        // Mark as root (layer roots should have the root flag)
+        new_inode.version_mut().mark_root();
+
+        // Allocate internode in arena
+        let new_inode_ptr: *mut InternodeNode<LeafValue<V>, WIDTH> =
+            self.alloc_internode(new_inode);
+
+        // Update children's parent pointers to the new internode
+        // This is the KEY step: now left_leaf.parent() != null
+        // SAFETY: left_leaf and right_leaf are valid arena-backed pointers
+        unsafe {
+            (*left_leaf).set_parent(new_inode_ptr.cast());
+            (*right_leaf).set_parent(new_inode_ptr.cast());
+
+            // Clear the root flag on both leaves - they're no longer layer roots
+            (*left_leaf).version_mut().mark_nonroot();
+            (*right_leaf).version_mut().mark_nonroot();
+        }
+
+        // NOTE: We do NOT update the parent leaf's layer pointer here.
+        // The `maybe_parent` pattern in `reach_leaf_from_ptr()` handles this:
+        // - Layer pointer still points to old left_leaf
+        // - But left_leaf.parent() now points to new_inode
+        // - reach_leaf_from_ptr detects non-null parent and follows it
     }
 }

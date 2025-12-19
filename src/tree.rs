@@ -11,7 +11,9 @@ use std::sync::Arc;
 use crate::alloc::{ArenaAllocator, NodeAllocator};
 use crate::internode::InternodeNode;
 use crate::key::Key;
+use crate::ksearch::upper_bound_internode_direct;
 use crate::leaf::{KSUF_KEYLENX, LeafNode, LeafSplitResult, LeafValue, SplitUtils};
+use crate::nodeversion::NodeVersion;
 use crate::permuter::Permuter;
 use crate::slot::ValueSlot;
 
@@ -180,8 +182,11 @@ impl std::error::Error for InsertError {}
 /// let value = tree.get(b"hello");
 /// assert_eq!(value.map(|v| *v), Some(42));
 /// ```
-pub struct MassTree<V, const WIDTH: usize = 15, A: NodeAllocator<LeafValue<V>, WIDTH> = ArenaAllocator<LeafValue<V>, WIDTH>>
-{
+pub struct MassTree<
+    V,
+    const WIDTH: usize = 15,
+    A: NodeAllocator<LeafValue<V>, WIDTH> = ArenaAllocator<LeafValue<V>, WIDTH>,
+> {
     /// Node allocator for leaf and internode allocation.
     allocator: A,
 
@@ -207,7 +212,9 @@ pub struct MassTree<V, const WIDTH: usize = 15, A: NodeAllocator<LeafValue<V>, W
     _not_send_sync: PhantomData<*const ()>,
 }
 
-impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> StdFmt::Debug for MassTree<V, WIDTH, A> {
+impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> StdFmt::Debug
+    for MassTree<V, WIDTH, A>
+{
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("MassTree")
             .field("root", &self.root)
@@ -244,7 +251,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ///
     /// The pointer remains valid for the lifetime of the tree.
     #[inline]
-    fn alloc_leaf(&mut self, leaf: Box<LeafNode<LeafValue<V>, WIDTH>>) -> *mut LeafNode<LeafValue<V>, WIDTH> {
+    fn alloc_leaf(
+        &mut self,
+        leaf: Box<LeafNode<LeafValue<V>, WIDTH>>,
+    ) -> *mut LeafNode<LeafValue<V>, WIDTH> {
         self.allocator.alloc_leaf(leaf)
     }
 
@@ -362,27 +372,34 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 }
 
                 if match_result < 0 {
-                    // Layer pointer - prepare to descend
-                    // But first check if key has more bytes to compare
-                    if !key.has_suffix() {
-                        // Key ends at layer boundary - not found
-                        // (we need more bytes to distinguish within the layer)
-                        return None;
-                    }
+                    // Layer pointer found
+                    //
+                    // FIXED: Don't immediately return None when !key.has_suffix().
+                    // A layer slot can appear before a matching inline key in
+                    // permutation order. We should only descend into the layer
+                    // if the key actually has more bytes to match.
+                    //
+                    // C++ reference: masstree_get.hh:38-56
+                    if key.has_suffix() {
+                        // Key has more bytes - record layer for descent
+                        if let Some(layer_ptr) = leaf.get_layer(slot) {
+                            #[expect(
+                                clippy::cast_sign_loss,
+                                reason = "match_result < 0, so -match_result > 0"
+                            )]
+                            {
+                                shift_amount = (-match_result) as usize;
+                            }
 
-                    if let Some(layer_ptr) = leaf.get_layer(slot) {
-                        #[expect(
-                            clippy::cast_sign_loss,
-                            reason = "match_result < 0, so -match_result > 0"
-                        )]
-                        {
-                            shift_amount = (-match_result) as usize;
+                            found_layer = Some(layer_ptr);
                         }
 
-                        found_layer = Some(layer_ptr);
+                        break; // Must descend
                     }
 
-                    break;
+                    // Key has no more bytes (!key.has_suffix())
+                    // The key terminates at this layer boundary.
+                    // Continue searching - there might be an inline key match.
                 }
                 // match_result == 0: same ikey but different key, continue searching
             }
@@ -399,23 +416,181 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         }
     }
 
-    /// Reach leaf from a raw pointer (for layer descent).
+    /// Reach the leaf node containing the key, starting from a generic root pointer.
+    ///
+    /// # `maybe_parent` Pattern (C++ Reference)
+    ///
+    /// Layer pointers initially point to leaves, but after layer root promotion
+    /// the leaf gains a non-null parent (the new internode). This function
+    /// implements the C++ `maybe_parent()` pattern from `masstree_struct.hh:83`:
+    ///
+    /// 1. If pointer is to a leaf with null parent → use directly (layer root)
+    /// 2. If pointer is to a leaf with non-null parent → follow parent (promoted)
+    /// 3. If pointer is to an internode → traverse down to find target leaf
+    ///
+    /// This allows layer pointers to remain stale after promotion - they still
+    /// point to the old leaf, but we detect the promotion via the parent pointer.
+    ///
+    /// # Safety
+    ///
+    /// `root_ptr` must be a valid pointer to either a `LeafNode` or `InternodeNode`.
+    /// Both types have `NodeVersion` as their first field, enabling safe discrimination.
     #[inline(always)]
-    fn reach_leaf_from_ptr(&self, root_ptr: *const u8, key: &Key<'_>) -> &LeafNode<LeafValue<V>, WIDTH> {
-        // Check if it's the main tree root first
-        let main_root_ptr: *const u8 = match &self.root {
-            RootNode::Leaf(leaf) => StdPtr::from_ref(leaf.as_ref()).cast::<u8>(),
+    fn reach_leaf_from_ptr(
+        &self,
+        root_ptr: *const u8,
+        key: &Key<'_>,
+    ) -> &LeafNode<LeafValue<V>, WIDTH> {
+        // SAFETY: Both LeafNode and InternodeNode have NodeVersion as first field
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "root_ptr points to LeafNode or InternodeNode, both properly aligned"
+        )]
+        let version: &NodeVersion = unsafe { &*(root_ptr.cast::<NodeVersion>()) };
 
-            RootNode::Internode(inode) => StdPtr::from_ref(inode.as_ref()).cast::<u8>(),
-        };
+        if version.is_leaf() {
+            // It's a leaf - check if the layer was promoted via parent pointer
+            // SAFETY: version.is_leaf() confirms this is a LeafNode
+            let leaf: &LeafNode<LeafValue<V>, WIDTH> =
+                unsafe { &*(root_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>()) };
 
-        if root_ptr == main_root_ptr {
-            return self.reach_leaf(key);
+            let parent_ptr: *mut u8 = leaf.parent();
+
+            if parent_ptr.is_null() {
+                // Null parent means this leaf is still the layer root
+                leaf
+            } else {
+                // Non-null parent means layer was promoted - follow the parent
+                // SAFETY: parent_ptr is the internode created during promotion
+                let inode: &InternodeNode<LeafValue<V>, WIDTH> =
+                    unsafe { &*(parent_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
+
+                self.reach_leaf_via_internode(inode, key)
+            }
+        } else {
+            // Internode - traverse down to leaf
+            // SAFETY: !version.is_leaf() confirms this is an InternodeNode
+            let inode: &InternodeNode<LeafValue<V>, WIDTH> =
+                unsafe { &*(root_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
+
+            self.reach_leaf_via_internode(inode, key)
         }
+    }
 
-        // It's a layer root (always a leaf in current implementation)
-        //  SAFETY: Layer roots are allocated in arena and remain valid
-        unsafe { &*(root_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>()) }
+    /// Traverse from an internode down to the target leaf.
+    ///
+    /// Uses `upper_bound_internode_direct` to find the correct child at each level.
+    #[expect(
+        clippy::unused_self,
+        reason = "Method signature matches reach_leaf pattern"
+    )]
+    fn reach_leaf_via_internode(
+        &self,
+        mut inode: &InternodeNode<LeafValue<V>, WIDTH>,
+        key: &Key<'_>,
+    ) -> &LeafNode<LeafValue<V>, WIDTH> {
+        let target_ikey: u64 = key.ikey();
+
+        loop {
+            // Find child index
+            let child_idx: usize = upper_bound_internode_direct(target_ikey, inode);
+            let child_ptr: *mut u8 = inode.child(child_idx);
+
+            // Check child type via NodeVersion
+            // SAFETY: All children have NodeVersion as first field, properly aligned
+            #[expect(
+                clippy::cast_ptr_alignment,
+                reason = "child_ptr points to LeafNode or InternodeNode, both properly aligned"
+            )]
+            let child_version: &NodeVersion = unsafe { &*(child_ptr.cast::<NodeVersion>()) };
+
+            if child_version.is_leaf() {
+                // SAFETY: is_leaf() confirms LeafNode
+                return unsafe { &*(child_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>()) };
+            }
+
+            // Descend to child internode
+            // SAFETY: !is_leaf() confirms InternodeNode
+            inode = unsafe { &*(child_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
+        }
+    }
+
+    /// Mutable version of `reach_leaf_from_ptr`.
+    ///
+    /// See [`reach_leaf_from_ptr`] for the `maybe_parent` pattern explanation.
+    #[inline(always)]
+    fn reach_leaf_from_ptr_mut(
+        &mut self,
+        root_ptr: *mut u8,
+        key: &Key<'_>,
+    ) -> *mut LeafNode<LeafValue<V>, WIDTH> {
+        // SAFETY: Both LeafNode and InternodeNode have NodeVersion as first field
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "root_ptr points to LeafNode or InternodeNode, both properly aligned"
+        )]
+        let version: &NodeVersion = unsafe { &*(root_ptr.cast::<NodeVersion>()) };
+
+        if version.is_leaf() {
+            // It's a leaf - check if the layer was promoted via parent pointer
+            // SAFETY: version.is_leaf() confirms this is a LeafNode
+            let leaf: &LeafNode<LeafValue<V>, WIDTH> =
+                unsafe { &*(root_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>()) };
+
+            let parent_ptr: *mut u8 = leaf.parent();
+
+            if parent_ptr.is_null() {
+                // Null parent means this leaf is still the layer root
+                root_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>()
+            } else {
+                // Non-null parent means layer was promoted - follow the parent
+                // SAFETY: parent_ptr is the internode created during promotion
+                let inode: &InternodeNode<LeafValue<V>, WIDTH> =
+                    unsafe { &*(parent_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
+
+                self.reach_leaf_via_internode_mut(inode, key)
+            }
+        } else {
+            // SAFETY: !version.is_leaf() confirms this is an InternodeNode
+            let inode: &InternodeNode<LeafValue<V>, WIDTH> =
+                unsafe { &*(root_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
+
+            self.reach_leaf_via_internode_mut(inode, key)
+        }
+    }
+
+    /// Mutable traversal from internode to leaf.
+    #[expect(
+        clippy::unused_self,
+        clippy::needless_pass_by_ref_mut,
+        reason = "Method signature matches reach_leaf_mut pattern"
+    )]
+    fn reach_leaf_via_internode_mut(
+        &mut self,
+        mut inode: &InternodeNode<LeafValue<V>, WIDTH>,
+        key: &Key<'_>,
+    ) -> *mut LeafNode<LeafValue<V>, WIDTH> {
+        let target_ikey: u64 = key.ikey();
+
+        loop {
+            let child_idx: usize = upper_bound_internode_direct(target_ikey, inode);
+            let child_ptr: *mut u8 = inode.child(child_idx);
+
+            // SAFETY: All children have NodeVersion as first field, properly aligned
+            #[expect(
+                clippy::cast_ptr_alignment,
+                reason = "child_ptr points to LeafNode or InternodeNode, both properly aligned"
+            )]
+            let child_version: &NodeVersion = unsafe { &*(child_ptr.cast::<NodeVersion>()) };
+
+            if child_version.is_leaf() {
+                // SAFETY: is_leaf() confirms LeafNode
+                return child_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>();
+            }
+
+            // SAFETY: !is_leaf() confirms InternodeNode
+            inode = unsafe { &*(child_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
+        }
     }
 
     // ========================================================================
@@ -522,10 +697,12 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let store_keylenx: u8 = key.current_len().min(8) as u8;
 
             // Get the target leaf as a raw pointer to avoid borrow issues
+            // FIXED: Use reach_leaf_from_ptr_mut for layer roots to handle
+            // promoted layers (where the layer root became an internode)
             let leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = if layer_root.is_null() {
                 self.reach_leaf_mut(key) as *mut _
             } else {
-                layer_root
+                self.reach_leaf_from_ptr_mut(layer_root.cast::<u8>(), key)
             };
 
             // SAFETY: leaf_ptr is valid (from reach_leaf_mut or layer_root which points to arena)
@@ -553,38 +730,56 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     }
 
                     if match_result < 0 {
-                        // Layer pointer - descend into it
-                        if let Some(layer_ptr) = leaf.get_layer(slot) {
-                            #[expect(
-                                clippy::cast_sign_loss,
-                                reason = "match_result < 0, so -match_result > 0"
-                            )]
-                            key.shift_by((-match_result) as usize);
-                            descend_layer = Some(layer_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>());
-                        } else {
-                            return Err(InsertError::LeafFull); // Layer pointer invalid
+                        // Layer pointer found
+                        //
+                        // FIXED: Only descend if key has more bytes to match.
+                        // If key terminates at this layer boundary (!key.has_suffix()),
+                        // the key is DISTINCT from anything in the layer.
+                        // Continue searching - we may need to insert as inline key.
+                        //
+                        // C++ reference: masstree_insert.hh:36
+                        if key.has_suffix() {
+                            // Key has more bytes - must descend into layer
+                            if let Some(layer_ptr) = leaf.get_layer(slot) {
+                                #[expect(
+                                    clippy::cast_sign_loss,
+                                    reason = "match_result < 0, so -match_result > 0"
+                                )]
+                                key.shift_by((-match_result) as usize);
+                                descend_layer =
+                                    Some(layer_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>());
+                            } else {
+                                return Err(InsertError::LeafFull); // Layer pointer invalid
+                            }
+
+                            break;
                         }
 
-                        break;
+                        // !key.has_suffix(): Key terminates at layer boundary.
+                        // This is a DIFFERENT key from anything in the layer.
+                        // Continue searching - we may need to insert as inline key.
+                        continue;
                     }
 
                     // Same ikey but different key (keylenx or suffix mismatch)
                     // Check if we need to create a layer:
-                    // - If slot has suffix AND new key has suffix -> create layer
-                    // - If slot is inline AND new key has suffix -> create layer
-                    // - If slot has suffix AND new key is inline -> create layer
-                    // - If both are inline with different keylenx -> just different keys, continue
+                    //
+                    // FIXED: Only create layer if BOTH have suffixes.
+                    // Inline (keylenx 0-8) and suffix keys can coexist with same ikey
+                    // because they represent different full keys.
+                    //
+                    // C++ reference: masstree_insert.hh:36-45
                     let slot_has_suffix: bool = leaf.has_ksuf(slot);
                     let key_has_suffix: bool = key.has_suffix();
 
-                    if slot_has_suffix || key_has_suffix {
-                        // At least one has a suffix - need to create layer
+                    if slot_has_suffix && key_has_suffix {
+                        // Both have suffixes with same 8-byte prefix - need layer to distinguish
                         found_slot = Some(slot);
                         insert_pos = i;
                         break;
                     }
-                    // Both are inline keys with same ikey but different keylenx
-                    // They can coexist in the same leaf - continue searching
+                    // One is inline, one has suffix (or both inline with different keylenx)
+                    // These are distinct keys that can coexist - continue searching
                 } else if slot_ikey > ikey {
                     // Found insert position
                     insert_pos = i;
@@ -680,17 +875,28 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 (split_result.new_leaf, split_result.split_ikey)
             } else {
                 // Normal split
-                let split_result: LeafSplitResult<LeafValue<V>, WIDTH> = leaf.split_into(pre_insert_split_pos);
+                let split_result: LeafSplitResult<LeafValue<V>, WIDTH> =
+                    leaf.split_into(pre_insert_split_pos);
                 (split_result.new_leaf, split_result.split_ikey)
             };
 
             // Propagate split up the tree
             self.propagate_split(leaf_ptr, new_leaf_box, split_ikey);
 
-            // Reset layer_root since we're back in the main tree structure
-            layer_root = std::ptr::null_mut();
+            // FIXED: Do NOT reset layer_root after split.
+            //
+            // For main tree splits: layer_root was already null, stays null.
+            // On retry, reach_leaf_mut finds the correct leaf.
+            //
+            // For layer splits: layer_root still points to the old layer leaf.
+            // On retry, reach_leaf_from_ptr_mut checks the parent pointer:
+            // - If parent is null: leaf is still the layer root (no promotion)
+            // - If parent is non-null: layer was promoted, follow parent internode
+            //
+            // This implements the C++ `maybe_parent()` pattern from
+            // reference/masstree_struct.hh:83 and reference/masstree_get.hh:108.
 
-            // Loop continues - reach_leaf_mut will find the correct leaf
+            // Loop continues - reach_leaf_from_ptr_mut handles promotion
         }
     }
 }
@@ -1856,5 +2062,86 @@ mod tests {
         // Update shouldn't change count
         tree.insert(b"hello world!", 100).unwrap();
         assert_eq!(tree.len(), 3);
+    }
+
+    // ========================================================================
+    //  Layer Root Growth Tests
+    // ========================================================================
+
+    #[test]
+    fn test_layer_growth_beyond_width() {
+        // Test that a layer can grow beyond WIDTH entries by promoting to internode
+        let mut tree: MassTree<u64> = MassTree::new();
+
+        // All keys share same 8-byte prefix, forcing them into a layer
+        let prefix = b"samepfx!";
+
+        // Insert more than WIDTH (15) keys - will trigger layer root split
+        for i in 0..20u64 {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(&i.to_be_bytes());
+            tree.insert(&key, i).unwrap();
+        }
+
+        // All keys must be findable
+        for i in 0..20u64 {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(&i.to_be_bytes());
+            let result = tree.get(&key);
+            assert!(result.is_some(), "Key with suffix {i} not found");
+            assert_eq!(*result.unwrap(), i);
+        }
+    }
+
+    #[test]
+    fn test_layer_root_becomes_internode() {
+        // Test with default WIDTH - insert enough keys to trigger layer split
+        let mut tree: MassTree<u64> = MassTree::new();
+
+        // Force layer creation with suffix keys
+        tree.insert(b"prefix00suffix_a", 1).unwrap();
+        tree.insert(b"prefix00suffix_b", 2).unwrap();
+
+        // These should go into the layer and eventually trigger split
+        // With WIDTH=15, we need >15 keys in the layer to trigger split
+        for i in 0..20u64 {
+            let key = format!("prefix00suffix_{i:02}");
+            tree.insert(key.as_bytes(), i + 100).unwrap();
+        }
+
+        // Verify initial keys still findable
+        assert_eq!(*tree.get(b"prefix00suffix_a").unwrap(), 1);
+        assert_eq!(*tree.get(b"prefix00suffix_b").unwrap(), 2);
+
+        // Verify all numbered keys findable
+        for i in 0..20u64 {
+            let key = format!("prefix00suffix_{i:02}");
+            let result = tree.get(key.as_bytes());
+            assert!(result.is_some(), "Key {key} not found");
+        }
+    }
+
+    #[test]
+    fn test_layer_split_preserves_all_keys() {
+        // Comprehensive test: insert many keys with shared prefix, verify all retrievable
+        let mut tree: MassTree<u64> = MassTree::new();
+        let mut keys_and_values: Vec<(Vec<u8>, u64)> = Vec::new();
+
+        // Create keys that will all go into the same layer (share 8-byte prefix)
+        for i in 0..50u64 {
+            let mut key = b"testpfx!".to_vec(); // Exactly 8 bytes
+            key.extend_from_slice(format!("suffix{i:04}").as_bytes());
+            keys_and_values.push((key.clone(), i * 10));
+            tree.insert(&key, i * 10).unwrap();
+        }
+
+        // Verify all keys
+        for (key, expected) in &keys_and_values {
+            let result = tree.get(key);
+            assert!(result.is_some(), "Key {key:?} not found");
+            assert_eq!(*result.unwrap(), *expected);
+        }
+
+        assert_eq!(tree.len(), 50);
     }
 }

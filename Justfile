@@ -42,6 +42,16 @@ test-integration:
 test-one TEST:
     cargo test {{TEST}} -- --nocapture
 
+# Run ALL possible tests (unit, doc, integration, loom, miri)
+# This is the most comprehensive test command
+test-all: test test-loom miri-strict
+    @echo "All tests passed!"
+
+# Run loom tests for deterministic concurrency verification
+# Loom explores all possible thread interleavings
+test-loom:
+    RUSTFLAGS="--cfg loom" cargo test --lib nodeversion::loom_tests
+
 # Run clippy lints
 lint:
     cargo clippy --all-targets --all-features

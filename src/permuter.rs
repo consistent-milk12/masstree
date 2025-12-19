@@ -83,7 +83,6 @@ impl PermuterUtils {
     }
 }
 
-
 /// A permutation of slot indices for a leaf node.
 ///
 /// Encodes which physical slot holds the key at each logical position.

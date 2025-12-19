@@ -153,10 +153,12 @@ mod permutation {
                 }
                 (leaf, perm)
             })
-            .bench_local_values(|(mut leaf, perm): (Box<LeafNode<Slot, 15>>, Permuter<15>)| {
-                leaf.set_permutation(perm);
-                leaf
-            });
+            .bench_local_values(
+                |(mut leaf, perm): (Box<LeafNode<Slot, 15>>, Permuter<15>)| {
+                    leaf.set_permutation(perm);
+                    leaf
+                },
+            );
     }
 }
 

@@ -565,6 +565,15 @@ impl NodeVersion {
 
         self.value.store(value | ROOT_BIT, Ordering::Release);
     }
+
+    /// Clear the root bit.
+    ///
+    /// Called when a layer root leaf is demoted (layer root split).
+    pub fn mark_nonroot(&self) {
+        let value: u32 = self.value.load(Ordering::Relaxed);
+
+        self.value.store(value & !ROOT_BIT, Ordering::Release);
+    }
 }
 
 impl Clone for NodeVersion {
