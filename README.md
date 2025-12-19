@@ -119,6 +119,7 @@ Both implementations use deferred reclamation for node memory safety (C++ via `t
 | Scan/Remove | Planned | Range scans and key deletion not yet implemented |
 
 **Current Capabilities:**
+
 - Keys from 0-256 bytes (full trie layering for long keys)
 - Single-threaded (no concurrent access yet)
 - Pluggable allocation via `NodeAllocator` trait (arena-based by default)

@@ -1,4 +1,12 @@
+# This ignored reference/ folder contains a copy of the C++ source code
+# that has been used to study the Masstree implementation.
+#
+# It has been extensively modified to test and validate various properties
+# and contains extensive research notes that were added while working on the Rust
+# implementation. Consider adding later as a reference study material if possible.
 reference/
+
 .rumdl_cache/
 .cargo/
 target/
+.git/

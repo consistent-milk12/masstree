@@ -21,10 +21,10 @@ include = [
 ]
 
 [dependencies]
-# No dependencies for Phase 1 (single-threaded)
-# Future phases will add:
-# - seize: Hyaline-based memory reclamation (Phase 3) - predictable latency, robust
-# - parking_lot: High-performance mutexes if needed (Phase 3)
+# No dependencies for Phase 1-2 (single-threaded)
+# Phase 3 will add:
+# - seize: Hyaline-based memory reclamation - predictable latency, robust
+# - parking_lot: High-performance mutexes if needed
 
 [dev-dependencies]
 divan = "0.1.21"
