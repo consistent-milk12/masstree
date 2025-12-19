@@ -162,8 +162,8 @@ impl std::error::Error for InsertError {}
 /// - `ArenaAllocator` (default): Nodes live until tree is dropped. Simple,
 ///   no overhead, but memory is not reclaimed until drop.
 ///
-/// - Phase 3 will add an epoch-based allocator for concurrent access with
-///   deferred reclamation.
+/// - Phase 3 will add `SeizeAllocator` using hyaline reclamation (`seize` crate)
+///   for concurrent access with deferred reclamation.
 ///
 /// # Current Limitations
 ///

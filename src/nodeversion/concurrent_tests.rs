@@ -1,7 +1,9 @@
-//! Concurrent tests for NodeVersion.
+//! Concurrent tests for `NodeVersion`.
 //!
 //! These tests verify the atomic operations work correctly under contention.
 //! Guarded with `#[cfg(not(miri))]` because Miri doesn't support multi-threading well.
+
+#![expect(clippy::expect_used, reason = "fail fast with meaningful reason")]
 
 use super::*;
 use std::sync::Arc;
@@ -46,6 +48,7 @@ fn test_stable_spins_on_dirty() {
     // Writer thread: hold lock with dirty bit for a while
     let v_writer = Arc::clone(&version);
     let done = Arc::clone(&writer_done);
+
     let writer = thread::spawn(move || {
         let mut guard = v_writer.lock();
         guard.mark_insert();
@@ -100,6 +103,7 @@ fn test_try_lock_for_timeout() {
 }
 
 #[test]
+#[expect(clippy::panic, reason = "Intentional panic")]
 fn test_guard_unlocks_on_panic() {
     let version = Arc::new(NodeVersion::new(true));
     let v = Arc::clone(&version);
@@ -107,6 +111,7 @@ fn test_guard_unlocks_on_panic() {
     let handle = thread::spawn(move || {
         let mut guard = v.lock();
         guard.mark_insert();
+
         panic!("intentional panic");
     });
 

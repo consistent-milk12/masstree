@@ -91,36 +91,48 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         }
     }
 
-    /// Assigns a slot from a `Key` and optional output value.
+    /// Assign a key-value pair from a [`Key`] iterator.
     ///
-    /// If value is `Some`, assigns ikey, keylenx, value, and suffix (if any).
-    /// If value is `None`, initializes the slot for layer descent.
-    ///
-    /// This is the canonical way to populate a slot from key state during
-    /// layer creation or insertion.
+    /// This used when creating new layer entries. The key's current
+    /// position determines the ikey and suffix.
     ///
     /// # Arguments
-    ///
     /// * `slot` - Physical slot index (0..WIDTH)
     /// * `key` - The key containing ikey and suffix information
-    /// * `output` - Optional output value (from `S::into_output`); `None` means this slot will be a layer pointer
+    /// * `output` - The output value (from `S::into_output`). Wrapped in `Option`
+    ///   for caller convenience (e.g., from `try_clone_arc()`), but `None` will panic.
+    ///
+    /// # Panics
+    /// Panics if `output` is `None`. For layer pointer setup, use
+    /// [`assign_initialize_for_layer`](Self::assign_initialize_for_layer) instead.
+    ///
+    /// FIXED: Previously passed `KSUF_KEYLENX` to `assign_output()` which has
+    /// `debug_assert!(key_len <= 8)`. Now we pass the inline length and set
+    /// `keylenx` separately for suffix keys.
     pub fn assign_from_key(&mut self, slot: usize, key: &Key<'_>, output: Option<S::Output>) {
-        if let Some(val) = output {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "current_len() is at most 8 (single ikey slice)"
-            )]
-            let keylenx: u8 = if key.has_suffix() {
-                KSUF_KEYLENX
-            } else {
-                key.current_len() as u8
-            };
-            self.assign_output(slot, key.ikey(), keylenx, val);
-            if key.has_suffix() {
-                self.assign_ksuf(slot, key.suffix());
-            }
-        } else {
-            self.assign_initialize_for_layer(slot, key.ikey());
+        // Calculate inline length (0-8)
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "current_len() capped at slice length, min(8) ensures <= 8"
+        )]
+        let inline_len: u8 = key.current_len().min(8) as u8;
+
+        // INVARIANT: output must be Some - caller must ensure the source slot contains
+        // a value, not a layer pointer. Layer creation only happens when an existing
+        // VALUE conflicts with a new key, so try_clone_arc() should always succeed.
+        #[expect(clippy::expect_used, reason = "invariant: source slot must contain value")]
+        let value = output.expect(
+            "assign_from_key: output cannot be None (source slot was not a value); \
+             use assign_initialize_for_layer for layer pointer setup",
+        );
+
+        // Assign with inline length (satisfies assign_output's debug_assert)
+        self.assign_output(slot, key.ikey(), inline_len, value);
+
+        // If key has suffix, override keylenx and store suffix
+        if key.has_suffix() {
+            self.keylenx[slot] = KSUF_KEYLENX;
+            self.assign_ksuf(slot, key.suffix());
         }
     }
 }

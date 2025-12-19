@@ -3,7 +3,7 @@
 //! This module provides the [`NodeAllocator`] trait that abstracts how nodes
 //! are allocated and (eventually) deallocated. Currently uses [`ArenaAllocator`]
 //! which keeps nodes alive until the tree is dropped. Phase 3.4 will add
-//! an epoch-based allocator for concurrent access with deferred reclamation.
+//! `SeizeAllocator` using hyaline reclamation (`seize` crate) for concurrent access.
 
 use std::ptr as StdPtr;
 

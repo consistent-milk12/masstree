@@ -10,6 +10,8 @@ This project **attempts to reimplement** the [original C++ Masstree](https://git
 
 Masstree is a high-performance concurrent trie of B+trees designed for in-memory key-value storage. It combines the cache efficiency of B+trees with the no-rebalancing property of tries by slicing keys into 8-byte chunks, where each chunk navigates a separate B+tree layer.
 
+**Same algorithm, different implementation:** This project implements the same core algorithm as the C++ original: trie of B+trees, optimistic concurrency with version validation, B-link structure for lock-free traversal, permuter-based slot ordering. The divergences (Hyaline reclamation, `Arc<V>` values, type-state locking) are implementation choices that leverage Rust's strengths while preserving the algorithmic design.
+
 ## Disclaimer
 
 This is an **independent Rust implementation** of the Masstree data structure. It is **not affiliated with, endorsed by, or connected to** the original authors (Eddie Kohler, Yandong Mao, Robert Morris) or their institutions (Harvard College, MIT, University of California). This project is a study and reimplementation of the published algorithm for educational and practical use in Rust projects.
@@ -37,14 +39,14 @@ C++ can return raw pointers or references directly because:
 In Rust, we can't return `&V` from an optimistic read:
 
 - The borrow checker requires proof that references outlive their use
-- Nodes can be reclaimed by epoch-based GC while the caller still holds `&V`
+- Nodes can be reclaimed by deferred reclamation while the caller still holds `&V`
 - Guard-tied lifetimes are possible but create a complex API
 
 ### Proposed Solution: Dual Storage Modes
 
 **Default Mode: `MassTree<V>` with `Arc<V>`**
 
-Values are stored as `Arc<V>` (atomic reference-counted pointers). On read, the `Arc` is cloned (a cheap atomic increment), giving the caller an owned handle that survives node reclamation. This decouples value lifetime from the epoch-based memory reclamation used for nodes.
+Values are stored as `Arc<V>` (atomic reference-counted pointers). On read, the `Arc` is cloned (a cheap atomic increment), giving the caller an owned handle that survives node reclamation. This decouples value lifetime from the deferred memory reclamation used for nodes.
 
 - Works with any `V: Send + Sync + 'static`
 - No `Clone` requirement on `V` for reads
@@ -60,26 +62,46 @@ For performance-critical use cases with small, copyable values (`u64` handles, p
 
 This dual-mode approach provides equivalent flexibility to the C++ implementation, expressed through Rust's type system rather than raw pointers.
 
+## Memory Reclamation: Hyaline vs Classic Epoch-Based
+
+The original C++ Masstree uses classic epoch-based reclamation (EBR) via `threadinfo` and a global epoch counter (`globalepoch`). Every operation takes a `threadinfo&` parameter, and deferred nodes are stored in per-thread "limbo lists" tagged with the current epoch. Periodically, `rcu_quiesce()` scans all threads to find the minimum active epoch and frees everything older.
+
+This Rust implementation will use **hyaline reclamation** via the [`seize`](https://github.com/ibraheemdev/seize) crate instead (see the [Hyaline paper](https://arxiv.org/pdf/2108.02763.pdf)). The key differences:
+
+| Aspect | C++ EBR (`kvthread.hh`) | Rust Hyaline (`seize`) |
+|--------|-------------------------|------------------------|
+| **Epoch coordination** | Global counter, all threads sync | Per-thread, no global barrier |
+| **Stalled threads** | Block reclamation for everyone | Filtered out via epoch tracking |
+| **Reclamation timing** | Batch (every 128 frees) | Balanced across threads |
+| **Latency distribution** | Unpredictable spikes | Predictable, smoother |
+| **API burden** | Pass `threadinfo&` everywhere | Internal guard management |
+
+**Why this matters for Masstree:**
+
+Masstree is read-heavy with optimistic readers that rarely block. Classic EBR's batch reclamation (triggered every N operations) causes latency spikes that disrupt the otherwise smooth read path. Hyaline's per-thread balancing keeps reclamation work distributed, avoiding these spikes.
+
+Additionally, seize handles "stalled" threads gracefully: a thread blocked on I/O won't prevent other threads from reclaiming memory, unlike the C++ implementation where one slow thread blocks `min_active_epoch()` for everyone.
+
 ## Divergences from the C++ Implementation
 
-Both implementations use epoch-based reclamation (EBR) for node memory safety—C++ via `threadinfo`, this implementation via `crossbeam-epoch` (if implemented as planned). The difference lies in **value lifetime management**:
+Both implementations use deferred reclamation for node memory safety (C++ via `threadinfo`, Rust via `seize`). The difference lies in **value lifetime management**:
 
 | Aspect | C++ Masstree | Rust Masstree |
 |--------|--------------|---------------|
-| Node safety | EBR (manual `threadinfo&` passing) | EBR (epoch pinning is internal) |
+| Node safety | EBR (manual `threadinfo&` passing) | Hyaline via `seize` (internal) |
 | Value safety | User's responsibility | `Arc<V>` handles automatically |
 | Misuse | Silent undefined behavior | Compile error or safe behavior |
 | API burden | Must pass `threadinfo&` to every call | Clean API, no manual tracking |
 
 **Key differences:**
 
-1. **Values can't outlive their storage** — In C++, storing a `char*` to heap data, deleting the entry, then accessing the pointer is silent UB. With `Arc<V>`, the data lives until the last reference drops.
+1. **Values can't outlive their storage**: In C++, storing a `char*` to heap data, deleting the entry, then accessing the pointer is silent UB. With `Arc<V>`, the data lives until the last reference drops.
 
-2. **No manual coordination** — C++ users must ensure value cleanup happens after all readers finish. `Arc`'s refcount handles this automatically.
+2. **No manual coordination**: C++ users must ensure value cleanup happens after all readers finish. `Arc`'s refcount handles this automatically.
 
-3. **Composable safety** — `MassTree<Vec<String>>` would just work. In C++, complex value types need careful RCU-aware destructor implementations.
+3. **Composable safety**: `MassTree<Vec<String>>` just works. In C++, complex value types need careful RCU-aware destructor implementations.
 
-4. **Zero-cost when not needed** — `MassTreeIndex<u64>` would provide C++ equivalent performance for simple cases where `Arc` overhead matters.
+4. **Zero-cost when not needed**: `MassTreeIndex<u64>` provides C++-equivalent performance for simple cases where `Arc` overhead matters.
 
 ## Current Implementation Status
 

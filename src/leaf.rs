@@ -79,7 +79,6 @@ pub enum InsertTarget {
 /// Contains the new leaf and information about where to insert.
 ///
 /// # Type Parameters
-///
 /// * `S` - The slot type implementing [`ValueSlot`]
 /// * `WIDTH` - Node width (number of slots)
 #[derive(Debug)]
@@ -109,7 +108,6 @@ impl SplitUtils {
     /// the post-insert key stream, not just existing keys.
     ///
     /// # Arguments
-    ///
     /// * `leaf` - The leaf being split
     /// * `i` - Logical position in post-insert order
     /// * `insert_pos` - Where the new key will be inserted
@@ -204,13 +202,11 @@ impl SplitUtils {
     /// (in post-insert coordinates) will move to the new leaf.
     ///
     /// # Arguments
-    ///
     /// * `leaf` - The leaf node to split
     /// * `insert_pos` - Where the new key would be inserted
     /// * `insert_ikey` - The ikey of the new key
     ///
     /// # Returns
-    ///
     /// `SplitPoint` with position and split key, or None if split is not possible
     /// (e.g., all entries have same ikey - would need layer instead).
     pub fn calculate_split_point<S: ValueSlot, const WIDTH: usize>(
@@ -272,7 +268,7 @@ impl SplitUtils {
 /// # Type Parameter
 /// * `V` - The value type stored in the tree (stored as `Arc<V>`)
 ///
-/// # Why `Arc<V>`?
+/// NOTE: Why `Arc<V>`?
 /// Optimistic reads need to return owned values safely.
 /// `Arc<V>` allows cheap cloning (refcount) and decouples value
 /// lifetime from node lifetime (EBR handles node, `Arc` handles values).
@@ -804,7 +800,6 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// - The slot doesn't have a suffix (`keylenx != KSUF_KEYLENX`)
     ///
     /// # Panics
-    ///
     /// Panics in debug mode if `slot >= WIDTH`.
     #[must_use]
     pub fn ksuf(&self, slot: usize) -> Option<&[u8]> {
@@ -820,7 +815,6 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// Get the suffix for a slot, or an empty slice if none.
     ///
     /// # Panics
-    ///
     /// Panics in debug mode if `slot >= WIDTH`.
     #[inline]
     #[must_use]
@@ -834,12 +828,10 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// The slot's `keylenx` is set to `KSUF_KEYLENX`.
     ///
     /// # Arguments
-    ///
     /// * `slot` - Physical slot index
     /// * `suffix` - The suffix bytes to store (bytes after the first 8)
     ///
     /// # Panics
-    ///
     /// Panics if `slot >= WIDTH` or suffix is too long.
     #[expect(
         clippy::indexing_slicing,
@@ -869,7 +861,6 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// [`compact_ksuf()`](Self::compact_ksuf) to reclaim space.
     ///
     /// # Panics
-    ///
     /// Panics in debug mode if `slot >= WIDTH`.
     #[expect(
         clippy::indexing_slicing,

@@ -23,7 +23,7 @@ include = [
 [dependencies]
 # No dependencies for Phase 1 (single-threaded)
 # Future phases will add:
-# - crossbeam-epoch: Epoch-based memory reclamation (Phase 3)
+# - seize: Hyaline-based memory reclamation (Phase 3) - predictable latency, robust
 # - parking_lot: High-performance mutexes if needed (Phase 3)
 
 [dev-dependencies]

@@ -9,8 +9,8 @@
 //! NOTE: Loom tests use loom's own atomic types, so we create a simplified
 //! version of the lock to test the core CAS semantics.
 
-use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::sync::Arc;
+use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::thread;
 use std::marker::PhantomData;
 
@@ -127,12 +127,10 @@ impl LoomNodeVersion {
 
         let locked = value | LOCK_BIT;
 
-        match self.value.compare_exchange(
-            value,
-            locked,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ) {
+        match self
+            .value
+            .compare_exchange(value, locked, Ordering::Acquire, Ordering::Relaxed)
+        {
             Ok(_) => Some(LoomLockGuard {
                 version: self,
                 locked_value: locked,
