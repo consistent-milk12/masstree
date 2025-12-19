@@ -19,6 +19,7 @@ use crate::slot::ValueSlot;
 
 mod index;
 mod layer;
+mod optimistic;
 mod split;
 mod traverse;
 

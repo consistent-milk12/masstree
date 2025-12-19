@@ -748,6 +748,22 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         self.ikey0[0]
     }
 
+    /// Get the `keylenx` bound for this leaf (used for B-link navigation).
+    ///
+    /// The `keylenx` bound is the keylenx of the first key (slot 0 in permutation order).
+    /// Combined with `ikey_bound()`, this provides full key comparison for B-link traversal.
+    ///
+    /// # Panics
+    /// Panics in debug mode if the leaf is empty.
+    #[inline]
+    pub fn keylenx_bound(&self) -> u8 {
+        let perm: Permuter<WIDTH> = self.permutation;
+
+        debug_assert!(perm.size() > 0, "keylenx_bound called on empty_leaf");
+
+        self.keylenx(perm.get(0))
+    }
+
     /// Check if the given slot contains a layer pointer.
     ///
     /// # Panics
