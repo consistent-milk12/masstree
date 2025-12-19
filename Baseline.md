@@ -271,42 +271,60 @@ Note: `lower_bound_missing` regressed ~10% vs Run 7 at size 15 (7.9→8.7 ns).
 
 ---
 
-## SOTA Comparison (Updated Run 10)
+## SOTA Comparison (Updated Run 11)
+
+Run 11 introduced `benches/comparison.rs` with rigorous head-to-head benchmarks against `BTreeMap` using identical key generation, access patterns, and measurement methodology.
 
 ### vs Rust `std::collections::BTreeMap`
 
-| Operation | MassTree (Run 10) | BTreeMap | Advantage |
-|-----------|-------------------|----------|-----------|
-| Insert (single) | 31 ns | 50 ns | **1.6x faster** |
-| Insert (into 1000 keys) | 70 ns | 99 ns | **1.4x faster** |
-| Get (from 1000 keys) | 21 ns | 15 ns | BTreeMap 1.4x faster |
-| Batch insert (100 keys) | 2.73 µs | ~5 µs | **1.8x faster** |
+#### Single Operations
 
-**Verdict:** MassTree advantage restored after Run 10 optimizations. 1.4-1.8x faster on inserts.
+| Operation | Tree Size | MassTree | BTreeMap | Notes |
+|-----------|-----------|----------|----------|-------|
+| Insert (empty tree) | 1 | 52 ns | **23 ns** | BTreeMap 2.3x faster |
+| Insert (populated) | 10 | **34 ns** | 88 ns | MassTree 2.6x faster |
+| Insert (populated) | 100 | **41 ns** | 85 ns | MassTree 2.1x faster |
+| Insert (populated) | 1000 | **104 ns** | 156 ns | MassTree 1.5x faster |
+| Get (hit) | 10 | **9.5 ns** | 29 ns | MassTree 3.1x faster |
+| Get (hit) | 100 | **16 ns** | 22 ns | MassTree 1.4x faster |
+| Get (hit) | 1000 | **22 ns** | 60 ns | MassTree 2.7x faster |
+| Get (miss) | 1000 | **17 ns** | 104 ns | MassTree 6.1x faster |
+| Update existing | 1000 | **88 ns** | 148 ns | MassTree 1.7x faster |
 
-### vs Original [Masstree C++](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf)
+#### Batch Operations
 
-| Metric | Original C++ | Our Rust | Notes |
-|--------|--------------|----------|-------|
-| Single-core ops | ~50-150 ns (est.) | 10-31 ns | **3-5x faster** |
-| Multi-core throughput | 6-10M ops/sec (16 cores) | N/A | Phase 2 needed |
+| Operation | Size | MassTree | BTreeMap | Notes |
+|-----------|------|----------|----------|-------|
+| Sequential insert | 100 | **4.6 µs** | 6.8 µs | MassTree 1.5x faster |
+| Sequential insert | 500 | **27 µs** | 58 µs | MassTree 2.1x faster |
+| Random insert | 100 | **5.5 µs** | 8.7 µs | MassTree 1.6x faster |
+| Sequential get | 100 | **1.4 µs** | 3.6 µs | MassTree 2.6x faster |
+| Sequential get | 500 | **10 µs** | 36 µs | MassTree 3.6x faster |
 
-### vs [Congee](https://github.com/XiangpengHao/congee) (Concurrent ART, Rust)
+#### Mixed Workloads
 
-| Metric | Congee | MassTree | Notes |
-|--------|--------|----------|-------|
-| Peak throughput | **150 Mop/s** (32 cores) | N/A | Concurrent vs single-threaded |
-| Single-op latency | ~6.7 ns | 10-21 ns | ART ~1.5x faster for point queries |
+| Workload | Size | MassTree | BTreeMap | Notes |
+|----------|------|----------|----------|-------|
+| 50/50 read/write | 1000 | **0.9 µs** | 2.2 µs | MassTree 2.4x faster |
+| 90/10 read-heavy | 1000 | **0.6 µs** | 1.9 µs | MassTree 3.2x faster |
 
-### Summary
+#### Scaling (Get from N keys)
 
-| Category | Verdict |
-|----------|---------|
-| vs std::BTreeMap | **1.4-1.8x faster** inserts |
-| vs Original Masstree C++ | **3-5x faster** single-core |
-| vs Concurrent (Congee, sled) | Needs Phase 2 |
+| Tree Size | MassTree | BTreeMap | Notes |
+|-----------|----------|----------|-------|
+| 100 | **16 ns** | 21 ns | MassTree 1.3x faster |
+| 1000 | **22 ns** | 55 ns | MassTree 2.5x faster |
+| 5000 | **25 ns** | 39 ns | MassTree 1.6x faster |
+| 10000 | **19 ns** | 60 ns | MassTree 3.2x faster |
 
-✅ **Run 10 recovered from Run 9 regressions via `#[inline(always)]` and specialized hot paths.**
+**Observations:**
+
+1. **Empty tree insert**: BTreeMap has lower fixed overhead (~23 ns vs ~52 ns). This is a one-time cost that amortizes quickly.
+2. **Populated trees**: MassTree consistently outperforms BTreeMap, with the advantage growing at scale.
+3. **Read operations**: MassTree shows strong performance, particularly for misses and at larger tree sizes.
+4. **Mixed workloads**: MassTree's read performance dominates in realistic scenarios.
+
+NOTE: Interesting results but these benches are expected to severely degrade and BTreeMap should end up winning in most categories after I start working on adding concurrency.
 
 ---
 
@@ -320,6 +338,7 @@ Note: `lower_bound_missing` regressed ~10% vs Run 7 at size 15 (7.9→8.7 ns).
 - **Run 8:** Post-refactoring (tree.rs submodules, iterative traversal). Reverse insert 41% faster, insert into 1000 keys 28% faster, Arc/Copy mode now equal.
 - **Run 9:** Key/Permuter/InternodeNode primitives improved 30-50%. **Tree-level operations regressed 20-90%** due to `ValueSlot` trait abstraction overhead.
 - **Run 10:** Added `#[inline(always)]` to all `ValueSlot` trait methods and hot-path accessors. Specialized `swap_value`/`swap_inline` to avoid trait dispatch. **Regressions recovered.** Reverse insert now faster than Run 8. Arc/Copy modes equal again.
+- **Run 11:** Added `benches/comparison.rs` for rigorous head-to-head comparison with `std::BTreeMap`. Fixed layer root internode split bug. Results show MassTree faster for populated trees, BTreeMap faster for empty tree inserts due to lower fixed overhead.
 
 `lock_unlock`, `try_lock_success`, and `mark_*` operations show ~0 ns due to compiler optimization when input is freshly created per iteration.
 

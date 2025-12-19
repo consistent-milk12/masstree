@@ -103,6 +103,38 @@ Both implementations use deferred reclamation for node memory safety (C++ via `t
 
 4. **Zero-cost when not needed**: `MassTreeIndex<u64>` provides C++-equivalent performance for simple cases where `Arc` overhead matters.
 
+## Performance
+
+Benchmarks compare MassTree against `std::collections::BTreeMap` using identical key generation and access patterns. Run `cargo bench --bench comparison` to reproduce.
+
+### Where MassTree Performs Well
+
+| Operation | Tree Size | MassTree | BTreeMap | Ratio |
+|-----------|-----------|----------|----------|-------|
+| Insert (populated) | 1000 | 104 ns | 156 ns | 1.5x faster |
+| Get (hit) | 1000 | 22 ns | 60 ns | 2.7x faster |
+| Get (miss) | 1000 | 17 ns | 104 ns | 6.1x faster |
+| Batch get (500 keys) | 500 | 10 µs | 36 µs | 3.6x faster |
+| Mixed 90/10 read/write | 1000 | 0.6 µs | 1.9 µs | 3.2x faster |
+
+### Where BTreeMap Performs Well
+
+| Operation | Tree Size | MassTree | BTreeMap | Ratio |
+|-----------|-----------|----------|----------|-------|
+| Insert (empty tree) | 1 | 52 ns | 23 ns | BTreeMap 2.3x faster |
+
+MassTree has higher fixed overhead for initialization, which amortizes quickly with use.
+
+**NOTE**: Interesting results but these benches are expected to severely degrade and BTreeMap should end up winning in most categories after I start working on adding concurrency.
+
+### Caveats
+
+- **Single-threaded only**: Concurrency is planned for Phase 3
+- **No range scans yet**: Ordered iteration not implemented
+- **Different trade-offs**: MassTree is optimized for byte-slice keys; BTreeMap is more general
+
+See `Baseline.md` for detailed benchmark history.
+
 ## Current Implementation Status
 
 | Module | Status | Notes |

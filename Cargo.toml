@@ -21,10 +21,7 @@ include = [
 ]
 
 [dependencies]
-# No dependencies for Phase 1-2 (single-threaded)
-# Phase 3 will add:
-# - seize: Hyaline-based memory reclamation - predictable latency, robust
-# - parking_lot: High-performance mutexes if needed
+seize = "0.5.1"
 
 [dev-dependencies]
 divan = "0.1.21"
@@ -131,4 +128,8 @@ harness = false
 
 [[bench]]
 name = "tree"
+harness = false
+
+[[bench]]
+name = "comparison"
 harness = false
