@@ -1,9 +1,16 @@
 //! Benchmarks for key search operations using Divan.
 //!
 //! Run with: `cargo bench --bench ksearch`
+//! With mimalloc: `cargo bench --bench ksearch --features mimalloc`
+
 #![expect(clippy::indexing_slicing, reason = "fail fast in tests")]
 #![expect(clippy::cast_possible_truncation, reason = "reasonable for benches")]
 #![expect(clippy::cast_sign_loss, reason = "reasonable for benches")]
+
+// Use alternative allocator if feature is enabled
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use divan::{Bencher, black_box};
 use masstree::internode::InternodeNode;

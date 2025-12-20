@@ -12,16 +12,27 @@
 //! - **True contention**: Threads read/write overlapping key ranges
 //! - **High thread counts**: 1, 2, 4, 8, 16, 32 threads
 //!
-//! Run with: `cargo bench --bench concurrent_maps`
+//! ## Running with Alternative Allocators
+//!
+//! ```bash
+//! cargo bench --bench concurrent_maps                          # default allocator
+//! cargo bench --bench concurrent_maps --features mimalloc      # mimalloc
+//! cargo bench --bench concurrent_maps --features jemalloc      # jemalloc
+//! ```
 
 #![expect(clippy::indexing_slicing)]
 
+// Use alternative allocator if feature is enabled
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use crossbeam_skiplist::SkipMap;
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::MassTree;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 fn main() {
@@ -43,7 +54,8 @@ fn keys_16b(n: usize) -> Vec<Vec<u8>> {
         .map(|i| {
             let mut key = vec![0u8; 16];
             key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            key[8..16].copy_from_slice(&((i as u64).wrapping_mul(0x517cc1b727220a95)).to_be_bytes());
+            key[8..16]
+                .copy_from_slice(&((i as u64).wrapping_mul(0x517cc1b727220a95)).to_be_bytes());
             key
         })
         .collect()
@@ -55,7 +67,8 @@ fn keys_24b(n: usize) -> Vec<Vec<u8>> {
         .map(|i| {
             let mut key = vec![0u8; 24];
             key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            key[8..16].copy_from_slice(&((i as u64).wrapping_mul(0x517cc1b727220a95)).to_be_bytes());
+            key[8..16]
+                .copy_from_slice(&((i as u64).wrapping_mul(0x517cc1b727220a95)).to_be_bytes());
             key[16..24]
                 .copy_from_slice(&((i as u64).wrapping_mul(0x9e3779b97f4a7c15)).to_be_bytes());
             key
@@ -69,7 +82,8 @@ fn keys_32b(n: usize) -> Vec<Vec<u8>> {
         .map(|i| {
             let mut key = vec![0u8; 32];
             key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            key[8..16].copy_from_slice(&((i as u64).wrapping_mul(0x517cc1b727220a95)).to_be_bytes());
+            key[8..16]
+                .copy_from_slice(&((i as u64).wrapping_mul(0x517cc1b727220a95)).to_be_bytes());
             key[16..24]
                 .copy_from_slice(&((i as u64).wrapping_mul(0x9e3779b97f4a7c15)).to_be_bytes());
             key[24..32]
@@ -321,7 +335,7 @@ mod concurrent_reads_scaling {
                         let offset = t * 7919; // Prime offset per thread
                         for i in 0..OPS_PER_THREAD {
                             let idx = indices[(i + offset) % indices.len()];
-                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                            if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                 sum += *v;
                             }
                         }
@@ -430,7 +444,7 @@ mod concurrent_reads_long_keys {
                         let offset = t * 7919;
                         for i in 0..OPS_PER_THREAD {
                             let idx = indices[(i + offset) % indices.len()];
-                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                            if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                 sum += *v;
                             }
                         }
@@ -745,7 +759,7 @@ mod mixed_zipfian {
                                 let idx = indices[(i + offset) % indices.len()];
                                 if i % WRITE_RATIO == 0 {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                     sum += *v;
                                 }
                             }
@@ -870,7 +884,7 @@ mod mixed_uniform {
                                 let idx = indices[(i + offset) % indices.len()];
                                 if i % WRITE_RATIO == 0 {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                     sum += *v;
                                 }
                             }
@@ -995,7 +1009,7 @@ mod mixed_long_keys_zipfian {
                                 let idx = indices[(i + offset) % indices.len()];
                                 if i % WRITE_RATIO == 0 {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                     sum += *v;
                                 }
                             }
@@ -1120,7 +1134,7 @@ mod single_hot_key {
                                         (t * OPS_PER_THREAD + i) as u64,
                                         &guard,
                                     );
-                                } else if let Some(v) = tree.get_with_guard(&hot_key, &guard) {
+                                } else if let Some(v) = tree.get_ref(&hot_key, &guard) {
                                     sum += *v;
                                 }
                             }

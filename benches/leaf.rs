@@ -1,6 +1,12 @@
 //! Benchmarks for `LeafNode` using Divan.
 //!
 //! Run with: `cargo bench --bench leaf`
+//! With mimalloc: `cargo bench --bench leaf --features mimalloc`
+
+// Use alternative allocator if feature is enabled
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use divan::{Bencher, black_box};
 use masstree::leaf::{LeafNode, LeafValue};

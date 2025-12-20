@@ -1,7 +1,14 @@
 //! Benchmarks for `MassTree` and `MassTreeIndex` using Divan.
 //!
 //! Run with: `cargo bench --bench tree`
+//! With mimalloc: `cargo bench --bench tree --features mimalloc`
+
 #![expect(clippy::cast_possible_truncation)]
+
+// Use alternative allocator if feature is enabled
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use divan::{Bencher, black_box};
 use masstree::tree::{MassTree, MassTreeIndex};

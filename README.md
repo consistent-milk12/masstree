@@ -58,8 +58,13 @@ let handles: Vec<_> = (0..4).map(|i| {
         // Insert with guard (fine-grained locking)
         let _ = tree.insert_with_guard(b"key", i, &guard);
 
-        // Get with guard (lock-free, version-validated)
-        tree.get_with_guard(b"key", &guard)
+        // get_ref returns &V (zero-copy, best for read-heavy workloads)
+        if let Some(value) = tree.get_ref(b"key", &guard) {
+            println!("Got: {}", *value);
+        }
+
+        // get_with_guard returns Arc<V> (if you need ownership beyond guard)
+        let owned = tree.get_with_guard(b"key", &guard);
     })
 }).collect();
 
@@ -88,33 +93,67 @@ assert_eq!(*tree.get(b"alice").unwrap(), 100);
 
 ## Performance
 
-Benchmarks vs `BTreeMap` (single-threaded, `cargo bench --bench comparison`):
+### Single-Threaded Reads (vs other concurrent maps)
 
-| Operation | MassTree | BTreeMap | Ratio |
-|-----------|----------|----------|-------|
-| Get (hit, n=1000) | 21 ns | 54 ns | **2.6x faster** |
-| Get (miss, n=1000) | 9 ns | 91 ns | **10x faster** |
-| Insert (populated) | 128 ns | 181 ns | **1.4x faster** |
-| Mixed 90/10 r/w | 755 ns | 1.87 µs | **2.5x faster** |
+Benchmarks from `cargo bench --bench concurrent_maps` (1000 lookups per iteration):
 
-**Where BTreeMap wins:**
+| Key Size | MassTree | IndexSet | SkipMap | MassTree Advantage |
+|----------|----------|----------|---------|-------------------|
+| 8 bytes  | 81 µs    | 192 µs   | 278 µs  | **2.4x / 3.4x faster** |
+| 16 bytes | 95 µs    | 194 µs   | 281 µs  | **2.0x / 3.0x faster** |
+| 32 bytes | 96 µs    | 186 µs   | 263 µs  | **1.9x / 2.7x faster** |
 
-| Operation | MassTree | BTreeMap | Notes |
-|-----------|----------|----------|-------|
-| Insert (empty) | 91 ns | 15 ns | Higher fixed overhead |
-| Update existing | 478 ns | 141 ns | Arc swap cost |
+MassTree's multi-layer design has minimal overhead for longer keys (~18% slowdown from 8B to 32B).
+
+### Single-Threaded Inserts
+
+| Key Size | MassTree | SkipMap | IndexSet | Notes |
+|----------|----------|---------|----------|-------|
+| 8 bytes  | 71 µs    | 170 µs  | 536 µs   | **MassTree 2.4x faster** |
+| 32 bytes | 226 µs   | 158 µs  | 523 µs   | SkipMap 1.4x faster (multi-layer cost) |
+
+MassTree excels with short keys; longer keys require layer creation overhead.
 
 ## Concurrent Scaling
 
-Tested against DashMap (note: different data structure category):
+### Allocator Matters
 
-| Threads | MassTree | DashMap | Notes |
-|---------|----------|---------|-------|
-| 2 (reads) | 1.24ms | 1.90ms | MassTree 35% faster |
-| 8 (reads) | 5.17ms | 5.49ms | MassTree 6% faster |
-| 8 (high contention) | 4.34ms | 2.44ms | DashMap 44% faster |
+MassTree's performance depends heavily on the memory allocator. **Use mimalloc for best results.**
 
-MassTree scales well for reads. High write contention favors DashMap's sharded design.
+```rust
+// Add to your binary's main.rs
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+```
+
+### Read Scaling with mimalloc (recommended)
+
+| Threads | MassTree | SkipMap | IndexSet | Notes |
+|---------|----------|---------|----------|-------|
+| 1       | 5.3 ms   | 8.1 ms  | 6.9 ms   | **MassTree 1.5x faster** |
+| 8       | 15.5 ms  | 16.1 ms | 16.3 ms  | **MassTree fastest** |
+| 16      | 28.6 ms  | 28.6 ms | 28.8 ms  | Tie |
+| 32      | 50.3 ms  | 56.0 ms | 55.0 ms  | **MassTree 10% faster** |
+
+### Read Scaling with Standard Allocator
+
+| Threads | MassTree | SkipMap | IndexSet | Notes |
+|---------|----------|---------|----------|-------|
+| 1       | 9.4 ms   | 13.1 ms | 11.6 ms  | MassTree fastest |
+| 8       | 83.4 ms  | 47.7 ms | 53.6 ms  | SkipMap faster |
+| 16      | 179 ms   | 106 ms  | 112 ms   | SkipMap 1.7x faster |
+
+### Allocator Comparison (32 threads)
+
+| Allocator | MassTree | vs Standard |
+|-----------|----------|-------------|
+| **mimalloc** | **50 ms** | **7.5x faster** |
+| Standard  | 376 ms   | baseline |
+| jemalloc  | 1001 ms  | 2.7x slower (avoid!) |
+
+### Why Allocator Matters
+
+The standard glibc allocator has lock contention under MassTree's allocation pattern. mimalloc uses segment-based allocation that scales much better. jemalloc has a pathological interaction—avoid it with MassTree.
 
 ## Architecture
 
@@ -149,19 +188,12 @@ let index: MassTreeIndex<u64> = MassTreeIndex::new();
 
 ## Known Limitations
 
-1. **Memory grows monotonically** - Split nodes stay allocated until tree drop
-2. **No range scans** - Ordered iteration not yet implemented
-3. **No deletion** - Keys cannot be removed
-4. **Update overhead** - `Arc` swap is slower than in-place mutation
-5. **Limited stress testing** - Verified up to 8 threads
+1. **Allocator-sensitive** - Requires mimalloc for best concurrent performance (see above)
+2. **Memory grows monotonically** - Split nodes stay allocated until tree drop
+3. **No range scans** - Ordered iteration not yet implemented
+4. **No deletion** - Keys cannot be removed
+5. **Insert overhead for long keys** - Multi-layer creation slower than SkipMap
 6. **Key length limit** - Keys > 256 bytes will panic (not a Result error)
-
-## Roadmap
-
-- **v0.1.0** (current): Core concurrent get/insert
-- **v0.2.0**: Range scans, deletion, seize retirement
-- **v0.3.0**: Performance optimization, stress testing
-- **v1.0.0**: Production ready
 
 ## Contributing
 

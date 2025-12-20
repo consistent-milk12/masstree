@@ -1,7 +1,14 @@
 //! Benchmarks for `InternodeNode` using Divan.
 //!
 //! Run with: `cargo bench --bench internode`
+//! With mimalloc: `cargo bench --bench internode --features mimalloc`
+
 #![expect(clippy::cast_possible_truncation)]
+
+// Use alternative allocator if feature is enabled
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use divan::{Bencher, black_box};
 use masstree::internode::InternodeNode;

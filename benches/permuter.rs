@@ -1,6 +1,12 @@
 //! Fast benchmarks for `Permuter` using Divan.
 //!
 //! Run with: `cargo bench --bench permuter`
+//! With mimalloc: `cargo bench --bench permuter --features mimalloc`
+
+// Use alternative allocator if feature is enabled
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use divan::{Bencher, black_box};
 use masstree::permuter::Permuter;

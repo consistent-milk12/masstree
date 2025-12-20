@@ -8,8 +8,15 @@
 //! - Multiple tree sizes to capture scaling behavior
 //!
 //! Run with: `cargo bench --bench comparison`
+//! With mimalloc: `cargo bench --bench comparison --features mimalloc`
 
 #![expect(clippy::indexing_slicing)]
+
+// Use alternative allocator if feature is enabled
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use divan::{Bencher, black_box};
 use masstree::tree::{MassTree, MassTreeIndex};
 use std::collections::BTreeMap;

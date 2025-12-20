@@ -27,9 +27,19 @@ include = [
 	"README.md",
 ]
 
+[features]
+default = []
+# Alternative global allocators for benchmarking
+mimalloc = ["dep:mimalloc"]
+jemalloc = ["dep:tikv-jemallocator"]
+
 [dependencies]
 seize = "0.5.1"
 parking_lot = "0.12.5"
+
+# Optional allocators (enabled via features)
+mimalloc = { version = "0.1.48", optional = true }
+tikv-jemallocator = { version = "0.6.1", optional = true }
 
 [dev-dependencies]
 divan = "0.1.21"
