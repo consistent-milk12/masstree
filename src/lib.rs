@@ -1,23 +1,51 @@
 //! # `MassTree`
 //!
-//! A high-performance key-value store based on a trie of B+trees.
+//! A concurrent ordered map based on a trie of B+trees.
 //!
 //! This crate implements Masstree, combining tries and B+trees:
 //! - Trie structure for variable-length key prefixes (8-byte chunks)
 //! - B+tree at each trie node for the current 8-byte slice
 //! - Cache-friendly: 8-byte key slices fit in registers
 //!
-//! ## Current Status: Phase 3 In Progress
+//! ## Status: Alpha
 //!
-//! - **Phase 1-2 complete**: Single-threaded core with trie layering
-//! - **Phase 3.1 complete**: `NodeVersion` has CAS-based locking with backoff
-//! - **Phase 3.2-3.3 pending**: Optimistic get and locked insert (specs ready)
+//! **Not production ready.** Core concurrent operations work but memory
+//! reclamation is incomplete and range scans/deletion are not implemented.
 //!
-//! **Current constraints:**
-//! - Keys can be any length from 0-256 bytes
-//! - Full trie layering for keys sharing common prefixes
-//! - Tree operations are single-threaded (`MassTree` is `!Send`/`!Sync`)
-//! - `NodeVersion` locking is concurrent-ready but not yet used by tree ops
+//! | Feature | Status |
+//! |---------|--------|
+//! | Concurrent get | Works (lock-free, version-validated) |
+//! | Concurrent insert | Works (CAS fast path + locked fallback) |
+//! | Split propagation | Works (leaf and internode) |
+//! | Memory reclamation | Partial (nodes not freed until tree drop) |
+//! | Range scans | Not implemented |
+//! | Deletion | Not implemented |
+//!
+//! ## Thread Safety
+//!
+//! `MassTree<V>` is `Send + Sync` when `V: Send + Sync`. Concurrent access
+//! requires using the guard-based API:
+//!
+//! ```rust
+//! use masstree::MassTree;
+//!
+//! let tree: MassTree<u64> = MassTree::new();
+//! let guard = tree.guard();
+//!
+//! // Concurrent get (lock-free)
+//! let value = tree.get_with_guard(b"key", &guard);
+//!
+//! // Concurrent insert (fine-grained locking)
+//! let old = tree.insert_with_guard(b"key", 42, &guard);
+//! ```
+//!
+//! The non-guard methods (`get`, `insert`) exist for convenience but require
+//! `&mut self` for insert, making them unsuitable for concurrent use.
+//!
+//! ## Key Constraints
+//!
+//! - Keys must be 0-256 bytes. Longer keys will panic.
+//! - Keys are byte slices (`&[u8]`), not generic types.
 //!
 //! ## Design
 //!

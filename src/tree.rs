@@ -965,24 +965,23 @@ mod tests {
     use super::*;
 
     // ========================================================================
-    // !Send/!Sync Verification
+    // Send/Sync Verification
     // ========================================================================
     //
-    // MassTree uses PhantomData<*const ()> to be !Send and !Sync.
-    // Raw pointers (*mut T, *const T) are neither Send nor Sync in Rust,
-    // and PhantomData<T> inherits the auto-traits of T.
+    // MassTree<V> is Send + Sync when V: Send + Sync.
     //
-    // To verify this works, uncomment the following and observe the compile error:
+    // The struct uses:
+    // - AtomicPtr<u8> for root_ptr (Send + Sync)
+    // - AtomicUsize for count (Send + Sync)
+    // - PhantomData<V> which inherits Send/Sync from V
     //
-    // ```
-    // fn require_send<T: Send>() {}
-    // fn require_sync<T: Sync>() {}
-    //
-    // fn test_would_fail() {
-    //     require_send::<MassTree<u64>>();  // ERROR: MassTree is !Send
-    //     require_sync::<MassTree<u64>>();  // ERROR: MassTree is !Sync
-    // }
-    // ```
+    // This enables concurrent access via Arc<MassTree<V>>.
+
+    fn _assert_send_sync()
+    where
+        MassTree<u64>: Send + Sync,
+    {
+    }
 
     // ========================================================================
     //  MassTree Basic Tests

@@ -15,7 +15,8 @@ A concurrent ordered map for Rust, based on the Masstree algorithm (trie of B+tr
 | Concurrent get | Works | Lock-free, version-validated |
 | Concurrent insert | Works | CAS fast path + locked fallback |
 | Split propagation | Works | Leaf and internode splits at any level |
-| Linearizability | Verified | Loom + Shuttle tests |
+| Concurrency patterns | Tested | Loom tests core patterns (not full tree) |
+| Linearizability | Tested | Shuttle tests simplified model |
 | Memory safety | Verified | Miri strict provenance |
 | Memory reclamation | Partial | Nodes not reclaimed until tree drop |
 | Range scans | Missing | Planned for v0.2 |
@@ -38,22 +39,52 @@ Skip lists have poor cache locality. B+trees allocate nodes in blocks, improving
 
 ## Quick Start
 
+### Concurrent API (recommended)
+
+```rust
+use masstree::MassTree;
+use std::sync::Arc;
+use std::thread;
+
+// MassTree is Send + Sync when V: Send + Sync
+let tree = Arc::new(MassTree::<u64>::new());
+
+// Spawn concurrent readers and writers
+let handles: Vec<_> = (0..4).map(|i| {
+    let tree = Arc::clone(&tree);
+    thread::spawn(move || {
+        let guard = tree.guard();
+
+        // Insert with guard (fine-grained locking)
+        let _ = tree.insert_with_guard(b"key", i, &guard);
+
+        // Get with guard (lock-free, version-validated)
+        tree.get_with_guard(b"key", &guard)
+    })
+}).collect();
+
+for h in handles {
+    let _ = h.join().unwrap();
+}
+```
+
+### Single-threaded API
+
 ```rust
 use masstree::MassTree;
 
-// Create a new tree
 let mut tree: MassTree<u64> = MassTree::new();
 
-// Insert key-value pairs (keys are byte slices)
-tree.insert(b"alice", 100);
-tree.insert(b"bob", 200);
+// insert() requires &mut self - not for concurrent use
+let _ = tree.insert(b"alice", 100)?;
+let _ = tree.insert(b"bob", 200)?;
 
-// Concurrent reads (returns Arc<V>)
+// get() returns Arc<V>
 assert_eq!(*tree.get(b"alice").unwrap(), 100);
-
-// Keys can be any length (0-256 bytes)
-tree.insert(b"very_long_key_that_spans_multiple_layers", 42);
+# Ok::<(), masstree::tree::InsertError>(())
 ```
+
+**Note:** Keys must be 0-256 bytes. Longer keys will panic.
 
 ## Performance
 
@@ -123,6 +154,7 @@ let index: MassTreeIndex<u64> = MassTreeIndex::new();
 3. **No deletion** - Keys cannot be removed
 4. **Update overhead** - `Arc` swap is slower than in-place mutation
 5. **Limited stress testing** - Verified up to 8 threads
+6. **Key length limit** - Keys > 256 bytes will panic (not a Result error)
 
 ## Roadmap
 
