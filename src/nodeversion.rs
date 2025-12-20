@@ -222,15 +222,21 @@ impl LockGuard<'_> {
     ///
     /// Sets the splitting dirty bit. Version counter will increment on unlock.
     ///
-    /// # Memory Ordering
-    /// Same as [`mark_insert()`]: Release store followed by Acquire fence.
+    /// NOTE: Must be called explicitly
     ///
-    /// # Reference
-    /// C++ `nodeversion.hh:149-153` - `mark_split()`
-    #[inline]
+    /// Unlike `mark_insert()` (which is now auto set due to new strategy), `mark_split()`
+    /// must be called explicitly before split operations. This is because:
+    /// 1. Not all inserts require splits
+    /// 2. The [`SPLITTING_BIT`] affects version increment logic differently
+    /// 3. Split operations need the split version counter incremented
+    ///
+    /// # Memory Ordering
+    /// Uses [`Ordering::Release`] followed by [`Ordering::Acquire`] fence.
+    #[inline(always)]
     pub fn mark_split(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version.value.load(Ordering::Relaxed);
+
         self.version
             .value
             .store(value | SPLITTING_BIT, Ordering::Release);
