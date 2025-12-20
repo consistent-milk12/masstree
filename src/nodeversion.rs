@@ -192,29 +192,30 @@ impl LockGuard<'_> {
 
     /// Mark the node as being inserted into.
     ///
-    /// Sets the inserting dirty bit. Version counter will increment on unlock.
+    /// NOTE: With auto dirty on lock strategy, the [`INSERTING_BIT`] is already set
+    /// by `lock()`. This method is kept for:
+    /// 1. Explicit documentation of intent in calling code
+    /// 2. Updating `locked_value` tracking if needed
+    /// 3. Backward compatibility with code that calls this explicitly
     ///
-    /// # Memory Ordering
-    /// Uses Release store followed by Acquire fence to ensure:
-    /// 1. The dirty bit is visible to concurrent readers
-    /// 2. Subsequent structural modifications cannot be reordered before
-    ///    the dirty bit becomes visible
-    ///
-    /// # Reference
-    /// C++ `nodeversion.hh:143-147` - `mark_insert()`
-    #[inline]
+    /// This method is idempotent, calling it multiple times has no additional effect.
+    #[inline(always)]
     pub fn mark_insert(&mut self) {
-        // INVARIANT: lock is held, so no concurrent modifications possible.
-        let value: u32 = self.version.value.load(Ordering::Relaxed);
-        self.version
-            .value
-            .store(value | INSERTING_BIT, Ordering::Release);
+        if (self.locked_value & INSERTING_BIT) == 0 {
+            // This shouldn't happen with the always dirty on lock strategy
+            // we are currently going for. But still handle it gracefully.
+            let value: u32 = self.version.value.load(Ordering::Relaxed);
 
-        // Acquire fence ensures subsequent structural modifications
-        // cannot be reordered before the dirty bit becomes visible.
-        fence(Ordering::Acquire);
+            self.version
+                .value
+                .store(value | INSERTING_BIT, Ordering::Release);
 
-        self.locked_value |= INSERTING_BIT;
+            fence(Ordering::Acquire);
+
+            self.locked_value |= INSERTING_BIT;
+        }
+
+        // If already set, this is a no-op (idempotent)
     }
 
     /// Mark the node as being split.
