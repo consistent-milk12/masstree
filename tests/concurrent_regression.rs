@@ -6,10 +6,13 @@
 //! Run with: `cargo test --test concurrent_regression`
 //! Run with release: `cargo test --test concurrent_regression --release`
 
+#![allow(clippy::pedantic)]
+#![expect(clippy::unwrap_used)]
+
 use masstree::MassTree;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 // =============================================================================

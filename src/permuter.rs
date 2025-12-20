@@ -250,7 +250,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         self.get(WIDTH - 1)
     }
 
-    /// Get the slot at back() with an offset into the free region.
+    /// Get the slot at `back()` with an offset into the free region.
     ///
     /// `back_at_offset(0)` == `back()`, `back_at_offset(1)` is the next free slot, etc.
     /// This is used when a slot is claimed but not yet published in the permutation,

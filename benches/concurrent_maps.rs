@@ -1,13 +1,13 @@
 //! Comparison benchmarks: Concurrent Ordered Map Implementations
 //!
-//! Compares MassTree against other concurrent ordered map crates:
+//! Compares `MassTree` against other concurrent ordered map crates:
 //! - `crossbeam-skiplist::SkipMap` - Lock-free skip list (truly concurrent)
 //! - `indexset::concurrent::map::BTreeMap` - Concurrent B-tree
 //!
 //! ## Benchmark Design Philosophy
 //!
 //! These benchmarks aim for objectivity by testing:
-//! - **Variable key sizes**: 8, 16, 24, 32 bytes (MassTree optimizes for ≤8)
+//! - **Variable key sizes**: 8, 16, 24, 32 bytes (`MassTree` optimizes for ≤8)
 //! - **Realistic access patterns**: Zipfian distribution (hot keys), uniform random
 //! - **True contention**: Threads read/write overlapping key ranges
 //! - **High thread counts**: 1, 2, 4, 8, 16, 32 threads
@@ -20,7 +20,13 @@
 //! cargo bench --bench concurrent_maps --features jemalloc      # jemalloc
 //! ```
 
+#![expect(clippy::unwrap_used)]
 #![expect(clippy::indexing_slicing)]
+#![expect(
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
 
 // Use alternative allocator if feature is enabled
 #[cfg(feature = "mimalloc")]
@@ -43,51 +49,51 @@ fn main() {
 // Key Generation Helpers
 // =============================================================================
 
-/// Generate 8-byte keys (single MassTree layer, inline storage)
+/// Generate 8-byte keys (single `MassTree` layer, inline storage)
 fn keys_8b(n: usize) -> Vec<Vec<u8>> {
     (0..n).map(|i| (i as u64).to_be_bytes().to_vec()).collect()
 }
 
-/// Generate 16-byte keys (2 MassTree layers)
+/// Generate 16-byte keys (2 `MassTree` layers)
 fn keys_16b(n: usize) -> Vec<Vec<u8>> {
     (0..n)
         .map(|i| {
             let mut key = vec![0u8; 16];
             key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
             key[8..16]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x517cc1b727220a95)).to_be_bytes());
+                .copy_from_slice(&((i as u64).wrapping_mul(0x517c_c1b7_2722_0a95)).to_be_bytes());
             key
         })
         .collect()
 }
 
-/// Generate 24-byte keys (3 MassTree layers)
+/// Generate 24-byte keys (3 `MassTree` layers)
 fn keys_24b(n: usize) -> Vec<Vec<u8>> {
     (0..n)
         .map(|i| {
             let mut key = vec![0u8; 24];
             key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
             key[8..16]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x517cc1b727220a95)).to_be_bytes());
+                .copy_from_slice(&((i as u64).wrapping_mul(0x517c_c1b7_2722_0a95)).to_be_bytes());
             key[16..24]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x9e3779b97f4a7c15)).to_be_bytes());
+                .copy_from_slice(&((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)).to_be_bytes());
             key
         })
         .collect()
 }
 
-/// Generate 32-byte keys (4 MassTree layers) - typical hash/UUID size
+/// Generate 32-byte keys (4 `MassTree` layers) - typical hash/UUID size
 fn keys_32b(n: usize) -> Vec<Vec<u8>> {
     (0..n)
         .map(|i| {
             let mut key = vec![0u8; 32];
             key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
             key[8..16]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x517cc1b727220a95)).to_be_bytes());
+                .copy_from_slice(&((i as u64).wrapping_mul(0x517c_c1b7_2722_0a95)).to_be_bytes());
             key[16..24]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x9e3779b97f4a7c15)).to_be_bytes());
+                .copy_from_slice(&((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)).to_be_bytes());
             key[24..32]
-                .copy_from_slice(&((i as u64).wrapping_mul(0xbf58476d1ce4e5b9)).to_be_bytes());
+                .copy_from_slice(&((i as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9)).to_be_bytes());
             key
         })
         .collect()
@@ -101,7 +107,9 @@ fn zipfian_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
 
     for _ in 0..count {
         // Simple LCG for deterministic randomness
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let u = (state >> 33) as f64 / (1u64 << 31) as f64;
 
         // Approximate Zipfian: index = floor(n^(1-u)) - 1
@@ -118,7 +126,9 @@ fn uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
     let mut state = seed;
 
     for _ in 0..count {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         indices.push((state as usize) % n);
     }
     indices
@@ -158,7 +168,10 @@ fn setup_indexset(keys: &[Vec<u8>]) -> IndexSetBTreeMap<Vec<u8>, u64> {
 
 #[divan::bench_group(name = "01_get_by_key_size")]
 mod get_by_key_size {
-    use super::*;
+    use super::{
+        Bencher, black_box, keys_8b, keys_16b, keys_24b, keys_32b, setup_indexset, setup_masstree,
+        setup_skipmap, uniform_indices,
+    };
 
     const N: usize = 10_000;
 
@@ -238,7 +251,9 @@ mod get_by_key_size {
 
 #[divan::bench_group(name = "02_insert_by_key_size")]
 mod insert_by_key_size {
-    use super::*;
+    use super::{
+        Bencher, IndexSetBTreeMap, MassTree, SkipMap, keys_8b, keys_16b, keys_24b, keys_32b,
+    };
 
     const N: usize = 1000;
 
@@ -312,7 +327,10 @@ mod insert_by_key_size {
 
 #[divan::bench_group(name = "03_concurrent_reads_scaling")]
 mod concurrent_reads_scaling {
-    use super::*;
+    use super::{
+        Arc, Bencher, black_box, keys_8b, setup_indexset, setup_masstree, setup_skipmap, thread,
+        uniform_indices,
+    };
 
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
@@ -421,7 +439,10 @@ mod concurrent_reads_scaling {
 
 #[divan::bench_group(name = "04_concurrent_reads_long_keys")]
 mod concurrent_reads_long_keys {
-    use super::*;
+    use super::{
+        Arc, Bencher, black_box, keys_32b, setup_indexset, setup_masstree, setup_skipmap, thread,
+        uniform_indices,
+    };
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 5000;
@@ -530,7 +551,7 @@ mod concurrent_reads_long_keys {
 
 #[divan::bench_group(name = "05_concurrent_writes_disjoint")]
 mod concurrent_writes_disjoint {
-    use super::*;
+    use super::{Arc, Bencher, IndexSetBTreeMap, MassTree, SkipMap, thread};
 
     const OPS_PER_THREAD: usize = 1000;
 
@@ -621,7 +642,10 @@ mod concurrent_writes_disjoint {
 
 #[divan::bench_group(name = "06_concurrent_writes_contention")]
 mod concurrent_writes_contention {
-    use super::*;
+    use super::{
+        Arc, AtomicUsize, Bencher, Ordering, keys_8b, setup_indexset, setup_masstree,
+        setup_skipmap, thread,
+    };
 
     const KEY_SPACE: usize = 1000; // Small key space = high contention
     const OPS_PER_THREAD: usize = 5000;
@@ -641,10 +665,12 @@ mod concurrent_writes_contention {
                         let counter = Arc::clone(&counter);
                         thread::spawn(move || {
                             let guard = tree.guard();
-                            let mut state = (t as u64).wrapping_mul(0x517cc1b727220a95);
+                            let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
                             for _ in 0..OPS_PER_THREAD {
                                 // Random key from shared pool
-                                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                state = state
+                                    .wrapping_mul(6_364_136_223_846_793_005)
+                                    .wrapping_add(1);
                                 let idx = (state as usize) % keys.len();
                                 let val = counter.fetch_add(1, Ordering::Relaxed) as u64;
                                 let _ = tree.insert_with_guard(&keys[idx], val, &guard);
@@ -674,9 +700,11 @@ mod concurrent_writes_contention {
                         let keys = keys.clone();
                         let counter = Arc::clone(&counter);
                         thread::spawn(move || {
-                            let mut state = (t as u64).wrapping_mul(0x517cc1b727220a95);
+                            let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
                             for _ in 0..OPS_PER_THREAD {
-                                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                state = state
+                                    .wrapping_mul(6_364_136_223_846_793_005)
+                                    .wrapping_add(1);
                                 let idx = (state as usize) % keys.len();
                                 let val = counter.fetch_add(1, Ordering::Relaxed) as u64;
                                 map.insert(keys[idx].clone(), val);
@@ -706,9 +734,11 @@ mod concurrent_writes_contention {
                         let keys = keys.clone();
                         let counter = Arc::clone(&counter);
                         thread::spawn(move || {
-                            let mut state = (t as u64).wrapping_mul(0x517cc1b727220a95);
+                            let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
                             for _ in 0..OPS_PER_THREAD {
-                                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                state = state
+                                    .wrapping_mul(6_364_136_223_846_793_005)
+                                    .wrapping_add(1);
                                 let idx = (state as usize) % keys.len();
                                 let val = counter.fetch_add(1, Ordering::Relaxed) as u64;
                                 map.insert(keys[idx].clone(), val);
@@ -731,7 +761,10 @@ mod concurrent_writes_contention {
 
 #[divan::bench_group(name = "07_mixed_zipfian")]
 mod mixed_zipfian {
-    use super::*;
+    use super::{
+        Arc, Bencher, black_box, keys_8b, setup_indexset, setup_masstree, setup_skipmap, thread,
+        zipfian_indices,
+    };
 
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
@@ -856,7 +889,10 @@ mod mixed_zipfian {
 
 #[divan::bench_group(name = "08_mixed_uniform")]
 mod mixed_uniform {
-    use super::*;
+    use super::{
+        Arc, Bencher, black_box, keys_8b, setup_indexset, setup_masstree, setup_skipmap, thread,
+        uniform_indices,
+    };
 
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
@@ -981,7 +1017,10 @@ mod mixed_uniform {
 
 #[divan::bench_group(name = "09_mixed_long_keys_zipfian")]
 mod mixed_long_keys_zipfian {
-    use super::*;
+    use super::{
+        Arc, Bencher, black_box, keys_32b, setup_indexset, setup_masstree, setup_skipmap, thread,
+        zipfian_indices,
+    };
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 5000;
@@ -1106,7 +1145,9 @@ mod mixed_long_keys_zipfian {
 
 #[divan::bench_group(name = "10_single_hot_key")]
 mod single_hot_key {
-    use super::*;
+    use super::{
+        Arc, Bencher, black_box, keys_8b, setup_indexset, setup_masstree, setup_skipmap, thread,
+    };
 
     const N: usize = 10_000;
     const OPS_PER_THREAD: usize = 10_000;

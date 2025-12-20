@@ -38,7 +38,7 @@
 //! - Leaf full (need split)
 //! - Layer/suffix conflict (need layer creation)
 //! - Slot-0 violation (needs swap logic)
-//! - High contention (> MAX_CAS_RETRIES failures)
+//! - High contention (> `MAX_CAS_RETRIES` failures)
 
 use std::ptr;
 use std::sync::Arc;
@@ -50,8 +50,8 @@ use crate::alloc::NodeAllocator;
 use crate::key::Key;
 use crate::leaf::{LeafNode, LeafValue};
 
-use super::locked::InsertSearchResult;
 use super::MassTree;
+use super::locked::InsertSearchResult;
 
 /// Maximum CAS retry attempts before falling back to locked path.
 const MAX_CAS_RETRIES: usize = 3;
@@ -106,10 +106,11 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// * `FullNeedLock` - Leaf full, need split
     /// * `LayerNeedLock` - Layer conflict, need layer creation
     /// * `ContentionFallback` - Too many retries or complex case
+    #[expect(clippy::too_many_lines, reason = "Comples concurrency logic")]
     pub(super) fn try_cas_insert(
         &self,
         key: &Key<'_>,
-        value: Arc<V>,
+        value: &Arc<V>,
         guard: &LocalGuard<'_>,
     ) -> CasInsertResult<V> {
         let ikey: u64 = key.ikey();
@@ -169,7 +170,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     let (new_perm, slot) = perm.insert_from_back_immutable(logical_pos);
 
                     // 7. Prepare our Arc pointer
-                    let arc_ptr: *mut u8 = Arc::into_raw(Arc::clone(&value)) as *mut u8;
+                    let arc_ptr: *mut u8 = Arc::into_raw(Arc::clone(value)) as *mut u8;
 
                     // 8. Read current slot value and CAS to claim atomically
                     let current_slot_value: *mut u8 = leaf.load_slot_value(slot);
@@ -277,6 +278,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "fail fast on tests")]
 mod tests {
     use super::*;
     use crate::MassTree;
@@ -290,7 +292,7 @@ mod tests {
         let key = Key::new(b"hello");
         let value = Arc::new(42u64);
 
-        let result = tree.try_cas_insert(&key, value, &guard);
+        let result = tree.try_cas_insert(&key, &value, &guard);
         assert!(matches!(result, CasInsertResult::Success(None)));
 
         // Verify the value was inserted
@@ -310,7 +312,7 @@ mod tests {
         let key = Key::new(b"key1");
         let value = Arc::new(200u64);
 
-        let result = tree.try_cas_insert(&key, value, &guard);
+        let result = tree.try_cas_insert(&key, &value, &guard);
         assert!(matches!(result, CasInsertResult::ExistsNeedLock { .. }));
     }
 
@@ -323,7 +325,7 @@ mod tests {
         let key = Key::new(b"this_is_a_very_long_key_with_suffix");
         let value = Arc::new(42u64);
 
-        let result = tree.try_cas_insert(&key, value, &guard);
+        let result = tree.try_cas_insert(&key, &value, &guard);
         assert!(matches!(result, CasInsertResult::ContentionFallback));
     }
 
@@ -338,7 +340,7 @@ mod tests {
             let key = Key::new(key_bytes.as_bytes());
             let value = Arc::new(i * 100);
 
-            let result = tree.try_cas_insert(&key, value, &guard);
+            let result = tree.try_cas_insert(&key, &value, &guard);
             assert!(
                 matches!(result, CasInsertResult::Success(None)),
                 "Failed on key {i}"

@@ -1286,9 +1286,10 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// * `expected` - The expected current permutation value
     /// * `new` - The new permutation value to set
     ///
-    /// # Returns
-    /// * `Ok(())` - CAS succeeded, permutation is now `new`
-    /// * `Err(current)` - CAS failed, returns the current permutation value
+    /// # Errors
+    ///
+    /// Returns `Err(current)` if the CAS failed because the permutation was modified
+    /// by another thread. The error contains the current permutation value.
     ///
     /// # Memory Ordering
     /// - Success: `AcqRel` - synchronizes with Release stores of slot data
@@ -1306,6 +1307,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             CAS_FAILURE,
         ) {
             Ok(_) => Ok(()),
+
             Err(current) => Err(Permuter::from_value(current)),
         }
     }
@@ -1328,6 +1330,10 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// All stores use Release ordering to synchronize with readers that
     /// observe the new permutation after CAS success.
     #[inline]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "bounds checked by debug_assert, caller ensures slot < WIDTH"
+    )]
     pub unsafe fn store_slot_for_cas(
         &self,
         slot: usize,
@@ -1352,6 +1358,10 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// - Caller must have already reclaimed/freed the value that was stored
     /// - Slot must be in the free region (not visible to readers)
     #[inline]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "bounds checked by debug_assert, caller ensures slot < WIDTH"
+    )]
     pub unsafe fn clear_slot_for_cas(&self, slot: usize) {
         debug_assert!(slot < WIDTH, "clear_slot_for_cas: slot out of bounds");
         self.leaf_values[slot].store(std::ptr::null_mut(), WRITE_ORD);
@@ -1363,10 +1373,10 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// collision bug where two threads reading the same permutation would
     /// both try to write to the same slot.
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// - `Ok(())` if claim succeeded (caller now owns the slot)
-    /// - `Err(actual)` if slot was modified by another thread
+    /// Returns `Err(actual)` if the slot was already claimed or modified by another thread.
+    /// The error contains the actual value pointer found in the slot.
     ///
     /// # Arguments
     ///
@@ -1374,6 +1384,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// - `expected`: The expected current value (from `load_slot_value`)
     /// - `new_value`: The new value pointer to store (our Arc pointer)
     #[inline]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub fn cas_slot_value(
         &self,
         slot: usize,
@@ -1393,6 +1404,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// Used before `cas_slot_value` to get the expected value for CAS.
     #[inline]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub fn load_slot_value(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH, "load_slot_value: slot out of bounds");
         self.leaf_values[slot].load(READ_ORD)
@@ -1408,6 +1420,10 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// - Caller must have successfully claimed the slot via `cas_slot_value`
     /// - Slot must still be in the free region of the permutation
     #[inline]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "bounds checked by debug_assert, caller ensures slot < WIDTH"
+    )]
     pub unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
         debug_assert!(slot < WIDTH, "store_key_data_for_cas: slot out of bounds");
         self.ikey0[slot].store(ikey, WRITE_ORD);
@@ -1903,9 +1919,10 @@ impl<V, const WIDTH: usize> LeafNode<LeafValue<V>, WIDTH> {
     /// Uses CAS to ensure only one thread can claim a slot. Both the CAS fast path
     /// and the locked path use this to coordinate slot allocation.
     ///
-    /// # Returns
-    /// - `Ok(())` - Slot claimed successfully, key data stored
-    /// - `Err(arc)` - Slot taken by another thread, Arc returned for retry
+    /// # Errors
+    ///
+    /// Returns `Err(arc)` if the slot was already taken by another thread.
+    /// The Arc is returned so the caller can retry with a different slot.
     ///
     /// # Protocol
     /// 1. Convert Arc to raw pointer
@@ -1961,6 +1978,38 @@ impl<V, const WIDTH: usize> LeafNode<LeafValue<V>, WIDTH> {
             Arc::increment_strong_count(arc_ptr);
             Some(Arc::from_raw(arc_ptr))
         }
+    }
+
+    /// Get a reference to the value at a slot without cloning the Arc.
+    ///
+    /// This is significantly faster than [`try_clone_arc`] for read-heavy workloads
+    /// because it avoids atomic reference count operations.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must have validated version (or hold lock)
+    /// - Caller must hold a guard that protects the value from being freed
+    /// - The returned reference is valid only while the guard is held
+    ///
+    /// # Returns
+    ///
+    /// - `Some(&V)` if the slot contains a value
+    /// - `None` if the slot is empty or contains a layer pointer
+    #[inline(always)]
+    pub unsafe fn try_get_value_ref(&self, slot: usize) -> Option<&V> {
+        let keylenx = self.keylenx(slot);
+        let ptr: *mut u8 = self.leaf_value_ptr(slot);
+
+        if ptr.is_null() || keylenx >= LAYER_KEYLENX {
+            return None;
+        }
+
+        // SAFETY: ptr is non-null and came from Arc::into_raw in assign_arc/swap_value.
+        // The guard held by caller prevents the Arc from being freed.
+        // We return a reference to the value inside the Arc, which is valid
+        // as long as the Arc exists (guaranteed by the guard).
+        let value_ptr: *const V = ptr.cast();
+        Some(unsafe { &*value_ptr })
     }
 
     /// Swap a value at a slot, returning the old Arc.

@@ -10,6 +10,7 @@
 //! Run with: `cargo bench --bench comparison`
 //! With mimalloc: `cargo bench --bench comparison --features mimalloc`
 
+#![expect(clippy::type_complexity)]
 #![expect(clippy::indexing_slicing)]
 
 // Use alternative allocator if feature is enabled
@@ -35,6 +36,7 @@ fn sequential_keys_bytes(n: usize) -> Vec<Vec<u8>> {
 }
 
 /// Generate sequential keys as strings (`BTreeMap` format)
+#[expect(dead_code)]
 fn sequential_keys_strings(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("{:016x}", i as u64)).collect()
 }

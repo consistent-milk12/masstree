@@ -1,4 +1,4 @@
-//! Shuttle linearizability tests for MassTree.
+//! Shuttle linearizability tests for `MassTree`.
 //!
 //! Shuttle provides systematic concurrency testing by exploring different
 //! thread schedules. Unlike loom, shuttle uses a randomized approach with
@@ -11,11 +11,10 @@
 //! These tests verify that concurrent operations appear to take effect
 //! instantaneously at some point between their invocation and response.
 //! This is the gold standard for concurrent data structure correctness.
-//!
-//! # Reference
-//!
-//! - TODO.md §3.3.6: Shuttle linearizability testing
-//! - Suggestions.md §9: Linearizability Testing
+
+#![expect(clippy::indexing_slicing)]
+#![expect(clippy::unwrap_used)]
+#![allow(clippy::pedantic)]
 
 use shuttle::sync::Arc;
 use shuttle::thread;
@@ -28,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// A simplified concurrent map for shuttle testing.
 ///
 /// This uses shuttle's synchronization primitives to test concurrent behavior.
-/// The patterns here mirror MassTree's actual implementation:
+/// The patterns here mirror `MassTree`'s actual implementation:
 /// - Optimistic reads with version validation
 /// - Locked writes with version increment
 /// - CAS for structural modifications
@@ -57,7 +56,7 @@ impl ShuttleMap {
     }
 
     /// Find slot index for key (simple linear probe for testing).
-    fn find_slot(&self, key: u64) -> usize {
+    const fn find_slot(&self, key: u64) -> usize {
         (key as usize) % self.slots.len()
     }
 
@@ -404,7 +403,7 @@ fn test_shuttle_linearizable_history() {
                 let result = m2.get(42);
                 h2.lock()
                     .unwrap()
-                    .push(("get", 42, 0, result.map(|v| Some(v)).unwrap_or(None)));
+                    .push(("get", 42, 0, result.map(Some).unwrap_or(None)));
             });
 
             t1.join().unwrap();
@@ -415,10 +414,11 @@ fn test_shuttle_linearizable_history() {
             // - If get returned None, insert hadn't happened yet when get ran
             let hist = history.lock().unwrap();
             for (op, key, _val, result) in hist.iter() {
-                if *op == "get" && *key == 42 {
-                    if let Some(v) = result {
-                        assert_eq!(*v, 100, "Get returned wrong value");
-                    }
+                if *op == "get"
+                    && *key == 42
+                    && let Some(v) = result
+                {
+                    assert_eq!(*v, 100, "Get returned wrong value");
                 }
             }
         },

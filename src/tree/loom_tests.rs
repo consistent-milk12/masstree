@@ -292,10 +292,7 @@ fn test_loom_cas_root() {
         let r2 = t2.join().unwrap();
 
         // Exactly one should succeed
-        let success_count = [r1.is_ok(), r2.is_ok()]
-            .iter()
-            .filter(|&&x| x)
-            .count();
+        let success_count = [r1.is_ok(), r2.is_ok()].iter().filter(|&&x| x).count();
         assert_eq!(success_count, 1, "Exactly one CAS should succeed");
 
         // Clean up the node that wasn't installed

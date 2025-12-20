@@ -542,7 +542,7 @@ fn test_very_long_key() {
     assert!(tree.get(&different).is_none());
 }
 
-/// Test maximum key length (256 bytes per CLAUDE.md).
+/// Test maximum key length (256 bytes per).
 #[test]
 fn test_max_key_length() {
     let mut tree: MassTree<u64> = MassTree::new();
