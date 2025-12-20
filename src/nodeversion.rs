@@ -463,13 +463,15 @@ impl NodeVersion {
 
     /// Acquire the lock and return a guard.
     ///
-    /// Spins until the lock is acquired. The lock bit AND dirty bits must
-    /// both be clear before acquisition succeeds.
+    /// Strategy: Always-Dirty-On-Lock
+    /// This implementation automatically sets the [`INSERTING_BIT`] when acquiring the lock.
+    /// This eliminates the race window between lock acquisition and explicit dirty marking,
+    /// ensuring that CAS insert threads always wait for locked writers to complete.
     ///
-    /// # Liveness
-    /// This method may spin indefinitely if another thread holds the lock
-    /// or has dirty bits set. Use [`try_lock()`] or [`try_lock_for()`] if you
-    /// need a timeout.
+    /// 1. `stable()` spins until `DIRTY_MASK == 0` (includes `INSERTING_BIT`)
+    /// 2. `lock()` atomically sets `LOCK_BIT | INSERTING_BIT`
+    /// 3. Therefore, any thread calling `stable()` will wait for the lock holder
+    /// 4. This eliminates the window where a locked writer hasn't called `mark_insert()` yet
     ///
     /// # Memory Ordering
     /// Uses `Acquire` ordering on successful CAS to synchronize with the
@@ -479,17 +481,22 @@ impl NodeVersion {
     /// C++ `nodeversion.hh:87-109` - `lock()` template method
     #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock(&self) -> LockGuard<'_> {
-        let mut backoff = Backoff::new();
+        let mut backoff: Backoff = Backoff::new();
 
         loop {
-            let value = self.value.load(Ordering::Relaxed);
+            let value: u32 = self.value.load(Ordering::Relaxed);
 
-            // Must wait for both lock bit AND dirty bits to clear.
-            // C++ reference: `!(expected.v_ & P::lock_bit)` but also checks dirty post-acquisition.
+            // Must wait for both lock bit and dirty bits to clear.
+            // This ensures we don't acquire while another writer is active.
             if (value & (LOCK_BIT | DIRTY_MASK)) == 0 {
-                let locked = value | LOCK_BIT;
+                // STRATEGY: Set LOCK_BIT and INSERTING_BIT atomically.
+                // This ensures CAS insert threads (which call stable()) will wait for us.
+                //
+                // The INSERTING_BIT is set here rather than in a seprate mark_insert() call.
+                // This eliminates the race window between lock acquisition and dirty marking.
+                let locked: u32 = value | LOCK_BIT | INSERTING_BIT;
 
-                // CAS to acquire lock.
+                // CAS to acquire lock with auto-dirty.
                 // Acquire on success ensures we see all prior writes from previous holder.
                 // Relaxed on failure is fine, we'll retry.
                 if self
@@ -497,14 +504,9 @@ impl NodeVersion {
                     .compare_exchange_weak(value, locked, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
-                    // Invariant: dirty bits must be clear when we acquire.
-                    debug_assert!(
-                        (locked & DIRTY_MASK) == 0,
-                        "lock acquired with dirty bits set"
-                    );
-
                     return LockGuard {
                         version: self,
+                        // locked_value now includes INSERTING_BIT
                         locked_value: locked,
                         _marker: PhantomData,
                     };
