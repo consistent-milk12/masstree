@@ -29,6 +29,7 @@ divan = "0.1.21"
 proptest = "1.9.0"
 loom = "0.7.2"
 shuttle = "0.8.1"
+dashmap = "6.1.0"
 
 [lints.rust]
 # Allow loom and shuttle cfg for deterministic concurrency testing
@@ -134,4 +135,8 @@ harness = false
 
 [[bench]]
 name = "comparison"
+harness = false
+
+[[bench]]
+name = "dashmap_comparison"
 harness = false

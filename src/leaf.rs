@@ -450,6 +450,31 @@ impl<V> Clone for LeafValue<V> {
     }
 }
 
+// ============================================================================
+//  Send + Sync implementations for LeafValue
+// ============================================================================
+
+// SAFETY: LeafValue is safe to send between threads because:
+// 1. `Empty` has no data
+// 2. `Value(Arc<V>)` is Send when V: Send+Sync (Arc<T> is Send when T: Send+Sync)
+// 3. `Layer(*mut u8)` points to tree-owned nodes that are protected by:
+//    - Version-based optimistic concurrency control (readers validate before use)
+//    - Per-node locks via NodeVersion (writers acquire lock before modification)
+//    - Seize-based memory reclamation (nodes are not freed while readers exist)
+//
+// The raw pointer itself is just an address - it's the ACCESS to the data that
+// must be synchronized, which is handled by the tree's concurrency protocol.
+unsafe impl<V: Send + Sync> Send for LeafValue<V> {}
+
+// SAFETY: LeafValue is safe to share between threads because:
+// 1. `Empty` has no data to share
+// 2. `Value(Arc<V>)` is Sync when V: Send+Sync (Arc<T> is Sync when T: Send+Sync)
+// 3. `Layer(*mut u8)` - shared access to the pointer is safe because:
+//    - Readers use optimistic validation (stable() -> read -> has_changed())
+//    - Concurrent reads of the same pointer value are safe (just loading an address)
+//    - Writes go through locked paths that update atomically
+unsafe impl<V: Send + Sync> Sync for LeafValue<V> {}
+
 /// Value stored in a leaf slot (index mode with inline `V: Copy`).
 ///
 /// For high-perf index use cases values are small and Copy.
@@ -470,6 +495,11 @@ pub enum LeafValueIndex<V: Copy> {
     /// This will be refined to proper node type.
     Layer(*mut u8),
 }
+
+// SAFETY: Same reasoning as LeafValue - the Layer pointer is protected by
+// the tree's concurrency control (version validation, locks, seize reclamation).
+unsafe impl<V: Copy + Send> Send for LeafValueIndex<V> {}
+unsafe impl<V: Copy + Sync> Sync for LeafValueIndex<V> {}
 
 impl<V: Copy> LeafValueIndex<V> {
     // ============================================================================
