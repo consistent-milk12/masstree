@@ -376,7 +376,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ///
     /// C++ `masstree_struct.hh:83-92` - `maybe_parent()`
     #[expect(clippy::unused_self, reason = "Method signature for API consistency")]
-    fn maybe_parent(&self, mut node: *const u8) -> *const u8 {
+    pub(super) fn maybe_parent(&self, mut node: *const u8) -> *const u8 {
         loop {
             // SAFETY: node is a valid pointer to a LeafNode or InternodeNode.
             // Both have NodeVersion as first field.
@@ -801,6 +801,47 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         }
 
         (leaf, version)
+    }
+
+    /// Advance along the leaf B-link chain using `ikey_bound`, even if the
+    /// split bit predates our snapshot.
+    ///
+    /// This is used by writers to avoid inserting into a stale left leaf
+    /// when traversal raced with a split.
+    #[expect(clippy::unused_self, reason = "Method signature for API consistency")]
+    pub(super) fn advance_to_key_by_bound<'a>(
+        &'a self,
+        mut leaf: &'a LeafNode<LeafValue<V>, WIDTH>,
+        key: &Key<'_>,
+        _guard: &LocalGuard<'_>,
+    ) -> &'a LeafNode<LeafValue<V>, WIDTH> {
+        let key_ikey: u64 = key.ikey();
+
+        loop {
+            let next_raw: *mut LeafNode<LeafValue<V>, WIDTH> = leaf.next_raw();
+            if is_marked(next_raw) {
+                leaf.wait_for_split();
+                continue;
+            }
+
+            let next_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = unmark_ptr(next_raw);
+            if next_ptr.is_null() {
+                break;
+            }
+
+            // SAFETY: next_ptr protected by guard
+            let next: &LeafNode<LeafValue<V>, WIDTH> = unsafe { &*next_ptr };
+            let next_bound_ikey: u64 = next.ikey_bound();
+
+            if key_ikey >= next_bound_ikey {
+                leaf = next;
+                continue;
+            }
+
+            break;
+        }
+
+        leaf
     }
 }
 

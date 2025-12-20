@@ -40,7 +40,7 @@
 //! - Slot-0 violation (needs swap logic)
 //! - High contention (> `MAX_CAS_RETRIES` failures)
 
-use std::ptr;
+use std::ptr as StdPtr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -127,13 +127,30 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         }
 
         let mut retries: usize = 0;
+        let mut leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = StdPtr::null_mut();
+        let mut use_reach: bool = true;
 
         loop {
             // 1. Optimistic traversal to find target leaf
-            let layer_root: *const u8 = self.load_root_ptr(guard);
-            let leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> =
-                self.reach_leaf_concurrent(layer_root, key, guard);
+            if use_reach {
+                let mut layer_root: *const u8 = self.load_root_ptr(guard);
+                layer_root = self.maybe_parent(layer_root);
+                leaf_ptr = self.reach_leaf_concurrent(layer_root, key, guard);
+            } else {
+                use_reach = true;
+            }
+
             let leaf: &LeafNode<LeafValue<V>, WIDTH> = unsafe { &*leaf_ptr };
+
+            // If we raced with a split, advance to the correct leaf via B-link.
+            let advanced: &LeafNode<LeafValue<V>, WIDTH> =
+                self.advance_to_key_by_bound(leaf, key, guard);
+
+            if !StdPtr::eq(advanced, leaf) {
+                leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
+                use_reach = false;
+                continue;
+            }
 
             // 2. Get stable version and permutation
             let version: u32 = leaf.version().stable();
@@ -197,7 +214,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // 9. Validate version unchanged
                     if leaf.version().has_changed(version) {
                         // Version changed - try to restore slot to NULL
-                        match leaf.cas_slot_value(slot, arc_ptr, ptr::null_mut()) {
+                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
                             Ok(()) => {
                                 // Restored successfully, can reclaim Arc and retry
                                 let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
@@ -253,7 +270,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                         Err(_current_perm) => {
                             // Permutation CAS failed - try to restore slot to NULL
-                            match leaf.cas_slot_value(slot, arc_ptr, ptr::null_mut()) {
+                            match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
                                 Ok(()) => {
                                     // Restored successfully, can reclaim Arc
                                     let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };

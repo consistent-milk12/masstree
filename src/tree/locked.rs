@@ -209,6 +209,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             if !in_sublayer {
                 layer_root = self.get_root_ptr(guard);
             }
+            // Follow parent pointers to avoid stale layer roots.
+            layer_root = self.maybe_parent(layer_root);
 
             // Find and lock target leaf (or get layer descent hint)
             let find_result = self.find_locked(layer_root, key, guard);
@@ -498,13 +500,28 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             key.current_len() as u8
         };
 
+        let mut leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = StdPtr::null_mut();
+        let mut use_reach: bool = true;
+
         loop {
-            // Optimistic reach to leaf
-            let leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> =
-                self.reach_leaf_concurrent(layer_root, key, guard);
+            if use_reach {
+                // Optimistic reach to leaf
+                leaf_ptr = self.reach_leaf_concurrent(layer_root, key, guard);
+            } else {
+                use_reach = true;
+            }
 
             // SAFETY: leaf_ptr valid from reach_leaf_concurrent
             let leaf: &LeafNode<LeafValue<V>, WIDTH> = unsafe { &*leaf_ptr };
+
+            // If we raced with a split, advance to the correct leaf via B-link.
+            let advanced: &LeafNode<LeafValue<V>, WIDTH> =
+                self.advance_to_key_by_bound(leaf, key, guard);
+            if !StdPtr::eq(advanced, leaf) {
+                leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
+                use_reach = false;
+                continue;
+            }
 
             // Version snapshot
             let version: u32 = leaf.version().stable();
