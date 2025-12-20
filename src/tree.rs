@@ -25,7 +25,7 @@ mod optimistic;
 mod split;
 mod traverse;
 
-#[cfg(all(test, loom))]
+#[cfg(all(test, loom, not(miri)))]
 mod loom_tests;
 
 #[cfg(all(test, not(miri)))]
@@ -354,161 +354,17 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ///     println!("Found: {}", *value);
     /// }
     /// ```
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is safe for concurrent use. It internally creates a guard
+    /// and uses version-validated reads. For bulk operations, prefer
+    /// [`get_with_guard`](Self::get_with_guard) to amortize guard creation cost.
     #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<Arc<V>> {
+        let guard = self.guard();
         let mut search_key: Key<'_> = Key::new(key);
-
-        self.get_internal(&mut search_key)
-    }
-
-    /// Internal get implementation with layer descent support.
-    #[inline(always)]
-    fn get_internal(&self, key: &mut Key<'_>) -> Option<Arc<V>> {
-        // Start at tree root
-        let mut current_root: *const u8 = self.root_ptr.load(Ordering::Acquire);
-
-        loop {
-            // Reach the leaf for current layer
-            let leaf: &LeafNode<LeafValue<V>, WIDTH> = self.reach_leaf_from_ptr(current_root, key);
-
-            // Search in leaf
-            let perm: Permuter<WIDTH> = leaf.permutation();
-            let target_ikey: u64 = key.ikey();
-
-            // Calculate keylenx for search
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "current_len() <= 8 at each layer"
-            )]
-            let keylenx: u8 = if key.has_suffix() {
-                KSUF_KEYLENX
-            } else {
-                key.current_len() as u8
-            };
-
-            let mut found_layer: Option<*mut u8> = None;
-            let mut shift_amount: usize = 0;
-
-            for i in 0..perm.size() {
-                let slot: usize = perm.get(i);
-
-                if leaf.ikey(slot) != target_ikey {
-                    continue;
-                }
-
-                // Found matching ikey, check keylenx/suffix/layer
-                let match_result: i32 = leaf.ksuf_match_result(slot, keylenx, key.suffix());
-
-                if match_result == 1 {
-                    // Exact match - return value
-                    // SAFETY: version validated, slot valid from permuter
-                    return unsafe { leaf.try_clone_arc(slot) };
-                }
-
-                if match_result < 0 {
-                    // Layer pointer found
-                    //
-                    // FIXED: Don't immediately return None when !key.has_suffix().
-                    // A layer slot can appear before a matching inline key in
-                    // permutation order. We should only descend into the layer
-                    // if the key actually has more bytes to match.
-                    //
-                    // C++ reference: masstree_get.hh:38-56
-                    if key.has_suffix() {
-                        // Key has more bytes - record layer for descent
-                        if let Some(layer_ptr) = leaf.get_layer(slot) {
-                            #[expect(
-                                clippy::cast_sign_loss,
-                                reason = "match_result < 0, so -match_result > 0"
-                            )]
-                            {
-                                shift_amount = (-match_result) as usize;
-                            }
-
-                            found_layer = Some(layer_ptr);
-                        }
-
-                        break; // Must descend
-                    }
-
-                    // Key has no more bytes (!key.has_suffix())
-                    // The key terminates at this layer boundary.
-                    // Continue searching - there might be an inline key match.
-                }
-                // match_result == 0: same ikey but different key, continue searching
-            }
-
-            // Handle layer descent outside the loop
-            if let Some(layer_ptr) = found_layer {
-                key.shift_by(shift_amount);
-                current_root = layer_ptr;
-                continue; // Continue outer loop with new layer
-            }
-
-            // No match found in this layer
-            return None;
-        }
-    }
-
-    /// Reach the leaf node containing the key, starting from a generic root pointer.
-    ///
-    /// # `maybe_parent` Pattern (C++ Reference)
-    ///
-    /// Layer pointers initially point to leaves, but after layer root promotion
-    /// the leaf gains a non-null parent (the new internode). This function
-    /// implements the C++ `maybe_parent()` pattern from `masstree_struct.hh:83`:
-    ///
-    /// 1. If pointer is to a leaf with null parent → use directly (layer root)
-    /// 2. If pointer is to a leaf with non-null parent → follow parent (promoted)
-    /// 3. If pointer is to an internode → traverse down to find target leaf
-    ///
-    /// This allows layer pointers to remain stale after promotion - they still
-    /// point to the old leaf, but we detect the promotion via the parent pointer.
-    ///
-    /// # Safety
-    ///
-    /// `root_ptr` must be a valid pointer to either a `LeafNode` or `InternodeNode`.
-    /// Both types have `NodeVersion` as their first field, enabling safe discrimination.
-    #[inline(always)]
-    fn reach_leaf_from_ptr(
-        &self,
-        root_ptr: *const u8,
-        key: &Key<'_>,
-    ) -> &LeafNode<LeafValue<V>, WIDTH> {
-        // SAFETY: Both LeafNode and InternodeNode have NodeVersion as first field
-        #[expect(
-            clippy::cast_ptr_alignment,
-            reason = "root_ptr points to LeafNode or InternodeNode, both properly aligned"
-        )]
-        let version: &NodeVersion = unsafe { &*(root_ptr.cast::<NodeVersion>()) };
-
-        if version.is_leaf() {
-            // It's a leaf - check if the layer was promoted via parent pointer
-            // SAFETY: version.is_leaf() confirms this is a LeafNode
-            let leaf: &LeafNode<LeafValue<V>, WIDTH> =
-                unsafe { &*(root_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>()) };
-
-            let parent_ptr: *mut u8 = leaf.parent();
-
-            if parent_ptr.is_null() {
-                // Null parent means this leaf is still the layer root
-                leaf
-            } else {
-                // Non-null parent means layer was promoted - follow the parent
-                // SAFETY: parent_ptr is the internode created during promotion
-                let inode: &InternodeNode<LeafValue<V>, WIDTH> =
-                    unsafe { &*(parent_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
-
-                self.reach_leaf_via_internode(inode, key)
-            }
-        } else {
-            // Internode - traverse down to leaf
-            // SAFETY: !version.is_leaf() confirms this is an InternodeNode
-            let inode: &InternodeNode<LeafValue<V>, WIDTH> =
-                unsafe { &*(root_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
-
-            self.reach_leaf_via_internode(inode, key)
-        }
+        self.get_concurrent(&mut search_key, &guard)
     }
 
     /// Traverse from an internode down to the target leaf.

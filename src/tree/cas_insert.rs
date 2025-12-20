@@ -1,7 +1,7 @@
 //! CAS-based lock-free insert for [`MassTree`].
 //!
-//! Provides a fast path for simple inserts that can be completed with a single
-//! compare-and-swap on the permutation, avoiding lock acquisition overhead.
+//! Provides a fast path for simple inserts that can be completed with atomic
+//! slot reservation followed by a compare-and-swap on the permutation.
 //!
 //! # Protocol
 //!
@@ -9,10 +9,18 @@
 //! 1. Optimistic traversal to find target leaf
 //! 2. Get stable version and permutation
 //! 3. Search for key position
-//! 4. Pre-store slot data (ikey, keylenx, value_ptr) with Release ordering
-//! 5. CAS permutation to atomically publish the insert
-//! 6. On failure, retry or fall back to locked path
+//! 4. CAS slot value to atomically claim the slot
+//! 5. Store key data (ikey, keylenx)
+//! 6. CAS permutation to atomically publish the insert
+//! 7. On failure, restore slot and retry or fall back to locked path
 //! ```
+//!
+//! # Atomic Slot Reservation
+//!
+//! The key insight is that two threads reading the same permutation will get
+//! the same `back()` slot. To prevent data loss from slot collisions, we use
+//! CAS on the slot's value pointer to atomically claim ownership before
+//! writing any data. Only the thread that wins the slot CAS can proceed.
 //!
 //! # When CAS Succeeds
 //!
@@ -20,7 +28,8 @@
 //! - Leaf has space (`size < WIDTH`)
 //! - No slot-0 violation (or slot-0 can be reused)
 //! - No suffix needed (inline key ≤ 8 bytes)
-//! - No concurrent modification (version stable)
+//! - Slot CAS succeeds (atomic claim)
+//! - Version stable during CAS window
 //! - Permutation CAS succeeds
 //!
 //! # When Falls Back to Locked Path
@@ -31,6 +40,7 @@
 //! - Slot-0 violation (needs swap logic)
 //! - High contention (> MAX_CAS_RETRIES failures)
 
+use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -74,11 +84,12 @@ pub(super) enum CasInsertResult<V> {
 }
 
 impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, WIDTH, A> {
-    /// Try CAS-based lock-free insert.
+    /// Try CAS-based lock-free insert with atomic slot reservation.
     ///
     /// Attempts to insert a new key-value pair using optimistic concurrency:
-    /// 1. Pre-store slot data in a free slot
-    /// 2. CAS the permutation to atomically publish
+    /// 1. CAS slot value to atomically claim the slot
+    /// 2. Store key data (ikey, keylenx)
+    /// 3. CAS the permutation to atomically publish
     ///
     /// Returns `CasInsertResult` indicating success or reason for fallback.
     ///
@@ -157,19 +168,60 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // 6. Compute new permutation (immutable)
                     let (new_perm, slot) = perm.insert_from_back_immutable(logical_pos);
 
-                    // 7. Pre-store slot data
-                    // Clone the Arc and convert to raw pointer
+                    // 7. Prepare our Arc pointer
                     let arc_ptr: *mut u8 = Arc::into_raw(Arc::clone(&value)) as *mut u8;
 
-                    // SAFETY: slot is in the free region (not visible to readers yet)
-                    unsafe {
-                        leaf.store_slot_for_cas(slot, ikey, keylenx, arc_ptr);
+                    // 8. Read current slot value and CAS to claim atomically
+                    let current_slot_value: *mut u8 = leaf.load_slot_value(slot);
+
+                    match leaf.cas_slot_value(slot, current_slot_value, arc_ptr) {
+                        Err(_actual) => {
+                            // Slot modified by another thread - fall back immediately
+                            // Don't retry with same slot to prevent "stealing" scenarios
+                            // where we CAS from another thread's value
+                            // SAFETY: we just created this Arc clone, nobody else has it
+                            let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                            return CasInsertResult::ContentionFallback;
+                        }
+
+                        Ok(()) => {
+                            // We claimed the slot - store key data
+                            // SAFETY: we own the slot after successful CAS
+                            unsafe {
+                                leaf.store_key_data_for_cas(slot, ikey, keylenx);
+                            }
+                        }
                     }
 
-                    // 8. Validate version unchanged
+                    // 9. Validate version unchanged
                     if leaf.version().has_changed(version) {
-                        // Version changed - reclaim the Arc we stored
-                        // SAFETY: we just stored this pointer, nobody else saw it
+                        // Version changed - try to restore slot to NULL
+                        match leaf.cas_slot_value(slot, arc_ptr, ptr::null_mut()) {
+                            Ok(()) => {
+                                // Restored successfully, can reclaim Arc and retry
+                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                            }
+                            Err(_) => {
+                                // Slot was stolen - just reclaim our Arc
+                                // The slot now belongs to someone else
+                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                            }
+                        }
+
+                        retries += 1;
+                        if retries > MAX_CAS_RETRIES {
+                            return CasInsertResult::ContentionFallback;
+                        }
+                        continue;
+                    }
+
+                    // 10. Verify slot ownership before publishing
+                    // Another thread could have stolen our slot by CAS'ing from our
+                    // value to their value. This can happen when they retry with the
+                    // same permutation (which hasn't changed yet).
+                    if leaf.load_slot_value(slot) != arc_ptr {
+                        // Slot was stolen - just reclaim our Arc
+                        // Don't try to restore slot, it belongs to someone else
                         let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
 
                         retries += 1;
@@ -179,19 +231,37 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         continue;
                     }
 
-                    // 9. CAS the permutation
+                    // 11. CAS the permutation to publish
                     match leaf.cas_permutation(perm, new_perm) {
                         Ok(()) => {
+                            // Permutation CAS succeeded - verify slot wasn't stolen
+                            // in the tiny window between ownership check and perm CAS
+                            if leaf.load_slot_value(slot) != arc_ptr {
+                                // Slot was stolen after we published! This is rare but possible.
+                                // The entry is in the permutation but has wrong data.
+                                // Fall back to locked path which will see the key exists
+                                // and update it with the correct value.
+                                // Note: we don't reclaim our Arc - it's been overwritten
+                                return CasInsertResult::ContentionFallback;
+                            }
+
                             // Success! Increment count
                             self.count.fetch_add(1, Ordering::Relaxed);
                             return CasInsertResult::Success(None);
                         }
 
                         Err(_current_perm) => {
-                            // CAS failed - reclaim the Arc we stored
-                            // SAFETY: we stored this pointer, nobody else saw it
-                            //         (permutation didn't change to include this slot)
-                            let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                            // Permutation CAS failed - try to restore slot to NULL
+                            match leaf.cas_slot_value(slot, arc_ptr, ptr::null_mut()) {
+                                Ok(()) => {
+                                    // Restored successfully, can reclaim Arc
+                                    let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                                }
+                                Err(_) => {
+                                    // Slot was stolen - just reclaim our Arc
+                                    let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                                }
+                            }
 
                             retries += 1;
                             if retries > MAX_CAS_RETRIES {

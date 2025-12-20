@@ -226,7 +226,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ///    c. Search leaf with version validation
     ///    d. If layer found, shift key and descend
     ///    e. If retry needed, restart from layer root
-    fn get_concurrent(&self, key: &mut Key<'_>, guard: &LocalGuard<'_>) -> Option<Arc<V>> {
+    pub(super) fn get_concurrent(&self, key: &mut Key<'_>, guard: &LocalGuard<'_>) -> Option<Arc<V>> {
         // Start at tree root (use atomic pointer for concurrent access)
         let mut layer_root: *const u8 = self.load_root_ptr(guard);
 

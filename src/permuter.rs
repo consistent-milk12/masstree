@@ -250,6 +250,24 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         self.get(WIDTH - 1)
     }
 
+    /// Get the slot at back() with an offset into the free region.
+    ///
+    /// `back_at_offset(0)` == `back()`, `back_at_offset(1)` is the next free slot, etc.
+    /// This is used when a slot is claimed but not yet published in the permutation,
+    /// allowing the locked path to try the next available slot.
+    ///
+    /// # Panics
+    /// Debug-panics if `size() + offset >= WIDTH` (no more free slots at that offset).
+    #[must_use]
+    #[inline(always)]
+    pub const fn back_at_offset(&self, offset: usize) -> usize {
+        debug_assert!(
+            self.size() + offset < WIDTH,
+            "back_at_offset: offset exceeds free slots"
+        );
+        self.get(WIDTH - 1 - offset)
+    }
+
     /// Return the raw u64 value.
     #[must_use]
     #[inline(always)]

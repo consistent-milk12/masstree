@@ -918,5 +918,5 @@ mod tests {
 mod concurrent_tests;
 
 // Loom tests for deterministic concurrency verification.
-#[cfg(all(test, loom))]
+#[cfg(all(test, loom, not(miri)))]
 mod loom_tests;

@@ -37,6 +37,9 @@ proptest = "1.9.0"
 loom = "0.7.2"
 shuttle = "0.8.1"
 dashmap = "6.1.0"
+crossbeam-skiplist = "0.1.3"
+concurrent-map = "5.0.37"
+indexset = { version = "0.12.3", features = ["concurrent"] }
 
 [lints.rust]
 # Allow loom and shuttle cfg for deterministic concurrency testing
@@ -146,4 +149,12 @@ harness = false
 
 [[bench]]
 name = "dashmap_comparison"
+harness = false
+
+[[bench]]
+name = "lock_comparison"
+harness = false
+
+[[bench]]
+name = "concurrent_maps"
 harness = false

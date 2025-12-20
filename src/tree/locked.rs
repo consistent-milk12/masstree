@@ -30,13 +30,14 @@
 use std::cmp::Ordering;
 use std::ptr as StdPtr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering as AtomicOrdering;
 
 use seize::LocalGuard;
 
 use crate::alloc::NodeAllocator;
 use crate::internode::InternodeNode;
 use crate::key::Key;
-use crate::leaf::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode, LeafValue};
+use crate::leaf::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode, LeafValue, SplitUtils};
 use crate::nodeversion::LockGuard;
 use crate::permuter::Permuter;
 
@@ -145,16 +146,24 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         value: Arc<V>,
         guard: &LocalGuard<'_>,
     ) -> Result<Option<Arc<V>>, InsertError> {
-        // Try CAS fast path first (lock-free for simple inserts)
-        // Only try CAS for keys at layer 0 (not in sublayer)
-        match self.try_cas_insert(key, Arc::clone(&value), guard) {
-            CasInsertResult::Success(old) => return Ok(old),
-            // Fall through to locked path for complex cases
-            CasInsertResult::ExistsNeedLock { .. }
-            | CasInsertResult::FullNeedLock
-            | CasInsertResult::LayerNeedLock { .. }
-            | CasInsertResult::ContentionFallback => {
-                // Continue with locked path below
+        // CAS fast path for simple inserts (short keys, no suffix).
+        // Both CAS and locked paths now use atomic slot claiming via try_claim_slot,
+        // so they coordinate properly without conflicts.
+        if !key.has_suffix() && key.current_len() <= 8 {
+            match self.try_cas_insert(key, Arc::clone(&value), guard) {
+                CasInsertResult::Success(old) => return Ok(old),
+                CasInsertResult::ExistsNeedLock { .. } => {
+                    // Key exists - locked path will handle update
+                }
+                CasInsertResult::FullNeedLock => {
+                    // Need split - locked path will handle
+                }
+                CasInsertResult::LayerNeedLock { .. } => {
+                    // Need layer creation - locked path will handle
+                }
+                CasInsertResult::ContentionFallback => {
+                    // High contention - fall back to locked path
+                }
             }
         }
 
@@ -163,7 +172,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         // Track whether we're in a sublayer (don't reload root if so)
         let mut in_sublayer: bool = false;
 
-        loop {
+        'outer: loop {
             // Reload root in case it changed due to a split
             // BUT only if we're at the main tree level, not in a sublayer
             if !in_sublayer {
@@ -237,6 +246,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     cursor.leaf().set_keylenx(slot, LAYER_KEYLENX);
                     cursor.leaf().set_leaf_value_ptr(slot, layer_ptr);
 
+                    self.count.fetch_add(1, AtomicOrdering::Relaxed);
                     return Ok(None);
                 }
 
@@ -248,27 +258,57 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     if can_insert {
                         cursor.lock.mark_insert();
 
-                        // Allocate slot from permutation
                         let leaf = cursor.leaf();
                         let mut perm: Permuter<WIDTH> = leaf.permutation();
-                        let slot: usize = perm.insert_from_back(logical_pos);
 
-                        // Check slot-0 rule
-                        let actual_slot: usize = if slot == 0 && !leaf.can_reuse_slot0(cursor.ikey)
-                        {
-                            // Need to avoid slot 0 - swap with another free slot
-                            perm.swap_free_slots(WIDTH - 1, perm.size() - 1);
-                            perm.get(logical_pos)
-                        } else {
-                            slot
+                        // Try to claim a slot using CAS. A CAS thread might have claimed
+                        // a slot without publishing it yet (perm CAS failed), so we try
+                        // slots from the back of the free region until one succeeds.
+                        let mut back_offset: usize = 0;
+                        let actual_slot: usize = loop {
+                            // Check we haven't exhausted free slots
+                            if perm.size() + back_offset >= WIDTH {
+                                // All free slots are claimed by CAS threads
+                                // This shouldn't happen often - drop lock and retry
+                                drop(cursor.lock);
+                                continue 'outer;
+                            }
+
+                            let candidate: usize = perm.back_at_offset(back_offset);
+
+                            // Check slot-0 rule
+                            if candidate == 0 && !leaf.can_reuse_slot0(cursor.ikey) {
+                                back_offset += 1;
+                                continue;
+                            }
+
+                            // Try to atomically claim this slot
+                            match leaf.try_claim_slot(
+                                candidate,
+                                cursor.ikey,
+                                cursor.keylenx.min(8),
+                                Arc::clone(&value),
+                            ) {
+                                Ok(()) => {
+                                    // Successfully claimed - swap to back if needed
+                                    if back_offset > 0 {
+                                        perm.swap_free_slots(WIDTH - 1, WIDTH - 1 - back_offset);
+                                    }
+                                    break candidate;
+                                }
+                                Err(_returned_arc) => {
+                                    // Slot taken by CAS thread, try next
+                                    back_offset += 1;
+                                    continue;
+                                }
+                            }
                         };
 
-                        // Two-store write: ikey, keylenx, value
-                        leaf.assign_arc(
-                            actual_slot,
-                            cursor.ikey,
-                            cursor.keylenx.min(8),
-                            Arc::clone(&value),
+                        // Insert the claimed slot at the logical position
+                        let _allocated: usize = perm.insert_from_back(logical_pos);
+                        debug_assert!(
+                            _allocated == actual_slot,
+                            "insert_from_back should return the swapped slot"
                         );
 
                         // Suffix if needed
@@ -282,7 +322,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         // Publish: permutation store is linearization point
                         leaf.set_permutation(perm);
 
-                        // count is usize, will be updated to AtomicUsize for full concurrency
+                        self.count.fetch_add(1, AtomicOrdering::Relaxed);
                         return Ok(None);
                     }
 
@@ -293,8 +333,31 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     let perm: Permuter<WIDTH> = leaf.permutation();
                     let size: usize = perm.size();
 
-                    // Calculate split position (half the entries)
-                    let split_pos: usize = size / 2;
+                    // P0.3 FIX: Calculate split position respecting equal-ikey rule.
+                    // Use SplitUtils::calculate_split_point which adjusts the split
+                    // point to keep entries with the same ikey together.
+                    //
+                    // Reference: masstree_split.hh:80-97 (equal-ikey adjustment)
+                    let split_pos: usize =
+                        match SplitUtils::calculate_split_point(leaf, logical_pos, cursor.ikey) {
+                            Some(sp) => {
+                                // Convert from post-insert to pre-insert coordinates
+                                // If insert_pos < split_pos, the key would go left and
+                                // split_pos is shifted by 1 in post-insert coordinates
+                                if logical_pos < sp.pos {
+                                    sp.pos.saturating_sub(1).max(1)
+                                } else {
+                                    sp.pos.min(size.saturating_sub(1)).max(1)
+                                }
+                            }
+                            None => {
+                                // All entries have same ikey - would need layer creation.
+                                // This shouldn't happen in normal split path since we
+                                // check for conflicts earlier, but fall back to simple
+                                // split which will be handled by layer creation on retry.
+                                size / 2
+                            }
+                        };
 
                     // Perform the split
                     // SAFETY: We hold the lock, guard protects suffix operations
@@ -321,16 +384,25 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // Track the new leaf for cleanup (link succeeded)
                     self.allocator.track_leaf(right_leaf_ptr);
 
-                    // Unlock the left leaf before propagating
-                    drop(cursor.lock);
+                    // P0.2 FIX: Keep left leaf locked during parent propagation.
+                    // The C++ implementation uses hand-over-hand locking: child stays
+                    // locked until parent is updated. This prevents a window where
+                    // keys have moved but parent doesn't know about the right sibling.
+                    //
+                    // Reference: masstree_split.hh:247-293 (delayed shrink + hand-over-hand)
 
-                    // Propagate split to parent
-                    match self.propagate_leaf_split_concurrent(
+                    // Propagate split to parent (while still holding left leaf lock)
+                    let propagate_result = self.propagate_leaf_split_concurrent(
                         cursor.leaf_ptr,
                         right_leaf_ptr,
                         split_result.split_ikey,
                         guard,
-                    ) {
+                    );
+
+                    // NOW release the left leaf lock (after parent is updated)
+                    drop(cursor.lock);
+
+                    match propagate_result {
                         Ok(()) => {
                             // Split propagated successfully
                             // Retry to find the correct leaf for our key
@@ -872,16 +944,15 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             );
         }
 
-        // Lock parent with validation
-        let (parent_ptr, mut parent_lock) = self.locked_parent_leaf(left_leaf);
-        // SAFETY: parent_ptr is valid from locked_parent_leaf
-        let parent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*parent_ptr };
+        // Lock parent with validation and find child index
+        // We loop here because the parent might have been split between
+        // locked_parent_leaf's validation and our child search.
+        let (parent_ptr, mut parent_lock, child_idx) = loop {
+            let (parent_ptr, parent_lock) = self.locked_parent_leaf(left_leaf);
+            // SAFETY: parent_ptr is valid from locked_parent_leaf
+            let parent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*parent_ptr };
 
-        // Mark that we're modifying the parent
-        parent_lock.mark_insert();
-
-        // Find where left_leaf is in parent's children
-        let child_idx: usize = {
+            // Find where left_leaf is in parent's children
             let nkeys: usize = parent.size();
             let mut found_idx: Option<usize> = None;
             for i in 0..=nkeys {
@@ -891,9 +962,24 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 }
             }
 
-            #[expect(clippy::expect_used, reason = "Invariant: child must exist in parent")]
-            found_idx.expect("left_leaf must be in parent")
+            match found_idx {
+                Some(idx) => break (parent_ptr, parent_lock, idx),
+                None => {
+                    // Child not found - this can happen if the parent was split
+                    // and the child moved to a sibling, but the child's parent
+                    // pointer was updated AFTER we validated in locked_parent_leaf.
+                    // Release lock and retry.
+                    drop(parent_lock);
+                    continue;
+                }
+            }
         };
+
+        // SAFETY: parent_ptr is valid from locked_parent_leaf
+        let parent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*parent_ptr };
+
+        // Mark that we're modifying the parent
+        parent_lock.mark_insert();
 
         // Check if parent has space
         if parent.size() < WIDTH {
@@ -985,7 +1071,35 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         let parent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*parent_ptr };
 
         // Lock the parent
-        let parent_lock = parent.version().lock();
+        let mut parent_lock = parent.version().lock();
+
+        // FIX: Check if parent is still full after acquiring lock.
+        // Between the fullness check in the caller and acquiring this lock,
+        // another thread may have already split this node.
+        if parent.size() < WIDTH {
+            // Parent was split by another thread - just insert
+            parent_lock.mark_insert();
+            parent.insert_key_and_child(child_idx, insert_ikey, insert_child);
+
+            // Update child's parent pointer
+            // SAFETY: insert_child is valid
+            unsafe {
+                if parent.children_are_leaves() {
+                    (*insert_child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
+                        .set_parent(parent_ptr.cast::<u8>());
+                } else {
+                    (*insert_child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
+                        .set_parent(parent_ptr.cast::<u8>());
+                }
+            }
+            return Ok(());
+        }
+
+        // P0.4 FIX: Mark dirty BEFORE structural modifications.
+        // In Masstree's OCC protocol, the lock bit does NOT block readers.
+        // Only dirty bits signal that mutation is in progress.
+        // Reference: nodeversion.hh:143-159, masstree_split.hh:215-216
+        parent_lock.mark_split();
 
         // Create new sibling internode
         let sibling: Box<InternodeNode<LeafValue<V>, WIDTH>> = InternodeNode::new(parent.height());
@@ -1038,24 +1152,32 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             }
         }
 
-        drop(parent_lock);
+        // P0.5 FIX: Keep parent_lock held during propagation.
+        // The C++ implementation uses hand-over-hand locking: child stays locked
+        // until parent/grandparent update is complete to prevent concurrent
+        // interleaving that could corrupt the split propagation.
+        //
+        // Reference: masstree_split.hh:206-293 (single structured loop)
 
         // Check if parent was root
         if parent.parent().is_null() && parent.version().is_root() {
-            // Create new root above both
-            return self.create_root_internode_from_internode_split(
+            // Root split - create new root (still holding parent_lock)
+            let result = self.create_root_internode_from_internode_split(
                 parent_ptr,
                 sibling_ptr,
                 popup_key,
                 guard,
             );
+            // NOW release the parent lock after root is installed
+            drop(parent_lock);
+            return result;
         }
 
         // Recursively propagate to grandparent
         let grandparent: &InternodeNode<LeafValue<V>, WIDTH> =
             unsafe { &*parent.parent().cast::<InternodeNode<LeafValue<V>, WIDTH>>() };
 
-        // Find parent's position in grandparent
+        // Find parent's position in grandparent (while still holding parent_lock)
         let parent_idx: usize = {
             let mut found: Option<usize> = None;
             for i in 0..=grandparent.size() {
@@ -1069,26 +1191,34 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         };
 
         // Check if grandparent has space
-        let grandparent_lock = grandparent.version().lock();
+        let mut grandparent_lock = grandparent.version().lock();
         if grandparent.size() < WIDTH {
+            // P0.4 FIX: Mark dirty BEFORE structural modification
+            grandparent_lock.mark_insert();
             grandparent.insert_key_and_child(parent_idx, popup_key, sibling_ptr.cast::<u8>());
             unsafe {
                 (*sibling_ptr).set_parent(parent.parent());
             }
+            // NOW release both locks (hand-over-hand: grandparent first, then parent)
             drop(grandparent_lock);
+            drop(parent_lock);
             return Ok(());
         }
 
+        // Grandparent full - need recursive split
+        // Drop grandparent_lock since we'll re-acquire it in the recursive call
         drop(grandparent_lock);
-
-        // Grandparent full - recursive split
-        self.propagate_internode_split_concurrent(
+        // Keep parent_lock until recursive call completes
+        let result = self.propagate_internode_split_concurrent(
             parent.parent().cast(),
             parent_idx,
             popup_key,
             sibling_ptr.cast::<u8>(),
             guard,
-        )
+        );
+        // NOW release parent_lock after recursive propagation is complete
+        drop(parent_lock);
+        result
     }
 
     /// Create a new root internode from an internode split.

@@ -1341,6 +1341,79 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         self.leaf_values[slot].store(value_ptr, WRITE_ORD);
     }
 
+    /// Clear a slot after a failed CAS insert.
+    ///
+    /// This must be called when CAS fails after `store_slot_for_cas` to prevent
+    /// double-free on leaf drop. The slot's value pointer is set to null so
+    /// the drop implementation won't try to free it.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must have already reclaimed/freed the value that was stored
+    /// - Slot must be in the free region (not visible to readers)
+    #[inline]
+    pub unsafe fn clear_slot_for_cas(&self, slot: usize) {
+        debug_assert!(slot < WIDTH, "clear_slot_for_cas: slot out of bounds");
+        self.leaf_values[slot].store(std::ptr::null_mut(), WRITE_ORD);
+    }
+
+    /// Atomically claim a slot for CAS insert by CAS'ing the value pointer.
+    ///
+    /// This is the atomic slot reservation mechanism that prevents the slot
+    /// collision bug where two threads reading the same permutation would
+    /// both try to write to the same slot.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if claim succeeded (caller now owns the slot)
+    /// - `Err(actual)` if slot was modified by another thread
+    ///
+    /// # Arguments
+    ///
+    /// - `slot`: The slot index to claim
+    /// - `expected`: The expected current value (from `load_slot_value`)
+    /// - `new_value`: The new value pointer to store (our Arc pointer)
+    #[inline]
+    pub fn cas_slot_value(
+        &self,
+        slot: usize,
+        expected: *mut u8,
+        new_value: *mut u8,
+    ) -> Result<(), *mut u8> {
+        debug_assert!(slot < WIDTH, "cas_slot_value: slot out of bounds");
+
+        match self.leaf_values[slot].compare_exchange(expected, new_value, CAS_SUCCESS, CAS_FAILURE)
+        {
+            Ok(_) => Ok(()),
+            Err(actual) => Err(actual),
+        }
+    }
+
+    /// Load the current value pointer at a slot.
+    ///
+    /// Used before `cas_slot_value` to get the expected value for CAS.
+    #[inline]
+    pub fn load_slot_value(&self, slot: usize) -> *mut u8 {
+        debug_assert!(slot < WIDTH, "load_slot_value: slot out of bounds");
+        self.leaf_values[slot].load(READ_ORD)
+    }
+
+    /// Store key data for a slot after successful CAS claim.
+    ///
+    /// This stores ikey and keylenx with Release ordering to ensure
+    /// they are visible to readers after the permutation CAS succeeds.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must have successfully claimed the slot via `cas_slot_value`
+    /// - Slot must still be in the free region of the permutation
+    #[inline]
+    pub unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
+        debug_assert!(slot < WIDTH, "store_key_data_for_cas: slot out of bounds");
+        self.ikey0[slot].store(ikey, WRITE_ORD);
+        self.keylenx[slot].store(keylenx, WRITE_ORD);
+    }
+
     /// Get the number of keys in this leaf.
     #[inline(always)]
     #[must_use]
@@ -1823,6 +1896,50 @@ impl<V, const WIDTH: usize> LeafNode<LeafValue<V>, WIDTH> {
 
         let ptr: *mut u8 = Arc::into_raw(arc_value).cast_mut().cast::<u8>();
         self.set_leaf_value_ptr(slot, ptr);
+    }
+
+    /// Try to atomically claim a slot for insert.
+    ///
+    /// Uses CAS to ensure only one thread can claim a slot. Both the CAS fast path
+    /// and the locked path use this to coordinate slot allocation.
+    ///
+    /// # Returns
+    /// - `Ok(())` - Slot claimed successfully, key data stored
+    /// - `Err(arc)` - Slot taken by another thread, Arc returned for retry
+    ///
+    /// # Protocol
+    /// 1. Convert Arc to raw pointer
+    /// 2. CAS slot value from NULL to our pointer
+    /// 3. If successful, store key data
+    /// 4. If failed, reclaim Arc and return it
+    #[inline]
+    pub fn try_claim_slot(
+        &self,
+        slot: usize,
+        ikey: u64,
+        keylenx: u8,
+        value: Arc<V>,
+    ) -> Result<(), Arc<V>> {
+        debug_assert!(slot < WIDTH, "try_claim_slot: slot out of bounds");
+
+        let arc_ptr: *mut u8 = Arc::into_raw(value).cast_mut().cast::<u8>();
+
+        // Try to claim slot atomically (CAS from NULL to our pointer)
+        match self.cas_slot_value(slot, std::ptr::null_mut(), arc_ptr) {
+            Ok(()) => {
+                // We own the slot - store key data
+                // SAFETY: We just claimed this slot atomically via CAS
+                unsafe {
+                    self.store_key_data_for_cas(slot, ikey, keylenx);
+                }
+                Ok(())
+            }
+            Err(_) => {
+                // Slot already taken - reclaim Arc and return it
+                // SAFETY: We just created this Arc from into_raw, nobody else has it
+                Err(unsafe { Arc::from_raw(arc_ptr.cast::<V>()) })
+            }
+        }
     }
 
     /// Try to clone Arc value from slot.
