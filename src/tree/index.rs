@@ -6,7 +6,7 @@
 use std::fmt as StdFmt;
 use std::sync::Arc;
 
-use crate::alloc::{ArenaAllocator, NodeAllocator};
+use crate::alloc::{NodeAllocator, SeizeAllocator};
 use crate::leaf::LeafValue;
 
 use super::{InsertError, MassTree};
@@ -29,7 +29,7 @@ use super::{InsertError, MassTree};
 ///
 /// * `V` - The value type to store (must be `Copy`)
 /// * `WIDTH` - Node width (default: 15, max: 15)
-/// * `A` - Node allocator (default: `ArenaAllocator`)
+/// * `A` - Node allocator (default: `SeizeAllocator`)
 ///
 /// # Example
 ///
@@ -45,7 +45,7 @@ use super::{InsertError, MassTree};
 pub struct MassTreeIndex<
     V: Copy,
     const WIDTH: usize = 15,
-    A: NodeAllocator<LeafValue<V>, WIDTH> = ArenaAllocator<LeafValue<V>, WIDTH>,
+    A: NodeAllocator<LeafValue<V>, WIDTH> = SeizeAllocator<LeafValue<V>, WIDTH>,
 > {
     /// Wraps `MassTree` internally. True inline storage is planned for future.
     pub(crate) inner: MassTree<V, WIDTH, A>,
@@ -61,8 +61,8 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> StdFmt:
     }
 }
 
-impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>> {
-    /// Create a new empty `MassTreeIndex` with the default arena allocator.
+impl<V: Copy, const WIDTH: usize> MassTreeIndex<V, WIDTH, SeizeAllocator<LeafValue<V>, WIDTH>> {
+    /// Create a new empty `MassTreeIndex` with the default seize allocator.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -91,7 +91,7 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>>
 
     /// Get the number of keys in the tree.
     #[must_use]
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.inner.len()
     }
 
@@ -151,7 +151,7 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>>
 }
 
 impl<V: Copy, const WIDTH: usize> Default
-    for MassTreeIndex<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>>
+    for MassTreeIndex<V, WIDTH, SeizeAllocator<LeafValue<V>, WIDTH>>
 {
     fn default() -> Self {
         Self::new()

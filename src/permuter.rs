@@ -257,6 +257,18 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         self.value
     }
 
+    /// Create a Permuter from a raw u64 value.
+    ///
+    /// Used when loading from atomic storage.
+    ///
+    /// # Arguments
+    /// * `value` - The raw u64 value loaded from atomic
+    #[inline]
+    #[must_use]
+    pub const fn from_value(value: u64) -> Self {
+        Self { value }
+    }
+
     /// Set the size without changing slot positions.
     ///
     /// # Safety

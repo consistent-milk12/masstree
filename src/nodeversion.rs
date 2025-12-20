@@ -21,6 +21,7 @@
 //! ```
 
 use std::marker::PhantomData;
+use std::sync::atomic::compiler_fence;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::time::{Duration, Instant};
 
@@ -403,9 +404,40 @@ impl NodeVersion {
     /// # Implementation Note
     /// Uses `> LOCK_BIT` (i.e., `> 1`) because XOR of only the lock bit equals 1,
     /// which is NOT > 1, so lock-only changes return false.
+    ///
+    /// # Compiler Fence Requirement (P0.1)
+    ///
+    /// This method includes a **compiler fence** before the version load.
+    /// This is critical for correctness: the optimistic read protocol is
+    /// "read fields → validate version". Without the fence, the compiler
+    /// could reorder field reads to occur AFTER the version check, defeating
+    /// the validation.
+    ///
+    /// ## C++ Reference
+    ///
+    /// The C++ `nodeversion.hh:72-74` uses `fence()` (compiler barrier):
+    /// ```cpp
+    /// bool has_changed(nodeversion x) const {
+    ///     fence();  // compiler barrier from compiler.hh:77
+    ///     return (x.v_ ^ v_) > lock_bit;
+    /// }
+    /// ```
+    ///
+    /// ## Why Acquire Alone Is Insufficient
+    ///
+    /// `Ordering::Acquire` on the load only prevents reordering of operations
+    /// AFTER the load. It does NOT prevent the compiler from moving reads
+    /// that occurred BEFORE the `has_changed()` call to occur after it.
+    ///
+    /// The compiler fence ensures all prior reads (slot data) complete before
+    /// we load the version for validation.
     #[inline]
     #[must_use]
     pub fn has_changed(&self, old: u32) -> bool {
+        // Compiler fence: ensures all prior reads complete before version check.
+        // This matches C++ fence() in nodeversion.hh:72.
+        compiler_fence(Ordering::SeqCst);
+
         // XOR the versions, change = differing bits above LOCK_BIT
         (old ^ self.value.load(Ordering::Acquire)) > LOCK_BIT
     }
@@ -413,9 +445,15 @@ impl NodeVersion {
     /// Check if a split has occurred since `old`.
     ///
     /// Returns true if the split version counter changed.
+    ///
+    /// Uses the same compiler fence as `has_changed()` for correctness.
+    /// See [`has_changed`] for the full explanation.
     #[inline]
     #[must_use]
     pub fn has_split(&self, old: u32) -> bool {
+        // Compiler fence: ensures all prior reads complete before version check.
+        compiler_fence(Ordering::SeqCst);
+
         (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
     }
 

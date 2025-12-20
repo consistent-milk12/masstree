@@ -26,7 +26,7 @@ fn main() {
 // =============================================================================
 
 fn setup_leaf_with_keys(keys: &[u64]) -> Box<LeafNode<Slot, 15>> {
-    let mut leaf = LeafNode::<Slot, 15>::new();
+    let leaf = LeafNode::<Slot, 15>::new();
     let mut perm = leaf.permutation();
 
     for (i, &ikey) in keys.iter().enumerate() {
@@ -38,7 +38,7 @@ fn setup_leaf_with_keys(keys: &[u64]) -> Box<LeafNode<Slot, 15>> {
 }
 
 fn setup_internode_with_keys(keys: &[u64]) -> Box<InternodeNode<Slot, 15>> {
-    let mut node = InternodeNode::<Slot, 15>::new(0);
+    let node = InternodeNode::<Slot, 15>::new(0);
 
     for (i, &ikey) in keys.iter().enumerate() {
         node.set_ikey(i, ikey);

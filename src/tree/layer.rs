@@ -5,6 +5,7 @@ use crate::alloc::NodeAllocator;
 use crate::key::Key;
 use crate::leaf::{LeafNode, LeafValue};
 use crate::permuter::Permuter;
+use seize::LocalGuard;
 
 use super::MassTree;
 
@@ -26,7 +27,12 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// A tuple of (`layer_root`, `insert_slot`) where:
     /// - `layer_root` is the new sublayer to continue insertion
     /// - `insert_slot` is the slot in that layer for the new key
-    pub(super) fn make_new_layer(
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure no concurrent access to the leaf.
+    #[expect(clippy::too_many_lines, reason = "Complex layer creation logic")]
+    pub(super) unsafe fn make_new_layer(
         &mut self,
         leaf: &mut LeafNode<LeafValue<V>, WIDTH>,
         slot: usize,
@@ -40,8 +46,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
         // 2. Get existing value before we modify the slot
         //
-        // Use leaf_value() accessor here.
-        let existing_value: Option<Arc<V>> = leaf.leaf_value(slot).try_clone_arc();
+        // Slot holds Arc pointer; cloning is safe under the leaf lock.
+        let existing_value: Option<Arc<V>> = unsafe { leaf.try_clone_arc(slot) };
 
         // 3. Shift new_key to get to the suffix portion
         // new_key has the full original key - shift advances past the ikey we matched on
@@ -64,12 +70,17 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
         while cmp == Ordering::Equal && existing_key.has_suffix() && new_key.has_suffix() {
             // Create intermediate layer node (single entry)
-            let mut twig: Box<LeafNode<LeafValue<V>, WIDTH>> =
+            let twig: Box<LeafNode<LeafValue<V>, WIDTH>> =
                 LeafNode::<LeafValue<V>, WIDTH>::new_layer_root();
-            twig.assign_initialize_for_layer(0, existing_key.ikey());
-            twig.set_permutation(Permuter::make_sorted(1));
-
+            // Note: Can't call methods on twig before alloc since it moves into alloc
             let twig_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = self.alloc_leaf(twig);
+
+            // Initialize the twig node
+            // SAFETY: twig_ptr is valid, just allocated
+            unsafe {
+                (*twig_ptr).assign_initialize_for_layer(0, existing_key.ikey());
+                (*twig_ptr).set_permutation(Permuter::make_sorted(1));
+            }
 
             // Link to previous twig
             if twig_head.is_some() {
@@ -91,7 +102,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         }
 
         // 5. Create final leaf with both keys (they now have different ikeys)
-        let mut final_leaf = LeafNode::<LeafValue<V>, WIDTH>::new_layer_root();
+        let final_leaf = LeafNode::<LeafValue<V>, WIDTH>::new_layer_root();
+
+        // Allocate final_leaf first, before creating guard
+        let final_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = self.alloc_leaf(final_leaf);
 
         // Determine ordering: existing vs new
         //
@@ -122,17 +136,28 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             }
         };
 
-        // Assign both slots using the unified helper
-        final_leaf.assign_from_key(0, &first_key, first_val);
-        final_leaf.assign_from_key(1, &second_key, second_val);
+        // Create guard only for assign_from_key operations (after all allocations)
+        // SAFETY: final_ptr is valid from alloc_leaf
+        {
+            let guard: LocalGuard<'_> = self.collector.enter();
+            let final_leaf_ref: &LeafNode<LeafValue<V>, WIDTH> = unsafe { &*final_ptr };
+            // Assign both slots using the unified helper
+            // SAFETY: guard comes from tree's collector
+            unsafe {
+                final_leaf_ref.assign_from_key(0, &first_key, first_val, &guard);
+                final_leaf_ref.assign_from_key(1, &second_key, second_val, &guard);
+            }
+        } // guard dropped here
 
         // Set up permutation (size 2, but slot for new key not yet "inserted")
         // The caller will call finish_insert to add the new slot to permutation
-        let mut perm: Permuter<WIDTH> = Permuter::make_sorted(2);
-        perm.remove_to_back(new_slot); // Remove new slot from "visible" permutation
-        final_leaf.set_permutation(perm);
-
-        let final_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = self.alloc_leaf(final_leaf);
+        // SAFETY: final_ptr is valid
+        unsafe {
+            let final_leaf_ref: &LeafNode<LeafValue<V>, WIDTH> = &*final_ptr;
+            let mut perm: Permuter<WIDTH> = Permuter::make_sorted(2);
+            perm.remove_to_back(new_slot); // Remove new slot from "visible" permutation
+            final_leaf_ref.set_permutation(perm);
+        }
 
         // 6. Link twig chain to final leaf
         if twig_tail.is_null() {
@@ -157,6 +182,17 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             Some(ptr) => ptr,
             None => unreachable!("twig_head is always set before this point"),
         };
+
+        // CRITICAL: Drop the original Arc before overwriting with layer pointer.
+        // try_clone_arc() above incremented the refcount; we must drop the original
+        // to avoid leaking it when set_layer overwrites the slot.
+        // SAFETY: slot contains a valid Arc pointer (we just cloned it above)
+        let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
+        if !old_ptr.is_null() {
+            // SAFETY: old_ptr came from Arc::into_raw in a previous insert
+            let _old_arc: Arc<V> = unsafe { Arc::from_raw(old_ptr.cast::<V>()) };
+            // _old_arc is dropped here, decrementing refcount
+        }
 
         leaf.set_layer(slot, layer_root.cast::<u8>());
 

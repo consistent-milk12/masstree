@@ -4,7 +4,7 @@ An experimental Rust implementation of the Masstree algorithm, a high-performanc
 
 This project **attempts to reimplement** the [original C++ Masstree](https://github.com/kohler/masstree-beta)
 
-**Status:** Phase 2 complete - single-threaded core with full trie layering. Keys of any length (0-256 bytes), `get`/`insert`/split operations, and allocation abstraction all working. Concurrency planned for Phase 3.
+**Status:** Phase 3 in progress - concurrent `get` and `insert` with version-validated optimistic reads and locked writes. Split propagation works under contention. Loom and Shuttle tests verify linearizability. Memory reclamation and lock-free linking still TODO.
 
 ## Overview
 
@@ -129,7 +129,7 @@ MassTree has higher fixed overhead for initialization, which amortizes quickly w
 
 ### Caveats
 
-- **Single-threaded only**: Concurrency is planned for Phase 3
+- **Concurrency in progress**: Basic concurrent `get`/`insert` work, but memory reclamation and some edge cases still need work
 - **No range scans yet**: Ordered iteration not implemented
 - **Different trade-offs**: MassTree is optimized for byte-slice keys; BTreeMap is more general
 
@@ -141,20 +141,21 @@ See `Baseline.md` for detailed benchmark history.
 |--------|--------|-------|
 | `key` | Complete | 8-byte ikey extraction, layer traversal, suffix handling |
 | `permuter` | Complete | Const-generic WIDTH, u64-encoded slot permutation |
-| `nodeversion` | Complete | Versioned lock with type-state guard pattern (single-threaded) |
+| `nodeversion` | Complete | Atomic versioned lock with CAS-based acquisition, backoff |
 | `leaf` | Complete | LeafNode struct, split operations, B-link pointers, layer support |
 | `internode` | Complete | Routing nodes, split-with-insert, height-based child typing |
 | `ksearch` | Complete | Binary search for leaves and internodes |
-| `tree` | Complete | `MassTree` with `get`/`insert`, split propagation, trie layering |
+| `tree` | In Progress | Concurrent `get`/`insert` with version validation, split propagation |
 | `suffix` | Complete | SuffixBag for keys > 8 bytes with per-slot metadata |
-| `alloc` | Complete | `NodeAllocator` trait, `ArenaAllocator` impl (Phase 3 ready) |
+| `alloc` | Complete | `NodeAllocator` trait, `SeizeAllocator` (Miri-compliant) |
 | Scan/Remove | Planned | Range scans and key deletion not yet implemented |
 
 **Current Capabilities:**
 
 - Keys from 0-256 bytes (full trie layering for long keys)
-- Single-threaded (no concurrent access yet)
-- Pluggable allocation via `NodeAllocator` trait (arena-based by default)
+- Concurrent `get` (optimistic, lock-free) and `insert` (locked, with split propagation)
+- Pluggable allocation via `NodeAllocator` trait
 - Miri-verified for strict pointer provenance
+- Loom + Shuttle tested for linearizability
 
 **Note on `MassTreeIndex`:** The current `MassTreeIndex<V: Copy>` is a convenience wrapper that still uses `Arc<V>` internally. True inline storage for `V: Copy` values is planned but not yet implemented.

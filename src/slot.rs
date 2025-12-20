@@ -151,6 +151,18 @@ pub trait ValueSlot: Default + Sized {
     fn take(&mut self) -> Self {
         StdMem::take(self)
     }
+
+    /// Cleanup a raw pointer that was stored via `Arc::into_raw` or `Box::into_raw`.
+    ///
+    /// Called during node teardown (Drop) for non-layer slots.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must be non-null and have been created by the corresponding
+    ///   storage method (`assign_arc` for `LeafValue`, `assign_inline` for `LeafValueIndex`)
+    /// - `ptr` must not have been already cleaned up
+    /// - Caller must ensure no concurrent access to this pointer
+    unsafe fn cleanup_value_ptr(ptr: *mut u8);
 }
 
 // ============================================================================
@@ -229,6 +241,14 @@ impl<V> ValueSlot for LeafValue<V> {
             _ => None,
         }
     }
+
+    #[inline(always)]
+    unsafe fn cleanup_value_ptr(ptr: *mut u8) {
+        // SAFETY: Caller guarantees ptr came from Arc::into_raw
+        unsafe {
+            drop(Arc::from_raw(ptr.cast::<V>()));
+        }
+    }
 }
 
 // ============================================================================
@@ -303,6 +323,14 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
         match old {
             Self::Value(v) => Some(v),
             _ => None,
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn cleanup_value_ptr(ptr: *mut u8) {
+        // SAFETY: Caller guarantees ptr came from Box::into_raw
+        unsafe {
+            drop(Box::from_raw(ptr.cast::<V>()));
         }
     }
 }

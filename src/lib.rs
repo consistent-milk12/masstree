@@ -44,13 +44,14 @@ pub mod key;
 pub mod ksearch;
 pub mod leaf;
 pub mod nodeversion;
+pub mod ordering;
 pub mod permuter;
 pub mod slot;
 pub mod suffix;
 pub mod tree;
 
 // Re-export main types for convenience
-pub use alloc::{ArenaAllocator, NodeAllocator};
+pub use alloc::{ArenaAllocator, NodeAllocator, SeizeAllocator};
 pub use slot::ValueSlot;
 pub use suffix::{PermutationProvider, SuffixBag};
 pub use tree::{MassTree, MassTreeIndex};

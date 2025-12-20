@@ -22,15 +22,17 @@ include = [
 
 [dependencies]
 seize = "0.5.1"
+parking_lot = "0.12.5"
 
 [dev-dependencies]
 divan = "0.1.21"
 proptest = "1.9.0"
 loom = "0.7.2"
+shuttle = "0.8.1"
 
 [lints.rust]
-# Allow loom cfg for deterministic concurrency testing
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+# Allow loom and shuttle cfg for deterministic concurrency testing
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(shuttle)'] }
 
 # Safety and correctness
 unsafe_op_in_unsafe_fn = "warn"

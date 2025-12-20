@@ -48,7 +48,7 @@ mod accessors {
     use super::{Bencher, InternodeNode, Slot, black_box};
 
     fn setup_internode_with_keys(n: usize) -> Box<InternodeNode<Slot, 15>> {
-        let mut node = InternodeNode::<Slot, 15>::new(0);
+        let node = InternodeNode::<Slot, 15>::new(0);
 
         for i in 0..n {
             let ikey = ((i + 1) as u64) << 56;
@@ -113,7 +113,7 @@ mod compare {
     use super::{Bencher, InternodeNode, Slot, black_box};
 
     fn setup_internode() -> Box<InternodeNode<Slot, 15>> {
-        let mut node = InternodeNode::<Slot, 15>::new(0);
+        let node = InternodeNode::<Slot, 15>::new(0);
         let keys: [u64; 5] = [
             0x1000_0000_0000_0000,
             0x2000_0000_0000_0000,
@@ -165,7 +165,7 @@ mod modify {
     fn set_ikey(bencher: Bencher) {
         bencher
             .with_inputs(|| InternodeNode::<Slot, 15>::new(0))
-            .bench_local_values(|mut node| {
+            .bench_local_values(|node| {
                 node.set_ikey(7, black_box(0x1234_5678_9ABC_DEF0));
                 node
             });
@@ -175,7 +175,7 @@ mod modify {
     fn set_child(bencher: Bencher) {
         bencher
             .with_inputs(|| InternodeNode::<Slot, 15>::new(0))
-            .bench_local_values(|mut node| {
+            .bench_local_values(|node| {
                 node.set_child(7, black_box(0xDEAD_BEEF as *mut u8));
                 node
             });
@@ -185,11 +185,11 @@ mod modify {
     fn assign(bencher: Bencher) {
         bencher
             .with_inputs(|| {
-                let mut node = InternodeNode::<Slot, 15>::new(0);
+                let node = InternodeNode::<Slot, 15>::new(0);
                 node.set_nkeys(5);
                 node
             })
-            .bench_local_values(|mut node| {
+            .bench_local_values(|node| {
                 node.assign(
                     3,
                     black_box(0x1234_5678_9ABC_DEF0),
@@ -203,7 +203,7 @@ mod modify {
     fn set_nkeys(bencher: Bencher) {
         bencher
             .with_inputs(|| InternodeNode::<Slot, 15>::new(0))
-            .bench_local_values(|mut node| {
+            .bench_local_values(|node| {
                 node.set_nkeys(black_box(10));
                 node
             });
@@ -219,7 +219,7 @@ mod insert {
     use super::{Bencher, InternodeNode, Slot, black_box, ptr};
 
     fn setup_internode_with_space(n: usize) -> Box<InternodeNode<Slot, 15>> {
-        let mut node = InternodeNode::<Slot, 15>::new(0);
+        let node = InternodeNode::<Slot, 15>::new(0);
 
         for i in 0..n {
             let ikey = ((i + 1) as u64) << 56;
@@ -235,7 +235,7 @@ mod insert {
     fn insert_at_front(bencher: Bencher) {
         bencher
             .with_inputs(|| setup_internode_with_space(10))
-            .bench_local_values(|mut node| {
+            .bench_local_values(|node| {
                 node.insert_key_and_child(
                     0,
                     black_box(0x0050_0000_0000_0000),
@@ -249,7 +249,7 @@ mod insert {
     fn insert_at_middle(bencher: Bencher) {
         bencher
             .with_inputs(|| setup_internode_with_space(10))
-            .bench_local_values(|mut node| {
+            .bench_local_values(|node| {
                 node.insert_key_and_child(
                     5,
                     black_box(0x0550_0000_0000_0000),
@@ -263,7 +263,7 @@ mod insert {
     fn insert_at_back(bencher: Bencher) {
         bencher
             .with_inputs(|| setup_internode_with_space(10))
-            .bench_local_values(|mut node| {
+            .bench_local_values(|node| {
                 node.insert_key_and_child(
                     10,
                     black_box(0xFF00_0000_0000_0000),
@@ -283,7 +283,7 @@ mod split {
     use super::{Bencher, InternodeNode, Slot, black_box, ptr};
 
     fn setup_full_internode() -> Box<InternodeNode<Slot, 15>> {
-        let mut node = InternodeNode::<Slot, 15>::new(0);
+        let node = InternodeNode::<Slot, 15>::new(0);
 
         for i in 0..15 {
             let ikey = ((i + 1) as u64) << 56;
@@ -303,7 +303,7 @@ mod split {
                 let right = InternodeNode::<Slot, 15>::new(0);
                 (left, right)
             })
-            .bench_local_values(|(mut left, mut right)| {
+            .bench_local_values(|(left, mut right)| {
                 let (popup, went_left) = left.split_into(
                     &mut right,
                     3, // Insert goes to left
@@ -323,7 +323,7 @@ mod split {
                 let right = InternodeNode::<Slot, 15>::new(0);
                 (left, right)
             })
-            .bench_local_values(|(mut left, mut right)| {
+            .bench_local_values(|(left, mut right)| {
                 let (popup, went_left) = left.split_into(
                     &mut right,
                     8, // Insert becomes popup key
@@ -343,7 +343,7 @@ mod split {
                 let right = InternodeNode::<Slot, 15>::new(0);
                 (left, right)
             })
-            .bench_local_values(|(mut left, mut right)| {
+            .bench_local_values(|(left, mut right)| {
                 let (popup, went_left) = left.split_into(
                     &mut right,
                     12, // Insert goes to right
@@ -380,7 +380,7 @@ mod navigation {
     fn set_parent(bencher: Bencher) {
         bencher
             .with_inputs(|| InternodeNode::<Slot, 15>::new(0))
-            .bench_local_values(|mut node| {
+            .bench_local_values(|node| {
                 node.set_parent(black_box(0xDEAD_BEEF as *mut u8));
                 node
             });
@@ -396,7 +396,7 @@ mod shift {
     use super::{Bencher, InternodeNode, Slot};
 
     fn setup_source_internode() -> Box<InternodeNode<Slot, 15>> {
-        let mut node = InternodeNode::<Slot, 15>::new(0);
+        let node = InternodeNode::<Slot, 15>::new(0);
         for i in 0..10 {
             let ikey = ((i + 1) as u64) << 56;
             node.set_ikey(i, ikey);
@@ -415,7 +415,7 @@ mod shift {
                 let dst = InternodeNode::<Slot, 15>::new(0);
                 (src, dst)
             })
-            .bench_local_values(|(src, mut dst)| {
+            .bench_local_values(|(src, dst)| {
                 dst.shift_from(0, &src, 0, count);
                 (src, dst)
             });

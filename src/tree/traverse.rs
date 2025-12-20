@@ -3,38 +3,16 @@
 //! This module provides methods for navigating from the root to leaf nodes,
 //! supporting both immutable and mutable traversal patterns.
 
+use std::sync::atomic::Ordering;
+
 use crate::alloc::NodeAllocator;
 use crate::internode::InternodeNode;
 use crate::key::Key;
 use crate::ksearch::upper_bound_internode_direct;
 use crate::leaf::{LeafNode, LeafValue};
+use crate::nodeversion::NodeVersion;
 
-use super::{MassTree, RootNode};
-
-/// Traverse from an internode to the target leaf (iterative).
-///
-/// Free function to avoid `self_only_used_in_recursion` lint.
-#[allow(dead_code)]
-#[inline(always)]
-fn reach_leaf_from_internode<V, const WIDTH: usize>(
-    mut internode: &InternodeNode<LeafValue<V>, WIDTH>,
-    ikey: u64,
-) -> &LeafNode<LeafValue<V>, WIDTH> {
-    loop {
-        let child_idx: usize = upper_bound_internode_direct(ikey, internode);
-        let child_ptr: *mut u8 = internode.child(child_idx);
-
-        if internode.children_are_leaves() {
-            // Child is a leaf
-            // SAFETY: children_are_leaves() guarantees child is LeafNode
-            return unsafe { &*(child_ptr as *const LeafNode<LeafValue<V>, WIDTH>) };
-        }
-
-        // Child is another internode, continue iteration
-        // SAFETY: !children_are_leaves() guarantees child is InternodeNode
-        internode = unsafe { &*(child_ptr as *const InternodeNode<LeafValue<V>, WIDTH>) };
-    }
-}
+use super::MassTree;
 
 impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, WIDTH, A> {
     /// Find the leftmost leaf node in the tree.
@@ -66,7 +44,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// Reach the leaf node that should contain the given key.
     ///
     /// Traverses from root through internodes to find the target leaf.
-    /// For single-threaded mode, no version checking is needed.
+    /// Uses `root_ptr` as the single source of truth (no `RootNode` enum).
     ///
     /// # Arguments
     ///
@@ -78,53 +56,71 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     #[allow(dead_code)]
     #[inline(always)]
     pub(super) fn reach_leaf(&self, key: &Key<'_>) -> &LeafNode<LeafValue<V>, WIDTH> {
-        match &self.root {
-            RootNode::Leaf(leaf) => leaf.as_ref(),
+        let root: *const u8 = self.root_ptr.load(Ordering::Acquire);
 
-            RootNode::Internode(internode) => {
-                // Traverse internodes to find leaf
-                reach_leaf_from_internode(internode.as_ref(), key.ikey())
-            }
+        // SAFETY: root_ptr always points to a valid node.
+        // NodeVersion is the first field of both LeafNode and InternodeNode.
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "root points to LeafNode or InternodeNode, both properly aligned"
+        )]
+        let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+        let is_leaf: bool = unsafe { (*version_ptr).is_leaf() };
+
+        if is_leaf {
+            // SAFETY: is_leaf() confirmed this is a LeafNode
+            unsafe { &*(root.cast::<LeafNode<LeafValue<V>, WIDTH>>()) }
+        } else {
+            // SAFETY: !is_leaf() confirmed this is an InternodeNode
+            let internode: &InternodeNode<LeafValue<V>, WIDTH> =
+                unsafe { &*(root.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
+
+            self.reach_leaf_via_internode(internode, key)
         }
     }
 
     /// Reach the leaf node that should contain the given key (mutable).
+    ///
+    /// Uses `root_ptr` as the single source of truth (no `RootNode` enum).
     #[inline(always)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "Returns &mut LeafNode which requires &mut self for lifetime"
+    )]
     pub(super) fn reach_leaf_mut(&mut self, key: &Key<'_>) -> &mut LeafNode<LeafValue<V>, WIDTH> {
-        // Check if root is a leaf first (immutable borrow to check)
-        let is_leaf: bool = self.root.is_leaf();
+        let root: *mut u8 = self.root_ptr.load(Ordering::Acquire);
+
+        // SAFETY: root_ptr always points to a valid node.
+        // NodeVersion is the first field of both LeafNode and InternodeNode.
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "root points to LeafNode or InternodeNode, both properly aligned"
+        )]
+        let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+        let is_leaf: bool = unsafe { (*version_ptr).is_leaf() };
 
         if is_leaf {
-            // Now we can borrow mutably
-            match &mut self.root {
-                RootNode::Leaf(leaf) => return leaf.as_mut(),
-                RootNode::Internode(_) => unreachable!(),
+            // SAFETY: is_leaf() confirmed this is a LeafNode
+            unsafe { &mut *(root.cast::<LeafNode<LeafValue<V>, WIDTH>>()) }
+        } else {
+            // SAFETY: !is_leaf() confirmed this is an InternodeNode
+            let internode: &InternodeNode<LeafValue<V>, WIDTH> =
+                unsafe { &*(root.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
+
+            let ikey: u64 = key.ikey();
+            let child_idx: usize = upper_bound_internode_direct(ikey, internode);
+            let start_ptr: *mut u8 = internode.child(child_idx);
+            let children_are_leaves: bool = internode.children_are_leaves();
+
+            if children_are_leaves {
+                // SAFETY: children_are_leaves() guarantees child is LeafNode
+                unsafe { &mut *start_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>() }
+            } else {
+                // Iterative traversal for deeper trees
+                // SAFETY: The returned pointer is valid for the tree's lifetime (arena-backed)
+                unsafe { &mut *Self::reach_leaf_mut_iterative_static(start_ptr, ikey) }
             }
         }
-
-        // Root is an internode - extract info with immutable borrow first
-        let (start_ptr, children_are_leaves, ikey) = match &self.root {
-            RootNode::Internode(internode) => {
-                let ikey: u64 = key.ikey();
-                let child_idx: usize = upper_bound_internode_direct(ikey, internode.as_ref());
-                (
-                    internode.child(child_idx),
-                    internode.children_are_leaves(),
-                    ikey,
-                )
-            }
-
-            RootNode::Leaf(_) => unreachable!(),
-        };
-
-        if children_are_leaves {
-            // SAFETY: children_are_leaves() guarantees child is LeafNode
-            return unsafe { &mut *start_ptr.cast::<LeafNode<LeafValue<V>, WIDTH>>() };
-        }
-
-        // Iterative traversal for deeper trees
-        // SAFETY: The returned pointer is valid for the tree's lifetime (arena-backed)
-        unsafe { &mut *Self::reach_leaf_mut_iterative_static(start_ptr, ikey) }
     }
 
     /// Iterative leaf reach for deeply nested trees.

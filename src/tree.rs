@@ -5,120 +5,32 @@
 
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
-use std::ptr as StdPtr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
-use crate::alloc::{ArenaAllocator, NodeAllocator};
+use crate::alloc::{NodeAllocator, SeizeAllocator};
 use crate::internode::InternodeNode;
 use crate::key::Key;
 use crate::ksearch::upper_bound_internode_direct;
 use crate::leaf::{KSUF_KEYLENX, LeafNode, LeafSplitResult, LeafValue, SplitUtils};
 use crate::nodeversion::NodeVersion;
 use crate::permuter::Permuter;
-use crate::slot::ValueSlot;
+use seize::{Collector, LocalGuard};
 
 mod index;
 mod layer;
+mod locked;
 mod optimistic;
 mod split;
 mod traverse;
 
+#[cfg(all(test, loom))]
+mod loom_tests;
+
+#[cfg(all(test, not(miri)))]
+mod shuttle_tests;
+
 pub use index::MassTreeIndex;
-
-// ============================================================================
-//  RootNode Enum
-// ============================================================================
-
-/// The root of a `MassTree` layer.
-///
-/// Can be either a leaf (small tree) or an internode (larger tree).
-///
-/// # Type Parameters
-///
-/// * `S` - The slot type implementing [`ValueSlot`]
-/// * `WIDTH` - Node width (number of slots)
-pub enum RootNode<S: ValueSlot, const WIDTH: usize = 15> {
-    /// Root is a leaf node (tree has 0 or 1 level).
-    Leaf(Box<LeafNode<S, WIDTH>>),
-
-    /// Root is an internode (tree has multiple levels).
-    Internode(Box<InternodeNode<S, WIDTH>>),
-}
-
-impl<S: ValueSlot, const WIDTH: usize> RootNode<S, WIDTH> {
-    /// Check if root is a leaf.
-    #[inline]
-    #[must_use]
-    pub const fn is_leaf(&self) -> bool {
-        matches!(self, Self::Leaf(_))
-    }
-
-    /// Check if root is an internode.
-    #[inline]
-    #[must_use]
-    pub const fn is_internode(&self) -> bool {
-        matches!(self, Self::Internode(_))
-    }
-
-    /// Get leaf reference if root is a leaf.
-    #[inline]
-    #[must_use]
-    pub fn as_leaf(&self) -> Option<&LeafNode<S, WIDTH>> {
-        match self {
-            Self::Leaf(leaf) => Some(leaf.as_ref()),
-
-            Self::Internode(_) => None,
-        }
-    }
-
-    /// Get mutable leaf reference if root is a leaf.
-    #[inline]
-    pub fn as_leaf_mut(&mut self) -> Option<&mut LeafNode<S, WIDTH>> {
-        match self {
-            Self::Leaf(leaf) => Some(leaf.as_mut()),
-
-            Self::Internode(_) => None,
-        }
-    }
-
-    /// Get internode reference if root is an internode.
-    #[inline]
-    #[must_use]
-    pub fn as_internode(&self) -> Option<&InternodeNode<S, WIDTH>> {
-        match self {
-            Self::Leaf(_) => None,
-
-            Self::Internode(node) => Some(node.as_ref()),
-        }
-    }
-
-    /// Get mutable internode reference if root is an internode.
-    #[inline]
-    pub fn as_internode_mut(&mut self) -> Option<&mut InternodeNode<S, WIDTH>> {
-        match self {
-            Self::Leaf(_) => None,
-
-            Self::Internode(node) => Some(node.as_mut()),
-        }
-    }
-}
-
-impl<S: ValueSlot, const WIDTH: usize> StdFmt::Debug for RootNode<S, WIDTH> {
-    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
-        match self {
-            Self::Leaf(_) => f.debug_tuple("RootNode::Leaf").field(&"...").finish(),
-
-            Self::Internode(_) => f.debug_tuple("RootNode::Internode").field(&"...").finish(),
-        }
-    }
-}
-
-// ============================================================================
-//  MassTree (Default Mode with Arc<V>)
-// ============================================================================
-
-// NOTE: MAX_INLINE_KEY_LEN removed - layer support now handles keys of any length
-//  up to MAX_KEY_LENGTH (256 bytes, defined in key.rs)
 
 // ============================================================================
 //  InsertError
@@ -133,6 +45,16 @@ pub enum InsertError {
 
     /// Memory allocation failed.
     AllocationFailed,
+
+    /// Root-level split required.
+    /// Concurrent root updates require changing `MassTree.root` to `AtomicPtr`.
+    /// Fall back to single-threaded insert path.
+    RootSplitRequired,
+
+    /// Parent internode is full and needs splitting.
+    /// Recursive internode split not yet fully implemented concurrently.
+    /// Fall back to single-threaded insert path.
+    ParentSplitRequired,
 }
 
 impl StdFmt::Display for InsertError {
@@ -141,6 +63,14 @@ impl StdFmt::Display for InsertError {
             Self::LeafFull => write!(f, "leaf node is full"),
 
             Self::AllocationFailed => write!(f, "memory allocation failed"),
+
+            Self::RootSplitRequired => {
+                write!(f, "root-level split required (use single-threaded insert)")
+            }
+
+            Self::ParentSplitRequired => {
+                write!(f, "parent split required (use single-threaded insert)")
+            }
         }
     }
 }
@@ -156,17 +86,18 @@ impl std::error::Error for InsertError {}
 ///
 /// * `V` - The value type to store
 /// * `WIDTH` - Node width (default: 15, max: 15)
-/// * `A` - Node allocator (default: `ArenaAllocator`)
+/// * `A` - Node allocator (default: `SeizeAllocator`)
 ///
 /// # Allocator
 ///
 /// The allocator determines how nodes are allocated and (eventually) freed:
 ///
-/// - `ArenaAllocator` (default): Nodes live until tree is dropped. Simple,
-///   no overhead, but memory is not reclaimed until drop.
+/// - `SeizeAllocator` (default): Miri-compliant allocator using `Box::into_raw()`
+///   for clean pointer provenance. Ready for concurrent access with seize-based
+///   deferred reclamation.
 ///
-/// - Phase 3 will add `SeizeAllocator` using hyaline reclamation (`seize` crate)
-///   for concurrent access with deferred reclamation.
+/// - `ArenaAllocator`: Legacy allocator for testing. Causes Stacked Borrows
+///   violations under Miri.
 ///
 /// # Current Limitations
 ///
@@ -186,31 +117,29 @@ impl std::error::Error for InsertError {}
 pub struct MassTree<
     V,
     const WIDTH: usize = 15,
-    A: NodeAllocator<LeafValue<V>, WIDTH> = ArenaAllocator<LeafValue<V>, WIDTH>,
+    A: NodeAllocator<LeafValue<V>, WIDTH> = SeizeAllocator<LeafValue<V>, WIDTH>,
 > {
+    /// Memory reclamation collector for safe concurrent access.
+    ///
+    /// Uses seize's hyaline-based reclamation to safely retire nodes
+    /// and values that may still be accessed by concurrent readers.
+    collector: Collector,
+
     /// Node allocator for leaf and internode allocation.
     allocator: A,
 
-    /// Root of the tree.
-    root: RootNode<LeafValue<V>, WIDTH>,
+    /// Atomic root pointer for concurrent access.
+    ///
+    /// Points to the same node as `root` but can be atomically updated.
+    /// Used by `insert_with_guard`, `get_with_guard`, and concurrent splits.
+    /// The node type (leaf vs internode) is determined by the node's version.
+    root_ptr: AtomicPtr<u8>,
 
-    /// Number of key-value pairs in the tree.
-    /// Updated on insert (new key) and delete operations.
-    count: usize,
+    /// Number of key-value pairs in the tree (atomic for concurrent access).
+    count: AtomicUsize,
 
-    /// Marker to make `MassTree` `!Send` and `!Sync`.
-    ///
-    /// `PhantomData<*const ()>` makes this type `!Send` and `!Sync` because
-    /// raw pointers (`*const T`, `*mut T`) are neither `Send` nor `Sync` in Rust,
-    /// and `PhantomData<T>` inherits the auto-traits of `T`.
-    ///
-    /// Tree operations are currently single-threaded. While `NodeVersion` has
-    /// CAS-based locking (Phase 3.1), tree operations don't use it yet.
-    /// This marker prevents accidental concurrent use of the tree.
-    ///
-    /// When Phase 3.2-3.3 implements optimistic get and locked insert,
-    /// this marker can be removed and proper `Send`/`Sync` bounds added.
-    _not_send_sync: PhantomData<*const ()>,
+    /// Marker to indicate V must be Send + Sync for concurrent access.
+    _marker: PhantomData<V>,
 }
 
 impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> StdFmt::Debug
@@ -218,19 +147,19 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> StdFmt::Debug
 {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("MassTree")
-            .field("root", &self.root)
-            .field("count", &self.count)
+            .field("root_ptr", &self.root_ptr.load(Ordering::Relaxed))
+            .field("count", &self.count.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
 
-impl<V, const WIDTH: usize> MassTree<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>> {
-    /// Create a new empty `MassTree` with the default arena allocator.
+impl<V, const WIDTH: usize> MassTree<V, WIDTH, SeizeAllocator<LeafValue<V>, WIDTH>> {
+    /// Create a new empty `MassTree` with the default seize allocator.
     ///
     /// The tree starts with a single empty leaf as root.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_allocator(ArenaAllocator::new())
+        Self::with_allocator(SeizeAllocator::new())
     }
 }
 
@@ -239,13 +168,37 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ///
     /// The tree starts with a single empty leaf as root.
     #[must_use]
-    pub fn with_allocator(allocator: A) -> Self {
+    pub fn with_allocator(mut allocator: A) -> Self {
+        // Create root leaf and register with allocator.
+        // The allocator tracks it for cleanup — no Box stored in MassTree.
+        let root_leaf: Box<LeafNode<LeafValue<V>, WIDTH>> = LeafNode::new_root();
+        let root_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = allocator.alloc_leaf(root_leaf);
+
         Self {
+            collector: Collector::new(),
             allocator,
-            root: RootNode::Leaf(LeafNode::new_root()),
-            count: 0,
-            _not_send_sync: PhantomData,
+            root_ptr: AtomicPtr::new(root_ptr.cast::<u8>()),
+            count: AtomicUsize::new(0),
+            _marker: PhantomData,
         }
+    }
+
+    /// Enter a protected region and return a guard.
+    ///
+    /// The guard protects any pointers loaded during its lifetime from being
+    /// reclaimed. Call this before reading tree nodes or values.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let guard = tree.guard();
+    /// let value = tree.get_with_guard(key, &guard);
+    /// // guard dropped, reclamation can proceed
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn guard(&self) -> LocalGuard<'_> {
+        self.collector.enter()
     }
 
     /// Store a leaf in the allocator and return a raw pointer.
@@ -269,17 +222,99 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     }
 
     // ========================================================================
-    //  Split Propagation (moved to split.rs)
+    //  Atomic Root Access
     // ========================================================================
+
+    /// Load the root pointer atomically.
+    ///
+    /// Used by concurrent operations to get the current root.
+    /// The node type (leaf vs internode) is determined by the node's version.
+    #[inline]
+    pub(crate) fn load_root_ptr(&self, _guard: &LocalGuard<'_>) -> *const u8 {
+        self.root_ptr.load(Ordering::Acquire)
+    }
+
+    /// Compare-and-swap the root pointer atomically.
+    ///
+    /// Returns `Ok(())` if the swap succeeded, `Err(current)` if the current
+    /// value was not equal to `expected`.
+    ///
+    /// # Safety
+    ///
+    /// The `new` pointer must point to a valid node that will remain valid
+    /// for the lifetime of the tree. The old root (if different from new)
+    /// must remain valid for concurrent readers (via seize retirement).
+    #[inline]
+    pub(crate) fn cas_root_ptr(&self, expected: *mut u8, new: *mut u8) -> Result<(), *mut u8> {
+        self.root_ptr
+            .compare_exchange(expected, new, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+    }
+
+    /// Store a new root pointer atomically.
+    ///
+    /// Used when we're certain no concurrent root update is happening
+    /// (e.g., under a lock or single-threaded context).
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn store_root_ptr(&self, new: *mut u8) {
+        self.root_ptr.store(new, Ordering::Release);
+    }
+
+    /// Check if the current root is a leaf node.
+    ///
+    /// # Safety
+    /// Reads the version field through a raw pointer. The `root_ptr` must
+    /// point to a valid node (guaranteed by construction).
+    #[inline]
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "root_ptr points to LeafNode or InternodeNode, both have NodeVersion \
+                  as first field with proper alignment; we only store *const u8 for type erasure"
+    )]
+    fn root_is_leaf(&self) -> bool {
+        let root: *const u8 = self.root_ptr.load(Ordering::Acquire);
+
+        // SAFETY: `root_ptr` always points to a valid node.
+        // `NodeVersion` is the first field of both LeafNode and InternodeNode.
+        let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+
+        unsafe { (*version_ptr).is_leaf() }
+    }
+
+    /// Get the root pointer as a leaf node pointer.
+    ///
+    /// # Safety
+    /// Caller must ensure `root_is_leaf()` returned true.
+    #[inline]
+    #[allow(dead_code)]
+    unsafe fn root_as_leaf_ptr(&self) -> *mut LeafNode<LeafValue<V>, WIDTH> {
+        self.root_ptr.load(Ordering::Acquire).cast()
+    }
+
+    /// Get the root pointer as an internode pointer.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `root_is_leaf()` returned false.
+    #[inline]
+    #[allow(dead_code)]
+    unsafe fn root_as_internode_ptr(&self) -> *mut InternodeNode<LeafValue<V>, WIDTH> {
+        self.root_ptr.load(Ordering::Acquire).cast()
+    }
 
     /// Check if the tree is empty.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        match &self.root {
-            RootNode::Leaf(leaf) => leaf.is_empty(),
+        if self.root_is_leaf() {
+            let leaf_ptr: *const LeafNode<LeafValue<V>, WIDTH> =
+                self.root_ptr.load(Ordering::Acquire).cast();
 
-            RootNode::Internode(_) => false, // Internode implies at least one key
+            unsafe { (*leaf_ptr).is_empty() }
+        } else {
+            // Internode implies at least one key
+            false
         }
     }
 
@@ -288,8 +323,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// This is O(1) as we track the count incrementally.
     #[inline]
     #[must_use]
-    pub const fn len(&self) -> usize {
-        self.count
+    pub fn len(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
     }
 
     // ========================================================================
@@ -329,11 +364,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     #[inline(always)]
     fn get_internal(&self, key: &mut Key<'_>) -> Option<Arc<V>> {
         // Start at tree root
-        let mut current_root: *const u8 = match &self.root {
-            RootNode::Leaf(leaf) => StdPtr::from_ref(leaf.as_ref()).cast::<u8>(),
-
-            RootNode::Internode(inode) => StdPtr::from_ref(inode.as_ref()).cast::<u8>(),
-        };
+        let mut current_root: *const u8 = self.root_ptr.load(Ordering::Acquire);
 
         loop {
             // Reach the leaf for current layer
@@ -369,7 +400,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                 if match_result == 1 {
                     // Exact match - return value
-                    return leaf.leaf_value(slot).try_clone_arc();
+                    // SAFETY: version validated, slot valid from permuter
+                    return unsafe { leaf.try_clone_arc(slot) };
                 }
 
                 if match_result < 0 {
@@ -726,7 +758,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                     if match_result == 1 {
                         // Exact match - update value
-                        let old_value: Option<Arc<V>> = leaf.swap_value(slot, value);
+                        let guard: LocalGuard<'_> = self.collector.enter();
+                        // SAFETY: guard protects concurrent access, slot valid from permuter
+                        let old_value: Option<Arc<V>> =
+                            unsafe { leaf.swap_value(slot, value, &guard) };
                         return Ok(old_value);
                     }
 
@@ -799,8 +834,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 // Create new layer for the conflicting keys
                 //  SAFETY: leaf_ptr is valid and we're done reading from leaf
                 let leaf_ref: &mut LeafNode<LeafValue<V>, WIDTH> = unsafe { &mut *leaf_ptr };
-                let (final_leaf_ptr, new_slot) =
-                    self.make_new_layer(leaf_ref, conflict_slot, key, Arc::clone(&value));
+                // SAFETY: guard protects concurrent access (created inside make_new_layer)
+                let (final_leaf_ptr, new_slot) = unsafe {
+                    self.make_new_layer(leaf_ref, conflict_slot, key, Arc::clone(&value))
+                };
 
                 // Finish insert in the new layer leaf
                 //  SAFETY: make_new_layer returns valid pointer from arena
@@ -811,7 +848,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     final_leaf.set_permutation(perm);
                 }
 
-                self.count += 1;
+                self.count.fetch_add(1, Ordering::Relaxed);
                 return Ok(None);
             }
 
@@ -841,14 +878,16 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                 // If key has suffix, store it
                 if key.has_suffix() {
-                    leaf.assign_ksuf(slot, key.suffix());
+                    let guard: LocalGuard<'_> = self.collector.enter();
+                    // SAFETY: guard protects concurrent access, slot just allocated
+                    unsafe { leaf.assign_ksuf(slot, key.suffix(), &guard) };
                 }
 
                 // Commit permutation update
                 leaf.set_permutation(perm);
 
                 // Track new entry
-                self.count += 1;
+                self.count.fetch_add(1, Ordering::Relaxed);
 
                 return Ok(None);
             }
@@ -872,12 +911,17 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 (LeafNode::new(), ikey)
             } else if pre_insert_split_pos == 0 {
                 // Left-sequential: move ALL entries to right
-                let split_result: LeafSplitResult<LeafValue<V>, WIDTH> = leaf.split_all_to_right();
+                let guard: LocalGuard<'_> = self.collector.enter();
+                // SAFETY: guard protects concurrent access during splits
+                let split_result: LeafSplitResult<LeafValue<V>, WIDTH> =
+                    unsafe { leaf.split_all_to_right(&guard) };
                 (split_result.new_leaf, split_result.split_ikey)
             } else {
                 // Normal split
+                let guard: LocalGuard<'_> = self.collector.enter();
+                // SAFETY: guard protects concurrent access during splits
                 let split_result: LeafSplitResult<LeafValue<V>, WIDTH> =
-                    leaf.split_into(pre_insert_split_pos);
+                    unsafe { leaf.split_into(pre_insert_split_pos, &guard) };
                 (split_result.new_leaf, split_result.split_ikey)
             };
 
@@ -902,7 +946,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     }
 }
 
-impl<V, const WIDTH: usize> Default for MassTree<V, WIDTH, ArenaAllocator<LeafValue<V>, WIDTH>> {
+impl<V, const WIDTH: usize> Default for MassTree<V, WIDTH, SeizeAllocator<LeafValue<V>, WIDTH>> {
     fn default() -> Self {
         Self::new()
     }
@@ -964,18 +1008,16 @@ mod tests {
     fn test_root_is_leaf() {
         let tree: MassTree<u64> = MassTree::new();
 
-        assert!(tree.root.is_leaf());
-        assert!(!tree.root.is_internode());
+        assert!(tree.root_is_leaf());
     }
 
     #[test]
-    fn test_root_node_accessors() {
+    fn test_root_is_leaf_on_new_tree() {
         let tree: MassTree<u64> = MassTree::new();
 
-        assert!(tree.root.as_leaf().is_some());
-        assert!(tree.root.as_internode().is_none());
+        // New tree should have a leaf root
+        assert!(tree.root_is_leaf());
     }
-
     // ========================================================================
     //  MassTreeIndex Basic Tests
     // ========================================================================
@@ -1062,22 +1104,26 @@ mod tests {
     /// This bypasses the insert API to test get in isolation.
     #[test]
     fn test_get_after_manual_leaf_insert() {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree<u64> = MassTree::new();
 
         // Manually insert into the root leaf (key = "hello", 5 bytes <= 8)
-        if let RootNode::Leaf(leaf) = &mut tree.root {
-            let key: Key<'_> = Key::new(b"hello");
-            let ikey: u64 = key.ikey();
-            let keylenx: u8 = key.current_len() as u8;
+        debug_assert!(tree.root_is_leaf());
 
-            // Assign to slot 0 (plain field access, no atomics)
-            leaf.assign_value(0, ikey, keylenx, 42u64);
+        // SAFETY: New tree has leaf root - test-only direct manipulation
+        let leaf: &mut LeafNode<LeafValue<u64>, 15> =
+            unsafe { &mut *tree.root_ptr.load(Ordering::Acquire).cast() };
 
-            // Update permutation
-            let mut perm = leaf.permutation();
-            let _ = perm.insert_from_back(0);
-            leaf.set_permutation(perm);
-        }
+        let key: Key<'_> = Key::new(b"hello");
+        let ikey: u64 = key.ikey();
+        let keylenx: u8 = key.current_len() as u8;
+
+        // Assign to slot 0 (plain field access, no atomics)
+        leaf.assign_value(0, ikey, keylenx, 42u64);
+
+        // Update permutation
+        let mut perm = leaf.permutation();
+        let _ = perm.insert_from_back(0);
+        leaf.set_permutation(perm);
 
         // Now test get
         let result = tree.get(b"hello");
@@ -1087,52 +1133,38 @@ mod tests {
 
     #[test]
     fn test_get_wrong_key_after_insert() {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree<u64> = MassTree::new();
 
         // Manually insert "hello" = 42
-        if let RootNode::Leaf(leaf) = &mut tree.root {
-            let key: Key<'_> = Key::new(b"hello");
-            let ikey: u64 = key.ikey();
-            let keylenx: u8 = key.current_len() as u8;
+        debug_assert!(tree.root_is_leaf());
 
-            leaf.assign_value(0, ikey, keylenx, 42u64);
+        // SAFETY: New tree has leaf root test-only direct manipulation
+        let leaf: &mut LeafNode<LeafValue<u64>, 15> =
+            unsafe { &mut *tree.root_ptr.load(Ordering::Acquire).cast() };
 
-            let mut perm: Permuter = leaf.permutation();
-            let _ = perm.insert_from_back(0);
-            leaf.set_permutation(perm);
-        }
+        let key: Key<'_> = Key::new(b"hello");
+        let ikey: u64 = key.ikey();
+        let keylenx: u8 = key.current_len() as u8;
 
-        // Get with wrong key should return None
+        leaf.assign_value(0, ikey, keylenx, 42u64);
+
+        let mut perm: Permuter = leaf.permutation();
+        let _ = perm.insert_from_back(0);
+        leaf.set_permutation(perm);
+
         assert!(tree.get(b"world").is_none());
         assert!(tree.get(b"hell").is_none());
-        assert!(tree.get(b"helloX").is_none()); // 6 bytes, still valid length but different key
+        assert!(tree.get(b"helloX").is_none());
     }
 
     #[test]
     fn test_get_multiple_keys() {
         let mut tree: MassTree<u64> = MassTree::new();
 
-        // Insert multiple keys manually
-        if let RootNode::Leaf(leaf) = &mut tree.root {
-            // Insert "aaa" = 100
-            let key1: Key<'_> = Key::new(b"aaa");
-            leaf.assign_value(0, key1.ikey(), key1.current_len() as u8, 100u64);
-
-            // Insert "bbb" = 200
-            let key2: Key<'_> = Key::new(b"bbb");
-            leaf.assign_value(1, key2.ikey(), key2.current_len() as u8, 200u64);
-
-            // Insert "ccc" = 300
-            let key3: Key<'_> = Key::new(b"ccc");
-            leaf.assign_value(2, key3.ikey(), key3.current_len() as u8, 300u64);
-
-            // Update permutation (keys are already sorted)
-            let mut perm: Permuter = leaf.permutation();
-            let _ = perm.insert_from_back(0); // aaa at position 0
-            let _ = perm.insert_from_back(1); // bbb at position 1
-            let _ = perm.insert_from_back(2); // ccc at position 2
-            leaf.set_permutation(perm);
-        }
+        // Use the insert API to add multiple keys
+        tree.insert(b"aaa", 100).unwrap();
+        tree.insert(b"bbb", 200).unwrap();
+        tree.insert(b"ccc", 300).unwrap();
 
         // Test retrieval
         assert_eq!(*tree.get(b"aaa").unwrap(), 100);
@@ -1150,20 +1182,24 @@ mod tests {
 
     #[test]
     fn test_index_get_after_manual_insert() {
-        let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
+        let tree: MassTreeIndex<u64> = MassTreeIndex::new();
 
         // Manually insert into the root leaf
-        if let RootNode::Leaf(leaf) = &mut tree.inner.root {
-            let key = Key::new(b"test");
-            let ikey = key.ikey();
-            let keylenx = key.current_len() as u8;
+        debug_assert!(tree.inner.root_is_leaf());
 
-            leaf.assign_value(0, ikey, keylenx, 999u64);
+        // SAFETY: New tree has leaf root - test-only direct manipulation
+        let leaf: &mut LeafNode<LeafValue<u64>, 15> =
+            unsafe { &mut *tree.inner.root_ptr.load(Ordering::Acquire).cast() };
 
-            let mut perm = leaf.permutation();
-            let _ = perm.insert_from_back(0);
-            leaf.set_permutation(perm);
-        }
+        let key = Key::new(b"test");
+        let ikey = key.ikey();
+        let keylenx = key.current_len() as u8;
+
+        leaf.assign_value(0, ikey, keylenx, 999u64);
+
+        let mut perm = leaf.permutation();
+        let _ = perm.insert_from_back(0);
+        leaf.set_permutation(perm);
 
         // Get returns V directly (not Arc<V>)
         let result = tree.get(b"test");
@@ -1176,55 +1212,67 @@ mod tests {
 
     #[test]
     fn test_get_empty_key() {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree<u64> = MassTree::new();
 
         // Insert empty key
-        if let RootNode::Leaf(leaf) = &mut tree.root {
-            let key = Key::new(b"");
-            leaf.assign_value(0, key.ikey(), 0, 123u64);
+        debug_assert!(tree.root_is_leaf());
 
-            let mut perm = leaf.permutation();
-            let _ = perm.insert_from_back(0);
-            leaf.set_permutation(perm);
-        }
+        // SAFETY: New tree has leaf root - test-only direct manipulation
+        let leaf: &mut LeafNode<LeafValue<u64>, 15> =
+            unsafe { &mut *tree.root_ptr.load(Ordering::Acquire).cast() };
+
+        let key = Key::new(b"");
+        leaf.assign_value(0, key.ikey(), 0, 123u64);
+
+        let mut perm = leaf.permutation();
+        let _ = perm.insert_from_back(0);
+        leaf.set_permutation(perm);
 
         assert_eq!(*tree.get(b"").unwrap(), 123);
     }
 
     #[test]
     fn test_get_max_inline_key() {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree<u64> = MassTree::new();
 
         // Insert 8-byte key (max inline size)
         let key_bytes = b"12345678";
 
-        if let RootNode::Leaf(leaf) = &mut tree.root {
-            let key = Key::new(key_bytes);
-            leaf.assign_value(0, key.ikey(), 8, 888u64);
+        debug_assert!(tree.root_is_leaf());
 
-            let mut perm = leaf.permutation();
-            let _ = perm.insert_from_back(0);
-            leaf.set_permutation(perm);
-        }
+        // SAFETY: New tree has leaf root - test-only direct manipulation
+        let leaf: &mut LeafNode<LeafValue<u64>, 15> =
+            unsafe { &mut *tree.root_ptr.load(Ordering::Acquire).cast() };
+
+        let key = Key::new(key_bytes);
+        leaf.assign_value(0, key.ikey(), 8, 888u64);
+
+        let mut perm = leaf.permutation();
+        let _ = perm.insert_from_back(0);
+        leaf.set_permutation(perm);
 
         assert_eq!(*tree.get(key_bytes).unwrap(), 888);
     }
 
     #[test]
     fn test_get_binary_key() {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree<u64> = MassTree::new();
 
         // Binary key with null bytes
         let key_bytes = &[0x00, 0x01, 0x02, 0x00, 0xFF];
 
-        if let RootNode::Leaf(leaf) = &mut tree.root {
-            let key = Key::new(key_bytes);
-            leaf.assign_value(0, key.ikey(), key.current_len() as u8, 777u64);
+        debug_assert!(tree.root_is_leaf());
 
-            let mut perm = leaf.permutation();
-            let _ = perm.insert_from_back(0);
-            leaf.set_permutation(perm);
-        }
+        // SAFETY: New tree has leaf root - test-only direct manipulation
+        let leaf: &mut LeafNode<LeafValue<u64>, 15> =
+            unsafe { &mut *tree.root_ptr.load(Ordering::Acquire).cast() };
+
+        let key = Key::new(key_bytes);
+        leaf.assign_value(0, key.ikey(), key.current_len() as u8, 777u64);
+
+        let mut perm = leaf.permutation();
+        let _ = perm.insert_from_back(0);
+        leaf.set_permutation(perm);
 
         assert_eq!(*tree.get(key_bytes).unwrap(), 777);
     }
@@ -1360,7 +1408,7 @@ mod tests {
         }
 
         // Before 16th insert: root is a leaf
-        assert!(tree.root.is_leaf());
+        assert!(tree.root_is_leaf());
 
         // 16th insert should trigger a split
         let result = tree.insert(b"overflow", 999);
@@ -1368,7 +1416,7 @@ mod tests {
         assert!(result.unwrap().is_none()); // New key, no old value
 
         // After split: root should be an internode
-        assert!(tree.root.is_internode());
+        assert!(!tree.root_is_leaf());
 
         // Verify the new key is accessible
         let value = tree.get(b"overflow");
@@ -1453,10 +1501,13 @@ mod tests {
         tree.insert(b"aaa", 1).unwrap();
 
         // Permutation should maintain sorted order
-        if let RootNode::Leaf(leaf) = &tree.root {
-            let perm = leaf.permutation();
-            assert_eq!(perm.size(), 3);
-        }
+        debug_assert!(tree.root_is_leaf());
+
+        // SAFETY: Tree has leaf root after 3 inserts
+        let leaf: &LeafNode<LeafValue<u64>, 15> =
+            unsafe { &*tree.root_ptr.load(Ordering::Acquire).cast() };
+        let perm = leaf.permutation();
+        assert_eq!(perm.size(), 3);
 
         // Verify get still works (relies on correct permutation)
         assert_eq!(*tree.get(b"aaa").unwrap(), 1);
@@ -1658,7 +1709,7 @@ mod tests {
     }
 
     // ========================================================================
-    //  Split Tests (CODE_009.md)
+    //  Split Tests
     // ========================================================================
 
     #[test]
@@ -1680,7 +1731,7 @@ mod tests {
         }
 
         // Root should be internode (multiple splits occurred)
-        assert!(tree.root.is_internode());
+        assert!(!tree.root_is_leaf());
 
         // Verify len() works on internode-root trees
         assert_eq!(tree.len(), 100);
@@ -1698,7 +1749,7 @@ mod tests {
 
         // Verify len() returns correct count
         assert_eq!(tree.len(), 200);
-        assert!(tree.root.is_internode());
+        assert!(!tree.root_is_leaf());
 
         // Insert more and verify again
         for i in 200..500 {
@@ -1830,7 +1881,7 @@ mod tests {
         }
 
         // Tree must have internodes
-        assert!(tree.root.is_internode());
+        assert!(!tree.root_is_leaf());
     }
 
     #[test]
@@ -1888,7 +1939,7 @@ mod tests {
     }
 
     // ========================================================================
-    //  Layer Tests (CODE_011.md)
+    //  Layer Tests
     // ========================================================================
 
     #[test]

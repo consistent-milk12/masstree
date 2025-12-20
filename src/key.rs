@@ -86,6 +86,7 @@ impl<'a> Key<'a> {
     /// assert_eq!(key.len(), 4);
     /// ```
     #[must_use]
+    #[inline(always)]
     pub fn new(data: &'a [u8]) -> Self {
         assert!(
             data.len() <= MAX_KEY_LENGTH,
@@ -110,6 +111,7 @@ impl<'a> Key<'a> {
     /// The key will have length equal to the significant bytes in the ikey
     /// (trailing zeros are not counted).
     #[must_use]
+    #[inline(always)]
     pub const fn from_ikey(ikey: u64) -> Self {
         // Calculate length: 8 minus trailing zero bytes
         let len: usize = if ikey == 0 {
@@ -131,6 +133,7 @@ impl<'a> Key<'a> {
     /// Used when extracting the "remaining key" from a slot's suffix
     /// to compare with the new key layer creation.
     #[must_use]
+    #[inline(always)]
     pub fn from_suffix(suffix: &'a [u8]) -> Self {
         Self::new(suffix)
     }
@@ -139,8 +142,8 @@ impl<'a> Key<'a> {
     ///
     /// This value can be directly compared with other ikeys using standard
     /// integer comparison, which is equivalent to lexicographic byte comparison.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn len(&self) -> usize {
         self.data.len()
     }
@@ -149,22 +152,22 @@ impl<'a> Key<'a> {
     ///
     /// This value can be directly compared with other ikeys using standard
     /// integer comparison, which is equivalent to lexicographic byte comparison.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn ikey(&self) -> u64 {
         self.ikey
     }
 
     /// Return the number of shifts performed.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn shift_count(&self) -> usize {
         self.shift_count
     }
 
     /// Return the suffix start offset (relative to original key).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn suffix_start(&self) -> usize {
         self.suffix_start
     }
@@ -172,29 +175,29 @@ impl<'a> Key<'a> {
     /// Return the length of the key at the current layer.
     ///
     /// This is the number of bytes remaining from the current position.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn current_len(&self) -> usize {
         self.data.len().saturating_sub(self.shift_count * IKEY_SIZE)
     }
 
     /// Check if the key is empty.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn is_empty(&self) -> bool {
         self.ikey == 0 && self.data.is_empty()
     }
 
     /// Check if the key has been shifted.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn is_shifted(&self) -> bool {
         self.shift_count > 0
     }
 
     /// Check if the key has been shifted.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn has_suffix(&self) -> bool {
         self.current_len() > IKEY_SIZE
     }
@@ -203,6 +206,7 @@ impl<'a> Key<'a> {
     ///
     /// Returns an empty slice if there is no suffix.
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Guarded by length check, suffix_start <= data.len()"
@@ -217,8 +221,8 @@ impl<'a> Key<'a> {
     }
 
     /// Return the length of the suffix.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn suffix_len(&self) -> usize {
         self.data.len().saturating_sub(self.suffix_start)
     }
@@ -229,6 +233,7 @@ impl<'a> Key<'a> {
     /// # Panics
     ///
     /// Panics in debug mode if `!has_suffix()`.
+    #[inline(always)]
     pub fn shift(&mut self) {
         debug_assert!(self.has_suffix(), "shift() called without suffix");
 
@@ -248,6 +253,7 @@ impl<'a> Key<'a> {
     ///
     /// # Panics
     /// Panics if `bytes` is not a multiple of `IKEY_SIZE`
+    #[inline(always)]
     pub fn shift_by(&mut self, bytes: usize) {
         debug_assert!(
             bytes.is_multiple_of(IKEY_SIZE),
@@ -265,6 +271,7 @@ impl<'a> Key<'a> {
     ///
     /// # Panics
     /// Panics in debug mode if `is_shifted()`.
+    #[inline(always)]
     pub fn unshift(&mut self) {
         debug_assert!(self.is_shifted(), "unshift() called at position 0");
 
@@ -278,6 +285,7 @@ impl<'a> Key<'a> {
     }
 
     /// Reset to the original position (undo all shifts).
+    #[inline(always)]
     pub fn unshift_all(&mut self) {
         if self.shift_count > 0 {
             self.shift_count = 0;
@@ -324,6 +332,7 @@ impl<'a> Key<'a> {
     /// - `Ordering::Equal` if the keys match at this layer
     /// - `Ordering::Greater` if this key is greater than the store key
     #[must_use]
+    #[inline(always)]
     pub fn compare(&self, other_ikey: u64, keylenx: usize) -> Ordering {
         // First compare the ikeys
         match self.ikey.cmp(&other_ikey) {
@@ -351,8 +360,8 @@ impl<'a> Key<'a> {
     }
 
     /// Get the full key data.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn full_data(&self) -> &'a [u8] {
         self.data
     }
@@ -361,8 +370,8 @@ impl<'a> Key<'a> {
     ///
     /// Since ikeys are stored in big-endian order, standard u64 comparison
     /// is equivalent to lexicographic byte comparison.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn compare_ikey(a: u64, b: u64) -> Ordering {
         // Use if-else for const fn compatibility
         if a < b {
@@ -378,8 +387,8 @@ impl<'a> Key<'a> {
     ///
     /// Pads with zeros if fewer than 8 bytes remain.
     /// Returns 0 if offset is past the end of data.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn read_ikey(data: &[u8], offset: usize) -> u64 {
         if let Some(remaining) = data.get(offset..) {
             if let Some(bytes) = remaining.first_chunk::<IKEY_SIZE>() {
