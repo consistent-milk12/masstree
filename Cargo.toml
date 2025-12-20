@@ -1,13 +1,20 @@
 [package]
 name = "masstree"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-rust-version = "1.92.0"
+rust-version = "1.85.0"
 authors = ["consistent-milk12"]
-description = "Masstree: A high-performance concurrent trie of B+trees for key-value storage"
+description = "A concurrent ordered map (trie of B+trees) - alpha release, not production ready"
 license = "MIT"
 repository = "https://github.com/consistent-milk12/masstree"
-keywords = ["data-structures", "concurrent", "trie", "btree", "key-value"]
+documentation = "https://docs.rs/masstree"
+keywords = [
+	"data-structures",
+	"concurrent",
+	"btree",
+	"ordered-map",
+	"lock-free",
+]
 categories = ["data-structures", "concurrency", "database-implementations"]
 readme = "README.md"
 include = [

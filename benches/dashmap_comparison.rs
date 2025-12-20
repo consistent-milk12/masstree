@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::thread;
 
 use dashmap::DashMap;
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use masstree::tree::MassTree;
 
 fn main() {
@@ -48,7 +48,7 @@ fn shuffled_indices(n: usize, seed: usize) -> Vec<usize> {
 
 #[divan::bench_group(name = "01_insert")]
 mod insert {
-    use super::*;
+    use super::{Bencher, DashMap, MassTree, black_box, sequential_keys};
 
     const SIZES: &[usize] = &[100, 1000, 10000];
 
@@ -61,6 +61,7 @@ mod insert {
                 for (i, key) in keys.iter().enumerate() {
                     tree.insert(black_box(key), black_box(i as u64));
                 }
+
                 tree
             });
     }
@@ -68,14 +69,12 @@ mod insert {
     #[divan::bench(args = SIZES)]
     fn dashmap(bencher: Bencher, n: usize) {
         let keys = sequential_keys(n);
-        bencher
-            .with_inputs(DashMap::new)
-            .bench_local_values(|map| {
-                for (i, key) in keys.iter().enumerate() {
-                    map.insert(black_box(key.clone()), black_box(i as u64));
-                }
-                map
-            });
+        bencher.with_inputs(DashMap::new).bench_local_values(|map| {
+            for (i, key) in keys.iter().enumerate() {
+                map.insert(black_box(key.clone()), black_box(i as u64));
+            }
+            map
+        });
     }
 }
 

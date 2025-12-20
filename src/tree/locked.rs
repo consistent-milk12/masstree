@@ -40,6 +40,7 @@ use crate::leaf::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode, LeafValue};
 use crate::nodeversion::LockGuard;
 use crate::permuter::Permuter;
 
+use super::cas_insert::CasInsertResult;
 use super::{InsertError, MassTree};
 
 // ============================================================================
@@ -48,7 +49,7 @@ use super::{InsertError, MassTree};
 
 /// Result of searching for insert position in a leaf.
 #[derive(Debug, Clone, Copy)]
-enum InsertSearchResult {
+pub(super) enum InsertSearchResult {
     /// Key exists at this slot - update value.
     Found { slot: usize },
 
@@ -144,6 +145,19 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         value: Arc<V>,
         guard: &LocalGuard<'_>,
     ) -> Result<Option<Arc<V>>, InsertError> {
+        // Try CAS fast path first (lock-free for simple inserts)
+        // Only try CAS for keys at layer 0 (not in sublayer)
+        match self.try_cas_insert(key, Arc::clone(&value), guard) {
+            CasInsertResult::Success(old) => return Ok(old),
+            // Fall through to locked path for complex cases
+            CasInsertResult::ExistsNeedLock { .. }
+            | CasInsertResult::FullNeedLock
+            | CasInsertResult::LayerNeedLock { .. }
+            | CasInsertResult::ContentionFallback => {
+                // Continue with locked path below
+            }
+        }
+
         // Track current layer root (updated after each split/layer descent)
         let mut layer_root: *const u8 = self.get_root_ptr(guard);
         // Track whether we're in a sublayer (don't reload root if so)
@@ -440,7 +454,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
     /// Search leaf for key position (for insert).
     #[expect(clippy::unused_self, reason = "Method signature for API consistency")]
-    fn search_for_insert(
+    pub(super) fn search_for_insert(
         &self,
         leaf: &LeafNode<LeafValue<V>, WIDTH>,
         key: &Key<'_>,

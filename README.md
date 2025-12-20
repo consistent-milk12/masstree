@@ -1,161 +1,161 @@
 # masstree
 
-An experimental Rust implementation of the Masstree algorithm, a high-performance concurrent key-value store based on a cache-friendly trie of B+trees.
+A concurrent ordered map for Rust, based on the Masstree algorithm (trie of B+trees).
 
-This project **attempts to reimplement** the [original C++ Masstree](https://github.com/kohler/masstree-beta)
+[![Crates.io](https://img.shields.io/crates/v/masstree.svg)](https://crates.io/crates/masstree)
+[![Documentation](https://docs.rs/masstree/badge.svg)](https://docs.rs/masstree)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Status:** Phase 3 in progress - concurrent `get` and `insert` with version-validated optimistic reads and locked writes. Split propagation works under contention. Loom and Shuttle tests verify linearizability. Memory reclamation and lock-free linking still TODO.
+## Status: Alpha
 
-## Overview
+**Not production ready.** Use for evaluation and feedback only.
 
-Masstree is a high-performance concurrent trie of B+trees designed for in-memory key-value storage. It combines the cache efficiency of B+trees with the no-rebalancing property of tries by slicing keys into 8-byte chunks, where each chunk navigates a separate B+tree layer.
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Concurrent get | Works | Lock-free, version-validated |
+| Concurrent insert | Works | CAS fast path + locked fallback |
+| Split propagation | Works | Leaf and internode splits at any level |
+| Linearizability | Verified | Loom + Shuttle tests |
+| Memory safety | Verified | Miri strict provenance |
+| Memory reclamation | Partial | Nodes not reclaimed until tree drop |
+| Range scans | Missing | Planned for v0.2 |
+| Deletion | Missing | Planned for v0.2 |
+| Stress testing | Limited | Tested up to 8 threads |
 
-**Same algorithm, different implementation:** This project implements the same core algorithm as the C++ original: trie of B+trees, optimistic concurrency with version validation, B-link structure for lock-free traversal, permuter-based slot ordering. The divergences (Hyaline reclamation, `Arc<V>` values, type-state locking) are implementation choices that leverage Rust's strengths while preserving the algorithmic design.
+**305 tests passing** (unit + integration + property + loom + shuttle)
 
-## Disclaimer
+## Why This Crate?
 
-This is an **independent Rust implementation** of the Masstree data structure. It is **not affiliated with, endorsed by, or connected to** the original authors (Eddie Kohler, Yandong Mao, Robert Morris) or their institutions (Harvard College, MIT, University of California). This project is a study and reimplementation of the published algorithm for educational and practical use in Rust projects.
+Rust lacks a popular concurrent ordered map. The ecosystem:
 
-## Why Rust?
+| Crate | Type | Downloads/month |
+|-------|------|-----------------|
+| `dashmap` | Unordered HashMap | 10.7 million |
+| `crossbeam-skiplist` | Ordered SkipList | 220k |
+| `masstree` | Ordered B+tree | *new* |
 
-The original Masstree is a very interesting and performant concurrent data structure, but its C++ implementation relies on manual memory management, platform-specific atomics, and subtle pointer tricks that make it difficult to extend or verify. Rust's ownership model and type system offer an opportunity to express similar algorithms with compile-time safety guarantees, eliminate entire classes of concurrency bugs, and produce a codebase that's easier to audit and maintain.
+Skip lists have poor cache locality. B+trees allocate nodes in blocks, improving cache utilization. MassTree brings cache-efficient concurrent ordered maps to Rust.
 
-**This is not a faithful port.** The implementation diverges in meaningful ways to leverage Rust's strengths and work within its constraints. The focus of this project is on correctness, safety, and learning the algorithm deeply.
+## Quick Start
 
-## Value Storage Strategy
+```rust
+use masstree::MassTree;
 
-### How C++ Handles This
+// Create a new tree
+let mut tree: MassTree<u64> = MassTree::new();
 
-The original C++ Masstree is fully generic via templates, not limited to index-style values. The `leafvalue` class uses a union that can store any `value_type` inline (if pointer-sized) or as a pointer to external data. The codebase includes implementations for `value_bag` (database rows), `value_string`, `value_array`, and raw `uint64_t`.
+// Insert key-value pairs (keys are byte slices)
+tree.insert(b"alice", 100);
+tree.insert(b"bob", 200);
 
-C++ can return raw pointers or references directly because:
+// Concurrent reads (returns Arc<V>)
+assert_eq!(*tree.get(b"alice").unwrap(), 100);
 
-- Callers hold a "critical section" via `threadinfo` passed to every operation
-- Using a reference after releasing is undefined behavior, but C++ allows it
-- Memory safety is the caller's responsibility, enforced by convention
-
-### Why Rust Needs a Different Approach
-
-In Rust, we can't return `&V` from an optimistic read:
-
-- The borrow checker requires proof that references outlive their use
-- Nodes can be reclaimed by deferred reclamation while the caller still holds `&V`
-- Guard-tied lifetimes are possible but create a complex API
-
-### Proposed Solution: Dual Storage Modes
-
-**Default Mode: `MassTree<V>` with `Arc<V>`**
-
-Values are stored as `Arc<V>` (atomic reference-counted pointers). On read, the `Arc` is cloned (a cheap atomic increment), giving the caller an owned handle that survives node reclamation. This decouples value lifetime from the deferred memory reclamation used for nodes.
-
-- Works with any `V: Send + Sync + 'static`
-- No `Clone` requirement on `V` for reads
-- Small overhead from atomic refcount operations
-
-**Index Mode: `MassTreeIndex<V: Copy>`**
-
-For performance-critical use cases with small, copyable values (`u64` handles, pointers, fixed-size structs), an index variant stores values inline. Reads copy the value directly from the slot, avoiding the `Arc` indirection entirely.
-
-- Maximum throughput for index-style workloads
-- Requires `V: Copy`
-- Best suited for database indexes, handle maps, and similar patterns
-
-This dual-mode approach provides equivalent flexibility to the C++ implementation, expressed through Rust's type system rather than raw pointers.
-
-## Memory Reclamation: Hyaline vs Classic Epoch-Based
-
-The original C++ Masstree uses classic epoch-based reclamation (EBR) via `threadinfo` and a global epoch counter (`globalepoch`). Every operation takes a `threadinfo&` parameter, and deferred nodes are stored in per-thread "limbo lists" tagged with the current epoch. Periodically, `rcu_quiesce()` scans all threads to find the minimum active epoch and frees everything older.
-
-This Rust implementation will use **hyaline reclamation** via the [`seize`](https://github.com/ibraheemdev/seize) crate instead (see the [Hyaline paper](https://arxiv.org/pdf/2108.02763.pdf)). The key differences:
-
-| Aspect | C++ EBR (`kvthread.hh`) | Rust Hyaline (`seize`) |
-|--------|-------------------------|------------------------|
-| **Epoch coordination** | Global counter, all threads sync | Per-thread, no global barrier |
-| **Stalled threads** | Block reclamation for everyone | Filtered out via epoch tracking |
-| **Reclamation timing** | Batch (every 128 frees) | Balanced across threads |
-| **Latency distribution** | Unpredictable spikes | Predictable, smoother |
-| **API burden** | Pass `threadinfo&` everywhere | Internal guard management |
-
-**Why this matters for Masstree:**
-
-Masstree is read-heavy with optimistic readers that rarely block. Classic EBR's batch reclamation (triggered every N operations) causes latency spikes that disrupt the otherwise smooth read path. Hyaline's per-thread balancing keeps reclamation work distributed, avoiding these spikes.
-
-Additionally, seize handles "stalled" threads gracefully: a thread blocked on I/O won't prevent other threads from reclaiming memory, unlike the C++ implementation where one slow thread blocks `min_active_epoch()` for everyone.
-
-## Divergences from the C++ Implementation
-
-Both implementations use deferred reclamation for node memory safety (C++ via `threadinfo`, Rust via `seize`). The difference lies in **value lifetime management**:
-
-| Aspect | C++ Masstree | Rust Masstree |
-|--------|--------------|---------------|
-| Node safety | EBR (manual `threadinfo&` passing) | Hyaline via `seize` (internal) |
-| Value safety | User's responsibility | `Arc<V>` handles automatically |
-| Misuse | Silent undefined behavior | Compile error or safe behavior |
-| API burden | Must pass `threadinfo&` to every call | Clean API, no manual tracking |
-
-**Key differences:**
-
-1. **Values can't outlive their storage**: In C++, storing a `char*` to heap data, deleting the entry, then accessing the pointer is silent UB. With `Arc<V>`, the data lives until the last reference drops.
-
-2. **No manual coordination**: C++ users must ensure value cleanup happens after all readers finish. `Arc`'s refcount handles this automatically.
-
-3. **Composable safety**: `MassTree<Vec<String>>` just works. In C++, complex value types need careful RCU-aware destructor implementations.
-
-4. **Zero-cost when not needed**: `MassTreeIndex<u64>` provides C++-equivalent performance for simple cases where `Arc` overhead matters.
+// Keys can be any length (0-256 bytes)
+tree.insert(b"very_long_key_that_spans_multiple_layers", 42);
+```
 
 ## Performance
 
-Benchmarks compare MassTree against `std::collections::BTreeMap` using identical key generation and access patterns. Run `cargo bench --bench comparison` to reproduce.
+Benchmarks vs `BTreeMap` (single-threaded, `cargo bench --bench comparison`):
 
-### Where MassTree Performs Well
+| Operation | MassTree | BTreeMap | Ratio |
+|-----------|----------|----------|-------|
+| Get (hit, n=1000) | 21 ns | 54 ns | **2.6x faster** |
+| Get (miss, n=1000) | 9 ns | 91 ns | **10x faster** |
+| Insert (populated) | 128 ns | 181 ns | **1.4x faster** |
+| Mixed 90/10 r/w | 755 ns | 1.87 µs | **2.5x faster** |
 
-| Operation | Tree Size | MassTree | BTreeMap | Ratio |
-|-----------|-----------|----------|----------|-------|
-| Insert (populated) | 1000 | 104 ns | 156 ns | 1.5x faster |
-| Get (hit) | 1000 | 22 ns | 60 ns | 2.7x faster |
-| Get (miss) | 1000 | 17 ns | 104 ns | 6.1x faster |
-| Batch get (500 keys) | 500 | 10 µs | 36 µs | 3.6x faster |
-| Mixed 90/10 read/write | 1000 | 0.6 µs | 1.9 µs | 3.2x faster |
+**Where BTreeMap wins:**
 
-### Where BTreeMap Performs Well
+| Operation | MassTree | BTreeMap | Notes |
+|-----------|----------|----------|-------|
+| Insert (empty) | 91 ns | 15 ns | Higher fixed overhead |
+| Update existing | 478 ns | 141 ns | Arc swap cost |
 
-| Operation | Tree Size | MassTree | BTreeMap | Ratio |
-|-----------|-----------|----------|----------|-------|
-| Insert (empty tree) | 1 | 52 ns | 23 ns | BTreeMap 2.3x faster |
+## Concurrent Scaling
 
-MassTree has higher fixed overhead for initialization, which amortizes quickly with use.
+Tested against DashMap (note: different data structure category):
 
-**NOTE**: Interesting results but these benches are expected to severely degrade and BTreeMap should end up winning in most categories after I start working on adding concurrency.
+| Threads | MassTree | DashMap | Notes |
+|---------|----------|---------|-------|
+| 2 (reads) | 1.24ms | 1.90ms | MassTree 35% faster |
+| 8 (reads) | 5.17ms | 5.49ms | MassTree 6% faster |
+| 8 (high contention) | 4.34ms | 2.44ms | DashMap 44% faster |
 
-### Caveats
+MassTree scales well for reads. High write contention favors DashMap's sharded design.
 
-- **Concurrency in progress**: Basic concurrent `get`/`insert` work, but memory reclamation and some edge cases still need work
-- **No range scans yet**: Ordered iteration not implemented
-- **Different trade-offs**: MassTree is optimized for byte-slice keys; BTreeMap is more general
+## Architecture
 
-See `Baseline.md` for detailed benchmark history.
+MassTree implements the [Masstree algorithm](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf):
 
-## Current Implementation Status
+- **Trie of B+trees**: Keys split into 8-byte chunks, each navigating a B+tree layer
+- **Optimistic reads**: Version validation, retry on concurrent modification
+- **Fine-grained locking**: Per-leaf locks for writes, CAS for simple inserts
+- **B-link structure**: Lock-free traversal during splits
 
-| Module | Status | Notes |
-|--------|--------|-------|
-| `key` | Complete | 8-byte ikey extraction, layer traversal, suffix handling |
-| `permuter` | Complete | Const-generic WIDTH, u64-encoded slot permutation |
-| `nodeversion` | Complete | Atomic versioned lock with CAS-based acquisition, backoff |
-| `leaf` | Complete | LeafNode struct, split operations, B-link pointers, layer support |
-| `internode` | Complete | Routing nodes, split-with-insert, height-based child typing |
-| `ksearch` | Complete | Binary search for leaves and internodes |
-| `tree` | In Progress | Concurrent `get`/`insert` with version validation, split propagation |
-| `suffix` | Complete | SuffixBag for keys > 8 bytes with per-slot metadata |
-| `alloc` | Complete | `NodeAllocator` trait, `SeizeAllocator` (Miri-compliant) |
-| Scan/Remove | Planned | Range scans and key deletion not yet implemented |
+```text
+Key: "hello world!"
+      ↓
+Layer 0: "hello wo" → B+tree lookup
+      ↓
+Layer 1: "rld!\0\0\0\0" → B+tree lookup → Value
+```
 
-**Current Capabilities:**
+## Value Storage
 
-- Keys from 0-256 bytes (full trie layering for long keys)
-- Concurrent `get` (optimistic, lock-free) and `insert` (locked, with split propagation)
-- Pluggable allocation via `NodeAllocator` trait
-- Miri-verified for strict pointer provenance
-- Loom + Shuttle tested for linearizability
+Two modes:
 
-**Note on `MassTreeIndex`:** The current `MassTreeIndex<V: Copy>` is a convenience wrapper that still uses `Arc<V>` internally. True inline storage for `V: Copy` values is planned but not yet implemented.
+```rust
+// Default: Arc<V> for any value type
+let tree: MassTree<MyStruct> = MassTree::new();
+
+// Index mode: Copy types (planned optimization)
+let index: MassTreeIndex<u64> = MassTreeIndex::new();
+```
+
+`Arc<V>` enables safe concurrent reads without guard lifetimes. The trade-off is atomic refcount overhead on access.
+
+## Known Limitations
+
+1. **Memory grows monotonically** - Split nodes stay allocated until tree drop
+2. **No range scans** - Ordered iteration not yet implemented
+3. **No deletion** - Keys cannot be removed
+4. **Update overhead** - `Arc` swap is slower than in-place mutation
+5. **Limited stress testing** - Verified up to 8 threads
+
+## Roadmap
+
+- **v0.1.0** (current): Core concurrent get/insert
+- **v0.2.0**: Range scans, deletion, seize retirement
+- **v0.3.0**: Performance optimization, stress testing
+- **v1.0.0**: Production ready
+
+## Contributing
+
+Feedback and bug reports welcome! This is an alpha release—expect rough edges.
+
+```bash
+# Run tests
+cargo test
+
+# Run benchmarks
+cargo bench --bench comparison
+
+# Run with Miri (requires nightly)
+cargo +nightly miri test
+```
+
+## References
+
+- [Masstree Paper (EUROSYS 2012)](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf)
+- [C++ Implementation](https://github.com/kohler/masstree-beta)
+- [seize (memory reclamation)](https://github.com/ibraheemdev/seize)
+
+## Disclaimer
+
+This is an **independent Rust implementation** of the Masstree data structure. It is **not affiliated with, endorsed by, or connected to** the original authors (Eddie Kohler, Yandong Mao, Robert Morris) or their institutions.
+
+## License
+
+MIT

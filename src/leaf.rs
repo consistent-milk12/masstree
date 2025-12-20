@@ -24,7 +24,7 @@ use std::ptr as StdPtr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
-use crate::ordering::{READ_ORD, RELAXED, WRITE_ORD};
+use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use seize::{Guard, LocalGuard};
 
 pub mod layer;
@@ -1275,6 +1275,70 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     #[inline(always)]
     pub fn set_permutation(&self, perm: Permuter<WIDTH>) {
         self.permutation.store(perm.value(), WRITE_ORD);
+    }
+
+    /// Compare-and-swap the permutation atomically.
+    ///
+    /// Attempts to atomically update the permutation from `expected` to `new`.
+    /// This is the linearization point for lock-free CAS-based insertion.
+    ///
+    /// # Arguments
+    /// * `expected` - The expected current permutation value
+    /// * `new` - The new permutation value to set
+    ///
+    /// # Returns
+    /// * `Ok(())` - CAS succeeded, permutation is now `new`
+    /// * `Err(current)` - CAS failed, returns the current permutation value
+    ///
+    /// # Memory Ordering
+    /// - Success: `AcqRel` - synchronizes with Release stores of slot data
+    /// - Failure: `Acquire` - allows reading the current state
+    #[inline]
+    pub fn cas_permutation(
+        &self,
+        expected: Permuter<WIDTH>,
+        new: Permuter<WIDTH>,
+    ) -> Result<(), Permuter<WIDTH>> {
+        match self.permutation.compare_exchange(
+            expected.value(),
+            new.value(),
+            CAS_SUCCESS,
+            CAS_FAILURE,
+        ) {
+            Ok(_) => Ok(()),
+            Err(current) => Err(Permuter::from_value(current)),
+        }
+    }
+
+    /// Pre-store slot data for CAS-based insert.
+    ///
+    /// Stores ikey, keylenx, and value pointer with Release ordering.
+    /// Must be called **before** [`Self::cas_permutation`] to ensure data
+    /// visibility after CAS succeeds.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure:
+    /// - `slot` is in the free region of the current permutation
+    /// - No concurrent writer is modifying this slot
+    /// - The permutation will be CAS'd to include this slot atomically
+    ///
+    /// # Memory Ordering
+    ///
+    /// All stores use Release ordering to synchronize with readers that
+    /// observe the new permutation after CAS success.
+    #[inline]
+    pub unsafe fn store_slot_for_cas(
+        &self,
+        slot: usize,
+        ikey: u64,
+        keylenx: u8,
+        value_ptr: *mut u8,
+    ) {
+        debug_assert!(slot < WIDTH, "store_slot_for_cas: slot out of bounds");
+        self.ikey0[slot].store(ikey, WRITE_ORD);
+        self.keylenx[slot].store(keylenx, WRITE_ORD);
+        self.leaf_values[slot].store(value_ptr, WRITE_ORD);
     }
 
     /// Get the number of keys in this leaf.

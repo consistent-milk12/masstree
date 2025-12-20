@@ -17,6 +17,7 @@ use crate::nodeversion::NodeVersion;
 use crate::permuter::Permuter;
 use seize::{Collector, LocalGuard};
 
+mod cas_insert;
 mod index;
 mod layer;
 mod locked;

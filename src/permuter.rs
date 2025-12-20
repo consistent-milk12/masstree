@@ -223,8 +223,8 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     }
 
     /// Return the number of slots in use.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn size(&self) -> usize {
         (self.value & SIZE_MASK) as usize
     }
@@ -233,8 +233,8 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `i >= WIDTH`.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn get(&self, i: usize) -> usize {
         debug_assert!(i < WIDTH, "get: index out of bounds");
 
@@ -244,15 +244,15 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// Return the slot at the back (position WIDTH - 1)
     ///
     /// This is the next slot to be allocated on `insert_from_back`.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn back(&self) -> usize {
         self.get(WIDTH - 1)
     }
 
     /// Return the raw u64 value.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn value(&self) -> u64 {
         self.value
     }
@@ -263,8 +263,8 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     ///
     /// # Arguments
     /// * `value` - The raw u64 value loaded from atomic
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn from_value(value: u64) -> Self {
         Self { value }
     }
@@ -273,7 +273,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     ///
     /// # Safety
     /// Caller must ensure the new size is valid (0..=WIDTH).
-    #[inline]
+    #[inline(always)]
     pub fn set_size(&mut self, n: usize) {
         debug_assert!(n <= WIDTH, "set_size: n ({n}) > WIDTH ({WIDTH})");
 
@@ -290,7 +290,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// # Panics
     ///
     /// Panics in debug mode if position or slot is out of range.
-    #[inline]
+    #[inline(always)]
     pub fn set(&mut self, i: usize, slot: usize) {
         debug_assert!(i < WIDTH, "set: position {i} >= WIDTH {WIDTH}");
         debug_assert!(slot < WIDTH, "set: slot {slot} >= WIDTH {WIDTH}");
@@ -378,6 +378,53 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         self.debug_assert_valid();
 
         slot
+    }
+
+    /// Compute the result of `insert_from_back` without mutating self.
+    ///
+    /// Returns `(new_permuter, allocated_slot)` for use in CAS operations.
+    /// The returned permuter represents the state after insertion.
+    ///
+    /// This is the immutable version of [`Self::insert_from_back`] for lock-free
+    /// CAS-based insertion where we need to compute the new permutation value
+    /// before attempting an atomic compare-and-swap.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `i > size()` or `size() >= WIDTH`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let perm = Permuter::<15>::empty();
+    /// let (new_perm, slot) = perm.insert_from_back_immutable(0);
+    /// assert_eq!(new_perm.size(), 1);
+    /// assert_eq!(new_perm.get(0), slot);
+    /// // Original unchanged
+    /// assert_eq!(perm.size(), 0);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn insert_from_back_immutable(&self, i: usize) -> (Self, usize) {
+        debug_assert!(i <= self.size(), "insert_from_back_immutable: i > size");
+        debug_assert!(
+            self.size() < WIDTH,
+            "insert_from_back_immutable: permuter full"
+        );
+
+        let slot: usize = self.back();
+        let i_shift: usize = (i * 4) + 4;
+        let low_mask: u64 = (1u64 << i_shift) - 1;
+
+        let new_value: u64 = ((self.value + 1) & low_mask)
+            | ((slot as u64) << i_shift)
+            | ((self.value << 4) & !(low_mask | (0xF << i_shift)));
+
+        let new_perm = Self { value: new_value };
+
+        #[cfg(debug_assertions)]
+        new_perm.debug_assert_valid();
+
+        (new_perm, slot)
     }
 
     /// Remove the element at position `i` and move it to the back.
@@ -1052,5 +1099,93 @@ mod tests {
 
         assert_eq!(p1, p2);
         assert_eq!(p1.value(), p2.value());
+    }
+
+    // ==================== insert_from_back_immutable Tests ====================
+
+    #[test]
+    fn test_insert_from_back_immutable_basic() {
+        let p: Permuter<15> = Permuter::empty();
+        assert_eq!(p.size(), 0);
+
+        // Insert at position 0 (immutable)
+        let (new_p, slot) = p.insert_from_back_immutable(0);
+
+        // Original unchanged
+        assert_eq!(p.size(), 0);
+
+        // New permuter has the insert
+        assert_eq!(new_p.size(), 1);
+        assert_eq!(slot, 0);
+        assert_eq!(new_p.get(0), 0);
+    }
+
+    #[test]
+    fn test_insert_from_back_immutable_matches_mutable() {
+        // Verify immutable version produces same result as mutable version
+        let original: Permuter<15> = Permuter::make_sorted(5);
+
+        // Mutable insert
+        let mut mutable = original;
+        let mutable_slot = mutable.insert_from_back(2);
+
+        // Immutable insert
+        let (immutable, immutable_slot) = original.insert_from_back_immutable(2);
+
+        // Should produce identical results
+        assert_eq!(mutable_slot, immutable_slot);
+        assert_eq!(mutable.value(), immutable.value());
+        assert_eq!(mutable.size(), immutable.size());
+
+        for i in 0..mutable.size() {
+            assert_eq!(mutable.get(i), immutable.get(i));
+        }
+    }
+
+    #[test]
+    fn test_insert_from_back_immutable_chain() {
+        // Test chaining multiple immutable inserts
+        let p0: Permuter<15> = Permuter::empty();
+
+        let (p1, slot0) = p0.insert_from_back_immutable(0);
+        let (p2, slot1) = p1.insert_from_back_immutable(0);
+        let (p3, slot2) = p2.insert_from_back_immutable(1);
+
+        // Original unchanged
+        assert_eq!(p0.size(), 0);
+
+        // Each step added one
+        assert_eq!(p1.size(), 1);
+        assert_eq!(p2.size(), 2);
+        assert_eq!(p3.size(), 3);
+
+        // Slots allocated in order
+        assert_eq!(slot0, 0);
+        assert_eq!(slot1, 1);
+        assert_eq!(slot2, 2);
+
+        // Final permuter has correct structure
+        assert_eq!(p3.get(0), 1); // slot1 at position 0
+        assert_eq!(p3.get(1), 2); // slot2 at position 1
+        assert_eq!(p3.get(2), 0); // slot0 at position 2 (shifted)
+    }
+
+    #[test]
+    fn test_insert_from_back_immutable_for_cas() {
+        // Simulate CAS usage: compute new value, compare old
+        let current: Permuter<15> = Permuter::make_sorted(3);
+        let current_value = current.value();
+
+        let (new_perm, slot) = current.insert_from_back_immutable(1);
+
+        // Simulate CAS: old value should match current
+        assert_eq!(current.value(), current_value);
+
+        // New value is different
+        assert_ne!(new_perm.value(), current_value);
+
+        // Could now do: compare_exchange(current_value, new_perm.value())
+        assert_eq!(slot, 3); // Next slot after sorted(3)
+        assert_eq!(new_perm.size(), 4);
     }
 }

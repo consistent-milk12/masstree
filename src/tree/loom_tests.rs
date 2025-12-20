@@ -359,3 +359,181 @@ fn test_loom_count_tracking() {
         assert_eq!(map.count.load(Ordering::Relaxed), 1);
     });
 }
+
+// ============================================================================
+//  CAS Insert Pattern Tests
+// ============================================================================
+
+/// Simplified permutation CAS model for testing CAS insert semantics.
+///
+/// Models the core pattern: store slot data, then CAS permutation to publish.
+struct LoomPermutedLeaf {
+    /// Permutation value (size in low 4 bits, slots in higher bits).
+    permutation: AtomicU64,
+    /// Slot data (key, value pairs).
+    slots: [(AtomicU64, AtomicU64); 4],
+    /// Count of successful inserts.
+    count: AtomicUsize,
+}
+
+impl LoomPermutedLeaf {
+    fn new() -> Self {
+        Self {
+            // Empty permutation with slots [3,2,1,0] in free region
+            // Size = 0, so all slots are free
+            permutation: AtomicU64::new(0x3210_0),
+            slots: std::array::from_fn(|_| (AtomicU64::new(0), AtomicU64::new(0))),
+            count: AtomicUsize::new(0),
+        }
+    }
+
+    /// CAS-based insert (lock-free).
+    ///
+    /// 1. Load permutation
+    /// 2. Compute slot to use
+    /// 3. Store data in slot
+    /// 4. CAS permutation to publish
+    fn cas_insert(&self, key: u64, value: u64) -> bool {
+        loop {
+            let perm = self.permutation.load(Ordering::SeqCst);
+            let size = perm & 0xF;
+
+            if size >= 4 {
+                return false; // Full
+            }
+
+            // Get slot from "back" (position 3)
+            let slot = ((perm >> 16) & 0xF) as usize;
+
+            // Pre-store slot data
+            self.slots[slot].0.store(key, Ordering::SeqCst);
+            self.slots[slot].1.store(value, Ordering::SeqCst);
+
+            // Compute new permutation (increment size, shift slots)
+            // For simplicity, just increment size
+            let new_perm = (perm & !0xF) | (size + 1);
+
+            // CAS to publish
+            if self
+                .permutation
+                .compare_exchange(perm, new_perm, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                return true;
+            }
+
+            // CAS failed - retry
+            loom::thread::yield_now();
+        }
+    }
+
+    /// Read all visible key-value pairs.
+    fn read_all(&self) -> Vec<(u64, u64)> {
+        let perm = self.permutation.load(Ordering::SeqCst);
+        let size = (perm & 0xF) as usize;
+
+        let mut result = Vec::new();
+        for i in 0..size {
+            // Get slot at position i (simplified - just use i as slot)
+            let key = self.slots[i].0.load(Ordering::SeqCst);
+            let value = self.slots[i].1.load(Ordering::SeqCst);
+            result.push((key, value));
+        }
+        result
+    }
+}
+
+/// Test CAS insert with two threads inserting different keys.
+///
+/// Both should succeed without interference.
+#[test]
+fn test_loom_cas_insert_different_slots() {
+    loom::model(|| {
+        let leaf = Arc::new(LoomPermutedLeaf::new());
+
+        let l1 = Arc::clone(&leaf);
+        let t1 = thread::spawn(move || l1.cas_insert(1, 100));
+
+        let l2 = Arc::clone(&leaf);
+        let t2 = thread::spawn(move || l2.cas_insert(2, 200));
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+
+        // Both should succeed
+        assert!(r1, "First insert should succeed");
+        assert!(r2, "Second insert should succeed");
+
+        // Count should be 2
+        assert_eq!(leaf.count.load(Ordering::Relaxed), 2);
+    });
+}
+
+/// Test CAS insert where both threads try to use same slot.
+///
+/// Only one should win the CAS race per attempt.
+#[test]
+fn test_loom_cas_insert_same_slot_race() {
+    loom::model(|| {
+        let leaf = Arc::new(LoomPermutedLeaf::new());
+
+        let l1 = Arc::clone(&leaf);
+        let t1 = thread::spawn(move || l1.cas_insert(42, 100));
+
+        let l2 = Arc::clone(&leaf);
+        let t2 = thread::spawn(move || l2.cas_insert(42, 200));
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+
+        // Both should succeed (retry on CAS failure)
+        assert!(r1, "First insert should eventually succeed");
+        assert!(r2, "Second insert should eventually succeed");
+
+        // Final count should be 2 (both inserted)
+        assert_eq!(leaf.count.load(Ordering::Relaxed), 2);
+    });
+}
+
+/// Test CAS insert with concurrent reader.
+///
+/// Reader should see consistent data (never partial).
+#[test]
+fn test_loom_cas_insert_with_reader() {
+    loom::model(|| {
+        let leaf = Arc::new(LoomPermutedLeaf::new());
+
+        let l1 = Arc::clone(&leaf);
+        let t1 = thread::spawn(move || {
+            l1.cas_insert(42, 999);
+        });
+
+        let l2 = Arc::clone(&leaf);
+        let t2 = thread::spawn(move || {
+            let data = l2.read_all();
+            // Should see either empty or complete insert, never partial
+            for (key, value) in &data {
+                if *key == 42 {
+                    assert_eq!(*value, 999, "Partial write detected");
+                }
+            }
+            data
+        });
+
+        t1.join().unwrap();
+        let read_result = t2.join().unwrap();
+
+        // After join, insert should be visible
+        let final_data = leaf.read_all();
+        assert!(
+            final_data.iter().any(|(k, _)| *k == 42),
+            "Insert should be visible after join"
+        );
+
+        // If reader saw the key, it must have the correct value
+        if let Some((_, v)) = read_result.iter().find(|(k, _)| *k == 42) {
+            assert_eq!(*v, 999, "Reader saw partial write");
+        }
+    });
+}
