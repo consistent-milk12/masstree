@@ -167,14 +167,17 @@ pub struct LockGuard<'a> {
 
 impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
-        // Automatically unlock on drop, even during panic.
-        // Version counter increment depend on dirty bits:
+        // Version counter increment depends on dirty bits:
         // - If splitting: increment split counter, clear all dirty/lock bits
         // - If inserting: increment insert counter, clear inserting/lock bits
+        //
+        // With current strategy, INSERTING_BIT is always set (unless SPLITTING_BIT was set),
+        // so the version counter is always incremented on unlock.
         let new_value: u32 = if self.locked_value & SPLITTING_BIT != 0 {
             (self.locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK
         } else {
             // The expression `(inserting << 2)` equals `vinsert_lowbit` when inserting
+            // Currently, INSERTING_BIT is always 1 here, so version increments
             (self.locked_value + ((self.locked_value & INSERTING_BIT) << 2)) & UNLOCK_MASK
         };
 
@@ -184,7 +187,7 @@ impl Drop for LockGuard<'_> {
 
 impl LockGuard<'_> {
     /// Get the locked version value.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn locked_value(&self) -> u32 {
         self.locked_value
@@ -254,7 +257,7 @@ impl LockGuard<'_> {
     ///
     /// # Memory Ordering
     /// Same as [`mark_insert()`]: Release store followed by Acquire fence.
-    #[inline]
+    #[inline(always)]
     pub fn mark_deleted(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version.value.load(Ordering::Relaxed);
@@ -270,7 +273,7 @@ impl LockGuard<'_> {
     }
 
     /// Clear the root bit.
-    #[inline]
+    #[inline(always)]
     pub fn mark_nonroot(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version.value.load(Ordering::Relaxed);
@@ -288,6 +291,7 @@ impl NodeVersion {
     /// # Arguments
     /// - `is_leaf` - true for leaf nodes, false for internodes
     #[must_use]
+    #[inline(always)]
     pub const fn new(is_leaf: bool) -> Self {
         let initial: u32 = if is_leaf { ISLEAF_BIT } else { 0 };
 
@@ -300,6 +304,7 @@ impl NodeVersion {
     ///
     ///  WARN: ONLY FOR TESTING.
     #[must_use]
+    #[inline(always)]
     pub const fn from_value(value: u32) -> Self {
         Self {
             value: AtomicU32::new(value),
@@ -311,57 +316,57 @@ impl NodeVersion {
     // ========================================================================
 
     /// Check if this is a leaf node.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_leaf(&self) -> bool {
         (self.value.load(Ordering::Relaxed) & ISLEAF_BIT) != 0
     }
 
     /// Check if this is a root node.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_root(&self) -> bool {
         (self.value.load(Ordering::Relaxed) & ROOT_BIT) != 0
     }
 
     /// Check if this node is logically deleted.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_deleted(&self) -> bool {
         (self.value.load(Ordering::Relaxed) & DELETED_BIT) != 0
     }
 
     /// Check if this node is locked.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_locked(&self) -> bool {
         (self.value.load(Ordering::Relaxed) & LOCK_BIT) != 0
     }
 
     /// Check if this node is being inserted into.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_inserting(&self) -> bool {
         (self.value.load(Ordering::Relaxed) & INSERTING_BIT) != 0
     }
 
     /// Check if this node is being split.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_splitting(&self) -> bool {
         (self.value.load(Ordering::Relaxed) & SPLITTING_BIT) != 0
     }
 
     /// Check if any dirty bit set (inserting or splitting).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_dirty(&self) -> bool {
         (self.value.load(Ordering::Relaxed) & DIRTY_MASK) != 0
     }
 
     /// Get the raw version value.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn value(&self) -> u32 {
         self.value.load(Ordering::Relaxed)
     }
@@ -438,8 +443,8 @@ impl NodeVersion {
     ///
     /// The compiler fence ensures all prior reads (slot data) complete before
     /// we load the version for validation.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn has_changed(&self, old: u32) -> bool {
         // Compiler fence: ensures all prior reads complete before version check.
         // This matches C++ fence() in nodeversion.hh:72.
@@ -455,8 +460,8 @@ impl NodeVersion {
     ///
     /// Uses the same compiler fence as `has_changed()` for correctness.
     /// See [`has_changed`] for the full explanation.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn has_split(&self, old: u32) -> bool {
         // Compiler fence: ensures all prior reads complete before version check.
         compiler_fence(Ordering::SeqCst);
@@ -536,14 +541,14 @@ impl NodeVersion {
     /// C++ `nodeversion.hh:111-127` - `try_lock()` template method
     #[must_use]
     pub fn try_lock(&self) -> Option<LockGuard<'_>> {
-        let value = self.value.load(Ordering::Relaxed);
+        let value: u32 = self.value.load(Ordering::Relaxed);
 
         // Fail fast if locked or dirty.
         if (value & (LOCK_BIT | DIRTY_MASK)) != 0 {
             return None;
         }
 
-        let locked = value | LOCK_BIT;
+        let locked: u32 = value | LOCK_BIT;
 
         // Single CAS attempt (use strong CAS for single-shot).
         match self
@@ -555,6 +560,7 @@ impl NodeVersion {
                 locked_value: locked,
                 _marker: PhantomData,
             }),
+
             Err(_) => None,
         }
     }
@@ -607,6 +613,7 @@ impl NodeVersion {
     /// Mark the node as a root.
     ///
     /// Does not require the lock. Used during tree initialization.
+    #[inline(always)]
     pub fn mark_root(&self) {
         let value: u32 = self.value.load(Ordering::Relaxed);
 
@@ -616,6 +623,7 @@ impl NodeVersion {
     /// Clear the root bit.
     ///
     /// Called when a layer root leaf is demoted (layer root split).
+    #[inline(always)]
     pub fn mark_nonroot(&self) {
         let value: u32 = self.value.load(Ordering::Relaxed);
 
