@@ -750,7 +750,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ///
     /// C++ `masstree_struct.hh:693-712` - `advance_to_key()`
     #[expect(clippy::unused_self, reason = "Method signature for API consistency")]
-    fn advance_to_key<'a>(
+    pub(super) fn advance_to_key<'a>(
         &'a self,
         mut leaf: &'a LeafNode<LeafValue<V>, WIDTH>,
         key: &Key<'_>,

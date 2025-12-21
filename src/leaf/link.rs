@@ -68,7 +68,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     pub unsafe fn link_split(&self, new_sibling: *mut Self) -> bool {
         let old_next = self.safe_next();
 
-        // P0.5 FIX: Never mark a null pointer.
+        // FIXED: Never mark a null pointer.
         if old_next.is_null() {
             unsafe {
                 (*new_sibling).set_next(StdPtr::null_mut());
@@ -89,14 +89,18 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             (*new_sibling).set_prev(StdPtr::from_ref(self).cast_mut());
         }
 
-        match self.cas_next(marked, new_sibling) {
-            Ok(_) => {
-                unsafe {
-                    (*old_next).set_prev(new_sibling);
-                }
-                true
+        if self.cas_next(marked, new_sibling).is_ok() {
+            unsafe {
+                (*old_next).set_prev(new_sibling);
             }
-            Err(_) => false,
+            true
+        } else {
+            // OPTIMIZE: Unmark the pointer before returning false.
+            // If we leave it marked, wait_for_split() will spin forever.
+            // This CAS should not fail if locking is correct, but we must
+            // handle it gracefully to avoid infinite loops.
+            let _ = self.cas_next(marked, old_next);
+            false
         }
     }
 }

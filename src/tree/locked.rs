@@ -215,7 +215,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             // Find and lock target leaf (or get layer descent hint)
             let find_result = self.find_locked(layer_root, key, guard);
 
-            // R4 FIX: Handle DescendLayer case first (no lock held)
+            // FIXED: Handle DescendLayer case first (no lock held)
             let mut cursor = match find_result {
                 FindLockedResult::DescendLayer {
                     layer_ptr,
@@ -382,7 +382,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     let perm: Permuter<WIDTH> = leaf.permutation();
                     let size: usize = perm.size();
 
-                    // P0.3 FIX: Calculate split position respecting equal-ikey rule.
+                    // FIXED: Calculate split position respecting equal-ikey rule.
                     // Use SplitUtils::calculate_split_point which adjusts the split
                     // point to keep entries with the same ikey together.
                     //
@@ -424,7 +424,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // Track the new leaf for cleanup (link succeeded)
                     self.allocator.track_leaf(right_leaf_ptr);
 
-                    // P0.2 FIX: Keep left leaf locked during parent propagation.
+                    // FIXED: Keep left leaf locked during parent propagation.
                     // The C++ implementation uses hand-over-hand locking: child stays
                     // locked until parent is updated. This prevents a window where
                     // keys have moved but parent doesn't know about the right sibling.
@@ -483,12 +483,30 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// When a layer pointer is stable (version unchanged), we return `DescendLayer`
     /// without acquiring a lock. This avoids unnecessary lock acquisition for
     /// layer traversal, improving performance on deep tries.
+    /// Find and lock target leaf for insertion.
+    ///
+    /// # Protocol (Writer Membership Revalidation)
+    ///
+    /// 1. Optimistic reach to leaf
+    /// 2. Advance along B-link chain if key escaped to sibling
+    /// 3. Take version snapshot
+    /// 4. Search for key position
+    /// 5. For layer descent with stable pointer: return `DescendLayer` (no lock)
+    /// 6. Acquire lock
+    /// 7. Validate version and permutation
+    /// 8. If validation fails: use `advance_to_key` to follow B-links
+    /// 9. After lock acquired: verify key still belongs in this leaf
+    ///
+    /// # Reference
+    /// C++ `masstree_get.hh:100-105` - B-link following after lock validation failure
     fn find_locked<'a>(
         &'a self,
         layer_root: *const u8,
         key: &Key<'_>,
         guard: &LocalGuard<'_>,
     ) -> FindLockedResult<'a, V, WIDTH> {
+        use crate::leaf::link::unmark_ptr;
+
         let ikey: u64 = key.ikey();
         #[expect(
             clippy::cast_possible_truncation,
@@ -502,6 +520,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
         let mut leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = StdPtr::null_mut();
         let mut use_reach: bool = true;
+        // Track the version we used for advance_to_key calls
+        let mut last_version: u32 = 0;
 
         loop {
             if use_reach {
@@ -523,14 +543,15 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 continue;
             }
 
-            // Version snapshot
+            // Version snapshot (spins until dirty bits clear)
             let version: u32 = leaf.version().stable();
+            last_version = version;
 
             // Search for key position
             let perm: Permuter<WIDTH> = leaf.permutation();
             let result: InsertSearchResult = self.search_for_insert(leaf, key, &perm);
 
-            // R4 FIX: For layer descent, check if we can skip locking entirely.
+            // FIXED: For layer descent, check if we can skip locking entirely.
             // If layer pointer is stable (version unchanged), return DescendLayer
             // without acquiring a lock.
             if let InsertSearchResult::Layer { slot, shift_amount } = &result {
@@ -547,18 +568,55 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             // Acquire lock
             let lock: LockGuard<'a> = leaf.version().lock();
 
-            // Validate version unchanged
+            // FIXED: Validate version with B-link following on failure
+            //
+            // Instead of just retrying, use advance_to_key to follow B-links.
+            // This matches C++ behavior: masstree_get.hh:100-105
             if leaf.version().has_changed(version) {
-                // Version changed - retry
+                // Version changed during our read-lock window.
+                // Use advance_to_key with the OLD version to detect splits.
                 drop(lock);
+
+                let (new_leaf, _) = self.advance_to_key(leaf, key, last_version, guard);
+                if !StdPtr::eq(new_leaf, leaf) {
+                    // Key escaped to a different leaf - search there
+                    leaf_ptr = StdPtr::from_ref(new_leaf).cast_mut();
+                    use_reach = false;
+                }
+                // If same leaf, use_reach stays true to re-traverse from root
                 continue;
             }
 
             // Validate permutation unchanged
             let current_perm: Permuter<WIDTH> = leaf.permutation();
             if current_perm.value() != perm.value() {
+                // Permutation changed (another insert completed).
                 drop(lock);
+
+                let (new_leaf, _) = self.advance_to_key(leaf, key, last_version, guard);
+                if !StdPtr::eq(new_leaf, leaf) {
+                    leaf_ptr = StdPtr::from_ref(new_leaf).cast_mut();
+                    use_reach = false;
+                }
                 continue;
+            }
+
+            // FIXED: Post-lock membership check
+            // Verify the key still belongs in this leaf by checking next leaf's bound.
+            let next_raw: *mut LeafNode<LeafValue<V>, WIDTH> = leaf.next_raw();
+            let next_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = unmark_ptr(next_raw);
+            if !next_ptr.is_null() {
+                // SAFETY: next_ptr is valid (from leaf's atomic next pointer)
+                let next_leaf: &LeafNode<LeafValue<V>, WIDTH> = unsafe { &*next_ptr };
+                let next_bound: u64 = next_leaf.ikey_bound();
+
+                // If our key's ikey >= next leaf's bound, we're in the wrong leaf
+                if key.ikey() >= next_bound {
+                    drop(lock);
+                    leaf_ptr = next_ptr;
+                    use_reach = false;
+                    continue;
+                }
             }
 
             return FindLockedResult::LockedCursor(InsertCursor {
@@ -1302,7 +1360,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     fn propagate_internode_split_concurrent(
         &self,
         parent_ptr: *mut InternodeNode<LeafValue<V>, WIDTH>,
-        child_idx: usize,
+        _child_idx: usize, // Unused - we recompute after lock
         insert_ikey: u64,
         insert_child: *mut u8,
         guard: &LocalGuard<'_>,
@@ -1313,7 +1371,12 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         // Lock the parent
         let mut parent_lock = parent.version().lock();
 
-        // FIX: Check if parent is still full after acquiring lock.
+        // FIXED: Recompute child index after acquiring lock.
+        // The original child_idx may be stale if another thread modified
+        // the parent between dropping and reacquiring the lock.
+        let child_idx: usize = parent.find_insert_position(insert_ikey);
+
+        // FIXED: Check if parent is still full after acquiring lock.
         // Between the fullness check in the caller and acquiring this lock,
         // another thread may have already split this node.
         if parent.size() < WIDTH {
@@ -1335,7 +1398,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             return Ok(());
         }
 
-        // P0.4 FIX: Mark dirty BEFORE structural modifications.
+        // FIXED: Mark dirty BEFORE structural modifications.
         // In Masstree's OCC protocol, the lock bit does NOT block readers.
         // Only dirty bits signal that mutation is in progress.
         // Reference: nodeversion.hh:143-159, masstree_split.hh:215-216
@@ -1392,7 +1455,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             }
         }
 
-        // P0.5 FIX: Keep parent_lock held during propagation.
+        // FIXED: Keep parent_lock held during propagation.
         // The C++ implementation uses hand-over-hand locking: child stays locked
         // until parent/grandparent update is complete to prevent concurrent
         // interleaving that could corrupt the split propagation.
@@ -1453,7 +1516,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         // Check if grandparent has space
         let mut grandparent_lock = grandparent.version().lock();
         if grandparent.size() < WIDTH {
-            // P0.4 FIX: Mark dirty BEFORE structural modification
+            // FIXED: Mark dirty BEFORE structural modification
             grandparent_lock.mark_insert();
             grandparent.insert_key_and_child(parent_idx, popup_key, sibling_ptr.cast::<u8>());
             unsafe {

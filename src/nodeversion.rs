@@ -450,8 +450,16 @@ impl NodeVersion {
         // This matches C++ fence() in nodeversion.hh:72.
         compiler_fence(Ordering::SeqCst);
 
-        // XOR the versions, change = differing bits above LOCK_BIT
-        (old ^ self.value.load(Ordering::Acquire)) > LOCK_BIT
+        // XOR the versions, change = differing bits above LOCK_BIT | INSERTING_BIT.
+        //
+        // With the "always dirty on lock" strategy, we set INSERTING_BIT when acquiring
+        // the lock. This means `old` (from stable()) won't have INSERTING_BIT, but
+        // `current` (after we lock) will. We must ignore this difference, otherwise
+        // has_changed() always returns true after we acquire the lock.
+        //
+        // LOCK_BIT = 1, INSERTING_BIT = 2, so LOCK_BIT | INSERTING_BIT = 3.
+        // We check if any bits above bit 1 (i.e., bits 2+) differ.
+        (old ^ self.value.load(Ordering::Acquire)) > (LOCK_BIT | INSERTING_BIT)
     }
 
     /// Check if a split has occurred since `old`.
@@ -696,15 +704,18 @@ mod tests {
         {
             let guard: LockGuard<'_> = v.lock();
             assert!(v.is_locked());
+            // With "always dirty on lock" strategy, INSERTING_BIT is set automatically
             assert_eq!(guard.locked_value() & LOCK_BIT, LOCK_BIT);
+            assert_eq!(guard.locked_value() & INSERTING_BIT, INSERTING_BIT);
 
             // Guard drops here, releasing lock
         }
 
         assert!(!v.is_locked());
 
-        // No dirty bits set, so version should be unchanged
-        assert!(!v.has_changed(stable_before));
+        // With "always dirty on lock" strategy, version ALWAYS increments on unlock
+        // because INSERTING_BIT is set automatically.
+        assert!(v.has_changed(stable_before));
     }
 
     #[test]
@@ -764,17 +775,20 @@ mod tests {
     }
 
     #[test]
-    fn test_no_version_increment_without_dirty() {
+    fn test_version_always_increments_with_auto_dirty() {
+        // With "always dirty on lock" strategy, version ALWAYS increments
+        // because INSERTING_BIT is set automatically on lock().
         let v: NodeVersion = NodeVersion::new(true);
         let stable_before: u32 = v.stable();
 
         {
-            // Lock and let drop without setting dirty bits
+            // Lock sets INSERTING_BIT automatically
             let _guard: LockGuard<'_> = v.lock();
+            // INSERTING_BIT is set, so version will increment on drop
         }
 
-        // Version should NOT have changed
-        assert!(!v.has_changed(stable_before));
+        // Version SHOULD have changed (auto-dirty strategy)
+        assert!(v.has_changed(stable_before));
     }
 
     #[test]
@@ -909,22 +923,26 @@ mod tests {
         let initial: u32 = v.value();
 
         let guard: LockGuard<'_> = v.lock();
-        assert_eq!(guard.locked_value(), initial | LOCK_BIT);
+        // With "always dirty on lock" strategy, INSERTING_BIT is set automatically
+        assert_eq!(guard.locked_value(), initial | LOCK_BIT | INSERTING_BIT);
     }
 
     #[test]
-    fn test_guard_mark_updates_locked_value() {
+    fn test_guard_mark_insert_is_idempotent() {
+        // With "always dirty on lock" strategy, INSERTING_BIT is already set.
+        // mark_insert() should be idempotent (no-op if already set).
         let v: NodeVersion = NodeVersion::new(true);
 
         let mut guard: LockGuard<'_> = v.lock();
         let initial_locked: u32 = guard.locked_value();
 
-        assert_eq!(initial_locked & INSERTING_BIT, 0);
+        // INSERTING_BIT is already set by lock()
+        assert_ne!(initial_locked & INSERTING_BIT, 0);
 
         guard.mark_insert();
 
-        // Guard's locked_value is updated
-        assert_ne!(guard.locked_value() & INSERTING_BIT, 0);
+        // Guard's locked_value should be unchanged (idempotent)
+        assert_eq!(guard.locked_value(), initial_locked);
     }
 }
 

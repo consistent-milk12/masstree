@@ -544,6 +544,22 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
         search_ikey.cmp(&self.ikey(p))
     }
 
+    /// Find the position where a key should be inserted.
+    ///
+    /// Returns the index where `insert_ikey` should go, such that
+    /// `ikey(i-1) < insert_ikey <= ikey(i)` (or at the end if greater than all).
+    ///
+    /// FIXED: Used in the data race fix for recomputing child index after reacquiring lock.
+    pub fn find_insert_position(&self, insert_ikey: u64) -> usize {
+        let n = self.nkeys();
+        for i in 0..n {
+            if insert_ikey <= self.ikey(i) {
+                return i;
+            }
+        }
+        n
+    }
+
     // ========================================================================
     //  Invariant Checker
     // ========================================================================
