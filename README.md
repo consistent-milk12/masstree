@@ -22,6 +22,14 @@ MassTree fills this gap with a cache-efficient B+tree that scales.
 
 Two benchmark suites: `lock_comparison` (vs `Mutex`/`RwLock<BTreeMap>`) and `concurrent_maps` (vs `crossbeam-skiplist`).
 
+### Benchmark Caveats (Why The Gap Can Look Huge)
+
+- Most read-throughput numbers use `MassTree::get_ref(..., &guard)` (no `Arc` clone) with a **guard pinned once per thread**, this is a best-case for Masstree’s design.
+- `Mutex<BTreeMap>` / `RwLock<BTreeMap>` benchmarks take a lock **per operation** (as you would with a shared map), and use the standard library locks (not `parking_lot`).
+- `crossbeam-skiplist::SkipMap` does not expose a reusable epoch guard in its high-level API, many operations pin/unpin internally per call. For a closer “same guard model” comparison, use `crossbeam_skiplist::base::SkipList` with an explicitly pinned guard.
+- Current node allocation tracking (`SeizeAllocator`) uses a mutex on allocatio/deallocation, most read-heavy benchmarks don’t allocate nodes (and many “write” mixes are updates), so this overhead won’t show up unless you benchmark split-heavy growth.
+- Concurrent-write results should be treated as being "WRONG" until remaining write-correctness bug (missing keys under contention) is fixed.
+
 ### Where MassTree Does Well
 
 **Concurrent read throughput (32 threads):**
@@ -100,7 +108,7 @@ This should be possible, after it is properly implemented with all features and 
 | Feature | Status |
 |---------|--------|
 | Concurrent get |  Lock-free, version-validated |
-| Concurrent insert |  CAS fast path + locked fallback |
+| Concurrent insert |  Implemented (CAS fast path + locked fallback), but not yet correct under heavy contention (known “missing keys” bug; fix in progress via permutation freezing) |
 | Split propagation |  Leaf and internode splits |
 | Memory safety |  Miri strict provenance |
 | Range scans | Planned |

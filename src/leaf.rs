@@ -28,7 +28,6 @@ use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use seize::{Guard, LocalGuard};
 
 mod freeze;
-use freeze::LeafFreezeUtils;
 
 pub mod layer;
 pub mod link;
