@@ -417,7 +417,7 @@ impl NodeVersion {
     /// Uses `> LOCK_BIT` (i.e., `> 1`) because XOR of only the lock bit equals 1,
     /// which is NOT > 1, so lock-only changes return false.
     ///
-    /// # Compiler Fence Requirement (P0.1)
+    /// # Compiler Fence Requirement
     ///
     /// This method includes a **compiler fence** before the version load.
     /// This is critical for correctness: the optimistic read protocol is

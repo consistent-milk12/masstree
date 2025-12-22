@@ -93,10 +93,10 @@ pub use slot::ValueSlot;
 pub use suffix::{PermutationProvider, SuffixBag};
 pub use tree::{MassTree, MassTreeIndex};
 
-// Re-export debug counters for P0.6-B diagnosis (lightweight, always-on)
+// Re-export debug counters for diagnosis (lightweight, always-on)
 pub use tree::{
-    get_all_debug_counters, get_debug_counters, reset_debug_counters, DebugCounters,
     ADVANCE_BLINK_COUNT, BLINK_SHOULD_FOLLOW_COUNT, CAS_INSERT_FALLBACK_COUNT,
-    CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, LOCKED_INSERT_COUNT,
-    SEARCH_NOT_FOUND_COUNT, SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT,
+    CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters, LOCKED_INSERT_COUNT,
+    SEARCH_NOT_FOUND_COUNT, SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters,
+    get_debug_counters, reset_debug_counters,
 };

@@ -224,7 +224,9 @@ mod get_by_key_size {
 
 #[divan::bench_group(name = "03_concurrent_reads_scaling")]
 mod concurrent_reads_scaling {
-    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, uniform_indices};
+    use super::{
+        Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, uniform_indices,
+    };
 
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
@@ -301,7 +303,9 @@ mod concurrent_reads_scaling {
 
 #[divan::bench_group(name = "04_concurrent_reads_long_keys")]
 mod concurrent_reads_long_keys {
-    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, uniform_indices};
+    use super::{
+        Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, uniform_indices,
+    };
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 5000;
@@ -460,7 +464,9 @@ mod concurrent_writes_contention {
 
 #[divan::bench_group(name = "06_mixed_zipfian")]
 mod mixed_zipfian {
-    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, zipfian_indices};
+    use super::{
+        Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, zipfian_indices,
+    };
 
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
@@ -549,7 +555,9 @@ mod mixed_zipfian {
 
 #[divan::bench_group(name = "07_mixed_long_keys_zipfian")]
 mod mixed_long_keys_zipfian {
-    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, zipfian_indices};
+    use super::{
+        Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, zipfian_indices,
+    };
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 5000;

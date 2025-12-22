@@ -28,9 +28,7 @@
 
 mod common;
 
-use masstree::{
-    MassTree, get_debug_counters, reset_debug_counters, BLINK_SHOULD_FOLLOW_COUNT,
-};
+use masstree::{BLINK_SHOULD_FOLLOW_COUNT, MassTree, get_debug_counters, reset_debug_counters};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -225,7 +223,11 @@ fn concurrent_insert_4_threads_overlapping_keys() {
     }
 
     let actual_len = tree.len();
-    tracing::info!(expected = NUM_KEYS, actual = actual_len, "All threads joined");
+    tracing::info!(
+        expected = NUM_KEYS,
+        actual = actual_len,
+        "All threads joined"
+    );
 
     // Verify all keys are present
     let guard = tree.guard();
@@ -541,11 +543,11 @@ fn stress_concurrent_insert_many_keys() {
 
     assert_eq!(actual_len, TOTAL_KEYS);
 
-    // Report debug counters - this is the key diagnostic for P0.6-B
+    // Report debug counters
     let (blink_should_follow, search_not_found) = get_debug_counters();
     if blink_should_follow > 0 {
         eprintln!(
-            "\n*** P0.6-B DIAGNOSTIC ***\n\
+            "\n*** - DIAGNOSTIC ***\n\
              B-link should have been followed: {} times\n\
              Total search NotFound: {} times\n\
              This indicates stale routing after splits.\n",

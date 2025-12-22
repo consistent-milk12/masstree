@@ -48,7 +48,10 @@ pub fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
 /// - `prefix_buckets` must be > 0. Smaller values increase collisions.
 pub fn keys_shared_prefix<const K: usize>(n: usize, prefix_buckets: u64) -> Vec<[u8; K]> {
     assert!(K % 8 == 0, "key size must be a multiple of 8");
-    assert!((16..=32).contains(&K), "key size must be 16..=32 for shared-prefix keys");
+    assert!(
+        (16..=32).contains(&K),
+        "key size must be 16..=32 for shared-prefix keys"
+    );
     assert!(prefix_buckets > 0, "prefix_buckets must be > 0");
 
     const MULTIPLIERS: [u64; 4] = [

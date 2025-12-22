@@ -24,10 +24,10 @@
 
 mod common;
 
-use masstree::{get_debug_counters, reset_debug_counters, MassTree};
+use masstree::{MassTree, get_debug_counters, reset_debug_counters};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 // =============================================================================
@@ -39,7 +39,7 @@ fn report_debug_counters(test_name: &str) {
     let (blink_should_follow, search_not_found) = get_debug_counters();
     if blink_should_follow > 0 || search_not_found > 0 {
         eprintln!(
-            "\n*** {} - P0.6-B DIAGNOSTIC ***\n\
+            "\n*** {} - DIAGNOSTIC ***\n\
              B-link followed: {} times\n\
              Search NotFound: {} times\n",
             test_name, blink_should_follow, search_not_found
@@ -313,8 +313,8 @@ fn multilayer_mixed_lengths() {
                 for i in 0..KEYS_PER_THREAD {
                     // Rotate through different key lengths: 8, 16, 24, 32 bytes
                     let key = match i % 4 {
-                        0 => format!("{:08}", t * 10000 + i),       // 8 bytes (1 layer)
-                        1 => format!("k{:02}_{:010}", t, i),        // 16 bytes (2 layers)
+                        0 => format!("{:08}", t * 10000 + i), // 8 bytes (1 layer)
+                        1 => format!("k{:02}_{:010}", t, i),  // 16 bytes (2 layers)
                         2 => format!("key_{:02}_middle_{:010}", t, i), // 24 bytes (3 layers)
                         _ => format!("prefix_{:02}_mid_{:010}_end!", t, i), // 32 bytes (4 layers)
                     };
@@ -390,7 +390,10 @@ fn high_thread_8_threads_8byte_keys() {
     report_debug_counters("high_thread_8_threads_8byte_keys");
 
     if fail_count > 0 {
-        panic!("high_thread_8: {} immediate verification failures", fail_count);
+        panic!(
+            "high_thread_8: {} immediate verification failures",
+            fail_count
+        );
     }
 
     verify_all_keys(
@@ -447,7 +450,10 @@ fn high_thread_16_threads_8byte_keys() {
     report_debug_counters("high_thread_16_threads_8byte_keys");
 
     if fail_count > 0 {
-        panic!("high_thread_16: {} immediate verification failures", fail_count);
+        panic!(
+            "high_thread_16: {} immediate verification failures",
+            fail_count
+        );
     }
 
     assert_eq!(tree.len(), TOTAL_KEYS);
@@ -734,7 +740,9 @@ fn pattern_pseudorandom_keys() {
                 let mut thread_keys = Vec::with_capacity(KEYS_PER_THREAD);
 
                 for _ in 0..KEYS_PER_THREAD {
-                    rng_state = rng_state.wrapping_mul(0x5851F42D4C957F2D).wrapping_add(t as u64);
+                    rng_state = rng_state
+                        .wrapping_mul(0x5851F42D4C957F2D)
+                        .wrapping_add(t as u64);
                     let key_val = rng_state;
                     let key = key_val.to_be_bytes();
 
@@ -771,7 +779,10 @@ fn pattern_pseudorandom_keys() {
     let keys = inserted_keys.lock().unwrap();
     let mut missing = 0;
     for &key_val in keys.iter() {
-        if tree.get_with_guard(&key_val.to_be_bytes(), &guard).is_none() {
+        if tree
+            .get_with_guard(&key_val.to_be_bytes(), &guard)
+            .is_none()
+        {
             missing += 1;
         }
     }
@@ -1062,7 +1073,8 @@ fn repeated_10_runs_4_threads_24byte() {
                     for i in 0..500 {
                         let key = format!("thread_{:02}_key_{:010}", t, i);
 
-                        let _ = tree.insert_with_guard(key.as_bytes(), (t * 10000 + i) as u64, &guard);
+                        let _ =
+                            tree.insert_with_guard(key.as_bytes(), (t * 10000 + i) as u64, &guard);
 
                         if tree.get_with_guard(key.as_bytes(), &guard).is_none() {
                             verify_failures.fetch_add(1, Ordering::Relaxed);
@@ -1169,7 +1181,8 @@ fn extreme_100_runs_stress() {
                     for i in 0..1000 {
                         let key = format!("run{:03}_t{:02}_k{:06}", run, t, i);
 
-                        let _ = tree.insert_with_guard(key.as_bytes(), (t * 10000 + i) as u64, &guard);
+                        let _ =
+                            tree.insert_with_guard(key.as_bytes(), (t * 10000 + i) as u64, &guard);
 
                         if tree.get_with_guard(key.as_bytes(), &guard).is_none() {
                             verify_failures.fetch_add(1, Ordering::Relaxed);

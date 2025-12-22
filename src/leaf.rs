@@ -620,7 +620,7 @@ impl<V: Copy> LeafValueIndex<V> {
 /// The type discriminant (Value vs Layer) is in `keylenx`, not pointer bits.
 /// This passes Miri strict provenance checks.
 ///
-/// # Suffix Strategy (P0.4 — Concurrent Safety)
+/// # Suffix Strategy (Concurrent Safety)
 ///
 /// **CRITICAL**: The current `SuffixBag` (`Vec<u8>`) is NOT data-race-free.
 /// Even "append-only" `Vec::extend_from_slice` is a data race under concurrency.
@@ -677,7 +677,7 @@ pub struct LeafNode<S: ValueSlot, const WIDTH: usize = 15> {
     /// Using `AtomicPtr` preserves provenance (vs `AtomicU64` which would erase it).
     leaf_values: [AtomicPtr<u8>; WIDTH],
 
-    /// Suffix storage (P0.4: atomic pointer for concurrent access).
+    /// Suffix storage (atomic pointer for concurrent access).
     ///
     /// **CRITICAL**: Uses `AtomicPtr<SuffixBag>` NOT `Option<Box<SuffixBag>>`.
     /// Writers allocate new `SuffixBag`, copy data, publish via store(Release),
@@ -736,7 +736,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             ikey0: std::array::from_fn(|_| AtomicU64::new(0)),
             keylenx: std::array::from_fn(|_| AtomicU8::new(0)),
             leaf_values: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
-            ksuf: AtomicPtr::new(std::ptr::null_mut()), // P0.4: AtomicPtr instead of Option
+            ksuf: AtomicPtr::new(std::ptr::null_mut()), // AtomicPtr instead of Option
             next: AtomicPtr::new(std::ptr::null_mut()),
             prev: AtomicPtr::new(std::ptr::null_mut()),
             parent: AtomicPtr::new(std::ptr::null_mut()),

@@ -21,7 +21,7 @@ Basic Analysis:
   - splits        List split events with slot indices
   - perms         Decode and validate permutation values
 
-Advanced Debugging (P0.6):
+Advanced Debugging:
   - leaf-timeline Show complete lifecycle of a specific leaf
   - correlate     Trace a key from insert through split/loss
   - missing-keys  Find keys that should exist but don't appear in final state
@@ -30,7 +30,7 @@ Advanced Debugging (P0.6):
 
 Anomaly Detection:
   - anomalies --slot-reuse   Detect slot reuse within epoch
-  - anomalies --slot-steal   Detect slot value overwrites (P0.6-A)
+  - anomalies --slot-steal   Detect slot value overwrites
   - anomalies --all          Run all anomaly detectors
 
 USAGE EXAMPLES
@@ -51,7 +51,7 @@ python scripts/masstree_log_analyze.py logs/masstree_formatted.json missing-keys
 # Show all operations on a specific leaf
 python scripts/masstree_log_analyze.py logs/masstree_formatted.json leaf-timeline 0x7913d0000d80
 
-# Detect slot stealing (P0.6-A bug pattern)
+# Detect slot stealing
 python scripts/masstree_log_analyze.py logs/masstree_formatted.json anomalies --slot-steal
 
 # Show thread interleaving on contested leaves
@@ -98,7 +98,7 @@ MSG_SPLIT_COMPLETE = "insert_concurrent: split completed"
 MSG_LOCKED_INSERT = "insert_concurrent: inserting key"
 MSG_LOCKED_SPLIT_DECISION = "insert_concurrent: split required"
 
-# P0.6-B related messages
+# Related messages
 MSG_BLINK_WARNING = (
     "get: NotFound but ikey >= next leaf bound (stale routing; should follow B-link)"
 )
@@ -523,12 +523,10 @@ def cmd_summary(events: Sequence[Event]) -> None:
                 continue
             print(f"  {t}: {count}")
 
-    # P0.6-specific stats
     cas_success = sum(1 for e in events if e.message == MSG_CAS_SUCCESS)
     cas_aborts = sum(1 for e in events if e.message in CAS_ABORT_MESSAGES)
     splits = sum(1 for e in events if e.message == MSG_SPLIT_COMPLETE)
 
-    print("\n--- P0.6 Stats ---")
     print(f"  CAS successes: {cas_success}")
     print(f"  CAS aborts: {cas_aborts}")
     print(f"  Splits: {splits}")
@@ -571,7 +569,7 @@ def cmd_splits(events: Sequence[Event], *, limit: int | None, show_slots: bool) 
     List split-related events.
 
     With --show-slots, also displays the slot indices (not just ikeys) for each position,
-    which helps distinguish permutation corruption from slot overwrite (per DeepReview §P0.6-B).
+    which helps distinguish permutation corruption from slot overwrite.
     """
     split_events = [
         e for e in events if e.message in (MSG_SPLIT_COMPLETE, MSG_SPLIT_START)
@@ -1058,7 +1056,7 @@ def anomaly_slot_reuse(events: Sequence[Event]) -> int:
     a CAS-inserted slot should not be reused for a different ikey.
 
     This is not a formal proof (splits can free slots), but it is a strong signal
-    for the P0.6 "slot stealing" class of bugs.
+    for the "slot stealing" class of bugs.
     """
     print("--- Anomaly: Slot Reuse Within Epoch ---\n")
 
@@ -1127,20 +1125,18 @@ def anomaly_slot_reuse(events: Sequence[Event]) -> int:
 
 def anomaly_slot_steal(events: Sequence[Event]) -> int:
     """
-    Detect slot value overwrites (P0.6-A bug pattern).
+    Detect slot value overwrites.
 
     Looks for the pattern where:
     1. Thread A successfully CAS inserts at slot S
     2. Thread B (stale) overwrites slot S with a different value
     3. Thread B's permutation CAS fails and it clears the slot
 
-    This is the root cause identified in DeepReview.md §P0.6-A.
-
     Detection heuristic: Look for CAS successes followed by the same slot
     being used by a different key within a short time window, without an
     intervening split.
     """
-    print("--- Anomaly: Slot Stealing (P0.6-A) ---\n")
+    print("--- Anomaly: Slot Stealing ---\n")
 
     # Group by leaf
     per_leaf: dict[str, list[Event]] = defaultdict(list)
@@ -1196,14 +1192,13 @@ def anomaly_slot_steal(events: Sequence[Event]) -> int:
         print(
             "\nThis pattern suggests the CAS insert is not using NULL-claim semantics."
         )
-        print("See DeepReview.md §P0.6-A for fix recommendations.")
 
     return findings
 
 
 def cmd_blink_warnings(events: Sequence[Event], *, limit: int | None = None) -> None:
     """
-    List B-link navigation warnings (P0.6-B indicator).
+    List B-link navigation warnings.
 
     These warnings indicate that a get() operation found NotFound but the key's
     ikey was >= the next leaf's bound, suggesting the B-link should have been
@@ -1259,17 +1254,15 @@ def cmd_blink_warnings(events: Sequence[Event], *, limit: int | None = None) -> 
 
 def anomaly_writer_reader_divergence(events: Sequence[Event]) -> int:
     """
-    Detect writer/reader leaf disagreement (P0.6-B pattern from Analysis.md Case 3).
+    Detect writer/reader leaf disagreement.
 
     Pattern:
     1. Writer selects leaf L1 via advance_to_key_by_bound for key K
     2. Insert succeeds at L1
     3. Immediate get for key K searches leaf L2 (different!)
     4. Key not found
-
-    This is the core symptom identified in Analysis.md §4.2 Case 3.
     """
-    print("--- Anomaly: Writer/Reader Leaf Divergence (P0.6-B) ---\n")
+    print("--- Anomaly: Writer/Reader Leaf Divergence ---\n")
 
     # Track writer leaf selection: {(ikey, thread) -> leaf_ptr}
     writer_leaf: dict[tuple[int, str | None], tuple[str, dt.datetime]] = {}
@@ -1332,7 +1325,7 @@ def anomaly_writer_reader_divergence(events: Sequence[Event]) -> int:
         print("\nIf missing, add tracing to these code paths.")
     else:
         print(f"\nTotal: {findings} divergences detected")
-        print("\nThis is strong evidence of P0.6-B: keys inserted into leaf that")
+        print("\nThis is strong evidence of: keys inserted into leaf that")
         print("becomes unreachable via normal tree traversal after a split.")
 
     return findings
@@ -1340,7 +1333,7 @@ def anomaly_writer_reader_divergence(events: Sequence[Event]) -> int:
 
 def anomaly_immediate_verify(events: Sequence[Event]) -> int:
     """
-    Detect immediate verification failures (P0.6-B indicator).
+    Detect immediate verification failures.
 
     Pattern:
     1. Key K is successfully inserted
@@ -1745,17 +1738,15 @@ Examples:
     casf_p.add_argument("--limit", type=int, help="Sample failures to show.")
 
     # B-link warnings command
-    blink_p = sub.add_parser(
-        "blink-warnings", help="List B-link navigation warnings (P0.6-B indicator)."
-    )
+    blink_p = sub.add_parser("blink-warnings", help="List B-link navigation warnings.")
     blink_p.add_argument("--limit", type=int, help="Max warnings to show.")
 
-    anom_p = sub.add_parser("anomalies", help="Run anomaly detection heuristics.")
+    anom_p = sub.add_parser("anomalies", help="Run an1maly detection heuristics.")
     anom_p.add_argument(
         "--slot-reuse", action="store_true", help="Detect slot reuse within epoch."
     )
     anom_p.add_argument(
-        "--slot-steal", action="store_true", help="Detect slot overwrites (P0.6-A)."
+        "--slot-steal", action="store_true", help="Detect slot overwrites."
     )
     anom_p.add_argument(
         "--missing", action="store_true", help="Detect keys missing after success."
@@ -1763,12 +1754,12 @@ Examples:
     anom_p.add_argument(
         "--divergence",
         action="store_true",
-        help="Detect writer/reader leaf divergence (P0.6-B).",
+        help="Detect writer/reader leaf divergence.",
     )
     anom_p.add_argument(
         "--immediate",
         action="store_true",
-        help="Detect immediate verification failures (P0.6-B).",
+        help="Detect immediate verification failures.",
     )
     anom_p.add_argument("--all", action="store_true", help="Run all anomaly detectors.")
 

@@ -33,12 +33,12 @@ mod shuttle_tests;
 
 pub use index::MassTreeIndex;
 
-// Re-export debug counters for P0.6-B diagnosis
+// Re-export debug counters
 pub use optimistic::{
-    get_all_debug_counters, get_debug_counters, reset_debug_counters, DebugCounters,
     ADVANCE_BLINK_COUNT, BLINK_SHOULD_FOLLOW_COUNT, CAS_INSERT_FALLBACK_COUNT,
-    CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, LOCKED_INSERT_COUNT,
-    SEARCH_NOT_FOUND_COUNT, SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT,
+    CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters, LOCKED_INSERT_COUNT,
+    SEARCH_NOT_FOUND_COUNT, SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters,
+    get_debug_counters, reset_debug_counters,
 };
 
 // ============================================================================

@@ -1341,7 +1341,11 @@ mod concurrent_reads_long_keys_shared_prefix_deep {
 
     #[divan::bench(args = [1, 2, 4, 8, 16])]
     fn masstree_32b(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
         let tree = Arc::new(setup_masstree::<32>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 
@@ -1374,7 +1378,11 @@ mod concurrent_reads_long_keys_shared_prefix_deep {
 
     #[divan::bench(args = [1, 2, 4, 8, 16])]
     fn mutex_btreemap_32b(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
         let tree = Arc::new(setup_mutex_btreemap::<32>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 
@@ -1407,7 +1415,11 @@ mod concurrent_reads_long_keys_shared_prefix_deep {
 
     #[divan::bench(args = [1, 2, 4, 8, 16])]
     fn rwlock_btreemap_32b(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
         let tree = Arc::new(setup_rwlock_btreemap::<32>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 

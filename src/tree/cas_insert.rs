@@ -27,7 +27,7 @@
 //! - If slot is not NULL, treat as contention and retry with fresh state
 //! - Only the first thread to CAS from NULL succeeds; others retry
 //!
-//! This prevents the P0.6-A bug where a stale thread could CAS from another
+//! This prevents the bug where a stale thread could CAS from another
 //! thread's pointer to its own, corrupting the published entry.
 //!
 //! # When CAS Succeeds
@@ -206,7 +206,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         "CAS insert: attempting to claim slot"
                     );
 
-                    // 8. P0.6-A FIX: Enforce NULL-claim semantics.
+                    // FIXED: Enforce NULL-claim semantics.
                     //
                     // CRITICAL: Only claim slots that are empty (NULL). Two threads reading
                     // the same stale permutation will compute the same back() slot. Without
@@ -217,8 +217,6 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     //
                     // With NULL-claim, only the first thread to CAS NULL→ptr succeeds.
                     // Other threads get contention fallback and retry with fresh state.
-                    //
-                    // Reference: DeepReview.md §P0.6-A, Diagnosis.md §Root Cause
                     match leaf.cas_slot_value(slot, StdPtr::null_mut(), arc_ptr) {
                         Err(_actual) => {
                             // Slot already claimed by another thread.
@@ -242,7 +240,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         }
 
                         Ok(()) => {
-                            // P0.6 FIX: Validate version BEFORE writing key data.
+                            // FIX: Validate version BEFORE writing key data.
                             //
                             // If we write key data before validation and the version
                             // changed, we may corrupt slot data that another thread
@@ -252,8 +250,6 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                             // has_changed() ignores INSERTING_BIT, allowing CAS inserts to
                             // race with locked splits. has_changed_or_locked() checks both
                             // version change AND if INSERTING_BIT is set.
-                            //
-                            // Reference: Diagnosis.md §Cause B, §Root Cause Analysis
                             if leaf.version().has_changed_or_locked(version) {
                                 debug_log!(
                                     ikey,
@@ -336,7 +332,11 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // A locked writer could have acquired the lock between our secondary
                     // check and now. Check again to avoid racing with split_into().
                     if leaf.version().has_changed_or_locked(version) {
-                        trace_log!(ikey, slot, "CAS insert: version changed before perm CAS, aborting");
+                        trace_log!(
+                            ikey,
+                            slot,
+                            "CAS insert: version changed before perm CAS, aborting"
+                        );
                         match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
                             Ok(()) | Err(_) => {
                                 let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
@@ -363,7 +363,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                                 return CasInsertResult::ContentionFallback;
                             }
 
-                            // P0.6-B FIX: Detect concurrent split after permutation publish.
+                            // FIXED: Detect concurrent split after permutation publish.
                             //
                             // A split could have started between our final version check
                             // and the permutation CAS. There are two distinct scenarios:
@@ -386,14 +386,15 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                                 use crate::leaf::link::{is_marked, unmark_ptr};
 
                                 // Helper: check if slot is in permutation
-                                let slot_in_perm = |perm: &crate::permuter::Permuter<WIDTH>, s: usize| -> bool {
-                                    for i in 0..perm.size() {
-                                        if perm.get(i) == s {
-                                            return true;
+                                let slot_in_perm =
+                                    |perm: &crate::permuter::Permuter<WIDTH>, s: usize| -> bool {
+                                        for i in 0..perm.size() {
+                                            if perm.get(i) == s {
+                                                return true;
+                                            }
                                         }
-                                    }
-                                    false
-                                };
+                                        false
+                                    };
 
                                 // Check 1: Is a SPLIT in progress?
                                 if leaf.version().is_splitting() {

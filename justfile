@@ -413,7 +413,7 @@ analyzer := "python3 scripts/masstree_log_analyze.py"
 analyze-help:
     {{analyzer}} --help
 
-# High-level log summary with P0.6 stats
+# High-level log summary with
 analyze-summary:
     @just log-finalize 2>/dev/null || true
     {{analyzer}} {{log_file}} summary
@@ -468,7 +468,7 @@ analyze-slot-reuse:
     @just log-finalize 2>/dev/null || true
     {{analyzer}} {{log_file}} anomalies --slot-reuse
 
-# Detect slot stealing (P0.6-A pattern)
+# Detect slot stealing
 analyze-slot-steal:
     @just log-finalize 2>/dev/null || true
     {{analyzer}} {{log_file}} anomalies --slot-steal
@@ -483,7 +483,7 @@ analyze-export OUT:
     @just log-finalize 2>/dev/null || true
     {{analyzer}} {{log_file}} export-csv {{OUT}}
 
-# Full P0.6 debugging workflow: run test, finalize logs, run all anomaly detectors
+# debugging workflow: run test, finalize logs, run all anomaly detectors
 debug-p06 TEST:
     @echo "=== Running test with tracing ==="
     rm -f {{log_file}}

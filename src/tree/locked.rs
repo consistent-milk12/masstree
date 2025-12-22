@@ -193,7 +193,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         // Both CAS and locked paths use NULL-claim semantics for slot reservation:
         // - CAS path: cas_slot_value(slot, NULL, ptr) - only claims empty slots
         // - Locked path: try_claim_slot() - same NULL-claim internally
-        // This prevents slot stealing between concurrent CAS inserts (P0.6-A fix).
+        // This prevents slot stealing between concurrent CAS inserts.
         if !key.has_suffix() && key.current_len() <= 8 {
             match self.try_cas_insert(key, &Arc::clone(&value), guard) {
                 CasInsertResult::Success(old) => {
@@ -321,7 +321,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                 // Case 4: New key
                 InsertSearchResult::NotFound { logical_pos } => {
-                    // FIX (Option C from Diagnosis.md): Capture permutation size at decision point.
+                    // FIXED: Capture permutation size at decision point.
                     // This allows us to detect if a CAS insert happened between our decision
                     // to split and when we actually start the split.
                     let perm_at_decision: Permuter<WIDTH> = cursor.leaf().permutation();
@@ -408,7 +408,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     );
                     cursor.lock.mark_split();
 
-                    // FIX (Option C from Diagnosis.md): Re-read permutation after mark_split.
+                    // FIXED: Re-read permutation after mark_split.
                     // If a CAS insert completed between our can_insert check and mark_split,
                     // the permutation size will have changed. In that case, abort the split
                     // and retry - the leaf topology may have changed.
@@ -417,8 +417,6 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // 1. Thread A does CAS insert (perm: N → N+1)
                     // 2. Thread B sees leaf full, calls mark_split()
                     // 3. Thread B's split_into() would use stale split coordinates
-                    //
-                    // Reference: Diagnosis.md "Root Cause Analysis" section
                     let leaf: &LeafNode<LeafValue<V>, WIDTH> = cursor.leaf();
                     let perm: Permuter<WIDTH> = leaf.permutation();
                     let size: usize = perm.size();
@@ -439,14 +437,13 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         continue 'outer;
                     }
 
-                    // P0.6 FIX: Calculate split position using PRE-INSERT semantics.
+                    // FIXED: Calculate split position using PRE-INSERT semantics.
                     //
                     // The Rust implementation uses SPLIT-THEN-RETRY: split happens first
                     // based on existing keys, then insert is retried. The pre-insert
                     // calculation gives correct coordinates directly - no band-aid
                     // adjustments needed.
                     //
-                    // Reference: Diagnosis.md, CODE_021.md §Fix 3
                     let split_pos: usize = SplitUtils::calculate_split_point(leaf, 0, 0)
                         .map_or(size / 2, |sp| sp.pos)
                         .clamp(1, size - 1);
