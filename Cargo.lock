@@ -365,6 +365,7 @@ name = "masstree"
 version = "0.1.2"
 dependencies = [
  "concurrent-map",
+ "crossbeam-epoch",
  "crossbeam-skiplist",
  "dashmap",
  "divan",
