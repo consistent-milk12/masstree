@@ -66,6 +66,14 @@
 // We use extensive benchmarking to verify #[inline(always)] placement is correct.
 #![allow(clippy::inline_always)]
 
+// Global allocator selection (enabled via features)
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 pub mod alloc;
 pub mod internode;
 pub mod key;
@@ -76,6 +84,7 @@ pub mod ordering;
 pub mod permuter;
 pub mod slot;
 pub mod suffix;
+mod tracing_helpers;
 pub mod tree;
 
 // Re-export main types for convenience
@@ -83,3 +92,11 @@ pub use alloc::{ArenaAllocator, NodeAllocator, SeizeAllocator};
 pub use slot::ValueSlot;
 pub use suffix::{PermutationProvider, SuffixBag};
 pub use tree::{MassTree, MassTreeIndex};
+
+// Re-export debug counters for P0.6-B diagnosis (lightweight, always-on)
+pub use tree::{
+    get_all_debug_counters, get_debug_counters, reset_debug_counters, DebugCounters,
+    ADVANCE_BLINK_COUNT, BLINK_SHOULD_FOLLOW_COUNT, CAS_INSERT_FALLBACK_COUNT,
+    CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, LOCKED_INSERT_COUNT,
+    SEARCH_NOT_FOUND_COUNT, SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT,
+};

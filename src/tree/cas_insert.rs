@@ -9,18 +9,26 @@
 //! 1. Optimistic traversal to find target leaf
 //! 2. Get stable version and permutation
 //! 3. Search for key position
-//! 4. CAS slot value to atomically claim the slot
-//! 5. Store key data (ikey, keylenx)
-//! 6. CAS permutation to atomically publish the insert
-//! 7. On failure, restore slot and retry or fall back to locked path
+//! 4. CAS slot value from NULL to claim (NULL-claim semantics)
+//! 5. Validate version before writing key data
+//! 6. Store key data (ikey, keylenx)
+//! 7. Validate version again
+//! 8. CAS permutation to atomically publish the insert
+//! 9. On failure, restore slot to NULL and retry or fall back
 //! ```
 //!
-//! # Atomic Slot Reservation
+//! # Atomic Slot Reservation (NULL-Claim Semantics)
 //!
-//! The key insight is that two threads reading the same permutation will get
-//! the same `back()` slot. To prevent data loss from slot collisions, we use
-//! CAS on the slot's value pointer to atomically claim ownership before
-//! writing any data. Only the thread that wins the slot CAS can proceed.
+//! Two threads reading the same stale permutation will compute the same
+//! `back()` slot. To prevent "slot stealing" where a stale thread overwrites
+//! a published entry, we enforce **NULL-claim semantics**:
+//!
+//! - Slot CAS is always `NULL → our_ptr` (never `existing_ptr → our_ptr`)
+//! - If slot is not NULL, treat as contention and retry with fresh state
+//! - Only the first thread to CAS from NULL succeeds; others retry
+//!
+//! This prevents the P0.6-A bug where a stale thread could CAS from another
+//! thread's pointer to its own, corrupting the published entry.
 //!
 //! # When CAS Succeeds
 //!
@@ -49,6 +57,7 @@ use seize::LocalGuard;
 use crate::alloc::NodeAllocator;
 use crate::key::Key;
 use crate::leaf::{LeafNode, LeafValue};
+use crate::tracing_helpers::{debug_log, trace_log};
 
 use super::MassTree;
 use super::locked::InsertSearchResult;
@@ -189,30 +198,104 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // 7. Prepare our Arc pointer
                     let arc_ptr: *mut u8 = Arc::into_raw(Arc::clone(value)) as *mut u8;
 
-                    // 8. Read current slot value and CAS to claim atomically
-                    let current_slot_value: *mut u8 = leaf.load_slot_value(slot);
+                    trace_log!(
+                        ikey,
+                        slot,
+                        leaf_ptr = ?leaf_ptr,
+                        perm_size = perm.size(),
+                        "CAS insert: attempting to claim slot"
+                    );
 
-                    match leaf.cas_slot_value(slot, current_slot_value, arc_ptr) {
+                    // 8. P0.6-A FIX: Enforce NULL-claim semantics.
+                    //
+                    // CRITICAL: Only claim slots that are empty (NULL). Two threads reading
+                    // the same stale permutation will compute the same back() slot. Without
+                    // NULL-claim, a stale thread can CAS from ptrA→ptrB, "stealing" a slot
+                    // that was already published by another thread. This causes:
+                    //   1. The published entry to have wrong data
+                    //   2. Keys to go missing after successful insert
+                    //
+                    // With NULL-claim, only the first thread to CAS NULL→ptr succeeds.
+                    // Other threads get contention fallback and retry with fresh state.
+                    //
+                    // Reference: DeepReview.md §P0.6-A, Diagnosis.md §Root Cause
+                    match leaf.cas_slot_value(slot, StdPtr::null_mut(), arc_ptr) {
                         Err(_actual) => {
-                            // Slot modified by another thread - fall back immediately
-                            // Don't retry with same slot to prevent "stealing" scenarios
-                            // where we CAS from another thread's value
+                            // Slot already claimed by another thread.
+                            // This is expected contention - fall back to get fresh state.
                             // SAFETY: we just created this Arc clone, nobody else has it
                             let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
-                            return CasInsertResult::ContentionFallback;
+
+                            debug_log!(
+                                ikey,
+                                slot,
+                                leaf_ptr = ?leaf_ptr,
+                                "CAS insert: slot not NULL, contention detected"
+                            );
+
+                            retries += 1;
+                            if retries > MAX_CAS_RETRIES {
+                                return CasInsertResult::ContentionFallback;
+                            }
+                            // Retry with fresh permutation
+                            continue;
                         }
 
                         Ok(()) => {
-                            // We claimed the slot - store key data
-                            // SAFETY: we own the slot after successful CAS
+                            // P0.6 FIX: Validate version BEFORE writing key data.
+                            //
+                            // If we write key data before validation and the version
+                            // changed, we may corrupt slot data that another thread
+                            // is using. Check version first, then write only if stable.
+                            //
+                            // CRITICAL: Use has_changed_or_locked() instead of has_changed().
+                            // has_changed() ignores INSERTING_BIT, allowing CAS inserts to
+                            // race with locked splits. has_changed_or_locked() checks both
+                            // version change AND if INSERTING_BIT is set.
+                            //
+                            // Reference: Diagnosis.md §Cause B, §Root Cause Analysis
+                            if leaf.version().has_changed_or_locked(version) {
+                                debug_log!(
+                                    ikey,
+                                    slot,
+                                    leaf_ptr = ?leaf_ptr,
+                                    "CAS insert: version changed after slot claim, aborting (check 1)"
+                                );
+                                // Version changed - restore slot to NULL and retry
+                                match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                                    Ok(()) | Err(_) => {
+                                        // SAFETY: we just created this Arc clone
+                                        let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                                    }
+                                }
+
+                                retries += 1;
+                                if retries > MAX_CAS_RETRIES {
+                                    return CasInsertResult::ContentionFallback;
+                                }
+                                continue;
+                            }
+
+                            // Version stable - now safe to write key data
+                            // SAFETY: we own the slot after successful CAS and version is stable
                             unsafe {
                                 leaf.store_key_data_for_cas(slot, ikey, keylenx);
                             }
                         }
                     }
 
-                    // 9. Validate version unchanged
-                    if leaf.version().has_changed(version) {
+                    // 9. Secondary version validation (belt-and-suspenders)
+                    // This catches any races in the window between the first check
+                    // and the permutation CAS.
+                    //
+                    // CRITICAL: Use has_changed_or_locked() to detect locked splits.
+                    if leaf.version().has_changed_or_locked(version) {
+                        debug_log!(
+                            ikey,
+                            slot,
+                            leaf_ptr = ?leaf_ptr,
+                            "CAS insert: version changed after key write, aborting (check 2)"
+                        );
                         // Version changed - try to restore slot to NULL
                         match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
                             Ok(()) => {
@@ -249,7 +332,24 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         continue;
                     }
 
-                    // 11. CAS the permutation to publish
+                    // 11. Final version check before permutation CAS
+                    // A locked writer could have acquired the lock between our secondary
+                    // check and now. Check again to avoid racing with split_into().
+                    if leaf.version().has_changed_or_locked(version) {
+                        trace_log!(ikey, slot, "CAS insert: version changed before perm CAS, aborting");
+                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                            Ok(()) | Err(_) => {
+                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                            }
+                        }
+                        retries += 1;
+                        if retries > MAX_CAS_RETRIES {
+                            return CasInsertResult::ContentionFallback;
+                        }
+                        continue;
+                    }
+
+                    // 12. CAS the permutation to publish
                     match leaf.cas_permutation(perm, new_perm) {
                         Ok(()) => {
                             // Permutation CAS succeeded - verify slot wasn't stolen
@@ -263,6 +363,110 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                                 return CasInsertResult::ContentionFallback;
                             }
 
+                            // P0.6-B FIX: Detect concurrent split after permutation publish.
+                            //
+                            // A split could have started between our final version check
+                            // and the permutation CAS. There are two distinct scenarios:
+                            //
+                            // A) SPLIT MOVED OUR ENTRY:
+                            //    - split_into() read our permutation, copied our entry to right leaf
+                            //    - split_into() then truncated left leaf's permutation
+                            //    - Our slot is NO LONGER in the current permutation
+                            //    - Our entry IS in the tree (in the right leaf)
+                            //    - This is SUCCESS - increment count and return
+                            //
+                            // B) ORPHAN CREATED:
+                            //    - Our CAS succeeded but split changed routing
+                            //    - Our slot IS still in the current permutation
+                            //    - But ikey >= split_ikey means routing goes to right leaf
+                            //    - Our entry is unreachable - fall back to locked path
+                            //
+                            // We distinguish by checking if our slot is in the current perm.
+                            {
+                                use crate::leaf::link::{is_marked, unmark_ptr};
+
+                                // Helper: check if slot is in permutation
+                                let slot_in_perm = |perm: &crate::permuter::Permuter<WIDTH>, s: usize| -> bool {
+                                    for i in 0..perm.size() {
+                                        if perm.get(i) == s {
+                                            return true;
+                                        }
+                                    }
+                                    false
+                                };
+
+                                // Check 1: Is a SPLIT in progress?
+                                if leaf.version().is_splitting() {
+                                    // Split in progress - wait for it to complete
+                                    // so we can properly determine if we were moved or orphaned
+                                    let _ = leaf.version().stable();
+                                }
+
+                                let next_raw = leaf.next_raw();
+
+                                // Check 2: Is the B-link being set up?
+                                if is_marked(next_raw) {
+                                    // Wait for link completion
+                                    leaf.wait_for_split();
+                                }
+
+                                // Now check the current permutation state
+                                let current_perm = leaf.permutation();
+
+                                // Check if our slot is still in the permutation
+                                if !slot_in_perm(&current_perm, slot) {
+                                    // SCENARIO A: Split moved our entry!
+                                    // Our slot was in our new_perm, but split_into() truncated
+                                    // the permutation. This means split_into() copied our entry
+                                    // to the right leaf before truncating.
+                                    //
+                                    // Our entry IS in the tree (in the right leaf), so this is
+                                    // a successful insert. Increment count and return Success.
+                                    debug_log!(
+                                        ikey,
+                                        slot,
+                                        leaf_ptr = ?leaf_ptr,
+                                        "CAS insert: slot removed by split (entry moved to right leaf), counting as success"
+                                    );
+                                    self.count.fetch_add(1, Ordering::Relaxed);
+                                    return CasInsertResult::Success(None);
+                                }
+
+                                // Our slot IS in the current permutation.
+                                // Check if our key belongs in a right sibling.
+                                let next_ptr = unmark_ptr(next_raw);
+                                if !next_ptr.is_null() {
+                                    // SAFETY: next_ptr is valid (not null, unmarked after wait)
+                                    let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+                                    if ikey >= next_bound {
+                                        // SCENARIO B: Orphan created
+                                        // Our slot is in the permutation, but our ikey >= split_ikey.
+                                        // This means routing will go to the right leaf, but our
+                                        // entry is in the left leaf - unreachable!
+                                        //
+                                        // Fall back to locked path which will insert correctly.
+                                        debug_log!(
+                                            ikey,
+                                            slot,
+                                            leaf_ptr = ?leaf_ptr,
+                                            next_bound,
+                                            "CAS insert: orphan created (slot in perm but ikey >= next_bound), falling back"
+                                        );
+                                        // Note: we don't increment count - the fallback will handle it
+                                        return CasInsertResult::ContentionFallback;
+                                    }
+                                }
+                            }
+
+                            debug_log!(
+                                ikey,
+                                slot,
+                                leaf_ptr = ?leaf_ptr,
+                                old_perm_size = perm.size(),
+                                new_perm_size = new_perm.size(),
+                                "CAS insert: permutation CAS succeeded"
+                            );
+
                             // Success! Increment count
                             self.count.fetch_add(1, Ordering::Relaxed);
                             return CasInsertResult::Success(None);
@@ -270,6 +474,14 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                         Err(_current_perm) => {
                             // Permutation CAS failed - try to restore slot to NULL
+                            debug_log!(
+                                ikey,
+                                slot,
+                                leaf_ptr = ?leaf_ptr,
+                                old_perm_size = perm.size(),
+                                "CAS insert: permutation CAS FAILED, restoring slot"
+                            );
+
                             match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
                                 Ok(()) => {
                                     // Restored successfully, can reclaim Arc

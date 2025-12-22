@@ -34,6 +34,9 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 
 use seize::LocalGuard;
 
+#[allow(unused_imports)]
+use crate::tracing_helpers::{debug_log, error_log, trace_log, warn_log};
+
 use crate::alloc::NodeAllocator;
 use crate::internode::InternodeNode;
 use crate::key::Key;
@@ -183,16 +186,25 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         value: Arc<V>,
         guard: &LocalGuard<'_>,
     ) -> Result<Option<Arc<V>>, InsertError> {
+        let ikey: u64 = key.ikey();
+        trace_log!(ikey, "insert_concurrent: starting");
+
         // CAS fast path for simple inserts (short keys, no suffix).
-        // Both CAS and locked paths now use atomic slot claiming via try_claim_slot,
-        // so they coordinate properly without conflicts.
+        // Both CAS and locked paths use NULL-claim semantics for slot reservation:
+        // - CAS path: cas_slot_value(slot, NULL, ptr) - only claims empty slots
+        // - Locked path: try_claim_slot() - same NULL-claim internally
+        // This prevents slot stealing between concurrent CAS inserts (P0.6-A fix).
         if !key.has_suffix() && key.current_len() <= 8 {
             match self.try_cas_insert(key, &Arc::clone(&value), guard) {
-                CasInsertResult::Success(old) => return Ok(old),
+                CasInsertResult::Success(old) => {
+                    trace_log!(ikey, "insert_concurrent: CAS success");
+                    return Ok(old);
+                }
                 CasInsertResult::ExistsNeedLock { .. }
                 | CasInsertResult::FullNeedLock
                 | CasInsertResult::LayerNeedLock { .. }
                 | CasInsertResult::ContentionFallback => {
+                    trace_log!(ikey, "insert_concurrent: CAS fallback to locked path");
                     // Key exists - locked path will handle update
                 }
             }
@@ -202,8 +214,15 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         let mut layer_root: *const u8 = self.get_root_ptr(guard);
         // Track whether we're in a sublayer (don't reload root if so)
         let mut in_sublayer: bool = false;
+        // Track retry count for debugging
+        let mut retry_count: u32 = 0;
 
         'outer: loop {
+            retry_count += 1;
+            if retry_count > 1 {
+                debug_log!(ikey, retry_count, "insert_concurrent: retry loop iteration");
+            }
+
             // Reload root in case it changed due to a split
             // BUT only if we're at the main tree level, not in a sublayer
             if !in_sublayer {
@@ -302,6 +321,12 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                 // Case 4: New key
                 InsertSearchResult::NotFound { logical_pos } => {
+                    // FIX (Option C from Diagnosis.md): Capture permutation size at decision point.
+                    // This allows us to detect if a CAS insert happened between our decision
+                    // to split and when we actually start the split.
+                    let perm_at_decision: Permuter<WIDTH> = cursor.leaf().permutation();
+                    let size_at_decision: usize = perm_at_decision.size();
+
                     // Check if we can insert directly BEFORE marking
                     let can_insert = cursor.leaf().can_insert_directly(cursor.ikey);
 
@@ -376,28 +401,55 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     }
 
                     // Leaf full - need to split
+                    debug_log!(
+                        ikey,
+                        leaf_ptr = ?cursor.leaf_ptr,
+                        "insert_concurrent: leaf full, triggering split"
+                    );
                     cursor.lock.mark_split();
 
+                    // FIX (Option C from Diagnosis.md): Re-read permutation after mark_split.
+                    // If a CAS insert completed between our can_insert check and mark_split,
+                    // the permutation size will have changed. In that case, abort the split
+                    // and retry - the leaf topology may have changed.
+                    //
+                    // This fixes the race where:
+                    // 1. Thread A does CAS insert (perm: N → N+1)
+                    // 2. Thread B sees leaf full, calls mark_split()
+                    // 3. Thread B's split_into() would use stale split coordinates
+                    //
+                    // Reference: Diagnosis.md "Root Cause Analysis" section
                     let leaf: &LeafNode<LeafValue<V>, WIDTH> = cursor.leaf();
                     let perm: Permuter<WIDTH> = leaf.permutation();
                     let size: usize = perm.size();
 
-                    // FIXED: Calculate split position respecting equal-ikey rule.
-                    // Use SplitUtils::calculate_split_point which adjusts the split
-                    // point to keep entries with the same ikey together.
-                    //
-                    // Reference: masstree_split.hh:80-97 (equal-ikey adjustment)
-                    let split_pos: usize =
-                        SplitUtils::calculate_split_point(leaf, logical_pos, cursor.ikey).map_or(
-                            size / 2,
-                            |sp| {
-                                if logical_pos < sp.pos {
-                                    sp.pos.saturating_sub(1).max(1)
-                                } else {
-                                    sp.pos.min(size.saturating_sub(1)).max(1)
-                                }
-                            },
+                    if size != size_at_decision {
+                        // Permutation changed - a CAS insert happened concurrently.
+                        // Abort the split and retry the insert from the beginning.
+                        // The retry will either:
+                        // - Find space (if another thread also split)
+                        // - Re-evaluate split with correct coordinates
+                        debug_log!(
+                            ikey,
+                            size_at_decision,
+                            size_now = size,
+                            "insert_concurrent: permutation changed during split decision, aborting"
                         );
+                        drop(cursor.lock);
+                        continue 'outer;
+                    }
+
+                    // P0.6 FIX: Calculate split position using PRE-INSERT semantics.
+                    //
+                    // The Rust implementation uses SPLIT-THEN-RETRY: split happens first
+                    // based on existing keys, then insert is retried. The pre-insert
+                    // calculation gives correct coordinates directly - no band-aid
+                    // adjustments needed.
+                    //
+                    // Reference: Diagnosis.md, CODE_021.md §Fix 3
+                    let split_pos: usize = SplitUtils::calculate_split_point(leaf, 0, 0)
+                        .map_or(size / 2, |sp| sp.pos)
+                        .clamp(1, size - 1);
 
                     // Perform the split
                     // SAFETY: We hold the lock, guard protects suffix operations
@@ -406,12 +458,26 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     let right_leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> =
                         Box::into_raw(split_result.new_leaf);
 
+                    debug_log!(
+                        ikey,
+                        split_pos,
+                        split_ikey = split_result.split_ikey,
+                        left_ptr = ?cursor.leaf_ptr,
+                        right_ptr = ?right_leaf_ptr,
+                        "insert_concurrent: split completed"
+                    );
+
                     // Link the new sibling (CAS+mark protocol)
                     // SAFETY: right_leaf_ptr is valid, we hold the lock on left leaf
                     let link_success: bool = unsafe { leaf.link_split(right_leaf_ptr) };
 
                     if !link_success {
                         // CAS failed - another split happened concurrently
+                        warn_log!(
+                            ikey,
+                            left_ptr = ?cursor.leaf_ptr,
+                            "insert_concurrent: link_split CAS failed, retrying"
+                        );
                         // Deallocate the new leaf we created (it wasn't linked)
                         // SAFETY: right_leaf_ptr was just allocated, never shared
                         let _ = unsafe { Box::from_raw(right_leaf_ptr) };
@@ -420,6 +486,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         drop(cursor.lock);
                         continue;
                     }
+
+                    trace_log!(ikey, "insert_concurrent: link_split succeeded");
 
                     // Track the new leaf for cleanup (link succeeded)
                     self.allocator.track_leaf(right_leaf_ptr);
@@ -443,11 +511,20 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     drop(cursor.lock);
 
                     match propagate_result {
-                        Ok(())
-                        | Err(InsertError::RootSplitRequired | InsertError::ParentSplitRequired) => {
+                        Ok(()) => {
+                            debug_log!(
+                                ikey,
+                                split_ikey = split_result.split_ikey,
+                                "insert_concurrent: split propagation succeeded, retrying insert"
+                            );
+                        }
+                        Err(InsertError::RootSplitRequired | InsertError::ParentSplitRequired) => {
                             // Similar to RootSplitRequired - our split is linked but
                             // parent propagation was handled by another thread.
-                            // Retry the insert.
+                            debug_log!(
+                                ikey,
+                                "insert_concurrent: split propagation handled by another thread, retrying"
+                            );
                         }
 
                         Err(e) => return Err(e),
@@ -538,6 +615,12 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let advanced: &LeafNode<LeafValue<V>, WIDTH> =
                 self.advance_to_key_by_bound(leaf, key, guard);
             if !StdPtr::eq(advanced, leaf) {
+                trace_log!(
+                    ikey,
+                    from_leaf = ?leaf_ptr,
+                    to_leaf = ?StdPtr::from_ref(advanced),
+                    "find_locked: B-link advance (pre-lock)"
+                );
                 leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
                 use_reach = false;
                 continue;
@@ -575,11 +658,22 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             if leaf.version().has_changed(version) {
                 // Version changed during our read-lock window.
                 // Use advance_to_key with the OLD version to detect splits.
+                trace_log!(
+                    ikey,
+                    leaf_ptr = ?leaf_ptr,
+                    "find_locked: version changed, following B-link"
+                );
                 drop(lock);
 
                 let (new_leaf, _) = self.advance_to_key(leaf, key, last_version, guard);
                 if !StdPtr::eq(new_leaf, leaf) {
                     // Key escaped to a different leaf - search there
+                    trace_log!(
+                        ikey,
+                        from_leaf = ?leaf_ptr,
+                        to_leaf = ?StdPtr::from_ref(new_leaf),
+                        "find_locked: key escaped to sibling (post-lock)"
+                    );
                     leaf_ptr = StdPtr::from_ref(new_leaf).cast_mut();
                     use_reach = false;
                 }
@@ -591,6 +685,11 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let current_perm: Permuter<WIDTH> = leaf.permutation();
             if current_perm.value() != perm.value() {
                 // Permutation changed (another insert completed).
+                trace_log!(
+                    ikey,
+                    leaf_ptr = ?leaf_ptr,
+                    "find_locked: permutation changed, retrying"
+                );
                 drop(lock);
 
                 let (new_leaf, _) = self.advance_to_key(leaf, key, last_version, guard);
@@ -612,6 +711,13 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                 // If our key's ikey >= next leaf's bound, we're in the wrong leaf
                 if key.ikey() >= next_bound {
+                    debug_log!(
+                        ikey,
+                        next_bound,
+                        leaf_ptr = ?leaf_ptr,
+                        next_ptr = ?next_ptr,
+                        "find_locked: post-lock membership check failed, moving to next leaf"
+                    );
                     drop(lock);
                     leaf_ptr = next_ptr;
                     use_reach = false;

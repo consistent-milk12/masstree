@@ -153,9 +153,12 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    /// Lock then unlock (no dirty bits) should not change version.
+    /// Lock then unlock increments version (auto-dirty strategy sets INSERTING_BIT).
+    ///
+    /// With the "auto dirty on lock" strategy, lock() automatically sets INSERTING_BIT.
+    /// This means unlock() will increment the version counter, so has_changed() returns true.
     #[test]
-    fn lock_unlock_no_dirty_preserves_version(is_leaf in any::<bool>()) {
+    fn lock_unlock_increments_version_due_to_auto_dirty(is_leaf in any::<bool>()) {
         let v = NodeVersion::new(is_leaf);
         let before = v.stable();
 
@@ -165,7 +168,8 @@ proptest! {
         }
 
         prop_assert!(!v.is_locked());
-        prop_assert!(!v.has_changed(before));
+        // With auto-dirty strategy, version changes due to INSERTING_BIT
+        prop_assert!(v.has_changed(before));
     }
 
     /// Lock sets the lock bit.
@@ -601,22 +605,27 @@ proptest! {
         prop_assert!(v.has_changed(before));
     }
 
-    /// Guard locked_value tracks mark operations.
+    /// Guard locked_value has INSERTING_BIT set from auto-dirty strategy.
+    ///
+    /// With "auto dirty on lock" strategy, lock() sets INSERTING_BIT automatically.
+    /// mark_insert() is now idempotent - calling it doesn't change anything.
     #[test]
-    fn guard_tracks_marks(is_leaf in any::<bool>()) {
+    fn guard_has_inserting_bit_from_auto_dirty(is_leaf in any::<bool>()) {
         let v = NodeVersion::new(is_leaf);
 
         let mut guard = v.lock();
         let initial = guard.locked_value();
 
-        // Initially, no inserting bit
-        prop_assert_eq!(initial & INSERTING_BIT, 0);
+        // With auto-dirty strategy, INSERTING_BIT is already set by lock()
+        prop_assert_ne!(initial & INSERTING_BIT, 0);
 
         guard.mark_insert();
         let after_insert = guard.locked_value();
 
-        // After mark_insert, inserting bit should be set
+        // mark_insert is idempotent, still set
         prop_assert_ne!(after_insert & INSERTING_BIT, 0);
+        // Value unchanged since it was already set
+        prop_assert_eq!(initial, after_insert);
     }
 }
 

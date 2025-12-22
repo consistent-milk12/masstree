@@ -23,10 +23,7 @@
 )]
 #![expect(clippy::unwrap_used)]
 
-// Use alternative allocator if feature is enabled
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+mod bench_utils;
 
 use dashmap::DashMap;
 use divan::{Bencher, black_box};
@@ -35,92 +32,30 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+use bench_utils::{keys, uniform_indices, zipfian_indices};
+
 fn main() {
     divan::main();
 }
 
 // =============================================================================
-// Key Generation Helpers
+// Setup Helpers
 // =============================================================================
 
-/// Generate 8-byte keys (single `MassTree` layer, inline storage)
-fn keys_8b(n: usize) -> Vec<Vec<u8>> {
-    (0..n).map(|i| (i as u64).to_be_bytes().to_vec()).collect()
-}
-
-/// Generate 16-byte keys (2 `MassTree` layers)
-fn keys_16b(n: usize) -> Vec<Vec<u8>> {
-    (0..n)
-        .map(|i| {
-            let mut key = vec![0u8; 16];
-            key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            key[8..16]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x517c_c1b7_2722_0a95)).to_be_bytes());
-            key
-        })
-        .collect()
-}
-
-/// Generate 24-byte keys (3 `MassTree` layers)
-fn keys_24b(n: usize) -> Vec<Vec<u8>> {
-    (0..n)
-        .map(|i| {
-            let mut key = vec![0u8; 24];
-            key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            key[8..16]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x517c_c1b7_2722_0a95)).to_be_bytes());
-            key[16..24]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)).to_be_bytes());
-            key
-        })
-        .collect()
-}
-
-/// Generate 32-byte keys (4 `MassTree` layers) - typical hash/UUID size
-fn keys_32b(n: usize) -> Vec<Vec<u8>> {
-    (0..n)
-        .map(|i| {
-            let mut key = vec![0u8; 32];
-            key[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-            key[8..16]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x517c_c1b7_2722_0a95)).to_be_bytes());
-            key[16..24]
-                .copy_from_slice(&((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)).to_be_bytes());
-            key[24..32]
-                .copy_from_slice(&((i as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9)).to_be_bytes());
-            key
-        })
-        .collect()
-}
-
-/// Generate Zipfian-distributed indices (hot keys accessed more frequently)
-fn zipfian_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
-    let mut indices = Vec::with_capacity(count);
-    let mut state = seed;
-
-    for _ in 0..count {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        let u = (state >> 33) as f64 / (1u64 << 31) as f64;
-        let idx = ((n as f64).powf(1.0 - u) - 1.0).max(0.0) as usize;
-        indices.push(idx.min(n - 1));
+fn setup_masstree<const K: usize>(keys: &[[u8; K]]) -> MassTree<u64> {
+    let mut tree = MassTree::new();
+    for (i, key) in keys.iter().enumerate() {
+        let _ = tree.insert(key, i as u64);
     }
-    indices
+    tree
 }
 
-/// Uniform random indices
-fn uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
-    let mut indices = Vec::with_capacity(count);
-    let mut state = seed;
-
-    for _ in 0..count {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        indices.push((state as usize) % n);
+fn setup_dashmap<const K: usize>(keys: &[[u8; K]]) -> DashMap<[u8; K], u64> {
+    let map = DashMap::new();
+    for (i, key) in keys.iter().enumerate() {
+        map.insert(*key, i as u64);
     }
-    indices
+    map
 }
 
 // =============================================================================
@@ -129,20 +64,12 @@ fn uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
 
 #[divan::bench_group(name = "01_insert_by_key_size")]
 mod insert_by_key_size {
-    use super::{Bencher, DashMap, MassTree, keys_8b, keys_16b, keys_24b, keys_32b};
+    use super::{Bencher, DashMap, MassTree, keys};
 
     const N: usize = 10_000;
 
-    #[divan::bench(args = ["8B", "16B", "24B", "32B"])]
-    fn masstree(bencher: Bencher, key_size: &str) {
-        let keys = match key_size {
-            "8B" => keys_8b(N),
-            "16B" => keys_16b(N),
-            "24B" => keys_24b(N),
-            "32B" => keys_32b(N),
-            _ => unreachable!(),
-        };
-
+    fn bench_masstree<const K: usize>(bencher: Bencher) {
+        let keys = keys::<K>(N);
         bencher
             .with_inputs(|| keys.clone())
             .bench_local_values(|keys| {
@@ -154,25 +81,57 @@ mod insert_by_key_size {
             });
     }
 
-    #[divan::bench(args = ["8B", "16B", "24B", "32B"])]
-    fn dashmap(bencher: Bencher, key_size: &str) {
-        let keys = match key_size {
-            "8B" => keys_8b(N),
-            "16B" => keys_16b(N),
-            "24B" => keys_24b(N),
-            "32B" => keys_32b(N),
-            _ => unreachable!(),
-        };
-
+    fn bench_dashmap<const K: usize>(bencher: Bencher) {
+        let keys = keys::<K>(N);
         bencher
             .with_inputs(|| keys.clone())
             .bench_local_values(|keys| {
-                let map = DashMap::new();
+                let map = DashMap::<[u8; K], u64>::new();
                 for (i, key) in keys.iter().enumerate() {
-                    map.insert(key.clone(), i as u64);
+                    map.insert(*key, i as u64);
                 }
                 map
             });
+    }
+
+    #[divan::bench(name = "masstree_8B")]
+    fn masstree_8b(bencher: Bencher) {
+        bench_masstree::<8>(bencher);
+    }
+
+    #[divan::bench(name = "masstree_16B")]
+    fn masstree_16b(bencher: Bencher) {
+        bench_masstree::<16>(bencher);
+    }
+
+    #[divan::bench(name = "masstree_24B")]
+    fn masstree_24b(bencher: Bencher) {
+        bench_masstree::<24>(bencher);
+    }
+
+    #[divan::bench(name = "masstree_32B")]
+    fn masstree_32b(bencher: Bencher) {
+        bench_masstree::<32>(bencher);
+    }
+
+    #[divan::bench(name = "dashmap_8B")]
+    fn dashmap_8b(bencher: Bencher) {
+        bench_dashmap::<8>(bencher);
+    }
+
+    #[divan::bench(name = "dashmap_16B")]
+    fn dashmap_16b(bencher: Bencher) {
+        bench_dashmap::<16>(bencher);
+    }
+
+    #[divan::bench(name = "dashmap_24B")]
+    fn dashmap_24b(bencher: Bencher) {
+        bench_dashmap::<24>(bencher);
+    }
+
+    #[divan::bench(name = "dashmap_32B")]
+    fn dashmap_32b(bencher: Bencher) {
+        bench_dashmap::<32>(bencher);
     }
 }
 
@@ -182,39 +141,13 @@ mod insert_by_key_size {
 
 #[divan::bench_group(name = "02_get_by_key_size")]
 mod get_by_key_size {
-    use super::{
-        Bencher, DashMap, MassTree, black_box, keys_8b, keys_16b, keys_24b, keys_32b,
-        uniform_indices,
-    };
+    use super::{Bencher, black_box, keys, setup_dashmap, setup_masstree, uniform_indices};
 
     const N: usize = 10_000;
 
-    fn setup_masstree(keys: &[Vec<u8>]) -> MassTree<u64> {
-        let mut tree = MassTree::new();
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert(key, i as u64);
-        }
-        tree
-    }
-
-    fn setup_dashmap(keys: &[Vec<u8>]) -> DashMap<Vec<u8>, u64> {
-        let map = DashMap::new();
-        for (i, key) in keys.iter().enumerate() {
-            map.insert(key.clone(), i as u64);
-        }
-        map
-    }
-
-    #[divan::bench(args = ["8B", "16B", "24B", "32B"])]
-    fn masstree(bencher: Bencher, key_size: &str) {
-        let keys = match key_size {
-            "8B" => keys_8b(N),
-            "16B" => keys_16b(N),
-            "24B" => keys_24b(N),
-            "32B" => keys_32b(N),
-            _ => unreachable!(),
-        };
-        let tree = setup_masstree(&keys);
+    fn bench_masstree<const K: usize>(bencher: Bencher) {
+        let keys = keys::<K>(N);
+        let tree = setup_masstree::<K>(&keys);
         let indices = uniform_indices(N, 1000, 42);
 
         bencher.bench_local(|| {
@@ -228,16 +161,9 @@ mod get_by_key_size {
         });
     }
 
-    #[divan::bench(args = ["8B", "16B", "24B", "32B"])]
-    fn dashmap(bencher: Bencher, key_size: &str) {
-        let keys = match key_size {
-            "8B" => keys_8b(N),
-            "16B" => keys_16b(N),
-            "24B" => keys_24b(N),
-            "32B" => keys_32b(N),
-            _ => unreachable!(),
-        };
-        let map = setup_dashmap(&keys);
+    fn bench_dashmap<const K: usize>(bencher: Bencher) {
+        let keys = keys::<K>(N);
+        let map = setup_dashmap::<K>(&keys);
         let indices = uniform_indices(N, 1000, 42);
 
         bencher.bench_local(|| {
@@ -250,6 +176,46 @@ mod get_by_key_size {
             black_box(sum)
         });
     }
+
+    #[divan::bench(name = "masstree_8B")]
+    fn masstree_8b(bencher: Bencher) {
+        bench_masstree::<8>(bencher);
+    }
+
+    #[divan::bench(name = "masstree_16B")]
+    fn masstree_16b(bencher: Bencher) {
+        bench_masstree::<16>(bencher);
+    }
+
+    #[divan::bench(name = "masstree_24B")]
+    fn masstree_24b(bencher: Bencher) {
+        bench_masstree::<24>(bencher);
+    }
+
+    #[divan::bench(name = "masstree_32B")]
+    fn masstree_32b(bencher: Bencher) {
+        bench_masstree::<32>(bencher);
+    }
+
+    #[divan::bench(name = "dashmap_8B")]
+    fn dashmap_8b(bencher: Bencher) {
+        bench_dashmap::<8>(bencher);
+    }
+
+    #[divan::bench(name = "dashmap_16B")]
+    fn dashmap_16b(bencher: Bencher) {
+        bench_dashmap::<16>(bencher);
+    }
+
+    #[divan::bench(name = "dashmap_24B")]
+    fn dashmap_24b(bencher: Bencher) {
+        bench_dashmap::<24>(bencher);
+    }
+
+    #[divan::bench(name = "dashmap_32B")]
+    fn dashmap_32b(bencher: Bencher) {
+        bench_dashmap::<32>(bencher);
+    }
 }
 
 // =============================================================================
@@ -258,39 +224,23 @@ mod get_by_key_size {
 
 #[divan::bench_group(name = "03_concurrent_reads_scaling")]
 mod concurrent_reads_scaling {
-    use super::{Arc, Bencher, DashMap, MassTree, black_box, keys_8b, thread, uniform_indices};
+    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, uniform_indices};
 
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
 
-    fn setup_masstree(keys: &[Vec<u8>]) -> MassTree<u64> {
-        let mut tree = MassTree::new();
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert(key, i as u64);
-        }
-        tree
-    }
-
-    fn setup_dashmap(keys: &[Vec<u8>]) -> DashMap<Vec<u8>, u64> {
-        let map = DashMap::new();
-        for (i, key) in keys.iter().enumerate() {
-            map.insert(key.clone(), i as u64);
-        }
-        map
-    }
-
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(N);
-        let tree = Arc::new(setup_masstree(&keys));
-        let indices = uniform_indices(N, OPS_PER_THREAD, 42);
+        let keys = Arc::new(keys::<8>(N));
+        let tree = Arc::new(setup_masstree::<8>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 
         bencher.bench_local(|| {
             let handles: Vec<_> = (0..threads)
                 .map(|t| {
                     let tree = Arc::clone(&tree);
-                    let keys = keys.clone();
-                    let indices = indices.clone();
+                    let keys = Arc::clone(&keys);
+                    let indices = Arc::clone(&indices);
                     thread::spawn(move || {
                         let guard = tree.guard();
                         let mut sum = 0u64;
@@ -314,16 +264,16 @@ mod concurrent_reads_scaling {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn dashmap(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(N);
-        let map = Arc::new(setup_dashmap(&keys));
-        let indices = uniform_indices(N, OPS_PER_THREAD, 42);
+        let keys = Arc::new(keys::<8>(N));
+        let map = Arc::new(setup_dashmap::<8>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 
         bencher.bench_local(|| {
             let handles: Vec<_> = (0..threads)
                 .map(|t| {
                     let map = Arc::clone(&map);
-                    let keys = keys.clone();
-                    let indices = indices.clone();
+                    let keys = Arc::clone(&keys);
+                    let indices = Arc::clone(&indices);
                     thread::spawn(move || {
                         let mut sum = 0u64;
                         let offset = t * 7919;
@@ -351,39 +301,23 @@ mod concurrent_reads_scaling {
 
 #[divan::bench_group(name = "04_concurrent_reads_long_keys")]
 mod concurrent_reads_long_keys {
-    use super::{Arc, Bencher, DashMap, MassTree, black_box, keys_32b, thread, uniform_indices};
+    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, uniform_indices};
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 5000;
 
-    fn setup_masstree(keys: &[Vec<u8>]) -> MassTree<u64> {
-        let mut tree = MassTree::new();
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert(key, i as u64);
-        }
-        tree
-    }
-
-    fn setup_dashmap(keys: &[Vec<u8>]) -> DashMap<Vec<u8>, u64> {
-        let map = DashMap::new();
-        for (i, key) in keys.iter().enumerate() {
-            map.insert(key.clone(), i as u64);
-        }
-        map
-    }
-
     #[divan::bench(args = [1, 2, 4, 8, 16])]
     fn masstree_32b(bencher: Bencher, threads: usize) {
-        let keys = keys_32b(N);
-        let tree = Arc::new(setup_masstree(&keys));
-        let indices = uniform_indices(N, OPS_PER_THREAD, 42);
+        let keys = Arc::new(keys::<32>(N));
+        let tree = Arc::new(setup_masstree::<32>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 
         bencher.bench_local(|| {
             let handles: Vec<_> = (0..threads)
                 .map(|t| {
                     let tree = Arc::clone(&tree);
-                    let keys = keys.clone();
-                    let indices = indices.clone();
+                    let keys = Arc::clone(&keys);
+                    let indices = Arc::clone(&indices);
                     thread::spawn(move || {
                         let guard = tree.guard();
                         let mut sum = 0u64;
@@ -407,16 +341,16 @@ mod concurrent_reads_long_keys {
 
     #[divan::bench(args = [1, 2, 4, 8, 16])]
     fn dashmap_32b(bencher: Bencher, threads: usize) {
-        let keys = keys_32b(N);
-        let map = Arc::new(setup_dashmap(&keys));
-        let indices = uniform_indices(N, OPS_PER_THREAD, 42);
+        let keys = Arc::new(keys::<32>(N));
+        let map = Arc::new(setup_dashmap::<32>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 
         bencher.bench_local(|| {
             let handles: Vec<_> = (0..threads)
                 .map(|t| {
                     let map = Arc::clone(&map);
-                    let keys = keys.clone();
-                    let indices = indices.clone();
+                    let keys = Arc::clone(&keys);
+                    let indices = Arc::clone(&indices);
                     thread::spawn(move || {
                         let mut sum = 0u64;
                         let offset = t * 7919;
@@ -444,39 +378,23 @@ mod concurrent_reads_long_keys {
 
 #[divan::bench_group(name = "05_concurrent_writes_contention")]
 mod concurrent_writes_contention {
-    use super::{Arc, AtomicUsize, Bencher, DashMap, MassTree, Ordering, keys_8b, thread};
+    use super::{Arc, AtomicUsize, Bencher, Ordering, keys, setup_dashmap, setup_masstree, thread};
 
     const KEY_SPACE: usize = 1000;
     const OPS_PER_THREAD: usize = 5000;
 
-    fn setup_masstree(keys: &[Vec<u8>]) -> MassTree<u64> {
-        let mut tree = MassTree::new();
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert(key, i as u64);
-        }
-        tree
-    }
-
-    fn setup_dashmap(keys: &[Vec<u8>]) -> DashMap<Vec<u8>, u64> {
-        let map = DashMap::new();
-        for (i, key) in keys.iter().enumerate() {
-            map.insert(key.clone(), i as u64);
-        }
-        map
-    }
-
     #[divan::bench(args = [2, 4, 8, 16])]
     fn masstree(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(KEY_SPACE);
+        let keys = Arc::new(keys::<8>(KEY_SPACE));
 
         bencher
-            .with_inputs(|| Arc::new(setup_masstree(&keys)))
+            .with_inputs(|| Arc::new(setup_masstree::<8>(keys.as_ref())))
             .bench_local_values(|tree| {
                 let counter = Arc::new(AtomicUsize::new(0));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
-                        let keys = keys.clone();
+                        let keys = Arc::clone(&keys);
                         let counter = Arc::clone(&counter);
                         thread::spawn(move || {
                             let guard = tree.guard();
@@ -502,16 +420,16 @@ mod concurrent_writes_contention {
 
     #[divan::bench(args = [2, 4, 8, 16])]
     fn dashmap(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(KEY_SPACE);
+        let keys = Arc::new(keys::<8>(KEY_SPACE));
 
         bencher
-            .with_inputs(|| Arc::new(setup_dashmap(&keys)))
+            .with_inputs(|| Arc::new(setup_dashmap::<8>(keys.as_ref())))
             .bench_local_values(|map| {
                 let counter = Arc::new(AtomicUsize::new(0));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
-                        let keys = keys.clone();
+                        let keys = Arc::clone(&keys);
                         let counter = Arc::clone(&counter);
                         thread::spawn(move || {
                             let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
@@ -521,7 +439,8 @@ mod concurrent_writes_contention {
                                     .wrapping_add(1);
                                 let idx = (state as usize) % keys.len();
                                 let val = counter.fetch_add(1, Ordering::Relaxed) as u64;
-                                map.insert(keys[idx].clone(), val);
+                                let key = keys[idx];
+                                map.insert(key, val);
                             }
                         })
                     })
@@ -541,41 +460,25 @@ mod concurrent_writes_contention {
 
 #[divan::bench_group(name = "06_mixed_zipfian")]
 mod mixed_zipfian {
-    use super::{Arc, Bencher, DashMap, MassTree, black_box, keys_8b, thread, zipfian_indices};
+    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, zipfian_indices};
 
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
     const WRITE_RATIO: usize = 10;
 
-    fn setup_masstree(keys: &[Vec<u8>]) -> MassTree<u64> {
-        let mut tree = MassTree::new();
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert(key, i as u64);
-        }
-        tree
-    }
-
-    fn setup_dashmap(keys: &[Vec<u8>]) -> DashMap<Vec<u8>, u64> {
-        let map = DashMap::new();
-        for (i, key) in keys.iter().enumerate() {
-            map.insert(key.clone(), i as u64);
-        }
-        map
-    }
-
     #[divan::bench(args = [1, 2, 4, 8, 16])]
     fn masstree(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(N);
-        let indices = zipfian_indices(N, OPS_PER_THREAD, 42);
+        let keys = Arc::new(keys::<8>(N));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
 
         bencher
-            .with_inputs(|| Arc::new(setup_masstree(&keys)))
+            .with_inputs(|| Arc::new(setup_masstree::<8>(keys.as_ref())))
             .bench_local_values(|tree| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
-                        let keys = keys.clone();
-                        let indices = indices.clone();
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let mut sum = 0u64;
@@ -603,17 +506,17 @@ mod mixed_zipfian {
 
     #[divan::bench(args = [1, 2, 4, 8, 16])]
     fn dashmap(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(N);
-        let indices = zipfian_indices(N, OPS_PER_THREAD, 42);
+        let keys = Arc::new(keys::<8>(N));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
 
         bencher
-            .with_inputs(|| Arc::new(setup_dashmap(&keys)))
+            .with_inputs(|| Arc::new(setup_dashmap::<8>(keys.as_ref())))
             .bench_local_values(|map| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
-                        let keys = keys.clone();
-                        let indices = indices.clone();
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
                         thread::spawn(move || {
                             let mut sum = 0u64;
                             let offset = t * 7919;
@@ -621,7 +524,8 @@ mod mixed_zipfian {
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[(i + offset) % indices.len()];
                                 if i % WRITE_RATIO == 0 {
-                                    map.insert(keys[idx].clone(), i as u64);
+                                    let key = keys[idx];
+                                    map.insert(key, i as u64);
                                 } else if let Some(v) = map.get(&keys[idx]) {
                                     sum += *v;
                                 }
@@ -645,41 +549,25 @@ mod mixed_zipfian {
 
 #[divan::bench_group(name = "07_mixed_long_keys_zipfian")]
 mod mixed_long_keys_zipfian {
-    use super::{Arc, Bencher, DashMap, MassTree, black_box, keys_32b, thread, zipfian_indices};
+    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread, zipfian_indices};
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 5000;
     const WRITE_RATIO: usize = 10;
 
-    fn setup_masstree(keys: &[Vec<u8>]) -> MassTree<u64> {
-        let mut tree = MassTree::new();
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert(key, i as u64);
-        }
-        tree
-    }
-
-    fn setup_dashmap(keys: &[Vec<u8>]) -> DashMap<Vec<u8>, u64> {
-        let map = DashMap::new();
-        for (i, key) in keys.iter().enumerate() {
-            map.insert(key.clone(), i as u64);
-        }
-        map
-    }
-
     #[divan::bench(args = [1, 2, 4, 8, 16])]
     fn masstree_32b(bencher: Bencher, threads: usize) {
-        let keys = keys_32b(N);
-        let indices = zipfian_indices(N, OPS_PER_THREAD, 42);
+        let keys = Arc::new(keys::<32>(N));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
 
         bencher
-            .with_inputs(|| Arc::new(setup_masstree(&keys)))
+            .with_inputs(|| Arc::new(setup_masstree::<32>(keys.as_ref())))
             .bench_local_values(|tree| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
-                        let keys = keys.clone();
-                        let indices = indices.clone();
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let mut sum = 0u64;
@@ -707,17 +595,17 @@ mod mixed_long_keys_zipfian {
 
     #[divan::bench(args = [1, 2, 4, 8, 16])]
     fn dashmap_32b(bencher: Bencher, threads: usize) {
-        let keys = keys_32b(N);
-        let indices = zipfian_indices(N, OPS_PER_THREAD, 42);
+        let keys = Arc::new(keys::<32>(N));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
 
         bencher
-            .with_inputs(|| Arc::new(setup_dashmap(&keys)))
+            .with_inputs(|| Arc::new(setup_dashmap::<32>(keys.as_ref())))
             .bench_local_values(|map| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
-                        let keys = keys.clone();
-                        let indices = indices.clone();
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
                         thread::spawn(move || {
                             let mut sum = 0u64;
                             let offset = t * 7919;
@@ -725,7 +613,8 @@ mod mixed_long_keys_zipfian {
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[(i + offset) % indices.len()];
                                 if i % WRITE_RATIO == 0 {
-                                    map.insert(keys[idx].clone(), i as u64);
+                                    let key = keys[idx];
+                                    map.insert(key, i as u64);
                                 } else if let Some(v) = map.get(&keys[idx]) {
                                     sum += *v;
                                 }
@@ -749,39 +638,23 @@ mod mixed_long_keys_zipfian {
 
 #[divan::bench_group(name = "08_single_hot_key")]
 mod single_hot_key {
-    use super::{Arc, Bencher, DashMap, MassTree, black_box, keys_8b, thread};
+    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread};
 
     const N: usize = 10_000;
     const OPS_PER_THREAD: usize = 10_000;
 
-    fn setup_masstree(keys: &[Vec<u8>]) -> MassTree<u64> {
-        let mut tree = MassTree::new();
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert(key, i as u64);
-        }
-        tree
-    }
-
-    fn setup_dashmap(keys: &[Vec<u8>]) -> DashMap<Vec<u8>, u64> {
-        let map = DashMap::new();
-        for (i, key) in keys.iter().enumerate() {
-            map.insert(key.clone(), i as u64);
-        }
-        map
-    }
-
     #[divan::bench(args = [2, 4, 8, 16])]
     fn masstree(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(N);
-        let hot_key = keys[N / 2].clone();
+        let keys = keys::<8>(N);
+        let hot_key = keys[N / 2];
 
         bencher
-            .with_inputs(|| Arc::new(setup_masstree(&keys)))
+            .with_inputs(|| Arc::new(setup_masstree::<8>(&keys)))
             .bench_local_values(|tree| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
-                        let hot_key = hot_key.clone();
+                        let hot_key = hot_key;
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let mut sum = 0u64;
@@ -811,22 +684,22 @@ mod single_hot_key {
 
     #[divan::bench(args = [2, 4, 8, 16])]
     fn dashmap(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(N);
-        let hot_key = keys[N / 2].clone();
+        let keys = keys::<8>(N);
+        let hot_key = keys[N / 2];
 
         bencher
-            .with_inputs(|| Arc::new(setup_dashmap(&keys)))
+            .with_inputs(|| Arc::new(setup_dashmap::<8>(&keys)))
             .bench_local_values(|map| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
-                        let hot_key = hot_key.clone();
+                        let hot_key = hot_key;
                         thread::spawn(move || {
                             let mut sum = 0u64;
 
                             for i in 0..OPS_PER_THREAD {
                                 if i % 10 == 0 {
-                                    map.insert(hot_key.clone(), (t * OPS_PER_THREAD + i) as u64);
+                                    map.insert(hot_key, (t * OPS_PER_THREAD + i) as u64);
                                 } else if let Some(v) = map.get(&hot_key) {
                                     sum += *v;
                                 }
@@ -850,31 +723,15 @@ mod single_hot_key {
 
 #[divan::bench_group(name = "09_read_scaling")]
 mod read_scaling {
-    use super::{Arc, Bencher, DashMap, MassTree, black_box, keys_8b, thread};
+    use super::{Arc, Bencher, black_box, keys, setup_dashmap, setup_masstree, thread};
 
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 50_000;
 
-    fn setup_masstree(keys: &[Vec<u8>]) -> MassTree<u64> {
-        let mut tree = MassTree::new();
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert(key, i as u64);
-        }
-        tree
-    }
-
-    fn setup_dashmap(keys: &[Vec<u8>]) -> DashMap<Vec<u8>, u64> {
-        let map = DashMap::new();
-        for (i, key) in keys.iter().enumerate() {
-            map.insert(key.clone(), i as u64);
-        }
-        map
-    }
-
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(N);
-        let tree = Arc::new(setup_masstree(&keys));
+        let keys = Arc::new(keys::<8>(N));
+        let tree = Arc::new(setup_masstree::<8>(keys.as_ref()));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -882,7 +739,7 @@ mod read_scaling {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
-                        let keys = keys.clone();
+                        let keys = Arc::clone(&keys);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let mut sum = 0u64;
@@ -906,8 +763,8 @@ mod read_scaling {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn dashmap(bencher: Bencher, threads: usize) {
-        let keys = keys_8b(N);
-        let map = Arc::new(setup_dashmap(&keys));
+        let keys = Arc::new(keys::<8>(N));
+        let map = Arc::new(setup_dashmap::<8>(keys.as_ref()));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -915,7 +772,7 @@ mod read_scaling {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
-                        let keys = keys.clone();
+                        let keys = Arc::clone(&keys);
                         thread::spawn(move || {
                             let mut sum = 0u64;
                             let start = (t * 7919) % keys.len();

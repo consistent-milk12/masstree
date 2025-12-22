@@ -39,9 +39,100 @@
 
 use std::ptr as StdPtr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering::Acquire;
+use std::sync::atomic::{AtomicU64, Ordering::Acquire, Ordering::Relaxed};
 
 use seize::LocalGuard;
+
+// ============================================================================
+// Lightweight Debug Counters (near-zero overhead)
+// ============================================================================
+
+/// Atomic counter for B-link navigation issues (P0.6-B diagnostic).
+/// Incremented when get() returns NotFound but ikey >= next leaf's bound.
+pub static BLINK_SHOULD_FOLLOW_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counter for total NotFound results in search_leaf_concurrent.
+pub static SEARCH_NOT_FOUND_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counter for successful CAS inserts.
+pub static CAS_INSERT_SUCCESS_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counter for CAS insert retries (contention).
+pub static CAS_INSERT_RETRY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counter for CAS insert fallbacks to locked path.
+pub static CAS_INSERT_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counter for locked insert completions.
+pub static LOCKED_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counter for leaf splits.
+pub static SPLIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counter for advance_to_key B-link follows.
+pub static ADVANCE_BLINK_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counter for keys inserted into wrong leaf (P0.6-B detection).
+pub static WRONG_LEAF_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Reset debug counters (call before test).
+pub fn reset_debug_counters() {
+    BLINK_SHOULD_FOLLOW_COUNT.store(0, Relaxed);
+    SEARCH_NOT_FOUND_COUNT.store(0, Relaxed);
+    CAS_INSERT_SUCCESS_COUNT.store(0, Relaxed);
+    CAS_INSERT_RETRY_COUNT.store(0, Relaxed);
+    CAS_INSERT_FALLBACK_COUNT.store(0, Relaxed);
+    LOCKED_INSERT_COUNT.store(0, Relaxed);
+    SPLIT_COUNT.store(0, Relaxed);
+    ADVANCE_BLINK_COUNT.store(0, Relaxed);
+    WRONG_LEAF_INSERT_COUNT.store(0, Relaxed);
+}
+
+/// Debug counter values.
+#[derive(Debug, Clone, Copy)]
+pub struct DebugCounters {
+    /// B-link should have been followed in get()
+    pub blink_should_follow: u64,
+    /// Total NotFound results
+    pub search_not_found: u64,
+    /// Successful CAS inserts
+    pub cas_insert_success: u64,
+    /// CAS insert retries
+    pub cas_insert_retry: u64,
+    /// CAS insert fallbacks to locked
+    pub cas_insert_fallback: u64,
+    /// Locked insert completions
+    pub locked_insert: u64,
+    /// Leaf splits
+    pub split: u64,
+    /// B-links followed in advance_to_key
+    pub advance_blink: u64,
+    /// Keys inserted into wrong leaf
+    pub wrong_leaf_insert: u64,
+}
+
+/// Get debug counter values.
+pub fn get_debug_counters() -> (u64, u64) {
+    (
+        BLINK_SHOULD_FOLLOW_COUNT.load(Relaxed),
+        SEARCH_NOT_FOUND_COUNT.load(Relaxed),
+    )
+}
+
+/// Get all debug counter values.
+pub fn get_all_debug_counters() -> DebugCounters {
+    DebugCounters {
+        blink_should_follow: BLINK_SHOULD_FOLLOW_COUNT.load(Relaxed),
+        search_not_found: SEARCH_NOT_FOUND_COUNT.load(Relaxed),
+        cas_insert_success: CAS_INSERT_SUCCESS_COUNT.load(Relaxed),
+        cas_insert_retry: CAS_INSERT_RETRY_COUNT.load(Relaxed),
+        cas_insert_fallback: CAS_INSERT_FALLBACK_COUNT.load(Relaxed),
+        locked_insert: LOCKED_INSERT_COUNT.load(Relaxed),
+        split: SPLIT_COUNT.load(Relaxed),
+        advance_blink: ADVANCE_BLINK_COUNT.load(Relaxed),
+        wrong_leaf_insert: WRONG_LEAF_INSERT_COUNT.load(Relaxed),
+    }
+}
 
 use crate::alloc::NodeAllocator;
 use crate::internode::InternodeNode;
@@ -50,6 +141,9 @@ use crate::ksearch::upper_bound_internode_direct;
 use crate::leaf::link::{is_marked, unmark_ptr};
 use crate::leaf::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode, LeafValue};
 use crate::nodeversion::NodeVersion;
+use crate::tracing_helpers::{debug_log, trace_log};
+#[cfg(feature = "tracing")]
+use crate::tracing_helpers::warn_log;
 
 use super::MassTree;
 
@@ -573,10 +667,22 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
             // Validate version AFTER all reads
             if leaf.version().has_changed(version) {
+                trace_log!(
+                    ikey = target_ikey,
+                    leaf_ptr = ?StdPtr::from_ref(leaf),
+                    old_version = version,
+                    "get: leaf changed during search; attempting B-link advance"
+                );
                 // Version changed - follow B-link chain if split occurred
                 let (new_leaf, new_version) = self.advance_to_key(leaf, key, version, guard);
 
                 if !StdPtr::eq(new_leaf, leaf) {
+                    debug_log!(
+                        ikey = target_ikey,
+                        from_leaf_ptr = ?StdPtr::from_ref(leaf),
+                        to_leaf_ptr = ?StdPtr::from_ref(new_leaf),
+                        "get: B-link advance selected different leaf"
+                    );
                     // Different leaf - search there
                     return self.search_leaf_concurrent(
                         StdPtr::from_ref(new_leaf).cast_mut(),
@@ -612,7 +718,71 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 return SearchResult::Found(arc);
             }
 
-            // No match found
+            // No match found - but we might be in the wrong leaf due to a split!
+            //
+            // P0.6-B FIX: A split could have started after our has_changed() check.
+            // If so, we need to wait for it to complete and retry, because the
+            // B-link might not be set up yet.
+            if leaf.version().is_dirty() {
+                // Split/insert in progress - retry from start of this function
+                // to get fresh version and potentially follow B-links
+                version = leaf.version().stable();
+                continue;
+            }
+
+            // P0.6-B FIX: Check if key belongs to a right sibling by comparing
+            // against the next leaf's bound. If ikey >= next_bound, we must
+            // follow the B-link chain.
+            //
+            // This can happen when:
+            // 1. Split completed before our traversal
+            // 2. Internode now routes to the NEW right leaf
+            // 3. But the key is actually in the OLD left leaf
+            // 4. Version is stable (split finished), so has_changed() = false
+            {
+                let next_raw: *mut LeafNode<LeafValue<V>, WIDTH> = leaf.next_raw();
+                let next_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = unmark_ptr(next_raw);
+                if !next_ptr.is_null() && !is_marked(next_raw) {
+                    // SAFETY: next_ptr is valid (not null, not marked for deletion)
+                    let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+                    if target_ikey >= next_bound {
+                        // Key should be in the next leaf! Follow B-link.
+                        BLINK_SHOULD_FOLLOW_COUNT.fetch_add(1, Relaxed);
+
+                        debug_log!(
+                            ikey = target_ikey,
+                            leaf_ptr = ?StdPtr::from_ref(leaf),
+                            next_ptr = ?next_ptr,
+                            next_bound = next_bound,
+                            "get: NotFound but ikey >= next_bound; following B-link (P0.6-B fix)"
+                        );
+
+                        // Recursively search in the next leaf
+                        return self.search_leaf_concurrent(next_ptr, key, guard);
+                    }
+                }
+            }
+
+            // Truly not found - key is not in this leaf or any right sibling
+            SEARCH_NOT_FOUND_COUNT.fetch_add(1, Relaxed);
+
+            #[cfg(feature = "tracing")]
+            {
+                let bound_ikey: u64 = leaf.ikey_bound();
+                let next_raw: *mut LeafNode<LeafValue<V>, WIDTH> = leaf.next_raw();
+                let next_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = unmark_ptr(next_raw);
+                let next_bound_ikey: Option<u64> =
+                    (!next_ptr.is_null() && !is_marked(next_raw)).then(|| unsafe { (&*next_ptr).ikey_bound() });
+
+                trace_log!(
+                    ikey = target_ikey,
+                    leaf_ptr = ?StdPtr::from_ref(leaf),
+                    leaf_bound_ikey = bound_ikey,
+                    next_ptr = ?next_ptr,
+                    next_bound_ikey = ?next_bound_ikey,
+                    "get: NotFound in leaf (truly not found)"
+                );
+            }
             return SearchResult::NotFound;
         }
     }
@@ -758,13 +928,42 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         _guard: &LocalGuard<'_>,
     ) -> (&'a LeafNode<LeafValue<V>, WIDTH>, u32) {
         let mut version: u32 = leaf.version().stable();
+        let key_ikey: u64 = key.ikey();
 
-        // Only follow chain if split occurred
+        trace_log!(
+            ikey = key_ikey,
+            leaf_ptr = ?StdPtr::from_ref(leaf),
+            old_version,
+            stable_version = version,
+            has_split = leaf.version().has_split(old_version),
+            "advance_to_key: begin"
+        );
+
+        // Only follow chain if split occurred or is in progress
+        //
+        // P0.6-B FIX: Check both has_split() AND is_splitting() because:
+        // - has_split() detects completed splits (split counter incremented)
+        // - is_splitting() detects in-progress splits (SPLITTING_BIT set)
+        //
+        // We must check BOTH because during an in-progress split, the split
+        // counter hasn't incremented yet (that happens on unlock).
+        //
+        // IMPORTANT: These checks are not atomic. A split could start between
+        // checking has_split and is_splitting. To handle this, we re-check
+        // is_splitting after has_split returns false.
         if !leaf.version().has_split(old_version) {
-            return (leaf, version);
+            // Double-check: split could have started after has_split check
+            if !leaf.version().is_splitting() {
+                return (leaf, version);
+            }
         }
 
-        let key_ikey: u64 = key.ikey();
+        // P0.6-B FIX: If a split is in progress, wait for it to complete before
+        // trying to follow B-links. The B-link is set up in link_split() which
+        // happens AFTER split_into() moves the keys.
+        //
+        // stable() spins until all DIRTY_MASK bits clear (including SPLITTING_BIT)
+        version = leaf.version().stable();
 
         while !leaf.version().is_deleted() {
             // Load next pointer
@@ -772,6 +971,12 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
             // Check for marked pointer (split in progress)
             if is_marked(next_raw) {
+                trace_log!(
+                    ikey = key_ikey,
+                    leaf_ptr = ?StdPtr::from_ref(leaf),
+                    next_raw = ?next_raw,
+                    "advance_to_key: next pointer marked; waiting for split"
+                );
                 // Spin until split completes
                 leaf.wait_for_split();
                 continue;
@@ -779,6 +984,11 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
             let next_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = unmark_ptr(next_raw);
             if next_ptr.is_null() {
+                trace_log!(
+                    ikey = key_ikey,
+                    leaf_ptr = ?StdPtr::from_ref(leaf),
+                    "advance_to_key: reached end of B-link chain"
+                );
                 break;
             }
 
@@ -790,12 +1000,26 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let next_bound_ikey: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound_ikey {
+                trace_log!(
+                    ikey = key_ikey,
+                    from_leaf_ptr = ?StdPtr::from_ref(leaf),
+                    to_leaf_ptr = ?StdPtr::from_ref(next),
+                    next_bound_ikey,
+                    "advance_to_key: following B-link to the right"
+                );
                 // Key belongs in next leaf or further
                 leaf = next;
                 version = leaf.version().stable();
                 continue;
             }
 
+            trace_log!(
+                ikey = key_ikey,
+                leaf_ptr = ?StdPtr::from_ref(leaf),
+                next_ptr = ?StdPtr::from_ref(next),
+                next_bound_ikey,
+                "advance_to_key: key belongs to current leaf"
+            );
             // Key belongs in current leaf
             break;
         }
@@ -817,15 +1041,33 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ) -> &'a LeafNode<LeafValue<V>, WIDTH> {
         let key_ikey: u64 = key.ikey();
 
+        // P0.6-B FIX: If a split is in progress on this leaf, wait for it to
+        // complete before trying to follow B-links. The B-link is set up in
+        // link_split() which happens AFTER split_into() moves the keys.
+        if leaf.version().is_splitting() {
+            let _ = leaf.version().stable(); // Spins until SPLITTING_BIT clears
+        }
+
         loop {
             let next_raw: *mut LeafNode<LeafValue<V>, WIDTH> = leaf.next_raw();
             if is_marked(next_raw) {
+                trace_log!(
+                    ikey = key_ikey,
+                    leaf_ptr = ?StdPtr::from_ref(leaf),
+                    next_raw = ?next_raw,
+                    "advance_to_key_by_bound: next pointer marked; waiting for split"
+                );
                 leaf.wait_for_split();
                 continue;
             }
 
             let next_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = unmark_ptr(next_raw);
             if next_ptr.is_null() {
+                trace_log!(
+                    ikey = key_ikey,
+                    leaf_ptr = ?StdPtr::from_ref(leaf),
+                    "advance_to_key_by_bound: reached end of B-link chain"
+                );
                 break;
             }
 
@@ -834,6 +1076,13 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let next_bound_ikey: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound_ikey {
+                trace_log!(
+                    ikey = key_ikey,
+                    from_leaf_ptr = ?StdPtr::from_ref(leaf),
+                    to_leaf_ptr = ?StdPtr::from_ref(next),
+                    next_bound_ikey,
+                    "advance_to_key_by_bound: following B-link to the right"
+                );
                 leaf = next;
                 continue;
             }
