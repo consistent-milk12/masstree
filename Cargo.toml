@@ -1,10 +1,10 @@
 [package]
 name = "masstree"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.92.0"
 authors = ["consistent-milk12"]
-description = "A concurrent ordered map (trie of B+trees) - alpha release, not production ready"
+description = "A high-performance concurrent ordered map (trie of B+trees) - alpha release, not production ready"
 license = "MIT"
 repository = "https://github.com/consistent-milk12/masstree"
 documentation = "https://docs.rs/masstree"
@@ -21,7 +21,6 @@ include = [
 	"src/**/*",
 	"benches/**/*",
 	"tests/**/*",
-	"examples/**/*",
 	"Cargo.toml",
 	"LICENSE",
 	"README.md",
