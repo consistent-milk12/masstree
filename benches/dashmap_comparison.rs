@@ -16,12 +16,9 @@
 //! With mimalloc: `cargo bench --bench dashmap_comparison --features mimalloc`
 
 #![expect(clippy::indexing_slicing)]
-#![expect(
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss
-)]
+#![expect(clippy::cast_possible_truncation)]
 #![expect(clippy::unwrap_used)]
+#![expect(clippy::redundant_locals)]
 
 mod bench_utils;
 

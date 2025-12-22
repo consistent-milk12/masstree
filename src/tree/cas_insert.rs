@@ -217,67 +217,62 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     //
                     // With NULL-claim, only the first thread to CAS NULL→ptr succeeds.
                     // Other threads get contention fallback and retry with fresh state.
-                    match leaf.cas_slot_value(slot, StdPtr::null_mut(), arc_ptr) {
-                        Err(_actual) => {
-                            // Slot already claimed by another thread.
-                            // This is expected contention - fall back to get fresh state.
-                            // SAFETY: we just created this Arc clone, nobody else has it
-                            let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                    if let Err(_actual) = leaf.cas_slot_value(slot, StdPtr::null_mut(), arc_ptr) {
+                        // Slot already claimed by another thread.
+                        // This is expected contention - fall back to get fresh state.
+                        // SAFETY: we just created this Arc clone, nobody else has it
+                        let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
 
-                            debug_log!(
-                                ikey,
-                                slot,
-                                leaf_ptr = ?leaf_ptr,
-                                "CAS insert: slot not NULL, contention detected"
-                            );
+                        debug_log!(
+                            ikey,
+                            slot,
+                            leaf_ptr = ?leaf_ptr,
+                            "CAS insert: slot not NULL, contention detected"
+                        );
 
-                            retries += 1;
-                            if retries > MAX_CAS_RETRIES {
-                                return CasInsertResult::ContentionFallback;
+                        retries += 1;
+                        if retries > MAX_CAS_RETRIES {
+                            return CasInsertResult::ContentionFallback;
+                        }
+                        // Retry with fresh permutation
+                        continue;
+                    }
+                    // FIX: Validate version BEFORE writing key data.
+                    //
+                    // If we write key data before validation and the version
+                    // changed, we may corrupt slot data that another thread
+                    // is using. Check version first, then write only if stable.
+                    //
+                    // CRITICAL: Use has_changed_or_locked() instead of has_changed().
+                    // has_changed() ignores INSERTING_BIT, allowing CAS inserts to
+                    // race with locked splits. has_changed_or_locked() checks both
+                    // version change AND if INSERTING_BIT is set.
+                    if leaf.version().has_changed_or_locked(version) {
+                        debug_log!(
+                            ikey,
+                            slot,
+                            leaf_ptr = ?leaf_ptr,
+                            "CAS insert: version changed after slot claim, aborting (check 1)"
+                        );
+                        // Version changed - restore slot to NULL and retry
+                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                            Ok(()) | Err(_) => {
+                                // SAFETY: we just created this Arc clone
+                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
                             }
-                            // Retry with fresh permutation
-                            continue;
                         }
 
-                        Ok(()) => {
-                            // FIX: Validate version BEFORE writing key data.
-                            //
-                            // If we write key data before validation and the version
-                            // changed, we may corrupt slot data that another thread
-                            // is using. Check version first, then write only if stable.
-                            //
-                            // CRITICAL: Use has_changed_or_locked() instead of has_changed().
-                            // has_changed() ignores INSERTING_BIT, allowing CAS inserts to
-                            // race with locked splits. has_changed_or_locked() checks both
-                            // version change AND if INSERTING_BIT is set.
-                            if leaf.version().has_changed_or_locked(version) {
-                                debug_log!(
-                                    ikey,
-                                    slot,
-                                    leaf_ptr = ?leaf_ptr,
-                                    "CAS insert: version changed after slot claim, aborting (check 1)"
-                                );
-                                // Version changed - restore slot to NULL and retry
-                                match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
-                                    Ok(()) | Err(_) => {
-                                        // SAFETY: we just created this Arc clone
-                                        let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
-                                    }
-                                }
-
-                                retries += 1;
-                                if retries > MAX_CAS_RETRIES {
-                                    return CasInsertResult::ContentionFallback;
-                                }
-                                continue;
-                            }
-
-                            // Version stable - now safe to write key data
-                            // SAFETY: we own the slot after successful CAS and version is stable
-                            unsafe {
-                                leaf.store_key_data_for_cas(slot, ikey, keylenx);
-                            }
+                        retries += 1;
+                        if retries > MAX_CAS_RETRIES {
+                            return CasInsertResult::ContentionFallback;
                         }
+                        continue;
+                    }
+
+                    // Version stable - now safe to write key data
+                    // SAFETY: we own the slot after successful CAS and version is stable
+                    unsafe {
+                        leaf.store_key_data_for_cas(slot, ikey, keylenx);
                     }
 
                     // 9. Secondary version validation (belt-and-suspenders)

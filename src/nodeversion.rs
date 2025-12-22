@@ -479,19 +479,19 @@ impl NodeVersion {
 
     /// Check if the version has changed OR if a modification is in progress.
     ///
-    /// This is a stronger check than [`has_changed`] for CAS operations.
+    /// This is a stronger check than [`Self::has_changed`] for CAS operations.
     /// It returns true if:
     /// - The version counter has changed (same as `has_changed`), OR
-    /// - The node is currently being modified (INSERTING_BIT or SPLITTING_BIT set)
+    /// - The node is currently being modified ([`INSERTING_BIT`] or [`SPLITTING_BIT`] set)
     ///
     /// CAS inserts should use this instead of `has_changed` to avoid racing
     /// with locked splits. The race scenario:
     /// 1. CAS insert reads version V via `stable()` (no dirty bits)
-    /// 2. Locked thread acquires lock, sets INSERTING_BIT
-    /// 3. CAS insert checks `has_changed(V)` - returns false (ignores INSERTING_BIT)
+    /// 2. Locked thread acquires lock, sets [`INSERTING_BIT`]
+    /// 3. CAS insert checks `has_changed(V)` - returns false (ignores [`INSERTING_BIT`])
     /// 4. CAS insert proceeds, racing with the split
     ///
-    /// By checking INSERTING_BIT directly, we catch this race.
+    /// By checking [`INSERTING_BIT`] directly, we catch this race.
     #[must_use]
     #[inline(always)]
     pub fn has_changed_or_locked(&self, old: u32) -> bool {

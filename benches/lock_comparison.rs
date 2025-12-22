@@ -20,12 +20,8 @@
 //! Run with: `cargo bench --bench lock_comparison`
 //! With mimalloc: `cargo bench --bench lock_comparison --features mimalloc`
 
+#![expect(clippy::redundant_locals)]
 #![expect(clippy::indexing_slicing)]
-#![expect(
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss
-)]
 #![expect(clippy::unwrap_used)]
 
 mod bench_utils;
@@ -38,7 +34,7 @@ use std::thread;
 
 use bench_utils::keys_shared_prefix;
 use bench_utils::keys_shared_prefix_chunks;
-use bench_utils::{keys, uniform_indices, zipfian_indices};
+use bench_utils::{keys, uniform_indices};
 
 fn main() {
     divan::main();

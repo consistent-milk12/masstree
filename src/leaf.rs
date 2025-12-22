@@ -29,6 +29,7 @@ use seize::{Guard, LocalGuard};
 
 mod freeze;
 
+pub mod cas;
 pub mod layer;
 pub mod link;
 
@@ -1279,38 +1280,31 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         self.permutation.store(perm.value(), WRITE_ORD);
     }
 
-    /// Compare-and-swap the permutation atomically.
-    ///
-    /// Attempts to atomically update the permutation from `expected` to `new`.
-    /// This is the linearization point for lock-free CAS-based insertion.
-    ///
-    /// # Arguments
-    /// * `expected` - The expected current permutation value
-    /// * `new` - The new permutation value to set
+    /// Compare-and-swap the permutation atomically (non-freeze contexts only).
     ///
     /// # Errors
+    /// Failure returned frozen raw, use `cas_permutation_raw()`
     ///
-    /// Returns `Err(current)` if the CAS failed because the permutation was modified
-    /// by another thread. The error contains the current permutation value.
-    ///
-    /// # Memory Ordering
-    /// - Success: `AcqRel` - synchronizes with Release stores of slot data
-    /// - Failure: `Acquire` - allows reading the current state
+    /// # Panics
+    /// Panics if the failure is due to a frozen permutation. Use `cas_permutation_raw`
+    /// in code paths where freezing may occur.
     #[inline]
     pub fn cas_permutation(
         &self,
         expected: Permuter<WIDTH>,
         new: Permuter<WIDTH>,
     ) -> Result<(), Permuter<WIDTH>> {
-        match self.permutation.compare_exchange(
-            expected.value(),
-            new.value(),
-            CAS_SUCCESS,
-            CAS_FAILURE,
-        ) {
-            Ok(_) => Ok(()),
+        match self.cas_permutation_raw(expected, new) {
+            Ok(()) => Ok(()),
 
-            Err(current) => Err(Permuter::from_value(current)),
+            Err(failure) => {
+                assert!(
+                    !failure.is_frozen::<WIDTH>(),
+                    "cas_permutation(): failure returned frozen raw, use cas_permutation_raw"
+                );
+
+                Err(Permuter::from_value(failure.current_raw()))
+            }
         }
     }
 

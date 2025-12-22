@@ -22,11 +22,8 @@
 
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::indexing_slicing)]
-#![expect(
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
-)]
+#![expect(clippy::pedantic)]
+#![expect(clippy::redundant_locals)]
 
 mod bench_utils;
 
@@ -37,7 +34,6 @@ use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::MassTree;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use bench_utils::keys_shared_prefix;

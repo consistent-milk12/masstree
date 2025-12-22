@@ -21,6 +21,7 @@
 
 #![allow(clippy::pedantic)]
 #![expect(clippy::unwrap_used)]
+#![allow(clippy::panic)]
 
 mod common;
 

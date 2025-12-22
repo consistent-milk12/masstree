@@ -48,10 +48,10 @@ use seize::LocalGuard;
 // ============================================================================
 
 /// Atomic counter for B-link navigation issues.
-/// Incremented when get() returns NotFound but ikey >= next leaf's bound.
+/// Incremented when `get()` returns `NotFound` but ikey >= next leaf's bound.
 pub static BLINK_SHOULD_FOLLOW_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Atomic counter for total NotFound results in search_leaf_concurrent.
+/// Atomic counter for total `NotFound` results in `search_leaf_concurrent`.
 pub static SEARCH_NOT_FOUND_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for successful CAS inserts.
@@ -69,7 +69,7 @@ pub static LOCKED_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Atomic counter for leaf splits.
 pub static SPLIT_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Atomic counter for advance_to_key B-link follows.
+/// Atomic counter for `advance_to_key` B-link follows.
 pub static ADVANCE_BLINK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for keys inserted into wrong leaf.
@@ -91,22 +91,30 @@ pub fn reset_debug_counters() {
 /// Debug counter values.
 #[derive(Debug, Clone, Copy)]
 pub struct DebugCounters {
-    /// B-link should have been followed in get()
+    /// B-link should have been followed in `get()`
     pub blink_should_follow: u64,
-    /// Total NotFound results
+
+    /// Total `NotFound` results
     pub search_not_found: u64,
+
     /// Successful CAS inserts
     pub cas_insert_success: u64,
+
     /// CAS insert retries
     pub cas_insert_retry: u64,
+
     /// CAS insert fallbacks to locked
     pub cas_insert_fallback: u64,
+
     /// Locked insert completions
     pub locked_insert: u64,
+
     /// Leaf splits
     pub split: u64,
-    /// B-links followed in advance_to_key
+
+    /// B-links followed in `advance_to_key`
     pub advance_blink: u64,
+
     /// Keys inserted into wrong leaf
     pub wrong_leaf_insert: u64,
 }
@@ -141,8 +149,11 @@ use crate::ksearch::upper_bound_internode_direct;
 use crate::leaf::link::{is_marked, unmark_ptr};
 use crate::leaf::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode, LeafValue};
 use crate::nodeversion::NodeVersion;
+
+#[allow(unused_imports)]
 #[cfg(feature = "tracing")]
 use crate::tracing_helpers::warn_log;
+
 use crate::tracing_helpers::{debug_log, trace_log};
 
 use super::MassTree;
@@ -590,6 +601,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// # Reference
     ///
     /// C++ `masstree_get.hh:22-57` - `find_unlocked()`
+    #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
     fn search_leaf_concurrent(
         &self,
         leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH>,

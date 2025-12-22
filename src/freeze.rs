@@ -36,6 +36,9 @@ impl LeafFreezeUtils {
         ((raw >> Self::freeze_shift::<WIDTH>()) & 0xF) == 0xF
     }
 
+    /// Freeze a raw permutation value by setting a sentinel nibble.
+    ///
+    /// Returns a value that will fail any `cas_permutation()` with a valid expected value.
     #[must_use]
     #[inline(always)]
     pub const fn freeze_raw<const WIDTH: usize>(raw: u64) -> u64 {
@@ -43,6 +46,11 @@ impl LeafFreezeUtils {
     }
 }
 
+/// Error returned when attempting to read a frozen permutation.
+///
+/// This indicates a split is in progress. The caller should either:
+/// - Wait for unfreeze using `permutation_wait()`, or
+/// - Fall back to a locked code path
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Frozen;
 
@@ -65,7 +73,7 @@ impl StdFmt::Display for Frozen {
 /// spin forever, but may leave the tree in an inconsistent state if the split
 /// had already performed destructive moves.
 ///
-/// WARN: Split code must be structured so that panics cannot occur after
+/// CRITICAL: Split code must be structured so that panics cannot occur after
 /// destructive mutations begin.
 #[must_use = "FreezeGuard must be consumed vai unfreeze_get_permutation()"]
 pub struct FreezeGuard<'a, S: ValueSlot, const WIDTH: usize> {
@@ -74,14 +82,24 @@ pub struct FreezeGuard<'a, S: ValueSlot, const WIDTH: usize> {
     active: bool,
 }
 
-impl<S: ValueSlot, const WIDTH: usize> FreezeGuard<'_, S, WIDTH> {
+impl<'a, S: ValueSlot, const WIDTH: usize> FreezeGuard<'a, S, WIDTH> {
+    /// Construct a new [`FreezeGuard`]
+    #[inline(always)]
+    pub const fn new(leaf: &'a LeafNode<S, WIDTH>, snapshot_raw: u64, active: bool) -> Self {
+        Self {
+            leaf,
+            snapshot_raw,
+            active,
+        }
+    }
+
     /// Get the permutation snapshot captured at freeze time.
     ///
     /// This is the authoritative membership for split computation.
     /// It includes all CAS inserts that published before freeze succeeded.
     #[must_use]
     #[inline(always)]
-    pub fn snapshot(&self) -> Permuter<WIDTH> {
+    pub const fn snapshot(&self) -> Permuter<WIDTH> {
         Permuter::from_value(self.snapshot_raw)
     }
 
@@ -90,6 +108,12 @@ impl<S: ValueSlot, const WIDTH: usize> FreezeGuard<'_, S, WIDTH> {
     #[inline(always)]
     pub const fn snapshot_raw(&self) -> u64 {
         self.snapshot_raw
+    }
+
+    /// Set whether the guard is active.
+    #[inline(always)]
+    pub const fn set_active(&mut self, active: bool) {
+        self.active = active;
     }
 }
 
@@ -103,9 +127,7 @@ impl<S: ValueSlot, const WIDTH: usize> Drop for FreezeGuard<'_, S, WIDTH> {
         //
         // This is only correct if the split didn't perform any destructive moves.
         // The split code must be structured to be panic-free after freeze.
-        self.leaf
-            .permutation
-            .permutation_store_raw_release(self.snapshot_raw);
+        self.leaf.permutation_store_raw_release(self.snapshot_raw);
     }
 }
 

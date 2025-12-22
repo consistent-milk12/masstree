@@ -573,6 +573,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ///
     /// # Reference
     /// C++ `masstree_get.hh:100-105` - B-link following after lock validation failure
+    #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
     fn find_locked<'a>(
         &'a self,
         layer_root: *const u8,
@@ -595,7 +596,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         let mut leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> = StdPtr::null_mut();
         let mut use_reach: bool = true;
         // Track the version we used for advance_to_key calls
-        let mut last_version: u32 = 0;
+        let mut last_version: u32;
 
         loop {
             if use_reach {

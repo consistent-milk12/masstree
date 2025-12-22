@@ -4,15 +4,24 @@
 //! - Avoid per-op heap allocation for keys (use fixed-size arrays where possible).
 //! - Keep key generation deterministic across benches.
 
-#![allow(dead_code)]
-#![expect(clippy::cast_possible_truncation)]
+#![allow(dead_code, unfulfilled_lint_expectations)]
+#![expect(
+    clippy::needless_range_loop,
+    clippy::cast_possible_truncation,
+    clippy::missing_panics_doc,
+    clippy::items_after_statements,
+    clippy::indexing_slicing,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 
 /// Deterministically generate fixed-size byte-array keys.
 ///
 /// - `K` must be a multiple of 8, between 8 and 32 (inclusive).
 /// - Keys are built from 8-byte chunks derived from `i` with different multipliers.
+#[must_use]
 pub fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
-    assert!(K % 8 == 0, "key size must be a multiple of 8");
+    assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=32).contains(&K), "key size must be 8..=32");
 
     const MULTIPLIERS: [u64; 4] = [
@@ -24,16 +33,21 @@ pub fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
 
     let chunks = K / 8;
     let mut out = Vec::with_capacity(n);
+
     for i in 0..n {
         let mut key = [0u8; K];
+
         for c in 0..chunks {
             let v = (i as u64).wrapping_mul(MULTIPLIERS[c]);
             let bytes = v.to_be_bytes();
             let start = c * 8;
+
             key[start..start + 8].copy_from_slice(&bytes);
         }
+
         out.push(key);
     }
+
     out
 }
 
@@ -46,8 +60,9 @@ pub fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
 ///
 /// - `K` must be a multiple of 8, between 16 and 32 (inclusive).
 /// - `prefix_buckets` must be > 0. Smaller values increase collisions.
+#[must_use]
 pub fn keys_shared_prefix<const K: usize>(n: usize, prefix_buckets: u64) -> Vec<[u8; K]> {
-    assert!(K % 8 == 0, "key size must be a multiple of 8");
+    assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!(
         (16..=32).contains(&K),
         "key size must be 16..=32 for shared-prefix keys"
@@ -92,12 +107,13 @@ pub fn keys_shared_prefix<const K: usize>(n: usize, prefix_buckets: u64) -> Vec<
 /// - `K` must be a multiple of 8, between 16 and 32 (inclusive).
 /// - `prefix_chunks` must be in `1..chunks` (must leave at least one unique chunk).
 /// - `prefix_buckets` must be > 0.
+#[must_use]
 pub fn keys_shared_prefix_chunks<const K: usize>(
     n: usize,
     prefix_chunks: usize,
     prefix_buckets: u64,
 ) -> Vec<[u8; K]> {
-    assert!(K % 8 == 0, "key size must be a multiple of 8");
+    assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((16..=32).contains(&K), "key size must be 16..=32");
     assert!(prefix_buckets > 0, "prefix_buckets must be > 0");
 
@@ -141,6 +157,7 @@ pub fn keys_shared_prefix_chunks<const K: usize>(
 
 /// Generate Zipfian-distributed indices (hot keys accessed more frequently).
 /// Uses s=1.0 (standard Zipf), approximated via rejection sampling.
+#[must_use]
 pub fn zipfian_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
     let mut indices = Vec::with_capacity(count);
     let mut state = seed;
@@ -157,6 +174,7 @@ pub fn zipfian_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
 }
 
 /// Uniform random indices.
+#[must_use]
 pub fn uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
     let mut indices = Vec::with_capacity(count);
     let mut state = seed;

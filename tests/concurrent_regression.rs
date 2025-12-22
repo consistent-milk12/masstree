@@ -24,11 +24,12 @@
 //! Logs are written to `logs/` directory (gitignored).
 
 #![allow(clippy::pedantic)]
+#![allow(clippy::panic, reason = "Fail fast in tests")]
 #![expect(clippy::unwrap_used)]
 
 mod common;
 
-use masstree::{BLINK_SHOULD_FOLLOW_COUNT, MassTree, get_debug_counters, reset_debug_counters};
+use masstree::{MassTree, get_debug_counters, reset_debug_counters};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
