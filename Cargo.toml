@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -30,8 +30,6 @@ include = [
 default = []
 # Alternative global allocators for benchmarking
 mimalloc = ["dep:mimalloc"]
-jemalloc = ["dep:tikv-jemallocator"]
-# Enable tracing instrumentation for debugging race conditions.
 # When disabled (default), all tracing calls compile to no-ops with zero overhead.
 tracing = ["dep:tracing"]
 
@@ -41,7 +39,6 @@ parking_lot = "0.12.5"
 
 # Optional allocators (enabled via features)
 mimalloc = { version = "0.1.48", optional = true }
-tikv-jemallocator = { version = "0.6.1", optional = true }
 
 # Optional tracing (enabled via features) - zero overhead when disabled
 tracing = { version = "0.1.44", optional = true }
@@ -52,6 +49,7 @@ proptest = "1.9.0"
 loom = "0.7.2"
 shuttle = "0.8.1"
 dashmap = "6.1.0"
+congee = "0.4.1"
 crossbeam-skiplist = "0.1.3"
 crossbeam-epoch = "0.9.18"
 concurrent-map = "5.0.37"
@@ -173,10 +171,6 @@ harness = false
 
 [[bench]]
 name = "comparison"
-harness = false
-
-[[bench]]
-name = "dashmap_comparison"
 harness = false
 
 [[bench]]

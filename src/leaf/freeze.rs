@@ -133,7 +133,9 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// - `Ok(FreezeGuard)` on success
     /// - `Err(AlreadyFrozen)` if already frozen
-    pub(crate) fn try_freeze_permutation(&self) -> Result<FreezeGuard<'_, S, WIDTH>, AlreadyFrozen> {
+    pub(crate) fn try_freeze_permutation(
+        &self,
+    ) -> Result<FreezeGuard<'_, S, WIDTH>, AlreadyFrozen> {
         // Preconditions (still assert, even for try_ variant)
         assert!(
             self.version().is_locked(),

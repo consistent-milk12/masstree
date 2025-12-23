@@ -199,6 +199,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         value: Arc<V>,
         guard: &LocalGuard<'_>,
     ) -> Result<Option<Arc<V>>, InsertError> {
+        #[allow(unfulfilled_lint_expectations)]
+        #[expect(unused_variables, reason = "Used in feature gated logs")]
         let ikey: u64 = key.ikey();
         trace_log!(ikey, "insert_concurrent: starting");
 
@@ -1168,7 +1170,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 if retries > 0 {
                     tracing::debug!(
                         retries,
-                        inode_ptr = ?inode as *const _,
+                        inode_ptr = ?std::ptr::from_ref(inode),
                         parent_ptr = ?parent_ptr,
                         "locked_parent_internode succeeded after retries"
                     );
@@ -1184,18 +1186,16 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 retries,
-                inode_ptr = ?inode as *const _,
+                inode_ptr = ?std::ptr::from_ref(inode),
                 old_parent = ?parent_ptr,
                 new_parent = ?current_parent,
                 "locked_parent_internode: parent changed, retrying"
             );
 
-            if retries >= MAX_PROPAGATION_RETRIES {
-                panic!(
-                    "locked_parent_internode: exceeded {} retries - possible livelock or bug",
-                    MAX_PROPAGATION_RETRIES
-                );
-            }
+            assert!(
+                retries < MAX_PROPAGATION_RETRIES,
+                "locked_parent_internode: exceeded {MAX_PROPAGATION_RETRIES} retries - possible livelock or bug"
+            );
 
             // Brief pause to reduce contention
             std::hint::spin_loop();
@@ -1586,12 +1586,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 );
             }
 
-            if retries > MAX_PROPAGATION_RETRIES {
-                panic!(
-                    "propagate_internode_split_concurrent: exceeded {} retries",
-                    MAX_PROPAGATION_RETRIES
-                );
-            }
+            assert!(
+                retries <= MAX_PROPAGATION_RETRIES,
+                "propagate_internode_split_concurrent: exceeded {MAX_PROPAGATION_RETRIES} retries"
+            );
 
             // SAFETY: parent_ptr is valid (from locked_parent_*)
             let parent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*parent_ptr };
@@ -1697,22 +1695,23 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
             // Not a root - propagate to grandparent
             // Use locked_parent_internode for safe grandparent acquisition with revalidation
-            let (grandparent_ptr, mut grandparent_lock) =
-                match self.locked_parent_internode(parent) {
-                    Some(result) => result,
-                    None => {
-                        // Parent became a root while we were working
-                        // This is a valid race - retry to take the root path
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            retries,
-                            parent_ptr = ?parent_ptr,
-                            "parent became root during propagation, retrying"
-                        );
-                        drop(parent_lock);
-                        continue 'retry;
-                    }
-                };
+            let (grandparent_ptr, mut grandparent_lock): (
+                *mut InternodeNode<LeafValue<V>, WIDTH>,
+                LockGuard<'_>,
+            ) = if let Some(result) = self.locked_parent_internode(parent) {
+                result
+            } else {
+                // Parent became a root while we were working
+                // This is a valid race - retry to take the root path
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    retries,
+                    parent_ptr = ?parent_ptr,
+                    "parent became root during propagation, retrying"
+                );
+                drop(parent_lock);
+                continue 'retry;
+            };
 
             let grandparent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*grandparent_ptr };
 
@@ -1729,23 +1728,20 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 found
             };
 
-            let parent_idx = match parent_idx {
-                Some(idx) => idx,
-                None => {
-                    // Parent not found in grandparent - structure changed
-                    // This can happen if grandparent was split and parent moved
-                    // Release locks and retry from the beginning
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        retries,
-                        parent_ptr = ?parent_ptr,
-                        grandparent_ptr = ?grandparent_ptr,
-                        "parent not found in grandparent, retrying from beginning"
-                    );
-                    drop(grandparent_lock);
-                    drop(parent_lock);
-                    continue 'retry;
-                }
+            let Some(parent_idx) = parent_idx else {
+                // Parent not found in grandparent - structure changed
+                // This can happen if grandparent was split and parent moved
+                // Release locks and retry from the beginning
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    retries,
+                    parent_ptr = ?parent_ptr,
+                    grandparent_ptr = ?grandparent_ptr,
+                    "parent not found in grandparent, retrying from beginning"
+                );
+                drop(grandparent_lock);
+                drop(parent_lock);
+                continue 'retry;
             };
 
             // Check if grandparent has space
