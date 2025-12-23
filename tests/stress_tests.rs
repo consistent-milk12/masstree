@@ -101,8 +101,8 @@ fn multilayer_16byte_keys_4_threads() {
             thread::spawn(move || {
                 let guard = tree.guard();
                 for i in 0..KEYS_PER_THREAD {
-                    // 16-byte key: "T0_00000000" format (padded to exactly 16 bytes)
-                    let key = format!("T{}_{:010}", t, i);
+                    // 16-byte key: "T00___0000000000" format (exactly 16 bytes)
+                    let key = format!("T{:02}___{:010}", t, i);
                     debug_assert_eq!(key.len(), 16);
 
                     let _ = tree.insert_with_guard(key.as_bytes(), (t * 10000 + i) as u64, &guard);
@@ -128,12 +128,12 @@ fn multilayer_16byte_keys_4_threads() {
         );
     }
 
-    // Final verification
+    // Final verification - use same format as insert!
     let guard = tree.guard();
     let mut missing = Vec::new();
     for t in 0..NUM_THREADS {
         for i in 0..KEYS_PER_THREAD {
-            let key = format!("T{}_{:010}", t, i);
+            let key = format!("T{:02}___{:010}", t, i);
             if tree.get_with_guard(key.as_bytes(), &guard).is_none() {
                 missing.push((t, i));
             }
@@ -244,7 +244,7 @@ fn multilayer_32byte_keys_4_threads() {
                 let guard = tree.guard();
                 for i in 0..KEYS_PER_THREAD {
                     // 32-byte key
-                    let key = format!("prefix_{:02}_middle_{:010}_end", t, i);
+                    let key = format!("prefix_{:02}_middle_{:010}_ends", t, i);
                     debug_assert_eq!(key.len(), 32);
 
                     let _ = tree.insert_with_guard(key.as_bytes(), (t * 10000 + i) as u64, &guard);
@@ -269,11 +269,12 @@ fn multilayer_32byte_keys_4_threads() {
         );
     }
 
+    // Final verification - use same format as insert!
     let guard = tree.guard();
     let mut missing = Vec::new();
     for t in 0..NUM_THREADS {
         for i in 0..KEYS_PER_THREAD {
-            let key = format!("prefix_{:02}_middle_{:010}_end", t, i);
+            let key = format!("prefix_{:02}_middle_{:010}_ends", t, i);
             if tree.get_with_guard(key.as_bytes(), &guard).is_none() {
                 missing.push((t, i));
             }
@@ -737,7 +738,7 @@ fn pattern_pseudorandom_keys() {
             thread::spawn(move || {
                 let guard = tree.guard();
                 // Simple LCG: x = (a*x + c) mod m
-                let mut rng_state = (t as u64 + 1) * 0x9E3779B97F4A7C15;
+                let mut rng_state = (t as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15);
                 let mut thread_keys = Vec::with_capacity(KEYS_PER_THREAD);
 
                 for _ in 0..KEYS_PER_THREAD {
@@ -819,7 +820,7 @@ fn pattern_shared_prefix() {
                 let guard = tree.guard();
                 for i in 0..KEYS_PER_THREAD {
                     // All keys share "prefix__" (8 bytes), differ in suffix
-                    let key = format!("prefix__{:02}_{:06}", t, i);
+                    let key = format!("prefix__{:02}_{:07}", t, i);
                     debug_assert_eq!(key.len(), 18);
 
                     let _ = tree.insert_with_guard(key.as_bytes(), (t * 10000 + i) as u64, &guard);

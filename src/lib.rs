@@ -87,7 +87,9 @@ pub mod slot;
 pub mod suffix;
 mod tracing_helpers;
 pub mod tree;
-pub use freeze::*;
+
+// Re-export freeze types for convenience
+pub use freeze::{AlreadyFrozen, FreezeGuard, Frozen, LeafFreezeUtils};
 
 // Re-export main types for convenience
 pub use alloc::{ArenaAllocator, NodeAllocator, SeizeAllocator};

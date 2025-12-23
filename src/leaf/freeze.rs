@@ -6,7 +6,7 @@
 use std::hint as StdHint;
 
 use crate::{
-    FreezeGuard, Frozen, LeafFreezeUtils, ValueSlot,
+    AlreadyFrozen, FreezeGuard, Frozen, LeafFreezeUtils, ValueSlot,
     ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, WRITE_ORD},
     permuter::Permuter,
 };
@@ -64,7 +64,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     }
 
     pub(crate) fn freeze_permutation(&self) -> FreezeGuard<'_, S, WIDTH> {
-        // Preconditions (fail-fast in release buiilds)
+        // Preconditions (fail-fast in release builds)
         assert!(
             self.version().is_locked(),
             "freeze_permutation: must hold leaf lock"
@@ -96,6 +96,10 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
                 .compare_exchange(raw, frozen_raw, CAS_SUCCESS, CAS_FAILURE)
             {
                 Ok(_) => {
+                    // TEST HOOK: Allow tests to inject barriers after freeze
+                    #[cfg(test)]
+                    crate::tree::test_hooks::call_after_freeze_hook();
+
                     // Success: return guard with unfrozen snapshot
                     return FreezeGuard::new(self, raw, true);
                 }
@@ -103,6 +107,62 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
                 Err(_) => {
                     // A concurrent CAS insert published just before us.
                     // Retry with the new permutation value.
+                    StdHint::spin_loop();
+                }
+            }
+        }
+    }
+
+    /// Try to freeze the permutation, returning an error if already frozen.
+    ///
+    /// This is a diagnostic variant of [`Self::freeze_permutation()`] that
+    /// returns `Err(AlreadyFrozen)` instead of panicking if the permutation
+    /// is already frozen.
+    ///
+    /// # Use Case
+    ///
+    /// Primarily for testing and diagnostics. Normal split code should use
+    /// [`Self::freeze_permutation()`] which panics on invariant violations.
+    ///
+    /// # Preconditions
+    ///
+    /// - Caller must hold the leaf lock
+    /// - Caller must have called `mark_split()`
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(FreezeGuard)` on success
+    /// - `Err(AlreadyFrozen)` if already frozen
+    pub(crate) fn try_freeze_permutation(&self) -> Result<FreezeGuard<'_, S, WIDTH>, AlreadyFrozen> {
+        // Preconditions (still assert, even for try_ variant)
+        assert!(
+            self.version().is_locked(),
+            "try_freeze_permutation: must hold leaf lock"
+        );
+        assert!(
+            self.version().is_splitting(),
+            "try_freeze_permutation: must have called mark_split()"
+        );
+
+        // CAS loop to install freeze sentinel
+        loop {
+            let raw: u64 = self.permutation.load(READ_ORD);
+
+            // Check for already-frozen - return error instead of panic
+            if LeafFreezeUtils::is_frozen::<WIDTH>(raw) {
+                return Err(AlreadyFrozen { raw });
+            }
+
+            let frozen_raw: u64 = LeafFreezeUtils::freeze_raw::<WIDTH>(raw);
+
+            match self
+                .permutation
+                .compare_exchange(raw, frozen_raw, CAS_SUCCESS, CAS_FAILURE)
+            {
+                Ok(_) => {
+                    return Ok(FreezeGuard::new(self, raw, true));
+                }
+                Err(_) => {
                     StdHint::spin_loop();
                 }
             }

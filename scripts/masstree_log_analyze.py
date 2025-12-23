@@ -1340,8 +1340,8 @@ def anomaly_immediate_verify(events: Sequence[Event]) -> int:
     2. Immediate get() for key K returns NotFound
     3. This happens within a very short time window (< 1ms typically)
 
-    Based on Analysis.md §2.4, these transient failures indicate a
-    visibility window where the key is temporarily unfindable.
+    These transient failures indicate a visibility window where
+    the key is temporarily unfindable.
     """
     print("--- Anomaly: Immediate Verify Failures ---\n")
 

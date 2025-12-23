@@ -53,6 +53,19 @@ use crate::permuter::Permuter;
 /// rather than normal contention.
 const MAX_CHILD_NOT_FOUND_RETRIES: usize = 16;
 
+/// Maximum retries for split propagation before declaring invariant violation.
+///
+/// This bounds the retry loop in `locked_parent_internode` and
+/// `propagate_internode_split_concurrent` to prevent livelock under pathological
+/// contention. Value chosen to be high enough for legitimate contention but low
+/// enough to detect bugs quickly.
+///
+/// # Reference
+///
+/// C++ `masstree_struct.hh:552-570` uses an unbounded loop, but we add bounds
+/// for safety and debuggability.
+const MAX_PROPAGATION_RETRIES: usize = 64;
+
 use super::cas_insert::CasInsertResult;
 use super::{InsertError, MassTree};
 
@@ -628,8 +641,17 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let version: u32 = leaf.version().stable();
             last_version = version;
 
-            // Search for key position
-            let perm: Permuter<WIDTH> = leaf.permutation();
+            // Search for key position.
+            // Use permutation_try() for freeze safety.
+            let perm: Permuter<WIDTH> = if let Ok(p) = leaf.permutation_try() {
+                p
+            } else {
+                // Split in progress - retry with fresh version
+                use_reach = true;
+
+                continue;
+            };
+
             let result: InsertSearchResult = self.search_for_insert(leaf, key, &perm);
 
             // FIXED: For layer descent, check if we can skip locking entirely.
@@ -1091,35 +1113,92 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         }
     }
 
-    /// Lock parent of an internode with validation loop.
+    /// Acquire lock on an internode's parent with revalidation.
     ///
-    /// Same algorithm as `locked_parent_leaf` but for internode children.
-    #[allow(dead_code)]
+    /// This function safely acquires the parent internode's lock while handling
+    /// the race where another thread may split the parent (changing the child's
+    /// parent pointer) between our read and lock acquisition.
+    ///
+    /// # Algorithm (matches C++ `locked_parent`)
+    ///
+    /// 1. Read parent pointer (optimistic)
+    /// 2. Lock the parent
+    /// 3. Re-read parent pointer (revalidate)
+    /// 4. If changed, unlock and retry
+    ///
+    /// # Returns
+    ///
+    /// - `Some((parent_ptr, lock_guard))` - Successfully locked parent
+    /// - `None` - Node has no parent (is a root)
+    ///
+    /// # Panics
+    ///
+    /// Panics if retry count exceeds `MAX_PROPAGATION_RETRIES` (indicates bug).
+    ///
+    /// # Reference
+    ///
+    /// C++ `masstree_struct.hh:552-570` (`locked_parent`)
     #[expect(clippy::unused_self, reason = "Method signature for API consistency")]
     fn locked_parent_internode(
         &self,
-        node: &InternodeNode<LeafValue<V>, WIDTH>,
-    ) -> (*mut InternodeNode<LeafValue<V>, WIDTH>, LockGuard<'_>) {
+        inode: &InternodeNode<LeafValue<V>, WIDTH>,
+    ) -> Option<(*mut InternodeNode<LeafValue<V>, WIDTH>, LockGuard<'_>)> {
+        let mut retries: usize = 0;
+
         loop {
-            let parent_ptr: *mut u8 = node.parent();
-            debug_assert!(
-                !parent_ptr.is_null(),
-                "locked_parent_internode called on root"
-            );
+            // Step 1: Optimistic read of parent pointer
+            let parent_ptr: *mut u8 = inode.parent();
 
-            // SAFETY: parent_ptr is valid (node has a parent)
-            let parent: &InternodeNode<LeafValue<V>, WIDTH> =
-                unsafe { &*(parent_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
-
-            let lock: LockGuard<'_> = parent.version().lock();
-
-            let current_parent: *mut u8 = node.parent();
-
-            if current_parent == parent_ptr {
-                return (parent_ptr.cast(), lock);
+            // No parent means this is a root node
+            if parent_ptr.is_null() {
+                return None;
             }
 
+            // Step 2: Lock the parent
+            // SAFETY: parent_ptr is non-null, and seize guard ensures it won't be freed
+            let parent: &InternodeNode<LeafValue<V>, WIDTH> =
+                unsafe { &*(parent_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
+            let lock: LockGuard<'_> = parent.version().lock();
+
+            // Step 3: Revalidate - check parent pointer hasn't changed
+            let current_parent: *mut u8 = inode.parent();
+            if current_parent == parent_ptr {
+                // Success: parent is stable
+                #[cfg(feature = "tracing")]
+                if retries > 0 {
+                    tracing::debug!(
+                        retries,
+                        inode_ptr = ?inode as *const _,
+                        parent_ptr = ?parent_ptr,
+                        "locked_parent_internode succeeded after retries"
+                    );
+                }
+                return Some((parent_ptr.cast(), lock));
+            }
+
+            // Step 4: Parent changed, release lock and retry
             drop(lock);
+
+            retries += 1;
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                retries,
+                inode_ptr = ?inode as *const _,
+                old_parent = ?parent_ptr,
+                new_parent = ?current_parent,
+                "locked_parent_internode: parent changed, retrying"
+            );
+
+            if retries >= MAX_PROPAGATION_RETRIES {
+                panic!(
+                    "locked_parent_internode: exceeded {} retries - possible livelock or bug",
+                    MAX_PROPAGATION_RETRIES
+                );
+            }
+
+            // Brief pause to reduce contention
+            std::hint::spin_loop();
         }
     }
 
@@ -1460,6 +1539,29 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// Propagate an internode split up the tree (concurrent version).
     ///
     /// Called when a parent internode is full and needs to be split.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Lock parent, check if still full (may have been split by another thread)
+    /// 2. If not full, just insert and return
+    /// 3. If full, split the parent creating a sibling
+    /// 4. Check if parent is a root:
+    ///    - Main tree root: Create new root internode via CAS
+    ///    - Layer root: Promote via `maybe_parent` pattern
+    /// 5. Otherwise, propagate to grandparent:
+    ///    - Use `locked_parent_internode()` for safe grandparent acquisition
+    ///    - Revalidate parent position in grandparent
+    ///    - Insert separator + sibling, or recursively split
+    ///
+    /// # Race Handling
+    ///
+    /// - **Revalidation loop**: If grandparent changes during lock acquisition, retry
+    /// - **Position revalidation**: If parent not found in grandparent, structure changed
+    /// - **Bounded retries**: Prevents livelock, detects bugs
+    ///
+    /// # Reference
+    ///
+    /// C++ `masstree_split.hh:206-297` (`make_split` main loop)
     #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
     fn propagate_internode_split_concurrent(
         &self,
@@ -1469,183 +1571,216 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         insert_child: *mut u8,
         guard: &LocalGuard<'_>,
     ) -> Result<(), InsertError> {
-        // SAFETY: parent_ptr is valid (from locked_parent_*)
-        let parent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*parent_ptr };
+        let mut retries: usize = 0;
 
-        // Lock the parent
-        let mut parent_lock = parent.version().lock();
+        'retry: loop {
+            retries += 1;
 
-        // FIXED: Recompute child index after acquiring lock.
-        // The original child_idx may be stale if another thread modified
-        // the parent between dropping and reacquiring the lock.
-        let child_idx: usize = parent.find_insert_position(insert_ikey);
+            #[cfg(feature = "tracing")]
+            if retries > 1 {
+                tracing::debug!(
+                    retries,
+                    parent_ptr = ?parent_ptr,
+                    insert_ikey,
+                    "propagate_internode_split: retrying due to structure change"
+                );
+            }
 
-        // FIXED: Check if parent is still full after acquiring lock.
-        // Between the fullness check in the caller and acquiring this lock,
-        // another thread may have already split this node.
-        if parent.size() < WIDTH {
-            // Parent was split by another thread - just insert
-            parent_lock.mark_insert();
-            parent.insert_key_and_child(child_idx, insert_ikey, insert_child);
+            if retries > MAX_PROPAGATION_RETRIES {
+                panic!(
+                    "propagate_internode_split_concurrent: exceeded {} retries",
+                    MAX_PROPAGATION_RETRIES
+                );
+            }
+
+            // SAFETY: parent_ptr is valid (from locked_parent_*)
+            let parent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*parent_ptr };
+
+            // Lock the parent
+            let mut parent_lock = parent.version().lock();
+
+            // Recompute child index after acquiring lock (may have changed)
+            let child_idx: usize = parent.find_insert_position(insert_ikey);
+
+            // Check if parent is still full (another thread may have split it)
+            if parent.size() < WIDTH {
+                // Parent was split by another thread - just insert
+                parent_lock.mark_insert();
+                parent.insert_key_and_child(child_idx, insert_ikey, insert_child);
+
+                // Update child's parent pointer
+                unsafe {
+                    if parent.children_are_leaves() {
+                        (*insert_child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
+                            .set_parent(parent_ptr.cast::<u8>());
+                    } else {
+                        (*insert_child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
+                            .set_parent(parent_ptr.cast::<u8>());
+                    }
+                }
+                return Ok(());
+            }
+
+            // Parent is full - must split
+            parent_lock.mark_split();
+
+            // Create new sibling internode
+            let sibling: Box<InternodeNode<LeafValue<V>, WIDTH>> =
+                InternodeNode::new(parent.height());
+            let sibling_ptr: *mut InternodeNode<LeafValue<V>, WIDTH> = Box::into_raw(sibling);
+            self.allocator.track_internode(sibling_ptr);
+
+            // Split and insert simultaneously
+            let (popup_key, insert_went_left) = unsafe {
+                parent.split_into(&mut *sibling_ptr, child_idx, insert_ikey, insert_child)
+            };
 
             // Update child's parent pointer
-            // SAFETY: insert_child is valid
             unsafe {
+                let child_parent = if insert_went_left {
+                    parent_ptr.cast::<u8>()
+                } else {
+                    sibling_ptr.cast::<u8>()
+                };
+
                 if parent.children_are_leaves() {
                     (*insert_child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
-                        .set_parent(parent_ptr.cast::<u8>());
+                        .set_parent(child_parent);
                 } else {
                     (*insert_child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
-                        .set_parent(parent_ptr.cast::<u8>());
+                        .set_parent(child_parent);
                 }
-            }
-            return Ok(());
-        }
 
-        // FIXED: Mark dirty BEFORE structural modifications.
-        // In Masstree's OCC protocol, the lock bit does NOT block readers.
-        // Only dirty bits signal that mutation is in progress.
-        // Reference: nodeversion.hh:143-159, masstree_split.hh:215-216
-        parent_lock.mark_split();
-
-        // Create new sibling internode
-        let sibling: Box<InternodeNode<LeafValue<V>, WIDTH>> = InternodeNode::new(parent.height());
-        let sibling_ptr: *mut InternodeNode<LeafValue<V>, WIDTH> = Box::into_raw(sibling);
-
-        // Track the new internode for cleanup
-        self.allocator.track_internode(sibling_ptr);
-
-        // Split and insert simultaneously
-        // SAFETY: parent_ptr and sibling_ptr are valid
-        let (popup_key, insert_went_left) =
-            unsafe { parent.split_into(&mut *sibling_ptr, child_idx, insert_ikey, insert_child) };
-
-        // Update child's parent pointer
-        // SAFETY: insert_child is valid
-        unsafe {
-            if insert_went_left {
-                // Child went into left (parent)
-                if parent.children_are_leaves() {
-                    (*insert_child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
-                        .set_parent(parent_ptr.cast::<u8>());
-                } else {
-                    (*insert_child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
-                        .set_parent(parent_ptr.cast::<u8>());
-                }
-            } else {
-                // Child went into right (sibling)
-                if parent.children_are_leaves() {
-                    (*insert_child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
-                        .set_parent(sibling_ptr.cast::<u8>());
-                } else {
-                    (*insert_child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
-                        .set_parent(sibling_ptr.cast::<u8>());
-                }
-            }
-
-            // Update sibling's children's parent pointers
-            let sibling_ref: &InternodeNode<LeafValue<V>, WIDTH> = &*sibling_ptr;
-            for i in 0..=sibling_ref.size() {
-                let child: *mut u8 = sibling_ref.child(i);
-                if !child.is_null() {
-                    if sibling_ref.children_are_leaves() {
-                        (*child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
-                            .set_parent(sibling_ptr.cast::<u8>());
-                    } else {
-                        (*child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
-                            .set_parent(sibling_ptr.cast::<u8>());
+                // Update sibling's children's parent pointers
+                let sibling_ref: &InternodeNode<LeafValue<V>, WIDTH> = &*sibling_ptr;
+                for i in 0..=sibling_ref.size() {
+                    let child: *mut u8 = sibling_ref.child(i);
+                    if !child.is_null() {
+                        if sibling_ref.children_are_leaves() {
+                            (*child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
+                                .set_parent(sibling_ptr.cast::<u8>());
+                        } else {
+                            (*child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
+                                .set_parent(sibling_ptr.cast::<u8>());
+                        }
                     }
                 }
             }
-        }
 
-        // FIXED: Keep parent_lock held during propagation.
-        // The C++ implementation uses hand-over-hand locking: child stays locked
-        // until parent/grandparent update is complete to prevent concurrent
-        // interleaving that could corrupt the split propagation.
-        //
-        // Reference: masstree_split.hh:206-293 (single structured loop)
+            // Check if parent is a root (null parent AND is_root flag)
+            if parent.parent().is_null() && parent.version().is_root() {
+                let current_root: *mut u8 =
+                    self.root_ptr.load(std::sync::atomic::Ordering::Acquire);
 
-        // Check if parent is a root (null parent AND is_root flag)
-        if parent.parent().is_null() && parent.version().is_root() {
-            // Distinguish between main tree root and layer roots.
-            // Main tree root: self.root_ptr points to this internode
-            // Layer root: self.root_ptr points to something else
-            let current_root: *mut u8 = self.root_ptr.load(std::sync::atomic::Ordering::Acquire);
+                if current_root == parent_ptr.cast::<u8>() {
+                    // MAIN TREE ROOT INTERNODE SPLIT
+                    let result = self.create_root_internode_from_internode_split(
+                        parent_ptr,
+                        sibling_ptr,
+                        popup_key,
+                        guard,
+                    );
+                    drop(parent_lock);
+                    return result;
+                }
 
-            if current_root == parent_ptr.cast::<u8>() {
-                // MAIN TREE ROOT INTERNODE SPLIT
-                let result = self.create_root_internode_from_internode_split(
+                // LAYER ROOT INTERNODE SPLIT
+                let result = self.promote_layer_root_internode_concurrent(
                     parent_ptr,
                     sibling_ptr,
                     popup_key,
                     guard,
                 );
-                // NOW release the parent lock after root is installed
                 drop(parent_lock);
                 return result;
             }
-            // LAYER ROOT INTERNODE SPLIT
-            let result = self.promote_layer_root_internode_concurrent(
-                parent_ptr,
-                sibling_ptr,
+
+            // Not a root - propagate to grandparent
+            // Use locked_parent_internode for safe grandparent acquisition with revalidation
+            let (grandparent_ptr, mut grandparent_lock) =
+                match self.locked_parent_internode(parent) {
+                    Some(result) => result,
+                    None => {
+                        // Parent became a root while we were working
+                        // This is a valid race - retry to take the root path
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            retries,
+                            parent_ptr = ?parent_ptr,
+                            "parent became root during propagation, retrying"
+                        );
+                        drop(parent_lock);
+                        continue 'retry;
+                    }
+                };
+
+            let grandparent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*grandparent_ptr };
+
+            // Find parent's position in grandparent
+            // CRITICAL: Do this AFTER acquiring grandparent lock
+            let parent_idx: Option<usize> = {
+                let mut found: Option<usize> = None;
+                for i in 0..=grandparent.size() {
+                    if grandparent.child(i) == parent_ptr.cast::<u8>() {
+                        found = Some(i);
+                        break;
+                    }
+                }
+                found
+            };
+
+            let parent_idx = match parent_idx {
+                Some(idx) => idx,
+                None => {
+                    // Parent not found in grandparent - structure changed
+                    // This can happen if grandparent was split and parent moved
+                    // Release locks and retry from the beginning
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        retries,
+                        parent_ptr = ?parent_ptr,
+                        grandparent_ptr = ?grandparent_ptr,
+                        "parent not found in grandparent, retrying from beginning"
+                    );
+                    drop(grandparent_lock);
+                    drop(parent_lock);
+                    continue 'retry;
+                }
+            };
+
+            // Check if grandparent has space
+            if grandparent.size() < WIDTH {
+                // Grandparent has space - insert separator and sibling
+                grandparent_lock.mark_insert();
+                grandparent.insert_key_and_child(parent_idx, popup_key, sibling_ptr.cast::<u8>());
+                unsafe {
+                    (*sibling_ptr).set_parent(grandparent_ptr.cast::<u8>());
+                }
+
+                // Release locks in order: grandparent first, then parent
+                drop(grandparent_lock);
+                drop(parent_lock);
+                return Ok(());
+            }
+
+            // Grandparent full - need recursive split
+            // Release grandparent lock (will re-acquire in recursive call)
+            drop(grandparent_lock);
+
+            // Recursive call to split grandparent
+            // Note: We pass grandparent_ptr which we just validated
+            let result = self.propagate_internode_split_concurrent(
+                grandparent_ptr,
+                parent_idx,
                 popup_key,
+                sibling_ptr.cast::<u8>(),
                 guard,
             );
-            // NOW release the parent lock after promotion is complete
+
+            // Release parent lock after recursive propagation completes
             drop(parent_lock);
             return result;
         }
-
-        // Recursively propagate to grandparent
-        let grandparent: &InternodeNode<LeafValue<V>, WIDTH> =
-            unsafe { &*parent.parent().cast::<InternodeNode<LeafValue<V>, WIDTH>>() };
-
-        // Find parent's position in grandparent (while still holding parent_lock)
-        let parent_idx: usize = {
-            let mut found: Option<usize> = None;
-            for i in 0..=grandparent.size() {
-                if grandparent.child(i) == parent_ptr.cast::<u8>() {
-                    found = Some(i);
-                    break;
-                }
-            }
-            #[expect(
-                clippy::expect_used,
-                reason = "Invariant: parent must exist in grandparent"
-            )]
-            found.expect("parent must be in grandparent")
-        };
-
-        // Check if grandparent has space
-        let mut grandparent_lock = grandparent.version().lock();
-        if grandparent.size() < WIDTH {
-            // FIXED: Mark dirty BEFORE structural modification
-            grandparent_lock.mark_insert();
-            grandparent.insert_key_and_child(parent_idx, popup_key, sibling_ptr.cast::<u8>());
-            unsafe {
-                (*sibling_ptr).set_parent(parent.parent());
-            }
-            // NOW release both locks (hand-over-hand: grandparent first, then parent)
-            drop(grandparent_lock);
-            drop(parent_lock);
-            return Ok(());
-        }
-
-        // Grandparent full - need recursive split
-        // Drop grandparent_lock since we'll re-acquire it in the recursive call
-        drop(grandparent_lock);
-        // Keep parent_lock until recursive call completes
-        let result = self.propagate_internode_split_concurrent(
-            parent.parent().cast(),
-            parent_idx,
-            popup_key,
-            sibling_ptr.cast::<u8>(),
-            guard,
-        );
-        // NOW release parent_lock after recursive propagation is complete
-        drop(parent_lock);
-        result
     }
 
     /// Create a new root internode from an internode split.

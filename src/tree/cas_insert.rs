@@ -163,7 +163,14 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
             // 2. Get stable version and permutation
             let version: u32 = leaf.version().stable();
-            let perm = leaf.permutation();
+
+            // Use permutation_try() for freeze safety.
+            // If a split is in progress (frozen), fall back to locked path.
+            let Ok(perm) = leaf.permutation_try() else {
+                trace_log!(ikey, leaf_ptr = ?leaf_ptr, "CAS insert: permutation frozen, falling back");
+
+                return CasInsertResult::ContentionFallback;
+            };
 
             // 3. Search for key position
             let search_result = self.search_for_insert(leaf, key, &perm);
@@ -345,7 +352,15 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     }
 
                     // 12. CAS the permutation to publish
-                    match leaf.cas_permutation(perm, new_perm) {
+                    //
+                    // Use cas_permutation_raw() for freeze safety.
+                    // If the CAS fails due to frozen state, fall back to locked path.
+
+                    // TEST HOOK: Allow tests to inject barriers before CAS publish
+                    #[cfg(test)]
+                    super::test_hooks::call_before_cas_publish_hook();
+
+                    match leaf.cas_permutation_raw(perm, new_perm) {
                         Ok(()) => {
                             // Permutation CAS succeeded - verify slot wasn't stolen
                             // in the tiny window between ownership check and perm CAS
@@ -406,8 +421,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                                     leaf.wait_for_split();
                                 }
 
-                                // Now check the current permutation state
-                                let current_perm = leaf.permutation();
+                                // Now check the current permutation state.
+                                // Use permutation_wait() since we need a valid perm for checking.
+                                // At this point the split should have completed (we waited above).
+                                let current_perm = leaf.permutation_wait();
 
                                 // Check if our slot is still in the permutation
                                 if !slot_in_perm(&current_perm, slot) {
@@ -468,7 +485,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                             return CasInsertResult::Success(None);
                         }
 
-                        Err(_current_perm) => {
+                        Err(failure) => {
                             // Permutation CAS failed - try to restore slot to NULL
                             debug_log!(
                                 ikey,
@@ -478,15 +495,23 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                                 "CAS insert: permutation CAS FAILED, restoring slot"
                             );
 
+                            // Rollback: restore slot to NULL and reclaim Arc
                             match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
-                                Ok(()) => {
-                                    // Restored successfully, can reclaim Arc
+                                Ok(()) | Err(_) => {
+                                    // SAFETY: we created this Arc clone, it's ours to reclaim
                                     let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
                                 }
-                                Err(_) => {
-                                    // Slot was stolen - just reclaim our Arc
-                                    let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
-                                }
+                            }
+
+                            // Check if failure was due to frozen state (split in progress)
+                            if failure.is_frozen::<WIDTH>() {
+                                trace_log!(
+                                    ikey,
+                                    slot,
+                                    leaf_ptr = ?leaf_ptr,
+                                    "CAS insert: permutation frozen during CAS, falling back"
+                                );
+                                return CasInsertResult::ContentionFallback;
                             }
 
                             retries += 1;

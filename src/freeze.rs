@@ -60,6 +60,34 @@ impl StdFmt::Display for Frozen {
     }
 }
 
+impl std::error::Error for Frozen {}
+
+/// Error returned when attempting to freeze an already-frozen permutation.
+///
+/// This is a diagnostic error for [`LeafNode::try_freeze_permutation()`].
+/// Under normal operation, this should not occur because:
+/// - Freeze requires holding the leaf lock
+/// - The lock holder always unfreezes before releasing
+///
+/// Observing this error indicates an internal invariant violation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AlreadyFrozen {
+    /// The raw permutation value that was already frozen.
+    pub raw: u64,
+}
+
+impl StdFmt::Display for AlreadyFrozen {
+    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
+        write!(
+            f,
+            "permutation already frozen (raw={:#018x}); possible invariant violation",
+            self.raw
+        )
+    }
+}
+
+impl std::error::Error for AlreadyFrozen {}
+
 /// RAII guard for a frozen permutation.
 ///
 /// Created by [`LeafNode::freeze_permutation()`]. The guard:

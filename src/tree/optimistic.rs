@@ -620,8 +620,15 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 return SearchResult::Retry;
             }
 
-            // Load permutation (Acquire)
-            let perm = leaf.permutation();
+            // Load permutation (Acquire).
+            // Use permutation_try() for freeze safety.
+            // If frozen, a split is in progress - retry with fresh version.
+            let Ok(perm) = leaf.permutation_try() else {
+                version = leaf.version().stable();
+
+                continue;
+            };
+
             let target_ikey: u64 = key.ikey();
 
             // Calculate keylenx for search
@@ -828,8 +835,14 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 return SearchResultRef::Retry;
             }
 
-            // Load permutation (Acquire)
-            let perm = leaf.permutation();
+            // Load permutation (Acquire).
+            // Use permutation_try() for freeze safety.
+            let Ok(perm) = leaf.permutation_try() else {
+                version = leaf.version().stable();
+
+                continue;
+            };
+
             let target_ikey: u64 = key.ikey();
 
             // Calculate keylenx for search
@@ -1199,7 +1212,14 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             return LockfreeSearchResult::Retry;
         }
 
-        let perm = leaf.permutation();
+        // Load permutation with freeze safety.
+        // If frozen, return Retry to restart from tree root.
+        let perm = match leaf.permutation_try() {
+            Ok(p) => p,
+            Err(crate::Frozen) => {
+                return LockfreeSearchResult::Retry;
+            }
+        };
         let size: usize = perm.size();
         let target_ikey: u64 = key.ikey();
 

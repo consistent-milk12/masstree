@@ -20,6 +20,7 @@ use seize::{Collector, LocalGuard};
 mod cas_insert;
 mod index;
 mod layer;
+mod leaf_iterator;
 mod locked;
 mod optimistic;
 mod split;
@@ -30,6 +31,9 @@ mod loom_tests;
 
 #[cfg(all(test, not(miri)))]
 mod shuttle_tests;
+
+#[cfg(test)]
+pub mod test_hooks;
 
 pub use index::MassTreeIndex;
 

@@ -24,10 +24,12 @@ use std::ptr as StdPtr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
+use crate::FreezeGuard;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use seize::{Guard, LocalGuard};
 
 mod freeze;
+mod orphan;
 
 pub mod cas;
 pub mod layer;
@@ -1635,13 +1637,23 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// A new leaf containing the upper half, and the split key.
     ///
     /// # Panics
-    /// Panics in debug mode if `split_pos` is 0 or >= size.
+    ///
+    /// - Panics in debug mode if `split_pos` is 0 or >= size.
+    /// - May panic on OOM during new leaf allocation (before freeze).
     ///
     /// # Safety
     ///
     /// - The `guard` must be valid and from the same collector as the tree.
-    /// - The caller must hold the leaf's lock before calling.
+    /// - The caller must hold the leaf's lock before calling (if concurrent).
     /// - No concurrent reads to the entries being moved may occur.
+    ///
+    /// # Freeze Protocol
+    ///
+    /// When the leaf lock is held (`version().is_locked()` is true), this method
+    /// freezes the permutation before computing the split. This prevents concurrent
+    /// CAS inserts from publishing permutation updates that could be clobbered.
+    ///
+    /// When not locked (single-threaded path), no freeze is performed.
     ///
     /// FIXED: Suffix Migration
     /// This method now correctly migrates suffix data for keys with `keylenx == KSUF_KEYLENX`.
@@ -1651,8 +1663,20 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         split_pos: usize,
         guard: &LocalGuard<'_>,
     ) -> LeafSplitResult<S, WIDTH> {
+        // Allocate new leaf BEFORE freezing (allocation can panic on OOM)
         let new_leaf: Box<Self> = Self::new();
-        let old_perm: Permuter<WIDTH> = self.permutation();
+
+        // Freeze only under the concurrent split protocol (lock held).
+        // This prevents the known bug 3: CAS inserts cannot publish while we hold freeze.
+        let freeze_guard = if self.version().is_locked() {
+            Some(self.freeze_permutation())
+        } else {
+            None
+        };
+
+        let old_perm: Permuter<WIDTH> = freeze_guard
+            .as_ref()
+            .map_or_else(|| self.permutation(), FreezeGuard::snapshot);
         let old_size: usize = old_perm.size();
 
         debug_assert!(
@@ -1699,10 +1723,17 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         let new_perm: Permuter<WIDTH> = Permuter::make_sorted(entries_to_move);
         new_leaf.set_permutation(new_perm);
 
-        // Update old leaf's permutation
+        // Update old leaf's permutation (truncated)
         let mut old_perm_updated: Permuter<WIDTH> = old_perm;
         old_perm_updated.set_size(split_pos);
-        self.set_permutation(old_perm_updated);
+
+        // Publish the truncated permutation.
+        // If frozen, this consumes the guard (unfreeze); otherwise it's a normal store.
+        if let Some(guard) = freeze_guard {
+            self.unfreeze_set_permutation(guard, old_perm_updated);
+        } else {
+            self.set_permutation(old_perm_updated);
+        }
 
         // Get split key
         let split_ikey: u64 = new_leaf.ikey(new_perm.get(0));
@@ -1731,17 +1762,38 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Safety
     ///
     /// - The `guard` must be valid and from the same collector as the tree.
-    /// - The caller must hold the leaf's lock before calling.
+    /// - The caller must hold the leaf's lock before calling (if concurrent).
     /// - No concurrent reads to the entries being moved may occur.
+    ///
+    /// # Freeze Protocol
+    ///
+    /// Uses permutation freezing when locked to prevent **known bug 1** race.
     ///
     /// FIXED: Suffix Migration
     /// This method now correctly migrates suffix data for keys with `keylenx == KSUF_KEYLENX`.
+    ///
+    /// # Panics
+    ///
+    /// - Panics if the leaf is empty (`size == 0`).
+    /// - May panic on OOM during new leaf allocation (before freeze).
     pub unsafe fn split_all_to_right(&self, guard: &LocalGuard<'_>) -> LeafSplitResult<S, WIDTH> {
+        // Allocate new leaf BEFORE freezing (can panic on OOM)
         let new_leaf: Box<Self> = Self::new();
-        let old_perm: Permuter<WIDTH> = self.permutation();
+
+        // Freeze only under the concurrent split protocol (lock held).
+        let freeze_guard = if self.version().is_locked() {
+            Some(self.freeze_permutation())
+        } else {
+            None
+        };
+
+        let old_perm: Permuter<WIDTH> = freeze_guard
+            .as_ref()
+            .map_or_else(|| self.permutation(), FreezeGuard::snapshot);
         let old_size: usize = old_perm.size();
 
-        debug_assert!(old_size > 0, "Cannot split empty leaf");
+        // It is valid to assert here: if this fails, we have not started moving data yet.
+        assert!(old_size > 0, "Cannot split empty leaf");
 
         // Move all entries to new leaf
         for i in 0..old_size {
@@ -1769,8 +1821,13 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         let new_perm: Permuter<WIDTH> = Permuter::make_sorted(old_size);
         new_leaf.set_permutation(new_perm);
 
-        // Clear this leaf's permutation
-        self.set_permutation(Permuter::empty());
+        // Clear this leaf's permutation (empty).
+        // If frozen, this consumes the guard (unfreeze); otherwise it's a normal store.
+        if let Some(guard) = freeze_guard {
+            self.unfreeze_set_permutation(guard, Permuter::empty());
+        } else {
+            self.set_permutation(Permuter::empty());
+        }
 
         // Split key is first key of new leaf
         let split_ikey: u64 = new_leaf.ikey(new_perm.get(0));
@@ -1789,15 +1846,29 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// Verify leaf node invariants (debug builds only).
     ///
     /// Checks:
-    /// - Permutation is valid
+    /// - Permutation is valid (and not frozen)
     /// - keylenx values are consistent with lv variants
     /// - ikeys are in sorted order (via permutation)
+    /// - No orphaned slots (non-NULL pointers outside permutation)
     ///
     /// # Panics
     /// If any invariant is violated.
+    ///
+    /// # Freeze Safety
+    /// If the permutation is frozen (split in progress), invariant checking
+    /// is skipped silently because the leaf is in a transient state.
     #[cfg(debug_assertions)]
     pub fn debug_assert_invariants(&self) {
-        let perm: Permuter<WIDTH> = self.permutation();
+        use crate::LeafFreezeUtils;
+
+        // Load raw permutation and check for freeze
+        let raw: u64 = self.permutation.load(READ_ORD);
+        if LeafFreezeUtils::is_frozen::<WIDTH>(raw) {
+            // Permutation is frozen - skip validation (transient state)
+            return;
+        }
+
+        let perm: Permuter<WIDTH> = Permuter::from_value(raw);
 
         // Check permutation validity
         perm.debug_assert_valid();
@@ -1820,7 +1891,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             }
         }
 
-        // Check if ikey ordering (if size > 1)
+        // Check ikey ordering (if size > 1)
         if size > 1 {
             for i in 1..size {
                 let prev_slot: usize = perm.get(i - 1);
@@ -1834,6 +1905,15 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
                     "ikeys are not in sorted order: slot {prev_slot} ({prev_ikey:#x}) > slot {curr_slot} ({curr_ikey:#x})"
                 );
             }
+        }
+
+        // Check for orphaned slots (non-NULL pointers not in permutation)
+        // Use has_orphaned_slots_if_safe which returns None if frozen (already checked above)
+        if let Some(has_orphans) = self.has_orphaned_slots_if_safe() {
+            assert!(
+                !has_orphans,
+                "leaf has orphaned slots (non-NULL pointers not in permutation)"
+            );
         }
     }
 

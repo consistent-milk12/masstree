@@ -59,6 +59,7 @@ impl CasPermutationFailure {
     /// For retry loops that need to compute a new `expected` value.
     #[must_use]
     #[inline(always)]
+    #[expect(dead_code, reason = "TODO: Reserved for future use")]
     pub const fn as_permuter<const WIDTH: usize>(self) -> Option<Permuter<WIDTH>> {
         if self.is_frozen::<WIDTH>() {
             None
