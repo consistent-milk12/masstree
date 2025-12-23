@@ -1,0 +1,57 @@
+        FAIL [   0.138s] masstree::stress_tests multilayer_mixed_lengths
+  stdout ───
+
+    running 1 test
+    test multilayer_mixed_lengths ... FAILED
+
+    failures:
+
+    failures:
+        multilayer_mixed_lengths
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.13s
+
+  stderr ───
+
+    *** multilayer_mixed_lengths - DIAGNOSTIC ***
+    B-link followed: 18 times
+    Search NotFound: 0 times
+
+
+    thread 'multilayer_mixed_lengths' (990536) panicked at tests/stress_tests.rs:349:5:
+    assertion `left == right` failed
+      left: 1599
+     right: 1600
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::panicking::assert_failed_inner
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:444:17
+       3: core::panicking::assert_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:399:5
+       4: stress_tests::multilayer_mixed_lengths
+                 at ./tests/stress_tests.rs:349:5
+       5: stress_tests::multilayer_mixed_lengths::{{closure}}
+                 at ./tests/stress_tests.rs:300:30
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.024s] masstree::tree_proptests max_length_key_works
+        PASS [   0.035s] masstree::tree_proptests medium_width_tree_works
+        PASS [   0.127s] masstree::tree_proptests differential_insert_get
+        PASS [   0.045s] masstree::tree_proptests sequential_ascending_inserts
+        PASS [   0.149s] masstree::stress_tests repeated_20_runs_8_threads_mixed
+        PASS [   0.033s] masstree::tree_proptests small_width_tree_works
+        PASS [   0.046s] masstree::tree_proptests sequential_descending_inserts
+        PASS [   0.070s] masstree::tree_proptests len_equals_unique_key_count
+        PASS [   0.047s] masstree::tree_proptests splits_preserve_all_keys
+        PASS [   0.096s] masstree::tree_proptests stress_test_many_operations
+        PASS [   0.302s] masstree::tree_proptests differential_random_ops
+────────────
+        FAIL [   0.138s] masstree::stress_tests multilayer_mixed_lengths
+error: test run failed

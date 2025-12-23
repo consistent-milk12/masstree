@@ -1,0 +1,43 @@
+        FAIL [   0.155s] masstree::stress_tests repeated_10_runs_4_threads_8byte
+  stdout ───
+
+    running 1 test
+    test repeated_10_runs_4_threads_8byte ... FAILED
+
+    failures:
+
+    failures:
+        repeated_10_runs_4_threads_8byte
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.14s
+
+  stderr ───
+
+    thread 'repeated_10_runs_4_threads_8byte' (967692) panicked at tests/stress_tests.rs:1058:9:
+    assertion `left == right` failed: Failed on run 5
+      left: 1999
+     right: 2000
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::panicking::assert_failed_inner
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:439:23
+       3: core::panicking::assert_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:399:5
+       4: stress_tests::repeated_10_runs_4_threads_8byte
+                 at ./tests/stress_tests.rs:1058:9
+       5: stress_tests::repeated_10_runs_4_threads_8byte::{{closure}}
+                 at ./tests/stress_tests.rs:1015:38
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.115s] masstree::tree_proptests stress_test_many_operations
+        PASS [   0.259s] masstree::tree_proptests differential_random_ops
+────────────
+        FAIL [   0.155s] masstree::stress_tests repeated_10_runs_4_threads_8byte
+error: test run failed

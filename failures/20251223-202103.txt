@@ -1,0 +1,58 @@
+        FAIL [   0.159s] masstree::stress_tests large_volume_10k_keys_4_threads
+  stdout ───
+
+    running 1 test
+    test large_volume_10k_keys_4_threads ... FAILED
+
+    failures:
+
+    failures:
+        large_volume_10k_keys_4_threads
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.15s
+
+  stderr ───
+
+    *** large_volume_10k_keys_4_threads - DIAGNOSTIC ***
+    B-link followed: 9 times
+    Search NotFound: 0 times
+
+
+    thread 'large_volume_10k_keys_4_threads' (1126152) panicked at tests/stress_tests.rs:564:5:
+    assertion `left == right` failed
+      left: 9999
+     right: 10000
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::panicking::assert_failed_inner
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:444:17
+       3: core::panicking::assert_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:399:5
+       4: stress_tests::large_volume_10k_keys_4_threads
+                 at ./tests/stress_tests.rs:564:5
+       5: stress_tests::large_volume_10k_keys_4_threads::{{closure}}
+                 at ./tests/stress_tests.rs:519:37
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.045s] masstree::tree_proptests is_empty_consistent_with_len
+        PASS [   0.026s] masstree::tree_proptests max_length_key_works
+        PASS [   0.036s] masstree::tree_proptests medium_width_tree_works
+        PASS [   0.136s] masstree::stress_tests repeated_20_runs_8_threads_mixed
+        PASS [   0.039s] masstree::tree_proptests sequential_ascending_inserts
+        PASS [   0.034s] masstree::tree_proptests small_width_tree_works
+        PASS [   0.041s] masstree::tree_proptests sequential_descending_inserts
+        PASS [   0.143s] masstree::tree_proptests differential_insert_get
+        PASS [   0.068s] masstree::tree_proptests len_equals_unique_key_count
+        PASS [   0.041s] masstree::tree_proptests splits_preserve_all_keys
+        PASS [   0.114s] masstree::tree_proptests stress_test_many_operations
+        PASS [   0.292s] masstree::tree_proptests differential_random_ops
+────────────
+        FAIL [   0.159s] masstree::stress_tests large_volume_10k_keys_4_threads
+error: test run failed
