@@ -43,7 +43,7 @@ use std::thread;
 
 use bench_utils::keys_shared_prefix;
 use bench_utils::keys_shared_prefix_chunks;
-use bench_utils::{keys, rw1_keys, shuffled_indices, uniform_indices, zipfian_indices};
+use bench_utils::{keys, rw1_keys, shuffled_indices, uniform_indices};
 
 fn main() {
     divan::main();
@@ -704,7 +704,7 @@ mod concurrent_reads_long_keys {
 mod concurrent_writes_disjoint {
     use super::{Arc, Bencher, IndexSetBTreeMap, MassTree, SkipMap, thread};
 
-    const OPS_PER_THREAD: usize = 1000;
+    const OPS_PER_THREAD: usize = 50_000;
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree(bencher: Bencher, threads: usize) {
@@ -797,8 +797,8 @@ mod concurrent_writes_contention {
 
     use super::{Arc, Bencher, keys, setup_indexset, setup_masstree, setup_skipmap, thread};
 
-    const KEY_SPACE: usize = 1000; // Small key space = high contention
-    const OPS_PER_THREAD: usize = 5000;
+    const KEY_SPACE: usize = 10_000; // Small key space = high contention
+    const OPS_PER_THREAD: usize = 50_000;
 
     #[divan::bench(args = [2, 4, 8, 16, 32])]
     fn masstree(bencher: Bencher, threads: usize) {
@@ -908,140 +908,10 @@ mod concurrent_writes_contention {
 }
 
 // =============================================================================
-// 07: MIXED WORKLOAD - Zipfian Access (Realistic Hot Keys)
+// 07: MIXED WORKLOAD - Uniform Random (No Hot Keys)
 // =============================================================================
 
-#[divan::bench_group(name = "07_mixed_zipfian")]
-mod mixed_zipfian {
-    use super::{
-        Arc, Bencher, black_box, keys, setup_indexset, setup_masstree, setup_skipmap, thread,
-        zipfian_indices,
-    };
-
-    const N: usize = 100_000;
-    const OPS_PER_THREAD: usize = 10_000;
-    const WRITE_RATIO: usize = 10; // 10% writes
-
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn masstree(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
-
-        bencher
-            .with_inputs(|| Arc::new(setup_masstree::<8>(keys.as_ref())))
-            .bench_local_values(|tree| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let tree = Arc::clone(&tree);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        thread::spawn(move || {
-                            let guard = tree.guard();
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum += *v;
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-                tree
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn skipmap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
-
-        bencher
-            .with_inputs(|| Arc::new(setup_skipmap::<8>(keys.as_ref())))
-            .bench_local_values(|map| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let key = keys[idx];
-                                    map.insert(key, i as u64);
-                                } else if let Some(e) = map.get(&keys[idx]) {
-                                    sum += *e.value();
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-                map
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn indexset(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
-
-        bencher
-            .with_inputs(|| Arc::new(setup_indexset::<8>(keys.as_ref())))
-            .bench_local_values(|map| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let key = keys[idx];
-                                    map.insert(key, i as u64);
-                                } else if let Some(r) = map.get(&keys[idx]) {
-                                    sum += r.get().value;
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-                map
-            });
-    }
-}
-
-// =============================================================================
-// 08: MIXED WORKLOAD - Uniform Random (No Hot Keys)
-// =============================================================================
-
-#[divan::bench_group(name = "08_mixed_uniform")]
+#[divan::bench_group(name = "07_mixed_uniform")]
 mod mixed_uniform {
     use super::{
         Arc, Bencher, black_box, keys, setup_indexset, setup_masstree, setup_skipmap, thread,
@@ -1572,47 +1442,43 @@ mod read_scaling_32b {
 }
 
 // =============================================================================
-// 09: MIXED WORKLOAD - Long Keys + Zipfian (Worst Case for MassTree)
+// 08c: WRITE SCALING - Throughput (32-byte keys)
 // =============================================================================
 
-#[divan::bench_group(name = "09_mixed_long_keys_zipfian")]
-mod mixed_long_keys_zipfian {
-    use super::{
-        Arc, Bencher, black_box, keys, setup_dashmap, setup_indexset, setup_masstree,
-        setup_skipmap, thread, zipfian_indices,
-    };
+#[divan::bench_group(name = "08c_write_scaling_32B")]
+mod write_scaling_32b {
+    use super::{Arc, Bencher, IndexSetBTreeMap, MassTree, SkipMap, keys, thread};
 
+    // 10M keys pre-populated, then measure write throughput
     const N: usize = 10_000_000;
     const OPS_PER_THREAD: usize = 50_000;
-    const WRITE_RATIO: usize = 10;
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn masstree_32b(bencher: Bencher, threads: usize) {
+    fn masstree(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<32>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
 
         bencher
-            .with_inputs(|| Arc::new(setup_masstree::<32>(keys.as_ref())))
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| {
+                let mut tree = MassTree::<u64>::new();
+                // Pre-populate with half the keys
+                for (i, key) in keys.iter().take(N / 2).enumerate() {
+                    let _ = tree.insert(key, i as u64);
+                }
+                Arc::new(tree)
+            })
             .bench_local_values(|tree| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
                         thread::spawn(move || {
                             let guard = tree.guard();
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
+                            let start = (t * 7919) % keys.len();
                             for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum += *v;
-                                }
+                                let idx = (start + i) % keys.len();
+                                let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                             }
-                            black_box(sum);
                         })
                     })
                     .collect();
@@ -1625,32 +1491,29 @@ mod mixed_long_keys_zipfian {
     }
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn skipmap_32b(bencher: Bencher, threads: usize) {
+    fn skipmap(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<32>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
 
         bencher
-            .with_inputs(|| Arc::new(setup_skipmap::<32>(keys.as_ref())))
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| {
+                let map = SkipMap::<[u8; 32], u64>::new();
+                for (i, key) in keys.iter().take(N / 2).enumerate() {
+                    map.insert(*key, i as u64);
+                }
+                Arc::new(map)
+            })
             .bench_local_values(|map| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
+                            let start = (t * 7919) % keys.len();
                             for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let key = keys[idx];
-                                    map.insert(key, i as u64);
-                                } else if let Some(e) = map.get(&keys[idx]) {
-                                    sum += *e.value();
-                                }
+                                let idx = (start + i) % keys.len();
+                                map.insert(keys[idx], i as u64);
                             }
-                            black_box(sum);
                         })
                     })
                     .collect();
@@ -1663,70 +1526,29 @@ mod mixed_long_keys_zipfian {
     }
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn indexset_32b(bencher: Bencher, threads: usize) {
+    fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<32>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
 
         bencher
-            .with_inputs(|| Arc::new(setup_indexset::<32>(keys.as_ref())))
-            .bench_local_values(|map| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let key = keys[idx];
-                                    map.insert(key, i as u64);
-                                } else if let Some(r) = map.get(&keys[idx]) {
-                                    sum += r.get().value;
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| {
+                let map = IndexSetBTreeMap::<[u8; 32], u64>::new();
+                for (i, key) in keys.iter().take(N / 2).enumerate() {
+                    map.insert(*key, i as u64);
                 }
-                map
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn dashmap_32b(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<32>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
-
-        bencher
-            .with_inputs(|| Arc::new(setup_dashmap::<32>(keys.as_ref())))
+                Arc::new(map)
+            })
             .bench_local_values(|map| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
+                            let start = (t * 7919) % keys.len();
                             for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let key = keys[idx];
-                                    map.insert(key, i as u64);
-                                } else if let Some(r) = map.get(&keys[idx]) {
-                                    sum += *r.value();
-                                }
+                                let idx = (start + i) % keys.len();
+                                map.insert(keys[idx], i as u64);
                             }
-                            black_box(sum);
                         })
                     })
                     .collect();
@@ -1740,10 +1562,10 @@ mod mixed_long_keys_zipfian {
 }
 
 // =============================================================================
-// 10: SINGLE HOT KEY - Maximum Contention
+// 09: SINGLE HOT KEY - Maximum Contention
 // =============================================================================
 
-#[divan::bench_group(name = "10_single_hot_key")]
+#[divan::bench_group(name = "09_single_hot_key")]
 mod single_hot_key {
     use super::{
         Arc, Bencher, black_box, keys, setup_dashmap, setup_indexset, setup_masstree,
@@ -2502,215 +2324,6 @@ mod concurrent_reads_long_keys_shared_prefix_deep {
 }
 
 // =============================================================================
-// 15: MIXED WORKLOAD - Long Keys + Zipfian + Shared Prefix (Stresses Layering)
-// =============================================================================
-
-#[divan::bench_group(name = "15_mixed_long_keys_zipfian_shared_prefix")]
-mod mixed_long_keys_zipfian_shared_prefix {
-    use super::{
-        Arc, Bencher, black_box, epoch, keys_shared_prefix, setup_dashmap, setup_indexset,
-        setup_masstree, setup_skiplist, setup_skipmap, thread, zipfian_indices,
-    };
-
-    const N: usize = 10_000_000;
-    const OPS_PER_THREAD: usize = 50_000;
-    const WRITE_RATIO: usize = 10;
-    const PREFIX_BUCKETS: u64 = 16; // smaller => more shared prefixes => deeper MassTree layers
-
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn masstree_32b(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix::<32>(N, PREFIX_BUCKETS));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
-
-        bencher
-            .with_inputs(|| Arc::new(setup_masstree::<32>(keys.as_ref())))
-            .bench_local_values(|tree| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let tree = Arc::clone(&tree);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        thread::spawn(move || {
-                            let guard = tree.guard();
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum += *v;
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-                tree
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn skipmap_32b(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix::<32>(N, PREFIX_BUCKETS));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
-
-        bencher
-            .with_inputs(|| Arc::new(setup_skipmap::<32>(keys.as_ref())))
-            .bench_local_values(|map| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let key = keys[idx];
-                                    map.insert(key, i as u64);
-                                } else if let Some(e) = map.get(&keys[idx]) {
-                                    sum += *e.value();
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-                map
-            });
-    }
-
-    /// SkipList variant that reuses a pinned guard per thread for both reads and writes.
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn skiplist_32b_guarded(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix::<32>(N, PREFIX_BUCKETS));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
-
-        bencher
-            .with_inputs(|| Arc::new(setup_skiplist::<32>(keys.as_ref())))
-            .bench_local_values(|list| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let list = Arc::clone(&list);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        thread::spawn(move || {
-                            let guard = &epoch::pin();
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let key = keys[idx];
-                                    list.insert(key, i as u64, guard);
-                                } else if let Some(e) = list.get(&keys[idx], guard) {
-                                    sum += *e.value();
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-                list
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn indexset_32b(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix::<32>(N, PREFIX_BUCKETS));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
-
-        bencher
-            .with_inputs(|| Arc::new(setup_indexset::<32>(keys.as_ref())))
-            .bench_local_values(|map| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let key = keys[idx];
-                                    map.insert(key, i as u64);
-                                } else if let Some(r) = map.get(&keys[idx]) {
-                                    sum += r.get().value;
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-                map
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    fn dashmap_32b(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix::<32>(N, PREFIX_BUCKETS));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD, 42));
-
-        bencher
-            .with_inputs(|| Arc::new(setup_dashmap::<32>(keys.as_ref())))
-            .bench_local_values(|map| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let offset = t * 7919;
-
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[(i + offset) % indices.len()];
-                                if i % WRITE_RATIO == 0 {
-                                    let key = keys[idx];
-                                    map.insert(key, i as u64);
-                                } else if let Some(r) = map.get(&keys[idx]) {
-                                    sum += *r.value();
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-                map
-            });
-    }
-}
-
-// =============================================================================
 // 10: RW1 - C++ Masstree-Compatible Benchmark
 // =============================================================================
 //
@@ -2744,63 +2357,63 @@ mod rw1_cpp_compatible {
         (k as i64).to_be_bytes()
     }
 
-    // /// MassTree: Insert N keys, then get all in shuffled order with verification
-    // #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
-    // fn masstree_rw1(bencher: Bencher, threads: usize) {
-    //     bencher
-    //         .counter(divan::counter::ItemsCount::new(threads * N * 2)) // N puts + N gets per thread
-    //         .bench_local(|| {
-    //             // Fresh tree for each iteration
-    //             let tree = Arc::new(MassTree::<i32>::new());
-    //
-    //             let handles: Vec<_> = (0..threads)
-    //                 .map(|t| {
-    //                     let tree = Arc::clone(&tree);
-    //                     thread::spawn(move || {
-    //                         let seed = SEED_BASE + t as u64;
-    //                         let (keys, expected_values) = rw1_keys(N, seed);
-    //                         let guard = tree.guard();
-    //
-    //                         // Phase 1: Insert all keys
-    //                         for (i, &key) in keys.iter().enumerate() {
-    //                             let key_bytes = i32_to_key(key);
-    //                             let _ =
-    //                                 tree.insert_with_guard(&key_bytes, expected_values[i], &guard);
-    //                         }
-    //
-    //                         // Phase 2: Get all keys in shuffled order, verify values
-    //                         let shuffle_order = shuffled_indices(N, seed.wrapping_add(1));
-    //
-    //                         let mut verified = 0usize;
-    //                         let mut misses = 0usize;
-    //
-    //                         for &idx in &shuffle_order {
-    //                             let key = keys[idx];
-    //                             let key_bytes = i32_to_key(key);
-    //                             let expected = expected_values[idx];
-    //
-    //                             if let Some(&value) = tree.get_ref(&key_bytes, &guard) {
-    //                                 // Note: Due to concurrent inserts from other threads,
-    //                                 // we might get a different value if keys collide.
-    //                                 // We just verify we got *something*.
-    //                                 if value == expected {
-    //                                     verified += 1;
-    //                                 }
-    //                             } else {
-    //                                 misses += 1;
-    //                             }
-    //                         }
-    //
-    //                         black_box((verified, misses));
-    //                     })
-    //                 })
-    //                 .collect();
-    //
-    //             for h in handles {
-    //                 h.join().unwrap();
-    //             }
-    //         });
-    // }
+    /// MassTree: Insert N keys, then get all in shuffled order with verification
+    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    fn masstree_rw1(bencher: Bencher, threads: usize) {
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * N * 2)) // N puts + N gets per thread
+            .bench_local(|| {
+                // Fresh tree for each iteration
+                let tree = Arc::new(MassTree::<i32>::new());
+
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(&tree);
+                        thread::spawn(move || {
+                            let seed = SEED_BASE + t as u64;
+                            let (keys, expected_values) = rw1_keys(N, seed);
+                            let guard = tree.guard();
+
+                            // Phase 1: Insert all keys
+                            for (i, &key) in keys.iter().enumerate() {
+                                let key_bytes = i32_to_key(key);
+                                let _ =
+                                    tree.insert_with_guard(&key_bytes, expected_values[i], &guard);
+                            }
+
+                            // Phase 2: Get all keys in shuffled order, verify values
+                            let shuffle_order = shuffled_indices(N, seed.wrapping_add(1));
+
+                            let mut verified = 0usize;
+                            let mut misses = 0usize;
+
+                            for &idx in &shuffle_order {
+                                let key = keys[idx];
+                                let key_bytes = i32_to_key(key);
+                                let expected = expected_values[idx];
+
+                                if let Some(&value) = tree.get_ref(&key_bytes, &guard) {
+                                    // Note: Due to concurrent inserts from other threads,
+                                    // we might get a different value if keys collide.
+                                    // We just verify we got *something*.
+                                    if value == expected {
+                                        verified += 1;
+                                    }
+                                } else {
+                                    misses += 1;
+                                }
+                            }
+
+                            black_box((verified, misses));
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
 
     /// MassTree: Read-only phase after pre-population (for fairer read comparison)
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]

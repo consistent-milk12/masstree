@@ -190,8 +190,8 @@ fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
                         );
                     }
 
-                    // Log every 100th op
-                    if i % 100 == 0 {
+                    // Log every 10000th op (less spam for large runs)
+                    if i % 10000 == 0 && i > 0 {
                         eprintln!("[T{:02}] op {}/{}", t, i, ops_per_thread);
                     }
 
@@ -344,23 +344,12 @@ fn main() {
     eprintln!("Watchdog will report any thread stuck for >2 seconds.");
     eprintln!();
 
-    // Smaller test first to identify hang quickly
-    eprintln!("=== PHASE 1: Small test (2 threads, 100 ops) ===");
-    run_05_disjoint_writes(2, 100);
-    run_06_contention_writes(2, 100, 50);
-
-    eprintln!("\n=== PHASE 2: Medium test (4 threads, 500 ops) ===");
-    run_05_disjoint_writes(4, 500);
-    run_06_contention_writes(4, 500, 100);
-
-    eprintln!("\n=== PHASE 3: Full benchmark config ===");
-    for &threads in &[2, 4, 8, 16, 32] {
-        run_05_disjoint_writes(threads, 1000);
+    // Run the exact benchmark config that shows variance: 8 threads, 50k ops
+    eprintln!("=== EXACT BENCHMARK CONFIG: 8 threads, 50k ops/thread ===");
+    for run in 1..=10 {
+        eprintln!("\n--- Run {}/10 ---", run);
+        run_05_disjoint_writes(8, 50_000);
     }
 
-    for &threads in &[2, 4, 8, 16, 32] {
-        run_06_contention_writes(threads, 5000, 1000);
-    }
-
-    eprintln!("\nAll tests completed without hanging!");
+    eprintln!("\nAll tests completed!");
 }

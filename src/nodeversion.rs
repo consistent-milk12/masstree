@@ -394,6 +394,10 @@ impl NodeVersion {
     #[must_use]
     pub fn stable(&self) -> u32 {
         let mut backoff = Backoff::new();
+        #[cfg(feature = "tracing")]
+        let start = Instant::now();
+        #[cfg(feature = "tracing")]
+        let mut spins: u32 = 0;
 
         loop {
             let value = self.value.load(Ordering::Relaxed);
@@ -402,10 +406,26 @@ impl NodeVersion {
                 // Acquire fence after dirty check clears.
                 // Ensures we see all writes from the writer who set dirty bits.
                 fence(Ordering::Acquire);
+
+                #[cfg(feature = "tracing")]
+                {
+                    let elapsed = start.elapsed();
+                    if elapsed > Duration::from_millis(5) {
+                        eprintln!(
+                            "[SLOW STABLE] took {:?} spins={}",
+                            elapsed, spins
+                        );
+                    }
+                }
+
                 return value;
             }
 
             backoff.spin();
+            #[cfg(feature = "tracing")]
+            {
+                spins += 1;
+            }
         }
     }
 
@@ -538,6 +558,10 @@ impl NodeVersion {
     #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock(&self) -> LockGuard<'_> {
         let mut backoff: Backoff = Backoff::new();
+        #[cfg(feature = "tracing")]
+        let start = Instant::now();
+        #[cfg(feature = "tracing")]
+        let mut spins: u32 = 0;
 
         loop {
             let value: u32 = self.value.load(Ordering::Relaxed);
@@ -560,6 +584,17 @@ impl NodeVersion {
                     .compare_exchange_weak(value, locked, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
+                    #[cfg(feature = "tracing")]
+                    {
+                        let elapsed = start.elapsed();
+                        if elapsed > Duration::from_millis(5) {
+                            eprintln!(
+                                "[SLOW LOCK] took {:?} spins={}",
+                                elapsed, spins
+                            );
+                        }
+                    }
+
                     return LockGuard {
                         version: self,
                         // locked_value now includes INSERTING_BIT
@@ -570,6 +605,10 @@ impl NodeVersion {
             }
 
             backoff.spin();
+            #[cfg(feature = "tracing")]
+            {
+                spins += 1;
+            }
         }
     }
 

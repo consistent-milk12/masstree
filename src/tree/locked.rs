@@ -180,15 +180,29 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         let mut key = Key::new(key);
         let arc = Arc::new(value);
         #[cfg(feature = "tracing")]
+        let start = std::time::Instant::now();
+
+        let result = self.insert_concurrent(&mut key, arc, guard);
+
+        #[cfg(feature = "tracing")]
         {
-            static INSERT_COUNT: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(0);
-            let count = INSERT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if count % 10000 == 0 {
-                eprintln!("[INSERT] count={} ikey=0x{:016x}", count, key.ikey());
+            let elapsed = start.elapsed();
+            if elapsed > std::time::Duration::from_millis(100) {
+                eprintln!(
+                    "[VERY SLOW INSERT] ikey=0x{:016x} took {:?}",
+                    key.ikey(),
+                    elapsed
+                );
+            } else if elapsed > std::time::Duration::from_millis(20) {
+                eprintln!(
+                    "[SLOW INSERT] ikey=0x{:016x} took {:?}",
+                    key.ikey(),
+                    elapsed
+                );
             }
         }
-        self.insert_concurrent(&mut key, arc, guard)
+
+        result
     }
 
     /// Concurrent insert implementation with cursor pattern.
@@ -226,12 +240,16 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 debug_log!(ikey, retry_count, "insert_concurrent: retry loop iteration");
             }
             #[cfg(feature = "tracing")]
-            if retry_count > 100 && retry_count % 100 == 0 {
+            if retry_count == 10 || retry_count == 50 || (retry_count > 100 && retry_count % 100 == 0) {
                 eprintln!(
-                    "[STUCK?] insert_concurrent: ikey=0x{:016x} retry_count={} in_sublayer={}",
+                    "[HIGH RETRY] insert_concurrent: ikey=0x{:016x} retry_count={} in_sublayer={}",
                     ikey, retry_count, in_sublayer
                 );
             }
+
+            // Pre-allocated node for potential split (reduces lock hold time).
+            // We allocate OUTSIDE the lock when we have a hint that split is likely.
+            let mut preallocated_leaf: Option<Box<LeafNode<LeafValue<V>, WIDTH>>> = None;
 
             // CAS fast path for simple inserts (short keys, no suffix, layer 0 only).
             // Both CAS and locked paths use NULL-claim semantics for slot reservation:
@@ -245,12 +263,17 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         trace_log!(ikey, "insert_concurrent: CAS success");
                         return Ok(old);
                     }
+                    CasInsertResult::FullNeedLock => {
+                        trace_log!(ikey, "insert_concurrent: CAS fallback to locked path (full)");
+                        // Leaf is full - pre-allocate split target BEFORE acquiring lock.
+                        // This reduces lock hold time by moving allocation outside the critical section.
+                        preallocated_leaf = Some(LeafNode::new());
+                    }
                     CasInsertResult::ExistsNeedLock { .. }
-                    | CasInsertResult::FullNeedLock
                     | CasInsertResult::LayerNeedLock { .. }
                     | CasInsertResult::Slot0NeedLock => {
                         trace_log!(ikey, "insert_concurrent: CAS fallback to locked path");
-                        // Key exists, leaf full, or slot-0 violation - locked path will handle
+                        // Key exists, layer needed, or slot-0 violation - locked path will handle
                     }
                     CasInsertResult::ContentionFallback => {
                         // Contention (frozen permutation or version change).
@@ -283,8 +306,22 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             // Follow parent pointers to avoid stale layer roots.
             layer_root = self.maybe_parent(layer_root);
 
+            #[cfg(feature = "tracing")]
+            let find_locked_start = std::time::Instant::now();
+
             // Find and lock target leaf (or get layer descent hint)
             let find_result = self.find_locked(layer_root, key, guard);
+
+            #[cfg(feature = "tracing")]
+            {
+                let find_locked_elapsed = find_locked_start.elapsed();
+                if find_locked_elapsed > std::time::Duration::from_millis(10) {
+                    eprintln!(
+                        "[SLOW FIND_LOCKED] ikey=0x{:016x} took {:?} retry_count={}",
+                        ikey, find_locked_elapsed, retry_count
+                    );
+                }
+            }
 
             // FIXED: Handle DescendLayer case first (no lock held)
             let mut cursor = match find_result {
@@ -536,12 +573,24 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         .map_or(size / 2, |sp| sp.pos)
                         .clamp(1, size - 1);
 
-                    // Perform the split
+                    #[cfg(feature = "tracing")]
+                    let split_start = std::time::Instant::now();
+
+                    // Perform the split.
+                    // Use pre-allocated node if available (reduces lock hold time).
                     // SAFETY: We hold the lock, guard protects suffix operations
-                    let split_result = unsafe { leaf.split_into(split_pos, guard) };
+                    let split_result = if let Some(new_leaf) = preallocated_leaf.take() {
+                        trace_log!(ikey, "insert_concurrent: using pre-allocated node for split");
+                        unsafe { leaf.split_into_preallocated(split_pos, new_leaf, guard) }
+                    } else {
+                        unsafe { leaf.split_into(split_pos, guard) }
+                    };
 
                     let right_leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> =
                         Box::into_raw(split_result.new_leaf);
+
+                    #[cfg(feature = "tracing")]
+                    let split_into_elapsed = split_start.elapsed();
 
                     debug_log!(
                         ikey,
@@ -584,6 +633,9 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     //
                     // Reference: masstree_split.hh:247-293 (delayed shrink + hand-over-hand)
 
+                    #[cfg(feature = "tracing")]
+                    let propagate_start = std::time::Instant::now();
+
                     // Propagate split to parent (while still holding left leaf lock)
                     let propagate_result = self.propagate_leaf_split_concurrent(
                         cursor.leaf_ptr,
@@ -592,8 +644,22 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         guard,
                     );
 
+                    #[cfg(feature = "tracing")]
+                    let propagate_elapsed = propagate_start.elapsed();
+
                     // NOW release the left leaf lock (after parent is updated)
                     drop(cursor.lock);
+
+                    #[cfg(feature = "tracing")]
+                    {
+                        let total_split_time = split_start.elapsed();
+                        if total_split_time > std::time::Duration::from_millis(10) {
+                            eprintln!(
+                                "[SLOW SPLIT] ikey=0x{:016x} total={:?} split_into={:?} propagate={:?}",
+                                ikey, total_split_time, split_into_elapsed, propagate_elapsed
+                            );
+                        }
+                    }
 
                     match propagate_result {
                         Ok(()) => {
@@ -1227,6 +1293,9 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         &self,
         leaf: &LeafNode<LeafValue<V>, WIDTH>,
     ) -> (*mut InternodeNode<LeafValue<V>, WIDTH>, LockGuard<'_>) {
+        #[cfg(feature = "tracing")]
+        let mut retries: u32 = 0;
+
         loop {
             // Step 1: Read parent pointer
             let parent_ptr: *mut u8 = leaf.parent();
@@ -1237,7 +1306,21 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 unsafe { &*(parent_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
 
             // Step 2: Lock parent
+            #[cfg(feature = "tracing")]
+            let lock_start = std::time::Instant::now();
+
             let lock: LockGuard<'_> = parent.version().lock();
+
+            #[cfg(feature = "tracing")]
+            {
+                let lock_elapsed = lock_start.elapsed();
+                if lock_elapsed > std::time::Duration::from_millis(5) {
+                    eprintln!(
+                        "[SLOW PARENT LOCK] parent={:?} took {:?} retries={}",
+                        parent_ptr, lock_elapsed, retries
+                    );
+                }
+            }
 
             // Step 3: Re-read parent pointer
             let current_parent: *mut u8 = leaf.parent();
@@ -1250,6 +1333,11 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
             // Parent changed during lock acquisition - retry
             drop(lock);
+
+            #[cfg(feature = "tracing")]
+            {
+                retries += 1;
+            }
         }
     }
 

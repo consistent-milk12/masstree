@@ -1707,9 +1707,41 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         split_pos: usize,
         guard: &LocalGuard<'_>,
     ) -> LeafSplitResult<S, WIDTH> {
-        // Allocate new leaf BEFORE freezing (allocation can panic on OOM)
+        // Allocate new leaf inline (original behavior for non-preallocated path)
         let new_leaf: Box<Self> = Self::new();
+        // SAFETY: caller guarantees the safety requirements
+        unsafe { self.split_into_preallocated(split_pos, new_leaf, guard) }
+    }
 
+    /// Split this leaf using a pre-allocated target node.
+    ///
+    /// This variant allows the caller to allocate the new leaf node **before**
+    /// acquiring the lock, reducing lock hold time during splits.
+    ///
+    /// # Performance
+    ///
+    /// Pre-allocating outside the lock reduces contention because allocation
+    /// can be slow (malloc, page faults) and holding the lock during allocation
+    /// serializes other threads waiting for the same leaf.
+    ///
+    /// # Arguments
+    ///
+    /// * `split_pos` - Logical position where to split (in pre-insert coordinates)
+    /// * `new_leaf` - Pre-allocated empty leaf node to receive the upper half
+    /// * `guard` - Seize guard for memory safety
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as `split_into()`:
+    /// - The `guard` must be valid and from the same collector as the tree.
+    /// - The caller must hold the leaf's lock before calling (if concurrent).
+    /// - The `new_leaf` must be freshly allocated (empty, no entries).
+    pub unsafe fn split_into_preallocated(
+        &self,
+        split_pos: usize,
+        new_leaf: Box<Self>,
+        guard: &LocalGuard<'_>,
+    ) -> LeafSplitResult<S, WIDTH> {
         // Freeze only under the concurrent split protocol (lock held).
         // This prevents the known bug 3: CAS inserts cannot publish while we hold freeze.
         let freeze_guard = if self.version().is_locked() {
@@ -1821,9 +1853,28 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// - Panics if the leaf is empty (`size == 0`).
     /// - May panic on OOM during new leaf allocation (before freeze).
     pub unsafe fn split_all_to_right(&self, guard: &LocalGuard<'_>) -> LeafSplitResult<S, WIDTH> {
-        // Allocate new leaf BEFORE freezing (can panic on OOM)
+        // Allocate new leaf inline (original behavior for non-preallocated path)
         let new_leaf: Box<Self> = Self::new();
+        // SAFETY: caller guarantees the safety requirements
+        unsafe { self.split_all_to_right_preallocated(new_leaf, guard) }
+    }
 
+    /// Move ALL entries to a pre-allocated right leaf.
+    ///
+    /// This variant allows the caller to allocate the new leaf node **before**
+    /// acquiring the lock, reducing lock hold time during splits.
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as `split_all_to_right()`:
+    /// - The `guard` must be valid and from the same collector as the tree.
+    /// - The caller must hold the leaf's lock before calling (if concurrent).
+    /// - The `new_leaf` must be freshly allocated (empty, no entries).
+    pub unsafe fn split_all_to_right_preallocated(
+        &self,
+        new_leaf: Box<Self>,
+        guard: &LocalGuard<'_>,
+    ) -> LeafSplitResult<S, WIDTH> {
         // Freeze only under the concurrent split protocol (lock held).
         let freeze_guard = if self.version().is_locked() {
             Some(self.freeze_permutation())
