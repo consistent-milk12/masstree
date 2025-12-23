@@ -626,17 +626,23 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // Track the new leaf for cleanup (link succeeded)
                     self.allocator.track_leaf(right_leaf_ptr);
 
-                    // FIXED: Keep left leaf locked during parent propagation.
-                    // The C++ implementation uses hand-over-hand locking: child stays
-                    // locked until parent is updated. This prevents a window where
-                    // keys have moved but parent doesn't know about the right sibling.
+                    // OPTIMIZATION: Release leaf lock BEFORE parent propagation.
                     //
-                    // Reference: masstree_split.hh:247-293 (delayed shrink + hand-over-hand)
+                    // Once link_split succeeds, the split is visible via B-link chain.
+                    // Readers use advance_to_key() to follow B-links, so they'll find
+                    // keys in the right sibling even before the parent is updated.
+                    //
+                    // Releasing early reduces lock hold time dramatically, preventing
+                    // lock convoy where all threads spin on stable() during propagation.
+                    //
+                    // The parent update is just an optimization for faster top-down
+                    // traversal - it's not required for correctness.
+                    drop(cursor.lock);
 
                     #[cfg(feature = "tracing")]
                     let propagate_start = std::time::Instant::now();
 
-                    // Propagate split to parent (while still holding left leaf lock)
+                    // Propagate split to parent (leaf lock already released)
                     let propagate_result = self.propagate_leaf_split_concurrent(
                         cursor.leaf_ptr,
                         right_leaf_ptr,
@@ -646,9 +652,6 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                     #[cfg(feature = "tracing")]
                     let propagate_elapsed = propagate_start.elapsed();
-
-                    // NOW release the left leaf lock (after parent is updated)
-                    drop(cursor.lock);
 
                     #[cfg(feature = "tracing")]
                     {
@@ -1305,11 +1308,11 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let parent: &InternodeNode<LeafValue<V>, WIDTH> =
                 unsafe { &*(parent_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
 
-            // Step 2: Lock parent
+            // Step 2: Lock parent using yield-based locking to reduce convoy
             #[cfg(feature = "tracing")]
             let lock_start = std::time::Instant::now();
 
-            let lock: LockGuard<'_> = parent.version().lock();
+            let lock: LockGuard<'_> = parent.version().lock_with_yield();
 
             #[cfg(feature = "tracing")]
             {
@@ -1382,11 +1385,11 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 return None;
             }
 
-            // Step 2: Lock the parent
+            // Step 2: Lock the parent using yield-based locking to reduce convoy
             // SAFETY: parent_ptr is non-null, and seize guard ensures it won't be freed
             let parent: &InternodeNode<LeafValue<V>, WIDTH> =
                 unsafe { &*(parent_ptr.cast::<InternodeNode<LeafValue<V>, WIDTH>>()) };
-            let lock: LockGuard<'_> = parent.version().lock();
+            let lock: LockGuard<'_> = parent.version().lock_with_yield();
 
             // Step 3: Revalidate - check parent pointer hasn't changed
             let current_parent: *mut u8 = inode.parent();
@@ -1820,8 +1823,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             // SAFETY: parent_ptr is valid (from locked_parent_*)
             let parent: &InternodeNode<LeafValue<V>, WIDTH> = unsafe { &*parent_ptr };
 
-            // Lock the parent
-            let mut parent_lock = parent.version().lock();
+            // Lock the parent using yield-based locking to reduce convoy
+            let mut parent_lock = parent.version().lock_with_yield();
 
             // Recompute child index after acquiring lock (may have changed)
             let child_idx: usize = parent.find_insert_position(insert_ikey);

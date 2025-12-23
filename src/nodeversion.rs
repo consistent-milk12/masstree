@@ -631,7 +631,8 @@ impl NodeVersion {
             return None;
         }
 
-        let locked: u32 = value | LOCK_BIT;
+        // Set both LOCK_BIT and INSERTING_BIT atomically (same as lock()).
+        let locked: u32 = value | LOCK_BIT | INSERTING_BIT;
 
         // Single CAS attempt (use strong CAS for single-shot).
         match self
@@ -686,6 +687,49 @@ impl NodeVersion {
             }
 
             backoff.spin();
+        }
+    }
+
+    /// Acquire the lock using try-lock with yield.
+    ///
+    /// Unlike [`lock()`] which spins with exponential backoff, this method
+    /// yields the CPU to other threads when the lock is contended. This is
+    /// more efficient for lock convoy situations where multiple threads are
+    /// waiting on the same lock.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Try to acquire the lock with `try_lock()`
+    /// 2. If failed, do a small number of spin-loop hints
+    /// 3. Then yield the CPU with `thread::yield_now()`
+    /// 4. Repeat until lock acquired
+    ///
+    /// # Memory Ordering
+    /// Uses `Acquire` ordering on successful lock acquisition.
+    #[must_use = "releasing a lock without using the guard is a logic error"]
+    pub fn lock_with_yield(&self) -> LockGuard<'_> {
+        const SPINS_BEFORE_YIELD: u32 = 4;
+
+        let mut spin_count: u32 = 0;
+
+        loop {
+            // Try to acquire the lock
+            if let Some(guard) = self.try_lock() {
+                return guard;
+            }
+
+            spin_count += 1;
+
+            if spin_count < SPINS_BEFORE_YIELD {
+                // Brief spin before yielding
+                for _ in 0..spin_count {
+                    std::hint::spin_loop();
+                }
+            } else {
+                // Yield CPU to other threads - reduces lock convoy
+                std::thread::yield_now();
+                spin_count = 0; // Reset for next cycle
+            }
         }
     }
 

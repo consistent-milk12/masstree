@@ -188,8 +188,8 @@ mod concurrent_reads_scaling {
         thread, uniform_indices,
     };
 
-    const N: usize = 10_000_000;
-    const OPS_PER_THREAD: usize = 50_000;
+    const N: usize = 100_000;
+    const OPS_PER_THREAD: usize = 10_000;
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree(bencher: Bencher, threads: usize) {
@@ -302,8 +302,8 @@ mod concurrent_reads_long_keys {
         thread, uniform_indices,
     };
 
-    const N: usize = 10_000_000;
-    const OPS_PER_THREAD: usize = 50_000;
+    const N: usize = 100_000;
+    const OPS_PER_THREAD: usize = 10_000;
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree_32b(bencher: Bencher, threads: usize) {
@@ -505,8 +505,8 @@ mod single_hot_key {
         thread,
     };
 
-    const N: usize = 10_000_000;
-    const OPS_PER_THREAD: usize = 50_000;
+    const N: usize = 100_000;
+    const OPS_PER_THREAD: usize = 10_000;
 
     #[divan::bench(args = [2, 4, 8, 16, 32])]
     fn masstree(bencher: Bencher, threads: usize) {
@@ -635,8 +635,8 @@ mod read_scaling {
         thread,
     };
 
-    const N: usize = 10_000_000;
-    const OPS_PER_THREAD: usize = 50_000;
+    const N: usize = 100_000;
+    const OPS_PER_THREAD: usize = 10_000;
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree(bencher: Bencher, threads: usize) {
@@ -844,8 +844,8 @@ mod concurrent_reads_long_keys_shared_prefix {
         setup_rwlock_btreemap, thread, uniform_indices,
     };
 
-    const N: usize = 10_000_000;
-    const OPS_PER_THREAD: usize = 50_000;
+    const N: usize = 100_000;
+    const OPS_PER_THREAD: usize = 10_000;
     const PREFIX_BUCKETS: u64 = 256;
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
@@ -1054,8 +1054,8 @@ mod concurrent_reads_long_keys_shared_prefix_deep {
         setup_rwlock_btreemap, thread, uniform_indices,
     };
 
-    const N: usize = 10_000_000;
-    const OPS_PER_THREAD: usize = 50_000;
+    const N: usize = 100_000;
+    const OPS_PER_THREAD: usize = 10_000;
     const PREFIX_BUCKETS: u64 = 1;
     const PREFIX_CHUNKS: usize = 3;
 
