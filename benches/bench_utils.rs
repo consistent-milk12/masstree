@@ -187,3 +187,49 @@ pub fn uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
     }
     indices
 }
+
+/// Shuffle a slice in-place using Fisher-Yates algorithm.
+/// Matches the C++ Masstree benchmark pattern.
+pub fn shuffle<T>(slice: &mut [T], seed: u64) {
+    let n = slice.len();
+    if n <= 1 {
+        return;
+    }
+
+    let mut state = seed;
+    for i in 0..n {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let j = (state as usize) % n;
+        slice.swap(i, j);
+    }
+}
+
+/// Generate random i32 values (like C++ Masstree rw1 test).
+/// Returns (keys, values) where value[i] = key[i] + 1.
+#[must_use]
+pub fn rw1_keys(n: usize, seed: u64) -> (Vec<i32>, Vec<i32>) {
+    let mut keys = Vec::with_capacity(n);
+    let mut state = seed;
+
+    for _ in 0..n {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let key = state as i32;
+        keys.push(key);
+    }
+
+    let values: Vec<i32> = keys.iter().map(|k| k.wrapping_add(1)).collect();
+    (keys, values)
+}
+
+/// Generate shuffled lookup order for rw1-style benchmarks.
+/// Returns indices into the keys array, shuffled randomly.
+#[must_use]
+pub fn shuffled_indices(n: usize, seed: u64) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..n).collect();
+    shuffle(&mut indices, seed);
+    indices
+}

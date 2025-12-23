@@ -83,6 +83,7 @@ pub mod leaf;
 pub mod nodeversion;
 pub mod ordering;
 pub mod permuter;
+pub mod prefetch;
 pub mod slot;
 pub mod suffix;
 mod tracing_helpers;

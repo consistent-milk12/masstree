@@ -11,6 +11,7 @@ use crate::key::Key;
 use crate::ksearch::upper_bound_internode_direct;
 use crate::leaf::{LeafNode, LeafValue};
 use crate::nodeversion::NodeVersion;
+use crate::prefetch::prefetch_read;
 
 use super::MassTree;
 
@@ -110,6 +111,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let ikey: u64 = key.ikey();
             let child_idx: usize = upper_bound_internode_direct(ikey, internode);
             let start_ptr: *mut u8 = internode.child(child_idx);
+
+            // Prefetch child node while checking if it's a leaf
+            prefetch_read(start_ptr);
+
             let children_are_leaves: bool = internode.children_are_leaves();
 
             if children_are_leaves {
@@ -140,6 +145,9 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 unsafe { &*(current as *const InternodeNode<LeafValue<V>, WIDTH>) };
             let child_idx: usize = upper_bound_internode_direct(ikey, internode);
             let child_ptr: *mut u8 = internode.child(child_idx);
+
+            // Prefetch child node while checking if it's a leaf
+            prefetch_read(child_ptr);
 
             if internode.children_are_leaves() {
                 // SAFETY: children_are_leaves() guarantees child is LeafNode

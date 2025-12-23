@@ -657,16 +657,37 @@ impl<V: Copy> LeafValueIndex<V> {
 /// 3. **Old Container**: Retire via `guard.defer_retire()`
 #[repr(C, align(64))]
 pub struct LeafNode<S: ValueSlot, const WIDTH: usize = 15> {
+    // ========================================================================
+    // Cache Line 0: Version + metadata (read-heavy, rarely written)
+    // ========================================================================
     /// Version for optimistic concurrency control.
     version: NodeVersion,
 
     /// Modification state for suffix operations.
     modstate: ModState,
 
+    /// Padding to fill cache line 0 and separate version from permutation.
+    ///
+    /// **Purpose**: Eliminate false sharing between `version` and `permutation`.
+    /// - `version` is CAS'd during splits (infrequent)
+    /// - `permutation` is CAS'd on every CAS insert (frequent)
+    ///
+    /// Separating them into different cache lines prevents cache line bouncing.
+    _pad0: [u8; 55],
+
+    // ========================================================================
+    // Cache Line 1: Permutation (CAS-heavy, isolated for performance)
+    // ========================================================================
     /// Permutation (atomic for concurrent reads).
     /// Store is linearization point for new slot visibility.
     permutation: AtomicU64,
 
+    /// Padding to fill cache line 1.
+    _pad1: [u8; 56],
+
+    // ========================================================================
+    // Cache Lines 2+: Keys and values (read during search, written on insert)
+    // ========================================================================
     /// 8-byte keys for each slot.
     ikey0: [AtomicU64; WIDTH],
 
@@ -737,7 +758,9 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         Self {
             version,
             modstate: ModState::Insert,
+            _pad0: [0; 55],
             permutation: AtomicU64::new(Permuter::<WIDTH>::empty().value()),
+            _pad1: [0; 56],
             ikey0: std::array::from_fn(|_| AtomicU64::new(0)),
             keylenx: std::array::from_fn(|_| AtomicU8::new(0)),
             leaf_values: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
@@ -812,6 +835,27 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         debug_assert!(slot < WIDTH, "set_ikey: slot out of bounds");
 
         self.ikey0[slot].store(ikey, WRITE_ORD);
+    }
+
+    /// Load all ikeys into a contiguous buffer for SIMD search.
+    ///
+    /// This loads all WIDTH slots (including unused ones) atomically.
+    /// Used by SIMD-accelerated leaf search to find matching ikeys.
+    ///
+    /// # Returns
+    ///
+    /// Array of all ikeys. Unused slots may contain any value.
+    #[inline]
+    #[must_use]
+    #[expect(clippy::indexing_slicing)]
+    pub fn load_all_ikeys(&self) -> [u64; WIDTH] {
+        let mut ikeys = [0u64; WIDTH];
+
+        (0..WIDTH).for_each(|i| {
+            ikeys[i] = self.ikey0[i].load(READ_ORD);
+        });
+
+        ikeys
     }
 
     /// Get the keylenx at the given physical slot.
@@ -2197,7 +2241,9 @@ impl<S: ValueSlot, const WIDTH: usize> Default for LeafNode<S, WIDTH> {
         Self {
             version: NodeVersion::new(true),
             modstate: ModState::Insert,
+            _pad0: [0; 55],
             permutation: AtomicU64::new(Permuter::<WIDTH>::empty().value()),
+            _pad1: [0; 56],
             ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             keylenx: StdArray::from_fn(|_| AtomicU8::new(0)),
             leaf_values: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
@@ -2276,7 +2322,13 @@ pub type LeafNodeCompact<V> = ArcLeafNode<V, 7>;
 // ============================================================================
 
 /// Compile-time size check for `ArcLeafNode<u64, 15>`.
-/// Should be around 448 bytes (7 cache lines) after alignment.
+///
+/// With cache-line padding for false sharing prevention:
+/// - Cache line 0: version + modstate + 55 bytes padding = 64 bytes
+/// - Cache line 1: permutation + 56 bytes padding = 64 bytes
+/// - Remaining: keys, values, pointers = ~400 bytes
+///
+/// Total: ~560 bytes (9 cache lines)
 ///
 /// The enum discriminant adds overhead compared to C++ union approach, but keeps
 /// type safety. `LeafValue<u64>` is 16 bytes (Arc ptr + discriminant).
@@ -2285,8 +2337,9 @@ const _: () = {
     const SIZE: usize = StdMem::size_of::<ArcLeafNode<u64, 15>>();
     const ALIGN: usize = StdMem::align_of::<ArcLeafNode<u64, 15>>();
 
-    // Should fit in 8 cache lines (512 bytes) at most
-    assert!(SIZE <= 512, "ArcLeafNode exceeds 8 cache lines");
+    // With cache-line padding, allow up to 10 cache lines (640 bytes)
+    // This is a reasonable trade-off for eliminating false sharing
+    assert!(SIZE <= 640, "ArcLeafNode exceeds 10 cache lines");
 
     // Should be cache-aligned
     assert!(ALIGN == 64, "ArcLeafNode not cache-line-aligned");
@@ -2297,8 +2350,8 @@ const _: () = {
     const SIZE: usize = StdMem::size_of::<InlineLeafNode<u64, 15>>();
     const ALIGN: usize = StdMem::align_of::<InlineLeafNode<u64, 15>>();
 
-    // Inline mode should be smaller since there's no Arc pointer
-    assert!(SIZE <= 512, "InlineLeafNode exceeds 8 cache lines");
+    // With cache-line padding, allow up to 10 cache lines
+    assert!(SIZE <= 640, "InlineLeafNode exceeds 10 cache lines");
     assert!(ALIGN == 64, "InlineLeafNode not cache-line-aligned");
 };
 

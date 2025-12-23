@@ -22,6 +22,7 @@
 #![allow(clippy::pedantic)]
 #![expect(clippy::unwrap_used)]
 #![allow(clippy::panic)]
+#![allow(clippy::indexing_slicing)]
 
 mod common;
 
@@ -797,6 +798,8 @@ fn pattern_pseudorandom_keys() {
     }
 
     assert_eq!(tree.len(), keys.len());
+
+    drop(keys)
 }
 
 /// Same key prefix, different suffixes (tests layer contention)
@@ -1245,10 +1248,8 @@ fn extreme_100k_keys() {
                     let _ = tree.insert_with_guard(&key, key_val, &guard);
 
                     // Verify every 100th key to reduce overhead
-                    if i % 100 == 0 {
-                        if tree.get_with_guard(&key, &guard).is_none() {
-                            verify_failures.fetch_add(1, Ordering::Relaxed);
-                        }
+                    if i % 100 == 0 && tree.get_with_guard(&key, &guard).is_none() {
+                        verify_failures.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             })

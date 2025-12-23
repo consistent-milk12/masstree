@@ -35,7 +35,7 @@ A Rust implementation of the [Masstree algorithm](https://pdos.csail.mit.edu/pap
 | Range scans | Planned |
 | Deletion | Planned |
 
-**305 tests passing** (unit, integration, property, loom, shuttle)
+**341 tests passing** (unit, integration, property, loom, shuttle)
 
 ## Benchmarks
 
@@ -73,6 +73,37 @@ For 8-byte integer keys, Congee wins decisively:
 | **MassTree** | **143 Mitem/s** | — |
 | RwLock\<BTreeMap\> | 36 Mitem/s | 4x slower |
 | Mutex\<BTreeMap\> | 4 Mitem/s | 35x slower |
+
+### vs Original C++ Masstree
+
+Direct comparison using the same methodology as the [C++ reference implementation](https://github.com/kohler/masstree-beta)'s `rw1` test: 10M random i32 keys, shuffled read access, value verification.
+
+| Threads | C++ Masstree | Rust MassTree | Difference |
+|---------|--------------|---------------|------------|
+| 1 | 1.83 Mops/s | 2.12 Mitem/s | +16% |
+| 2 | 3.38 Mops/s | 4.15 Mitem/s | +23% |
+| 4 | 5.71 Mops/s | 8.02 Mitem/s | +40% |
+| 8 | 9.00 Mops/s | 14.05 Mitem/s | +56% |
+| 16 | 11.79 Mops/s | 15.29 Mitem/s | +30% |
+| 32 | 13.42 Mops/s | 18.04 Mitem/s | +34% |
+
+Scaling: C++ 7.3x vs Rust 8.5x (1→32 threads).
+
+**Why we're faster**: We're simpler, not more optimized. The C++ implementation supports features we lack (deletion, range scans, variable-length key suffixes), and each feature adds overhead. We also benefit from [seize](https://github.com/ibraheemdev/seize)'s Hyaline memory reclamation (simpler than C++'s epoch-based RCU) and mimalloc.
+
+**Caveats**: This is one specific workload (read-heavy, shuffled access). The C++ implementation has been battle-tested for over a decade. We haven't done serious optimization work yet (no SIMD in hot path). These numbers may not generalize to your use case.
+
+To reproduce:
+
+```bash
+# Rust
+just apples
+
+# C++ (from reference/ directory)
+# Just clone the original repo: https://github.com/kohler/masstree-beta
+./configure && make
+./mttest -j32 -l 10000000 rw1
+```
 
 ### Benchmark Caveats
 

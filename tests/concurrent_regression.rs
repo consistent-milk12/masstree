@@ -442,6 +442,7 @@ fn stress_concurrent_insert_many_keys() {
     let insert_failures = Arc::new(AtomicUsize::new(0));
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
+    #[expect(clippy::unnecessary_unwrap)]
     let handles: Vec<_> = (0..NUM_THREADS)
         .map(|t| {
             let tree = Arc::clone(&tree);

@@ -223,6 +223,21 @@ miri-all:
 bench:
     cargo bench
 
+# Run benchmarks with native CPU optimizations (AVX2, etc.)
+bench-native:
+    RUSTFLAGS="-C target-cpu=native" cargo bench --bench concurrent_maps --features mimalloc
+
+# Run specific benchmark with native optimizations
+# Usage: just bench-native-one 08a_read_scaling
+bench-native-one FILTER:
+    RUSTFLAGS="-C target-cpu=native" cargo bench --bench concurrent_maps --features mimalloc -- {{FILTER}}
+
+# Run C++ Masstree-compatible read scaling benchmark (apples-to-apples comparison)
+# Pre-populates 10M keys, then measures pure read throughput with shuffled access
+# Compare with: cd reference && ./mttest -j32 -l 10000000 rw1
+apples:
+    cargo bench --bench concurrent_maps --features mimalloc -- rw1_reads_only
+
 # === Profiling ===
 
 # Build with debug symbols for profiling

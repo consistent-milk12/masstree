@@ -1,12 +1,23 @@
-//! Filepath: src/ksearch.rs
 //! Key search algorithms for `MassTree`.
 //!
 //! Provides binary search for:
 //! - Lower bound in leaves (finding keys or insertion points)
 //! - Upper bound in internodes (routing to children)
 //!
+//! # Submodules
+//!
+//! - [`simd`]: SIMD-accelerated key comparison primitives
+//! - [`simd_search`]: High-level SIMD search functions for tree nodes
+//!
 //! # Reference
 //! Based on `ksearch.hh` from the C++ Masstree implementation.
+
+pub mod simd;
+pub mod simd_search;
+
+// Re-export SIMD search functions for convenience
+pub use simd_search::find_ikey_matches_leaf;
+pub use simd_search::upper_bound_internode_simd;
 
 use crate::internode::InternodeNode;
 use crate::leaf::LeafNode;

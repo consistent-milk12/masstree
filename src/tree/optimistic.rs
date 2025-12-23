@@ -43,6 +43,8 @@ use std::sync::atomic::{AtomicU64, Ordering::Acquire, Ordering::Relaxed};
 
 use seize::LocalGuard;
 
+use crate::prefetch::prefetch_read;
+
 // ============================================================================
 // Lightweight Debug Counters (near-zero overhead)
 // ============================================================================
@@ -560,6 +562,9 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let child_idx: usize = upper_bound_internode_direct(target_ikey, inode);
             let child: *mut u8 = inode.child(child_idx);
 
+            // Prefetch child node while we validate version (hides memory latency)
+            prefetch_read(child);
+
             if child.is_null() {
                 // Concurrent split in progress - retry from start
                 node = start;
@@ -655,6 +660,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     continue;
                 }
 
+                // Two-store read: keylenx + leaf_values
                 let slot_keylenx: u8 = leaf.keylenx(slot);
                 let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
@@ -868,6 +874,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     continue;
                 }
 
+                // keylenx + leaf_values
                 let slot_keylenx: u8 = leaf.keylenx(slot);
                 let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
@@ -1172,6 +1179,9 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
             let child_idx: usize = upper_bound_internode_direct(target_ikey, internode);
             let child: *mut u8 = internode.child(child_idx);
+
+            // Prefetch child node while we validate version (hides memory latency)
+            prefetch_read(child);
 
             if child.is_null() {
                 // Concurrent split in progress - retry from start
