@@ -65,6 +65,19 @@ use super::locked::InsertSearchResult;
 /// Maximum CAS retry attempts before falling back to locked path.
 const MAX_CAS_RETRIES: usize = 3;
 
+/// Exponential backoff for CAS retries.
+///
+/// Reduces contention by spacing out retry attempts. Each retry doubles the
+/// number of spin iterations, capped at 64 to avoid excessive latency.
+#[inline]
+fn backoff(retries: usize) {
+    // Exponential: 1, 2, 4, 8, 16, 32, 64, 64, ...
+    let spins = 1usize << retries.min(6);
+    for _ in 0..spins {
+        std::hint::spin_loop();
+    }
+}
+
 /// Result of a CAS insert attempt.
 #[derive(Debug)]
 pub(super) enum CasInsertResult<V> {
@@ -250,7 +263,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                             trace_log!(ikey, leaf_ptr = ?leaf_ptr, retries, "CAS insert: max retries on slot CAS, falling back");
                             return CasInsertResult::ContentionFallback;
                         }
-                        // Retry with fresh permutation
+                        // Backoff before retry to reduce contention
+                        backoff(retries);
                         continue;
                     }
                     // FIX: Validate version BEFORE writing key data.
@@ -282,6 +296,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         if retries > MAX_CAS_RETRIES {
                             return CasInsertResult::ContentionFallback;
                         }
+                        backoff(retries);
                         continue;
                     }
 
@@ -320,6 +335,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         if retries > MAX_CAS_RETRIES {
                             return CasInsertResult::ContentionFallback;
                         }
+                        backoff(retries);
                         continue;
                     }
 
@@ -336,6 +352,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         if retries > MAX_CAS_RETRIES {
                             return CasInsertResult::ContentionFallback;
                         }
+                        backoff(retries);
                         continue;
                     }
 
@@ -357,6 +374,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         if retries > MAX_CAS_RETRIES {
                             return CasInsertResult::ContentionFallback;
                         }
+                        backoff(retries);
                         continue;
                     }
 
@@ -541,7 +559,8 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                             if retries > MAX_CAS_RETRIES {
                                 return CasInsertResult::ContentionFallback;
                             }
-                            // Retry with new state
+                            // Backoff before retry
+                            backoff(retries);
                         }
                     }
                 }

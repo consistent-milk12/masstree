@@ -400,9 +400,13 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                                 // Re-read permutation - if size < WIDTH, CAS threads may
                                 // release their claims. Retry a few times before splitting.
                                 slot_retry_count += 1;
-                                if slot_retry_count < 3 {
-                                    // Brief yield to let CAS threads finish
-                                    std::hint::spin_loop();
+                                if slot_retry_count < 2 {
+                                    // Brief yield to let CAS threads finish.
+                                    // Use exponential backoff to reduce contention.
+                                    let spins = 1usize << slot_retry_count.min(4);
+                                    for _ in 0..spins {
+                                        std::hint::spin_loop();
+                                    }
                                     perm = leaf.permutation();
                                     back_offset = 0;
                                     continue;
