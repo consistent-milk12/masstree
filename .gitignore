@@ -10,3 +10,7 @@ reference/
 .cargo/
 target/
 .git/
+
+logs/
+docs/
+.backup/
