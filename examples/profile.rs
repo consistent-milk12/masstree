@@ -1,4 +1,4 @@
-//! Profiling binary for use with valgrind/callgrind.
+//! Profiling binary for use with perf/valgrind/callgrind.
 //!
 //! # Usage
 //!
@@ -6,13 +6,15 @@
 //! # Build with optimizations + debug symbols
 //! cargo build --release --example profile
 //!
-//! # Run with callgrind
-//! valgrind --tool=callgrind ./target/release/examples/profile [workload]
+//! # Run with perf (recommended for concurrency profiling)
+//! perf record -g ./target/release/examples/profile contention
+//! perf report
 //!
-//! # Analyze results
+//! # Run with callgrind (single-threaded only)
+//! valgrind --tool=callgrind ./target/release/examples/profile key
+//!
+//! # Analyze callgrind results
 //! callgrind_annotate callgrind.out.<pid> --auto=yes
-//!
-//! # Or use kcachegrind for GUI
 //! kcachegrind callgrind.out.<pid>
 //! ```
 //!
@@ -20,10 +22,14 @@
 //!
 //! - `key` (default): Key operations
 //! - `permuter`: Permuter operations
-//! - `all`: Both workloads
+//! - `contention`: 32-thread contention writes (for perf profiling)
+//! - `all`: All workloads
 
 use std::hint::black_box;
+use std::sync::Arc;
+use std::thread;
 
+use masstree::MassTree;
 use masstree::key::Key;
 use masstree::permuter::Permuter;
 
@@ -36,13 +42,15 @@ fn main() {
     match workload {
         "key" => run_key_workload(),
         "permuter" => run_permuter_workload(),
+        "contention" => run_contention_workload(),
         "all" => {
             run_key_workload();
             run_permuter_workload();
+            run_contention_workload();
         }
         _ => {
             eprintln!("Unknown workload: {workload}");
-            eprintln!("Available: key, permuter, all");
+            eprintln!("Available: key, permuter, contention, all");
             std::process::exit(1);
         }
     }
@@ -170,4 +178,98 @@ fn run_permuter_workload() {
     }
 
     eprintln!("Permuter workload complete.");
+}
+
+// =============================================================================
+// Key generation (from bench_utils)
+// =============================================================================
+
+const MULTIPLIERS: [u64; 4] = [
+    1,
+    0x517c_c1b7_2722_0a95,
+    0x9e37_79b9_7f4a_7c15,
+    0xbf58_476d_1ce4_e5b9,
+];
+
+fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
+    assert!(K % 8 == 0, "key size must be a multiple of 8");
+    let chunks = K / 8;
+    let mut out = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let mut key = [0u8; K];
+        for c in 0..chunks {
+            let v = (i as u64).wrapping_mul(MULTIPLIERS[c]);
+            let bytes = v.to_be_bytes();
+            let start = c * 8;
+            key[start..start + 8].copy_from_slice(&bytes);
+        }
+        out.push(key);
+    }
+    out
+}
+
+fn setup_masstree<const K: usize>(keys: &[[u8; K]]) -> MassTree<u64> {
+    let mut tree = MassTree::new();
+    for (i, key) in keys.iter().enumerate() {
+        let _ = tree.insert(key, i as u64);
+    }
+    tree
+}
+
+/// Contention workload: 32 threads hammering 1000 keys
+/// This is the workload where MassTree has high variance
+#[inline(never)]
+fn run_contention_workload() {
+    const THREADS: usize = 32;
+    const OPS_PER_THREAD: usize = 50_000;
+    const KEY_SPACE: usize = 1000;
+
+    eprintln!(
+        "Running Contention workload ({} threads, {} ops/thread, {} keys)...",
+        THREADS, OPS_PER_THREAD, KEY_SPACE
+    );
+
+    let keys: Arc<Vec<[u8; 8]>> = Arc::new(keys::<8>(KEY_SPACE));
+    let tree = Arc::new(setup_masstree::<8>(keys.as_ref()));
+
+    eprintln!("Pre-populated {} keys", tree.len());
+
+    let start = std::time::Instant::now();
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|t| {
+            let tree = Arc::clone(&tree);
+            let keys = Arc::clone(&keys);
+            thread::spawn(move || {
+                let guard = tree.guard();
+                let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+
+                for _ in 0..OPS_PER_THREAD {
+                    // LCG random
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1);
+                    let idx = (state as usize) % keys.len();
+                    let key = &keys[idx];
+                    let val = state;
+
+                    let _ = black_box(tree.insert_with_guard(key, val, &guard));
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        let _ = h.join();
+    }
+
+    let elapsed = start.elapsed();
+    let total_ops = THREADS * OPS_PER_THREAD;
+    eprintln!(
+        "Contention workload complete: {} ops in {:?} ({:.0} ops/sec)",
+        total_ops,
+        elapsed,
+        total_ops as f64 / elapsed.as_secs_f64()
+    );
 }
