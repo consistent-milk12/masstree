@@ -492,25 +492,33 @@ use find_all_impl::{find_all_matches_u64_avx2, find_all_matches_u64_sse2};
 mod tests {
     use super::*;
 
+    // ========================================================================
+    //  SIMD-dispatching tests (skip under Miri - no SIMD support)
+    // ========================================================================
+
     #[test]
+    #[cfg(not(miri))]
     fn test_find_exact_empty() {
         let keys: [u64; 0] = [];
         assert_eq!(find_exact_u64(&keys, 42), None);
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_exact_single_found() {
         let keys = [42u64];
         assert_eq!(find_exact_u64(&keys, 42), Some(0));
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_exact_single_not_found() {
         let keys = [42u64];
         assert_eq!(find_exact_u64(&keys, 43), None);
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_exact_multiple() {
         let keys = [10u64, 20, 30, 40, 50];
         assert_eq!(find_exact_u64(&keys, 10), Some(0));
@@ -520,6 +528,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_exact_alignment() {
         // Test with various sizes to exercise SIMD remainder handling
         for size in 1..=16 {
@@ -532,24 +541,28 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_count_le_empty() {
         let keys: [u64; 0] = [];
         assert_eq!(count_le_u64(&keys, 0, 42), 0);
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_count_le_all() {
         let keys = [10u64, 20, 30, 40, 50];
         assert_eq!(count_le_u64(&keys, 5, 100), 5);
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_count_le_none() {
         let keys = [10u64, 20, 30, 40, 50];
         assert_eq!(count_le_u64(&keys, 5, 5), 0);
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_count_le_partial() {
         let keys = [10u64, 20, 30, 40, 50];
         assert_eq!(count_le_u64(&keys, 5, 10), 1);
@@ -559,6 +572,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_count_le_alignment() {
         // Test with various sizes
         for size in 1..=16 {
@@ -569,7 +583,10 @@ mod tests {
         }
     }
 
-    // Test scalar fallback explicitly
+    // ========================================================================
+    //  Scalar tests (safe under Miri)
+    // ========================================================================
+
     #[test]
     fn test_scalar_find_exact() {
         let keys = [10u64, 20, 30, 40, 50];
@@ -584,16 +601,18 @@ mod tests {
     }
 
     // ========================================================================
-    //  find_all_matches Tests
+    //  find_all_matches Tests (SIMD-dispatching, skip under Miri)
     // ========================================================================
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_all_matches_empty() {
         let keys: [u64; 0] = [];
         assert_eq!(find_all_matches_u64(&keys, 0, 42), 0);
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_all_matches_single() {
         let keys = [42u64];
         assert_eq!(find_all_matches_u64(&keys, 1, 42), 0b0001);
@@ -601,6 +620,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_all_matches_multiple() {
         let keys = [10u64, 20, 30, 20, 50];
         // Find all 20s at indices 1 and 3
@@ -612,6 +632,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_all_matches_all_same() {
         let keys = [42u64; 8];
         assert_eq!(find_all_matches_u64(&keys, 8, 42), 0b1111_1111);
@@ -619,6 +640,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_all_matches_various_sizes() {
         // Test with various sizes to exercise SIMD remainder handling
         for size in 1..=15 {

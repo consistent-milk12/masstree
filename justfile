@@ -14,9 +14,22 @@ build:
 build-release:
     cargo build --release
 
-# Run all tests (unit + doc + integration)
+# Run all tests with nextest (saves failures to file if any)
 test:
-    cargo test
+    #!/usr/bin/env bash
+    set -o pipefail
+    cargo nextest run --no-fail-fast 2>&1 | tee .test-output.tmp
+    exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        # Ensure failures directory exists
+        mkdir -p failures
+        # Extract only FAIL sections with their details (stdout/stderr blocks)
+        outfile="failures/$(date +%Y%m%d-%H%M%S).txt"
+        awk '/^[[:space:]]*FAIL/{found=1} found{print} /^────────────$/{if(found) found=0} /^[[:space:]]*Summary/{found=1}' .test-output.tmp > "$outfile"
+        echo "Failures saved to $outfile"
+    fi
+    rm -f .test-output.tmp
+    exit $exit_code
 
 # Run all tests with nextest, tracing, and mimalloc (prioritized mode)
 # This is the recommended way to run tests for development

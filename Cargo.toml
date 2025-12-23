@@ -31,7 +31,8 @@ default = []
 # Alternative global allocators for benchmarking
 mimalloc = ["dep:mimalloc"]
 # When disabled (default), all tracing calls compile to no-ops with zero overhead.
-tracing = ["dep:tracing"]
+# When enabled, auto-initializes a subscriber that respects RUST_LOG env var.
+tracing = ["dep:tracing", "dep:tracing-subscriber"]
 
 [dependencies]
 seize = "0.5.1"
@@ -42,6 +43,10 @@ mimalloc = { version = "0.1.48", optional = true }
 
 # Optional tracing (enabled via features) - zero overhead when disabled
 tracing = { version = "0.1.44", optional = true }
+tracing-subscriber = { version = "0.3.22", features = [
+	"env-filter",
+	"fmt",
+], optional = true }
 
 [dev-dependencies]
 divan = "0.1.21"

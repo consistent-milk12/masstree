@@ -252,11 +252,11 @@ fn setup_tracing() {
         .json()
         .with_filter(make_filter(config.default_level));
 
-    // Compose and install subscriber
-    Registry::default()
+    // Compose and install subscriber (use try_init to avoid panic if lib already set one)
+    let _ = Registry::default()
         .with(console_layer)
         .with(file_layer)
-        .init();
+        .try_init();
 }
 
 #[cfg(test)]

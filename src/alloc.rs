@@ -12,14 +12,29 @@
 //!
 //! - [`ArenaAllocator`] (deprecated): Original Phase 1/2 allocator that stores
 //!   `Box<T>` in a Vec. Causes Stacked Borrows violations under Miri.
+//!
+//! ## Memory Reclamation
+//!
+//! The [`NodeAllocator`] trait provides retirement methods for seize-based
+//! memory reclamation:
+//! - `retire_leaf` / `retire_internode`: Retire individual nodes
+//! - `retire_subtree_root`: Retire an entire subtree (for layer teardown)
+//! - `teardown_tree`: Synchronous tree teardown at `MassTree::drop`
+
+mod reclaim;
 
 use std::ptr as StdPtr;
 
 use parking_lot::Mutex;
+use seize::{Guard, LocalGuard};
 
 use crate::internode::InternodeNode;
 use crate::leaf::LeafNode;
 use crate::slot::ValueSlot;
+
+use reclaim::{
+    reclaim_internode_boxed, reclaim_leaf_boxed, reclaim_subtree_impl, reclaim_subtree_root,
+};
 
 /// Trait for allocating and deallocating tree nodes.
 ///
@@ -146,6 +161,69 @@ pub trait NodeAllocator<S: ValueSlot, const WIDTH: usize> {
     #[expect(unused_variables, reason = "by default it's no op")]
     fn track_internode(&self, ptr: *mut InternodeNode<S, WIDTH>) {
         // Default: no-op for allocators without interior mutability
+    }
+
+    // ========================================================================
+    //  Memory Reclamation
+    // ========================================================================
+
+    /// Retire a leaf node that has been unlinked from the tree.
+    ///
+    /// Schedules the node for deferred reclamation via seize. The node will
+    /// be freed once no readers can hold references to it.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been allocated by this allocator.
+    /// - `ptr` must be unreachable from the tree by any new traversal.
+    /// - In-flight traversals must detect deletion/retry via the OCC protocol.
+    #[inline(always)]
+    #[expect(unused_variables, reason = "by default it's no op")]
+    unsafe fn retire_leaf(&self, ptr: *mut LeafNode<S, WIDTH>, guard: &LocalGuard<'_>) {
+        // Default: no-op for arena-style allocators
+    }
+
+    /// Retire an internode that has been unlinked from the tree.
+    ///
+    /// Schedules the node for deferred reclamation via seize.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been allocated by this allocator.
+    /// - `ptr` must be unreachable from the tree by any new traversal.
+    /// - In-flight traversals must detect deletion/retry via the OCC protocol.
+    #[inline(always)]
+    #[expect(unused_variables, reason = "by default it's no op")]
+    unsafe fn retire_internode(&self, ptr: *mut InternodeNode<S, WIDTH>, guard: &LocalGuard<'_>) {
+        // Default: no-op for arena-style allocators
+    }
+
+    /// Retire an entire subtree that has been unlinked from the tree.
+    ///
+    /// Typically used for reclaiming a whole layer when a layer pointer is removed.
+    /// The subtree will be traversed and all nodes freed once safe.
+    ///
+    /// # Safety
+    ///
+    /// - The subtree must be fully unlinked from the main tree before calling.
+    /// - No other shared pointers may reference nodes exclusively through this subtree.
+    #[inline(always)]
+    #[expect(unused_variables, reason = "by default it's no op")]
+    unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // Default: no-op for arena-style allocators
+    }
+
+    /// Teardown reachable nodes at `MassTree::drop`.
+    ///
+    /// Called when the tree is being destroyed and no concurrent access is possible.
+    /// This traverses and frees all nodes reachable from the root.
+    ///
+    /// Arena allocators can no-op (they free via their own Drop).
+    /// Seize-based allocators must implement this to free nodes by traversal.
+    #[inline(always)]
+    #[expect(unused_variables, reason = "by default it's no op")]
+    fn teardown_tree(&mut self, root_ptr: *mut u8) {
+        // Default: no-op for arena-style allocators
     }
 }
 
@@ -478,6 +556,60 @@ impl<S: ValueSlot, const WIDTH: usize> NodeAllocator<S, WIDTH> for SeizeAllocato
     fn track_internode(&self, ptr: *mut InternodeNode<S, WIDTH>) {
         self.internode_ptrs.lock().push(ptr);
     }
+
+    // ========================================================================
+    //  Memory Reclamation
+    // ========================================================================
+
+    unsafe fn retire_leaf(&self, ptr: *mut LeafNode<S, WIDTH>, guard: &LocalGuard<'_>) {
+        // Remove from tracking to keep counts accurate and prevent double-free.
+        {
+            let mut ptrs = self.leaf_ptrs.lock();
+            if let Some(pos) = ptrs.iter().position(|&p| p == ptr) {
+                ptrs.swap_remove(pos);
+            }
+        }
+        // Schedule deferred reclamation via seize.
+        // SAFETY: Caller guarantees ptr validity and unlink discipline.
+        unsafe { guard.defer_retire(ptr, reclaim_leaf_boxed::<S, WIDTH>) };
+    }
+
+    unsafe fn retire_internode(&self, ptr: *mut InternodeNode<S, WIDTH>, guard: &LocalGuard<'_>) {
+        // Remove from tracking to keep counts accurate and prevent double-free.
+        {
+            let mut ptrs = self.internode_ptrs.lock();
+            if let Some(pos) = ptrs.iter().position(|&p| p == ptr) {
+                ptrs.swap_remove(pos);
+            }
+        }
+        // Schedule deferred reclamation via seize.
+        // SAFETY: Caller guarantees ptr validity and unlink discipline.
+        unsafe { guard.defer_retire(ptr, reclaim_internode_boxed::<S, WIDTH>) };
+    }
+
+    unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // Note: We don't remove individual nodes from tracking here.
+        // The subtree reclaimer will drop them, and our Drop impl will
+        // skip any that are no longer in the tracking vecs.
+        //
+        // SAFETY: Caller guarantees subtree is fully unlinked.
+        unsafe { guard.defer_retire(root_ptr, reclaim_subtree_root::<S, WIDTH>) };
+    }
+
+    #[expect(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "root_ptr is a valid tree root from MassTree::drop"
+    )]
+    fn teardown_tree(&mut self, root_ptr: *mut u8) {
+        // Clear tracking to prevent double-free in Drop.
+        // The subtree reclaimer will drop all nodes.
+        self.leaf_ptrs.get_mut().clear();
+        self.internode_ptrs.get_mut().clear();
+
+        // Reclaim synchronously via DFS traversal.
+        // SAFETY: Tree drop is exclusive access, no concurrent readers.
+        unsafe { reclaim_subtree_impl::<S, WIDTH>(root_ptr) };
+    }
 }
 
 impl<S: ValueSlot, const WIDTH: usize> Drop for SeizeAllocator<S, WIDTH> {
@@ -786,5 +918,54 @@ mod tests {
         // SAFETY: ptr2 was just allocated above
         unsafe { alloc.dealloc_internode(ptr2) };
         assert_eq!(alloc.internode_count(), 0);
+    }
+
+    // ========================================================================
+    //  Memory Reclamation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_seize_teardown_tree_clears_tracking() {
+        let mut alloc: SeizeArcAllocator<u64, 15> = SeizeAllocator::new();
+
+        // Allocate a single leaf node
+        let ptr = alloc.alloc_leaf(LeafNode::new());
+        assert_eq!(alloc.leaf_count(), 1);
+
+        // Teardown should clear tracking and free the node
+        alloc.teardown_tree(ptr.cast());
+
+        // Tracking should be cleared
+        assert_eq!(alloc.leaf_count(), 0);
+        assert_eq!(alloc.internode_count(), 0);
+    }
+
+    #[test]
+    fn test_seize_teardown_tree_null_is_noop() {
+        let mut alloc: SeizeArcAllocator<u64, 15> = SeizeAllocator::new();
+
+        // Teardown with null should not crash (no nodes allocated)
+        alloc.teardown_tree(std::ptr::null_mut());
+
+        // Tracking should remain at zero
+        assert_eq!(alloc.leaf_count(), 0);
+        assert_eq!(alloc.internode_count(), 0);
+    }
+
+    #[test]
+    fn test_seize_teardown_then_drop_no_double_free() {
+        let mut alloc: SeizeArcAllocator<u64, 15> = SeizeAllocator::new();
+
+        // Allocate a leaf node
+        let ptr = alloc.alloc_leaf(LeafNode::new());
+        assert_eq!(alloc.leaf_count(), 1);
+
+        // Teardown should clear tracking and free
+        alloc.teardown_tree(ptr.cast());
+        assert_eq!(alloc.leaf_count(), 0);
+
+        // Drop should be a no-op (no double-free)
+        drop(alloc);
+        // Miri will catch any double-free
     }
 }

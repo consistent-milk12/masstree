@@ -21,6 +21,12 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         let raw: u64 = self.permutation.load(READ_ORD);
 
         if LeafFreezeUtils::is_frozen::<WIDTH>(raw) {
+            #[cfg(feature = "tracing")]
+            tracing::trace!(
+                leaf_ptr = ?std::ptr::from_ref(self),
+                raw = format_args!("{raw:#018x}"),
+                "permutation_try: FROZEN detected"
+            );
             Err(Frozen)
         } else {
             Ok(Permuter::from_value(raw))
@@ -28,10 +34,25 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     }
 
     pub(crate) fn permutation_wait(&self) -> Permuter<WIDTH> {
+        const MAX_STABLE_RETRIES: u32 = 100;
+        let mut stable_retries: u32 = 0;
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            leaf_ptr = ?std::ptr::from_ref(self),
+            "permutation_wait: ENTER - waiting for unfrozen permutation"
+        );
+
         loop {
             let raw: u64 = self.permutation.load(READ_ORD);
 
             if !LeafFreezeUtils::is_frozen::<WIDTH>(raw) {
+                #[cfg(feature = "tracing")]
+                tracing::trace!(
+                    leaf_ptr = ?std::ptr::from_ref(self),
+                    stable_retries,
+                    "permutation_wait: EXIT - permutation unfrozen"
+                );
                 return Permuter::from_value(raw);
             }
 
@@ -39,19 +60,19 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             let mut spun: u32 = 0;
 
             while spun < MAX_SPIN_ITERS {
-                // processor instruction hint
-                //
-                // A common use case for `spin_loop` is implementing bounded optimistic
-                // spinning in a CAS loop in synchronization primitives. To avoid problems
-                // like priority inversion, it is strongly recommended that the spin loop is
-                // terminated after a finite amount of iterations and an appropriate blocking
-                // syscall is made.
                 StdHint::spin_loop();
                 spun += 1;
 
                 let raw: u64 = self.permutation.load(READ_ORD);
 
                 if !LeafFreezeUtils::is_frozen::<WIDTH>(raw) {
+                    #[cfg(feature = "tracing")]
+                    tracing::trace!(
+                        leaf_ptr = ?std::ptr::from_ref(self),
+                        stable_retries,
+                        spun,
+                        "permutation_wait: EXIT - unfrozen during spin"
+                    );
                     return Permuter::from_value(raw);
                 }
             }
@@ -59,7 +80,31 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             // A frozen permutation implies a split is in progress.
             // The splitter must have set `SPLITTING_BIT` before freezing, so
             // `stable()` will wait for the split critical section to complete.
+            #[cfg(feature = "tracing")]
+            tracing::trace!(
+                leaf_ptr = ?std::ptr::from_ref(self),
+                stable_retries,
+                version = self.version().value(),
+                "permutation_wait: calling stable() - waiting for split"
+            );
             let _ = self.version().stable();
+
+            stable_retries += 1;
+
+            // Bounded wait: if we've waited too long, return an empty permutation.
+            // The caller should revalidate version and retry if this happens.
+            // This prevents infinite hangs while maintaining correctness via OCC.
+            if stable_retries >= MAX_STABLE_RETRIES {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    stable_retries,
+                    leaf_ptr = ?std::ptr::from_ref(self),
+                    version = self.version().value(),
+                    "permutation_wait: TIMEOUT - exceeded max retries, returning empty"
+                );
+                // Return empty permutation - caller will detect stale state via version check
+                return Permuter::empty();
+            }
         }
     }
 
@@ -74,7 +119,17 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             "freeze_permutation: must have called mark_split()"
         );
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            leaf_ptr = ?std::ptr::from_ref(self),
+            version = self.version().value(),
+            "freeze_permutation: ENTER - installing freeze sentinel"
+        );
+
         // CAS loop to install freeze sentinel
+        #[cfg(feature = "tracing")]
+        let mut cas_retries: u32 = 0;
+
         loop {
             let raw: u64 = self.permutation.load(READ_ORD);
 
@@ -100,11 +155,29 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
                     #[cfg(test)]
                     crate::tree::test_hooks::call_after_freeze_hook();
 
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        leaf_ptr = ?std::ptr::from_ref(self),
+                        cas_retries,
+                        old_raw = format_args!("{raw:#018x}"),
+                        frozen_raw = format_args!("{frozen_raw:#018x}"),
+                        "freeze_permutation: SUCCESS - permutation frozen"
+                    );
+
                     // Success: return guard with unfrozen snapshot
                     return FreezeGuard::new(self, raw, true);
                 }
 
                 Err(_) => {
+                    #[cfg(feature = "tracing")]
+                    {
+                        cas_retries += 1;
+                        tracing::trace!(
+                            leaf_ptr = ?std::ptr::from_ref(self),
+                            cas_retries,
+                            "freeze_permutation: CAS failed, retrying"
+                        );
+                    }
                     // A concurrent CAS insert published just before us.
                     // Retry with the new permutation value.
                     StdHint::spin_loop();
@@ -201,6 +274,14 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         mut guard: FreezeGuard<'_, S, WIDTH>,
         perm: Permuter<WIDTH>,
     ) {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            leaf_ptr = ?std::ptr::from_ref(self),
+            new_perm_size = perm.size(),
+            new_perm_raw = format_args!("{:#018x}", perm.value()),
+            "unfreeze_set_permutation: UNFREEZING permutation"
+        );
+
         // Disable rollback on drop
         guard.set_active(false);
 

@@ -277,36 +277,6 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         }
     }
 
-    /// Get multiple keys in a single call.
-    ///
-    /// More efficient than individual `get()` calls due to:
-    /// - Better instruction cache utilization
-    /// - Potential CPU branch prediction improvements
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let keys: Vec<&[u8]> = vec![b"key1", b"key2", b"key3"];
-    /// let values: Vec<Option<Arc<u64>>> = tree.get_many(&keys);
-    /// ```
-    pub fn get_many<'a, I>(&self, keys: I) -> Vec<Option<Arc<V>>>
-    where
-        I: IntoIterator<Item = &'a [u8]>,
-    {
-        keys.into_iter().map(|key| self.get(key)).collect()
-    }
-
-    /// Get multiple keys, returning only found values with their keys.
-    ///
-    /// Useful when you want to filter out missing keys.
-    pub fn get_many_existing<'a, I>(&self, keys: I) -> Vec<(&'a [u8], Arc<V>)>
-    where
-        I: IntoIterator<Item = &'a [u8]>,
-    {
-        keys.into_iter()
-            .filter_map(|key| self.get(key).map(|v| (key, v)))
-            .collect()
-    }
 }
 
 // ============================================================================
@@ -1564,42 +1534,6 @@ mod tests {
         for b in 0..=255u8 {
             assert_eq!(tree.get(&[b]).map(|v| *v), Some(u64::from(b)));
         }
-    }
-
-    #[test]
-    fn test_get_many() {
-        let mut tree: MassTree<u64, 15> = MassTree::new();
-
-        tree.insert(b"a", 1).unwrap();
-        tree.insert(b"b", 2).unwrap();
-        tree.insert(b"c", 3).unwrap();
-
-        let keys: Vec<&[u8]> = vec![b"a", b"b", b"c", b"d"];
-        let results = tree.get_many(keys);
-
-        assert_eq!(results.len(), 4);
-        assert_eq!(results[0].as_ref().map(|v| **v), Some(1));
-        assert_eq!(results[1].as_ref().map(|v| **v), Some(2));
-        assert_eq!(results[2].as_ref().map(|v| **v), Some(3));
-        assert!(results[3].is_none());
-    }
-
-    #[test]
-    fn test_get_many_existing() {
-        let mut tree: MassTree<u64, 15> = MassTree::new();
-
-        tree.insert(b"a", 1).unwrap();
-        tree.insert(b"b", 2).unwrap();
-        tree.insert(b"c", 3).unwrap();
-
-        let keys: Vec<&[u8]> = vec![b"a", b"b", b"c", b"d"];
-        let results = tree.get_many_existing(keys);
-
-        // Only 3 found (d is missing)
-        assert_eq!(results.len(), 3);
-        assert_eq!(*results[0].1, 1);
-        assert_eq!(*results[1].1, 2);
-        assert_eq!(*results[2].1, 3);
     }
 
     #[test]

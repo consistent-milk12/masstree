@@ -88,6 +88,13 @@ pub(super) enum CasInsertResult<V> {
         slot: usize,
     },
 
+    /// Slot-0 violation - need locked path for swap logic.
+    ///
+    /// This is NOT transient contention. Slot-0 stores `ikey_bound` and can only
+    /// be reused if the new key's ikey matches the bound. The locked path has
+    /// swap logic to handle this.
+    Slot0NeedLock,
+
     /// High contention or complex case - fall back to locked path.
     ContentionFallback,
 }
@@ -168,7 +175,6 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             // If a split is in progress (frozen), fall back to locked path.
             let Ok(perm) = leaf.permutation_try() else {
                 trace_log!(ikey, leaf_ptr = ?leaf_ptr, "CAS insert: permutation frozen, falling back");
-
                 return CasInsertResult::ContentionFallback;
             };
 
@@ -195,8 +201,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // 5. Check slot-0 rule
                     let next_free: usize = perm.back();
                     if next_free == 0 && !leaf.can_reuse_slot0(ikey) {
-                        // Slot-0 violation requires swap logic - fall back
-                        return CasInsertResult::ContentionFallback;
+                        // Slot-0 violation requires swap logic - use locked path
+                        // This is NOT transient contention - retrying won't help
+                        trace_log!(ikey, leaf_ptr = ?leaf_ptr, next_free, "CAS insert: slot-0 violation, need locked path");
+                        return CasInsertResult::Slot0NeedLock;
                     }
 
                     // 6. Compute new permutation (immutable)
@@ -239,6 +247,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                         retries += 1;
                         if retries > MAX_CAS_RETRIES {
+                            trace_log!(ikey, leaf_ptr = ?leaf_ptr, retries, "CAS insert: max retries on slot CAS, falling back");
                             return CasInsertResult::ContentionFallback;
                         }
                         // Retry with fresh permutation
@@ -367,8 +376,22 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                             if leaf.load_slot_value(slot) != arc_ptr {
                                 // Slot was stolen after we published! This is rare but possible.
                                 // The entry is in the permutation but has wrong data.
-                                // Fall back to locked path which will see the key exists
-                                // and update it with the correct value.
+                                //
+                                // CRITICAL: We MUST increment count here because:
+                                // 1. Our permutation CAS succeeded - slot is now visible in tree
+                                // 2. Our key metadata (ikey, keylenx) is in the slot
+                                // 3. The locked path retry will find "key exists" and do UPDATE
+                                // 4. Updates don't increment count (not a new key)
+                                //
+                                // If we don't increment here, the key ends up visible but uncounted.
+                                // The locked path will fix the value, but we own the count increment.
+                                self.count.fetch_add(1, Ordering::Relaxed);
+                                debug_log!(
+                                    ikey,
+                                    slot,
+                                    leaf_ptr = ?leaf_ptr,
+                                    "CAS insert: slot stolen after publish, count incremented, falling back for value fix"
+                                );
                                 // Note: we don't reclaim our Arc - it's been overwritten
                                 return CasInsertResult::ContentionFallback;
                             }

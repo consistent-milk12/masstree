@@ -822,6 +822,23 @@ impl<V, const WIDTH: usize> Default for MassTree<V, WIDTH, SeizeAllocator<LeafVa
 }
 
 // ============================================================================
+//  Drop Implementation
+// ============================================================================
+
+impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> Drop for MassTree<V, WIDTH, A> {
+    fn drop(&mut self) {
+        // No concurrent access is possible here (Drop requires unique access).
+        // Load the root pointer and delegate teardown to the allocator.
+        //
+        // The allocator's teardown_tree method will:
+        // - For SeizeAllocator: traverse and free all reachable nodes
+        // - For ArenaAllocator: no-op (nodes freed via arena's own Drop)
+        let root: *mut u8 = self.root_ptr.load(std::sync::atomic::Ordering::Acquire);
+        self.allocator.teardown_tree(root);
+    }
+}
+
+// ============================================================================
 //  Tests
 // ============================================================================
 

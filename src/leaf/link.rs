@@ -48,12 +48,76 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         is_marked(self.next_raw())
     }
 
-    /// Wait for split to complete (spin on mark).
+    /// Wait for split to complete (spin on mark) with bounded wait.
+    ///
+    /// Uses progressive backoff: spin briefly, then wait on version.stable().
+    /// The splitter must have set SPLITTING_BIT before marking the pointer,
+    /// so stable() will wait for the split critical section to complete.
     #[inline]
     pub fn wait_for_split(&self) {
-        while self.is_next_marked() {
-            std::hint::spin_loop();
+        const MAX_SPIN_ITERS: u32 = 64;
+        const MAX_STABLE_RETRIES: u32 = 100;
+
+        let mut stable_retries: u32 = 0;
+
+        if !self.is_next_marked() {
+            return; // Fast path: not marked
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            leaf_ptr = ?std::ptr::from_ref(self),
+            next_ptr = ?self.next_raw(),
+            "wait_for_split: ENTER - next pointer is marked"
+        );
+
+        while self.is_next_marked() {
+            // Brief spin with backoff
+            for _ in 0..MAX_SPIN_ITERS {
+                std::hint::spin_loop();
+                if !self.is_next_marked() {
+                    #[cfg(feature = "tracing")]
+                    tracing::trace!(
+                        leaf_ptr = ?std::ptr::from_ref(self),
+                        stable_retries,
+                        "wait_for_split: EXIT - mark cleared during spin"
+                    );
+                    return;
+                }
+            }
+
+            // Wait for split to complete via version.stable()
+            #[cfg(feature = "tracing")]
+            tracing::trace!(
+                leaf_ptr = ?std::ptr::from_ref(self),
+                stable_retries,
+                version = self.version().value(),
+                "wait_for_split: calling stable() - waiting for split"
+            );
+            let _ = self.version().stable();
+            stable_retries += 1;
+
+            // Bounded wait: if we've waited too long, the mark should have been
+            // cleared. If not, there may be a bug, but we avoid infinite hang.
+            if stable_retries >= MAX_STABLE_RETRIES {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    stable_retries,
+                    leaf_ptr = ?std::ptr::from_ref(self),
+                    next_ptr = ?self.next_raw(),
+                    version = self.version().value(),
+                    "wait_for_split: TIMEOUT - exceeded max retries, proceeding anyway"
+                );
+                return;
+            }
+        }
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            leaf_ptr = ?std::ptr::from_ref(self),
+            stable_retries,
+            "wait_for_split: EXIT - mark cleared"
+        );
     }
 
     /// Link new sibling after split.

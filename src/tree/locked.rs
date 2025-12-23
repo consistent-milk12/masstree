@@ -179,6 +179,15 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ) -> Result<Option<Arc<V>>, InsertError> {
         let mut key = Key::new(key);
         let arc = Arc::new(value);
+        #[cfg(feature = "tracing")]
+        {
+            static INSERT_COUNT: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let count = INSERT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count % 10000 == 0 {
+                eprintln!("[INSERT] count={} ikey=0x{:016x}", count, key.ikey());
+            }
+        }
         self.insert_concurrent(&mut key, arc, guard)
     }
 
@@ -204,27 +213,6 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         let ikey: u64 = key.ikey();
         trace_log!(ikey, "insert_concurrent: starting");
 
-        // CAS fast path for simple inserts (short keys, no suffix).
-        // Both CAS and locked paths use NULL-claim semantics for slot reservation:
-        // - CAS path: cas_slot_value(slot, NULL, ptr) - only claims empty slots
-        // - Locked path: try_claim_slot() - same NULL-claim internally
-        // This prevents slot stealing between concurrent CAS inserts.
-        if !key.has_suffix() && key.current_len() <= 8 {
-            match self.try_cas_insert(key, &Arc::clone(&value), guard) {
-                CasInsertResult::Success(old) => {
-                    trace_log!(ikey, "insert_concurrent: CAS success");
-                    return Ok(old);
-                }
-                CasInsertResult::ExistsNeedLock { .. }
-                | CasInsertResult::FullNeedLock
-                | CasInsertResult::LayerNeedLock { .. }
-                | CasInsertResult::ContentionFallback => {
-                    trace_log!(ikey, "insert_concurrent: CAS fallback to locked path");
-                    // Key exists - locked path will handle update
-                }
-            }
-        }
-
         // Track current layer root (updated after each split/layer descent)
         let mut layer_root: *const u8 = self.get_root_ptr(guard);
         // Track whether we're in a sublayer (don't reload root if so)
@@ -236,6 +224,55 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             retry_count += 1;
             if retry_count > 1 {
                 debug_log!(ikey, retry_count, "insert_concurrent: retry loop iteration");
+            }
+            #[cfg(feature = "tracing")]
+            if retry_count > 100 && retry_count % 100 == 0 {
+                eprintln!(
+                    "[STUCK?] insert_concurrent: ikey=0x{:016x} retry_count={} in_sublayer={}",
+                    ikey, retry_count, in_sublayer
+                );
+            }
+
+            // CAS fast path for simple inserts (short keys, no suffix, layer 0 only).
+            // Both CAS and locked paths use NULL-claim semantics for slot reservation:
+            // - CAS path: cas_slot_value(slot, NULL, ptr) - only claims empty slots
+            // - Locked path: try_claim_slot() - same NULL-claim internally
+            // This prevents slot stealing between concurrent CAS inserts.
+            // Only attempt when not in sublayer (CAS path doesn't handle layers).
+            if !in_sublayer && !key.has_suffix() && key.current_len() <= 8 {
+                match self.try_cas_insert(key, &Arc::clone(&value), guard) {
+                    CasInsertResult::Success(old) => {
+                        trace_log!(ikey, "insert_concurrent: CAS success");
+                        return Ok(old);
+                    }
+                    CasInsertResult::ExistsNeedLock { .. }
+                    | CasInsertResult::FullNeedLock
+                    | CasInsertResult::LayerNeedLock { .. }
+                    | CasInsertResult::Slot0NeedLock => {
+                        trace_log!(ikey, "insert_concurrent: CAS fallback to locked path");
+                        // Key exists, leaf full, or slot-0 violation - locked path will handle
+                    }
+                    CasInsertResult::ContentionFallback => {
+                        // Contention (frozen permutation or version change).
+                        #[cfg(feature = "tracing")]
+                        if retry_count > 100 && retry_count % 100 == 0 {
+                            eprintln!(
+                                "[LIVELOCK] CAS ContentionFallback: ikey=0x{:016x} retry={}",
+                                ikey, retry_count
+                            );
+                        }
+                        // FIXED: After too many CAS retries, fall through to locked path
+                        // instead of retrying CAS forever. This prevents livelock when
+                        // permutation stays frozen or version keeps changing.
+                        if retry_count > 10 {
+                            trace_log!(ikey, retry_count, "insert_concurrent: CAS contention limit, using locked path");
+                            // Fall through to locked path below
+                        } else {
+                            trace_log!(ikey, retry_count, "insert_concurrent: CAS contention, retry from root");
+                            continue 'outer;
+                        }
+                    }
+                }
             }
 
             // Reload root in case it changed due to a split
@@ -355,13 +392,29 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         // a slot without publishing it yet (perm CAS failed), so we try
                         // slots from the back of the free region until one succeeds.
                         let mut back_offset: usize = 0;
-                        let actual_slot: usize = loop {
+                        let mut slot_retry_count: usize = 0;
+                        let claimed_slot: Option<usize> = loop {
                             // Check we haven't exhausted free slots
                             if perm.size() + back_offset >= WIDTH {
-                                // All free slots are claimed by CAS threads
-                                // This shouldn't happen often - drop lock and retry
-                                drop(cursor.lock);
-                                continue 'outer;
+                                // All free slots are claimed by CAS threads.
+                                // Re-read permutation - if size < WIDTH, CAS threads may
+                                // release their claims. Retry a few times before splitting.
+                                slot_retry_count += 1;
+                                if slot_retry_count < 3 {
+                                    // Brief yield to let CAS threads finish
+                                    std::hint::spin_loop();
+                                    perm = leaf.permutation();
+                                    back_offset = 0;
+                                    continue;
+                                }
+                                // Still exhausted after retries - need split
+                                debug_log!(
+                                    ikey,
+                                    perm_size = perm.size(),
+                                    back_offset,
+                                    "insert_concurrent: all slots claimed, need split"
+                                );
+                                break None;
                             }
 
                             let candidate: usize = perm.back_at_offset(back_offset);
@@ -384,7 +437,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                                     if back_offset > 0 {
                                         perm.swap_free_slots(WIDTH - 1, WIDTH - 1 - back_offset);
                                     }
-                                    break candidate;
+                                    break Some(candidate);
                                 }
                                 Err(_returned_arc) => {
                                     // Slot taken by CAS thread, try next
@@ -393,35 +446,44 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                             }
                         };
 
-                        // Insert the claimed slot at the logical position
-                        let allocated: usize = perm.insert_from_back(logical_pos);
-                        debug_assert!(
-                            allocated == actual_slot,
-                            "insert_from_back should return the swapped slot"
-                        );
+                        // If we successfully claimed a slot, complete the insert
+                        if let Some(actual_slot) = claimed_slot {
+                            // Insert the claimed slot at the logical position
+                            let allocated: usize = perm.insert_from_back(logical_pos);
+                            debug_assert!(
+                                allocated == actual_slot,
+                                "insert_from_back should return the swapped slot"
+                            );
 
-                        // Suffix if needed
-                        if key.has_suffix() {
-                            // SAFETY: guard protects suffix allocation
-                            unsafe {
-                                leaf.assign_ksuf(actual_slot, key.suffix(), guard);
+                            // Suffix if needed
+                            if key.has_suffix() {
+                                // SAFETY: guard protects suffix allocation
+                                unsafe {
+                                    leaf.assign_ksuf(actual_slot, key.suffix(), guard);
+                                }
                             }
+
+                            // Publish: permutation store is linearization point
+                            leaf.set_permutation(perm);
+
+                            self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                            return Ok(None);
                         }
 
-                        // Publish: permutation store is linearization point
-                        leaf.set_permutation(perm);
-
-                        self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                        return Ok(None);
+                        // All slots exhausted - need to transition to split.
+                        // We already called mark_insert(), also set split bit.
+                        cursor.lock.mark_split();
+                    } else {
+                        // Leaf was already full when we checked
+                        cursor.lock.mark_split();
                     }
 
-                    // Leaf full - need to split
+                    // Fall through to split path below
                     debug_log!(
                         ikey,
                         leaf_ptr = ?cursor.leaf_ptr,
                         "insert_concurrent: leaf full, triggering split"
                     );
-                    cursor.lock.mark_split();
 
                     // FIXED: Re-read permutation after mark_split.
                     // If a CAS insert completed between our can_insert check and mark_split,
@@ -448,6 +510,13 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                             size_now = size,
                             "insert_concurrent: permutation changed during split decision, aborting"
                         );
+                        #[cfg(feature = "tracing")]
+                        if retry_count > 100 && retry_count % 100 == 0 {
+                            eprintln!(
+                                "[LIVELOCK] perm changed in split: ikey=0x{:016x} retry={} size_at_decision={} size_now={}",
+                                ikey, retry_count, size_at_decision, size
+                            );
+                        }
                         drop(cursor.lock);
                         continue 'outer;
                     }
@@ -612,8 +681,29 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         let mut use_reach: bool = true;
         // Track the version we used for advance_to_key calls
         let mut last_version: u32;
+        // Track loop iterations for debugging (only when tracing)
+        #[cfg(feature = "tracing")]
+        let mut loop_count: u32 = 0;
+        #[cfg(feature = "tracing")]
+        let mut frozen_retry_count: u32 = 0;
 
         loop {
+            #[cfg(feature = "tracing")]
+            {
+                loop_count += 1;
+
+                // Warn if we're looping too many times (potential livelock)
+                if loop_count > 100 && loop_count % 100 == 0 {
+                    tracing::warn!(
+                        ikey,
+                        loop_count,
+                        frozen_retry_count,
+                        leaf_ptr = ?leaf_ptr,
+                        "find_locked: EXCESSIVE RETRIES - potential livelock"
+                    );
+                }
+            }
+
             if use_reach {
                 // Optimistic reach to leaf
                 leaf_ptr = self.reach_leaf_concurrent(layer_root, key, guard);
@@ -640,7 +730,19 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             }
 
             // Version snapshot (spins until dirty bits clear)
+            #[cfg(feature = "tracing")]
+            let stable_start = std::time::Instant::now();
             let version: u32 = leaf.version().stable();
+            #[cfg(feature = "tracing")]
+            {
+                let stable_elapsed = stable_start.elapsed();
+                if stable_elapsed > std::time::Duration::from_millis(10) {
+                    eprintln!(
+                        "[SLOW] stable() took {:?} ikey=0x{:016x} leaf={:?}",
+                        stable_elapsed, ikey, leaf_ptr
+                    );
+                }
+            }
             last_version = version;
 
             // Search for key position.
@@ -648,9 +750,29 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             let perm: Permuter<WIDTH> = if let Ok(p) = leaf.permutation_try() {
                 p
             } else {
-                // Split in progress - retry with fresh version
+                // Split in progress - wait for it to complete via stable(), then retry.
+                // This uses the dirty-bit protocol: splitter sets SPLITTING_BIT before
+                // freezing, so stable() will wait for the split critical section.
+                #[cfg(feature = "tracing")]
+                {
+                    frozen_retry_count += 1;
+                    tracing::debug!(
+                        ikey,
+                        leaf_ptr = ?leaf_ptr,
+                        frozen_retry_count,
+                        version = leaf.version().value(),
+                        "find_locked: permutation FROZEN, waiting on stable()"
+                    );
+                }
+                let _ = leaf.version().stable();
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    ikey,
+                    leaf_ptr = ?leaf_ptr,
+                    version = leaf.version().value(),
+                    "find_locked: stable() returned, retrying with use_reach=true"
+                );
                 use_reach = true;
-
                 continue;
             };
 
@@ -671,7 +793,19 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             }
 
             // Acquire lock
+            #[cfg(feature = "tracing")]
+            let lock_start = std::time::Instant::now();
             let lock: LockGuard<'a> = leaf.version().lock();
+            #[cfg(feature = "tracing")]
+            {
+                let lock_elapsed = lock_start.elapsed();
+                if lock_elapsed > std::time::Duration::from_millis(10) {
+                    eprintln!(
+                        "[SLOW] lock() took {:?} ikey=0x{:016x} leaf={:?}",
+                        lock_elapsed, ikey, leaf_ptr
+                    );
+                }
+            }
 
             // FIXED: Validate version with B-link following on failure
             //

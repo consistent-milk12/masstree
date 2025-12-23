@@ -74,6 +74,41 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+/// Initialize tracing subscriber when the `tracing` feature is enabled.
+///
+/// Call this at the start of tests or `main()` to enable logging.
+/// Respects `RUST_LOG` env var (e.g., `RUST_LOG=masstree=debug`).
+/// If `RUST_LOG` is not set, defaults to "warn" level.
+///
+/// Safe to call multiple times - only the first call takes effect.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// masstree::init_tracing();
+/// // Now tracing macros will output
+/// ```
+#[cfg(feature = "tracing")]
+pub fn init_tracing() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+        let filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+        // Use try_init to avoid panic if tests set their own subscriber
+        let _ = tracing_subscriber::registry()
+            .with(fmt::layer().compact().with_thread_ids(true))
+            .with(filter)
+            .try_init();
+    });
+}
+
+/// No-op when tracing feature is disabled.
+#[cfg(not(feature = "tracing"))]
+pub fn init_tracing() {}
+
 pub mod alloc;
 pub mod freeze;
 pub mod internode;

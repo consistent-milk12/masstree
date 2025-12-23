@@ -432,9 +432,12 @@ impl LoomPermutedLeaf {
 
         let mut result = Vec::new();
         for i in 0..size {
-            // Get slot at position i (simplified - just use i as slot)
-            let key = self.slots[i].0.load(Ordering::SeqCst);
-            let value = self.slots[i].1.load(Ordering::SeqCst);
+            // Get slot at position i from permutation encoding
+            // Permutation layout: [size:4][slot3:4][slot2:4][slot1:4][slot0:4]
+            // Position 0 is in bits 4-7, position 1 is in bits 8-11, etc.
+            let slot = ((perm >> (4 + i * 4)) & 0xF) as usize;
+            let key = self.slots[slot].0.load(Ordering::SeqCst);
+            let value = self.slots[slot].1.load(Ordering::SeqCst);
             result.push((key, value));
         }
         result

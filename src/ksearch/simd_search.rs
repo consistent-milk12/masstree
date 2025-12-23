@@ -237,6 +237,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_exact() {
         let node = make_internode(&[10, 20, 30, 40, 50]);
         assert_eq!(find_exact_internode(10, &node), Some(0));
@@ -260,6 +261,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_ikey_matches_empty() {
         let leaf = make_leaf_with_ikeys(&[]);
         // Even though leaf has no actual keys in permutation,
@@ -270,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_ikey_matches_single() {
         let leaf = make_leaf_with_ikeys(&[42]);
         let matches = find_ikey_matches_leaf(42, &leaf);
@@ -278,6 +281,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_ikey_matches_multiple() {
         // Set up slots 0, 2, 5 with same ikey
         let leaf = LeafNode::<LeafValue<()>, 15>::new();
@@ -300,6 +304,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_find_ikey_matches_all_slots() {
         let leaf = LeafNode::<LeafValue<()>, 15>::new();
         for i in 0..15 {
