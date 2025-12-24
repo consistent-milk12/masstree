@@ -168,15 +168,42 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Create a new leaf node (boxed).
+    #[inline]
     #[must_use]
     pub fn new() -> Box<Self> {
         Box::new(Self::new_with_root(false))
     }
 
     /// Create a new leaf node as the root of a tree/layer.
+    #[inline]
     #[must_use]
     pub fn new_root() -> Box<Self> {
         Box::new(Self::new_with_root(true))
+    }
+
+    /// Convert this leaf into a layer root.
+    ///
+    /// Sets up the node to serve as the root of a sub-layer:
+    /// - Sets parent pointer to null
+    /// - Marks version as root
+    ///
+    /// NOTE: This matches [`LeafNode::make_layer_root`] in `src/leaf/layer.rs`.
+    ///
+    /// SAFETY: Caller must ensure this node is not currently part of another tree
+    /// structure, or that appropriate synchronization is in place.
+    #[inline(always)]
+    pub fn make_layer_root(&self) {
+        self.set_parent(StdPtr::null_mut());
+        self.version.mark_root();
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn new_layer_root() -> Box<Self> {
+        let node: Box<Self> = Self::new();
+        node.make_layer_root();
+
+        node
     }
 
     // ============================================================================

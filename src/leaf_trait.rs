@@ -28,7 +28,7 @@ pub use crate::leaf::InsertTarget;
 pub use crate::leaf::SplitPoint;
 
 // ============================================================================
-// CAS Permutation Error
+//  CAS Permutation Error
 // ============================================================================
 
 /// Error returned when a CAS permutation operation fails.
@@ -62,7 +62,7 @@ impl<P: TreePermutation> CasPermutationError<P> {
 }
 
 // ============================================================================
-// TreePermutation Trait
+//  TreePermutation Trait
 // ============================================================================
 
 /// Trait for permutation types used in leaf nodes.
@@ -89,13 +89,65 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
     const WIDTH: usize;
 
     // ========================================================================
-    // Construction
+    //  Construction
     // ========================================================================
 
     /// Create an empty permutation with size = 0.
     ///
     /// Slots are arranged so `back()` returns slot 0 initially.
     fn empty() -> Self;
+
+    /// Create a new leaf node configured as a layer root.
+    ///
+    /// The returned node has:
+    /// - `is_root` flag set via `version.mark_root()`
+    /// - `parent` pointer set to null
+    ///
+    /// Layer roots are used when creating sublayers for keys longer than 8 bytes.
+    /// When two keys share the same 8-byte ikey but have different suffixes,
+    /// a new layer is created to distinguish them by their next 8-byte chunk.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create a layer root for handling suffix conflict
+    /// let layer_leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new_layer_root_boxed();
+    ///
+    /// assert!(layer_leaf.version().is_root());
+    /// assert!(layer_leaf.parent().is_null());
+    /// ````
+    fn new_layer_root_boxed() -> Box<Self>;
+
+    /// Create a sorted permutation with `n` elements in slots `0..n`.
+    ///
+    /// The permutation will have size `n` with logical positions `0..n`
+    /// mapping to physical slots 0..n in order.
+    ///
+    /// This is used when creating layer nodes during suffix conflict resolution,
+    /// where we need a small number of pre-positioned entries.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Number of elements (`0 <= n <= WIDTH`)
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `n > WIDTH`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create a permutation with 2 sorted entries
+    /// let perm = Permuter::<15>::make_sorted(2);
+    /// assert_eq!(perm.size(), 2);
+    ///
+    /// // Position 0 -> Slot 0
+    /// assert_eq!(perm.get(0), 0);
+    ///
+    /// // Position 1 -> Slot 1
+    /// assert_eq!(perm.get(1), 1);
+    /// ```
+    fn make_sorted(n: usize) -> Self;
 
     /// Create a permutation from a raw storage value.
     ///
@@ -108,7 +160,7 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
     fn from_value(raw: Self::Raw) -> Self;
 
     // ========================================================================
-    // Accessors
+    //  Accessors
     // ========================================================================
 
     /// Get the raw storage value.
@@ -141,7 +193,7 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
     fn back_at_offset(&self, offset: usize) -> usize;
 
     // ========================================================================
-    // Mutation
+    //  Mutation
     // ========================================================================
 
     /// Allocate a slot from back and insert at position `i`.
@@ -170,7 +222,7 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
     fn set_size(&mut self, n: usize);
 
     // ========================================================================
-    // Freeze Operations
+    //  Freeze Operations
     // ========================================================================
 
     /// Check if a raw permutation value is frozen.
@@ -186,7 +238,7 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
 }
 
 // ============================================================================
-// FreezeGuardOps Trait
+//  FreezeGuardOps Trait
 // ============================================================================
 
 /// Operations that freeze guards must support.
@@ -223,7 +275,7 @@ pub trait FreezeGuardOps<P: TreePermutation> {
 }
 
 // ============================================================================
-// TreeInternode Trait
+//  TreeInternode Trait
 // ============================================================================
 
 /// Trait for internode types used in a `MassTree`.
@@ -244,7 +296,7 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     const WIDTH: usize;
 
     // ========================================================================
-    // Construction
+    //  Construction
     // ========================================================================
 
     /// Create a new internode with specified height.
@@ -254,14 +306,14 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn new_root_boxed(height: u32) -> Box<Self>;
 
     // ========================================================================
-    // Version / Locking
+    //  Version / Locking
     // ========================================================================
 
     /// Get reference to node version.
     fn version(&self) -> &NodeVersion;
 
     // ========================================================================
-    // Structure
+    //  Structure
     // ========================================================================
 
     /// Get the height of this internode.
@@ -283,7 +335,7 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn is_full(&self) -> bool;
 
     // ========================================================================
-    // Keys
+    //  Keys
     // ========================================================================
 
     /// Get key at index.
@@ -328,7 +380,7 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn is_root(&self) -> bool;
 
     // ========================================================================
-    // Split Support
+    //  Split Support
     // ========================================================================
 
     /// Shift entries from another internode.
@@ -370,7 +422,7 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
 }
 
 // ============================================================================
-// TreeLeafNode Trait
+//  TreeLeafNode Trait
 // ============================================================================
 
 /// Trait for leaf node types that can be used in a [`MassTree`].
@@ -402,7 +454,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     const WIDTH: usize;
 
     // ========================================================================
-    // Construction
+    //  Construction
     // ========================================================================
 
     /// Create a new leaf node (heap-allocated).
@@ -412,7 +464,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn new_root_boxed() -> Box<Self>;
 
     // ========================================================================
-    // NodeVersion Operations
+    //  NodeVersion Operations
     // ========================================================================
 
     /// Get a reference to the node's version.
@@ -421,7 +473,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn version(&self) -> &NodeVersion;
 
     // ========================================================================
-    // Permutation Operations
+    //  Permutation Operations
     // ========================================================================
 
     /// Load the current permutation with Acquire ordering.
@@ -459,7 +511,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn permutation_wait(&self) -> Self::Perm;
 
     // ========================================================================
-    // Key Operations
+    //  Key Operations
     // ========================================================================
 
     /// Get ikey at physical slot.
@@ -503,7 +555,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn has_ksuf(&self, slot: usize) -> bool;
 
     // ========================================================================
-    // Value Operations
+    //  Value Operations
     // ========================================================================
 
     /// Load value pointer at slot.
@@ -532,7 +584,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ) -> Result<(), *mut u8>;
 
     // ========================================================================
-    // Size Operations
+    //  Size Operations
     // ========================================================================
 
     /// Get number of keys in this leaf.
@@ -554,7 +606,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     }
 
     // ========================================================================
-    // Navigation (B-link tree pointers)
+    //  Navigation (B-link tree pointers)
     // ========================================================================
 
     /// Get next leaf pointer (with mark bit cleared).
@@ -590,7 +642,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn set_parent(&self, parent: *mut u8);
 
     // ========================================================================
-    // Slot Assignment Helpers
+    //  Slot Assignment Helpers
     // ========================================================================
 
     /// Check if slot 0 can be reused for a new key.
@@ -601,7 +653,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn can_reuse_slot0(&self, new_ikey: u64) -> bool;
 
     // ========================================================================
-    // CAS Insert Support
+    //  CAS Insert Support
     // ========================================================================
 
     /// Pre-store slot data for CAS-based insert.
@@ -662,7 +714,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ) -> Result<(), CasPermutationError<Self::Perm>>;
 
     // ========================================================================
-    // Split Operations
+    //  Split Operations
     // ========================================================================
 
     /// The freeze guard type for this leaf.
@@ -724,7 +776,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ) -> (Box<Self>, u64, InsertTarget);
 
     // ========================================================================
-    // Freeze Operations
+    //  Freeze Operations
     // ========================================================================
 
     /// Freeze the permutation for split operations.
@@ -756,7 +808,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn is_permutation_frozen(&self) -> bool;
 
     // ========================================================================
-    // Sibling Link Helper (for split)
+    //  Sibling Link Helper (for split)
     // ========================================================================
 
     /// Link this leaf to a new sibling (B-link tree threading).
@@ -772,7 +824,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     unsafe fn link_sibling(&self, new_sibling: *mut Self);
 
     // ========================================================================
-    // Suffix Operations (for split)
+    //  Suffix Operations (for split)
     // ========================================================================
 
     /// Get suffix at slot (if any).
@@ -802,7 +854,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn take_leaf_value_ptr(&self, slot: usize) -> *mut u8;
 
     // ========================================================================
-    // Suffix Comparison Operations
+    //  Suffix Comparison Operations
     // ========================================================================
 
     /// Check if a slot's suffix equals the given suffix.
@@ -892,7 +944,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 }
 
 // ============================================================================
-// Tests
+//  Tests
 // ============================================================================
 
 #[cfg(test)]
@@ -904,7 +956,7 @@ mod tests {
     use crate::permuter24::Permuter24;
 
     // ========================================================================
-    // TreePermutation Tests
+    //  TreePermutation Tests
     // ========================================================================
 
     fn test_permutation_empty<P: TreePermutation>() {
@@ -1002,7 +1054,7 @@ mod tests {
     }
 
     // ========================================================================
-    // TreeLeafNode Tests
+    //  TreeLeafNode Tests
     // ========================================================================
 
     fn test_leaf_new<L: TreeLeafNode<LeafValue<u64>>>() {
@@ -1142,7 +1194,7 @@ mod tests {
     }
 
     // ========================================================================
-    // WIDTH Constant Verification
+    //  WIDTH Constant Verification
     // ========================================================================
 
     #[test]
@@ -1169,7 +1221,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Generic Function Tests (prove traits enable generic code)
+    //  Generic Function Tests (prove traits enable generic code)
     // ========================================================================
 
     /// Generic function that works with any permutation type

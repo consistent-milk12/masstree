@@ -17,7 +17,7 @@
 
 use portable_atomic::{AtomicU128, Ordering};
 
-use crate::suffix::PermutationProvider;
+use crate::{leaf_trait::TreePermutation, suffix::PermutationProvider};
 
 // Re-export Freeze24Utils from freeze24 module
 pub use crate::freeze24::Freeze24Utils;
@@ -655,13 +655,18 @@ impl Default for AtomicPermuter24 {
 // TreePermutation Implementation
 // =============================================================================
 
-impl crate::leaf_trait::TreePermutation for Permuter24 {
+impl TreePermutation for Permuter24 {
     type Raw = u128;
     const WIDTH: usize = WIDTH_24;
 
     #[inline(always)]
     fn empty() -> Self {
         Self::empty()
+    }
+
+    #[inline(always)]
+    fn make_sorted(n: usize) -> Self {
+        Self::make_sorted(n)
     }
 
     #[inline(always)]
@@ -912,5 +917,18 @@ mod tests {
         assert_eq!(p.back(), 10);
         assert_eq!(p.back_at_offset(0), 10);
         assert_eq!(p.back_at_offset(1), 11);
+    }
+
+    #[test]
+    fn test_make_sorted_via_trait() {
+        fn check_trait<P: TreePermutation>() {
+            let p = P::make_sorted(2);
+
+            assert_eq!(p.size(), 2);
+            assert_eq!(p.get(0), 0);
+            assert_eq!(p.get(1), 1);
+        }
+
+        check_trait::<Permuter24>();
     }
 }

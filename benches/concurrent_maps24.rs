@@ -1247,8 +1247,8 @@ mod read_scaling_32b {
 mod write_scaling_32b {
     use super::*;
 
-    const N: usize = 10_000_000;
-    const OPS_PER_THREAD: usize = 50_000;
+    const N: usize = 100_000;
+    const OPS_PER_THREAD: usize = 10_000;
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree24(bencher: Bencher, threads: usize) {

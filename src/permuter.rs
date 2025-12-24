@@ -24,7 +24,7 @@ const SIZE_BITS: usize = 4;
 /// Mask for extracting size (lower 4 bits).
 const SIZE_MASK: u64 = 0xF;
 
-use crate::{freeze::LeafFreezeUtils, suffix::PermutationProvider};
+use crate::{freeze::LeafFreezeUtils, leaf_trait::TreePermutation, suffix::PermutationProvider};
 
 /// Utility functions for [`Permuter`].
 struct PermuterUtils;
@@ -688,13 +688,18 @@ impl<const WIDTH: usize> PermutationProvider for Permuter<WIDTH> {
 //  TreePermutation Implementation
 // ============================================================================
 
-impl<const WIDTH: usize> crate::leaf_trait::TreePermutation for Permuter<WIDTH> {
+impl<const WIDTH: usize> TreePermutation for Permuter<WIDTH> {
     type Raw = u64;
     const WIDTH: usize = WIDTH;
 
     #[inline(always)]
     fn empty() -> Self {
         Self::empty()
+    }
+
+    #[inline(always)]
+    fn make_sorted(n: usize) -> Self {
+        Self::make_sorted(n)
     }
 
     #[inline(always)]
@@ -1285,5 +1290,18 @@ mod tests {
         // Could now do: compare_exchange(current_value, new_perm.value())
         assert_eq!(slot, 3); // Next slot after sorted(3)
         assert_eq!(new_perm.size(), 4);
+    }
+
+    #[test]
+    fn test_make_sorted_via_trait() {
+        fn check_trait<P: TreePermutation>() {
+            let p = P::make_sorted(2);
+
+            assert_eq!(p.size(), 2);
+            assert_eq!(p.get(0), 0);
+            assert_eq!(p.get(1), 1);
+        }
+
+        check_trait::<Permuter<15>>();
     }
 }
