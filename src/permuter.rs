@@ -24,7 +24,7 @@ const SIZE_BITS: usize = 4;
 /// Mask for extracting size (lower 4 bits).
 const SIZE_MASK: u64 = 0xF;
 
-use crate::{freeze::LeafFreezeUtils, leaf_trait::TreePermutation, suffix::PermutationProvider};
+use crate::{leaf_trait::TreePermutation, suffix::PermutationProvider};
 
 /// Utility functions for [`Permuter`].
 struct PermuterUtils;
@@ -754,12 +754,20 @@ impl<const WIDTH: usize> TreePermutation for Permuter<WIDTH> {
 
     #[inline(always)]
     fn is_frozen_raw(raw: u64) -> bool {
-        LeafFreezeUtils::is_frozen::<WIDTH>(raw)
+        // Freeze detection for WIDTH<=15: check if slot 14 contains sentinel 0xF
+        const FREEZE_SLOT: usize = 14;
+        const FREEZE_SENTINEL: u64 = 0xF;
+        let slot_value = (raw >> (FREEZE_SLOT * 4)) & 0xF;
+        slot_value == FREEZE_SENTINEL
     }
 
     #[inline(always)]
     fn freeze_raw(raw: u64) -> u64 {
-        LeafFreezeUtils::freeze_raw::<WIDTH>(raw)
+        // Set slot 14 to sentinel value 0xF to indicate frozen state
+        const FREEZE_SLOT: usize = 14;
+        const FREEZE_SENTINEL: u64 = 0xF;
+        let mask = !(0xFu64 << (FREEZE_SLOT * 4));
+        (raw & mask) | (FREEZE_SENTINEL << (FREEZE_SLOT * 4))
     }
 }
 

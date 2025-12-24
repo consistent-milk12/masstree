@@ -163,49 +163,5 @@ debug = true
 strip = "none"
 
 [[bench]]
-name = "key"
-harness = false
-
-[[bench]]
-name = "permuter"
-harness = false
-
-[[bench]]
-name = "nodeversion"
-harness = false
-
-[[bench]]
-name = "leaf"
-harness = false
-
-[[bench]]
-name = "internode"
-harness = false
-
-[[bench]]
-name = "ksearch"
-harness = false
-
-[[bench]]
-name = "tree"
-harness = false
-
-[[bench]]
-name = "comparison"
-harness = false
-
-[[bench]]
-name = "lock_comparison"
-harness = false
-
-[[bench]]
-name = "concurrent_maps"
-harness = false
-
-[[bench]]
 name = "concurrent_maps24"
-harness = false
-
-[[bench]]
-name = "fault_bench"
 harness = false

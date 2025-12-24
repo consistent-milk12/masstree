@@ -356,7 +356,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 #[expect(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::leaf::LeafValue;
+    use crate::value::LeafValue;
 
     #[test]
     fn test_permutation_try_unfrozen() {

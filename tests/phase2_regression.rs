@@ -537,7 +537,7 @@ fn test_very_long_key() {
     assert_eq!(*tree.get(&long_key).unwrap(), 42);
 
     // Slightly different key shouldn't match
-    let mut different = long_key.clone();
+    let mut different = long_key;
     different[100] = different[100].wrapping_add(1);
     assert!(tree.get(&different).is_none());
 }

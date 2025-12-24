@@ -1,26 +1,12 @@
 //! Key search algorithms for `MassTree`.
 //!
 //! Provides binary search for:
-//! - Lower bound in leaves (finding keys or insertion points)
 //! - Upper bound in internodes (routing to children)
-//!
-//! # Submodules
-//!
-//! - [`simd`]: SIMD-accelerated key comparison primitives
-//! - [`simd_search`]: High-level SIMD search functions for tree nodes
 //!
 //! # Reference
 //! Based on `ksearch.hh` from the C++ Masstree implementation.
 
-pub mod simd;
-pub mod simd_search;
-
-// Re-export SIMD search functions for convenience
-pub use simd_search::find_ikey_matches_leaf;
-pub use simd_search::upper_bound_internode_simd;
-
 use crate::internode::InternodeNode;
-use crate::leaf::LeafNode;
 use crate::leaf_trait::TreeInternode;
 use crate::permuter::Permuter;
 use crate::slot;
@@ -284,70 +270,8 @@ where
 }
 
 // ============================================================================
-//  Specialized Search Functions
+//  Specialized Search Functions for Internodes
 // ============================================================================
-
-/// Lower bound search in a leaf node.
-///
-/// Searches for a key by comparing both `ikey` and `keylenx`.
-///
-/// # Arguments
-/// * `search_ikey` - The 8-byte key to search for
-/// * `search_keylenx` - The key length/type encoding
-/// * `node` - The leaf node to search
-///
-/// # Returns
-/// `KeyIndexPosition` with logical position and physical slot (if found).
-///
-/// # Example
-///
-/// ```ignore
-/// let pos = lower_bound_leaf(ikey, keylenx, &leaf);
-/// if pos.is_found() {
-///     let slot = pos.slot();
-///     // Key found at physical slot
-/// } else {
-///     let insert_pos = pos.i;
-///     // Key not found, would insert at logical position i
-/// }
-/// ```
-#[inline]
-pub fn lower_bound_leaf<S: slot::ValueSlot, const WIDTH: usize>(
-    search_ikey: u64,
-    search_keylenx: u8,
-    node: &LeafNode<S, WIDTH>,
-) -> KeyIndexPosition {
-    let perm: Permuter<WIDTH> = node.permutation();
-    let size: usize = perm.size();
-
-    lower_bound_by(size, perm, |slot: usize| {
-        // Compare ikey first, then keylenx only if ikeys match
-        let node_ikey: u64 = node.ikey(slot);
-        match search_ikey.cmp(&node_ikey) {
-            Ordering::Equal => search_keylenx.cmp(&node.keylenx(slot)),
-            other => other,
-        }
-    })
-}
-
-/// Lower bound search in a leaf node by ikey only.
-///
-/// Simpler version that only compares ikeys, ignoring keylenx.
-/// Useful for finding the first slot with a given ikey prefix.
-#[inline]
-pub fn lower_bound_leaf_ikey<S: slot::ValueSlot, const WIDTH: usize>(
-    search_ikey: u64,
-    node: &LeafNode<S, WIDTH>,
-) -> KeyIndexPosition {
-    let perm: Permuter<WIDTH> = node.permutation();
-    let size: usize = perm.size();
-
-    lower_bound_by(size, perm, |slot: usize| {
-        let node_ikey: u64 = node.ikey(slot);
-
-        search_ikey.cmp(&node_ikey)
-    })
-}
 
 /// Upper bound search in an internode.
 ///

@@ -13,11 +13,11 @@ use std::mem as StdMem;
 use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, fence};
 
-use crate::leaf::LeafValue;
 use crate::leaf_trait::TreeInternode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{READ_ORD, RELAXED, WRITE_ORD};
 use crate::slot::ValueSlot;
+use crate::value::LeafValue;
 
 // ============================================================================
 //  InternodeNode
@@ -554,7 +554,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
                 if !child.is_null() {
                     // SAFETY: height > 0 means children are InternodeNode<S, WIDTH>
                     unsafe {
-                        (*child.cast::<InternodeNode<S, WIDTH>>()).set_parent(new_right_ptr_u8);
+                        (*child.cast::<Self>()).set_parent(new_right_ptr_u8);
                     }
                 }
             }
@@ -855,7 +855,14 @@ where
         insert_ikey: u64,
         insert_child: *mut u8,
     ) -> (u64, bool) {
-        Self::split_into(self, new_right, new_right_ptr, insert_pos, insert_ikey, insert_child)
+        Self::split_into(
+            self,
+            new_right,
+            new_right_ptr,
+            insert_pos,
+            insert_ikey,
+            insert_child,
+        )
     }
 }
 

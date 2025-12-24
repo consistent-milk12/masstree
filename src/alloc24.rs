@@ -300,7 +300,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::leaf::LeafValue;
+    use crate::value::LeafValue;
 
     #[test]
     fn test_seize_allocator24_new() {

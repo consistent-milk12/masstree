@@ -168,17 +168,15 @@ pub fn init_tracing() {
 #[cfg(not(feature = "tracing"))]
 pub const fn init_tracing() {}
 
-pub mod alloc;
 pub mod alloc24;
 pub mod alloc_trait;
-pub mod freeze;
 pub mod freeze24;
 pub mod internode;
 pub mod key;
 pub mod ksearch;
-pub mod leaf;
 pub mod leaf24;
 pub mod leaf_trait;
+pub mod link;
 pub mod nodeversion;
 pub mod ordering;
 pub mod permuter;
@@ -188,9 +186,9 @@ pub mod slot;
 pub mod suffix;
 mod tracing_helpers;
 pub mod tree;
+pub mod value;
 
 // Re-export freeze types for convenience
-pub use freeze::{AlreadyFrozen, FreezeGuard, Frozen, LeafFreezeUtils};
 pub use freeze24::Freeze24Utils;
 
 // Re-export leaf node traits for generic tree operations
@@ -208,11 +206,16 @@ pub use leaf24::{LeafNode24, WIDTH_24 as LEAF24_WIDTH};
 // Re-export allocator24 types
 pub use alloc24::{NodeAllocator24, SeizeAllocator24};
 
+// Re-export value types
+pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
+
+// Re-export link utilities
+pub use link::{is_marked, mark_ptr, unmark_ptr};
+
 // Re-export main types for convenience
-pub use alloc::{NodeAllocator, SeizeAllocator};
 pub use slot::ValueSlot;
 pub use suffix::{PermutationProvider, SuffixBag};
-pub use tree::{MassTree, MassTree24, MassTreeG, MassTreeGeneric, MassTreeIndex};
+pub use tree::{MassTree, MassTree24, MassTreeGeneric, MassTreeIndex};
 
 // Re-export debug counters for diagnosis (lightweight, always-on)
 pub use tree::{

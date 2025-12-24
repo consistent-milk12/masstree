@@ -16,16 +16,20 @@
 //! - [`TreeLeafNode`]: `LeafNode<S, WIDTH>`, `LeafNode24<S>`
 
 use std::fmt::Debug;
+use std::sync::Arc;
 
+use crate::key::Key;
 use crate::nodeversion::NodeVersion;
 use crate::slot::ValueSlot;
+use crate::value::LeafValue;
+use seize::LocalGuard;
 
 // ============================================================================
-// Re-exports from leaf.rs for use in generic code
+// Re-exports from value.rs for use in generic code
 // ============================================================================
 
-pub use crate::leaf::InsertTarget;
-pub use crate::leaf::SplitPoint;
+pub use crate::value::InsertTarget;
+pub use crate::value::SplitPoint;
 
 // ============================================================================
 //  CAS Permutation Error
@@ -96,27 +100,6 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
     ///
     /// Slots are arranged so `back()` returns slot 0 initially.
     fn empty() -> Self;
-
-    /// Create a new leaf node configured as a layer root.
-    ///
-    /// The returned node has:
-    /// - `is_root` flag set via `version.mark_root()`
-    /// - `parent` pointer set to null
-    ///
-    /// Layer roots are used when creating sublayers for keys longer than 8 bytes.
-    /// When two keys share the same 8-byte ikey but have different suffixes,
-    /// a new layer is created to distinguish them by their next 8-byte chunk.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Create a layer root for handling suffix conflict
-    /// let layer_leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new_layer_root_boxed();
-    ///
-    /// assert!(layer_leaf.version().is_root());
-    /// assert!(layer_leaf.parent().is_null());
-    /// ````
-    fn new_layer_root_boxed() -> Box<Self>;
 
     /// Create a sorted permutation with `n` elements in slots `0..n`.
     ///
@@ -390,7 +373,7 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// This method performs the split AND updates all children's parent pointers
     /// in `new_right` to point to `new_right_ptr`. This is critical for correctness:
-    /// parent updates must happen inside split_into (before returning) to prevent
+    /// parent updates must happen inside `split_into` (before returning) to prevent
     /// races where a thread sees a child with a stale parent pointer.
     ///
     /// # Arguments
@@ -462,6 +445,17 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Create a new root leaf node (heap-allocated).
     fn new_root_boxed() -> Box<Self>;
+
+    /// Create a new leaf node configured as a layer root.
+    ///
+    /// The returned node has:
+    /// - `is_root` flag set via `version.mark_root()`
+    /// - `parent` pointer set to null
+    ///
+    /// Layer roots are used when creating sublayers for keys longer than 8 bytes.
+    /// When two keys share the same 8-byte ikey but have different suffixes,
+    /// a new layer is created to distinguish them by their next 8-byte chunk.
+    fn new_layer_root_boxed() -> Box<Self>;
 
     // ========================================================================
     //  NodeVersion Operations
@@ -943,6 +937,86 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32;
 }
 
+// =============================================================================
+// LayerCapableLeaf Trait
+// =============================================================================
+
+/// Extension trait for Arc-mode leaves that support layer creation.
+///
+/// This trait adds layer-specific operations needed for handling suffix conflicts
+/// in keys longer than 8 bytes. It is separate from [`TreeLeafNode`] because the
+/// methods are specific to `LeafValue<V>` mode (Arc-wrapped values).
+///
+/// # When Layer Creation Occurs
+///
+/// Layer creation is triggered when:
+/// 1. Two keys share the same 8-byte ikey
+/// 2. Both have suffixes (bytes beyond the first 8)
+/// 3. The suffixes differ
+/// 4. Neither slot is already a layer pointer
+///
+/// This is the "Conflict" case in `InsertSearchResultGeneric`.
+///
+/// # Implementors
+///
+/// - `LeafNode24<LeafValue<V>>`
+pub trait LayerCapableLeaf<V: Send + Sync + 'static>: TreeLeafNode<LeafValue<V>> {
+    /// Try to clone the Arc value from a slot.
+    ///
+    /// Returns `None` if:
+    /// - Slot is empty (null pointer)
+    /// - Slot contains a layer pointer (`keylenx >= LAYER_KEYLENX`)
+    ///
+    /// # Safety Considerations
+    ///
+    /// This method is safe to call, but the caller should:
+    /// - Hold the node lock (for write operations), OR
+    /// - Have validated the version (for read operations)
+    ///
+    /// The returned `Arc<V>` is a new strong reference; the original
+    /// slot's reference count is incremented.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    fn try_clone_arc(&self, slot: usize) -> Option<Arc<V>>;
+
+    /// Assign a slot from a Key iterator with an Arc value.
+    ///
+    /// This method sets up a slot with:
+    /// - `ikey` from `key.ikey()`
+    /// - `keylenx` computed from `key.has_suffix()`:
+    ///   - If `key.has_suffix()`: `KSUF_KEYLENX` (64)
+    ///   - Otherwise: `key.current_len().min(8)` (0-8)
+    /// - Value pointer from `Arc::into_raw(value)`
+    /// - Suffix data via `assign_ksuf()` if `key.has_suffix()`
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index (0..WIDTH)
+    /// * `key` - The key containing ikey and suffix information
+    /// * `value` - The Arc-wrapped value. Must be `Some`; `None` will panic.
+    /// * `guard` - Seize guard for deferred suffix bag retirement
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the node lock
+    /// - `guard` must come from this tree's collector
+    /// - Slot must be unoccupied or caller must handle cleanup of old value
+    ///
+    /// # Panics
+    ///
+    /// - Panics if `value` is `None` (use layer pointer setup methods instead)
+    /// - Panics in debug mode if `slot >= WIDTH`
+    unsafe fn assign_from_key_arc(
+        &self,
+        slot: usize,
+        key: &Key<'_>,
+        value: Option<Arc<V>>,
+        guard: &LocalGuard<'_>,
+    );
+}
+
 // ============================================================================
 //  Tests
 // ============================================================================
@@ -950,10 +1024,9 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::leaf::{LeafNode, LeafValue};
     use crate::leaf24::LeafNode24;
-    use crate::permuter::Permuter;
     use crate::permuter24::Permuter24;
+    use crate::value::LeafValue;
 
     // ========================================================================
     //  TreePermutation Tests
@@ -1001,31 +1074,6 @@ mod tests {
         let raw = p.value();
         let p2 = P::from_value(raw);
         assert_eq!(p, p2);
-    }
-
-    #[test]
-    fn test_permuter15_trait_empty() {
-        test_permutation_empty::<Permuter<15>>();
-    }
-
-    #[test]
-    fn test_permuter15_trait_insert() {
-        test_permutation_insert::<Permuter<15>>();
-    }
-
-    #[test]
-    fn test_permuter15_trait_insert_immutable() {
-        test_permutation_insert_immutable::<Permuter<15>>();
-    }
-
-    #[test]
-    fn test_permuter15_trait_freeze() {
-        test_permutation_freeze::<Permuter<15>>();
-    }
-
-    #[test]
-    fn test_permuter15_trait_roundtrip() {
-        test_permutation_roundtrip::<Permuter<15>>();
     }
 
     #[test]
@@ -1134,36 +1182,6 @@ mod tests {
     }
 
     #[test]
-    fn test_leafnode15_trait_new() {
-        test_leaf_new::<LeafNode<LeafValue<u64>, 15>>();
-    }
-
-    #[test]
-    fn test_leafnode15_trait_permutation() {
-        test_leaf_permutation::<LeafNode<LeafValue<u64>, 15>>();
-    }
-
-    #[test]
-    fn test_leafnode15_trait_ikey() {
-        test_leaf_ikey::<LeafNode<LeafValue<u64>, 15>>();
-    }
-
-    #[test]
-    fn test_leafnode15_trait_keylenx() {
-        test_leaf_keylenx::<LeafNode<LeafValue<u64>, 15>>();
-    }
-
-    #[test]
-    fn test_leafnode15_trait_linking() {
-        test_leaf_linking::<LeafNode<LeafValue<u64>, 15>>();
-    }
-
-    #[test]
-    fn test_leafnode15_trait_version() {
-        test_leaf_version::<LeafNode<LeafValue<u64>, 15>>();
-    }
-
-    #[test]
     fn test_leafnode24_trait_new() {
         test_leaf_new::<LeafNode24<LeafValue<u64>>>();
     }
@@ -1201,19 +1219,11 @@ mod tests {
     fn test_width_constants() {
         // Permutation WIDTH matches leaf WIDTH
         assert_eq!(
-            <Permuter<15> as TreePermutation>::WIDTH,
-            <LeafNode<LeafValue<u64>, 15> as TreeLeafNode<LeafValue<u64>>>::WIDTH
-        );
-        assert_eq!(
             <Permuter24 as TreePermutation>::WIDTH,
             <LeafNode24<LeafValue<u64>> as TreeLeafNode<LeafValue<u64>>>::WIDTH
         );
 
         // Verify actual values
-        assert_eq!(
-            <LeafNode<LeafValue<u64>, 15> as TreeLeafNode<LeafValue<u64>>>::WIDTH,
-            15
-        );
         assert_eq!(
             <LeafNode24<LeafValue<u64>> as TreeLeafNode<LeafValue<u64>>>::WIDTH,
             24
@@ -1248,22 +1258,9 @@ mod tests {
     }
 
     #[test]
-    fn test_generic_perm_fill_15() {
-        let perm: Permuter<15> = generic_perm_fill(5);
-        assert_eq!(perm.size(), 5);
-    }
-
-    #[test]
     fn test_generic_perm_fill_24() {
         let perm: Permuter24 = generic_perm_fill(10);
         assert_eq!(perm.size(), 10);
-    }
-
-    #[test]
-    fn test_generic_leaf_setup_15() {
-        let leaf: Box<LeafNode<LeafValue<u64>, 15>> = generic_leaf_setup(42);
-        assert_eq!(leaf.ikey(0), 42);
-        assert_eq!(leaf.size(), 1);
     }
 
     #[test]

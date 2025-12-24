@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     marker::PhantomData,
     sync::{
         Arc,
@@ -10,16 +11,19 @@ use parking_lot::{Condvar, Mutex};
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
-    MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreeLeafNode, TreePermutation,
+    MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation,
     key::Key,
-    leaf::LeafValue,
+    leaf_trait::LayerCapableLeaf,
+    leaf24::LAYER_KEYLENX,
     nodeversion::NodeVersion,
     tree::{CasInsertResultGeneric, InsertError, InsertSearchResultGeneric},
+    value::LeafValue,
 };
 
 impl<V, L, A> MassTreeGeneric<V, L, A>
 where
-    L: TreeLeafNode<LeafValue<V>>,
+    V: Send + Sync + 'static,
+    L: LayerCapableLeaf<V>,
     A: NodeAllocatorGeneric<LeafValue<V>, L>,
 {
     /// Create a new empty `MassTreeGeneric` with the given allocator.
@@ -364,9 +368,9 @@ where
 
     /// Internal concurrent get implementation with layer descent support.
     fn get_concurrent_generic(&self, key: &mut Key<'_>, guard: &LocalGuard<'_>) -> Option<Arc<V>> {
-        use crate::leaf::KSUF_KEYLENX;
-        use crate::leaf::LAYER_KEYLENX;
         use crate::leaf_trait::TreePermutation;
+        use crate::leaf24::KSUF_KEYLENX;
+        use crate::leaf24::LAYER_KEYLENX;
 
         // Start at tree root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
@@ -577,8 +581,8 @@ where
         value: &Arc<V>,
         guard: &LocalGuard<'_>,
     ) -> CasInsertResultGeneric<V> {
-        use crate::leaf::link::{is_marked, unmark_ptr};
         use crate::leaf_trait::TreePermutation;
+        use crate::link::{is_marked, unmark_ptr};
         use std::ptr as StdPtr;
 
         let ikey: u64 = key.ikey();
@@ -739,8 +743,10 @@ where
                     match leaf.cas_permutation_raw(perm, new_perm) {
                         Ok(()) => {
                             // Verify slot wasn't stolen
+                            // NOTE: Do NOT increment count here - the slot was stolen by another
+                            // thread, so our insert did not complete. The locked fallback path
+                            // will handle the insert and increment the count if successful.
                             if leaf.load_slot_value(slot) != arc_ptr {
-                                self.count.fetch_add(1, AtomicOrdering::Relaxed);
                                 return CasInsertResultGeneric::ContentionFallback;
                             }
 
@@ -824,9 +830,9 @@ where
         key: &Key<'_>,
         perm: &L::Perm,
     ) -> InsertSearchResultGeneric {
-        use crate::leaf::KSUF_KEYLENX;
-        use crate::leaf::LAYER_KEYLENX;
         use crate::leaf_trait::TreePermutation;
+        use crate::leaf24::KSUF_KEYLENX;
+        use crate::leaf24::LAYER_KEYLENX;
 
         let target_ikey: u64 = key.ikey();
 
@@ -849,23 +855,34 @@ where
                     continue;
                 }
 
-                // Layer pointer
+                // Layer pointer - always descend into the layer.
+                // Even if the key has no suffix, the value should be stored in the sublayer
+                // with ikey=0, keylenx=0 (empty key at that layer level).
                 if slot_keylenx >= LAYER_KEYLENX {
-                    if key.has_suffix() {
-                        return InsertSearchResultGeneric::Layer {
-                            slot,
-                            shift_amount: 8,
-                        };
-                    }
-                    return InsertSearchResultGeneric::Conflict { slot };
+                    return InsertSearchResultGeneric::Layer {
+                        slot,
+                        shift_amount: 8,
+                    };
                 }
 
                 // Exact match check
                 if slot_keylenx == search_keylenx {
                     if slot_keylenx == KSUF_KEYLENX {
-                        // TODO: suffix comparison via trait method
-                        return InsertSearchResultGeneric::Found { slot };
+                        // Both have suffixes - compare them
+                        let key_suffix: &[u8] = key.suffix();
+                        if let Some(slot_suffix) = leaf.ksuf(slot) {
+                            if key_suffix == slot_suffix {
+                                // Same suffix = same key
+                                return InsertSearchResultGeneric::Found { slot };
+                            }
+                            // Different suffixes = conflict, need layer
+                            return InsertSearchResultGeneric::Conflict { slot };
+                        }
+                        // No stored suffix (shouldn't happen for KSUF_KEYLENX)
+                        // but treat as conflict to be safe
+                        return InsertSearchResultGeneric::Conflict { slot };
                     }
+                    // Inline keys (no suffix) with matching keylenx = same key
                     return InsertSearchResultGeneric::Found { slot };
                 }
 
@@ -893,7 +910,7 @@ where
         key: &Key<'_>,
         _guard: &LocalGuard<'_>,
     ) -> &'a L {
-        use crate::leaf::link::{is_marked, unmark_ptr};
+        use crate::link::{is_marked, unmark_ptr};
 
         let key_ikey: u64 = key.ikey();
 
@@ -1145,10 +1162,63 @@ where
                     layer_root = layer_ptr;
                 }
 
-                InsertSearchResultGeneric::Conflict { .. } => {
-                    // Layer creation needed - not implemented yet
+                InsertSearchResultGeneric::Conflict { slot } => {
+                    // =================================================================
+                    // Suffix Conflict: Same ikey, different suffix
+                    // Create a new layer to distinguish the keys
+                    // =================================================================
+
+                    // Mark insert before modifying the node
+                    lock.mark_insert();
+
+                    // Create new layer for the conflicting keys
+                    //
+                    // SAFETY:
+                    // - We hold the lock on `leaf`
+                    // - `guard` is from this tree's collector
+                    let layer_ptr: *mut u8 = unsafe {
+                        self.create_layer_concurrent_generic(
+                            leaf,
+                            slot,
+                            key,
+                            Arc::clone(&value),
+                            guard,
+                        )
+                    };
+
+                    // CRITICAL: Drop the existing Arc in the conflict slot.
+                    //
+                    // The create_layer_concurrent_generic function cloned it via try_clone_arc(),
+                    // so the slot's reference is now redundant. We must drop it to avoid
+                    // leaking memory when we overwrite with the layer pointer.
+                    //
+                    // SAFETY:
+                    // - We hold the lock, so no concurrent access
+                    let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
+                    if !old_ptr.is_null() {
+                        // SAFETY: old_ptr came from Arc::into_raw during the original insert
+                        let _old_arc: Arc<V> = unsafe { Arc::from_raw(old_ptr.cast::<V>()) };
+                        // _old_arc is dropped here, decrementing refcount
+                    }
+
+                    // Clear any existing suffix for this slot
+                    // SAFETY: We hold the lock
+                    unsafe { leaf.clear_ksuf(slot, guard) };
+
+                    // Install the layer pointer in the conflict slot
+                    //
+                    // NOTE: The original ikey remains unchanged (it's the shared prefix).
+                    // We only change keylenx to indicate this is now a layer pointer,
+                    // and set the pointer to the new layer chain.
+                    leaf.set_keylenx(slot, LAYER_KEYLENX);
+                    leaf.set_leaf_value_ptr(slot, layer_ptr);
+
+                    // Release lock and increment entry count
+                    // (new key was added to the layer, so count increases by 1)
                     drop(lock);
-                    return Err(InsertError::LayerCreationRequired);
+                    self.count.fetch_add(1, AtomicOrdering::Relaxed);
+
+                    return Ok(None);
                 }
             }
         }
@@ -1337,6 +1407,7 @@ where
 
     /// Propagate a leaf split to the parent.
     #[expect(clippy::too_many_lines)]
+    #[expect(clippy::panic, reason = "FATAL: Cannot continue")]
     fn propagate_split_generic(
         &self,
         left_leaf_ptr: *mut L,
@@ -1479,6 +1550,17 @@ where
 
             // CRITICAL: Save is_root BEFORE unlocking, because SPLIT_UNLOCK_MASK clears ROOT_BIT
             let parent_was_root: bool = parent.is_root();
+
+            // CRITICAL FIX: Set right_leaf's parent pointer BEFORE releasing the lock.
+            // This prevents a race where another thread tries to split right_leaf and
+            // finds NULL parent (not a root), causing it to spin forever waiting.
+            // The internode split may move right_leaf to a different parent, but:
+            // 1. Having a non-NULL parent allows the other thread to make progress
+            // 2. The "child not found" retry loop handles parent changes gracefully
+            // 3. propagate_internode_split_generic will update the parent if needed
+            unsafe {
+                (*right_leaf_ptr).set_parent(parent_ptr.cast::<u8>());
+            }
 
             // Release parent lock WITHOUT mark_split - propagate_internode_split_generic
             // will re-acquire the lock and call mark_split when it performs the split.
@@ -1840,7 +1922,13 @@ where
             // NOTE: split_into now updates all children's parent pointers in sibling internally
             // (matching C++ masstree_split.hh:163-165). This is critical for correctness.
             let (popup_key, insert_went_left) = unsafe {
-                parent.split_into(&mut *sibling_ptr, sibling_ptr, child_idx, insert_ikey, insert_child)
+                parent.split_into(
+                    &mut *sibling_ptr,
+                    sibling_ptr,
+                    child_idx,
+                    insert_ikey,
+                    insert_child,
+                )
             };
 
             #[cfg(feature = "tracing")]
@@ -2085,5 +2173,252 @@ where
         }
 
         Ok(())
+    }
+}
+
+// =============================================================================
+// Generic Layer Creation
+// =============================================================================
+
+impl<V, L, A> MassTreeGeneric<V, L, A>
+where
+    V: Send + Sync + 'static,
+    L: LayerCapableLeaf<V>,
+    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+{
+    /// Create a new layer for suffix conflict (generic version).
+    ///
+    /// Called when two keys share the same 8-byte ikey but have different suffixes.
+    /// Creates a twig chain if needed, ending in a leaf with both keys.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Extract existing key's suffix and Arc value from conflict slot
+    /// 2. Shift `new_key` past the matching ikey
+    /// 3. While both keys have matching ikeys AND both have more bytes:
+    ///    - Create intermediate "twig" layer node with just the matching ikey
+    ///    - Chain twig nodes together via layer pointers
+    /// 4. Create final leaf with both keys (now diverged)
+    /// 5. Link twig chain to final leaf
+    /// 6. Return head of chain (or final leaf if no chain)
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_leaf` - The leaf containing the conflict slot
+    /// * `conflict_slot` - Physical slot index with the existing key
+    /// * `new_key` - The new key being inserted (will be mutated via shift)
+    /// * `new_value` - Arc value for the new key
+    /// * `guard` - Seize guard for memory reclamation
+    ///
+    /// # Returns
+    ///
+    /// Raw pointer to the head of the layer chain (either a twig or the final leaf).
+    /// This pointer should be stored in the conflict slot with `LAYER_KEYLENX`.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the lock on `parent_leaf`
+    /// - Caller must have called `lock.mark_insert()` before calling this
+    /// - `guard` must come from this tree's collector
+    unsafe fn create_layer_concurrent_generic(
+        &self,
+        parent_leaf: &L,
+        conflict_slot: usize,
+        new_key: &mut Key<'_>,
+        new_value: Arc<V>,
+        guard: &LocalGuard<'_>,
+    ) -> *mut u8 {
+        // =====================================================================
+        // Step 1: Extract existing key's suffix and Arc value
+        // =====================================================================
+
+        // Get existing suffix (empty slice if no suffix stored)
+        let existing_suffix: &[u8] = parent_leaf.ksuf(conflict_slot).unwrap_or(&[]);
+
+        // Create a Key iterator from the existing suffix for comparison
+        let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
+
+        // Clone the existing Arc value from the conflict slot
+        // INVARIANT: Conflict case means the slot contains a value, not a layer pointer.
+        let existing_arc: Option<Arc<V>> = parent_leaf.try_clone_arc(conflict_slot);
+        debug_assert!(
+            existing_arc.is_some(),
+            "create_layer_concurrent_generic: conflict slot {} should contain a value, \
+             not a layer pointer. keylenx={}",
+            conflict_slot,
+            parent_leaf.keylenx(conflict_slot)
+        );
+
+        // =====================================================================
+        // Step 2: Shift new_key past the matching ikey
+        // =====================================================================
+
+        // The new_key's current ikey matched the conflict slot's ikey.
+        // If new_key has more bytes (suffix), shift to the next 8-byte chunk.
+        if new_key.has_suffix() {
+            new_key.shift();
+        }
+
+        // =====================================================================
+        // Step 3: Compare keys to determine twig chain depth
+        // =====================================================================
+
+        // Compare the next ikeys of both keys
+        let mut cmp: Ordering = existing_key.compare(new_key.ikey(), new_key.current_len());
+
+        // =====================================================================
+        // Step 4: Create twig chain while ikeys match AND both have more bytes
+        // =====================================================================
+
+        // Twig chain head (first twig node, returned to caller)
+        let mut twig_head: Option<*mut L> = None;
+        // Twig chain tail (last twig node, where we link the next node)
+        let mut twig_tail: *mut L = std::ptr::null_mut();
+
+        while cmp == Ordering::Equal && existing_key.has_suffix() && new_key.has_suffix() {
+            // Both keys have the same ikey at this level AND both have more bytes.
+            // Create an intermediate twig node that just holds this matching ikey.
+
+            // Allocate new twig node configured as layer root
+            let twig: Box<L> = L::new_layer_root_boxed();
+            let twig_ptr: *mut L = self.allocator.alloc_leaf(twig);
+
+            // Initialize twig with the matching ikey in slot 0
+            // SAFETY: twig_ptr is valid, we just allocated it
+            unsafe {
+                (*twig_ptr).set_ikey(0, existing_key.ikey());
+                // Twig has exactly 1 entry (the matching ikey, will point to next layer)
+                (*twig_ptr).set_permutation(<L::Perm as TreePermutation>::make_sorted(1));
+            }
+
+            // Link to previous twig in chain (if any)
+            if twig_head.is_some() {
+                // Previous twig's slot 0 now points to this twig as a layer
+                // SAFETY: twig_tail is valid from previous iteration
+                unsafe {
+                    (*twig_tail).set_keylenx(0, LAYER_KEYLENX);
+                    (*twig_tail).set_leaf_value_ptr(0, twig_ptr.cast::<u8>());
+                }
+            } else {
+                // First twig becomes the head of the chain
+                twig_head = Some(twig_ptr);
+            }
+            twig_tail = twig_ptr;
+
+            // Shift both keys to compare the next 8-byte chunk
+            existing_key.shift();
+            new_key.shift();
+            cmp = existing_key.compare(new_key.ikey(), new_key.current_len());
+        }
+
+        // =====================================================================
+        // Step 5: Create final leaf with both keys (now diverged or one is prefix)
+        // =====================================================================
+
+        let final_leaf: Box<L> = L::new_layer_root_boxed();
+        let final_ptr: *mut L = self.allocator.alloc_leaf(final_leaf);
+
+        // Assign both entries to the final leaf in sorted order
+        // SAFETY: final_ptr is valid (just allocated), guard is from caller
+        unsafe {
+            self.assign_final_layer_entries(
+                final_ptr,
+                &existing_key,
+                existing_arc,
+                new_key,
+                Some(new_value),
+                cmp,
+                guard,
+            );
+        }
+
+        // =====================================================================
+        // Step 6: Link twig chain to final leaf
+        // =====================================================================
+
+        twig_head.map_or_else(
+            || final_ptr.cast::<u8>(),
+            |head| {
+                // Link last twig to the final leaf
+                // SAFETY: twig_tail is valid (we have at least one twig since head is Some)
+                unsafe {
+                    (*twig_tail).set_keylenx(0, LAYER_KEYLENX);
+                    (*twig_tail).set_leaf_value_ptr(0, final_ptr.cast::<u8>());
+                }
+                // Return head of twig chain
+                head.cast::<u8>()
+            },
+        )
+    }
+
+    /// Assign two entries to the final layer leaf in sorted order.
+    ///
+    /// The entries are ordered by:
+    /// 1. ikey comparison (lexicographic via u64 big-endian)
+    /// 2. If ikeys equal: shorter key first (prefix before extension)
+    ///
+    /// # Safety
+    ///
+    /// - `final_ptr` must be valid and point to an empty leaf
+    /// - `guard` must come from this tree's collector
+    /// - Caller must ensure no concurrent access to `final_ptr`
+    #[expect(clippy::too_many_arguments, reason = "Internal helper")]
+    #[expect(clippy::unused_self, reason = "API Consistency")]
+    unsafe fn assign_final_layer_entries(
+        &self,
+        final_ptr: *mut L,
+        existing_key: &Key<'_>,
+        existing_arc: Option<Arc<V>>,
+        new_key: &Key<'_>,
+        new_arc: Option<Arc<V>>,
+        cmp: Ordering,
+        guard: &LocalGuard<'_>,
+    ) {
+        // SAFETY: final_ptr is valid per caller contract
+        let final_leaf: &L = unsafe { &*final_ptr };
+
+        match cmp {
+            Ordering::Less => {
+                // existing_key.ikey() < new_key.ikey()
+                // existing goes in slot 0, new goes in slot 1
+                // SAFETY: guard requirement passed through from caller
+                unsafe {
+                    final_leaf.assign_from_key_arc(0, existing_key, existing_arc, guard);
+                    final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
+                }
+            }
+            Ordering::Greater => {
+                // new_key.ikey() < existing_key.ikey()
+                // new goes in slot 0, existing goes in slot 1
+                // SAFETY: guard requirement passed through from caller
+                unsafe {
+                    final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
+                    final_leaf.assign_from_key_arc(1, existing_key, existing_arc, guard);
+                }
+            }
+            Ordering::Equal => {
+                // Keys have same ikey at this level.
+                // This happens when one key is a prefix of the other.
+                // Convention: shorter key first (prefix before extension).
+                if existing_key.current_len() <= new_key.current_len() {
+                    // existing is shorter or equal length -> existing first
+                    // SAFETY: guard requirement passed through from caller
+                    unsafe {
+                        final_leaf.assign_from_key_arc(0, existing_key, existing_arc, guard);
+                        final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
+                    }
+                } else {
+                    // new is shorter -> new first
+                    // SAFETY: guard requirement passed through from caller
+                    unsafe {
+                        final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
+                        final_leaf.assign_from_key_arc(1, existing_key, existing_arc, guard);
+                    }
+                }
+            }
+        }
+
+        // Set permutation: final leaf now has exactly 2 entries in slots 0 and 1
+        final_leaf.set_permutation(<L::Perm as TreePermutation>::make_sorted(2));
     }
 }

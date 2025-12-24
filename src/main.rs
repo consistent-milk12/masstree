@@ -54,7 +54,7 @@ fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
 }
 
 fn setup_masstree<const K: usize>(keys: &[[u8; K]]) -> MassTree<u64> {
-    let mut tree = MassTree::new();
+    let tree = MassTree::new();
     for (i, key) in keys.iter().enumerate() {
         let _ = tree.insert(key, i as u64);
     }

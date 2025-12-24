@@ -109,7 +109,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::leaf::LeafValue;
+    use crate::value::LeafValue;
 
     #[test]
     fn test_cas_permutation_success() {

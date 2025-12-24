@@ -172,8 +172,9 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::leaf::{LeafNode, LeafValue};
+    use crate::alloc24::SeizeAllocator24;
     use crate::leaf24::LeafNode24;
+    use crate::value::LeafValue;
 
     // ========================================================================
     // Generic Test Helpers
@@ -211,41 +212,17 @@ mod tests {
     }
 
     // ========================================================================
-    // SeizeAllocator Tests
-    // ========================================================================
-
-    #[test]
-    fn test_seize_allocator_generic_alloc() {
-        use crate::alloc::SeizeAllocator;
-
-        let alloc: SeizeAllocator<LeafValue<u64>, 15> = SeizeAllocator::new();
-        test_generic_alloc_leaf::<LeafValue<u64>, LeafNode<LeafValue<u64>, 15>, _>(&alloc);
-    }
-
-    #[test]
-    fn test_seize_allocator_generic_track() {
-        use crate::alloc::SeizeAllocator;
-
-        let alloc: SeizeAllocator<LeafValue<u64>, 15> = SeizeAllocator::new();
-        test_generic_track_leaf::<LeafValue<u64>, LeafNode<LeafValue<u64>, 15>, _>(&alloc);
-    }
-
-    // ========================================================================
     // SeizeAllocator24 Tests
     // ========================================================================
 
     #[test]
     fn test_seize_allocator24_generic_alloc() {
-        use crate::alloc24::SeizeAllocator24;
-
         let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
         test_generic_alloc_leaf::<LeafValue<u64>, LeafNode24<LeafValue<u64>>, _>(&alloc);
     }
 
     #[test]
     fn test_seize_allocator24_generic_track() {
-        use crate::alloc24::SeizeAllocator24;
-
         let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
         test_generic_track_leaf::<LeafValue<u64>, LeafNode24<LeafValue<u64>>, _>(&alloc);
     }
@@ -267,17 +244,8 @@ mod tests {
 
     #[test]
     fn test_generic_code_compiles() {
-        use crate::alloc::SeizeAllocator;
-        use crate::alloc24::SeizeAllocator24;
-
-        let mut alloc15: SeizeAllocator<LeafValue<u64>, 15> = SeizeAllocator::new();
         let mut alloc24: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
 
-        assert!(generic_tree_setup::<
-            LeafValue<u64>,
-            LeafNode<LeafValue<u64>, 15>,
-            _,
-        >(&mut alloc15));
         assert!(generic_tree_setup::<
             LeafValue<u64>,
             LeafNode24<LeafValue<u64>>,

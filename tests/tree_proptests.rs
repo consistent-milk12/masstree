@@ -6,7 +6,7 @@
 #![expect(clippy::unwrap_used, reason = "fail fast in tests")]
 
 use masstree::key::MAX_KEY_LENGTH;
-use masstree::tree::{MassTree, MassTree24, MassTreeIndex};
+use masstree::tree::{MassTree24, MassTreeIndex};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -409,44 +409,7 @@ proptest! {
 //  Smaller WIDTH Properties
 // ============================================================================
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
-
-    /// Tree with WIDTH=3 should work correctly (more splits).
-    #[test]
-    fn small_width_tree_works(keys in unique_keys(30)) {
-        let mut tree: MassTree<u64, 3> = MassTree::new();
-
-        for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
-        }
-
-        for (i, key) in keys.iter().enumerate() {
-            let result = tree.get(key);
-            prop_assert!(result.is_some(), "Key {:?} not found in WIDTH=3 tree", key);
-            prop_assert_eq!(*result.unwrap(), i as u64);
-        }
-
-        prop_assert_eq!(tree.len(), keys.len());
-    }
-
-    /// Tree with WIDTH=5 should work correctly.
-    #[test]
-    fn medium_width_tree_works(keys in unique_keys(40)) {
-        let mut tree: MassTree<u64, 5> = MassTree::new();
-
-        for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
-        }
-
-        for (i, key) in keys.iter().enumerate() {
-            prop_assert!(tree.get(key).is_some());
-            prop_assert_eq!(*tree.get(key).unwrap(), i as u64);
-        }
-
-        prop_assert_eq!(tree.len(), keys.len());
-    }
-}
+// Note: WIDTH=3 and WIDTH=5 tests removed as we now only support WIDTH=24
 
 // ============================================================================
 //  Edge Cases
