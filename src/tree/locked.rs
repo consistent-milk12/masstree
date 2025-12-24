@@ -802,10 +802,19 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 continue;
             }
 
-            // Version snapshot (spins until dirty bits clear)
+            // Version snapshot (fail-fast if dirty)
+            // PERF: Don't spin in stable() waiting for dirty bits.
+            // If a writer has the lock, retry from the beginning.
+            // This eliminates convoy behavior where all threads spin.
             #[cfg(feature = "tracing")]
             let stable_start = std::time::Instant::now();
-            let version: u32 = leaf.version().stable();
+            let version: u32 = leaf.version().value();
+            if leaf.version().is_dirty() {
+                // A writer is active - yield to let them finish
+                trace_log!(ikey, leaf_ptr = ?leaf_ptr, "find_locked: version dirty, yielding");
+                std::thread::yield_now(); // Give writer a chance to complete
+                continue;
+            }
             #[cfg(feature = "tracing")]
             {
                 let stable_elapsed = stable_start.elapsed();
@@ -837,13 +846,14 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         "find_locked: permutation FROZEN, waiting on stable()"
                     );
                 }
-                let _ = leaf.version().stable();
+                // PERF: yield instead of spinning in stable()
+                std::thread::yield_now();
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
                     ikey,
                     leaf_ptr = ?leaf_ptr,
                     version = leaf.version().value(),
-                    "find_locked: stable() returned, retrying with use_reach=true"
+                    "find_locked: yielded, retrying with use_reach=true"
                 );
                 use_reach = true;
                 continue;

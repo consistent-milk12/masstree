@@ -383,6 +383,7 @@ dependencies = [
  "loom",
  "mimalloc",
  "parking_lot",
+ "portable-atomic",
  "proptest",
  "seize",
  "serde_json",
@@ -474,6 +475,12 @@ name = "pin-project-lite"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
+
+[[package]]
+name = "portable-atomic"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f59e70c4aef1e55797c2e8fd94a4f2a973fc972cfde0e0b05f683667b0cd39dd"
 
 [[package]]
 name = "ppv-lite86"

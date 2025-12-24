@@ -37,6 +37,7 @@ tracing = ["dep:tracing", "dep:tracing-subscriber"]
 [dependencies]
 seize = "0.5.1"
 parking_lot = "0.12.5"
+portable-atomic = "1.12.0"
 
 # Optional allocators (enabled via features)
 mimalloc = { version = "0.1.48", optional = true }
@@ -140,6 +141,18 @@ inherits = "release"
 debug = 2
 strip = "none"
 lto = false
+
+# Profiling profile - optimized for flamegraph/perf
+# Frame pointers required for accurate stack traces
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = "none"
+lto = false
+
+# Force frame pointers in our code (dependencies need RUSTFLAGS)
+[profile.profiling.package."*"]
+debug = true
 
 [profile.bench]
 inherits = "release"

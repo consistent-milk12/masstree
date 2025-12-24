@@ -21,6 +21,7 @@ pub use simd_search::upper_bound_internode_simd;
 
 use crate::internode::InternodeNode;
 use crate::leaf::LeafNode;
+use crate::leaf_trait::TreeInternode;
 use crate::permuter::Permuter;
 use crate::slot;
 use std::cmp::Ordering;
@@ -392,6 +393,48 @@ pub fn upper_bound_internode_direct<S: slot::ValueSlot, const WIDTH: usize>(
     node: &InternodeNode<S, WIDTH>,
 ) -> usize {
     let size: usize = node.size();
+    let mut l: usize = 0;
+    let mut r: usize = size;
+
+    while l < r {
+        let m: usize = (l + r) >> 1;
+        let node_ikey: u64 = node.ikey(m);
+
+        match search_ikey.cmp(&node_ikey) {
+            Ordering::Less => {
+                r = m;
+            }
+
+            Ordering::Equal => {
+                return m + 1;
+            }
+
+            Ordering::Greater => {
+                l = m + 1;
+            }
+        }
+    }
+
+    l
+}
+
+/// Upper bound search in an internode (generic version).
+///
+/// Works with any internode type implementing [`TreeInternode`].
+/// Used by `MassTreeGeneric` for WIDTH-agnostic traversal.
+///
+/// # Arguments
+/// * `search_ikey` - The 8-byte key to route
+/// * `node` - The internode to search (any type implementing TreeInternode)
+///
+/// # Returns
+/// Child index (0 to nkeys). Use `node.child(result)` to get the child pointer.
+#[inline(always)]
+pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
+    search_ikey: u64,
+    node: &I,
+) -> usize {
+    let size: usize = node.nkeys();
     let mut l: usize = 0;
     let mut r: usize = size;
 

@@ -181,8 +181,16 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 continue;
             }
 
-            // 2. Get stable version and permutation
-            let version: u32 = leaf.version().stable();
+            // 2. Get version (fail-fast if dirty)
+            // PERF: Don't call stable() which spins. If a writer has the lock,
+            // immediately fall back to locked path instead of spinning.
+            // This eliminates the convoy problem where 32 threads spin waiting
+            // for one writer to finish.
+            let version: u32 = leaf.version().value();
+            if leaf.version().is_dirty() {
+                trace_log!(ikey, leaf_ptr = ?leaf_ptr, "CAS insert: version dirty, falling back");
+                return CasInsertResult::ContentionFallback;
+            }
 
             // Use permutation_try() for freeze safety.
             // If a split is in progress (frozen), fall back to locked path.

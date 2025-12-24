@@ -231,6 +231,47 @@ apples:
 build-profile:
     cargo build --profile release-with-debug
 
+# === Flamegraph (requires cargo-flamegraph) ===
+
+# Run flamegraph on the profile example
+# Usage: just flamegraph [workload]
+# Workloads: key, permuter, tree, all (default: tree)
+flamegraph workload="tree":
+    CARGO_PROFILE_PROFILING_DEBUG=2 \
+    RUSTFLAGS="-C force-frame-pointers=yes" \
+    cargo flamegraph --profile profiling --example profile -- {{workload}}
+    @echo "Output: flamegraph.svg"
+
+# Run flamegraph with mimalloc (allocator symbols may be incomplete)
+flamegraph-mimalloc workload="tree":
+    CARGO_PROFILE_PROFILING_DEBUG=2 \
+    RUSTFLAGS="-C force-frame-pointers=yes" \
+    CFLAGS="-fno-omit-frame-pointer" \
+    cargo flamegraph --profile profiling --example profile --features mimalloc -- {{workload}}
+    @echo "Output: flamegraph.svg"
+
+# Run flamegraph on a specific benchmark
+# Usage: just flamegraph-bench concurrent_maps "08a_read_scaling"
+flamegraph-bench bench filter="":
+    CARGO_PROFILE_PROFILING_DEBUG=2 \
+    RUSTFLAGS="-C force-frame-pointers=yes" \
+    cargo flamegraph --profile profiling --bench {{bench}} -- {{filter}}
+    @echo "Output: flamegraph.svg"
+
+# Run perf record manually (for more control)
+# Usage: just perf-record [workload]
+perf-record workload="tree":
+    RUSTFLAGS="-C force-frame-pointers=yes -C debuginfo=2" \
+    cargo build --profile profiling --example profile
+    perf record -g --call-graph dwarf ./target/profiling/examples/profile {{workload}}
+    @echo "Output: perf.data"
+    @echo "View:   perf report -g"
+
+# Generate flamegraph from existing perf.data
+perf-flamegraph:
+    perf script | stackcollapse-perf.pl | flamegraph.pl > perf-flamegraph.svg
+    @echo "Output: perf-flamegraph.svg"
+
 # Build the callgrind profiling example (with debug symbols)
 build-callgrind:
     cargo build --profile release-with-debug --example profile

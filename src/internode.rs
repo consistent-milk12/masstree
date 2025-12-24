@@ -664,6 +664,133 @@ const _: () = {
 };
 
 // ============================================================================
+//  TreeInternode Implementation
+// ============================================================================
+
+impl<S, const WIDTH: usize> crate::leaf_trait::TreeInternode<S> for InternodeNode<S, WIDTH>
+where
+    S: ValueSlot + Send + Sync + 'static,
+{
+    const WIDTH: usize = WIDTH;
+
+    #[inline]
+    fn new_boxed(height: u32) -> Box<Self> {
+        Self::new(height)
+    }
+
+    #[inline]
+    fn new_root_boxed(height: u32) -> Box<Self> {
+        Self::new_root(height)
+    }
+
+    #[inline]
+    fn version(&self) -> &crate::nodeversion::NodeVersion {
+        Self::version(self)
+    }
+
+    #[inline]
+    fn height(&self) -> u32 {
+        Self::height(self)
+    }
+
+    #[inline]
+    fn children_are_leaves(&self) -> bool {
+        Self::children_are_leaves(self)
+    }
+
+    #[inline]
+    fn nkeys(&self) -> usize {
+        Self::nkeys(self)
+    }
+
+    #[inline]
+    fn set_nkeys(&self, n: u8) {
+        Self::set_nkeys(self, n);
+    }
+
+    #[inline]
+    fn inc_nkeys(&self) {
+        Self::inc_nkeys(self);
+    }
+
+    #[inline]
+    fn is_full(&self) -> bool {
+        Self::is_full(self)
+    }
+
+    #[inline]
+    fn ikey(&self, idx: usize) -> u64 {
+        InternodeNode::ikey(self, idx)
+    }
+
+    #[inline]
+    fn set_ikey(&self, idx: usize, key: u64) {
+        InternodeNode::set_ikey(self, idx, key)
+    }
+
+    #[inline]
+    fn compare_key(&self, search_ikey: u64, p: usize) -> std::cmp::Ordering {
+        InternodeNode::compare_key(self, search_ikey, p)
+    }
+
+    #[inline]
+    fn find_insert_position(&self, insert_ikey: u64) -> usize {
+        InternodeNode::find_insert_position(self, insert_ikey)
+    }
+
+    #[inline]
+    fn child(&self, idx: usize) -> *mut u8 {
+        InternodeNode::child(self, idx)
+    }
+
+    #[inline]
+    fn set_child(&self, idx: usize, child: *mut u8) {
+        InternodeNode::set_child(self, idx, child)
+    }
+
+    #[inline]
+    fn assign(&self, p: usize, ikey: u64, right_child: *mut u8) {
+        InternodeNode::assign(self, p, ikey, right_child)
+    }
+
+    #[inline]
+    fn insert_key_and_child(&self, p: usize, new_ikey: u64, new_child: *mut u8) {
+        InternodeNode::insert_key_and_child(self, p, new_ikey, new_child)
+    }
+
+    #[inline]
+    fn parent(&self) -> *mut u8 {
+        InternodeNode::parent(self)
+    }
+
+    #[inline]
+    fn set_parent(&self, parent: *mut u8) {
+        InternodeNode::set_parent(self, parent)
+    }
+
+    #[inline]
+    fn is_root(&self) -> bool {
+        InternodeNode::is_root(self)
+    }
+
+    #[inline]
+    fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize) {
+        InternodeNode::shift_from(self, dst_pos, src, src_pos, count)
+    }
+
+    #[inline]
+    fn split_into(
+        &self,
+        new_right: &mut Self,
+        insert_pos: usize,
+        insert_ikey: u64,
+        insert_child: *mut u8,
+    ) -> (u64, bool) {
+        InternodeNode::split_into(self, new_right, insert_pos, insert_ikey, insert_child)
+    }
+}
+
+// ============================================================================
 //  Tests
 // ============================================================================
 

@@ -636,6 +636,62 @@ impl<S: ValueSlot, const WIDTH: usize> Drop for SeizeAllocator<S, WIDTH> {
 }
 
 // ============================================================================
+//  NodeAllocatorGeneric Implementation
+// ============================================================================
+
+impl<S, const WIDTH: usize> crate::alloc_trait::NodeAllocatorGeneric<S, LeafNode<S, WIDTH>>
+    for SeizeAllocator<S, WIDTH>
+where
+    S: ValueSlot + Send + Sync + 'static,
+{
+    #[inline]
+    fn alloc_leaf(&mut self, node: Box<LeafNode<S, WIDTH>>) -> *mut LeafNode<S, WIDTH> {
+        NodeAllocator::alloc_leaf(self, node)
+    }
+
+    #[inline]
+    fn track_leaf(&self, ptr: *mut LeafNode<S, WIDTH>) {
+        NodeAllocator::track_leaf(self, ptr);
+    }
+
+    #[inline]
+    unsafe fn retire_leaf(&self, ptr: *mut LeafNode<S, WIDTH>, guard: &LocalGuard<'_>) {
+        // SAFETY: Caller guarantees ptr is valid and unreachable
+        unsafe { NodeAllocator::retire_leaf(self, ptr, guard) }
+    }
+
+    #[inline]
+    fn alloc_internode_erased(&mut self, node_ptr: *mut u8) -> *mut u8 {
+        // SAFETY: Caller passes a valid Box<InternodeNode<S, WIDTH>> as *mut u8
+        let node: Box<InternodeNode<S, WIDTH>> =
+            unsafe { Box::from_raw(node_ptr.cast::<InternodeNode<S, WIDTH>>()) };
+        NodeAllocator::alloc_internode(self, node).cast()
+    }
+
+    #[inline]
+    fn track_internode_erased(&self, ptr: *mut u8) {
+        NodeAllocator::track_internode(self, ptr.cast());
+    }
+
+    #[inline]
+    unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // SAFETY: Caller guarantees ptr is valid InternodeNode<S, WIDTH>
+        unsafe { NodeAllocator::retire_internode(self, ptr.cast(), guard) }
+    }
+
+    #[inline]
+    fn teardown_tree(&mut self, root_ptr: *mut u8) {
+        NodeAllocator::teardown_tree(self, root_ptr);
+    }
+
+    #[inline]
+    unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // SAFETY: Caller guarantees subtree is unlinked
+        unsafe { NodeAllocator::retire_subtree_root(self, root_ptr, guard) }
+    }
+}
+
+// ============================================================================
 //  Tests
 // ============================================================================
 

@@ -25,6 +25,12 @@
 //! - `contention`: 32-thread contention writes (for perf profiling)
 //! - `all`: All workloads
 
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::indexing_slicing
+)]
+
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
@@ -192,20 +198,23 @@ const MULTIPLIERS: [u64; 4] = [
 ];
 
 fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
-    assert!(K % 8 == 0, "key size must be a multiple of 8");
+    assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     let chunks = K / 8;
     let mut out = Vec::with_capacity(n);
 
     for i in 0..n {
         let mut key = [0u8; K];
-        for c in 0..chunks {
+
+        (0..chunks).for_each(|c| {
             let v = (i as u64).wrapping_mul(MULTIPLIERS[c]);
             let bytes = v.to_be_bytes();
             let start = c * 8;
             key[start..start + 8].copy_from_slice(&bytes);
-        }
+        });
+
         out.push(key);
     }
+
     out
 }
 
@@ -218,7 +227,7 @@ fn setup_masstree<const K: usize>(keys: &[[u8; K]]) -> MassTree<u64> {
 }
 
 /// Contention workload: 32 threads hammering 1000 keys
-/// This is the workload where MassTree has high variance
+/// This is the workload where `MassTree` has high variance
 #[inline(never)]
 fn run_contention_workload() {
     const THREADS: usize = 32;
@@ -226,8 +235,7 @@ fn run_contention_workload() {
     const KEY_SPACE: usize = 1000;
 
     eprintln!(
-        "Running Contention workload ({} threads, {} ops/thread, {} keys)...",
-        THREADS, OPS_PER_THREAD, KEY_SPACE
+        "Running Contention workload ({THREADS} threads, {OPS_PER_THREAD} ops/thread, {KEY_SPACE} keys)..."
     );
 
     let keys: Arc<Vec<[u8; 8]>> = Arc::new(keys::<8>(KEY_SPACE));

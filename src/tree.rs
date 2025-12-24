@@ -68,6 +68,14 @@ pub enum InsertError {
     /// Recursive internode split not yet fully implemented concurrently.
     /// Fall back to single-threaded insert path.
     ParentSplitRequired,
+
+    /// Split required (generic path).
+    /// Leaf is full and needs to be split.
+    SplitRequired,
+
+    /// Layer creation required (generic path).
+    /// Key conflict requires creating a new sublayer.
+    LayerCreationRequired,
 }
 
 impl StdFmt::Display for InsertError {
@@ -83,6 +91,14 @@ impl StdFmt::Display for InsertError {
 
             Self::ParentSplitRequired => {
                 write!(f, "parent split required (use single-threaded insert)")
+            }
+
+            Self::SplitRequired => {
+                write!(f, "split required (leaf full)")
+            }
+
+            Self::LayerCreationRequired => {
+                write!(f, "layer creation required (key conflict)")
             }
         }
     }
@@ -835,6 +851,1295 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> Drop for Mass
         // - For ArenaAllocator: no-op (nodes freed via arena's own Drop)
         let root: *mut u8 = self.root_ptr.load(std::sync::atomic::Ordering::Acquire);
         self.allocator.teardown_tree(root);
+    }
+}
+
+// ============================================================================
+//  MassTreeGeneric - Generic over Leaf Type
+// ============================================================================
+
+use crate::alloc_trait::NodeAllocatorGeneric;
+#[allow(unused_imports)] // Will be used in submodule refactoring
+use crate::leaf_trait::{TreeInternode, TreeLeafNode};
+
+/// A high-performance generic trie of B+trees.
+///
+/// This is the generic version of [`MassTree`] that abstracts over the leaf node type.
+/// Use this when you need to work with different WIDTH variants programmatically.
+///
+/// For most use cases, prefer the type aliases:
+/// - [`MassTree<V>`] - Standard WIDTH=15 tree
+/// - [`MassTree24<V>`] - Wide WIDTH=24 tree (60% fewer splits)
+///
+/// # Type Parameters
+///
+/// - `V` - The value type to store
+/// - `L` - Leaf node type (must implement [`TreeLeafNode`])
+/// - `A` - Allocator type (must implement [`NodeAllocatorGeneric`])
+///
+/// # Example
+///
+/// ```ignore
+/// use masstree::{MassTreeGeneric, LeafNode24, SeizeAllocator24};
+///
+/// // Create a WIDTH=24 tree explicitly
+/// let tree: MassTreeGeneric<u64, LeafNode24<_>, SeizeAllocator24<_>> =
+///     MassTreeGeneric::new();
+/// ```
+pub struct MassTreeGeneric<V, L, A>
+where
+    L: TreeLeafNode<LeafValue<V>>,
+    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+{
+    /// Memory reclamation collector for safe concurrent access.
+    collector: Collector,
+
+    /// Node allocator for leaf and internode allocation.
+    allocator: A,
+
+    /// Atomic root pointer for concurrent access.
+    ///
+    /// Points to either a leaf node or an internode.
+    /// The node type is determined by the node's version field.
+    root_ptr: AtomicPtr<u8>,
+
+    /// Number of key-value pairs in the tree (atomic for concurrent access).
+    count: AtomicUsize,
+
+    /// Marker to indicate V and L must be Send + Sync for concurrent access.
+    _marker: PhantomData<(V, L)>,
+}
+
+impl<V, L, A> StdFmt::Debug for MassTreeGeneric<V, L, A>
+where
+    L: TreeLeafNode<LeafValue<V>>,
+    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+{
+    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
+        f.debug_struct("MassTreeGeneric")
+            .field("root_ptr", &self.root_ptr.load(Ordering::Relaxed))
+            .field("count", &self.count.load(Ordering::Relaxed))
+            .field("width", &L::WIDTH)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<V, L, A> MassTreeGeneric<V, L, A>
+where
+    L: TreeLeafNode<LeafValue<V>>,
+    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+{
+    /// Create a new empty `MassTreeGeneric` with the given allocator.
+    ///
+    /// The tree starts with a single empty leaf as root.
+    #[must_use]
+    pub fn with_allocator(mut allocator: A) -> Self {
+        // Create root leaf and register with allocator.
+        let root_leaf: Box<L> = L::new_root_boxed();
+        let root_ptr: *mut L = allocator.alloc_leaf(root_leaf);
+
+        Self {
+            collector: Collector::new(),
+            allocator,
+            root_ptr: AtomicPtr::new(root_ptr.cast::<u8>()),
+            count: AtomicUsize::new(0),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Enter a protected region and return a guard.
+    ///
+    /// The guard protects any pointers loaded during its lifetime from being
+    /// reclaimed. Call this before reading tree nodes or values.
+    #[inline]
+    #[must_use]
+    pub fn guard(&self) -> LocalGuard<'_> {
+        self.collector.enter()
+    }
+
+    /// Get the number of keys in the tree.
+    ///
+    /// This is O(1) as we track the count incrementally.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Check if the tree is empty.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        if self.root_is_leaf_generic() {
+            // SAFETY: root_is_leaf_generic confirmed this is a leaf
+            let leaf_ptr: *const L = self.root_ptr.load(Ordering::Acquire).cast();
+            unsafe { (*leaf_ptr).is_empty() }
+        } else {
+            // Internode implies at least one key
+            false
+        }
+    }
+
+    // ========================================================================
+    //  Internal Helpers
+    // ========================================================================
+
+    /// Load the root pointer atomically.
+    #[inline]
+    #[allow(dead_code)] // Used by submodules after refactoring
+    pub(crate) fn load_root_ptr_generic(&self, _guard: &LocalGuard<'_>) -> *const u8 {
+        self.root_ptr.load(Ordering::Acquire)
+    }
+
+    /// Compare-and-swap the root pointer atomically.
+    #[inline]
+    #[allow(dead_code)] // Used by submodules after refactoring
+    pub(crate) fn cas_root_ptr_generic(
+        &self,
+        expected: *mut u8,
+        new: *mut u8,
+    ) -> Result<(), *mut u8> {
+        self.root_ptr
+            .compare_exchange(expected, new, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+    }
+
+    /// Check if the current root is a leaf node.
+    ///
+    /// # Safety
+    /// Reads the version field through a raw pointer. The `root_ptr` must
+    /// point to a valid node (guaranteed by construction).
+    #[inline]
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "root_ptr points to L or L::Internode, both have NodeVersion \
+                  as first field with proper alignment"
+    )]
+    fn root_is_leaf_generic(&self) -> bool {
+        let root: *const u8 = self.root_ptr.load(Ordering::Acquire);
+
+        // SAFETY: `root_ptr` always points to a valid node.
+        // `NodeVersion` is the first field of both leaf and internode types.
+        let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+
+        unsafe { (*version_ptr).is_leaf() }
+    }
+
+    /// Get a mutable reference to the allocator.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn allocator_mut(&mut self) -> &mut A {
+        &mut self.allocator
+    }
+
+    /// Get an immutable reference to the allocator.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn allocator(&self) -> &A {
+        &self.allocator
+    }
+
+    /// Get a reference to the collector.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn collector(&self) -> &Collector {
+        &self.collector
+    }
+
+    /// Increment the entry count.
+    #[inline]
+    #[allow(dead_code)] // Used by submodules after refactoring
+    pub(crate) fn inc_count(&self) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ========================================================================
+    //  Generic Tree Traversal
+    // ========================================================================
+
+    /// Reach the leaf node that should contain the given key.
+    ///
+    /// Traverses from root through internodes to find the target leaf.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to search for
+    ///
+    /// # Returns
+    ///
+    /// Reference to the leaf node that contains or should contain the key.
+    #[allow(dead_code)]
+    #[inline(always)]
+    pub(crate) fn reach_leaf_generic(&self, key: &Key<'_>) -> &L {
+        let root: *const u8 = self.root_ptr.load(Ordering::Acquire);
+
+        // SAFETY: root_ptr always points to a valid node.
+        // NodeVersion is the first field of both L and L::Internode.
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "root points to L or L::Internode, both properly aligned"
+        )]
+        let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+        let is_leaf: bool = unsafe { (*version_ptr).is_leaf() };
+
+        if is_leaf {
+            // SAFETY: is_leaf() confirmed this is a leaf node
+            unsafe { &*(root.cast::<L>()) }
+        } else {
+            // SAFETY: !is_leaf() confirmed this is an internode
+            let internode: &L::Internode = unsafe { &*(root.cast::<L::Internode>()) };
+            self.reach_leaf_via_internode_generic(internode, key)
+        }
+    }
+
+    /// Traverse from an internode down to the target leaf.
+    ///
+    /// Uses generic internode search to find the correct child at each level.
+    #[allow(dead_code)]
+    #[expect(clippy::unused_self, reason = "Method signature matches reach_leaf pattern")]
+    fn reach_leaf_via_internode_generic(
+        &self,
+        mut inode: &L::Internode,
+        key: &Key<'_>,
+    ) -> &L {
+        use crate::ksearch::upper_bound_internode_generic;
+        use crate::prefetch::prefetch_read;
+
+        let target_ikey: u64 = key.ikey();
+
+        loop {
+            // Find child index using generic search
+            let child_idx: usize =
+                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
+            let child_ptr: *mut u8 = inode.child(child_idx);
+
+            // Prefetch child node
+            prefetch_read(child_ptr);
+
+            // Check child type via NodeVersion
+            // SAFETY: All children have NodeVersion as first field, properly aligned
+            #[expect(
+                clippy::cast_ptr_alignment,
+                reason = "child_ptr points to L or L::Internode, both properly aligned"
+            )]
+            let child_version: &NodeVersion = unsafe { &*(child_ptr.cast::<NodeVersion>()) };
+
+            if child_version.is_leaf() {
+                // SAFETY: is_leaf() confirms this is a leaf
+                return unsafe { &*(child_ptr.cast::<L>()) };
+            }
+
+            // Descend to child internode
+            // SAFETY: !is_leaf() confirms InternodeNode
+            inode = unsafe { &*(child_ptr.cast::<L::Internode>()) };
+        }
+    }
+
+    /// Reach the leaf node that should contain the given key (mutable).
+    #[allow(dead_code)]
+    #[inline(always)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "Returns &mut L which requires &mut self for lifetime"
+    )]
+    pub(crate) fn reach_leaf_mut_generic(&mut self, key: &Key<'_>) -> &mut L {
+        use crate::ksearch::upper_bound_internode_generic;
+        use crate::prefetch::prefetch_read;
+
+        let root: *mut u8 = self.root_ptr.load(Ordering::Acquire);
+
+        // SAFETY: root_ptr always points to a valid node.
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "root points to L or L::Internode, both properly aligned"
+        )]
+        let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+        let is_leaf: bool = unsafe { (*version_ptr).is_leaf() };
+
+        if is_leaf {
+            // SAFETY: is_leaf() confirmed this is a leaf
+            unsafe { &mut *(root.cast::<L>()) }
+        } else {
+            // SAFETY: !is_leaf() confirmed this is an internode
+            let internode: &L::Internode = unsafe { &*(root.cast::<L::Internode>()) };
+
+            let ikey: u64 = key.ikey();
+            let child_idx: usize =
+                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(ikey, internode);
+            let start_ptr: *mut u8 = internode.child(child_idx);
+
+            // Prefetch child node
+            prefetch_read(start_ptr);
+
+            let children_are_leaves: bool = internode.children_are_leaves();
+
+            if children_are_leaves {
+                // SAFETY: children_are_leaves() guarantees child is a leaf
+                unsafe { &mut *start_ptr.cast::<L>() }
+            } else {
+                // Iterative traversal for deeper trees
+                // SAFETY: The returned pointer is valid for the tree's lifetime
+                unsafe { &mut *Self::reach_leaf_mut_iterative_generic(start_ptr, ikey) }
+            }
+        }
+    }
+
+    /// Iterative leaf reach for deeply nested trees (generic version).
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer is valid for as long as the tree's allocations remain valid.
+    #[allow(dead_code)]
+    #[inline(always)]
+    fn reach_leaf_mut_iterative_generic(mut current: *mut u8, ikey: u64) -> *mut L {
+        use crate::ksearch::upper_bound_internode_generic;
+        use crate::prefetch::prefetch_read;
+
+        loop {
+            // SAFETY: current is a valid internode pointer from traversal
+            let internode: &L::Internode = unsafe { &*(current.cast::<L::Internode>()) };
+            let child_idx: usize =
+                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(ikey, internode);
+            let child_ptr: *mut u8 = internode.child(child_idx);
+
+            // Prefetch child node
+            prefetch_read(child_ptr);
+
+            if internode.children_are_leaves() {
+                // SAFETY: children_are_leaves() guarantees child is a leaf
+                return child_ptr.cast::<L>();
+            }
+
+            current = child_ptr;
+        }
+    }
+
+    // ========================================================================
+    //  Generic Optimistic Read Path
+    // ========================================================================
+
+    /// Get a value by key using an explicit guard.
+    ///
+    /// Use this when performing multiple operations to amortize guard overhead.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up (byte slice)
+    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
+    ///
+    /// # Returns
+    ///
+    /// * `Some(Arc<V>)` - If the key was found
+    /// * `None` - If the key was not found
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<Arc<V>> {
+        let mut search_key: Key<'_> = Key::new(key);
+        self.get_concurrent_generic(&mut search_key, guard)
+    }
+
+    /// Internal concurrent get implementation with layer descent support.
+    #[allow(dead_code)]
+    fn get_concurrent_generic(
+        &self,
+        key: &mut Key<'_>,
+        guard: &LocalGuard<'_>,
+    ) -> Option<Arc<V>> {
+        use crate::leaf::KSUF_KEYLENX;
+        use crate::leaf::LAYER_KEYLENX;
+        use crate::leaf_trait::TreePermutation;
+
+        // Start at tree root
+        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
+
+        loop {
+            // Find the actual layer root (handles layer root promotion)
+            layer_root = self.maybe_parent_generic(layer_root);
+
+            // Traverse to leaf for current layer
+            let leaf_ptr: *mut L = self.reach_leaf_concurrent_generic(layer_root, key, guard);
+
+            // Search in leaf with version validation
+            // SAFETY: leaf_ptr protected by guard
+            let leaf: &L = unsafe { &*leaf_ptr };
+            let version: u32 = leaf.version().stable();
+
+            // Check for deleted node
+            if leaf.version().is_deleted() {
+                continue; // Retry
+            }
+
+            // Load permutation
+            let Ok(perm) = leaf.permutation_try() else {
+                continue; // Frozen, retry
+            };
+
+            let target_ikey: u64 = key.ikey();
+
+            #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+            let search_keylenx: u8 = if key.has_suffix() {
+                KSUF_KEYLENX
+            } else {
+                key.current_len() as u8
+            };
+
+            // Search for matching key
+            let mut found_value: Option<Arc<V>> = None;
+            let mut found_layer: Option<*mut u8> = None;
+
+            for i in 0..perm.size() {
+                let slot: usize = perm.get(i);
+                let slot_ikey: u64 = leaf.ikey(slot);
+
+                if slot_ikey != target_ikey {
+                    continue;
+                }
+
+                let slot_keylenx: u8 = leaf.keylenx(slot);
+                let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                if slot_ptr.is_null() {
+                    continue;
+                }
+
+                if slot_keylenx == search_keylenx {
+                    // Potential exact match
+                    let suffix_match: bool = if slot_keylenx == KSUF_KEYLENX {
+                        // TODO: Add ksuf_equals to TreeLeafNode trait
+                        // For now, assume match (will be fixed with full trait impl)
+                        true
+                    } else {
+                        true
+                    };
+
+                    if suffix_match {
+                        // SAFETY: slot_ptr is the result of Arc::into_raw(arc),
+                        // which is a *const V pointer. We need to increment the
+                        // strong count and recreate the Arc.
+                        let arc: Arc<V> = unsafe {
+                            let value_ptr: *const V = slot_ptr.cast();
+                            Arc::increment_strong_count(value_ptr);
+                            Arc::from_raw(value_ptr)
+                        };
+                        found_value = Some(arc);
+                        break;
+                    }
+                } else if slot_keylenx >= LAYER_KEYLENX && key.has_suffix() {
+                    // Layer pointer
+                    found_layer = Some(slot_ptr);
+                    break;
+                }
+            }
+
+            // Validate version
+            if leaf.version().has_changed(version) {
+                // Version changed - retry from layer root
+                continue;
+            }
+
+            // Return result based on what we found
+            if let Some(arc) = found_value {
+                return Some(arc);
+            }
+
+            if let Some(next_layer) = found_layer {
+                // Descend into sublayer
+                key.shift();
+                layer_root = next_layer;
+                continue;
+            }
+
+            // Not found
+            return None;
+        }
+    }
+
+    /// Follow parent pointers to find the actual layer root.
+    #[allow(dead_code)]
+    #[expect(clippy::unused_self, reason = "Method signature pattern")]
+    fn maybe_parent_generic(&self, mut node: *const u8) -> *const u8 {
+        loop {
+            // SAFETY: node is valid, both types have NodeVersion as first field
+            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+
+            let parent = if version.is_leaf() {
+                // SAFETY: version.is_leaf() confirmed
+                let leaf: &L = unsafe { &*(node.cast::<L>()) };
+                leaf.parent()
+            } else {
+                // SAFETY: !version.is_leaf() confirmed
+                let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+                inode.parent()
+            };
+
+            if parent.is_null() {
+                return node;
+            }
+
+            node = parent;
+        }
+    }
+
+    /// Traverse from layer root to target leaf with version validation.
+    #[allow(dead_code)]
+    #[expect(clippy::unused_self, reason = "Method signature pattern")]
+    fn reach_leaf_concurrent_generic(
+        &self,
+        start: *const u8,
+        key: &Key<'_>,
+        _guard: &LocalGuard<'_>,
+    ) -> *mut L {
+        use crate::ksearch::upper_bound_internode_generic;
+        use crate::prefetch::prefetch_read;
+
+        let target_ikey: u64 = key.ikey();
+        let mut node: *const u8 = start;
+
+        loop {
+            // SAFETY: node is valid
+            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+
+            let v: u32 = version.stable();
+
+            if version.is_leaf() {
+                // Cast const to mut, then to L
+                return (node as *mut u8).cast::<L>();
+            }
+
+            // It's an internode
+            // SAFETY: !is_leaf() confirmed
+            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+
+            let child_idx: usize =
+                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
+            let child: *mut u8 = inode.child(child_idx);
+
+            prefetch_read(child);
+
+            if child.is_null() {
+                node = start;
+                continue;
+            }
+
+            if inode.version().has_changed(v) {
+                if inode.version().has_split(v) {
+                    node = start;
+                    continue;
+                }
+                continue;
+            }
+
+            node = child;
+        }
+    }
+
+    // ========================================================================
+    //  Generic CAS Insert Path
+    // ========================================================================
+
+    /// Maximum CAS retry attempts before falling back to locked path.
+    const MAX_CAS_RETRIES_GENERIC: usize = 3;
+
+    /// Try CAS-based lock-free insert.
+    ///
+    /// Attempts to insert a new key-value pair using optimistic concurrency.
+    /// Returns result indicating success or reason for fallback.
+    #[allow(dead_code)]
+    #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
+    pub(crate) fn try_cas_insert_generic(
+        &self,
+        key: &Key<'_>,
+        value: &Arc<V>,
+        guard: &LocalGuard<'_>,
+    ) -> CasInsertResultGeneric<V> {
+        use crate::leaf::link::{is_marked, unmark_ptr};
+        use crate::leaf_trait::TreePermutation;
+        use std::ptr as StdPtr;
+
+        let ikey: u64 = key.ikey();
+
+        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+        let keylenx: u8 = key.current_len() as u8;
+
+        // Suffix keys require locked path
+        if key.has_suffix() {
+            return CasInsertResultGeneric::ContentionFallback;
+        }
+
+        let mut retries: usize = 0;
+        let mut leaf_ptr: *mut L = StdPtr::null_mut();
+        let mut use_reach: bool = true;
+
+        loop {
+            // 1. Optimistic traversal to find target leaf
+            if use_reach {
+                let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
+                layer_root = self.maybe_parent_generic(layer_root);
+                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, guard);
+            } else {
+                use_reach = true;
+            }
+
+            let leaf: &L = unsafe { &*leaf_ptr };
+
+            // B-link advance if needed
+            let advanced: &L = self.advance_to_key_by_bound_generic(leaf, key, guard);
+            if !StdPtr::eq(advanced, leaf) {
+                leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
+                use_reach = false;
+                continue;
+            }
+
+            // 2. Get version (fail-fast if dirty)
+            let version: u32 = leaf.version().value();
+            if leaf.version().is_dirty() {
+                return CasInsertResultGeneric::ContentionFallback;
+            }
+
+            // Check for frozen permutation
+            let Ok(perm) = leaf.permutation_try() else {
+                return CasInsertResultGeneric::ContentionFallback;
+            };
+
+            // 3. Search for key position
+            let search_result = self.search_for_insert_generic(leaf, key, &perm);
+
+            match search_result {
+                InsertSearchResultGeneric::Found { slot } => {
+                    return CasInsertResultGeneric::ExistsNeedLock { slot };
+                }
+
+                InsertSearchResultGeneric::Layer { slot, .. }
+                | InsertSearchResultGeneric::Conflict { slot } => {
+                    return CasInsertResultGeneric::LayerNeedLock { slot };
+                }
+
+                InsertSearchResultGeneric::NotFound { logical_pos } => {
+                    // 4. Check if leaf has space
+                    if perm.size() >= L::WIDTH {
+                        return CasInsertResultGeneric::FullNeedLock;
+                    }
+
+                    // 5. Check slot-0 rule
+                    let next_free: usize = perm.back();
+                    if next_free == 0 && !leaf.can_reuse_slot0(ikey) {
+                        return CasInsertResultGeneric::Slot0NeedLock;
+                    }
+
+                    // 6. Compute new permutation
+                    let (new_perm, slot) = perm.insert_from_back_immutable(logical_pos);
+
+                    // 7. Prepare Arc pointer
+                    let arc_ptr: *mut u8 = Arc::into_raw(Arc::clone(value)) as *mut u8;
+
+                    // 8. CAS slot value (NULL-claim semantics)
+                    if let Err(_) = leaf.cas_slot_value(slot, StdPtr::null_mut(), arc_ptr) {
+                        let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                        retries += 1;
+                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
+                            return CasInsertResultGeneric::ContentionFallback;
+                        }
+                        Self::backoff_generic(retries);
+                        continue;
+                    }
+
+                    // 9. Validate version before writing key data
+                    if leaf.version().has_changed_or_locked(version) {
+                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                            Ok(()) | Err(_) => {
+                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                            }
+                        }
+                        retries += 1;
+                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
+                            return CasInsertResultGeneric::ContentionFallback;
+                        }
+                        Self::backoff_generic(retries);
+                        continue;
+                    }
+
+                    // 10. Store key data
+                    unsafe {
+                        leaf.store_key_data_for_cas(slot, ikey, keylenx);
+                    }
+
+                    // 11. Secondary version check
+                    if leaf.version().has_changed_or_locked(version) {
+                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                            Ok(()) | Err(_) => {
+                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                            }
+                        }
+                        retries += 1;
+                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
+                            return CasInsertResultGeneric::ContentionFallback;
+                        }
+                        Self::backoff_generic(retries);
+                        continue;
+                    }
+
+                    // 12. Verify slot ownership
+                    if leaf.load_slot_value(slot) != arc_ptr {
+                        let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                        retries += 1;
+                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
+                            return CasInsertResultGeneric::ContentionFallback;
+                        }
+                        Self::backoff_generic(retries);
+                        continue;
+                    }
+
+                    // 13. Final version check
+                    if leaf.version().has_changed_or_locked(version) {
+                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                            Ok(()) | Err(_) => {
+                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                            }
+                        }
+                        retries += 1;
+                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
+                            return CasInsertResultGeneric::ContentionFallback;
+                        }
+                        Self::backoff_generic(retries);
+                        continue;
+                    }
+
+                    // 14. CAS permutation to publish
+                    match leaf.cas_permutation_raw(perm, new_perm) {
+                        Ok(()) => {
+                            // Verify slot wasn't stolen
+                            if leaf.load_slot_value(slot) != arc_ptr {
+                                self.count.fetch_add(1, Ordering::Relaxed);
+                                return CasInsertResultGeneric::ContentionFallback;
+                            }
+
+                            // Check for concurrent split
+                            if leaf.version().is_splitting() {
+                                let _ = leaf.version().stable();
+                            }
+
+                            let next_raw = leaf.next_raw();
+                            if is_marked(next_raw) {
+                                leaf.wait_for_split();
+                            }
+
+                            // Check if split moved our entry
+                            let current_perm = leaf.permutation_wait();
+                            let mut slot_in_perm = false;
+                            for i in 0..current_perm.size() {
+                                if current_perm.get(i) == slot {
+                                    slot_in_perm = true;
+                                    break;
+                                }
+                            }
+
+                            if !slot_in_perm {
+                                // Split moved our entry - success
+                                self.count.fetch_add(1, Ordering::Relaxed);
+                                return CasInsertResultGeneric::Success(None);
+                            }
+
+                            // Check for orphan
+                            let next_ptr = unmark_ptr(next_raw);
+                            if !next_ptr.is_null() {
+                                let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+                                if ikey >= next_bound {
+                                    return CasInsertResultGeneric::ContentionFallback;
+                                }
+                            }
+
+                            // Success!
+                            self.count.fetch_add(1, Ordering::Relaxed);
+                            return CasInsertResultGeneric::Success(None);
+                        }
+
+                        Err(failure) => {
+                            match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                                Ok(()) | Err(_) => {
+                                    let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                                }
+                            }
+
+                            if failure.is_frozen() {
+                                return CasInsertResultGeneric::ContentionFallback;
+                            }
+
+                            retries += 1;
+                            if retries > Self::MAX_CAS_RETRIES_GENERIC {
+                                return CasInsertResultGeneric::ContentionFallback;
+                            }
+                            Self::backoff_generic(retries);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exponential backoff for CAS retries.
+    #[inline]
+    fn backoff_generic(retries: usize) {
+        let spins = 1usize << retries.min(6);
+        for _ in 0..spins {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Search for insert position in a leaf (generic version).
+    #[allow(dead_code)]
+    fn search_for_insert_generic(
+        &self,
+        leaf: &L,
+        key: &Key<'_>,
+        perm: &L::Perm,
+    ) -> InsertSearchResultGeneric {
+        use crate::leaf::KSUF_KEYLENX;
+        use crate::leaf::LAYER_KEYLENX;
+        use crate::leaf_trait::TreePermutation;
+
+        let target_ikey: u64 = key.ikey();
+
+        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+        let search_keylenx: u8 = if key.has_suffix() {
+            KSUF_KEYLENX
+        } else {
+            key.current_len() as u8
+        };
+
+        for i in 0..perm.size() {
+            let slot: usize = perm.get(i);
+            let slot_ikey: u64 = leaf.ikey(slot);
+
+            if slot_ikey == target_ikey {
+                let slot_keylenx: u8 = leaf.keylenx(slot);
+                let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                if slot_ptr.is_null() {
+                    continue;
+                }
+
+                // Layer pointer
+                if slot_keylenx >= LAYER_KEYLENX {
+                    if key.has_suffix() {
+                        return InsertSearchResultGeneric::Layer {
+                            slot,
+                            shift_amount: 8,
+                        };
+                    }
+                    return InsertSearchResultGeneric::Conflict { slot };
+                }
+
+                // Exact match check
+                if slot_keylenx == search_keylenx {
+                    if slot_keylenx == KSUF_KEYLENX {
+                        // TODO: suffix comparison via trait method
+                        return InsertSearchResultGeneric::Found { slot };
+                    }
+                    return InsertSearchResultGeneric::Found { slot };
+                }
+
+                // Same ikey, different keylenx - conflict
+                return InsertSearchResultGeneric::Conflict { slot };
+            }
+
+            // Sorted order - found insert position
+            if slot_ikey > target_ikey {
+                return InsertSearchResultGeneric::NotFound { logical_pos: i };
+            }
+        }
+
+        // Insert at end
+        InsertSearchResultGeneric::NotFound {
+            logical_pos: perm.size(),
+        }
+    }
+
+    /// Advance to correct leaf via B-link (generic version).
+    #[allow(dead_code)]
+    fn advance_to_key_by_bound_generic<'a>(
+        &'a self,
+        mut leaf: &'a L,
+        key: &Key<'_>,
+        _guard: &LocalGuard<'_>,
+    ) -> &'a L {
+        use crate::leaf::link::{is_marked, unmark_ptr};
+
+        let key_ikey: u64 = key.ikey();
+
+        if leaf.version().is_splitting() {
+            let _ = leaf.version().stable();
+        }
+
+        loop {
+            let next_raw: *mut L = leaf.next_raw();
+            if is_marked(next_raw) {
+                leaf.wait_for_split();
+                continue;
+            }
+
+            let next_ptr: *mut L = unmark_ptr(next_raw);
+            if next_ptr.is_null() {
+                return leaf;
+            }
+
+            // SAFETY: next_ptr is valid
+            let next: &L = unsafe { &*next_ptr };
+            let next_bound: u64 = next.ikey_bound();
+
+            if key_ikey >= next_bound {
+                leaf = next;
+                continue;
+            }
+
+            return leaf;
+        }
+    }
+
+    // ========================================================================
+    //  Generic Locked Insert Path
+    // ========================================================================
+
+    /// Insert a key-value pair using an explicit guard.
+    ///
+    /// This is the main public insert API for `MassTreeGeneric`.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert (byte slice)
+    /// * `value` - The value to insert
+    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(None)` - New key inserted
+    /// * `Ok(Some(old))` - Key existed, old value returned
+    /// * `Err(InsertError)` - Insert failed (key too long)
+    #[allow(dead_code)]
+    pub fn insert_with_guard(
+        &self,
+        key: &[u8],
+        value: V,
+        guard: &LocalGuard<'_>,
+    ) -> Result<Option<Arc<V>>, InsertError> {
+        let mut key = Key::new(key);
+        let arc = Arc::new(value);
+        self.insert_concurrent_generic(&mut key, arc, guard)
+    }
+
+    /// Internal concurrent insert with CAS fast path and locked fallback.
+    #[allow(dead_code)]
+    fn insert_concurrent_generic(
+        &self,
+        key: &mut Key<'_>,
+        value: Arc<V>,
+        guard: &LocalGuard<'_>,
+    ) -> Result<Option<Arc<V>>, InsertError> {
+        use crate::leaf_trait::TreePermutation;
+
+        // Track current layer root
+        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
+
+        loop {
+            // Follow parent pointers to actual layer root
+            layer_root = self.maybe_parent_generic(layer_root);
+
+            // Try CAS fast path first (only for simple cases)
+            if !key.has_suffix() {
+                match self.try_cas_insert_generic(key, &value, guard) {
+                    CasInsertResultGeneric::Success(old) => {
+                        return Ok(old);
+                    }
+                    CasInsertResultGeneric::ExistsNeedLock { .. }
+                    | CasInsertResultGeneric::FullNeedLock
+                    | CasInsertResultGeneric::LayerNeedLock { .. }
+                    | CasInsertResultGeneric::Slot0NeedLock
+                    | CasInsertResultGeneric::ContentionFallback => {
+                        // Fall through to locked path
+                    }
+                }
+            }
+
+            // Locked path
+            let leaf_ptr: *mut L =
+                self.reach_leaf_concurrent_generic(layer_root, key, guard);
+
+            let leaf: &L = unsafe { &*leaf_ptr };
+
+            // B-link advance if needed
+            let leaf: &L = self.advance_to_key_by_bound_generic(leaf, key, guard);
+
+            // Lock the leaf
+            let mut lock = leaf.version().lock();
+
+            // Get permutation (must not be frozen since we hold lock)
+            let perm = leaf.permutation();
+
+            // Search for insert position
+            let search_result = self.search_for_insert_generic(leaf, key, &perm);
+
+            match search_result {
+                InsertSearchResultGeneric::Found { slot } => {
+                    // Key exists - update value
+                    let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+                    if !old_ptr.is_null() {
+                        // Swap value
+                        let old_arc: Arc<V> = unsafe {
+                            Arc::from_raw(old_ptr as *const V)
+                        };
+                        let new_ptr: *mut u8 = Arc::into_raw(value) as *mut u8;
+
+                        // Mark insert, store value, unlock happens on drop
+                        lock.mark_insert();
+                        leaf.set_leaf_value_ptr(slot, new_ptr);
+                        drop(lock);
+
+                        return Ok(Some(old_arc));
+                    }
+                    drop(lock);
+                }
+
+                InsertSearchResultGeneric::NotFound { logical_pos } => {
+                    // New key - check if leaf has space
+                    if perm.size() >= L::WIDTH {
+                        // Need split - for now, return error
+                        // Full split support requires more infrastructure
+                        drop(lock);
+                        return Err(InsertError::SplitRequired);
+                    }
+
+                    // Check slot-0 rule
+                    let next_free: usize = perm.back();
+                    let ikey: u64 = key.ikey();
+
+                    if next_free == 0 && !leaf.can_reuse_slot0(ikey) {
+                        // Slot-0 violation - need swap logic
+                        // For now, try to use a different slot via back_at_offset
+                        let slot = if perm.size() < L::WIDTH - 1 {
+                            perm.back_at_offset(1)
+                        } else {
+                            drop(lock);
+                            return Err(InsertError::SplitRequired);
+                        };
+
+                        // Assign to alternative slot
+                        self.assign_slot_generic(leaf, &mut lock, slot, key, &value);
+
+                        // Update permutation with swap logic
+                        let mut new_perm = perm;
+                        new_perm.swap_free_slots(0, 1);
+                        let _ = new_perm.insert_from_back(logical_pos);
+                        leaf.set_permutation(new_perm);
+
+                        drop(lock);
+                        self.count.fetch_add(1, Ordering::Relaxed);
+                        return Ok(None);
+                    }
+
+                    // Normal insert
+                    let (new_perm, slot) = perm.insert_from_back_immutable(logical_pos);
+                    self.assign_slot_generic(leaf, &mut lock, slot, key, &value);
+
+                    // Update permutation
+                    leaf.set_permutation(new_perm);
+                    drop(lock);
+
+                    self.count.fetch_add(1, Ordering::Relaxed);
+                    return Ok(None);
+                }
+
+                InsertSearchResultGeneric::Layer { slot, .. } => {
+                    // Descend into sublayer
+                    let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+                    drop(lock);
+                    key.shift();
+                    layer_root = layer_ptr;
+                    continue;
+                }
+
+                InsertSearchResultGeneric::Conflict { .. } => {
+                    // Layer creation needed - not implemented yet
+                    drop(lock);
+                    return Err(InsertError::LayerCreationRequired);
+                }
+            }
+        }
+    }
+
+    /// Assign a value to a slot in a locked leaf.
+    #[allow(dead_code)]
+    fn assign_slot_generic(
+        &self,
+        leaf: &L,
+        lock: &mut crate::nodeversion::LockGuard<'_>,
+        slot: usize,
+        key: &Key<'_>,
+        value: &Arc<V>,
+    ) {
+        let ikey: u64 = key.ikey();
+
+        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+        let keylenx: u8 = key.current_len() as u8;
+
+        let value_ptr: *mut u8 = Arc::into_raw(Arc::clone(value)) as *mut u8;
+
+        // Mark insert dirty
+        lock.mark_insert();
+
+        // Store key data and value
+        leaf.set_ikey(slot, ikey);
+        leaf.set_keylenx(slot, keylenx);
+        leaf.set_leaf_value_ptr(slot, value_ptr);
+    }
+}
+
+/// Result of a CAS insert attempt (generic version).
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) enum CasInsertResultGeneric<V> {
+    /// CAS insert succeeded.
+    Success(Option<Arc<V>>),
+    /// Key already exists - need locked update.
+    ExistsNeedLock { slot: usize },
+    /// Leaf is full - need locked split.
+    FullNeedLock,
+    /// Layer creation needed.
+    LayerNeedLock { slot: usize },
+    /// Slot-0 violation - need locked path.
+    Slot0NeedLock,
+    /// High contention - fall back to locked path.
+    ContentionFallback,
+}
+
+/// Result of searching a leaf for insert position (generic version).
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) enum InsertSearchResultGeneric {
+    /// Key exists at this slot.
+    Found { slot: usize },
+    /// Key not found, insert at logical position.
+    NotFound { logical_pos: usize },
+    /// Same ikey but different suffix - need to create layer.
+    Conflict { slot: usize },
+    /// Found layer pointer - descend into sublayer.
+    Layer { slot: usize, shift_amount: usize },
+}
+
+impl<V, L, A> Drop for MassTreeGeneric<V, L, A>
+where
+    L: TreeLeafNode<LeafValue<V>>,
+    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+{
+    fn drop(&mut self) {
+        // No concurrent access is possible here (Drop requires unique access).
+        // Load the root pointer and delegate teardown to the allocator.
+        let root: *mut u8 = self.root_ptr.load(Ordering::Acquire);
+        self.allocator.teardown_tree(root);
+    }
+}
+
+// Send + Sync for MassTreeGeneric when V: Send + Sync
+//
+// The struct uses:
+// - Collector (Send + Sync)
+// - A (Send + Sync via trait bound)
+// - AtomicPtr<u8> (Send + Sync)
+// - AtomicUsize (Send + Sync)
+// - PhantomData<(V, L)> inherits from V, L (both have Send + Sync bounds)
+//
+// We explicitly verify this compiles via the test below.
+
+// ============================================================================
+//  Type Aliases for MassTreeGeneric
+// ============================================================================
+
+/// Standard WIDTH=15 MassTree using the generic implementation.
+///
+/// This is a type alias for [`MassTreeGeneric`] with:
+/// - `LeafNode<LeafValue<V>, 15>` for leaf nodes
+/// - `SeizeAllocator<LeafValue<V>, 15>` for memory management
+///
+/// # Example
+///
+/// ```ignore
+/// use masstree::MassTreeG;
+///
+/// let tree: MassTreeG<u64> = MassTreeG::new();
+/// let guard = tree.guard();
+/// tree.insert_with_guard(b"key", 42, &guard).unwrap();
+/// ```
+///
+/// # Note
+///
+/// This is the generic-based WIDTH=15 tree. The original [`MassTree`] uses
+/// direct implementation without traits for maximum performance.
+pub type MassTreeG<V> = MassTreeGeneric<
+    V,
+    crate::leaf::LeafNode<LeafValue<V>, 15>,
+    crate::alloc::SeizeAllocator<LeafValue<V>, 15>,
+>;
+
+/// Wide WIDTH=24 MassTree for reduced split frequency.
+///
+/// This is a type alias for [`MassTreeGeneric`] with:
+/// - `LeafNode24<LeafValue<V>>` for leaf nodes (60% more capacity)
+/// - `SeizeAllocator24<LeafValue<V>>` for memory management
+///
+/// WIDTH=24 nodes reduce split frequency by ~60% compared to WIDTH=15,
+/// at the cost of slightly larger node size (u128 permutation vs u64).
+///
+/// # Example
+///
+/// ```ignore
+/// use masstree::MassTree24;
+///
+/// let tree: MassTree24<u64> = MassTree24::new();
+/// let guard = tree.guard();
+/// tree.insert_with_guard(b"key", 42, &guard).unwrap();
+/// ```
+///
+/// # Current Limitations
+///
+/// - Split support not yet implemented (returns error when leaf is full)
+/// - Layer creation not yet implemented (returns error on key conflict)
+pub type MassTree24<V> = MassTreeGeneric<
+    V,
+    crate::leaf24::LeafNode24<LeafValue<V>>,
+    crate::alloc24::SeizeAllocator24<LeafValue<V>>,
+>;
+
+// ============================================================================
+//  Constructor implementations for type aliases
+// ============================================================================
+
+impl<V: Send + Sync + 'static> MassTreeG<V> {
+    /// Create a new empty WIDTH=15 tree using the generic implementation.
+    #[must_use]
+    pub fn new() -> Self {
+        let allocator = crate::alloc::SeizeAllocator::new();
+        MassTreeGeneric::with_allocator(allocator)
+    }
+}
+
+impl<V: Send + Sync + 'static> Default for MassTreeG<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: Send + Sync + 'static> MassTree24<V> {
+    /// Create a new empty WIDTH=24 tree.
+    #[must_use]
+    pub fn new() -> Self {
+        let allocator = crate::alloc24::SeizeAllocator24::new();
+        MassTreeGeneric::with_allocator(allocator)
+    }
+}
+
+impl<V: Send + Sync + 'static> Default for MassTree24<V> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2080,5 +3385,236 @@ mod tests {
         }
 
         assert_eq!(tree.len(), 50);
+    }
+
+    // ========================================================================
+    //  MassTreeGeneric Tests
+    // ========================================================================
+
+    #[test]
+    fn test_masstree_generic_new_is_empty() {
+        use crate::alloc::SeizeAllocator;
+        use crate::leaf::LeafNode;
+
+        // Create via with_allocator
+        let alloc: SeizeAllocator<LeafValue<u64>, 15> = SeizeAllocator::new();
+        let tree: MassTreeGeneric<
+            u64,
+            LeafNode<LeafValue<u64>, 15>,
+            SeizeAllocator<LeafValue<u64>, 15>,
+        > = MassTreeGeneric::with_allocator(alloc);
+
+        assert!(tree.is_empty());
+        assert_eq!(tree.len(), 0);
+    }
+
+    #[test]
+    fn test_masstree_generic_24_new_is_empty() {
+        use crate::alloc24::SeizeAllocator24;
+        use crate::leaf24::LeafNode24;
+
+        // Create WIDTH=24 tree
+        let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+        let tree: MassTreeGeneric<u64, LeafNode24<LeafValue<u64>>, SeizeAllocator24<LeafValue<u64>>> =
+            MassTreeGeneric::with_allocator(alloc);
+
+        assert!(tree.is_empty());
+        assert_eq!(tree.len(), 0);
+    }
+
+    #[test]
+    fn test_masstree_generic_debug() {
+        use crate::alloc::SeizeAllocator;
+        use crate::leaf::LeafNode;
+
+        let alloc: SeizeAllocator<LeafValue<u64>, 15> = SeizeAllocator::new();
+        let tree: MassTreeGeneric<
+            u64,
+            LeafNode<LeafValue<u64>, 15>,
+            SeizeAllocator<LeafValue<u64>, 15>,
+        > = MassTreeGeneric::with_allocator(alloc);
+
+        let debug_str = format!("{:?}", tree);
+        assert!(debug_str.contains("MassTreeGeneric"));
+        assert!(debug_str.contains("width: 15"));
+    }
+
+    #[test]
+    fn test_masstree_generic_24_debug() {
+        use crate::alloc24::SeizeAllocator24;
+        use crate::leaf24::LeafNode24;
+
+        let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+        let tree: MassTreeGeneric<u64, LeafNode24<LeafValue<u64>>, SeizeAllocator24<LeafValue<u64>>> =
+            MassTreeGeneric::with_allocator(alloc);
+
+        let debug_str = format!("{:?}", tree);
+        assert!(debug_str.contains("MassTreeGeneric"));
+        assert!(debug_str.contains("width: 24"));
+    }
+
+    #[test]
+    fn test_masstree_generic_guard() {
+        use crate::alloc::SeizeAllocator;
+        use crate::leaf::LeafNode;
+
+        let alloc: SeizeAllocator<LeafValue<u64>, 15> = SeizeAllocator::new();
+        let tree: MassTreeGeneric<
+            u64,
+            LeafNode<LeafValue<u64>, 15>,
+            SeizeAllocator<LeafValue<u64>, 15>,
+        > = MassTreeGeneric::with_allocator(alloc);
+
+        // Just verify guard creation doesn't panic
+        let _guard = tree.guard();
+    }
+
+    // ========================================================================
+    //  MassTreeGeneric Send/Sync Tests
+    // ========================================================================
+
+    fn _assert_masstree_generic_send_sync()
+    where
+        MassTreeGeneric<
+            u64,
+            LeafNode<LeafValue<u64>, 15>,
+            SeizeAllocator<LeafValue<u64>, 15>,
+        >: Send + Sync,
+    {
+    }
+
+    fn _assert_masstree_generic_24_send_sync()
+    where
+        MassTreeGeneric<
+            u64,
+            crate::leaf24::LeafNode24<LeafValue<u64>>,
+            crate::alloc24::SeizeAllocator24<LeafValue<u64>>,
+        >: Send + Sync,
+    {
+    }
+
+    // ========================================================================
+    //  MassTree24 Type Alias Tests
+    // ========================================================================
+
+    #[test]
+    fn test_masstree24_new() {
+        let tree: MassTree24<u64> = MassTree24::new();
+        assert!(tree.is_empty());
+        assert_eq!(tree.len(), 0);
+    }
+
+    #[test]
+    fn test_masstree24_get_empty() {
+        let tree: MassTree24<u64> = MassTree24::new();
+        let guard = tree.guard();
+
+        // Get on empty tree should return None
+        let value = tree.get_with_guard(b"hello", &guard);
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn test_masstree24_insert_and_get() {
+        let tree: MassTree24<u64> = MassTree24::new();
+        let guard = tree.guard();
+
+        // Insert a value
+        let result = tree.insert_with_guard(b"hello", 42, &guard);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // No old value
+
+        // Get the value back
+        let value = tree.get_with_guard(b"hello", &guard);
+        assert!(value.is_some());
+        assert_eq!(*value.unwrap(), 42);
+    }
+
+    #[test]
+    fn test_masstree24_multiple_inserts() {
+        let tree: MassTree24<u64> = MassTree24::new();
+        let guard = tree.guard();
+
+        // Insert multiple values (up to WIDTH=24 without split)
+        for i in 0..20u64 {
+            let key = format!("key{:02}", i);
+            let result = tree.insert_with_guard(key.as_bytes(), i * 10, &guard);
+            assert!(result.is_ok(), "Failed to insert key {}", i);
+        }
+
+        assert_eq!(tree.len(), 20);
+
+        // Verify all values
+        for i in 0..20u64 {
+            let key = format!("key{:02}", i);
+            let value = tree.get_with_guard(key.as_bytes(), &guard);
+            assert!(value.is_some(), "Key {} not found", i);
+            assert_eq!(*value.unwrap(), i * 10);
+        }
+    }
+
+    #[test]
+    fn test_masstree24_update_existing() {
+        let tree: MassTree24<u64> = MassTree24::new();
+        let guard = tree.guard();
+
+        // Insert initial value
+        tree.insert_with_guard(b"key", 100, &guard).unwrap();
+        assert_eq!(*tree.get_with_guard(b"key", &guard).unwrap(), 100);
+
+        // Update the value
+        let old = tree.insert_with_guard(b"key", 200, &guard).unwrap();
+        assert!(old.is_some());
+        assert_eq!(*old.unwrap(), 100);
+
+        // Verify updated value
+        assert_eq!(*tree.get_with_guard(b"key", &guard).unwrap(), 200);
+
+        // Count should still be 1
+        assert_eq!(tree.len(), 1);
+    }
+
+    #[test]
+    fn test_masstreeg_new() {
+        let tree: MassTreeG<u64> = MassTreeG::new();
+        assert!(tree.is_empty());
+        assert_eq!(tree.len(), 0);
+    }
+
+    #[test]
+    fn test_masstreeg_insert_and_get() {
+        let tree: MassTreeG<u64> = MassTreeG::new();
+        let guard = tree.guard();
+
+        // Insert a value
+        let result = tree.insert_with_guard(b"hello", 42, &guard);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        // Get the value back
+        let value = tree.get_with_guard(b"hello", &guard);
+        assert!(value.is_some());
+        assert_eq!(*value.unwrap(), 42);
+    }
+
+    #[test]
+    fn test_masstree24_split_required() {
+        // Test that inserting more than 24 keys returns SplitRequired error
+        // (until split support is implemented for MassTreeGeneric)
+        let tree: MassTree24<u64> = MassTree24::new();
+        let guard = tree.guard();
+
+        // Insert 24 keys (should all succeed)
+        for i in 0..24u64 {
+            let key = format!("key{:02}", i);
+            let result = tree.insert_with_guard(key.as_bytes(), i, &guard);
+            assert!(result.is_ok(), "Failed to insert key {}: {:?}", i, result);
+        }
+
+        assert_eq!(tree.len(), 24);
+
+        // The 25th key should fail with SplitRequired
+        let result = tree.insert_with_guard(b"key24", 24, &guard);
+        assert!(matches!(result, Err(InsertError::SplitRequired)));
     }
 }

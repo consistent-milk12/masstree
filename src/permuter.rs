@@ -678,6 +678,80 @@ impl<const WIDTH: usize> PermutationProvider for Permuter<WIDTH> {
     }
 }
 
+// ============================================================================
+//  TreePermutation Implementation
+// ============================================================================
+
+impl<const WIDTH: usize> crate::leaf_trait::TreePermutation for Permuter<WIDTH> {
+    type Raw = u64;
+    const WIDTH: usize = WIDTH;
+
+    #[inline]
+    fn empty() -> Self {
+        Permuter::empty()
+    }
+
+    #[inline]
+    fn from_value(raw: u64) -> Self {
+        Permuter::from_value(raw)
+    }
+
+    #[inline]
+    fn value(&self) -> u64 {
+        Permuter::value(self)
+    }
+
+    #[inline]
+    fn size(&self) -> usize {
+        Permuter::size(self)
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> usize {
+        Permuter::get(self, i)
+    }
+
+    #[inline]
+    fn back(&self) -> usize {
+        Permuter::back(self)
+    }
+
+    #[inline]
+    fn back_at_offset(&self, offset: usize) -> usize {
+        Permuter::back_at_offset(self, offset)
+    }
+
+    #[inline]
+    fn insert_from_back(&mut self, i: usize) -> usize {
+        Permuter::insert_from_back(self, i)
+    }
+
+    #[inline]
+    fn insert_from_back_immutable(&self, i: usize) -> (Self, usize) {
+        Permuter::insert_from_back_immutable(self, i)
+    }
+
+    #[inline]
+    fn swap_free_slots(&mut self, pos_i: usize, pos_j: usize) {
+        Permuter::swap_free_slots(self, pos_i, pos_j)
+    }
+
+    #[inline]
+    fn set_size(&mut self, n: usize) {
+        Permuter::set_size(self, n)
+    }
+
+    #[inline]
+    fn is_frozen_raw(raw: u64) -> bool {
+        crate::freeze::LeafFreezeUtils::is_frozen::<WIDTH>(raw)
+    }
+
+    #[inline]
+    fn freeze_raw(raw: u64) -> u64 {
+        crate::freeze::LeafFreezeUtils::freeze_raw::<WIDTH>(raw)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

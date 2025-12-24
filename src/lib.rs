@@ -95,8 +95,7 @@ pub fn init_tracing() {
 
     INIT.call_once(|| {
         use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-        let filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
         // Use try_init to avoid panic if tests set their own subscriber
         let _ = tracing_subscriber::registry()
             .with(fmt::layer().compact().with_thread_ids(true))
@@ -110,14 +109,20 @@ pub fn init_tracing() {
 pub fn init_tracing() {}
 
 pub mod alloc;
+pub mod alloc24;
+pub mod alloc_trait;
 pub mod freeze;
+pub mod freeze24;
 pub mod internode;
 pub mod key;
 pub mod ksearch;
 pub mod leaf;
+pub mod leaf24;
+pub mod leaf_trait;
 pub mod nodeversion;
 pub mod ordering;
 pub mod permuter;
+pub mod permuter24;
 pub mod prefetch;
 pub mod slot;
 pub mod suffix;
@@ -126,12 +131,28 @@ pub mod tree;
 
 // Re-export freeze types for convenience
 pub use freeze::{AlreadyFrozen, FreezeGuard, Frozen, LeafFreezeUtils};
+pub use freeze24::Freeze24Utils;
+
+// Re-export leaf node traits for generic tree operations
+pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
+
+// Re-export allocator trait for generic tree operations
+pub use alloc_trait::NodeAllocatorGeneric;
+
+// Re-export Permuter24 types
+pub use permuter24::{AtomicPermuter24, Permuter24, WIDTH_24};
+
+// Re-export LeafNode24 types
+pub use leaf24::{LeafNode24, WIDTH_24 as LEAF24_WIDTH};
+
+// Re-export allocator24 types
+pub use alloc24::{NodeAllocator24, SeizeAllocator24};
 
 // Re-export main types for convenience
 pub use alloc::{ArenaAllocator, NodeAllocator, SeizeAllocator};
 pub use slot::ValueSlot;
 pub use suffix::{PermutationProvider, SuffixBag};
-pub use tree::{MassTree, MassTreeIndex};
+pub use tree::{MassTree, MassTree24, MassTreeG, MassTreeGeneric, MassTreeIndex};
 
 // Re-export debug counters for diagnosis (lightweight, always-on)
 pub use tree::{

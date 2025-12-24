@@ -2406,6 +2406,214 @@ const _: () = {
     assert!(ALIGN == 64, "InlineLeafNode not cache-line-aligned");
 };
 
+// ============================================================================
+//  TreeLeafNode Implementation
+// ============================================================================
+
+impl<S: ValueSlot + Send + Sync + 'static, const WIDTH: usize> crate::leaf_trait::TreeLeafNode<S>
+    for LeafNode<S, WIDTH>
+{
+    type Perm = Permuter<WIDTH>;
+    type Internode = crate::internode::InternodeNode<S, WIDTH>;
+    const WIDTH: usize = WIDTH;
+
+    #[inline]
+    fn new_boxed() -> Box<Self> {
+        LeafNode::new()
+    }
+
+    #[inline]
+    fn new_root_boxed() -> Box<Self> {
+        LeafNode::new_root()
+    }
+
+    #[inline]
+    fn version(&self) -> &NodeVersion {
+        LeafNode::version(self)
+    }
+
+    #[inline]
+    fn permutation(&self) -> Permuter<WIDTH> {
+        LeafNode::permutation(self)
+    }
+
+    #[inline]
+    fn set_permutation(&self, perm: Permuter<WIDTH>) {
+        LeafNode::set_permutation(self, perm)
+    }
+
+    #[inline]
+    fn permutation_raw(&self) -> u64 {
+        self.permutation.load(READ_ORD)
+    }
+
+    fn permutation_try(&self) -> Result<Permuter<WIDTH>, ()> {
+        LeafNode::permutation_try(self).map_err(|_| ())
+    }
+
+    fn permutation_wait(&self) -> Permuter<WIDTH> {
+        LeafNode::permutation_wait(self)
+    }
+
+    #[inline]
+    fn ikey(&self, slot: usize) -> u64 {
+        LeafNode::ikey(self, slot)
+    }
+
+    #[inline]
+    fn set_ikey(&self, slot: usize, ikey: u64) {
+        LeafNode::set_ikey(self, slot, ikey)
+    }
+
+    #[inline]
+    fn ikey_bound(&self) -> u64 {
+        LeafNode::ikey_bound(self)
+    }
+
+    #[inline]
+    fn keylenx(&self, slot: usize) -> u8 {
+        LeafNode::keylenx(self, slot)
+    }
+
+    #[inline]
+    fn set_keylenx(&self, slot: usize, keylenx: u8) {
+        LeafNode::set_keylenx(self, slot, keylenx)
+    }
+
+    #[inline]
+    fn is_layer(&self, slot: usize) -> bool {
+        LeafNode::is_layer(self, slot)
+    }
+
+    #[inline]
+    fn has_ksuf(&self, slot: usize) -> bool {
+        LeafNode::has_ksuf(self, slot)
+    }
+
+    #[inline]
+    fn leaf_value_ptr(&self, slot: usize) -> *mut u8 {
+        LeafNode::leaf_value_ptr(self, slot)
+    }
+
+    #[inline]
+    fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
+        LeafNode::set_leaf_value_ptr(self, slot, ptr)
+    }
+
+    #[inline]
+    fn cas_slot_value(
+        &self,
+        slot: usize,
+        expected: *mut u8,
+        new_value: *mut u8,
+    ) -> Result<(), *mut u8> {
+        LeafNode::cas_slot_value(self, slot, expected, new_value)
+    }
+
+    #[inline]
+    fn safe_next(&self) -> *mut Self {
+        LeafNode::safe_next(self)
+    }
+
+    #[inline]
+    fn next_is_marked(&self) -> bool {
+        LeafNode::next_is_marked(self)
+    }
+
+    #[inline]
+    fn set_next(&self, next: *mut Self) {
+        LeafNode::set_next(self, next)
+    }
+
+    #[inline]
+    fn mark_next(&self) {
+        LeafNode::mark_next(self)
+    }
+
+    #[inline]
+    fn unmark_next(&self) {
+        LeafNode::unmark_next(self)
+    }
+
+    #[inline]
+    fn prev(&self) -> *mut Self {
+        LeafNode::prev(self)
+    }
+
+    #[inline]
+    fn set_prev(&self, prev: *mut Self) {
+        LeafNode::set_prev(self, prev)
+    }
+
+    #[inline]
+    fn parent(&self) -> *mut u8 {
+        LeafNode::parent(self)
+    }
+
+    #[inline]
+    fn set_parent(&self, parent: *mut u8) {
+        LeafNode::set_parent(self, parent)
+    }
+
+    #[inline]
+    fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
+        LeafNode::can_reuse_slot0(self, new_ikey)
+    }
+
+    #[inline]
+    unsafe fn store_slot_for_cas(
+        &self,
+        slot: usize,
+        ikey: u64,
+        keylenx: u8,
+        value_ptr: *mut u8,
+    ) {
+        // SAFETY: Caller guarantees slot is in free region and no concurrent modification
+        unsafe { LeafNode::store_slot_for_cas(self, slot, ikey, keylenx, value_ptr) }
+    }
+
+    #[inline]
+    unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
+        // SAFETY: Caller guarantees slot was claimed via cas_slot_value
+        unsafe { LeafNode::store_key_data_for_cas(self, slot, ikey, keylenx) }
+    }
+
+    #[inline]
+    unsafe fn clear_slot_for_cas(&self, slot: usize) {
+        // SAFETY: Caller guarantees value has been reclaimed
+        unsafe { LeafNode::clear_slot_for_cas(self, slot) }
+    }
+
+    #[inline]
+    fn load_slot_value(&self, slot: usize) -> *mut u8 {
+        LeafNode::load_slot_value(self, slot)
+    }
+
+    #[inline]
+    fn next_raw(&self) -> *mut Self {
+        LeafNode::next_raw(self)
+    }
+
+    #[inline]
+    fn wait_for_split(&self) {
+        LeafNode::wait_for_split(self)
+    }
+
+    #[inline]
+    fn cas_permutation_raw(
+        &self,
+        expected: Self::Perm,
+        new: Self::Perm,
+    ) -> Result<(), crate::leaf_trait::CasPermutationError<Self::Perm>> {
+        LeafNode::cas_permutation_raw(self, expected, new)
+            .map_err(|failure| {
+                crate::leaf_trait::CasPermutationError::new(
+                    crate::permuter::Permuter::from_value(failure.current_raw())
+                )
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

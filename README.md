@@ -176,6 +176,38 @@ Layer 1: "rld!\0\0\0\0" → B+tree lookup → Value
 
 **B-link trees**: Split operations use sibling pointers for lock-free traversal, allowing reads to proceed during structural modifications.
 
+## Divergences from C++ Masstree
+
+This is not a direct port. Key differences from the [original C++ implementation](https://github.com/kohler/masstree-beta):
+
+| Aspect | C++ Masstree | Rust MassTree |
+|--------|--------------|---------------|
+| **Memory Reclamation** | Epoch-Based RCU | Hyaline via [seize](https://github.com/ibraheemdev/seize) |
+| **Node Width** | 15 slots (u64 permuter) | 15 slots (planning 24 via u128) |
+
+### Why Hyaline over Epoch-Based RCU?
+
+The C++ implementation uses epoch-based reclamation where readers announce entry/exit from critical sections and memory is freed after all readers from an epoch have departed.
+
+We use [seize](https://github.com/ibraheemdev/seize)'s Hyaline scheme which:
+
+- Has simpler API (just `Guard` and `retire`)
+- Provides better worst-case latency (no epoch advancement delays)
+- Handles nested critical sections naturally
+- Is the state-of-the-art for Rust concurrent data structures
+
+### Planned: WIDTH=24 (Novel Optimization)
+
+The original C++ and our current implementation use WIDTH=15 because the permutation encoding fits in a `u64` (15 slots × 4 bits + 4 bits size = 64 bits).
+
+We're implementing WIDTH=24 using `u128` storage via the [`portable-atomic`](https://crates.io/crates/portable-atomic) crate:
+
+- 24 slots × 5 bits + 5 bits size = 125 bits (fits in u128)
+- 60% more capacity per node = ~40% fewer splits
+- Reduces lock contention under high thread counts
+
+This optimization wasn't practical for the 2012 C++ implementation but is feasible now with modern 128-bit atomic support.
+
 ## Limitations
 
 1. **No deletion** — keys cannot be removed (planned)
