@@ -27,8 +27,8 @@
 /// Find the first index where `keys[i] == target`, or `None` if not found.
 ///
 /// Uses SIMD when available to compare multiple keys simultaneously.
-#[inline]
 #[must_use]
+#[inline(always)]
 pub fn find_exact_u64(keys: &[u64], target: u64) -> Option<usize> {
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
@@ -51,8 +51,8 @@ pub fn find_exact_u64(keys: &[u64], target: u64) -> Option<usize> {
 ///
 /// This is useful for upper bound calculations: the count gives the
 /// child index to follow in an internode.
-#[inline]
 #[must_use]
+#[inline(always)]
 pub fn count_le_u64(keys: &[u64], size: usize, target: u64) -> usize {
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
@@ -75,9 +75,8 @@ pub fn count_le_u64(keys: &[u64], size: usize, target: u64) -> usize {
 // ============================================================================
 
 /// Scalar exact match search.
-#[inline]
-#[allow(dead_code)] // Used on non-x86 and in tests
 #[must_use]
+#[inline(always)]
 pub fn find_exact_u64_scalar(keys: &[u64], target: u64) -> Option<usize> {
     for (i, &key) in keys.iter().enumerate() {
         if key == target {
@@ -88,9 +87,8 @@ pub fn find_exact_u64_scalar(keys: &[u64], target: u64) -> Option<usize> {
 }
 
 /// Scalar count of keys ≤ target.
-#[inline]
-#[allow(dead_code)] // Used on non-x86 and in tests
 #[must_use]
+#[inline(always)]
 pub fn count_le_u64_scalar(keys: &[u64], size: usize, target: u64) -> usize {
     let mut count = 0;
     for key in keys.iter().take(size) {

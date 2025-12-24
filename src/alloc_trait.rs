@@ -58,7 +58,12 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// # Returns
     ///
     /// A raw mutable pointer to the allocated node with valid provenance.
-    fn alloc_leaf(&mut self, node: Box<L>) -> *mut L;
+    ///
+    /// # Note
+    ///
+    /// Uses interior mutability (`parking_lot::Mutex`) so this can be called
+    /// from concurrent code paths with only `&self`.
+    fn alloc_leaf(&self, node: Box<L>) -> *mut L;
 
     /// Track a leaf pointer for cleanup (concurrent-safe via `&self`).
     ///
@@ -103,7 +108,12 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     ///
     /// - The caller must pass a valid `Box::into_raw().cast()` pointer
     /// - The caller must cast the result back to the correct internode type
-    fn alloc_internode_erased(&mut self, node_ptr: *mut u8) -> *mut u8;
+    ///
+    /// # Note
+    ///
+    /// Uses interior mutability (`parking_lot::Mutex`) so this can be called
+    /// from concurrent code paths with only `&self`.
+    fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8;
 
     /// Track an internode pointer for cleanup (concurrent-safe).
     ///
@@ -135,7 +145,12 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// # Arguments
     ///
     /// * `root_ptr` - Pointer to the tree root (leaf or internode)
-    fn teardown_tree(&mut self, root_ptr: *mut u8);
+    ///
+    /// # Note
+    ///
+    /// Uses interior mutability (`parking_lot::Mutex`) so this can be called
+    /// from concurrent code paths with only `&self`.
+    fn teardown_tree(&self, root_ptr: *mut u8);
 
     /// Retire an entire subtree rooted at `root_ptr`.
     ///
@@ -165,7 +180,7 @@ mod tests {
     // ========================================================================
 
     /// Test that we can allocate a leaf via the generic trait.
-    fn test_generic_alloc_leaf<S, L, A>(alloc: &mut A)
+    fn test_generic_alloc_leaf<S, L, A>(alloc: &A)
     where
         S: ValueSlot + Send + Sync + 'static,
         L: TreeLeafNode<S>,
@@ -203,8 +218,8 @@ mod tests {
     fn test_seize_allocator_generic_alloc() {
         use crate::alloc::SeizeAllocator;
 
-        let mut alloc: SeizeAllocator<LeafValue<u64>, 15> = SeizeAllocator::new();
-        test_generic_alloc_leaf::<LeafValue<u64>, LeafNode<LeafValue<u64>, 15>, _>(&mut alloc);
+        let alloc: SeizeAllocator<LeafValue<u64>, 15> = SeizeAllocator::new();
+        test_generic_alloc_leaf::<LeafValue<u64>, LeafNode<LeafValue<u64>, 15>, _>(&alloc);
     }
 
     #[test]
@@ -223,8 +238,8 @@ mod tests {
     fn test_seize_allocator24_generic_alloc() {
         use crate::alloc24::SeizeAllocator24;
 
-        let mut alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
-        test_generic_alloc_leaf::<LeafValue<u64>, LeafNode24<LeafValue<u64>>, _>(&mut alloc);
+        let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+        test_generic_alloc_leaf::<LeafValue<u64>, LeafNode24<LeafValue<u64>>, _>(&alloc);
     }
 
     #[test]
@@ -263,8 +278,10 @@ mod tests {
             LeafNode<LeafValue<u64>, 15>,
             _,
         >(&mut alloc15));
-        assert!(generic_tree_setup::<LeafValue<u64>, LeafNode24<LeafValue<u64>>, _>(
-            &mut alloc24
-        ));
+        assert!(generic_tree_setup::<
+            LeafValue<u64>,
+            LeafNode24<LeafValue<u64>>,
+            _,
+        >(&mut alloc24));
     }
 }

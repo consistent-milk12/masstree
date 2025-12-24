@@ -82,7 +82,7 @@ struct Backoff {
 
 impl Backoff {
     /// Create a new backoff with count = 0.
-    #[inline]
+    #[inline(always)]
     const fn new() -> Self {
         Self { count: 0 }
     }
@@ -92,7 +92,6 @@ impl Backoff {
     /// Uses `std::hint::spin_loop()` which maps to the x86 `PAUSE` instruction,
     /// improving performance on hyper-threaded CPUs by hinting that we're in
     /// a spin-wait loop.
-    #[inline]
     fn spin(&mut self) {
         for _ in 0..=self.count {
             std::hint::spin_loop();
@@ -187,8 +186,8 @@ impl Drop for LockGuard<'_> {
 
 impl LockGuard<'_> {
     /// Get the locked version value.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn locked_value(&self) -> u32 {
         self.locked_value
     }
@@ -202,7 +201,7 @@ impl LockGuard<'_> {
     /// 3. Backward compatibility with code that calls this explicitly
     ///
     /// This method is idempotent, calling it multiple times has no additional effect.
-    #[inline(always)]
+    #[inline]
     pub fn mark_insert(&mut self) {
         if (self.locked_value & INSERTING_BIT) == 0 {
             // This shouldn't happen with the always dirty on lock strategy
@@ -235,7 +234,7 @@ impl LockGuard<'_> {
     ///
     /// # Memory Ordering
     /// Uses [`Ordering::Release`] followed by [`Ordering::Acquire`] fence.
-    #[inline(always)]
+    #[inline]
     pub fn mark_split(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version.value.load(Ordering::Relaxed);
@@ -390,7 +389,6 @@ impl NodeVersion {
     ///
     /// # Returns
     /// A version value with no dirty bits set.
-    #[inline]
     #[must_use]
     pub fn stable(&self) -> u32 {
         let mut backoff = Backoff::new();
@@ -411,10 +409,7 @@ impl NodeVersion {
                 {
                     let elapsed = start.elapsed();
                     if elapsed > Duration::from_millis(5) {
-                        eprintln!(
-                            "[SLOW STABLE] took {:?} spins={}",
-                            elapsed, spins
-                        );
+                        eprintln!("[SLOW STABLE] took {elapsed:?} spins={spins}");
                     }
                 }
 
@@ -558,8 +553,10 @@ impl NodeVersion {
     #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock(&self) -> LockGuard<'_> {
         let mut backoff: Backoff = Backoff::new();
+
         #[cfg(feature = "tracing")]
         let start = Instant::now();
+
         #[cfg(feature = "tracing")]
         let mut spins: u32 = 0;
 
@@ -588,10 +585,7 @@ impl NodeVersion {
                     {
                         let elapsed = start.elapsed();
                         if elapsed > Duration::from_millis(5) {
-                            eprintln!(
-                                "[SLOW LOCK] took {:?} spins={}",
-                                elapsed, spins
-                            );
+                            eprintln!("[SLOW LOCK] took {elapsed:?} spins={spins}");
                         }
                     }
 

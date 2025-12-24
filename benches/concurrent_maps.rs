@@ -2351,7 +2351,7 @@ mod rw1_cpp_compatible {
     const SEED_BASE: u64 = 31337;
 
     /// Convert i32 key to [u8; 8] for MassTree (big-endian, sign-extended)
-    #[inline]
+    #[inline(always)]
     const fn i32_to_key(k: i32) -> [u8; 8] {
         // Sign-extend to i64, then to big-endian bytes
         (k as i64).to_be_bytes()

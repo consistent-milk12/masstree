@@ -276,7 +276,6 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             }
         }
     }
-
 }
 
 // ============================================================================
@@ -1345,7 +1344,6 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "Fail fast in tests")]
-#[expect(clippy::indexing_slicing)]
 mod tests {
     use std::sync::atomic::Ordering;
 

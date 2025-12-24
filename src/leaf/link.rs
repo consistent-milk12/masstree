@@ -12,19 +12,19 @@ use super::LeafNode;
 const MARK_BIT: usize = 1;
 
 /// Set mark bit (provenance-safe).
-#[inline]
+#[inline(always)]
 pub fn mark_ptr<T>(p: *mut T) -> *mut T {
     p.map_addr(|a| a | MARK_BIT)
 }
 
 /// Clear mark bit (provenance-safe).
-#[inline]
+#[inline(always)]
 pub fn unmark_ptr<T>(p: *mut T) -> *mut T {
     p.map_addr(|a| a & !MARK_BIT)
 }
 
 /// Check if marked.
-#[inline]
+#[inline(always)]
 pub fn is_marked<T>(p: *mut T) -> bool {
     p.addr() & MARK_BIT != 0
 }
@@ -36,24 +36,23 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// Returns `Err(current_value)` if the CAS failed because the current
     /// value didn't match `current`.
-    #[inline]
+    #[inline(always)]
     pub fn cas_next(&self, current: *mut Self, new: *mut Self) -> Result<*mut Self, *mut Self> {
         self.next
             .compare_exchange(current, new, CAS_SUCCESS, CAS_FAILURE)
     }
 
     /// Check if next pointer is marked.
-    #[inline]
+    #[inline(always)]
     pub fn is_next_marked(&self) -> bool {
         is_marked(self.next_raw())
     }
 
     /// Wait for split to complete (spin on mark) with bounded wait.
     ///
-    /// Uses progressive backoff: spin briefly, then wait on version.stable().
-    /// The splitter must have set SPLITTING_BIT before marking the pointer,
-    /// so stable() will wait for the split critical section to complete.
-    #[inline]
+    /// Uses progressive backoff: spin briefly, then wait on `version.stable()`.
+    /// The splitter must have set [`SPLITTING_BIT`] before marking the pointer,
+    /// so `stable()` will wait for the split critical section to complete.
     pub fn wait_for_split(&self) {
         const MAX_SPIN_ITERS: u32 = 64;
         const MAX_STABLE_RETRIES: u32 = 100;

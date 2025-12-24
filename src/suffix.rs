@@ -30,7 +30,7 @@ impl SlotMeta {
     };
 
     /// Check if this slot has a suffix.
-    #[inline]
+    #[inline(always)]
     const fn has_suffix(self) -> bool {
         self.offset != u32::MAX
     }
@@ -97,6 +97,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
 
     /// Create a new suffix bag with initial capacity.
     #[must_use]
+    #[inline(always)]
     pub fn new() -> Self {
         Self {
             slots: [SlotMeta::EMPTY; WIDTH],
@@ -106,6 +107,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
 
     /// Create a new suffix bag with specified capacity.
     #[must_use]
+    #[inline(always)]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             slots: [SlotMeta::EMPTY; WIDTH],
@@ -118,21 +120,22 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     // ========================================================================
 
     /// Return the current capacity of the data buffer.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn capacity(&self) -> usize {
         self.data.capacity()
     }
 
     /// Return the number of bytes currently used.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn used(&self) -> usize {
         self.data.len()
     }
 
     /// Return the number of slots that have suffixes.
     #[must_use]
+    #[inline(always)]
     pub fn count(&self) -> usize {
         self.slots.iter().filter(|s| s.has_suffix()).count()
     }
@@ -146,8 +149,8 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// # Panics
     ///
     /// Panics if `slot >= WIDTH`.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot bounds checked via caller contract"
@@ -194,8 +197,8 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// # Panics
     ///
     /// Panics if `slot >= WIDTH`.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn get_or_empty(&self, slot: usize) -> &[u8] {
         self.get(slot).unwrap_or(&[])
     }
@@ -250,11 +253,11 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// # Panics
     ///
     /// Panics if `slot >= WIDTH`.
-    #[inline]
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot bounds checked via debug_assert"
     )]
+    #[inline(always)]
     pub fn clear(&mut self, slot: usize) {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
         self.slots[slot] = SlotMeta::EMPTY;
@@ -377,8 +380,8 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// - `true` if suffixes match exactly
     /// - `false` if slot has no suffix or suffixes differ
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn suffix_equals(&self, slot: usize, suffix: &[u8]) -> bool {
         self.get(slot).is_some_and(|stored| stored == suffix)
     }
@@ -390,18 +393,21 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// - `Some(Ordering)` if slot has a suffix
     /// - `None` if slot has no suffix
     #[must_use]
+    #[inline(always)]
     pub fn suffix_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering> {
         self.get(slot).map(|stored| stored.cmp(suffix))
     }
 }
 
 impl<const WIDTH: usize> Default for SuffixBag<WIDTH> {
+    #[inline(always)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
+    #[inline(always)]
     fn clone(&self) -> Self {
         Self {
             slots: self.slots,

@@ -1,4 +1,4 @@
-//! Permutation Freezing API for LeafNode24.
+//! Permutation Freezing API for `LeafNode24`.
 
 #![allow(dead_code)]
 
@@ -108,6 +108,27 @@ impl<S: ValueSlot> StdFmt::Debug for FreezeGuard24<'_, S> {
             .field("snapshot_raw", &format_args!("{:#034x}", self.snapshot_raw))
             .field("active", &self.active)
             .finish()
+    }
+}
+
+// ============================================================================
+// FreezeGuardOps Implementation
+// ============================================================================
+
+impl<S: ValueSlot> crate::leaf_trait::FreezeGuardOps<Permuter24> for FreezeGuard24<'_, S> {
+    #[inline(always)]
+    fn snapshot(&self) -> Permuter24 {
+        FreezeGuard24::snapshot(self)
+    }
+
+    #[inline(always)]
+    fn snapshot_raw(&self) -> u128 {
+        FreezeGuard24::snapshot_raw(self)
+    }
+
+    #[inline(always)]
+    fn set_active(&mut self, active: bool) {
+        FreezeGuard24::set_active(self, active);
     }
 }
 
@@ -241,38 +262,36 @@ impl<S: ValueSlot> LeafNode24<S> {
             let frozen_raw: u128 = Freeze24Utils::freeze_raw(raw);
 
             // Attempt to install freeze sentinel
-            match self
+            if self
                 .permutation
                 .compare_exchange_raw(raw, frozen_raw, CAS_SUCCESS, CAS_FAILURE)
+                .is_ok()
             {
-                Ok(_) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        leaf_ptr = ?std::ptr::from_ref(self),
-                        cas_retries,
-                        old_raw = format_args!("{raw:#034x}"),
-                        frozen_raw = format_args!("{frozen_raw:#034x}"),
-                        "freeze_permutation: SUCCESS - permutation frozen"
-                    );
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    leaf_ptr = ?std::ptr::from_ref(self),
+                    cas_retries,
+                    old_raw = format_args!("{raw:#034x}"),
+                    frozen_raw = format_args!("{frozen_raw:#034x}"),
+                    "freeze_permutation: SUCCESS - permutation frozen"
+                );
 
-                    // Success: return guard with unfrozen snapshot
-                    return FreezeGuard24::new(self, raw, true);
-                }
-
-                Err(_) => {
-                    #[cfg(feature = "tracing")]
-                    {
-                        cas_retries += 1;
-                        tracing::trace!(
-                            leaf_ptr = ?std::ptr::from_ref(self),
-                            cas_retries,
-                            "freeze_permutation: CAS failed, retrying"
-                        );
-                    }
-                    // A concurrent CAS insert published just before us.
-                    StdHint::spin_loop();
-                }
+                // Success: return guard with unfrozen snapshot
+                return FreezeGuard24::new(self, raw, true);
             }
+
+            #[cfg(feature = "tracing")]
+            {
+                cas_retries += 1;
+                tracing::trace!(
+                    leaf_ptr = ?std::ptr::from_ref(self),
+                    cas_retries,
+                    "freeze_permutation: CAS failed, retrying"
+                );
+            }
+
+            // A concurrent CAS insert published just before us.
+            StdHint::spin_loop();
         }
     }
 
@@ -311,7 +330,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Unfreeze the permutation and publish the final split result.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn unfreeze_set_permutation(
         &self,
         mut guard: FreezeGuard24<'_, S>,
@@ -334,6 +353,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::leaf::LeafValue;

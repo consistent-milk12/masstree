@@ -2,6 +2,13 @@
 //!
 //! This module provides allocators that work with the 24-slot leaf nodes,
 //! mirroring the design of `alloc.rs` but for the larger WIDTH.
+//!
+//! # Note on Internode WIDTH
+//!
+//! While leaves use WIDTH=24 (via Permuter24 with u128), internodes are still
+//! limited to WIDTH=15 because they use the original Permuter (u64 with 4-bit slots).
+//! This is fine since internodes just hold child pointers; the benefit of WIDTH=24
+//! comes from leaves holding more keys and splitting less often.
 
 use parking_lot::Mutex;
 use seize::{Guard, LocalGuard};
@@ -10,8 +17,8 @@ use crate::internode::InternodeNode;
 use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
 
-/// Width constant for clarity.
-const WIDTH_24: usize = 24;
+/// Width constant for internodes (limited by 4-bit permutation slots).
+const INTERNODE_WIDTH: usize = 15;
 
 /// Trait for allocating and deallocating 24-slot tree nodes.
 ///
@@ -20,17 +27,21 @@ const WIDTH_24: usize = 24;
 /// # Type Parameters
 ///
 /// * `S` - The slot type implementing [`ValueSlot`]
+///
+/// # Note
+///
+/// Uses interior mutability (`parking_lot::Mutex`) so all methods take `&self`.
 pub trait NodeAllocator24<S: ValueSlot> {
     /// Allocate a [`LeafNode24`] and return a stable raw pointer.
-    fn alloc_leaf24(&mut self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S>;
+    fn alloc_leaf24(&self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S>;
 
     /// Allocate an internode and return a stable raw pointer.
     ///
-    /// Note: Internodes are WIDTH=24 to match the tree structure.
+    /// Note: Internodes are WIDTH=15 (max for 4-bit permutation slots).
     fn alloc_internode24(
-        &mut self,
-        node: Box<InternodeNode<S, WIDTH_24>>,
-    ) -> *mut InternodeNode<S, WIDTH_24>;
+        &self,
+        node: Box<InternodeNode<S, INTERNODE_WIDTH>>,
+    ) -> *mut InternodeNode<S, INTERNODE_WIDTH>;
 
     /// Track a leaf24 pointer for cleanup (concurrent-safe via `&self`).
     #[inline(always)]
@@ -42,7 +53,7 @@ pub trait NodeAllocator24<S: ValueSlot> {
     /// Track an internode pointer for cleanup (concurrent-safe via `&self`).
     #[inline(always)]
     #[expect(unused_variables, reason = "by default it's no op")]
-    fn track_internode24(&self, ptr: *mut InternodeNode<S, WIDTH_24>) {
+    fn track_internode24(&self, ptr: *mut InternodeNode<S, INTERNODE_WIDTH>) {
         // Default: no-op
     }
 
@@ -68,7 +79,7 @@ pub trait NodeAllocator24<S: ValueSlot> {
     #[expect(unused_variables, reason = "by default it's no op")]
     unsafe fn retire_internode24(
         &self,
-        ptr: *mut InternodeNode<S, WIDTH_24>,
+        ptr: *mut InternodeNode<S, INTERNODE_WIDTH>,
         guard: &LocalGuard<'_>,
     ) {
         // Default: no-op
@@ -77,7 +88,7 @@ pub trait NodeAllocator24<S: ValueSlot> {
     /// Teardown reachable nodes at tree drop.
     #[inline(always)]
     #[expect(unused_variables, reason = "by default it's no op")]
-    fn teardown_tree24(&mut self, root_ptr: *mut u8) {
+    fn teardown_tree24(&self, root_ptr: *mut u8) {
         // Default: no-op
     }
 }
@@ -89,8 +100,8 @@ pub struct SeizeAllocator24<S: ValueSlot> {
     /// Raw pointers to allocated [`LeafNode24`] nodes.
     leaf_ptrs: Mutex<Vec<*mut LeafNode24<S>>>,
 
-    /// Raw pointers to allocated internode nodes.
-    internode_ptrs: Mutex<Vec<*mut InternodeNode<S, WIDTH_24>>>,
+    /// Raw pointers to allocated internode nodes (WIDTH=15).
+    internode_ptrs: Mutex<Vec<*mut InternodeNode<S, INTERNODE_WIDTH>>>,
 }
 
 // SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
@@ -138,17 +149,17 @@ impl<S: ValueSlot> Default for SeizeAllocator24<S> {
 }
 
 impl<S: ValueSlot> NodeAllocator24<S> for SeizeAllocator24<S> {
-    fn alloc_leaf24(&mut self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S> {
+    fn alloc_leaf24(&self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S> {
         let ptr: *mut LeafNode24<S> = Box::into_raw(node);
         self.leaf_ptrs.lock().push(ptr);
         ptr
     }
 
     fn alloc_internode24(
-        &mut self,
-        node: Box<InternodeNode<S, WIDTH_24>>,
-    ) -> *mut InternodeNode<S, WIDTH_24> {
-        let ptr: *mut InternodeNode<S, WIDTH_24> = Box::into_raw(node);
+        &self,
+        node: Box<InternodeNode<S, INTERNODE_WIDTH>>,
+    ) -> *mut InternodeNode<S, INTERNODE_WIDTH> {
+        let ptr: *mut InternodeNode<S, INTERNODE_WIDTH> = Box::into_raw(node);
         self.internode_ptrs.lock().push(ptr);
         ptr
     }
@@ -157,7 +168,7 @@ impl<S: ValueSlot> NodeAllocator24<S> for SeizeAllocator24<S> {
         self.leaf_ptrs.lock().push(ptr);
     }
 
-    fn track_internode24(&self, ptr: *mut InternodeNode<S, WIDTH_24>) {
+    fn track_internode24(&self, ptr: *mut InternodeNode<S, INTERNODE_WIDTH>) {
         self.internode_ptrs.lock().push(ptr);
     }
 
@@ -172,7 +183,7 @@ impl<S: ValueSlot> NodeAllocator24<S> for SeizeAllocator24<S> {
 
     unsafe fn retire_internode24(
         &self,
-        ptr: *mut InternodeNode<S, WIDTH_24>,
+        ptr: *mut InternodeNode<S, INTERNODE_WIDTH>,
         guard: &LocalGuard<'_>,
     ) {
         // SAFETY: Caller ensures ptr is valid and unreachable
@@ -183,10 +194,10 @@ impl<S: ValueSlot> NodeAllocator24<S> for SeizeAllocator24<S> {
         }
     }
 
-    fn teardown_tree24(&mut self, _root_ptr: *mut u8) {
-        // Free all tracked nodes
+    fn teardown_tree24(&self, _root_ptr: *mut u8) {
+        // Free all tracked nodes using interior mutability
         let leaves: Vec<*mut LeafNode24<S>> = std::mem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode<S, WIDTH_24>> =
+        let internodes: Vec<*mut InternodeNode<S, INTERNODE_WIDTH>> =
             std::mem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
@@ -232,47 +243,53 @@ impl<S> crate::alloc_trait::NodeAllocatorGeneric<S, LeafNode24<S>> for SeizeAllo
 where
     S: ValueSlot + Send + Sync + 'static,
 {
-    #[inline]
-    fn alloc_leaf(&mut self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S> {
+    #[inline(always)]
+    fn alloc_leaf(&self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S> {
         NodeAllocator24::alloc_leaf24(self, node)
     }
 
-    #[inline]
+    #[inline(always)]
     fn track_leaf(&self, ptr: *mut LeafNode24<S>) {
         NodeAllocator24::track_leaf24(self, ptr);
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn retire_leaf(&self, ptr: *mut LeafNode24<S>, guard: &LocalGuard<'_>) {
         // SAFETY: Caller guarantees ptr is valid and unreachable
         unsafe { NodeAllocator24::retire_leaf24(self, ptr, guard) }
     }
 
-    #[inline]
-    fn alloc_internode_erased(&mut self, node_ptr: *mut u8) -> *mut u8 {
-        // SAFETY: Caller passes a valid Box<InternodeNode<S, 24>> as *mut u8
-        let node: Box<InternodeNode<S, WIDTH_24>> =
-            unsafe { Box::from_raw(node_ptr.cast::<InternodeNode<S, WIDTH_24>>()) };
+    #[inline(always)]
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "Caller guarantees node_ptr is properly aligned for InternodeNode"
+    )]
+    fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
+        // SAFETY: Caller passes a valid Box<InternodeNode<S, INTERNODE_WIDTH>> as *mut u8.
+        // The pointer was originally created from Box::into_raw on an InternodeNode,
+        // so alignment is guaranteed.
+        let node: Box<InternodeNode<S, INTERNODE_WIDTH>> =
+            unsafe { Box::from_raw(node_ptr.cast::<InternodeNode<S, INTERNODE_WIDTH>>()) };
         NodeAllocator24::alloc_internode24(self, node).cast()
     }
 
-    #[inline]
+    #[inline(always)]
     fn track_internode_erased(&self, ptr: *mut u8) {
         NodeAllocator24::track_internode24(self, ptr.cast());
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        // SAFETY: Caller guarantees ptr is valid InternodeNode<S, 24>
+        // SAFETY: Caller guarantees ptr is valid InternodeNode<S, 15>
         unsafe { NodeAllocator24::retire_internode24(self, ptr.cast(), guard) }
     }
 
-    #[inline]
-    fn teardown_tree(&mut self, root_ptr: *mut u8) {
+    #[inline(always)]
+    fn teardown_tree(&self, root_ptr: *mut u8) {
         NodeAllocator24::teardown_tree24(self, root_ptr);
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn retire_subtree_root(&self, _root_ptr: *mut u8, _guard: &LocalGuard<'_>) {
         // TODO: Implement subtree traversal for WIDTH=24
         // For now, subtree retirement is not supported for WIDTH=24
@@ -294,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_seize_allocator24_alloc_leaf() {
-        let mut alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+        let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
         let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
 
         let ptr = alloc.alloc_leaf24(leaf);
@@ -319,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_seize_allocator24_drop_frees_nodes() {
-        let mut alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+        let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
         let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
 
         let _ = alloc.alloc_leaf24(leaf);

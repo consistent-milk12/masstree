@@ -90,7 +90,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// **Returns:** Pointer to the left leaf (the former root, still in arena).
     /// The caller should use this pointer for leaf linking.
     pub(super) fn create_root_internode(
-        &mut self,
+        &self,
         right_leaf: *mut LeafNode<LeafValue<V>, WIDTH>,
         split_ikey: u64,
     ) -> *mut LeafNode<LeafValue<V>, WIDTH> {
@@ -241,21 +241,36 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 self.alloc_internode(new_parent);
 
             // Split parent AND insert the split_ikey/right_leaf simultaneously
+            // NOTE: split_into now updates all children's parent pointers in sibling internally
+            // (matching C++ masstree_split.hh:163-165). This is critical for correctness.
             let (popup_key, insert_went_left) = unsafe {
                 parent.split_into(
                     &mut *new_parent_ptr,
+                    new_parent_ptr,
                     child_idx,
                     split_ikey,
                     right_leaf_ptr.cast::<u8>(),
                 )
             };
 
-            // Set right_leaf's parent based on where the insert went
+            // NOTE: split_into updates internode children's parents internally (height > 0).
+            // For leaf children (height == 0), we must update them here.
+            // Since this is propagate_split (leaf split), parent.children_are_leaves() is always true.
             unsafe {
+                let new_parent_ref: &InternodeNode<LeafValue<V>, WIDTH> = &*new_parent_ptr;
+
+                // Update all leaf children's parent pointers in new_parent
+                for i in 0..=new_parent_ref.nkeys() {
+                    let child: *mut u8 = new_parent_ref.child(i);
+                    if !child.is_null() {
+                        (*child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
+                            .set_parent(new_parent_ptr.cast::<u8>());
+                    }
+                }
+
+                // If insert_child (right_leaf) stayed in the LEFT parent, set its parent explicitly
                 if insert_went_left {
                     (*right_leaf_ptr).set_parent(parent_ptr);
-                } else {
-                    (*right_leaf_ptr).set_parent(new_parent_ptr.cast::<u8>());
                 }
             }
 
@@ -326,7 +341,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
     /// Handle root internode split - creates new root above both children.
     fn propagate_root_internode_split(
-        &mut self,
+        &self,
         left_internode_ptr: *mut InternodeNode<LeafValue<V>, WIDTH>,
         right_internode_ptr: *mut InternodeNode<LeafValue<V>, WIDTH>,
         popup_key: u64,
@@ -412,33 +427,26 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             self.alloc_internode(new_parent);
 
         // Split parent AND insert the popup_key at child_idx simultaneously
+        // NOTE: split_into now updates all children's parent pointers in sibling internally
+        // (matching C++ masstree_split.hh:163-165). This is critical for correctness.
         // SAFETY: new_parent_ptr is valid from alloc_internode
         let (new_popup_key, insert_went_left) = unsafe {
             parent.split_into(
                 &mut *new_parent_ptr,
+                new_parent_ptr,
                 child_idx,
                 popup_key,
                 right_internode_ptr.cast::<u8>(),
             )
         };
 
-        // Set right_internode's parent based on where the insert went
-        unsafe {
-            if insert_went_left {
+        // NOTE: Parent pointer updates for sibling's children are now done INSIDE split_into.
+        // However, if insert_child (right_internode) stayed in the LEFT parent, we must set its
+        // parent explicitly since split_into only updates children in the RIGHT sibling.
+        if insert_went_left {
+            unsafe {
                 (*right_internode_ptr).set_parent(parent_ptr);
-            } else {
-                (*right_internode_ptr).set_parent(new_parent_ptr.cast::<u8>());
             }
-        }
-
-        // Update parent pointers for other children in new_parent (skip the one we just set)
-        // SAFETY: new_parent_ptr is valid from store_internode_in_arena
-        unsafe {
-            update_children_parent_pointers(
-                new_parent_ptr,
-                new_parent_ptr.cast::<u8>(),
-                Some(right_internode_ptr.cast::<u8>()),
-            );
         }
 
         // Recursively propagate the new popup key
@@ -471,7 +479,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     ///
     /// C++ `masstree_split.hh:218-226`, `masstree_struct.hh:83`
     fn promote_layer_root(
-        &mut self,
+        &self,
         left_leaf: *mut LeafNode<LeafValue<V>, WIDTH>,
         right_leaf: *mut LeafNode<LeafValue<V>, WIDTH>,
         split_ikey: u64,
@@ -530,7 +538,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// The `reach_leaf_from_ptr()` follows parent pointers to find the current
     /// layer root regardless of how many promotions have occurred.
     fn promote_layer_root_internode(
-        &mut self,
+        &self,
         left_inode: *mut InternodeNode<LeafValue<V>, WIDTH>,
         right_inode: *mut InternodeNode<LeafValue<V>, WIDTH>,
         split_ikey: u64,

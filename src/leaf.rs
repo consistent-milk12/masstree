@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
 use crate::FreezeGuard;
+use crate::leaf_trait::CasPermutationError;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use seize::{Guard, LocalGuard};
 
@@ -308,8 +309,8 @@ impl<V> LeafValue<V> {
     // ============================================================================
 
     /// Create an empty leaf value.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn empty() -> Self {
         Self::Empty
     }
@@ -319,22 +320,22 @@ impl<V> LeafValue<V> {
     // ============================================================================
 
     /// Check if this slot is empty.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }
 
     /// Check if this slot contains a value.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn is_value(&self) -> bool {
         matches!(self, Self::Value(_))
     }
 
     /// Check if this slot contains a layer pointer.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn is_layer(&self) -> bool {
         matches!(self, Self::Layer(_))
     }
@@ -344,8 +345,8 @@ impl<V> LeafValue<V> {
     // ============================================================================
 
     /// Try to get the Arc value, returning None if not a value variant.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn try_as_value(&self) -> Option<&Arc<V>> {
         match self {
             Self::Value(arc) => Some(arc),
@@ -355,8 +356,8 @@ impl<V> LeafValue<V> {
     }
 
     /// Try to clone the Arc value, returning None if not a value variant.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub fn try_clone_arc(&self) -> Option<Arc<V>> {
         match self {
             Self::Value(arc) => Some(Arc::clone(arc)),
@@ -366,8 +367,8 @@ impl<V> LeafValue<V> {
     }
 
     /// Try to get the layer pointer, returning None if not a Layer variant.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn try_as_layer(&self) -> Option<*mut u8> {
         match self {
             Self::Layer(ptr) => Some(*ptr),
@@ -387,8 +388,8 @@ impl<V> LeafValue<V> {
     ///
     /// # Panics
     /// Panics if this is not a Layer variant.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     #[expect(clippy::expect_used, reason = "Invariant ensured by caller")]
     pub const fn as_layer(&self) -> *mut u8 {
         self.try_as_layer()
@@ -401,8 +402,8 @@ impl<V> LeafValue<V> {
     ///
     /// # Panics
     /// Panics if ths is not a Value variant.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     #[expect(clippy::expect_used, reason = "Invariant ensured by caller")]
     pub const fn as_value(&self) -> &Arc<V> {
         self.try_as_value()
@@ -415,8 +416,8 @@ impl<V> LeafValue<V> {
     ///
     /// # Panics
     /// Panics if ths is not a Value variant.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     #[expect(clippy::expect_used, reason = "Invariant ensured by caller")]
     pub fn clone_arc(&self) -> Arc<V> {
         self.try_clone_arc()
@@ -429,7 +430,7 @@ impl<V> LeafValue<V> {
     ///
     /// # Panics
     /// Panics if ths is not a Value variant.
-    #[inline]
+    #[inline(always)]
     #[expect(clippy::panic, reason = "Invariant ensured by caller")]
     pub fn as_value_mut(&mut self) -> &mut Arc<V> {
         match self {
@@ -512,8 +513,8 @@ impl<V: Copy> LeafValueIndex<V> {
     // ============================================================================
 
     /// Create an empty leaf value.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn empty() -> Self {
         Self::Empty
     }
@@ -523,22 +524,22 @@ impl<V: Copy> LeafValueIndex<V> {
     // ============================================================================
 
     /// Check if this slot is empty.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }
 
     /// Check if this slot contains a value.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn is_value(&self) -> bool {
         matches!(self, Self::Value(_))
     }
 
     /// Check if this slot contains a layer pointer.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn is_layer(&self) -> bool {
         matches!(self, Self::Layer(_))
     }
@@ -548,8 +549,8 @@ impl<V: Copy> LeafValueIndex<V> {
     // ============================================================================
 
     /// Try to get the value, returning None if not a Value variant.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn try_value(&self) -> Option<V> {
         match self {
             Self::Value(v) => Some(*v),
@@ -559,8 +560,8 @@ impl<V: Copy> LeafValueIndex<V> {
     }
 
     /// Try to get the layer pointer, returning None if not a Layer variant.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn try_as_layer(&self) -> Option<*mut u8> {
         match self {
             Self::Layer(ptr) => Some(*ptr),
@@ -580,8 +581,8 @@ impl<V: Copy> LeafValueIndex<V> {
     ///
     /// # Panics
     /// Panics if this is not a Value variant.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     #[expect(clippy::expect_used, reason = "Invariant ensured by caller")]
     pub const fn value(&self) -> V {
         self.try_value()
@@ -595,9 +596,9 @@ impl<V: Copy> LeafValueIndex<V> {
     ///
     /// # Panics
     /// Panics if this is not a Layer variant.
-    #[expect(clippy::expect_used, reason = "Invariant ensured by caller")]
-    #[inline]
     #[must_use]
+    #[inline(always)]
+    #[expect(clippy::expect_used, reason = "Invariant ensured by caller")]
     pub const fn as_layer(&self) -> *mut u8 {
         self.try_as_layer()
             .expect("LeafValueIndex::as_layer called on non-Layer variant")
@@ -749,6 +750,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
 
     /// Create a new leaf node (unboxed).
     #[must_use]
+    #[inline]
     pub fn new_with_root(is_root: bool) -> Self {
         let version: NodeVersion = NodeVersion::new(true);
         if is_root {
@@ -774,6 +776,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
 
     /// Create a new leaf node (boxed).
     #[must_use]
+    #[inline(always)]
     pub fn new() -> Box<Self> {
         Box::new(Self::new_with_root(false))
     }
@@ -782,6 +785,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// Same as `new()` but explicitly marks the node as root.
     #[must_use]
+    #[inline(always)]
     pub fn new_root() -> Box<Self> {
         Box::new(Self::new_with_root(true))
     }
@@ -791,13 +795,13 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     // ============================================================================
 
     /// Get a reference to the node's version.
-    #[inline]
+    #[inline(always)]
     pub const fn version(&self) -> &NodeVersion {
         &self.version
     }
 
     /// Get a mutable reference to the nodes version.
-    #[inline]
+    #[inline(always)]
     pub const fn version_mut(&mut self) -> &mut NodeVersion {
         &mut self.version
     }
@@ -810,8 +814,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot from Permuter, valid by construction"
@@ -845,8 +849,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Returns
     ///
     /// Array of all ikeys. Unused slots may contain any value.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     #[expect(clippy::indexing_slicing)]
     pub fn load_all_ikeys(&self) -> [u64; WIDTH] {
         let mut ikeys = [0u64; WIDTH];
@@ -862,8 +866,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot from Permuter, valid by construction"
@@ -905,7 +909,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if the leaf is empty.
-    #[inline]
+    #[inline(always)]
     pub fn keylenx_bound(&self) -> u8 {
         let perm: Permuter<WIDTH> = self.permutation();
 
@@ -918,8 +922,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_layer(&self, slot: usize) -> bool {
         self.keylenx(slot) >= LAYER_KEYLENX
     }
@@ -953,14 +957,14 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     // ============================================================================
 
     /// Load suffix bag pointer (reader).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn ksuf_ptr(&self) -> *mut SuffixBag<WIDTH> {
         self.ksuf.load(READ_ORD)
     }
 
     /// Check if this leaf has suffix storage allocated.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub fn has_ksuf_storage(&self) -> bool {
         !self.ksuf_ptr().is_null()
@@ -975,6 +979,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
     #[must_use]
+    #[inline(always)]
     pub fn ksuf(&self, slot: usize) -> Option<&[u8]> {
         debug_assert!(slot < WIDTH, "ksuf: slot {slot} >= WIDTH {WIDTH}");
 
@@ -995,8 +1000,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
         self.ksuf(slot).unwrap_or(&[])
     }
@@ -1012,6 +1017,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         clippy::indexing_slicing,
         reason = "Slot bounds checked via debug_assert"
     )]
+    #[inline]
     pub unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         debug_assert!(slot < WIDTH, "assign_ksuf: slot {slot} >= WIDTH {WIDTH}");
 
@@ -1049,6 +1055,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
         clippy::indexing_slicing,
         reason = "Slot bounds checked via debug_assert"
     )]
+    #[inline(always)]
     pub unsafe fn clear_ksuf(&self, slot: usize, guard: &LocalGuard<'_>) {
         debug_assert!(slot < WIDTH, "clear_ksuf: slot {slot} >= WIDTH {WIDTH}");
 
@@ -1077,6 +1084,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
 
     /// Check if a slot's suffix equals the given suffix.
     #[must_use]
+    #[inline(always)]
     pub fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
         debug_assert!(slot < WIDTH, "ksuf_equals: slot {slot} >= WIDTH {WIDTH}");
 
@@ -1095,6 +1103,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
 
     /// Compare a slot's suffix with the given suffix.
     #[must_use]
+    #[inline(always)]
     pub fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering> {
         debug_assert!(slot < WIDTH, "ksuf_compare: slot {slot} >= WIDTH {WIDTH}");
 
@@ -1129,6 +1138,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// Panics in debug mode if `slot >= WIDTH`.
     #[must_use]
+    #[inline(always)]
     pub fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
         debug_assert!(slot < WIDTH, "ksuf_matches: slot {slot} >= WIDTH {WIDTH}");
 
@@ -1172,8 +1182,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Panics
     ///
     /// Panics in debug mode if `slot >= WIDTH`.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::cast_possible_wrap,
         clippy::cast_possible_truncation,
@@ -1229,6 +1239,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// - The `guard` must be valid and from the same collector as the tree.
     /// - No concurrent modifications to suffix storage may occur during compaction.
+    #[inline]
     pub unsafe fn compact_ksuf(
         &self,
         exclude_slot: Option<usize>,
@@ -1311,8 +1322,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// Load permutation with Acquire ordering.
     ///
     /// Returns a `Permuter` wrapper for the permutation value.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub fn permutation(&self) -> Permuter<WIDTH> {
         Permuter::from_value(self.permutation.load(READ_ORD))
     }
@@ -1334,7 +1345,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Panics
     /// Panics if the failure is due to a frozen permutation. Use `cas_permutation_raw`
     /// in code paths where freezing may occur.
-    #[inline]
+    #[inline(always)]
     pub fn cas_permutation(
         &self,
         expected: Permuter<WIDTH>,
@@ -1371,7 +1382,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// All stores use Release ordering to synchronize with readers that
     /// observe the new permutation after CAS success.
-    #[inline]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "bounds checked by debug_assert, caller ensures slot < WIDTH"
@@ -1399,7 +1410,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// - Caller must have already reclaimed/freed the value that was stored
     /// - Slot must be in the free region (not visible to readers)
-    #[inline]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "bounds checked by debug_assert, caller ensures slot < WIDTH"
@@ -1425,7 +1436,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// - `slot`: The slot index to claim
     /// - `expected`: The expected current value (from `load_slot_value`)
     /// - `new_value`: The new value pointer to store (our Arc pointer)
-    #[inline]
+    #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub fn cas_slot_value(
         &self,
@@ -1445,7 +1456,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// Load the current value pointer at a slot.
     ///
     /// Used before `cas_slot_value` to get the expected value for CAS.
-    #[inline]
+    #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub fn load_slot_value(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH, "load_slot_value: slot out of bounds");
@@ -1461,7 +1472,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// - Caller must have successfully claimed the slot via `cas_slot_value`
     /// - Slot must still be in the free region of the permutation
-    #[inline]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "bounds checked by debug_assert, caller ensures slot < WIDTH"
@@ -1473,8 +1484,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     }
 
     /// Get the number of keys in this leaf.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub fn size(&self) -> usize {
         self.permutation().size()
     }
@@ -1487,8 +1498,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     }
 
     /// Check if the leaf is full.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_full(&self) -> bool {
         self.size() >= WIDTH
     }
@@ -1506,8 +1517,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// The LSB of `next` is used as a mark during splits. This function
     /// returns the actual pointer with the mark bit cleared.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn safe_next(&self) -> *mut Self {
         // Load atomic pointer, then use map_addr to preserve provenance while clearing mark bit
         let ptr: *mut Self = self.next.load(READ_ORD);
@@ -1515,28 +1526,28 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     }
 
     /// Get the raw next pointer (including mark bit).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn next_raw(&self) -> *mut Self {
         self.next.load(READ_ORD)
     }
 
     /// Check if the next pointer is marked (split in progress).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn next_is_marked(&self) -> bool {
         // addr() extracts address without exposing provenance
         (self.next.load(READ_ORD).addr() & 1) != 0
     }
 
     /// Set the next leaf pointer.
-    #[inline]
+    #[inline(always)]
     pub fn set_next(&self, next: *mut Self) {
         self.next.store(next, WRITE_ORD);
     }
 
     /// Mark the next pointer (during split).
-    #[inline]
+    #[inline(always)]
     pub fn mark_next(&self) {
         // Load, set mark bit, store back
         let ptr: *mut Self = self.next.load(RELAXED);
@@ -1545,21 +1556,21 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     }
 
     /// Unmark the next pointer.
-    #[inline]
+    #[inline(always)]
     pub fn unmark_next(&self) {
         let ptr: *mut Self = self.safe_next();
         self.next.store(ptr, WRITE_ORD);
     }
 
     /// Get the previous leaf pointer.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn prev(&self) -> *mut Self {
         self.prev.load(READ_ORD)
     }
 
     /// Set the previous leaf pointer.
-    #[inline]
+    #[inline(always)]
     pub fn set_prev(&self, prev: *mut Self) {
         self.prev.store(prev, WRITE_ORD);
     }
@@ -1569,14 +1580,14 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     // ============================================================================
 
     /// Get the parent pointer.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn parent(&self) -> *mut u8 {
         self.parent.load(READ_ORD)
     }
 
     /// Set the parent pointer.
-    #[inline]
+    #[inline(always)]
     pub fn set_parent(&self, parent: *mut u8) {
         self.parent.store(parent, WRITE_ORD);
     }
@@ -1586,14 +1597,14 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     // ============================================================================
 
     /// Get the modification state.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn modstate(&self) -> ModState {
         self.modstate
     }
 
     /// Set the modification state.
-    #[inline]
+    #[inline(always)]
     pub const fn set_modstate(&mut self, state: ModState) {
         self.modstate = state;
     }
@@ -1616,8 +1627,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Returns
     ///
     /// `true` if slot 0 can be reused, `false` otherwise.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
         // Rule 1: No predecessor leaf means slot 0 is always available
         if self.prev().is_null() {
@@ -1639,8 +1650,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// # Returns
     ///
     /// `true` if the leaf has space and can accept the key, `false` otherwise.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn can_insert_directly(&self, ikey: u64) -> bool {
         let size: usize = self.size();
         if size >= WIDTH {
@@ -1702,6 +1713,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// FIXED: Suffix Migration
     /// This method now correctly migrates suffix data for keys with `keylenx == KSUF_KEYLENX`.
     /// Previously, suffixes were lost during splits, causing lookup failures for long keys.
+    #[inline(always)]
     pub unsafe fn split_into(
         &self,
         split_pos: usize,
@@ -1852,6 +1864,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// - Panics if the leaf is empty (`size == 0`).
     /// - May panic on OOM during new leaf allocation (before freeze).
+    #[inline(always)]
     pub unsafe fn split_all_to_right(&self, guard: &LocalGuard<'_>) -> LeafSplitResult<S, WIDTH> {
         // Allocate new leaf inline (original behavior for non-preallocated path)
         let new_leaf: Box<Self> = Self::new();
@@ -1870,6 +1883,9 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     /// - The `guard` must be valid and from the same collector as the tree.
     /// - The caller must hold the leaf's lock before calling (if concurrent).
     /// - The `new_leaf` must be freshly allocated (empty, no entries).
+    ///
+    /// # Panics
+    /// If trying to split an empty leaf.}
     pub unsafe fn split_all_to_right_preallocated(
         &self,
         new_leaf: Box<Self>,
@@ -2014,7 +2030,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
 
     /// No-op in release builds
     #[cfg(not(debug_assertions))]
-    #[inline]
+    #[inline(always)]
     pub fn debug_assert_invariants(&self) {}
 
     // ============================================================================
@@ -2051,6 +2067,7 @@ impl<V, const WIDTH: usize> LeafNode<LeafValue<V>, WIDTH> {
     /// - `ikey`: 8-byte key (big-endian)
     /// - `key_len`: Actual key length (0-8)
     /// - `value`: The value to store (will be wrapped in Arc)
+    #[inline(always)]
     pub fn assign_value(&self, slot: usize, ikey: u64, key_len: u8, value: V) {
         debug_assert!(slot < WIDTH, "assign_value: slot out of bounds");
         debug_assert!(
@@ -2070,6 +2087,7 @@ impl<V, const WIDTH: usize> LeafNode<LeafValue<V>, WIDTH> {
     /// - `ikey`: 8-byte key (big-endian)
     /// - `key_len`: Actual key length (0-8)
     /// - `arc_value`: The Arc-wrapped value to store
+    #[inline(always)]
     pub fn assign_arc(&self, slot: usize, ikey: u64, key_len: u8, arc_value: Arc<V>) {
         debug_assert!(slot < WIDTH, "assign_arc: slot out of bounds");
         debug_assert!(
@@ -2188,7 +2206,7 @@ impl<V, const WIDTH: usize> LeafNode<LeafValue<V>, WIDTH> {
     /// # Safety
     /// - Caller must hold lock and have called `mark_insert()`
     /// - `guard` must come from this tree's collector
-    #[inline(always)]
+    #[inline]
     pub unsafe fn swap_value(
         &self,
         slot: usize,
@@ -2240,6 +2258,7 @@ impl<V: Copy, const WIDTH: usize> LeafNode<LeafValueIndex<V>, WIDTH> {
     /// - `ikey`: 8-byte key (big-endian)
     /// - `key_len`: Actual key length (0-8)
     /// - `value`: The value to store (copied directly)
+    #[inline(always)]
     pub fn assign_inline(&self, slot: usize, ikey: u64, key_len: u8, value: V) {
         debug_assert!(slot < WIDTH, "assign_inline: slot out of bounds");
         debug_assert!(
@@ -2285,6 +2304,7 @@ impl<V: Copy, const WIDTH: usize> LeafNode<LeafValueIndex<V>, WIDTH> {
 }
 
 impl<S: ValueSlot, const WIDTH: usize> Default for LeafNode<S, WIDTH> {
+    #[inline]
     fn default() -> Self {
         // Trigger compile-time WIDTH check
         let _: () = Self::WIDTH_CHECK;
@@ -2417,200 +2437,311 @@ impl<S: ValueSlot + Send + Sync + 'static, const WIDTH: usize> crate::leaf_trait
     type Internode = crate::internode::InternodeNode<S, WIDTH>;
     const WIDTH: usize = WIDTH;
 
-    #[inline]
+    #[inline(always)]
     fn new_boxed() -> Box<Self> {
-        LeafNode::new()
+        Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn new_root_boxed() -> Box<Self> {
-        LeafNode::new_root()
+        Self::new_root()
     }
 
-    #[inline]
+    #[inline(always)]
     fn version(&self) -> &NodeVersion {
-        LeafNode::version(self)
+        Self::version(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn permutation(&self) -> Permuter<WIDTH> {
-        LeafNode::permutation(self)
+        Self::permutation(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_permutation(&self, perm: Permuter<WIDTH>) {
-        LeafNode::set_permutation(self, perm)
+        Self::set_permutation(self, perm);
     }
 
-    #[inline]
+    #[inline(always)]
     fn permutation_raw(&self) -> u64 {
         self.permutation.load(READ_ORD)
     }
 
+    #[inline(always)]
     fn permutation_try(&self) -> Result<Permuter<WIDTH>, ()> {
-        LeafNode::permutation_try(self).map_err(|_| ())
+        Self::permutation_try(self).map_err(|_| ())
     }
 
+    #[inline(always)]
     fn permutation_wait(&self) -> Permuter<WIDTH> {
-        LeafNode::permutation_wait(self)
+        Self::permutation_wait(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn ikey(&self, slot: usize) -> u64 {
-        LeafNode::ikey(self, slot)
+        Self::ikey(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_ikey(&self, slot: usize, ikey: u64) {
-        LeafNode::set_ikey(self, slot, ikey)
+        Self::set_ikey(self, slot, ikey);
     }
 
-    #[inline]
+    #[inline(always)]
     fn ikey_bound(&self) -> u64 {
-        LeafNode::ikey_bound(self)
+        Self::ikey_bound(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn keylenx(&self, slot: usize) -> u8 {
-        LeafNode::keylenx(self, slot)
+        Self::keylenx(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_keylenx(&self, slot: usize, keylenx: u8) {
-        LeafNode::set_keylenx(self, slot, keylenx)
+        Self::set_keylenx(self, slot, keylenx);
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_layer(&self, slot: usize) -> bool {
-        LeafNode::is_layer(self, slot)
+        Self::is_layer(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn has_ksuf(&self, slot: usize) -> bool {
-        LeafNode::has_ksuf(self, slot)
+        Self::has_ksuf(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn leaf_value_ptr(&self, slot: usize) -> *mut u8 {
-        LeafNode::leaf_value_ptr(self, slot)
+        Self::leaf_value_ptr(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
-        LeafNode::set_leaf_value_ptr(self, slot, ptr)
+        Self::set_leaf_value_ptr(self, slot, ptr);
     }
 
-    #[inline]
+    #[inline(always)]
     fn cas_slot_value(
         &self,
         slot: usize,
         expected: *mut u8,
         new_value: *mut u8,
     ) -> Result<(), *mut u8> {
-        LeafNode::cas_slot_value(self, slot, expected, new_value)
+        Self::cas_slot_value(self, slot, expected, new_value)
     }
 
-    #[inline]
+    #[inline(always)]
     fn safe_next(&self) -> *mut Self {
-        LeafNode::safe_next(self)
+        Self::safe_next(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn next_is_marked(&self) -> bool {
-        LeafNode::next_is_marked(self)
+        Self::next_is_marked(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_next(&self, next: *mut Self) {
-        LeafNode::set_next(self, next)
+        Self::set_next(self, next);
     }
 
-    #[inline]
+    #[inline(always)]
     fn mark_next(&self) {
-        LeafNode::mark_next(self)
+        Self::mark_next(self);
     }
 
-    #[inline]
+    #[inline(always)]
     fn unmark_next(&self) {
-        LeafNode::unmark_next(self)
+        Self::unmark_next(self);
     }
 
-    #[inline]
+    #[inline(always)]
     fn prev(&self) -> *mut Self {
-        LeafNode::prev(self)
+        Self::prev(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_prev(&self, prev: *mut Self) {
-        LeafNode::set_prev(self, prev)
+        Self::set_prev(self, prev);
     }
 
-    #[inline]
+    #[inline(always)]
     fn parent(&self) -> *mut u8 {
-        LeafNode::parent(self)
+        Self::parent(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_parent(&self, parent: *mut u8) {
-        LeafNode::set_parent(self, parent)
+        Self::set_parent(self, parent);
     }
 
-    #[inline]
+    #[inline(always)]
     fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
-        LeafNode::can_reuse_slot0(self, new_ikey)
+        Self::can_reuse_slot0(self, new_ikey)
     }
 
-    #[inline]
-    unsafe fn store_slot_for_cas(
-        &self,
-        slot: usize,
-        ikey: u64,
-        keylenx: u8,
-        value_ptr: *mut u8,
-    ) {
+    #[inline(always)]
+    unsafe fn store_slot_for_cas(&self, slot: usize, ikey: u64, keylenx: u8, value_ptr: *mut u8) {
         // SAFETY: Caller guarantees slot is in free region and no concurrent modification
-        unsafe { LeafNode::store_slot_for_cas(self, slot, ikey, keylenx, value_ptr) }
+        unsafe { Self::store_slot_for_cas(self, slot, ikey, keylenx, value_ptr) }
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
         // SAFETY: Caller guarantees slot was claimed via cas_slot_value
-        unsafe { LeafNode::store_key_data_for_cas(self, slot, ikey, keylenx) }
+        unsafe { Self::store_key_data_for_cas(self, slot, ikey, keylenx) }
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn clear_slot_for_cas(&self, slot: usize) {
         // SAFETY: Caller guarantees value has been reclaimed
-        unsafe { LeafNode::clear_slot_for_cas(self, slot) }
+        unsafe { Self::clear_slot_for_cas(self, slot) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn load_slot_value(&self, slot: usize) -> *mut u8 {
-        LeafNode::load_slot_value(self, slot)
+        Self::load_slot_value(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn next_raw(&self) -> *mut Self {
-        LeafNode::next_raw(self)
+        Self::next_raw(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn wait_for_split(&self) {
-        LeafNode::wait_for_split(self)
+        Self::wait_for_split(self);
     }
 
-    #[inline]
+    #[inline(always)]
     fn cas_permutation_raw(
         &self,
         expected: Self::Perm,
         new: Self::Perm,
-    ) -> Result<(), crate::leaf_trait::CasPermutationError<Self::Perm>> {
-        LeafNode::cas_permutation_raw(self, expected, new)
-            .map_err(|failure| {
-                crate::leaf_trait::CasPermutationError::new(
-                    crate::permuter::Permuter::from_value(failure.current_raw())
-                )
-            })
+    ) -> Result<(), CasPermutationError<Self::Perm>> {
+        Self::cas_permutation_raw(self, expected, new).map_err(|failure| {
+            CasPermutationError::new(crate::permuter::Permuter::from_value(failure.current_raw()))
+        })
+    }
+
+    // ========================================================================
+    // Split Operations
+    // ========================================================================
+
+    type FreezeGuard<'a>
+        = crate::freeze::FreezeGuard<'a, S, WIDTH>
+    where
+        Self: 'a;
+
+    #[inline(always)]
+    fn calculate_split_point(&self, insert_pos: usize, insert_ikey: u64) -> Option<SplitPoint> {
+        SplitUtils::calculate_split_point(self, insert_pos, insert_ikey)
+    }
+
+    #[inline(always)]
+    unsafe fn split_into_preallocated(
+        &self,
+        split_pos: usize,
+        new_leaf: Box<Self>,
+        guard: &seize::LocalGuard<'_>,
+    ) -> (Box<Self>, u64, InsertTarget) {
+        // SAFETY: Caller guarantees preconditions
+        let result = unsafe { Self::split_into_preallocated(self, split_pos, new_leaf, guard) };
+        (result.new_leaf, result.split_ikey, result.insert_into)
+    }
+
+    #[inline(always)]
+    unsafe fn split_all_to_right_preallocated(
+        &self,
+        new_leaf: Box<Self>,
+        guard: &seize::LocalGuard<'_>,
+    ) -> (Box<Self>, u64, InsertTarget) {
+        // SAFETY: Caller guarantees preconditions
+        let result = unsafe { Self::split_all_to_right_preallocated(self, new_leaf, guard) };
+        (result.new_leaf, result.split_ikey, result.insert_into)
+    }
+
+    #[inline(always)]
+    fn freeze_permutation(&self) -> Self::FreezeGuard<'_> {
+        Self::freeze_permutation(self)
+    }
+
+    #[inline(always)]
+    fn unfreeze_set_permutation(&self, guard: Self::FreezeGuard<'_>, perm: Self::Perm) {
+        Self::unfreeze_set_permutation(self, guard, perm);
+    }
+
+    #[inline(always)]
+    fn is_permutation_frozen(&self) -> bool {
+        crate::freeze::LeafFreezeUtils::is_frozen::<WIDTH>(self.permutation_raw())
+    }
+
+    #[inline(always)]
+    unsafe fn link_sibling(&self, new_sibling: *mut Self) {
+        // Use existing trait methods
+        let old_next = <Self as crate::leaf_trait::TreeLeafNode<S>>::safe_next(self);
+        <Self as crate::leaf_trait::TreeLeafNode<S>>::set_next(self, new_sibling);
+        // SAFETY: Caller guarantees new_sibling is valid
+        unsafe {
+            (*new_sibling).set_prev(std::ptr::from_ref(self).cast_mut());
+            (*new_sibling).set_next(old_next);
+            if !old_next.is_null() {
+                (*old_next).set_prev(new_sibling);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn ksuf(&self, slot: usize) -> Option<&[u8]> {
+        Self::ksuf(self, slot)
+    }
+
+    #[inline(always)]
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>) {
+        // SAFETY: Caller guarantees preconditions
+        unsafe { Self::assign_ksuf(self, slot, suffix, guard) }
+    }
+
+    #[inline(always)]
+    unsafe fn clear_ksuf(&self, slot: usize, guard: &seize::LocalGuard<'_>) {
+        // SAFETY: Caller guarantees preconditions
+        unsafe { Self::clear_ksuf(self, slot, guard) }
+    }
+
+    #[inline(always)]
+    fn take_leaf_value_ptr(&self, slot: usize) -> *mut u8 {
+        Self::take_leaf_value_ptr(self, slot)
+    }
+
+    // ========================================================================
+    // Suffix Comparison Operations (Trait Delegates)
+    // ========================================================================
+
+    #[inline(always)]
+    fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
+        Self::ksuf_equals(self, slot, suffix)
+    }
+
+    #[inline(always)]
+    fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering> {
+        Self::ksuf_compare(self, slot, suffix)
+    }
+
+    #[inline(always)]
+    fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
+        Self::ksuf_or_empty(self, slot)
+    }
+
+    #[inline(always)]
+    fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
+        Self::ksuf_matches(self, slot, ikey, suffix)
+    }
+
+    #[inline(always)]
+    fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
+        Self::ksuf_match_result(self, slot, keylenx, suffix)
     }
 }
 

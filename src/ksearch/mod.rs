@@ -52,15 +52,15 @@ impl KeyIndexPosition {
     pub const NOT_FOUND: usize = usize::MAX;
 
     /// Create a new position for a found key.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn found(i: usize, p: usize) -> Self {
         Self { i, p }
     }
 
     /// Create a new position for a not-found key.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn not_found(i: usize) -> Self {
         Self {
             i,
@@ -69,8 +69,8 @@ impl KeyIndexPosition {
     }
 
     /// Check if the key was found.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn is_found(&self) -> bool {
         self.p != Self::NOT_FOUND
     }
@@ -80,16 +80,16 @@ impl KeyIndexPosition {
     /// # Panics
     ///
     /// Panics if the key was not found.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn slot(&self) -> usize {
         assert!(self.is_found(), "slot() called on not-found position");
         self.p
     }
 
     /// Get the physical slot as Option.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn try_slot(&self) -> Option<usize> {
         if self.p == Self::NOT_FOUND {
             None
@@ -100,6 +100,7 @@ impl KeyIndexPosition {
 }
 
 impl Default for KeyIndexPosition {
+    #[inline(always)]
     fn default() -> Self {
         Self::not_found(0)
     }
@@ -124,7 +125,6 @@ impl Default for KeyIndexPosition {
 ///
 /// # Returns
 /// `KeyIndexPosition` with logical position and physical slot (if found).
-#[inline]
 pub fn lower_bound_by<const WIDTH: usize, F>(
     size: usize,
     perm: Permuter<WIDTH>,
@@ -387,7 +387,7 @@ pub fn upper_bound_internode<S: slot::ValueSlot, const WIDTH: usize>(
 /// Upper bound search in an internode (direct version).
 ///
 /// Optimized version that doesn't create a permutation.
-#[inline(always)]
+#[inline]
 pub fn upper_bound_internode_direct<S: slot::ValueSlot, const WIDTH: usize>(
     search_ikey: u64,
     node: &InternodeNode<S, WIDTH>,
@@ -425,11 +425,11 @@ pub fn upper_bound_internode_direct<S: slot::ValueSlot, const WIDTH: usize>(
 ///
 /// # Arguments
 /// * `search_ikey` - The 8-byte key to route
-/// * `node` - The internode to search (any type implementing TreeInternode)
+/// * `node` - The internode to search (any type implementing [`TreeInternode`] )
 ///
 /// # Returns
 /// Child index (0 to nkeys). Use `node.child(result)` to get the child pointer.
-#[inline(always)]
+#[inline]
 pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
     search_ikey: u64,
     node: &I,

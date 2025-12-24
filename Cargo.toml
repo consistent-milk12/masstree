@@ -31,8 +31,9 @@ default = []
 # Alternative global allocators for benchmarking
 mimalloc = ["dep:mimalloc"]
 # When disabled (default), all tracing calls compile to no-ops with zero overhead.
-# When enabled, auto-initializes a subscriber that respects RUST_LOG env var.
-tracing = ["dep:tracing", "dep:tracing-subscriber"]
+# When enabled, auto-initializes a subscriber that writes JSON logs to logs/masstree.json.
+# Respects RUST_LOG env var (default: info). Set MASSTREE_LOG_CONSOLE=0 to disable console.
+tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
 
 [dependencies]
 seize = "0.5.1"
@@ -47,7 +48,9 @@ tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.22", features = [
 	"env-filter",
 	"fmt",
+	"json",
 ], optional = true }
+tracing-appender = { version = "0.2.3", optional = true }
 
 [dev-dependencies]
 divan = "0.1.21"
@@ -197,4 +200,12 @@ harness = false
 
 [[bench]]
 name = "concurrent_maps"
+harness = false
+
+[[bench]]
+name = "concurrent_maps24"
+harness = false
+
+[[bench]]
+name = "fault_bench"
 harness = false

@@ -76,6 +76,7 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>>
 {
     /// Create a new empty `MassTreeIndex` with a custom allocator.
     #[must_use]
+    #[inline(always)]
     pub fn with_allocator(allocator: A) -> Self {
         Self {
             inner: MassTree::with_allocator(allocator),
@@ -83,14 +84,15 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>>
     }
 
     /// Check if the tree is empty.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
     /// Get the number of keys in the tree.
     #[must_use]
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -108,6 +110,7 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>>
     /// * `Some(V)` - If the key was found (value is copied)
     /// * `None` - If the key was not found
     #[must_use]
+    #[inline(always)]
     pub fn get(&self, key: &[u8]) -> Option<V> {
         // For index mode, we dereference the Arc and copy
         self.inner.get(key).map(|arc: Arc<V>| *arc)
@@ -142,6 +145,7 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>>
     /// // Update existing key
     /// assert_eq!(tree.insert(b"hello", 100)?, Some(42));
     /// ```
+    #[inline(always)]
     pub fn insert(&mut self, key: &[u8], value: V) -> Result<Option<V>, InsertError> {
         // Use inner tree's insert, convert Arc<V> to V
         self.inner
@@ -153,6 +157,7 @@ impl<V: Copy, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>>
 impl<V: Copy, const WIDTH: usize> Default
     for MassTreeIndex<V, WIDTH, SeizeAllocator<LeafValue<V>, WIDTH>>
 {
+    #[inline(always)]
     fn default() -> Self {
         Self::new()
     }

@@ -19,7 +19,7 @@
     clippy::indexing_slicing
 )]
 
-use masstree::MassTree;
+use masstree::MassTree24;
 
 // ============================================================================
 //  1. Suffix Migration Tests (Task 1)
@@ -29,7 +29,7 @@ use masstree::MassTree;
 #[test]
 fn test_suffix_migration_split_into() {
     // Default WIDTH=15, so we need >15 keys to trigger splits
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Insert long keys (>8 bytes) that will need suffix storage
     // Insert 20 keys to ensure at least one split
@@ -52,7 +52,7 @@ fn test_suffix_migration_split_into() {
 /// Test that suffixes are migrated correctly during `split_all_to_right()`.
 #[test]
 fn test_suffix_migration_split_all_to_right() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Insert keys that will trigger split_all_to_right
     // (when new key would be at position 0)
@@ -67,7 +67,7 @@ fn test_suffix_migration_split_all_to_right() {
 /// Test suffix migration with various suffix lengths.
 #[test]
 fn test_suffix_migration_various_lengths() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Different suffix lengths (9, 16, 24, 100 bytes total)
     let long_key = "prefix00".to_string() + &"x".repeat(92);
@@ -103,7 +103,7 @@ fn test_suffix_migration_various_lengths() {
 /// Test exact 8-byte boundary keys.
 #[test]
 fn test_8_byte_boundary_key() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Exactly 8 bytes
     let key8 = b"exactkey"; // 8 bytes
@@ -117,7 +117,7 @@ fn test_8_byte_boundary_key() {
 /// Test exact 16-byte boundary keys (2 layers).
 #[test]
 fn test_16_byte_boundary_key() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Exactly 16 bytes
     let key16 = b"exactly16bytes!!"; // 16 bytes
@@ -132,7 +132,7 @@ fn test_16_byte_boundary_key() {
 /// Test exact 24-byte boundary keys (3 layers).
 #[test]
 fn test_24_byte_boundary_key() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Exactly 24 bytes
     let key24 = b"exactly_24_bytes_here!!!"; // 24 bytes
@@ -147,7 +147,7 @@ fn test_24_byte_boundary_key() {
 /// Test keys at multiple boundaries together.
 #[test]
 fn test_multiple_boundary_keys() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     let key8 = b"8bytes!!";
     let key16 = b"16_bytes_exact!!";
@@ -165,7 +165,7 @@ fn test_multiple_boundary_keys() {
 /// Test keys that share boundary prefix.
 #[test]
 fn test_shared_boundary_prefix() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Keys sharing first 8 bytes but different lengths
     tree.insert(b"prefix00", 1).unwrap(); // 8 bytes
@@ -184,7 +184,7 @@ fn test_shared_boundary_prefix() {
 /// Test when one key is a prefix of another.
 #[test]
 fn test_prefix_of_other_basic() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // "prefix" is a prefix of "prefix_with_more"
     tree.insert(b"prefix", 1).unwrap();
@@ -197,7 +197,7 @@ fn test_prefix_of_other_basic() {
 /// Test prefix-of-other at 8-byte boundary.
 #[test]
 fn test_prefix_of_other_at_boundary() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // "prefix00" (8 bytes) is prefix of "prefix00suffix"
     tree.insert(b"prefix00", 1).unwrap();
@@ -210,7 +210,7 @@ fn test_prefix_of_other_at_boundary() {
 /// Test multiple levels of prefix relationships.
 #[test]
 fn test_prefix_chain() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Chain: "a" < "ab" < "abc" < "abcd" < ...
     let keys = [
@@ -231,7 +231,7 @@ fn test_prefix_chain() {
 /// Test prefix-of-other in layer context.
 #[test]
 fn test_prefix_of_other_in_layer() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Create suffix keys that trigger layer creation
     tree.insert(b"prefix00suffix_a", 1).unwrap();
@@ -246,7 +246,7 @@ fn test_prefix_of_other_in_layer() {
 /// Test reverse insertion order (longer key first).
 #[test]
 fn test_prefix_of_other_reverse_order() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Insert longer key first
     tree.insert(b"prefix00suffix_longer", 1).unwrap();
@@ -265,7 +265,7 @@ fn test_prefix_of_other_reverse_order() {
 /// Test that inline and suffix keys with same ikey can coexist.
 #[test]
 fn test_inline_suffix_coexistence() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // 8-byte key (inline, keylenx=8)
     tree.insert(b"exactkey", 1).unwrap();
@@ -281,7 +281,7 @@ fn test_inline_suffix_coexistence() {
 /// Test various inline lengths with suffix keys.
 #[test]
 fn test_inline_lengths_with_suffix() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Different inline lengths (1-8 bytes)
     tree.insert(b"a", 1).unwrap();
@@ -311,7 +311,7 @@ fn test_inline_lengths_with_suffix() {
 /// Test that no spurious layer is created for inline vs suffix.
 #[test]
 fn test_no_spurious_layer_creation() {
-    let mut tree: MassTree<u64, 15> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Insert inline and suffix keys with same 8-byte prefix
     // These should NOT create a layer (one is inline, one is suffix)
@@ -339,7 +339,7 @@ fn test_no_spurious_layer_creation() {
 #[test]
 fn test_layer_growth_beyond_width() {
     // Default WIDTH=15, need >15 keys in layer to trigger split
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // All keys share same 8-byte prefix, forcing them into a layer
     let prefix = b"samepfx!";
@@ -364,7 +364,7 @@ fn test_layer_growth_beyond_width() {
 /// Test layer growth with different key patterns.
 #[test]
 fn test_layer_growth_random_order() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     let prefix = b"layerpfx";
 
@@ -390,7 +390,7 @@ fn test_layer_growth_random_order() {
 /// Test deeply nested layers (multiple 8-byte prefixes).
 #[test]
 fn test_nested_layer_growth() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Keys that share first 16 bytes (2 layers deep)
     let prefix16 = b"first___second__"; // 16 bytes
@@ -416,7 +416,7 @@ fn test_nested_layer_growth() {
 /// Test that layer roots can become internodes.
 #[test]
 fn test_layer_root_becomes_internode() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Create layer
     tree.insert(b"prefix00suffix_01", 1).unwrap();
@@ -440,7 +440,7 @@ fn test_layer_root_becomes_internode() {
 /// Test mixed operations with layer internode roots.
 #[test]
 fn test_layer_internode_mixed_operations() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // Build up layer with internode root
     for i in 0..20u64 {
@@ -475,7 +475,7 @@ fn test_layer_internode_mixed_operations() {
 /// Test empty key.
 #[test]
 fn test_empty_key() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     tree.insert(b"", 0).unwrap();
     assert_eq!(*tree.get(b"").unwrap(), 0);
@@ -489,7 +489,7 @@ fn test_empty_key() {
 /// Test single-byte keys.
 #[test]
 fn test_single_byte_keys() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     for i in 0..=255u8 {
         tree.insert(&[i], u64::from(i)).unwrap();
@@ -503,7 +503,7 @@ fn test_single_byte_keys() {
 /// Test key not found.
 #[test]
 fn test_key_not_found() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     tree.insert(b"exists", 1).unwrap();
 
@@ -516,7 +516,7 @@ fn test_key_not_found() {
 /// Test update existing key.
 #[test]
 fn test_update_existing() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     tree.insert(b"key", 1).unwrap();
     assert_eq!(*tree.get(b"key").unwrap(), 1);
@@ -529,7 +529,7 @@ fn test_update_existing() {
 /// Test very long key.
 #[test]
 fn test_very_long_key() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     let long_key: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
     tree.insert(&long_key, 42).unwrap();
@@ -545,7 +545,7 @@ fn test_very_long_key() {
 /// Test maximum key length (256 bytes per).
 #[test]
 fn test_max_key_length() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // 256 bytes is the maximum key length
     let max_key: Vec<u8> = (0..256).map(|i| (i % 256) as u8).collect();
@@ -557,7 +557,7 @@ fn test_max_key_length() {
 /// Test many keys with same first 8 bytes but different lengths.
 #[test]
 fn test_same_prefix_different_lengths() {
-    let mut tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree24<u64> = MassTree24::new();
 
     // All start with "testpfx!" (8 bytes)
     let prefix = b"testpfx!";

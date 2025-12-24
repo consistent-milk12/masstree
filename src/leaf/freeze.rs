@@ -146,43 +146,40 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
             let frozen_raw: u64 = LeafFreezeUtils::freeze_raw::<WIDTH>(raw);
 
             // Attempt to install from sentinel
-            match self
+            if self
                 .permutation
                 .compare_exchange(raw, frozen_raw, CAS_SUCCESS, CAS_FAILURE)
+                .is_ok()
             {
-                Ok(_) => {
-                    // TEST HOOK: Allow tests to inject barriers after freeze
-                    #[cfg(test)]
-                    crate::tree::test_hooks::call_after_freeze_hook();
+                // TEST HOOK: Allow tests to inject barriers after freeze
+                #[cfg(test)]
+                crate::tree::test_hooks::call_after_freeze_hook();
 
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        leaf_ptr = ?std::ptr::from_ref(self),
-                        cas_retries,
-                        old_raw = format_args!("{raw:#018x}"),
-                        frozen_raw = format_args!("{frozen_raw:#018x}"),
-                        "freeze_permutation: SUCCESS - permutation frozen"
-                    );
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    leaf_ptr = ?std::ptr::from_ref(self),
+                    cas_retries,
+                    old_raw = format_args!("{raw:#018x}"),
+                    frozen_raw = format_args!("{frozen_raw:#018x}"),
+                    "freeze_permutation: SUCCESS - permutation frozen"
+                );
 
-                    // Success: return guard with unfrozen snapshot
-                    return FreezeGuard::new(self, raw, true);
-                }
-
-                Err(_) => {
-                    #[cfg(feature = "tracing")]
-                    {
-                        cas_retries += 1;
-                        tracing::trace!(
-                            leaf_ptr = ?std::ptr::from_ref(self),
-                            cas_retries,
-                            "freeze_permutation: CAS failed, retrying"
-                        );
-                    }
-                    // A concurrent CAS insert published just before us.
-                    // Retry with the new permutation value.
-                    StdHint::spin_loop();
-                }
+                // Success: return guard with unfrozen snapshot
+                return FreezeGuard::new(self, raw, true);
             }
+
+            #[cfg(feature = "tracing")]
+            {
+                cas_retries += 1;
+                tracing::trace!(
+                    leaf_ptr = ?std::ptr::from_ref(self),
+                    cas_retries,
+                    "freeze_permutation: CAS failed, retrying"
+                );
+            }
+            // A concurrent CAS insert published just before us.
+            // Retry with the new permutation value.
+            StdHint::spin_loop();
         }
     }
 
@@ -268,7 +265,7 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Memory Ordering
     /// Uses Release store to synchronize with readers' Acquire loads
-    #[inline]
+    #[inline(always)]
     pub(crate) fn unfreeze_set_permutation(
         &self,
         mut guard: FreezeGuard<'_, S, WIDTH>,

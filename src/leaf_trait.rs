@@ -21,6 +21,13 @@ use crate::nodeversion::NodeVersion;
 use crate::slot::ValueSlot;
 
 // ============================================================================
+// Re-exports from leaf.rs for use in generic code
+// ============================================================================
+
+pub use crate::leaf::InsertTarget;
+pub use crate::leaf::SplitPoint;
+
+// ============================================================================
 // CAS Permutation Error
 // ============================================================================
 
@@ -36,20 +43,20 @@ pub struct CasPermutationError<P: TreePermutation> {
 
 impl<P: TreePermutation> CasPermutationError<P> {
     /// Create a new CAS permutation error.
-    #[inline]
-    pub fn new(current: P) -> Self {
+    #[inline(always)]
+    pub const fn new(current: P) -> Self {
         Self { current }
     }
 
     /// Check if the failure was due to frozen state (split in progress).
-    #[inline]
+    #[inline(always)]
     pub fn is_frozen(&self) -> bool {
         P::is_frozen_raw(self.current.value())
     }
 
     /// Get the current permutation value.
-    #[inline]
-    pub fn current(&self) -> P {
+    #[inline(always)]
+    pub const fn current(&self) -> P {
         self.current
     }
 }
@@ -179,6 +186,43 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
 }
 
 // ============================================================================
+// FreezeGuardOps Trait
+// ============================================================================
+
+/// Operations that freeze guards must support.
+///
+/// This trait abstracts over `FreezeGuard<'a, S, WIDTH>` (WIDTH=15) and
+/// `FreezeGuard24<'a, S>` (WIDTH=24), enabling generic split operations.
+///
+/// A freeze guard captures a snapshot of the permutation at freeze time and
+/// provides panic safety by restoring the original permutation if dropped
+/// while still active.
+///
+/// # Implementors
+///
+/// - `FreezeGuard<'a, S, WIDTH>` for WIDTH in 1..=15
+/// - `FreezeGuard24<'a, S>` for WIDTH=24
+pub trait FreezeGuardOps<P: TreePermutation> {
+    /// Get the permutation snapshot captured at freeze time.
+    ///
+    /// This is the authoritative membership for split computation.
+    /// It includes all CAS inserts that published before freeze succeeded.
+    fn snapshot(&self) -> P;
+
+    /// Get the raw snapshot value.
+    ///
+    /// Used for debugging/logging and low-level operations.
+    fn snapshot_raw(&self) -> P::Raw;
+
+    /// Set whether the guard is active.
+    ///
+    /// When active, dropping the guard will restore the original permutation
+    /// (panic safety). Set to `false` before successful unfreeze to prevent
+    /// rollback on normal drop.
+    fn set_active(&mut self, active: bool);
+}
+
+// ============================================================================
 // TreeInternode Trait
 // ============================================================================
 
@@ -292,9 +336,15 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Split this internode into a new sibling while inserting a key/child.
     ///
+    /// This method performs the split AND updates all children's parent pointers
+    /// in `new_right` to point to `new_right_ptr`. This is critical for correctness:
+    /// parent updates must happen inside split_into (before returning) to prevent
+    /// races where a thread sees a child with a stale parent pointer.
+    ///
     /// # Arguments
     ///
-    /// * `new_right` - The new right sibling (pre-allocated)
+    /// * `new_right` - The new right sibling (pre-allocated, mutable reference)
+    /// * `new_right_ptr` - Raw pointer to `new_right` for setting parent pointers
     /// * `insert_pos` - Position where the new key/child should be inserted
     /// * `insert_ikey` - The key to insert
     /// * `insert_child` - The child pointer to insert
@@ -304,9 +354,15 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// `(popup_key, insert_went_left)` where:
     /// - `popup_key` is the key that goes to the parent
     /// - `insert_went_left` is true if the insert went to the left sibling
+    ///
+    /// # Safety
+    ///
+    /// * `new_right_ptr` must point to `new_right`
+    /// * The caller must hold the lock on `self`
     fn split_into(
         &self,
         new_right: &mut Self,
+        new_right_ptr: *mut Self,
         insert_pos: usize,
         insert_ikey: u64,
         insert_child: *mut u8,
@@ -382,7 +438,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Check if permutation is frozen (split in progress).
     ///
     /// Convenience method that checks the raw value.
-    #[inline]
+    #[inline(always)]
     fn is_perm_frozen(&self) -> bool {
         Self::Perm::is_frozen_raw(self.permutation_raw())
     }
@@ -393,6 +449,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// # Errors
     /// Fails when trying to load a frozen permutation.
+    #[expect(clippy::result_unit_err)]
     fn permutation_try(&self) -> Result<Self::Perm, ()>;
 
     /// Wait for permutation to unfreeze.
@@ -421,7 +478,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Get ikey bound (slot 0's ikey for B-link navigation).
     ///
-    /// The ikey_bound is the smallest ikey in this leaf and is used
+    /// The `ikey_bound` is the smallest ikey in this leaf and is used
     /// for navigating to the correct sibling during splits.
     fn ikey_bound(&self) -> u64;
 
@@ -429,7 +486,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// Values:
     /// - 0-8: inline key length
-    /// - 64 (KSUF_KEYLENX): has suffix
+    /// - 64 (`KSUF_KEYLENX)`: has suffix
     /// - >=128 (LAYER_KEYLENX): is layer pointer
     fn keylenx(&self, slot: usize) -> u8;
 
@@ -462,10 +519,11 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// Used in CAS insert path to atomically claim a slot.
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// - `Ok(())` if CAS succeeded
-    /// - `Err(actual)` with the actual value if CAS failed
+    /// Returns `Err(actual)` containing the actual pointer value if the CAS
+    /// failed due to a concurrent modification (the slot's current value
+    /// did not match `expected`).
     fn cas_slot_value(
         &self,
         slot: usize,
@@ -478,19 +536,19 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     // ========================================================================
 
     /// Get number of keys in this leaf.
-    #[inline]
+    #[inline(always)]
     fn size(&self) -> usize {
         self.permutation().size()
     }
 
     /// Check if leaf is empty.
-    #[inline]
+    #[inline(always)]
     fn is_empty(&self) -> bool {
         self.size() == 0
     }
 
     /// Check if leaf is full.
-    #[inline]
+    #[inline(always)]
     fn is_full(&self) -> bool {
         self.size() >= Self::WIDTH
     }
@@ -537,7 +595,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Check if slot 0 can be reused for a new key.
     ///
-    /// Slot 0 stores ikey_bound() which must be preserved if this
+    /// Slot 0 stores `ikey_bound()` which must be preserved if this
     /// leaf has a predecessor (prev != null). Slot 0 can only be
     /// reused if the new key has the same ikey as the current bound.
     fn can_reuse_slot0(&self, new_ikey: u64) -> bool;
@@ -586,8 +644,13 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// CAS the permutation from expected to new value.
     ///
-    /// Returns `Ok(())` on success, `Err` with the failure info on failure.
     /// The raw permutation value is used for atomic comparison.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(CasPermutationError)` if:
+    /// - The permutation is frozen (split in progress)
+    /// - The current permutation value does not match `expected` (concurrent modification)
     ///
     /// # Freeze Safety
     ///
@@ -597,6 +660,235 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
         expected: Self::Perm,
         new: Self::Perm,
     ) -> Result<(), CasPermutationError<Self::Perm>>;
+
+    // ========================================================================
+    // Split Operations
+    // ========================================================================
+
+    /// The freeze guard type for this leaf.
+    ///
+    /// Used by split operations to atomically freeze the permutation and
+    /// capture a snapshot for computing the split.
+    type FreezeGuard<'a>: FreezeGuardOps<Self::Perm>
+    where
+        Self: 'a;
+
+    /// Calculate the optimal split point.
+    ///
+    /// # Arguments
+    ///
+    /// * `insert_pos` - Logical position where new key will be inserted
+    /// * `insert_ikey` - The key being inserted
+    ///
+    /// # Returns
+    ///
+    /// `Some(SplitPoint)` with position and split key, or `None` if split
+    /// is not possible (e.g., empty leaf).
+    fn calculate_split_point(&self, insert_pos: usize, insert_ikey: u64) -> Option<SplitPoint>;
+
+    /// Split this leaf at `split_pos` using a pre-allocated target.
+    ///
+    /// Moves entries from `split_pos..size` to `new_leaf`.
+    ///
+    /// # Returns
+    ///
+    /// `(new_leaf_box, split_ikey, insert_target)` tuple where:
+    /// - `new_leaf_box` is the new right leaf with moved entries
+    /// - `split_ikey` is the first key of the new leaf (separator for parent)
+    /// - `insert_target` indicates which leaf should receive the new key
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the leaf lock (if concurrent)
+    /// - `new_leaf` must be freshly allocated (empty)
+    /// - `guard` must be valid
+    unsafe fn split_into_preallocated(
+        &self,
+        split_pos: usize,
+        new_leaf: Box<Self>,
+        guard: &seize::LocalGuard<'_>,
+    ) -> (Box<Self>, u64, InsertTarget);
+
+    /// Move ALL entries to a new right leaf.
+    ///
+    /// Used for the edge case where `split_pos == 0` in post-insert coordinates.
+    /// The original leaf becomes empty, and all entries move to the new leaf.
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as `split_into_preallocated`.
+    unsafe fn split_all_to_right_preallocated(
+        &self,
+        new_leaf: Box<Self>,
+        guard: &seize::LocalGuard<'_>,
+    ) -> (Box<Self>, u64, InsertTarget);
+
+    // ========================================================================
+    // Freeze Operations
+    // ========================================================================
+
+    /// Freeze the permutation for split operations.
+    ///
+    /// Returns a guard that captures the pre-freeze permutation snapshot.
+    /// The guard provides panic safety by restoring a valid permutation if
+    /// the split is aborted.
+    ///
+    /// # Preconditions
+    ///
+    /// - Caller must hold the leaf lock
+    /// - Caller must have called `version().mark_split()`
+    fn freeze_permutation(&self) -> Self::FreezeGuard<'_>;
+
+    /// Unfreeze the permutation and publish the final split result.
+    ///
+    /// This consumes the freeze guard and atomically publishes the new
+    /// permutation, making the split visible to readers.
+    ///
+    /// # Arguments
+    ///
+    /// * `guard` - The freeze guard from `freeze_permutation()`
+    /// * `perm` - The new permutation to publish
+    fn unfreeze_set_permutation(&self, guard: Self::FreezeGuard<'_>, perm: Self::Perm);
+
+    /// Check if the permutation is currently frozen.
+    ///
+    /// A frozen permutation indicates a split is in progress.
+    fn is_permutation_frozen(&self) -> bool;
+
+    // ========================================================================
+    // Sibling Link Helper (for split)
+    // ========================================================================
+
+    /// Link this leaf to a new sibling (B-link tree threading).
+    ///
+    /// Sets up the doubly-linked list: `self.next = new_sibling`,
+    /// `new_sibling.prev = self`, and if there was an old next,
+    /// updates `old_next.prev = new_sibling`.
+    ///
+    /// # Safety
+    ///
+    /// - `new_sibling` must be a valid pointer to a freshly allocated leaf
+    /// - Caller must hold the leaf lock
+    unsafe fn link_sibling(&self, new_sibling: *mut Self);
+
+    // ========================================================================
+    // Suffix Operations (for split)
+    // ========================================================================
+
+    /// Get suffix at slot (if any).
+    ///
+    /// Returns `None` if no suffix is stored at this slot.
+    fn ksuf(&self, slot: usize) -> Option<&[u8]>;
+
+    /// Assign a suffix to a slot.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the leaf lock
+    /// - Slot must be valid
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>);
+
+    /// Clear suffix at slot.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the leaf lock
+    unsafe fn clear_ksuf(&self, slot: usize, guard: &seize::LocalGuard<'_>);
+
+    /// Take ownership of the value pointer at slot (for moving during split).
+    ///
+    /// Returns the pointer and clears the slot. Used when moving entries
+    /// between leaves during a split.
+    fn take_leaf_value_ptr(&self, slot: usize) -> *mut u8;
+
+    // ========================================================================
+    // Suffix Comparison Operations
+    // ========================================================================
+
+    /// Check if a slot's suffix equals the given suffix.
+    ///
+    /// Returns `false` if:
+    /// - Slot has no suffix (`keylenx != KSUF_KEYLENX`)
+    /// - Suffix bag is null
+    /// - Suffixes don't match
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool;
+
+    /// Compare a slot's suffix with the given suffix.
+    ///
+    /// Returns `None` if the slot has no suffix.
+    /// Returns `Some(Ordering)` if comparison is possible.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering>;
+
+    /// Get the suffix for a slot, or an empty slice if none.
+    ///
+    /// Convenience wrapper around `ksuf()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    #[inline(always)]
+    fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
+        self.ksuf(slot).unwrap_or(&[])
+    }
+
+    /// Check if a slot's key (ikey + suffix) matches the given full key.
+    ///
+    /// This compares both the 8-byte ikey and the suffix (if any).
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index
+    /// * `ikey` - The 8-byte key to compare
+    /// * `suffix` - The suffix to compare (bytes after the first 8)
+    ///
+    /// # Returns
+    ///
+    /// `true` if both ikey and suffix match.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool;
+
+    /// Check if a slot matches the given key parameters, with layer detection.
+    ///
+    /// This is the layer-aware version of `ksuf_matches` that returns detailed
+    /// match information needed for layer traversal.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index
+    /// * `keylenx` - The keylenx of the search key (0-8 for inline, `KSUF_KEYLENX` for suffix)
+    /// * `suffix` - The suffix bytes to match (empty if inline key)
+    ///
+    /// # Returns
+    ///
+    /// * `1` - Exact match (ikey, keylenx, and suffix all match)
+    /// * `0` - Same ikey but different key (keylenx or suffix mismatch)
+    /// * `-8` - Slot is a layer pointer; caller should shift key by 8 bytes and descend
+    ///
+    /// # Note
+    ///
+    /// The ikey is assumed to already match (caller should check `leaf.ikey(slot) == ikey`
+    /// before calling this method).
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32;
 }
 
 // ============================================================================

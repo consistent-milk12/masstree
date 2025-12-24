@@ -1,18 +1,24 @@
 //! Debug binary for concurrent write benchmarks (05 and 06).
 //!
-//! Diagnoses hangs/deadlocks in MassTree concurrent writes.
+//! Diagnoses hangs/deadlocks in `MassTree` concurrent writes.
 //!
 //! Run with:
 //! ```bash
 //! RUST_LOG=masstree=debug cargo run --features tracing
 //! ```
 
+#![allow(dead_code)]
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::indexing_slicing)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
 
 use masstree::MassTree;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,7 +34,7 @@ const MULTIPLIERS: [u64; 4] = [
 ];
 
 fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
-    assert!(K % 8 == 0, "key size must be a multiple of 8");
+    assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=32).contains(&K), "key size must be 8..=32");
 
     let chunks = K / 8;
@@ -36,12 +42,12 @@ fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
 
     for i in 0..n {
         let mut key = [0u8; K];
-        for c in 0..chunks {
+        (0..chunks).for_each(|c| {
             let v = (i as u64).wrapping_mul(MULTIPLIERS[c]);
             let bytes = v.to_be_bytes();
             let start = c * 8;
             key[start..start + 8].copy_from_slice(&bytes);
-        }
+        });
         out.push(key);
     }
     out
@@ -86,10 +92,8 @@ impl ThreadProgress {
     fn update(&self, thread_id: usize, op: usize, key: u64) {
         self.current_op[thread_id].store(op, Ordering::Relaxed);
         self.current_key[thread_id].store(key, Ordering::Relaxed);
-        self.last_progress_ms[thread_id].store(
-            self.start.elapsed().as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        self.last_progress_ms[thread_id]
+            .store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
 
     fn mark_done(&self, thread_id: usize) {
@@ -128,10 +132,7 @@ impl ThreadProgress {
 
 fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
     println!("\n{}", "=".repeat(80));
-    println!(
-        "05: DISJOINT WRITES ({} threads, {} ops/thread)",
-        threads, ops_per_thread
-    );
+    println!("05: DISJOINT WRITES ({threads} threads, {ops_per_thread} ops/thread)");
     println!("{}", "=".repeat(80));
 
     let tree = Arc::new(MassTree::<u64>::new());
@@ -148,8 +149,7 @@ fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
                 let stuck = progress.report_stuck(2000); // 2 second timeout
                 for (tid, op, key, stall_ms) in &stuck {
                     eprintln!(
-                        "!!! STUCK: Thread {} at op {} key=0x{:016x} for {}ms",
-                        tid, op, key, stall_ms
+                        "!!! STUCK: Thread {tid} at op {op} key=0x{key:016x} for {stall_ms}ms"
                     );
                 }
                 if progress.all_done() {
@@ -169,7 +169,12 @@ fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
                 let guard = tree.guard();
                 let base = t * ops_per_thread;
 
-                eprintln!("[T{:02}] Start: keys {}..{}", t, base, base + ops_per_thread - 1);
+                eprintln!(
+                    "[T{:02}] Start: keys {}..{}",
+                    t,
+                    base,
+                    base + ops_per_thread - 1
+                );
 
                 for i in 0..ops_per_thread {
                     let key_val = (base + i) as u64;
@@ -184,24 +189,21 @@ fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
 
                     // Log slow operations
                     if op_elapsed > Duration::from_millis(100) {
-                        eprintln!(
-                            "[T{:02}] SLOW op {} key=0x{:016x} took {:?}",
-                            t, i, key_val, op_elapsed
-                        );
+                        eprintln!("[T{t:02}] SLOW op {i} key=0x{key_val:016x} took {op_elapsed:?}");
                     }
 
                     // Log every 10000th op (less spam for large runs)
                     if i % 10000 == 0 && i > 0 {
-                        eprintln!("[T{:02}] op {}/{}", t, i, ops_per_thread);
+                        eprintln!("[T{t:02}] op {i}/{ops_per_thread}");
                     }
 
                     if let Err(e) = result {
-                        eprintln!("[T{:02}] ERROR op {} key=0x{:016x}: {:?}", t, i, key_val, e);
+                        eprintln!("[T{t:02}] ERROR op {i} key=0x{key_val:016x}: {e:?}");
                     }
                 }
 
                 progress.mark_done(t);
-                eprintln!("[T{:02}] DONE", t);
+                eprintln!("[T{t:02}] DONE");
             })
         })
         .collect();
@@ -230,8 +232,7 @@ fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
 fn run_06_contention_writes(threads: usize, ops_per_thread: usize, key_space: usize) {
     println!("\n{}", "=".repeat(80));
     println!(
-        "06: CONTENTION WRITES ({} threads, {} ops/thread, {} keys)",
-        threads, ops_per_thread, key_space
+        "06: CONTENTION WRITES ({threads} threads, {ops_per_thread} ops/thread, {key_space} keys)"
     );
     println!("{}", "=".repeat(80));
 
@@ -253,8 +254,7 @@ fn run_06_contention_writes(threads: usize, ops_per_thread: usize, key_space: us
                 let stuck = progress.report_stuck(2000);
                 for (tid, op, key, stall_ms) in &stuck {
                     eprintln!(
-                        "!!! STUCK: Thread {} at op {} key=0x{:016x} for {}ms",
-                        tid, op, key, stall_ms
+                        "!!! STUCK: Thread {tid} at op {op} key=0x{key:016x} for {stall_ms}ms"
                     );
                 }
                 if progress.all_done() {
@@ -276,7 +276,12 @@ fn run_06_contention_writes(threads: usize, ops_per_thread: usize, key_space: us
                 let guard = tree.guard();
                 let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
 
-                eprintln!("[T{:02}] Start: {} ops over {} keys", t, ops_per_thread, keys.len());
+                eprintln!(
+                    "[T{:02}] Start: {} ops over {} keys",
+                    t,
+                    ops_per_thread,
+                    keys.len()
+                );
 
                 for op in 0..ops_per_thread {
                     state = state
@@ -294,23 +299,20 @@ fn run_06_contention_writes(threads: usize, ops_per_thread: usize, key_space: us
                     let op_elapsed = op_start.elapsed();
 
                     if op_elapsed > Duration::from_millis(100) {
-                        eprintln!(
-                            "[T{:02}] SLOW op {} key=0x{:016x} took {:?}",
-                            t, op, ikey, op_elapsed
-                        );
+                        eprintln!("[T{t:02}] SLOW op {op} key=0x{ikey:016x} took {op_elapsed:?}");
                     }
 
                     if op % 500 == 0 {
-                        eprintln!("[T{:02}] op {}/{}", t, op, ops_per_thread);
+                        eprintln!("[T{t:02}] op {op}/{ops_per_thread}");
                     }
 
                     if let Err(e) = result {
-                        eprintln!("[T{:02}] ERROR op {} key=0x{:016x}: {:?}", t, op, ikey, e);
+                        eprintln!("[T{t:02}] ERROR op {op} key=0x{ikey:016x}: {e:?}");
                     }
                 }
 
                 progress.mark_done(t);
-                eprintln!("[T{:02}] DONE", t);
+                eprintln!("[T{t:02}] DONE");
             })
         })
         .collect();
@@ -347,7 +349,7 @@ fn main() {
     // Run the exact benchmark config that shows variance: 8 threads, 50k ops
     eprintln!("=== EXACT BENCHMARK CONFIG: 8 threads, 50k ops/thread ===");
     for run in 1..=10 {
-        eprintln!("\n--- Run {}/10 ---", run);
+        eprintln!("\n--- Run {run}/10 ---");
         run_05_disjoint_writes(8, 50_000);
     }
 

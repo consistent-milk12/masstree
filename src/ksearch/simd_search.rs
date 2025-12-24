@@ -100,8 +100,6 @@ pub fn upper_bound_internode_simd<S: ValueSlot, const WIDTH: usize>(
 ///
 /// Always uses SIMD for exact match (no threshold), as SIMD equality
 /// comparison is always efficient regardless of node size.
-#[inline]
-#[allow(dead_code)] // Will be used in future optimizations
 #[expect(
     clippy::needless_range_loop,
     clippy::indexing_slicing,
@@ -158,8 +156,8 @@ pub fn find_exact_internode<S: ValueSlot, const WIDTH: usize>(
 ///
 /// # Returns
 /// Bitmask where bit `i` is set if slot `i` has matching ikey.
-#[inline]
 #[must_use]
+#[inline(always)]
 pub fn find_ikey_matches_leaf<S: ValueSlot, const WIDTH: usize>(
     search_ikey: u64,
     leaf: &LeafNode<S, WIDTH>,

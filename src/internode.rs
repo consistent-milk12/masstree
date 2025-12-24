@@ -14,6 +14,7 @@ use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, fence};
 
 use crate::leaf::LeafValue;
+use crate::leaf_trait::TreeInternode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{READ_ORD, RELAXED, WRITE_ORD};
 use crate::slot::ValueSlot;
@@ -103,6 +104,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// # Returns
     /// A boxed internode with zero keys and null children.
     #[must_use]
+    #[inline]
     pub fn new(height: u32) -> Box<Self> {
         // Trigger compile-time WIDTH check
         let _: () = Self::WIDTH_CHECK;
@@ -123,6 +125,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// Same as `new()` but marks the node as root.
     #[must_use]
+    #[inline(always)]
     pub fn new_root(height: u32) -> Box<Self> {
         let node: Box<Self> = Self::new(height);
         node.version.mark_root();
@@ -134,14 +137,14 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     // ========================================================================
 
     /// Get a reference to the node's version.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn version(&self) -> &NodeVersion {
         &self.version
     }
 
     /// Get a mutable reference to the node's version.
-    #[inline]
+    #[inline(always)]
     pub const fn version_mut(&mut self) -> &mut NodeVersion {
         &mut self.version
     }
@@ -151,29 +154,29 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     // ========================================================================
 
     /// Get the number of keys in this internode.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn nkeys(&self) -> usize {
         self.nkeys.load(READ_ORD) as usize
     }
 
     /// Get the number of keys as usize (convenience method).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn size(&self) -> usize {
         self.nkeys()
     }
 
     /// Check if the internode has no keys.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.nkeys.load(READ_ORD) == 0
     }
 
     /// Check if the internode is full.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_full(&self) -> bool {
         self.nkeys.load(READ_ORD) as usize >= WIDTH
     }
@@ -182,8 +185,8 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `i >= WIDTH`.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn ikey(&self, i: usize) -> u64 {
         debug_assert!(i < WIDTH, "ikey: index out of bounds");
@@ -195,7 +198,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `i >= WIDTH`.
-    #[inline]
+    #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn set_ikey(&self, i: usize, ikey: u64) {
         debug_assert!(i < WIDTH, "set_ikey: index out of bounds");
@@ -207,15 +210,15 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// - `height = 0` means children are leaves
     /// - `height > 0` means children are internodes
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn height(&self) -> u32 {
         self.height
     }
 
     /// Check if children are leaves (height == 0).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn children_are_leaves(&self) -> bool {
         self.height == 0
     }
@@ -231,8 +234,8 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `i > WIDTH`.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "bounds checked via debug_assert; i < WIDTH"
@@ -252,7 +255,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `i > WIDTH`.
-    #[inline]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "bounds checked via debug_assert; i < WIDTH"
@@ -276,6 +279,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `p >= WIDTH`.
+    #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn assign(&self, p: usize, ikey: u64, right_child: *mut u8) {
         debug_assert!(p < WIDTH, "assign: position out of bounds");
@@ -288,7 +292,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if `n > WIDTH`.
-    #[inline]
+    #[inline(always)]
     pub fn set_nkeys(&self, n: u8) {
         debug_assert!((n as usize) <= WIDTH, "set_nkeys: count out of bounds");
         self.nkeys.store(n, WRITE_ORD);
@@ -298,7 +302,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if already at WIDTH.
-    #[inline]
+    #[inline(always)]
     pub fn inc_nkeys(&self) {
         let current: u8 = self.nkeys.load(RELAXED);
         debug_assert!((current as usize) < WIDTH, "inc_nkeys: would overflow");
@@ -367,6 +371,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// * `src` - Source internode
     /// * `src_pos` - Starting position in source
     /// * `count` - Number of entries to copy
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "caller ensures indices are within WIDTH bounds"
@@ -415,9 +420,41 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
         clippy::cast_possible_truncation,
         reason = "WIDTH <= 15, so mid and WIDTH-mid fit in u8"
     )]
+    /// Split this node and insert a new key/child simultaneously.
+    ///
+    /// This is the core internode split operation. It:
+    /// 1. Splits keys and children between `self` and `new_right`
+    /// 2. Inserts the new key/child at the appropriate position
+    /// 3. **Updates all children's parent pointers in `new_right`** (critical for correctness)
+    ///
+    /// # Arguments
+    ///
+    /// * `new_right` - The new right sibling (pre-allocated, mutable reference)
+    /// * `new_right_ptr` - Raw pointer to `new_right` for setting parent pointers
+    /// * `insert_pos` - Position where the new key/child should be inserted
+    /// * `insert_ikey` - The key to insert
+    /// * `insert_child` - The child pointer to insert
+    ///
+    /// # Returns
+    ///
+    /// `(popup_key, insert_went_left)` where:
+    /// - `popup_key` is the separator key that goes to the parent
+    /// - `insert_went_left` is true if the insert went into the left sibling (self)
+    ///
+    /// # Safety
+    ///
+    /// * `new_right_ptr` must point to `new_right`
+    /// * The caller must hold the lock on `self`
+    ///
+    /// # Note
+    ///
+    /// Parent pointer updates happen INSIDE this function (matching C++ masstree_split.hh:163-165).
+    /// This is critical for correctness: without it, concurrent threads can see stale parent
+    /// pointers on children that were moved to `new_right`, causing "child not found" panics.
     pub fn split_into(
         &self,
         new_right: &mut Self,
+        new_right_ptr: *mut Self,
         insert_pos: usize,
         insert_ikey: u64,
         insert_child: *mut u8,
@@ -495,6 +532,37 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
         // Set new_right's height to match self
         new_right.height = self.height;
 
+        // CRITICAL: Update children's parent pointers to point to new_right.
+        // This MUST happen inside split_into (before returning) to prevent races
+        // where a thread sees a child with a stale parent pointer.
+        // Matches C++ masstree_split.hh:163-165:
+        //   for (int i = 0; i <= nr->nkeys_; ++i) {
+        //       nr->child_[i]->set_parent(nr);
+        //   }
+        //
+        // NOTE: We only update internode children here (height > 0).
+        // For leaf children (height == 0), the caller must update them because
+        // the internode doesn't know the actual leaf type (could be LeafNode<S, WIDTH>
+        // or LeafNode24<S> for MassTree24).
+        if self.height > 0 {
+            // Children are internodes - we can handle this directly
+            let nr_nkeys: usize = new_right.nkeys.load(RELAXED) as usize;
+            let new_right_ptr_u8: *mut u8 = new_right_ptr.cast::<u8>();
+
+            for i in 0..=nr_nkeys {
+                let child: *mut u8 = new_right.child(i);
+                if !child.is_null() {
+                    // SAFETY: height > 0 means children are InternodeNode<S, WIDTH>
+                    unsafe {
+                        (*child.cast::<InternodeNode<S, WIDTH>>()).set_parent(new_right_ptr_u8);
+                    }
+                }
+            }
+        }
+        // NOTE: For height == 0 (leaf children), the caller is responsible for
+        // updating parent pointers. This must be done immediately after split_into
+        // returns, while still holding the parent lock.
+
         (popup_key, insert_went_left)
     }
 
@@ -505,8 +573,8 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// Get the parent pointer (as `*mut u8`).
     ///
     /// Cast to `*mut InternodeNode<V, WIDTH>` at usage sites.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn parent(&self) -> *mut u8 {
         self.parent.load(READ_ORD)
     }
@@ -514,14 +582,14 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// Set the parent pointer.
     ///
     /// Accepts `*mut u8` for uniformity with `LeafNode`.
-    #[inline]
+    #[inline(always)]
     pub fn set_parent(&self, parent: *mut u8) {
         self.parent.store(parent, WRITE_ORD);
     }
 
     /// Check if this is a root node (no parent or version says root).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_root(&self) -> bool {
         self.version.is_root()
     }
@@ -538,8 +606,8 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// - `Ordering::Greater` if `search_ikey > ikey0[p]`
     ///
     /// Unlike leaf nodes, internode comparison is purely on ikey—no keylenx.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn compare_key(&self, search_ikey: u64, p: usize) -> std::cmp::Ordering {
         search_ikey.cmp(&self.ikey(p))
     }
@@ -667,126 +735,127 @@ const _: () = {
 //  TreeInternode Implementation
 // ============================================================================
 
-impl<S, const WIDTH: usize> crate::leaf_trait::TreeInternode<S> for InternodeNode<S, WIDTH>
+impl<S, const WIDTH: usize> TreeInternode<S> for InternodeNode<S, WIDTH>
 where
     S: ValueSlot + Send + Sync + 'static,
 {
     const WIDTH: usize = WIDTH;
 
-    #[inline]
+    #[inline(always)]
     fn new_boxed(height: u32) -> Box<Self> {
         Self::new(height)
     }
 
-    #[inline]
+    #[inline(always)]
     fn new_root_boxed(height: u32) -> Box<Self> {
         Self::new_root(height)
     }
 
-    #[inline]
+    #[inline(always)]
     fn version(&self) -> &crate::nodeversion::NodeVersion {
         Self::version(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn height(&self) -> u32 {
         Self::height(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn children_are_leaves(&self) -> bool {
         Self::children_are_leaves(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn nkeys(&self) -> usize {
         Self::nkeys(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_nkeys(&self, n: u8) {
         Self::set_nkeys(self, n);
     }
 
-    #[inline]
+    #[inline(always)]
     fn inc_nkeys(&self) {
         Self::inc_nkeys(self);
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_full(&self) -> bool {
         Self::is_full(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn ikey(&self, idx: usize) -> u64 {
-        InternodeNode::ikey(self, idx)
+        Self::ikey(self, idx)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_ikey(&self, idx: usize, key: u64) {
-        InternodeNode::set_ikey(self, idx, key)
+        Self::set_ikey(self, idx, key);
     }
 
-    #[inline]
+    #[inline(always)]
     fn compare_key(&self, search_ikey: u64, p: usize) -> std::cmp::Ordering {
-        InternodeNode::compare_key(self, search_ikey, p)
+        Self::compare_key(self, search_ikey, p)
     }
 
-    #[inline]
+    #[inline(always)]
     fn find_insert_position(&self, insert_ikey: u64) -> usize {
-        InternodeNode::find_insert_position(self, insert_ikey)
+        Self::find_insert_position(self, insert_ikey)
     }
 
-    #[inline]
+    #[inline(always)]
     fn child(&self, idx: usize) -> *mut u8 {
-        InternodeNode::child(self, idx)
+        Self::child(self, idx)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_child(&self, idx: usize, child: *mut u8) {
-        InternodeNode::set_child(self, idx, child)
+        Self::set_child(self, idx, child);
     }
 
-    #[inline]
+    #[inline(always)]
     fn assign(&self, p: usize, ikey: u64, right_child: *mut u8) {
-        InternodeNode::assign(self, p, ikey, right_child)
+        Self::assign(self, p, ikey, right_child);
     }
 
-    #[inline]
+    #[inline(always)]
     fn insert_key_and_child(&self, p: usize, new_ikey: u64, new_child: *mut u8) {
-        InternodeNode::insert_key_and_child(self, p, new_ikey, new_child)
+        Self::insert_key_and_child(self, p, new_ikey, new_child);
     }
 
-    #[inline]
+    #[inline(always)]
     fn parent(&self) -> *mut u8 {
-        InternodeNode::parent(self)
+        Self::parent(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_parent(&self, parent: *mut u8) {
-        InternodeNode::set_parent(self, parent)
+        Self::set_parent(self, parent);
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_root(&self) -> bool {
-        InternodeNode::is_root(self)
+        Self::is_root(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize) {
-        InternodeNode::shift_from(self, dst_pos, src, src_pos, count)
+        Self::shift_from(self, dst_pos, src, src_pos, count);
     }
 
-    #[inline]
+    #[inline(always)]
     fn split_into(
         &self,
         new_right: &mut Self,
+        new_right_ptr: *mut Self,
         insert_pos: usize,
         insert_ikey: u64,
         insert_child: *mut u8,
     ) -> (u64, bool) {
-        InternodeNode::split_into(self, new_right, insert_pos, insert_ikey, insert_child)
+        Self::split_into(self, new_right, new_right_ptr, insert_pos, insert_ikey, insert_child)
     }
 }
 

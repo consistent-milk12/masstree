@@ -86,7 +86,7 @@ impl Permuter24 {
     /// Initial value with slots in reverse order, size = 0.
     ///
     /// This constant is used by both `empty()` and `AtomicPermuter24::new()`.
-    /// Position i holds slot (23 - i), so back() returns 0 initially.
+    /// Position i holds slot (23 - i), so `back()` returns 0 initially.
     ///
     /// Bit layout: size=0, slot[0]=23, slot[1]=22, ..., slot[23]=0
     pub const INITIAL: u128 = {
@@ -116,10 +116,12 @@ impl Permuter24 {
     ///
     /// Slots are stored in reverse order so `back()` returns 0 initially.
     /// Free slots will be allocated in order: 0, 1, 2, ...
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn empty() -> Self {
-        Self { value: Self::INITIAL }
+        Self {
+            value: Self::INITIAL,
+        }
     }
 
     /// Create a sorted permuter with `n` elements.
@@ -135,7 +137,9 @@ impl Permuter24 {
         debug_assert!(n <= 24, "make_sorted: n ({n}) > 24");
 
         if n == 24 {
-            return Self { value: Self::SORTED | 24 };
+            return Self {
+                value: Self::SORTED | 24,
+            };
         }
 
         // Build: positions 0..n sorted, positions n..24 hold remaining in reverse
@@ -157,14 +161,15 @@ impl Permuter24 {
     }
 
     /// Create from raw u128 value.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn from_value(value: u128) -> Self {
         Self { value }
     }
 }
 
 impl Default for Permuter24 {
+    #[inline(always)]
     fn default() -> Self {
         Self::empty()
     }
@@ -176,8 +181,8 @@ impl Default for Permuter24 {
 
 impl Permuter24 {
     /// Return the number of slots in use.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn size(&self) -> usize {
         (self.value & SIZE_MASK) as usize
     }
@@ -187,8 +192,8 @@ impl Permuter24 {
     /// # Panics
     ///
     /// Debug-panics if `i >= 24`.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn get(&self, i: usize) -> usize {
         debug_assert!(i < 24, "get: index out of bounds");
         ((self.value >> (i * SLOT_BITS + SIZE_BITS)) & SLOT_MASK) as usize
@@ -197,8 +202,8 @@ impl Permuter24 {
     /// Return the slot at the back (position 23).
     ///
     /// This is the next slot to be allocated on `insert_from_back`.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn back(&self) -> usize {
         self.get(23)
     }
@@ -210,8 +215,8 @@ impl Permuter24 {
     /// # Panics
     ///
     /// Debug-panics if `size() + offset >= 24`.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn back_at_offset(&self, offset: usize) -> usize {
         debug_assert!(
             self.size() + offset < 24,
@@ -221,8 +226,8 @@ impl Permuter24 {
     }
 
     /// Return the raw u128 value.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn value(&self) -> u128 {
         self.value
     }
@@ -251,6 +256,7 @@ impl Permuter24 {
     }
 
     /// Swap two slots in the free region (positions >= size).
+    #[inline(always)]
     pub fn swap_free_slots(&mut self, pos_i: usize, pos_j: usize) {
         let size = self.size();
         debug_assert!(pos_i >= size, "swap_free_slots: pos_i in use region");
@@ -346,6 +352,7 @@ impl Permuter24 {
     /// # Panics
     ///
     /// Debug-panics if `i >= size()`.
+    #[inline(always)]
     pub fn remove_to_back(&mut self, i: usize) {
         debug_assert!(i < self.size(), "remove_to_back: i >= size");
 
@@ -362,7 +369,7 @@ impl Permuter24 {
 
         self.value = ((x - 1) & !mask)       // decrement size, keep < i
             | ((x >> SLOT_BITS) & mask)       // shift >= i down
-            | ((x & mask) << shift_to_back);  // move removed to back
+            | ((x & mask) << shift_to_back); // move removed to back
 
         #[cfg(debug_assertions)]
         self.debug_assert_valid();
@@ -375,6 +382,7 @@ impl Permuter24 {
     /// # Panics
     ///
     /// Debug-panics if `i >= size()`.
+    #[inline(always)]
     pub fn remove(&mut self, i: usize) {
         let size = self.size();
         debug_assert!(i < size, "remove: i >= size");
@@ -389,7 +397,8 @@ impl Permuter24 {
 
         let rot_amount = (size - i - 1) * SLOT_BITS;
         // rot_mask covers positions i through size-1
-        let rot_mask: u128 = (((1u128 << rot_amount) << SLOT_BITS) - 1) << (i * SLOT_BITS + SIZE_BITS);
+        let rot_mask: u128 =
+            (((1u128 << rot_amount) << SLOT_BITS) - 1) << (i * SLOT_BITS + SIZE_BITS);
 
         self.value = ((self.value - 1) & !rot_mask)
             | (((self.value & rot_mask) >> SLOT_BITS) & rot_mask)
@@ -406,6 +415,7 @@ impl Permuter24 {
 
 impl Permuter24 {
     /// Exchange (swap) elements at positions `i` and `j`.
+    #[inline(always)]
     pub fn exchange(&mut self, i: usize, j: usize) {
         debug_assert!(i < 24 && j < 24, "exchange: out of range");
 
@@ -424,6 +434,7 @@ impl Permuter24 {
     }
 
     /// Rotate elements between positions `i` and `j`.
+    #[inline(always)]
     pub fn rotate(&mut self, i: usize, j: usize) {
         debug_assert!(i <= j && j <= 24, "rotate: invalid range");
 
@@ -440,9 +451,7 @@ impl Permuter24 {
         let rotate_amount = (j - i) * SLOT_BITS;
         let rotate_back = (24 - j) * SLOT_BITS;
 
-        self.value = (x & mask)
-            | ((x >> rotate_amount) & !mask)
-            | ((x & !mask) << rotate_back);
+        self.value = (x & mask) | ((x >> rotate_amount) & !mask) | ((x & !mask) << rotate_back);
 
         #[cfg(debug_assertions)]
         self.debug_assert_valid();
@@ -464,6 +473,14 @@ impl Permuter24 {
     ///
     /// If called on a frozen permuter, this method silently returns without
     /// checking invariants to avoid false positives.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if the permuter is invalid (not frozen) and:
+    /// - The size exceeds 24
+    /// - Any slot index is >= 24
+    /// - Any slot index appears more than once
+    /// - Not all slot indices 0-23 are present
     #[cfg(debug_assertions)]
     pub fn debug_assert_valid(&self) {
         // Skip validation for frozen permuters (slot 23 = 0x1F)
@@ -500,12 +517,12 @@ impl Permuter24 {
 // =============================================================================
 
 impl PermutationProvider for Permuter24 {
-    #[inline]
+    #[inline(always)]
     fn size(&self) -> usize {
         self.size()
     }
 
-    #[inline]
+    #[inline(always)]
     fn get(&self, i: usize) -> usize {
         self.get(i)
     }
@@ -528,6 +545,7 @@ pub struct AtomicPermuter24 {
 impl AtomicPermuter24 {
     /// Create with empty permutation.
     #[must_use]
+    #[inline(always)]
     pub const fn new() -> Self {
         Self {
             inner: AtomicU128::new(Permuter24::INITIAL),
@@ -536,7 +554,8 @@ impl AtomicPermuter24 {
 
     /// Create from existing permuter.
     #[must_use]
-    pub fn from_permuter(perm: Permuter24) -> Self {
+    #[inline(always)]
+    pub const fn from_permuter(perm: Permuter24) -> Self {
         Self {
             inner: AtomicU128::new(perm.value),
         }
@@ -555,7 +574,12 @@ impl AtomicPermuter24 {
     }
 
     /// Compare-and-exchange.
-    #[inline]
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with the current value if the comparison failed
+    /// (i.e., the current value did not match `expected`).
+    #[inline(always)]
     pub fn compare_exchange(
         &self,
         expected: Permuter24,
@@ -570,7 +594,12 @@ impl AtomicPermuter24 {
     }
 
     /// Compare-and-exchange weak.
-    #[inline]
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with the current value if the comparison failed
+    /// (i.e., the current value did not match `expected`), or spuriously.
+    #[inline(always)]
     pub fn compare_exchange_weak(
         &self,
         expected: Permuter24,
@@ -599,7 +628,12 @@ impl AtomicPermuter24 {
     }
 
     /// CAS on raw value.
-    #[inline]
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with the current value if the comparison failed
+    /// (i.e., the current value did not match `expected`).
+    #[inline(always)]
     pub fn compare_exchange_raw(
         &self,
         expected: u128,
@@ -625,67 +659,67 @@ impl crate::leaf_trait::TreePermutation for Permuter24 {
     type Raw = u128;
     const WIDTH: usize = WIDTH_24;
 
-    #[inline]
+    #[inline(always)]
     fn empty() -> Self {
-        Permuter24::empty()
+        Self::empty()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_value(raw: u128) -> Self {
-        Permuter24::from_value(raw)
+        Self::from_value(raw)
     }
 
-    #[inline]
+    #[inline(always)]
     fn value(&self) -> u128 {
-        Permuter24::value(self)
+        Self::value(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn size(&self) -> usize {
-        Permuter24::size(self)
+        Self::size(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn get(&self, i: usize) -> usize {
-        Permuter24::get(self, i)
+        Self::get(self, i)
     }
 
-    #[inline]
+    #[inline(always)]
     fn back(&self) -> usize {
-        Permuter24::back(self)
+        Self::back(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn back_at_offset(&self, offset: usize) -> usize {
-        Permuter24::back_at_offset(self, offset)
+        Self::back_at_offset(self, offset)
     }
 
-    #[inline]
+    #[inline(always)]
     fn insert_from_back(&mut self, i: usize) -> usize {
-        Permuter24::insert_from_back(self, i)
+        Self::insert_from_back(self, i)
     }
 
-    #[inline]
+    #[inline(always)]
     fn insert_from_back_immutable(&self, i: usize) -> (Self, usize) {
-        Permuter24::insert_from_back_immutable(self, i)
+        Self::insert_from_back_immutable(self, i)
     }
 
-    #[inline]
+    #[inline(always)]
     fn swap_free_slots(&mut self, pos_i: usize, pos_j: usize) {
-        Permuter24::swap_free_slots(self, pos_i, pos_j)
+        Self::swap_free_slots(self, pos_i, pos_j);
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_size(&mut self, n: usize) {
-        Permuter24::set_size(self, n)
+        Self::set_size(self, n);
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_frozen_raw(raw: u128) -> bool {
         crate::freeze24::Freeze24Utils::is_frozen(raw)
     }
 
-    #[inline]
+    #[inline(always)]
     fn freeze_raw(raw: u128) -> u128 {
         crate::freeze24::Freeze24Utils::freeze_raw(raw)
     }
@@ -853,12 +887,7 @@ mod tests {
         let old = ap.load(Ordering::Relaxed);
         let (new, _slot) = old.insert_from_back_immutable(0);
 
-        let result = ap.compare_exchange(
-            old,
-            new,
-            Ordering::SeqCst,
-            Ordering::Relaxed,
-        );
+        let result = ap.compare_exchange(old, new, Ordering::SeqCst, Ordering::Relaxed);
 
         assert!(result.is_ok());
         assert_eq!(ap.load(Ordering::Relaxed).size(), 1);

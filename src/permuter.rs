@@ -18,13 +18,13 @@
 pub const MAX_WIDTH: usize = 15;
 
 /// Number of bits used to store the size.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "TODO: Remove later if not needed")]
 const SIZE_BITS: usize = 4;
 
 /// Mask for extracting size (lower 4 bits).
 const SIZE_MASK: u64 = 0xF;
 
-use crate::suffix::PermutationProvider;
+use crate::{freeze::LeafFreezeUtils, suffix::PermutationProvider};
 
 /// Utility functions for [`Permuter`].
 struct PermuterUtils;
@@ -140,6 +140,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
 }
 
 impl<const WIDTH: usize> Default for Permuter<WIDTH> {
+    #[inline(always)]
     fn default() -> Self {
         Self::empty()
     }
@@ -158,8 +159,8 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// Free slots will allocated in order: 0, 1, 2, ...
     ///
     /// For WIDTH = 15: value = `0x0123_4567_89AB_CDE0` (matches C++ reference)
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn empty() -> Self {
         // Trigger compile-time WIDTH check
         let _: () = Self::WIDTH_CHECK;
@@ -331,6 +332,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// # Panics
     ///
     /// Panics in debug mode if positions are not in the free region.
+    #[inline(always)]
     pub fn swap_free_slots(&mut self, pos_i: usize, pos_j: usize) {
         let size: usize = self.size();
 
@@ -369,6 +371,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// 3. Insert the slot at position i
     /// 4. Increment size
     #[must_use]
+    #[inline]
     pub fn insert_from_back(&mut self, i: usize) -> usize {
         debug_assert!(i <= self.size(), "insert_from_back: i > size");
         debug_assert!(self.size() < WIDTH, "insert_from_back: permuter full");
@@ -460,6 +463,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// 1. Decrement size, keep positions `0..i` unchanged
     /// 2. Shift positions `i+1..WIDTH` down by one
     /// 3. Move the removed slot to position `WIDTH-1` (back)
+    #[inline]
     pub fn remove_to_back(&mut self, i: usize) {
         debug_assert!(i < self.size(), "remove_to_back: i >= size");
 
@@ -510,6 +514,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// Panics in debug mode if `i >= size()`.
     ///
     /// # Algorithm (matches C++ `kpermuter::remove`)
+    #[inline(always)]
     pub fn remove(&mut self, i: usize) {
         let size: usize = self.size();
         debug_assert!(i < size, "remove: i >= size");
@@ -555,6 +560,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     ///
     /// # Algorithm (matches C++ `kpermuter::exchange`)
     /// Uses XOR swap trick on the 4-bit slot values.
+    #[inline(always)]
     pub fn exchange(&mut self, i: usize, j: usize) {
         debug_assert!(i < WIDTH, "exchange: i >= WIDTH");
         debug_assert!(j < WIDTH, "exchange: j >= WIDTH");
@@ -667,12 +673,12 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
 // ============================================================================
 
 impl<const WIDTH: usize> PermutationProvider for Permuter<WIDTH> {
-    #[inline]
+    #[inline(always)]
     fn size(&self) -> usize {
         self.size()
     }
 
-    #[inline]
+    #[inline(always)]
     fn get(&self, i: usize) -> usize {
         self.get(i)
     }
@@ -686,69 +692,69 @@ impl<const WIDTH: usize> crate::leaf_trait::TreePermutation for Permuter<WIDTH> 
     type Raw = u64;
     const WIDTH: usize = WIDTH;
 
-    #[inline]
+    #[inline(always)]
     fn empty() -> Self {
-        Permuter::empty()
+        Self::empty()
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_value(raw: u64) -> Self {
-        Permuter::from_value(raw)
+        Self::from_value(raw)
     }
 
-    #[inline]
+    #[inline(always)]
     fn value(&self) -> u64 {
-        Permuter::value(self)
+        Self::value(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn size(&self) -> usize {
-        Permuter::size(self)
+        Self::size(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn get(&self, i: usize) -> usize {
-        Permuter::get(self, i)
+        Self::get(self, i)
     }
 
-    #[inline]
+    #[inline(always)]
     fn back(&self) -> usize {
-        Permuter::back(self)
+        Self::back(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn back_at_offset(&self, offset: usize) -> usize {
-        Permuter::back_at_offset(self, offset)
+        Self::back_at_offset(self, offset)
     }
 
-    #[inline]
+    #[inline(always)]
     fn insert_from_back(&mut self, i: usize) -> usize {
-        Permuter::insert_from_back(self, i)
+        Self::insert_from_back(self, i)
     }
 
-    #[inline]
+    #[inline(always)]
     fn insert_from_back_immutable(&self, i: usize) -> (Self, usize) {
-        Permuter::insert_from_back_immutable(self, i)
+        Self::insert_from_back_immutable(self, i)
     }
 
-    #[inline]
+    #[inline(always)]
     fn swap_free_slots(&mut self, pos_i: usize, pos_j: usize) {
-        Permuter::swap_free_slots(self, pos_i, pos_j)
+        Self::swap_free_slots(self, pos_i, pos_j);
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_size(&mut self, n: usize) {
-        Permuter::set_size(self, n)
+        Self::set_size(self, n);
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_frozen_raw(raw: u64) -> bool {
-        crate::freeze::LeafFreezeUtils::is_frozen::<WIDTH>(raw)
+        LeafFreezeUtils::is_frozen::<WIDTH>(raw)
     }
 
-    #[inline]
+    #[inline(always)]
     fn freeze_raw(raw: u64) -> u64 {
-        crate::freeze::LeafFreezeUtils::freeze_raw::<WIDTH>(raw)
+        LeafFreezeUtils::freeze_raw::<WIDTH>(raw)
     }
 }
 

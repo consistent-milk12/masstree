@@ -167,3 +167,26 @@ impl<S: ValueSlot, const WIDTH: usize> StdFmt::Debug for FreezeGuard<'_, S, WIDT
             .finish()
     }
 }
+
+// ============================================================================
+// FreezeGuardOps Implementation
+// ============================================================================
+
+impl<S: ValueSlot, const WIDTH: usize> crate::leaf_trait::FreezeGuardOps<Permuter<WIDTH>>
+    for FreezeGuard<'_, S, WIDTH>
+{
+    #[inline(always)]
+    fn snapshot(&self) -> Permuter<WIDTH> {
+        FreezeGuard::snapshot(self)
+    }
+
+    #[inline(always)]
+    fn snapshot_raw(&self) -> u64 {
+        FreezeGuard::snapshot_raw(self)
+    }
+
+    #[inline(always)]
+    fn set_active(&mut self, active: bool) {
+        FreezeGuard::set_active(self, active);
+    }
+}

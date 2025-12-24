@@ -69,6 +69,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// # Handling Failures
     /// Use `failure.is_frozen()` to check if a split is in progress.
     /// If frozen, fall back to locked path. Otherwise, retry with updated expected.
+    #[inline(always)]
     pub(crate) fn cas_permutation_raw(
         &self,
         expected: Permuter24,
@@ -88,7 +89,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// # Panics
     /// Panics if the failure is due to a frozen permutation. Use `cas_permutation_raw`
     /// in code paths where freezing may occur.
-    #[inline]
+    #[inline(always)]
     pub fn cas_permutation(&self, expected: Permuter24, new: Permuter24) -> Result<(), Permuter24> {
         match self.cas_permutation_raw(expected, new) {
             Ok(()) => Ok(()),

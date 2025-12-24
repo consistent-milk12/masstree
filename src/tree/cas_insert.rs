@@ -69,10 +69,11 @@ const MAX_CAS_RETRIES: usize = 3;
 ///
 /// Reduces contention by spacing out retry attempts. Each retry doubles the
 /// number of spin iterations, capped at 64 to avoid excessive latency.
-#[inline]
+#[inline(always)]
 fn backoff(retries: usize) {
     // Exponential: 1, 2, 4, 8, 16, 32, 64, 64, ...
     let spins = 1usize << retries.min(6);
+
     for _ in 0..spins {
         std::hint::spin_loop();
     }

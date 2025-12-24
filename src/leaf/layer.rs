@@ -33,8 +33,8 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     }
 
     /// Check if this node is layer root.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_layer_root(&self) -> bool {
         self.version.is_root() && self.parent().is_null()
     }
@@ -78,12 +78,12 @@ impl<S: ValueSlot, const WIDTH: usize> LeafNode<S, WIDTH> {
     ///
     /// # Returns
     /// Some(pointer) if slot contains a layer, None otherwise.
+    #[must_use]
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "slot from permuter, valid by construction"
     )]
-    #[must_use]
     pub fn get_layer(&self, slot: usize) -> Option<*mut u8> {
         if self.keylenx[slot].load(READ_ORD) >= LAYER_KEYLENX {
             let ptr: *mut u8 = self.leaf_values[slot].load(READ_ORD);

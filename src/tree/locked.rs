@@ -240,10 +240,12 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 debug_log!(ikey, retry_count, "insert_concurrent: retry loop iteration");
             }
             #[cfg(feature = "tracing")]
-            if retry_count == 10 || retry_count == 50 || (retry_count > 100 && retry_count % 100 == 0) {
+            if retry_count == 10
+                || retry_count == 50
+                || (retry_count > 100 && retry_count.is_multiple_of(100))
+            {
                 eprintln!(
-                    "[HIGH RETRY] insert_concurrent: ikey=0x{:016x} retry_count={} in_sublayer={}",
-                    ikey, retry_count, in_sublayer
+                    "[HIGH RETRY] insert_concurrent: ikey=0x{ikey:016x} retry_count={retry_count} in_sublayer={in_sublayer}"
                 );
             }
 
@@ -264,7 +266,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         return Ok(old);
                     }
                     CasInsertResult::FullNeedLock => {
-                        trace_log!(ikey, "insert_concurrent: CAS fallback to locked path (full)");
+                        trace_log!(
+                            ikey,
+                            "insert_concurrent: CAS fallback to locked path (full)"
+                        );
                         // Leaf is full - pre-allocate split target BEFORE acquiring lock.
                         // This reduces lock hold time by moving allocation outside the critical section.
                         preallocated_leaf = Some(LeafNode::new());
@@ -278,20 +283,27 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     CasInsertResult::ContentionFallback => {
                         // Contention (frozen permutation or version change).
                         #[cfg(feature = "tracing")]
-                        if retry_count > 100 && retry_count % 100 == 0 {
+                        if retry_count > 100 && retry_count.is_multiple_of(100) {
                             eprintln!(
-                                "[LIVELOCK] CAS ContentionFallback: ikey=0x{:016x} retry={}",
-                                ikey, retry_count
+                                "[LIVELOCK] CAS ContentionFallback: ikey=0x{ikey:016x} retry={retry_count}"
                             );
                         }
                         // FIXED: After too many CAS retries, fall through to locked path
                         // instead of retrying CAS forever. This prevents livelock when
                         // permutation stays frozen or version keeps changing.
                         if retry_count > 10 {
-                            trace_log!(ikey, retry_count, "insert_concurrent: CAS contention limit, using locked path");
+                            trace_log!(
+                                ikey,
+                                retry_count,
+                                "insert_concurrent: CAS contention limit, using locked path"
+                            );
                             // Fall through to locked path below
                         } else {
-                            trace_log!(ikey, retry_count, "insert_concurrent: CAS contention, retry from root");
+                            trace_log!(
+                                ikey,
+                                retry_count,
+                                "insert_concurrent: CAS contention, retry from root"
+                            );
                             continue 'outer;
                         }
                     }
@@ -317,8 +329,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 let find_locked_elapsed = find_locked_start.elapsed();
                 if find_locked_elapsed > std::time::Duration::from_millis(10) {
                     eprintln!(
-                        "[SLOW FIND_LOCKED] ikey=0x{:016x} took {:?} retry_count={}",
-                        ikey, find_locked_elapsed, retry_count
+                        "[SLOW FIND_LOCKED] ikey=0x{ikey:016x} took {find_locked_elapsed:?} retry_count={retry_count}"
                     );
                 }
             }
@@ -513,11 +524,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
 
                         // All slots exhausted - need to transition to split.
                         // We already called mark_insert(), also set split bit.
-                        cursor.lock.mark_split();
                     } else {
                         // Leaf was already full when we checked
-                        cursor.lock.mark_split();
                     }
+                    cursor.lock.mark_split();
 
                     // Fall through to split path below
                     debug_log!(
@@ -552,10 +562,9 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                             "insert_concurrent: permutation changed during split decision, aborting"
                         );
                         #[cfg(feature = "tracing")]
-                        if retry_count > 100 && retry_count % 100 == 0 {
+                        if retry_count > 100 && retry_count.is_multiple_of(100) {
                             eprintln!(
-                                "[LIVELOCK] perm changed in split: ikey=0x{:016x} retry={} size_at_decision={} size_now={}",
-                                ikey, retry_count, size_at_decision, size
+                                "[LIVELOCK] perm changed in split: ikey=0x{ikey:016x} retry={retry_count} size_at_decision={size_at_decision} size_now={size}"
                             );
                         }
                         drop(cursor.lock);
@@ -579,12 +588,16 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     // Perform the split.
                     // Use pre-allocated node if available (reduces lock hold time).
                     // SAFETY: We hold the lock, guard protects suffix operations
-                    let split_result = if let Some(new_leaf) = preallocated_leaf.take() {
-                        trace_log!(ikey, "insert_concurrent: using pre-allocated node for split");
-                        unsafe { leaf.split_into_preallocated(split_pos, new_leaf, guard) }
-                    } else {
-                        unsafe { leaf.split_into(split_pos, guard) }
-                    };
+                    let split_result = preallocated_leaf.take().map_or_else(
+                        || unsafe { leaf.split_into(split_pos, guard) },
+                        |new_leaf| {
+                            trace_log!(
+                                ikey,
+                                "insert_concurrent: using pre-allocated node for split"
+                            );
+                            unsafe { leaf.split_into_preallocated(split_pos, new_leaf, guard) }
+                        },
+                    );
 
                     let right_leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH> =
                         Box::into_raw(split_result.new_leaf);
@@ -658,8 +671,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                         let total_split_time = split_start.elapsed();
                         if total_split_time > std::time::Duration::from_millis(10) {
                             eprintln!(
-                                "[SLOW SPLIT] ikey=0x{:016x} total={:?} split_into={:?} propagate={:?}",
-                                ikey, total_split_time, split_into_elapsed, propagate_elapsed
+                                "[SLOW SPLIT] ikey=0x{ikey:016x} total={total_split_time:?} split_into={split_into_elapsed:?} propagate={propagate_elapsed:?}"
                             );
                         }
                     }
@@ -766,7 +778,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 loop_count += 1;
 
                 // Warn if we're looping too many times (potential livelock)
-                if loop_count > 100 && loop_count % 100 == 0 {
+                if loop_count > 100 && loop_count.is_multiple_of(100) {
                     tracing::warn!(
                         ikey,
                         loop_count,
@@ -820,8 +832,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 let stable_elapsed = stable_start.elapsed();
                 if stable_elapsed > std::time::Duration::from_millis(10) {
                     eprintln!(
-                        "[SLOW] stable() took {:?} ikey=0x{:016x} leaf={:?}",
-                        stable_elapsed, ikey, leaf_ptr
+                        "[SLOW] stable() took {stable_elapsed:?} ikey=0x{ikey:016x} leaf={leaf_ptr:?}"
                     );
                 }
             }
@@ -884,8 +895,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 let lock_elapsed = lock_start.elapsed();
                 if lock_elapsed > std::time::Duration::from_millis(10) {
                     eprintln!(
-                        "[SLOW] lock() took {:?} ikey=0x{:016x} leaf={:?}",
-                        lock_elapsed, ikey, leaf_ptr
+                        "[SLOW] lock() took {lock_elapsed:?} ikey=0x{ikey:016x} leaf={leaf_ptr:?}"
                     );
                 }
             }
@@ -1329,8 +1339,7 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                 let lock_elapsed = lock_start.elapsed();
                 if lock_elapsed > std::time::Duration::from_millis(5) {
                     eprintln!(
-                        "[SLOW PARENT LOCK] parent={:?} took {:?} retries={}",
-                        parent_ptr, lock_elapsed, retries
+                        "[SLOW PARENT LOCK] parent={parent_ptr:?} took {lock_elapsed:?} retries={retries}"
                     );
                 }
             }
@@ -1450,6 +1459,10 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
     /// Uses `locked_parent_leaf` for safe parent acquisition with validation.
     /// For main tree root splits, uses CAS on `root_ptr` to atomically install new root.
     /// For layer root splits, uses `maybe_parent` pattern (no CAS on main tree's root).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "wait-for-parent logic adds necessary complexity"
+    )]
     fn propagate_leaf_split_concurrent(
         &self,
         left_leaf_ptr: *mut LeafNode<LeafValue<V>, WIDTH>,
@@ -1460,11 +1473,12 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
         // SAFETY: left_leaf_ptr is valid (we just split it)
         let left_leaf: &LeafNode<LeafValue<V>, WIDTH> = unsafe { &*left_leaf_ptr };
 
-        // Check if this is a root leaf (no parent)
+        // Handle NULL parent case
         if left_leaf.parent().is_null() {
-            // Distinguish between main tree root and layer roots.
-            // Main tree root: self.root_ptr points to this leaf
-            // Layer root: self.root_ptr points to something else (layer pointer is in parent layer's slot)
+            // Distinguish between:
+            // 1. Main tree root: self.root_ptr points to this leaf
+            // 2. Layer root: is_root flag set, null parent
+            // 3. Newly split sibling: NOT is_root, null parent (wait for parent to be set)
             let current_root: *mut u8 = self.root_ptr.load(std::sync::atomic::Ordering::Acquire);
 
             if current_root == left_leaf_ptr.cast::<u8>() {
@@ -1477,15 +1491,52 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
                     guard,
                 );
             }
-            // LAYER ROOT LEAF SPLIT
-            // Create new internode as layer root, no CAS on main tree's root.
-            // Readers will use `maybe_parent` pattern to find the new root.
-            return self.promote_layer_root_concurrent(
-                left_leaf_ptr,
-                right_leaf_ptr,
-                split_ikey,
-                guard,
-            );
+
+            // Check if this is a real layer root (is_root flag set)
+            if left_leaf.version().is_root() {
+                // LAYER ROOT LEAF SPLIT
+                // Create new internode as layer root, no CAS on main tree's root.
+                // Readers will use `maybe_parent` pattern to find the new root.
+                return self.promote_layer_root_concurrent(
+                    left_leaf_ptr,
+                    right_leaf_ptr,
+                    split_ikey,
+                    guard,
+                );
+            }
+
+            // NULL parent but NOT a root: newly split sibling whose parent hasn't
+            // been set yet by the creating thread. Wait for the parent to be set.
+            // Strategy: spin briefly, then yield, then short sleep.
+            let mut spins: usize = 0;
+            loop {
+                // Check if parent is now set
+                if !left_leaf.parent().is_null() {
+                    break;
+                }
+
+                spins += 1;
+
+                // Backoff strategy tuned for parent-set latency (typically < 1µs):
+                // Phase 1 (0-64): Spin - handles majority of cases
+                // Phase 2 (64-1024): Yield - moderate backoff
+                // Phase 3 (1024+): Sleep 10µs - shorter sleep for faster recovery
+                if spins <= 64 {
+                    std::hint::spin_loop();
+                } else if spins <= 1024 {
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(std::time::Duration::from_micros(10));
+                }
+
+                // Safety valve: if we've been waiting too long, something is wrong
+                assert!(
+                    spins <= 1_000_000,
+                    "Timeout waiting for parent pointer to be set on newly split sibling \
+                     (spins={spins}, leaf={left_leaf_ptr:?}). This indicates a bug in split propagation."
+                );
+            }
+            // Parent is now set - fall through to normal parent handling below
         }
 
         // Lock parent with validation and find child index.
@@ -1868,38 +1919,38 @@ impl<V, const WIDTH: usize, A: NodeAllocator<LeafValue<V>, WIDTH>> MassTree<V, W
             self.allocator.track_internode(sibling_ptr);
 
             // Split and insert simultaneously
+            // NOTE: split_into now updates all children's parent pointers in sibling internally
+            // (matching C++ masstree_split.hh:163-165). This is critical for correctness.
             let (popup_key, insert_went_left) = unsafe {
-                parent.split_into(&mut *sibling_ptr, child_idx, insert_ikey, insert_child)
+                parent.split_into(&mut *sibling_ptr, sibling_ptr, child_idx, insert_ikey, insert_child)
             };
 
-            // Update child's parent pointer
+            // NOTE: split_into updates internode children's parents internally (height > 0).
+            // For leaf children (height == 0), we must update them here because split_into
+            // doesn't know the actual leaf type. This must happen while holding the parent lock.
             unsafe {
-                let child_parent = if insert_went_left {
-                    parent_ptr.cast::<u8>()
-                } else {
-                    sibling_ptr.cast::<u8>()
-                };
+                let sibling_ref: &InternodeNode<LeafValue<V>, WIDTH> = &*sibling_ptr;
 
                 if parent.children_are_leaves() {
-                    (*insert_child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
-                        .set_parent(child_parent);
-                } else {
-                    (*insert_child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
-                        .set_parent(child_parent);
-                }
-
-                // Update sibling's children's parent pointers
-                let sibling_ref: &InternodeNode<LeafValue<V>, WIDTH> = &*sibling_ptr;
-                for i in 0..=sibling_ref.size() {
-                    let child: *mut u8 = sibling_ref.child(i);
-                    if !child.is_null() {
-                        if sibling_ref.children_are_leaves() {
+                    // Update all leaf children's parent pointers in sibling
+                    for i in 0..=sibling_ref.nkeys() {
+                        let child: *mut u8 = sibling_ref.child(i);
+                        if !child.is_null() {
                             (*child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
                                 .set_parent(sibling_ptr.cast::<u8>());
-                        } else {
-                            (*child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
-                                .set_parent(sibling_ptr.cast::<u8>());
                         }
+                    }
+                }
+                // For internode children, split_into already updated them
+
+                // If insert_child stayed in the LEFT parent, set its parent explicitly
+                if insert_went_left {
+                    if parent.children_are_leaves() {
+                        (*insert_child.cast::<LeafNode<LeafValue<V>, WIDTH>>())
+                            .set_parent(parent_ptr.cast::<u8>());
+                    } else {
+                        (*insert_child.cast::<InternodeNode<LeafValue<V>, WIDTH>>())
+                            .set_parent(parent_ptr.cast::<u8>());
                     }
                 }
             }

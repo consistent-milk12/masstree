@@ -34,7 +34,7 @@ pub const KSUF_KEYLENX: u8 = 64;
 /// Base keylenx value indicating a layer pointer (>= this means layer).
 pub const LAYER_KEYLENX: u8 = 128;
 
-/// Width constant for LeafNode24.
+/// Width constant for [`LeafNode24`].
 pub const WIDTH_24: usize = 24;
 
 /// Modification state values (shared with leaf.rs).
@@ -184,13 +184,13 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Get a reference to the node's version.
-    #[inline]
+    #[inline(always)]
     pub const fn version(&self) -> &NodeVersion {
         &self.version
     }
 
     /// Get a mutable reference to the node's version.
-    #[inline]
+    #[inline(always)]
     pub const fn version_mut(&mut self) -> &mut NodeVersion {
         &mut self.version
     }
@@ -203,8 +203,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH_24`.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot from Permuter24, valid by construction"
@@ -228,8 +228,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Load all ikeys into a contiguous buffer for SIMD search.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     #[expect(clippy::indexing_slicing)]
     pub fn load_all_ikeys(&self) -> [u64; WIDTH_24] {
         let mut ikeys = [0u64; WIDTH_24];
@@ -242,8 +242,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Get the keylenx at the given physical slot.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot from Permuter24, valid by construction"
@@ -267,14 +267,14 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Get the ikey bound (ikey at slot 0, used for B-link tree routing).
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub fn ikey_bound(&self) -> u64 {
         self.ikey0[0].load(READ_ORD)
     }
 
     /// Get the `keylenx` bound for this leaf.
-    #[inline]
+    #[inline(always)]
     pub fn keylenx_bound(&self) -> u8 {
         let perm: Permuter24 = self.permutation();
 
@@ -284,15 +284,15 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Check if the given slot contains a layer pointer.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_layer(&self, slot: usize) -> bool {
         self.keylenx(slot) >= LAYER_KEYLENX
     }
 
     /// Check if the given slot has a suffix.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub fn has_ksuf(&self, slot: usize) -> bool {
         self.keylenx(slot) == KSUF_KEYLENX
     }
@@ -305,8 +305,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Check if keylenx indicates suffix storage (static helper).
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub const fn keylenx_has_ksuf(keylenx: u8) -> bool {
         keylenx == KSUF_KEYLENX
     }
@@ -316,15 +316,15 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Load suffix bag pointer (reader).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn ksuf_ptr(&self) -> *mut SuffixBag<WIDTH_24> {
         self.ksuf.load(READ_ORD)
     }
 
     /// Check if this leaf has suffix storage allocated.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn has_ksuf_storage(&self) -> bool {
         !self.ksuf_ptr().is_null()
     }
@@ -348,8 +348,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Get the suffix for a slot, or an empty slice if none.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
         self.ksuf(slot).unwrap_or(&[])
     }
@@ -499,8 +499,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// * `1` - Exact match
     /// * `0` - Same ikey but different key
     /// * `-8` - Slot is a layer pointer
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::cast_possible_wrap,
         clippy::cast_possible_truncation,
@@ -648,11 +648,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// # Safety
     /// - `slot` is in the free region of the current permutation
     /// - No concurrent writer is modifying this slot
-    #[inline]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "bounds checked by debug_assert"
-    )]
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub unsafe fn store_slot_for_cas(
         &self,
         slot: usize,
@@ -670,18 +667,18 @@ impl<S: ValueSlot> LeafNode24<S> {
     ///
     /// # Safety
     /// - Caller must have already reclaimed/freed the value that was stored
-    #[inline]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "bounds checked by debug_assert"
-    )]
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub unsafe fn clear_slot_for_cas(&self, slot: usize) {
         debug_assert!(slot < WIDTH_24, "clear_slot_for_cas: slot out of bounds");
         self.leaf_values[slot].store(std::ptr::null_mut(), WRITE_ORD);
     }
 
     /// Atomically claim a slot for CAS insert.
-    #[inline]
+    ///
+    /// # Errors
+    /// Returns error if CAS fails
+    #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub fn cas_slot_value(
         &self,
@@ -700,7 +697,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Load the current value pointer at a slot.
-    #[inline]
+    #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub fn load_slot_value(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH_24, "load_slot_value: slot out of bounds");
@@ -711,34 +708,34 @@ impl<S: ValueSlot> LeafNode24<S> {
     ///
     /// # Safety
     /// - Caller must have successfully claimed the slot via `cas_slot_value`
-    #[inline]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "bounds checked by debug_assert"
-    )]
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
-        debug_assert!(slot < WIDTH_24, "store_key_data_for_cas: slot out of bounds");
+        debug_assert!(
+            slot < WIDTH_24,
+            "store_key_data_for_cas: slot out of bounds"
+        );
         self.ikey0[slot].store(ikey, WRITE_ORD);
         self.keylenx[slot].store(keylenx, WRITE_ORD);
     }
 
     /// Get the number of keys in this leaf.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub fn size(&self) -> usize {
         self.permutation().size()
     }
 
     /// Check if the leaf is empty.
-    #[inline(always)]
     #[must_use]
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.size() == 0
     }
 
     /// Check if the leaf is full.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn is_full(&self) -> bool {
         self.size() >= WIDTH_24
     }
@@ -748,35 +745,35 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Get the next leaf pointer, masking the mark bit.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn safe_next(&self) -> *mut Self {
         let ptr: *mut Self = self.next.load(READ_ORD);
         ptr.map_addr(|addr: usize| addr & !1)
     }
 
     /// Get the raw next pointer (including mark bit).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn next_raw(&self) -> *mut Self {
         self.next.load(READ_ORD)
     }
 
     /// Check if the next pointer is marked (split in progress).
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn next_is_marked(&self) -> bool {
         (self.next.load(READ_ORD).addr() & 1) != 0
     }
 
     /// Set the next leaf pointer.
-    #[inline]
+    #[inline(always)]
     pub fn set_next(&self, next: *mut Self) {
         self.next.store(next, WRITE_ORD);
     }
 
     /// Mark the next pointer (during split).
-    #[inline]
+    #[inline(always)]
     pub fn mark_next(&self) {
         let ptr: *mut Self = self.next.load(RELAXED);
         let marked: *mut Self = ptr.map_addr(|addr: usize| addr | 1);
@@ -784,7 +781,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Unmark the next pointer.
-    #[inline]
+    #[inline(always)]
     pub fn unmark_next(&self) {
         let ptr: *mut Self = self.safe_next();
         self.next.store(ptr, WRITE_ORD);
@@ -793,7 +790,6 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// Wait for an in-progress split to complete.
     ///
     /// Spins until the next pointer is unmarked and version is stable.
-    #[inline]
     pub fn wait_for_split(&self) {
         const MAX_RETRIES: usize = 1000;
         let mut retries: usize = 0;
@@ -819,14 +815,14 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Get the previous leaf pointer.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn prev(&self) -> *mut Self {
         self.prev.load(READ_ORD)
     }
 
     /// Set the previous leaf pointer.
-    #[inline]
+    #[inline(always)]
     pub fn set_prev(&self, prev: *mut Self) {
         self.prev.store(prev, WRITE_ORD);
     }
@@ -836,14 +832,14 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Get the parent pointer.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn parent(&self) -> *mut u8 {
         self.parent.load(READ_ORD)
     }
 
     /// Set the parent pointer.
-    #[inline]
+    #[inline(always)]
     pub fn set_parent(&self, parent: *mut u8) {
         self.parent.store(parent, WRITE_ORD);
     }
@@ -853,14 +849,14 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Get the modification state.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub const fn modstate(&self) -> ModState24 {
         self.modstate
     }
 
     /// Set the modification state.
-    #[inline]
+    #[inline(always)]
     pub const fn set_modstate(&mut self, state: ModState24) {
         self.modstate = state;
     }
@@ -870,8 +866,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Check if slot 0 can be reused for a new key.
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
         if self.prev().is_null() {
             return true;
@@ -897,203 +893,507 @@ unsafe impl<S: ValueSlot + Send + Sync> Sync for LeafNode24<S> {}
 
 impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> for LeafNode24<S> {
     type Perm = Permuter24;
-    type Internode = crate::internode::InternodeNode<S, WIDTH_24>;
+    // Internodes are limited to WIDTH=15 due to 4-bit permutation slots
+    type Internode = crate::internode::InternodeNode<S, 15>;
     const WIDTH: usize = WIDTH_24;
 
-    #[inline]
+    #[inline(always)]
     fn new_boxed() -> Box<Self> {
-        LeafNode24::new()
+        Self::new()
     }
 
-    #[inline]
+    #[inline(always)]
     fn new_root_boxed() -> Box<Self> {
-        LeafNode24::new_root()
+        Self::new_root()
     }
 
-    #[inline]
+    #[inline(always)]
     fn version(&self) -> &crate::nodeversion::NodeVersion {
-        LeafNode24::version(self)
+        Self::version(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn permutation(&self) -> Permuter24 {
-        LeafNode24::permutation(self)
+        Self::permutation(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_permutation(&self, perm: Permuter24) {
-        LeafNode24::set_permutation(self, perm)
+        Self::set_permutation(self, perm);
     }
 
-    #[inline]
+    #[inline(always)]
     fn permutation_raw(&self) -> u128 {
-        LeafNode24::permutation_raw(self)
+        Self::permutation_raw(self)
     }
 
+    #[inline(always)]
     fn permutation_try(&self) -> Result<Permuter24, ()> {
-        LeafNode24::permutation_try(self).map_err(|_| ())
+        Self::permutation_try(self).map_err(|_| ())
     }
 
+    #[inline(always)]
     fn permutation_wait(&self) -> Permuter24 {
-        LeafNode24::permutation_wait(self)
+        Self::permutation_wait(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn ikey(&self, slot: usize) -> u64 {
-        LeafNode24::ikey(self, slot)
+        Self::ikey(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_ikey(&self, slot: usize, ikey: u64) {
-        LeafNode24::set_ikey(self, slot, ikey)
+        Self::set_ikey(self, slot, ikey);
     }
 
-    #[inline]
+    #[inline(always)]
     fn ikey_bound(&self) -> u64 {
-        LeafNode24::ikey_bound(self)
+        Self::ikey_bound(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn keylenx(&self, slot: usize) -> u8 {
-        LeafNode24::keylenx(self, slot)
+        Self::keylenx(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_keylenx(&self, slot: usize, keylenx: u8) {
-        LeafNode24::set_keylenx(self, slot, keylenx)
+        Self::set_keylenx(self, slot, keylenx);
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_layer(&self, slot: usize) -> bool {
-        LeafNode24::is_layer(self, slot)
+        Self::is_layer(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn has_ksuf(&self, slot: usize) -> bool {
-        LeafNode24::has_ksuf(self, slot)
+        Self::has_ksuf(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn leaf_value_ptr(&self, slot: usize) -> *mut u8 {
-        LeafNode24::leaf_value_ptr(self, slot)
+        Self::leaf_value_ptr(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
-        LeafNode24::set_leaf_value_ptr(self, slot, ptr)
+        Self::set_leaf_value_ptr(self, slot, ptr);
     }
 
-    #[inline]
+    #[inline(always)]
     fn cas_slot_value(
         &self,
         slot: usize,
         expected: *mut u8,
         new_value: *mut u8,
     ) -> Result<(), *mut u8> {
-        LeafNode24::cas_slot_value(self, slot, expected, new_value)
+        Self::cas_slot_value(self, slot, expected, new_value)
     }
 
-    #[inline]
+    #[inline(always)]
     fn safe_next(&self) -> *mut Self {
-        LeafNode24::safe_next(self)
+        Self::safe_next(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn next_is_marked(&self) -> bool {
-        LeafNode24::next_is_marked(self)
+        Self::next_is_marked(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_next(&self, next: *mut Self) {
-        LeafNode24::set_next(self, next)
+        Self::set_next(self, next);
     }
 
-    #[inline]
+    #[inline(always)]
     fn mark_next(&self) {
-        LeafNode24::mark_next(self)
+        Self::mark_next(self);
     }
 
-    #[inline]
+    #[inline(always)]
     fn unmark_next(&self) {
-        LeafNode24::unmark_next(self)
+        Self::unmark_next(self);
     }
 
-    #[inline]
+    #[inline(always)]
     fn prev(&self) -> *mut Self {
-        LeafNode24::prev(self)
+        Self::prev(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_prev(&self, prev: *mut Self) {
-        LeafNode24::set_prev(self, prev)
+        Self::set_prev(self, prev);
     }
 
-    #[inline]
+    #[inline(always)]
     fn parent(&self) -> *mut u8 {
-        LeafNode24::parent(self)
+        Self::parent(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn set_parent(&self, parent: *mut u8) {
-        LeafNode24::set_parent(self, parent)
+        Self::set_parent(self, parent);
     }
 
-    #[inline]
+    #[inline(always)]
     fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
-        LeafNode24::can_reuse_slot0(self, new_ikey)
+        Self::can_reuse_slot0(self, new_ikey)
     }
 
-    #[inline]
-    unsafe fn store_slot_for_cas(
-        &self,
-        slot: usize,
-        ikey: u64,
-        keylenx: u8,
-        value_ptr: *mut u8,
-    ) {
+    #[inline(always)]
+    unsafe fn store_slot_for_cas(&self, slot: usize, ikey: u64, keylenx: u8, value_ptr: *mut u8) {
         // SAFETY: Caller guarantees slot is in free region and no concurrent modification
-        unsafe { LeafNode24::store_slot_for_cas(self, slot, ikey, keylenx, value_ptr) }
+        unsafe { Self::store_slot_for_cas(self, slot, ikey, keylenx, value_ptr) }
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
         // SAFETY: Caller guarantees slot was claimed via cas_slot_value
-        unsafe { LeafNode24::store_key_data_for_cas(self, slot, ikey, keylenx) }
+        unsafe { Self::store_key_data_for_cas(self, slot, ikey, keylenx) }
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn clear_slot_for_cas(&self, slot: usize) {
         // SAFETY: Caller guarantees value has been reclaimed
-        unsafe { LeafNode24::clear_slot_for_cas(self, slot) }
+        unsafe { Self::clear_slot_for_cas(self, slot) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn load_slot_value(&self, slot: usize) -> *mut u8 {
-        LeafNode24::load_slot_value(self, slot)
+        Self::load_slot_value(self, slot)
     }
 
-    #[inline]
+    #[inline(always)]
     fn next_raw(&self) -> *mut Self {
-        LeafNode24::next_raw(self)
+        Self::next_raw(self)
     }
 
-    #[inline]
+    #[inline(always)]
     fn wait_for_split(&self) {
-        LeafNode24::wait_for_split(self)
+        Self::wait_for_split(self);
     }
 
-    #[inline]
+    #[inline(always)]
     fn cas_permutation_raw(
         &self,
         expected: Self::Perm,
         new: Self::Perm,
     ) -> Result<(), crate::leaf_trait::CasPermutationError<Self::Perm>> {
-        LeafNode24::cas_permutation_raw(self, expected, new)
-            .map_err(|failure| {
-                crate::leaf_trait::CasPermutationError::new(
-                    crate::permuter24::Permuter24::from_value(failure.current_raw())
-                )
-            })
+        Self::cas_permutation_raw(self, expected, new).map_err(|failure| {
+            crate::leaf_trait::CasPermutationError::new(crate::permuter24::Permuter24::from_value(
+                failure.current_raw(),
+            ))
+        })
+    }
+
+    // ========================================================================
+    // Split Operations
+    // ========================================================================
+
+    type FreezeGuard<'a>
+        = freeze::FreezeGuard24<'a, S>
+    where
+        Self: 'a;
+
+    fn calculate_split_point(
+        &self,
+        _insert_pos: usize,
+        insert_ikey: u64,
+    ) -> Option<crate::leaf::SplitPoint> {
+        let perm = self.permutation();
+        let size = perm.size();
+
+        if size == 0 {
+            return None;
+        }
+
+        // Split at midpoint
+        let mut split_pos = size / 2;
+        if split_pos == 0 {
+            return None;
+        }
+
+        // Adjust for equal ikeys: if keys at split boundary are equal,
+        // move split point to keep equal keys together
+        while split_pos > 0 && split_pos < size {
+            let left_slot = perm.get(split_pos - 1);
+            let right_slot = perm.get(split_pos);
+            let left_ikey = self.ikey(left_slot);
+            let right_ikey = self.ikey(right_slot);
+
+            if left_ikey == right_ikey {
+                // Equal keys - check if insert_ikey matches
+                match insert_ikey.cmp(&left_ikey) {
+                    std::cmp::Ordering::Equal => {
+                        // Insert goes with this group - move split right
+                        split_pos += 1;
+                    }
+                    std::cmp::Ordering::Less => {
+                        // Insert goes left - move split left
+                        split_pos -= 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        // Insert goes right - done
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Edge case: if split_pos is 0 or size, can't split
+        if split_pos == 0 || split_pos >= size {
+            return None;
+        }
+
+        let split_slot = perm.get(split_pos);
+        let split_ikey = self.ikey(split_slot);
+
+        Some(crate::leaf::SplitPoint {
+            pos: split_pos,
+            split_ikey,
+        })
+    }
+
+    unsafe fn split_into_preallocated(
+        &self,
+        split_pos: usize,
+        new_leaf: Box<Self>,
+        guard: &seize::LocalGuard<'_>,
+    ) -> (Box<Self>, u64, crate::leaf::InsertTarget) {
+        // Always freeze during split - caller must hold lock
+        let freeze_guard = Self::freeze_permutation(self);
+
+        let old_perm: Permuter24 = freeze_guard.snapshot();
+        let old_size = old_perm.size();
+
+        debug_assert!(
+            split_pos > 0 && split_pos < old_size,
+            "invalid split_pos {split_pos} for size {old_size}"
+        );
+
+        let entries_to_move = old_size - split_pos;
+
+        // Move entries to new leaf
+        for i in 0..entries_to_move {
+            let old_logical_pos = split_pos + i;
+            let old_slot = old_perm.get(old_logical_pos);
+            let new_slot = i;
+
+            let ikey = self.ikey(old_slot);
+            let keylenx = self.keylenx(old_slot);
+
+            new_leaf.set_ikey(new_slot, ikey);
+            new_leaf.set_keylenx(new_slot, keylenx);
+
+            // Move value pointer
+            let old_ptr = self.take_leaf_value_ptr(old_slot);
+            new_leaf.set_leaf_value_ptr(new_slot, old_ptr);
+
+            // Migrate suffix if present
+            if keylenx == KSUF_KEYLENX {
+                if let Some(suffix) = self.ksuf(old_slot) {
+                    // SAFETY: new_leaf is freshly allocated and caller holds lock
+                    unsafe { new_leaf.assign_ksuf(new_slot, suffix, guard) };
+                }
+                // SAFETY: caller holds lock
+                unsafe { self.clear_ksuf(old_slot, guard) };
+            }
+        }
+
+        // Build new leaf's permutation
+        let new_perm = Permuter24::make_sorted(entries_to_move);
+        new_leaf.set_permutation(new_perm);
+
+        // Update old leaf's permutation
+        let mut old_perm_updated = old_perm;
+        old_perm_updated.set_size(split_pos);
+
+        // Publish truncated permutation and unfreeze
+        Self::unfreeze_set_permutation(self, freeze_guard, old_perm_updated);
+
+        // Get split key from new leaf's first entry
+        let split_ikey = new_leaf.ikey(new_perm.get(0));
+
+        (new_leaf, split_ikey, crate::leaf::InsertTarget::Left)
+    }
+
+    unsafe fn split_all_to_right_preallocated(
+        &self,
+        new_leaf: Box<Self>,
+        guard: &seize::LocalGuard<'_>,
+    ) -> (Box<Self>, u64, crate::leaf::InsertTarget) {
+        // Always freeze during split - caller must hold lock
+        let freeze_guard = Self::freeze_permutation(self);
+
+        let old_perm: Permuter24 = freeze_guard.snapshot();
+        let old_size = old_perm.size();
+
+        debug_assert!(old_size > 0, "Cannot split empty leaf");
+
+        // Move all entries to new leaf
+        for i in 0..old_size {
+            let old_slot = old_perm.get(i);
+            let new_slot = i;
+
+            let ikey = self.ikey(old_slot);
+            let keylenx = self.keylenx(old_slot);
+
+            new_leaf.set_ikey(new_slot, ikey);
+            new_leaf.set_keylenx(new_slot, keylenx);
+
+            let old_ptr = self.take_leaf_value_ptr(old_slot);
+            new_leaf.set_leaf_value_ptr(new_slot, old_ptr);
+
+            if keylenx == KSUF_KEYLENX {
+                if let Some(suffix) = self.ksuf(old_slot) {
+                    // SAFETY: new_leaf is freshly allocated and caller holds lock
+                    unsafe { new_leaf.assign_ksuf(new_slot, suffix, guard) };
+                }
+                // SAFETY: caller holds lock
+                unsafe { self.clear_ksuf(old_slot, guard) };
+            }
+        }
+
+        // New leaf gets all entries
+        let new_perm = Permuter24::make_sorted(old_size);
+        new_leaf.set_permutation(new_perm);
+
+        // Old leaf becomes empty - unfreeze with empty permutation
+        Self::unfreeze_set_permutation(self, freeze_guard, Permuter24::empty());
+
+        // Split key is first key of new leaf
+        let split_ikey = new_leaf.ikey(new_perm.get(0));
+
+        (new_leaf, split_ikey, crate::leaf::InsertTarget::Right)
+    }
+
+    #[inline(always)]
+    fn freeze_permutation(&self) -> Self::FreezeGuard<'_> {
+        Self::freeze_permutation(self)
+    }
+
+    #[inline(always)]
+    fn unfreeze_set_permutation(&self, guard: Self::FreezeGuard<'_>, perm: Self::Perm) {
+        Self::unfreeze_set_permutation(self, guard, perm);
+    }
+
+    #[inline(always)]
+    fn is_permutation_frozen(&self) -> bool {
+        crate::freeze24::Freeze24Utils::is_frozen(self.permutation_raw())
+    }
+
+    #[inline(always)]
+    unsafe fn link_sibling(&self, new_sibling: *mut Self) {
+        // Use existing trait methods
+        let old_next = <Self as crate::leaf_trait::TreeLeafNode<S>>::safe_next(self);
+        <Self as crate::leaf_trait::TreeLeafNode<S>>::set_next(self, new_sibling);
+        // SAFETY: Caller guarantees new_sibling is valid
+        unsafe {
+            (*new_sibling).set_prev(StdPtr::from_ref(self).cast_mut());
+            (*new_sibling).set_next(old_next);
+            if !old_next.is_null() {
+                (*old_next).set_prev(new_sibling);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn ksuf(&self, slot: usize) -> Option<&[u8]> {
+        Self::ksuf(self, slot)
+    }
+
+    #[inline(always)]
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>) {
+        // SAFETY: Caller guarantees preconditions
+        unsafe { Self::assign_ksuf(self, slot, suffix, guard) }
+    }
+
+    #[inline(always)]
+    unsafe fn clear_ksuf(&self, slot: usize, guard: &seize::LocalGuard<'_>) {
+        // SAFETY: Caller guarantees preconditions
+        unsafe { Self::clear_ksuf(self, slot, guard) }
+    }
+
+    #[inline(always)]
+    fn take_leaf_value_ptr(&self, slot: usize) -> *mut u8 {
+        Self::take_leaf_value_ptr(self, slot)
+    }
+
+    // ========================================================================
+    // Suffix Comparison Operations (Trait Delegates)
+    // ========================================================================
+
+    #[inline(always)]
+    fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
+        Self::ksuf_equals(self, slot, suffix)
+    }
+
+    #[inline(always)]
+    fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering> {
+        Self::ksuf_compare(self, slot, suffix)
+    }
+
+    #[inline(always)]
+    fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
+        Self::ksuf_or_empty(self, slot)
+    }
+
+    #[inline(always)]
+    fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
+        Self::ksuf_matches(self, slot, ikey, suffix)
+    }
+
+    #[inline(always)]
+    fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
+        Self::ksuf_match_result(self, slot, keylenx, suffix)
+    }
+}
+
+// =============================================================================
+// Drop Implementation
+// =============================================================================
+
+impl<S: ValueSlot> Drop for LeafNode24<S> {
+    /// Drop the leaf node, cleaning up stored values and suffix bag.
+    ///
+    /// This iterates through all slots and drops any non-null value pointers
+    /// that are not layer pointers (keylenx < `LAYER_KEYLENX`). Layer pointers
+    /// are owned by the tree and cleaned up during tree teardown.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "slot iterates 0..WIDTH_24 which matches array size"
+    )]
+    fn drop(&mut self) {
+        for slot in 0..WIDTH_24 {
+            let ptr: *mut u8 = self.leaf_values[slot].load(RELAXED);
+            if ptr.is_null() {
+                continue;
+            }
+
+            let keylenx: u8 = self.keylenx[slot].load(RELAXED);
+            if keylenx < LAYER_KEYLENX {
+                // SAFETY: ptr came from the slot type's storage method
+                // (Arc::into_raw for LeafValue, Box::into_raw for LeafValueIndex).
+                // We only cleanup non-layer slots (keylenx < LAYER_KEYLENX).
+                unsafe {
+                    S::cleanup_value_ptr(ptr);
+                }
+            }
+            // Note: Layer pointers are owned by the tree and cleaned up
+            // during tree teardown, not here.
+        }
+
+        let ksuf_ptr: *mut SuffixBag<WIDTH_24> = self.ksuf.load(RELAXED);
+        if !ksuf_ptr.is_null() {
+            // SAFETY: ksuf_ptr came from Box::into_raw in assign_ksuf.
+            unsafe {
+                drop(Box::from_raw(ksuf_ptr));
+            }
+        }
     }
 }
 
