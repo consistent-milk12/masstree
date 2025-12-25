@@ -29,6 +29,9 @@ pub use optimistic::{
     CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters, LOCKED_INSERT_COUNT,
     SEARCH_NOT_FOUND_COUNT, SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters,
     get_debug_counters, reset_debug_counters,
+    // Parent-wait instrumentation for variance analysis
+    PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
+    PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, get_parent_wait_stats,
 };
 
 // ============================================================================
@@ -304,6 +307,11 @@ impl<V: Send + Sync + 'static> Default for MassTree<V> {
 #[expect(clippy::type_complexity, reason = "doesn't matter in tests")]
 mod tests {
     use super::*;
+    use crate::nodeversion::NodeVersion;
+    use crate::value::LeafValue;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
 
     // ========================================================================
     // Send/Sync Verification
@@ -343,6 +351,131 @@ mod tests {
         assert!(tree.get(b"hello").is_none());
         assert!(tree.get(b"").is_none());
         assert!(tree.get(b"any key").is_none());
+    }
+
+    #[test]
+    fn concurrent_insert_then_get_does_not_lose_key() {
+        // This reproduces the "insert returns Ok(None) but immediate get returns None" bug.
+        // If it fails, we also scan the leaf B-link chain to determine whether the key
+        // is truly missing from all leaves, or only unreachable via the normal get path.
+        fn scan_leaf_chain_contains(tree: &MassTree24<u64>, ikey: u64) -> bool {
+            use crate::leaf24::LeafNode24;
+            use crate::internode::InternodeNode;
+
+            let _guard = tree.guard();
+
+            // Descend to the leftmost leaf from the current root.
+            let mut node: *mut u8 = tree.root_ptr.load(std::sync::atomic::Ordering::Acquire);
+            let mut depth_limit: usize = 0;
+            while !node.is_null() {
+                depth_limit += 1;
+                assert!(depth_limit < 128, "unexpected depth while scanning");
+
+                // SAFETY: `node` is a tree node protected by the guard and root pointer.
+                let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+                let _ = version.stable();
+
+                if version.is_leaf() {
+                    break;
+                }
+
+                // SAFETY: `!is_leaf()` means this is an internode.
+                let inode: &InternodeNode<LeafValue<u64>, 15> =
+                    unsafe { &*(node.cast::<InternodeNode<LeafValue<u64>, 15>>()) };
+                node = inode.child(0);
+            }
+
+            if node.is_null() {
+                return false;
+            }
+
+            // SAFETY: node points at a leaf.
+            let mut leaf_ptr: *mut LeafNode24<LeafValue<u64>> = node.cast();
+            let mut leaf_steps: usize = 0;
+
+            while !leaf_ptr.is_null() {
+                leaf_steps += 1;
+                assert!(leaf_steps < 100_000, "possible leaf chain cycle");
+
+                // SAFETY: leaf_ptr is protected by the guard and leaf nodes are never freed
+                // while guarded.
+                let leaf: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_ptr };
+                let _ = leaf.version().stable();
+
+                let perm = leaf.permutation_wait();
+                for i in 0..perm.size() {
+                    let slot = perm.get(i);
+                    if leaf.ikey(slot) == ikey && leaf.keylenx(slot) == 8 {
+                        let ptr = leaf.leaf_value_ptr(slot);
+                        if !ptr.is_null() {
+                            return true;
+                        }
+                    }
+                }
+
+                leaf_ptr = leaf.safe_next();
+            }
+
+            false
+        }
+
+        const NUM_THREADS: usize = 4;
+        const OPS_PER_THREAD: usize = 500;
+
+        for run in 0..30 {
+            let tree = Arc::new(MassTree24::<u64>::new());
+            let missing_key = Arc::new(AtomicU64::new(u64::MAX));
+            let missing_thread = Arc::new(AtomicUsize::new(usize::MAX));
+            let missing_i = Arc::new(AtomicUsize::new(usize::MAX));
+
+            let handles: Vec<_> = (0..NUM_THREADS)
+                .map(|t| {
+                    let tree = Arc::clone(&tree);
+                    let missing_key = Arc::clone(&missing_key);
+                    let missing_thread = Arc::clone(&missing_thread);
+                    let missing_i = Arc::clone(&missing_i);
+                    thread::spawn(move || {
+                        let guard = tree.guard();
+                        for i in 0..OPS_PER_THREAD {
+                            let key_val: u64 = (t * 10_000 + i) as u64;
+                            let key = key_val.to_be_bytes();
+
+                            let _ = tree.insert_with_guard(&key, key_val, &guard);
+
+                            if tree.get_with_guard(&key, &guard).is_none() {
+                                let _ = missing_key.compare_exchange(
+                                    u64::MAX,
+                                    key_val,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                );
+                                missing_thread.store(t, Ordering::SeqCst);
+                                missing_i.store(i, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            let key_val = missing_key.load(Ordering::SeqCst);
+            if key_val != u64::MAX {
+                let t = missing_thread.load(Ordering::SeqCst);
+                let i = missing_i.load(Ordering::SeqCst);
+
+                let in_leaf_chain = scan_leaf_chain_contains(&tree, key_val);
+                panic!(
+                    "run {run}: insert/get lost key: t={t} i={i} key=0x{key_val:016x} tree.len()={} scan_leaf_chain_contains={in_leaf_chain}",
+                    tree.len(),
+                );
+            }
+
+            assert_eq!(tree.len(), NUM_THREADS * OPS_PER_THREAD);
+        }
     }
 
     // ========================================================================

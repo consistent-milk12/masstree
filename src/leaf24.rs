@@ -1215,11 +1215,13 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_leaf: Box<Self>,
         guard: &seize::LocalGuard<'_>,
     ) -> (Box<Self>, u64, crate::value::InsertTarget) {
-        // CRITICAL: Copy locked version from left leaf to new right leaf.
-        // This keeps the new leaf locked until split propagation completes,
-        // preventing other threads from splitting it while parent is NULL.
-        // Matches C++ behavior: child->assign_version(*n_) in masstree_split.hh:198.
-        new_leaf.version.copy_locked_from(&self.version);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            self_ptr = ?std::ptr::from_ref(self),
+            new_leaf_ptr = ?std::ptr::from_ref(new_leaf.as_ref()),
+            split_pos = split_pos,
+            "split_into_preallocated: START"
+        );
 
         // Always freeze during split - caller must hold lock
         let freeze_guard = Self::freeze_permutation(self);
@@ -1275,6 +1277,17 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         // Get split key from new leaf's first entry
         let split_ikey = new_leaf.ikey(new_perm.get(0));
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            self_ptr = ?std::ptr::from_ref(self),
+            new_leaf_ptr = ?std::ptr::from_ref(new_leaf.as_ref()),
+            split_ikey = format_args!("{:016x}", split_ikey),
+            entries_moved = entries_to_move,
+            old_size_after = split_pos,
+            new_size = new_perm.size(),
+            "split_into_preallocated: DONE"
+        );
+
         (new_leaf, split_ikey, crate::value::InsertTarget::Left)
     }
 
@@ -1283,11 +1296,6 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_leaf: Box<Self>,
         guard: &seize::LocalGuard<'_>,
     ) -> (Box<Self>, u64, crate::value::InsertTarget) {
-        // CRITICAL: Copy locked version from left leaf to new right leaf.
-        // This keeps the new leaf locked until split propagation completes.
-        // Matches C++ behavior: child->assign_version(*n_) in masstree_split.hh:198.
-        new_leaf.version.copy_locked_from(&self.version);
-
         // Always freeze during split - caller must hold lock
         let freeze_guard = Self::freeze_permutation(self);
 
@@ -1350,17 +1358,45 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 
     #[inline(always)]
     unsafe fn link_sibling(&self, new_sibling: *mut Self) {
-        // Use existing trait methods
+        // CRITICAL: Match C++ btree_leaflink.hh ordering:
+        // 1. Set up new_sibling's pointers FIRST
+        // 2. Fence to ensure visibility
+        // 3. Update self.next LAST
+        //
+        // This prevents readers from following self.next to new_sibling
+        // before new_sibling's pointers are initialized.
         let old_next = <Self as crate::leaf_trait::TreeLeafNode<S>>::safe_next(self);
-        <Self as crate::leaf_trait::TreeLeafNode<S>>::set_next(self, new_sibling);
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            self_ptr = ?StdPtr::from_ref(self),
+            new_sibling = ?new_sibling,
+            old_next = ?old_next,
+            "link_sibling: START"
+        );
+
         // SAFETY: Caller guarantees new_sibling is valid
         unsafe {
+            // Step 1: Set up new_sibling's pointers
             (*new_sibling).set_prev(StdPtr::from_ref(self).cast_mut());
             (*new_sibling).set_next(old_next);
             if !old_next.is_null() {
                 (*old_next).set_prev(new_sibling);
             }
         }
+
+        // Step 2: Fence ensures new_sibling is fully visible before linking
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+
+        // Step 3: Update self.next LAST - makes new_sibling reachable
+        <Self as crate::leaf_trait::TreeLeafNode<S>>::set_next(self, new_sibling);
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            self_ptr = ?StdPtr::from_ref(self),
+            new_sibling = ?new_sibling,
+            "link_sibling: DONE"
+        );
     }
 
     #[inline(always)]

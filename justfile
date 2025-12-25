@@ -47,6 +47,30 @@ next-trace:
         echo "Logs written to logs/masstree.json"
     fi
 
+# Run lock contention profiler with tracing (writes to logs/lock_contention.log)
+# Usage: just profile-locks [RUST_LOG=masstree=warn]
+profile-locks LOG_LEVEL="masstree=warn":
+    #!/usr/bin/env bash
+    rm -f logs/lock_contention.log
+    echo "Running lock contention profiler..."
+    echo "Log level: {{LOG_LEVEL}}"
+    RUST_LOG="{{LOG_LEVEL}}" cargo run --release --features "mimalloc,tracing" --bin lock_contention
+    if [ -f logs/lock_contention.log ]; then
+        echo ""
+        echo "=== SLOW Operations Summary ==="
+        grep -c "SLOW" logs/lock_contention.log || echo "0 slow operations"
+        echo ""
+        echo "=== Sample of slow operations ==="
+        grep "SLOW" logs/lock_contention.log | head -20 || true
+        echo ""
+        echo "Full logs: logs/lock_contention.log"
+        echo "Filter: grep SLOW logs/lock_contention.log"
+    fi
+
+# Run lock contention profiler without tracing (fast, stats only)
+profile-locks-fast:
+    cargo run --release --features mimalloc --bin lock_contention
+
 # Run a specific test with nextest, tracing, and mimalloc
 next-one TEST:
     cargo nextest run --no-fail-fast --features "tracing,mimalloc" {{TEST}}

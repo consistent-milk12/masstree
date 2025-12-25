@@ -165,3 +165,16 @@ strip = "none"
 [[bench]]
 name = "concurrent_maps24"
 harness = false
+
+
+[[bench]]
+name = "core_benches"
+harness = false
+
+# =============================================================================
+# Profiling Binaries
+# =============================================================================
+
+[[bin]]
+name = "lock_contention"
+path = "bin/lock_contention.rs"

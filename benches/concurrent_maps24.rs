@@ -24,6 +24,7 @@ mod bench_utils;
 
 use bench_utils::{keys, keys_shared_prefix, uniform_indices};
 use crossbeam_skiplist::SkipMap;
+use dashmap::DashMap;
 use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::MassTree24;
@@ -59,6 +60,14 @@ fn setup_skipmap<const K: usize>(keys: &[[u8; K]]) -> SkipMap<[u8; K], u64> {
 
 fn setup_indexset<const K: usize>(keys: &[[u8; K]]) -> IndexSetBTreeMap<[u8; K], u64> {
     let map = IndexSetBTreeMap::new();
+    for (i, key) in keys.iter().enumerate() {
+        map.insert(*key, i as u64);
+    }
+    map
+}
+
+fn setup_dashmap<const K: usize>(keys: &[[u8; K]]) -> DashMap<[u8; K], u64> {
+    let map = DashMap::new();
     for (i, key) in keys.iter().enumerate() {
         map.insert(*key, i as u64);
     }
@@ -1693,5 +1702,238 @@ mod concurrent_reads_long_keys_shared_prefix {
                 h.join().unwrap();
             }
         });
+    }
+}
+
+// =============================================================================
+// 11: RANDOM-ACCESS READ - True random access pattern (fair hash map comparison)
+//
+// This benchmark uses pre-computed random indices to ensure truly random access
+// patterns, making it a fair comparison between ordered structures (masstree,
+// skiplist) and hash-based structures (dashmap).
+//
+// The 10a/10b benchmarks use sequential-ish access which may benefit ordered
+// structures due to cache locality. This benchmark eliminates that advantage.
+// =============================================================================
+
+#[divan::bench_group(name = "11a_random_read_8B")]
+mod random_read_8b {
+    use super::*;
+
+    const N: usize = 1_000_000;
+    const OPS_PER_THREAD: usize = 100_000;
+
+    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    fn masstree24(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<8>(N));
+        let tree = Arc::new(setup_masstree24::<8>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(&tree);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        thread::spawn(move || {
+                            let guard = tree.guard();
+                            let mut sum = 0u64;
+                            let start = t * OPS_PER_THREAD;
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[start + i];
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum += *v;
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    fn dashmap(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<8>(N));
+        let map = Arc::new(setup_dashmap::<8>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let start = t * OPS_PER_THREAD;
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[start + i];
+                                if let Some(v) = map.get(&keys[idx]) {
+                                    sum += *v;
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    fn skipmap(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<8>(N));
+        let map = Arc::new(setup_skipmap::<8>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let start = t * OPS_PER_THREAD;
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[start + i];
+                                if let Some(e) = map.get(&keys[idx]) {
+                                    sum += *e.value();
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+#[divan::bench_group(name = "11b_random_read_32B")]
+mod random_read_32b {
+    use super::*;
+
+    const N: usize = 1_000_000;
+    const OPS_PER_THREAD: usize = 100_000;
+
+    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    fn masstree24(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<32>(N));
+        let tree = Arc::new(setup_masstree24::<32>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(&tree);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        thread::spawn(move || {
+                            let guard = tree.guard();
+                            let mut sum = 0u64;
+                            let start = t * OPS_PER_THREAD;
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[start + i];
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum += *v;
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    fn dashmap(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<32>(N));
+        let map = Arc::new(setup_dashmap::<32>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let start = t * OPS_PER_THREAD;
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[start + i];
+                                if let Some(v) = map.get(&keys[idx]) {
+                                    sum += *v;
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    fn skipmap(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<32>(N));
+        let map = Arc::new(setup_skipmap::<32>(keys.as_ref()));
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let start = t * OPS_PER_THREAD;
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[start + i];
+                                if let Some(e) = map.get(&keys[idx]) {
+                                    sum += *e.value();
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
     }
 }

@@ -401,18 +401,35 @@ impl NodeVersion {
         loop {
             // Use Relaxed ordering for spin loop efficiency (saves ~1 cycle/spin on ARM).
             // We only need Acquire semantics when we actually succeed.
-            let value = self.value.load(Ordering::Relaxed);
+            let value: u32 = self.value.load(Ordering::Relaxed);
 
             if (value & DIRTY_MASK) == 0 {
-                // Acquire fence ensures subsequent reads see modifications made
-                // by the writer who cleared the dirty bits.
-                fence(Ordering::Acquire);
+                // Upgrade to an Acquire load on the success path.
+                //
+                // This avoids relying on fence+relaxed subtleties and ensures we establish
+                // a proper synchronizes-with relationship with the writer's Release store
+                // in `LockGuard::drop()` on the same atomic.
+                let acquired: u32 = self.value.load(Ordering::Acquire);
+                if (acquired & DIRTY_MASK) != 0 || acquired != value {
+                    backoff.spin();
+                    #[cfg(feature = "tracing")]
+                    {
+                        spins += 1;
+                    }
+                    continue;
+                }
 
                 #[cfg(feature = "tracing")]
                 {
                     let elapsed = start.elapsed();
-                    if elapsed > Duration::from_millis(5) {
-                        eprintln!("[SLOW STABLE] took {elapsed:?} spins={spins}");
+                    if elapsed > Duration::from_millis(1) || spins > 100 {
+                        tracing::warn!(
+                            version_ptr = ?std::ptr::from_ref(self),
+                            elapsed_us = elapsed.as_micros() as u64,
+                            spins = spins,
+                            final_value = format_args!("{:#010x}", value),
+                            "SLOW_STABLE: stable() took >1ms waiting for dirty bits to clear"
+                        );
                     }
                 }
 
@@ -581,6 +598,9 @@ impl NodeVersion {
         #[cfg(feature = "tracing")]
         let mut spins: u32 = 0;
 
+        #[cfg(feature = "tracing")]
+        let mut contended = false;
+
         loop {
             let value: u32 = self.value.load(Ordering::Relaxed);
 
@@ -605,8 +625,14 @@ impl NodeVersion {
                     #[cfg(feature = "tracing")]
                     {
                         let elapsed = start.elapsed();
-                        if elapsed > Duration::from_millis(5) {
-                            eprintln!("[SLOW LOCK] took {elapsed:?} spins={spins}");
+                        if elapsed > Duration::from_millis(1) || spins > 100 {
+                            tracing::warn!(
+                                version_ptr = ?std::ptr::from_ref(self),
+                                elapsed_us = elapsed.as_micros() as u64,
+                                spins = spins,
+                                contended = contended,
+                                "SLOW_LOCK: lock() took >1ms"
+                            );
                         }
                     }
 
@@ -616,6 +642,11 @@ impl NodeVersion {
                         locked_value: locked,
                         _marker: PhantomData,
                     };
+                }
+            } else {
+                #[cfg(feature = "tracing")]
+                {
+                    contended = true;
                 }
             }
 
@@ -725,15 +756,41 @@ impl NodeVersion {
     pub fn lock_with_yield(&self) -> LockGuard<'_> {
         const SPINS_BEFORE_YIELD: u32 = 4;
 
+        #[cfg(feature = "tracing")]
+        let start = Instant::now();
+
+        #[cfg(feature = "tracing")]
+        let mut total_spins: u32 = 0;
+
+        #[cfg(feature = "tracing")]
+        let mut yields: u32 = 0;
+
         let mut spin_count: u32 = 0;
 
         loop {
             // Try to acquire the lock
             if let Some(guard) = self.try_lock() {
+                #[cfg(feature = "tracing")]
+                {
+                    let elapsed = start.elapsed();
+                    if elapsed > Duration::from_millis(1) || total_spins > 100 || yields > 10 {
+                        tracing::warn!(
+                            version_ptr = ?std::ptr::from_ref(self),
+                            elapsed_us = elapsed.as_micros() as u64,
+                            total_spins = total_spins,
+                            yields = yields,
+                            "SLOW_LOCK_YIELD: lock_with_yield() took >1ms"
+                        );
+                    }
+                }
                 return guard;
             }
 
             spin_count += 1;
+            #[cfg(feature = "tracing")]
+            {
+                total_spins += 1;
+            }
 
             if spin_count < SPINS_BEFORE_YIELD {
                 // Brief spin before yielding
@@ -744,6 +801,10 @@ impl NodeVersion {
                 // Yield CPU to other threads - reduces lock convoy
                 std::thread::yield_now();
                 spin_count = 0; // Reset for next cycle
+                #[cfg(feature = "tracing")]
+                {
+                    yields += 1;
+                }
             }
         }
     }
@@ -774,68 +835,6 @@ impl NodeVersion {
     #[inline(always)]
     pub fn mark_nonroot(&self) {
         self.value.fetch_and(!ROOT_BIT, Ordering::Release);
-    }
-
-    // ========================================================================
-    // Split-Locked Creation (C++ help-along protocol)
-    // ========================================================================
-
-    /// Copy version from another node INCLUDING the lock bit.
-    ///
-    /// This is used during splits to create a new sibling that starts locked.
-    /// Matches C++ behavior: `child->assign_version(*n_)` in masstree_split.hh:198.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that:
-    /// 1. The source node is locked (has LOCK_BIT set)
-    /// 2. The caller will eventually call `unlock_split_sibling()` on this node
-    ///
-    /// # Memory Ordering
-    ///
-    /// Uses Release ordering to ensure the locked state is visible to other threads.
-    #[inline]
-    pub fn copy_locked_from(&self, other: &Self) {
-        let other_value = other.value.load(Ordering::Acquire);
-        debug_assert!(
-            (other_value & LOCK_BIT) != 0,
-            "copy_locked_from: source must be locked"
-        );
-        // Copy the full version value including LOCK_BIT and INSERTING_BIT
-        self.value.store(other_value, Ordering::Release);
-    }
-
-    /// Unlock a split sibling that was created with `copy_locked_from`.
-    ///
-    /// This performs the same unlock logic as `LockGuard::drop()` but without
-    /// requiring a guard. Used at the end of split propagation to unlock the
-    /// right sibling that was kept locked during propagation.
-    ///
-    /// # Memory Ordering
-    ///
-    /// Uses Release ordering to ensure all modifications made while locked
-    /// are visible to subsequent readers.
-    ///
-    /// # Panics
-    ///
-    /// Debug-asserts that the node is currently locked.
-    #[inline]
-    pub fn unlock_split_sibling(&self) {
-        let locked_value = self.value.load(Ordering::Relaxed);
-        debug_assert!(
-            (locked_value & LOCK_BIT) != 0,
-            "unlock_split_sibling: node must be locked"
-        );
-
-        // Same logic as LockGuard::drop()
-        let new_value: u32 = if locked_value & SPLITTING_BIT != 0 {
-            (locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK
-        } else {
-            // INSERTING_BIT should be set from copy_locked_from
-            (locked_value + ((locked_value & INSERTING_BIT) << 2)) & UNLOCK_MASK
-        };
-
-        self.value.store(new_value, Ordering::Release);
     }
 }
 
@@ -900,25 +899,25 @@ impl Drop for SingleThreadedLockGuard<'_> {
 impl SingleThreadedLockGuard<'_> {
     /// Mark the node as being inserted into (no-op, for API compatibility).
     #[inline(always)]
-    pub fn mark_insert(&mut self) {
+    pub const fn mark_insert(&mut self) {
         // No-op - version increments on drop anyway
     }
 
     /// Mark the node as being split.
     #[inline(always)]
-    pub fn mark_split(&mut self) {
+    pub const fn mark_split(&mut self) {
         self.version.value |= SPLITTING_BIT;
     }
 
     /// Mark the node as deleted.
     #[inline(always)]
-    pub fn mark_deleted(&mut self) {
+    pub const fn mark_deleted(&mut self) {
         self.version.value |= DELETED_BIT | SPLITTING_BIT;
     }
 
     /// Clear the root bit.
     #[inline(always)]
-    pub fn mark_nonroot(&mut self) {
+    pub const fn mark_nonroot(&mut self) {
         self.version.value &= !ROOT_BIT;
     }
 }
@@ -975,21 +974,20 @@ impl SingleThreadedNodeVersion {
     }
 
     /// Acquire the "lock" (no-op, returns guard immediately).
-    #[must_use]
     #[inline(always)]
-    pub fn lock(&mut self) -> SingleThreadedLockGuard<'_> {
+    pub const fn lock(&mut self) -> SingleThreadedLockGuard<'_> {
         SingleThreadedLockGuard { version: self }
     }
 
     /// Mark the node as a root.
     #[inline(always)]
-    pub fn mark_root(&mut self) {
+    pub const fn mark_root(&mut self) {
         self.value |= ROOT_BIT;
     }
 
     /// Clear the root bit.
     #[inline(always)]
-    pub fn mark_nonroot(&mut self) {
+    pub const fn mark_nonroot(&mut self) {
         self.value &= !ROOT_BIT;
     }
 }

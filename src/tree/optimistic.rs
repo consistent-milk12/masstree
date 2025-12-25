@@ -35,6 +35,25 @@ pub static ADVANCE_BLINK_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Atomic counter for keys inserted into wrong leaf.
 pub static WRONG_LEAF_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
 
+// ============================================================================
+// Parent-Wait Instrumentation (for variance analysis)
+// ============================================================================
+
+/// Number of times we entered the parent-wait loop (NULL parent on non-layer-root).
+pub static PARENT_WAIT_HIT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Total spin iterations across all parent-wait events.
+pub static PARENT_WAIT_TOTAL_SPINS: AtomicU64 = AtomicU64::new(0);
+
+/// Maximum spins in any single parent-wait event.
+pub static PARENT_WAIT_MAX_SPINS: AtomicU64 = AtomicU64::new(0);
+
+/// Total nanoseconds spent in parent-wait loops.
+pub static PARENT_WAIT_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Maximum nanoseconds in any single parent-wait event.
+pub static PARENT_WAIT_MAX_NS: AtomicU64 = AtomicU64::new(0);
+
 /// Reset debug counters (call before test).
 pub fn reset_debug_counters() {
     BLINK_SHOULD_FOLLOW_COUNT.store(0, Relaxed);
@@ -46,6 +65,11 @@ pub fn reset_debug_counters() {
     SPLIT_COUNT.store(0, Relaxed);
     ADVANCE_BLINK_COUNT.store(0, Relaxed);
     WRONG_LEAF_INSERT_COUNT.store(0, Relaxed);
+    PARENT_WAIT_HIT_COUNT.store(0, Relaxed);
+    PARENT_WAIT_TOTAL_SPINS.store(0, Relaxed);
+    PARENT_WAIT_MAX_SPINS.store(0, Relaxed);
+    PARENT_WAIT_TOTAL_NS.store(0, Relaxed);
+    PARENT_WAIT_MAX_NS.store(0, Relaxed);
 }
 
 /// Debug counter values.
@@ -69,6 +93,16 @@ pub struct DebugCounters {
     pub advance_blink: u64,
     /// Keys inserted into wrong leaf
     pub wrong_leaf_insert: u64,
+    /// Parent-wait loop hits (NULL parent on non-layer-root)
+    pub parent_wait_hits: u64,
+    /// Total spins in parent-wait loops
+    pub parent_wait_total_spins: u64,
+    /// Max spins in single parent-wait
+    pub parent_wait_max_spins: u64,
+    /// Total ns in parent-wait loops
+    pub parent_wait_total_ns: u64,
+    /// Max ns in single parent-wait
+    pub parent_wait_max_ns: u64,
 }
 
 /// Get debug counter values (legacy).
@@ -91,5 +125,56 @@ pub fn get_all_debug_counters() -> DebugCounters {
         split: SPLIT_COUNT.load(Relaxed),
         advance_blink: ADVANCE_BLINK_COUNT.load(Relaxed),
         wrong_leaf_insert: WRONG_LEAF_INSERT_COUNT.load(Relaxed),
+        parent_wait_hits: PARENT_WAIT_HIT_COUNT.load(Relaxed),
+        parent_wait_total_spins: PARENT_WAIT_TOTAL_SPINS.load(Relaxed),
+        parent_wait_max_spins: PARENT_WAIT_MAX_SPINS.load(Relaxed),
+        parent_wait_total_ns: PARENT_WAIT_TOTAL_NS.load(Relaxed),
+        parent_wait_max_ns: PARENT_WAIT_MAX_NS.load(Relaxed),
+    }
+}
+
+/// Get parent-wait statistics for variance analysis.
+#[derive(Debug, Clone, Copy)]
+pub struct ParentWaitStats {
+    /// Number of parent-wait events
+    pub hits: u64,
+    /// Total spin iterations
+    pub total_spins: u64,
+    /// Max spins in single event
+    pub max_spins: u64,
+    /// Average spins per event (0 if no hits)
+    pub avg_spins: f64,
+    /// Total wait time in microseconds
+    pub total_us: f64,
+    /// Max wait time in microseconds
+    pub max_us: f64,
+    /// Average wait time per event in microseconds
+    pub avg_us: f64,
+}
+
+/// Get parent-wait statistics summary.
+pub fn get_parent_wait_stats() -> ParentWaitStats {
+    let hits = PARENT_WAIT_HIT_COUNT.load(Relaxed);
+    let total_spins = PARENT_WAIT_TOTAL_SPINS.load(Relaxed);
+    let max_spins = PARENT_WAIT_MAX_SPINS.load(Relaxed);
+    let total_ns = PARENT_WAIT_TOTAL_NS.load(Relaxed);
+    let max_ns = PARENT_WAIT_MAX_NS.load(Relaxed);
+
+    ParentWaitStats {
+        hits,
+        total_spins,
+        max_spins,
+        avg_spins: if hits > 0 {
+            total_spins as f64 / hits as f64
+        } else {
+            0.0
+        },
+        total_us: total_ns as f64 / 1000.0,
+        max_us: max_ns as f64 / 1000.0,
+        avg_us: if hits > 0 {
+            (total_ns as f64 / hits as f64) / 1000.0
+        } else {
+            0.0
+        },
     }
 }

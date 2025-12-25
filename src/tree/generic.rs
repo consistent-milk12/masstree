@@ -26,6 +26,14 @@ where
     L: LayerCapableLeaf<V>,
     A: NodeAllocatorGeneric<LeafValue<V>, L>,
 {
+    #[inline]
+    fn cas_insert_enabled() -> bool {
+        use std::sync::OnceLock;
+
+        static DISABLE_CAS: OnceLock<bool> = OnceLock::new();
+        !*DISABLE_CAS.get_or_init(|| std::env::var_os("MASSTREE_DISABLE_CAS").is_some())
+    }
+
     /// Create a new empty `MassTreeGeneric` with the given allocator.
     ///
     /// The tree starts with a single empty leaf as root.
@@ -374,6 +382,15 @@ where
         use crate::leaf24::LAYER_KEYLENX;
         use crate::link::{is_marked, unmark_ptr};
 
+        #[cfg(feature = "tracing")]
+        let target_ikey_for_trace: u64 = key.ikey();
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            ikey = format_args!("{:016x}", target_ikey_for_trace),
+            "get: START"
+        );
+
         // Start at tree root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
 
@@ -452,8 +469,15 @@ where
                         }
                     }
 
-                    // Validate version AFTER all reads
-                    if leaf.version().has_changed(version) {
+                    // Validate version AFTER all reads.
+                    //
+                    // IMPORTANT: Use `has_changed_or_locked` rather than `has_changed`.
+                    // With the "always-dirty-on-lock" strategy, a writer can acquire the lock
+                    // (setting `LOCK_BIT | INSERTING_BIT`) after our initial `stable()` read but
+                    // before this validation. `has_changed()` intentionally ignores those bits,
+                    // which could allow an optimistic reader to validate successfully while a
+                    // writer is actively mutating the node.
+                    if leaf.version().has_changed_or_locked(version) {
                         // Version changed - follow B-link chain if split occurred
                         let (advanced, new_version) =
                             self.advance_to_key_generic(leaf, key, version, guard);
@@ -514,12 +538,25 @@ where
                                 next_bound = next_bound,
                                 "get: NotFound but ikey >= next_bound; following B-link"
                             );
+                            crate::tree::optimistic::BLINK_SHOULD_FOLLOW_COUNT
+                                .fetch_add(1, AtomicOrdering::Relaxed);
                             leaf_ptr = next_ptr;
                             continue 'leaf_loop;
                         }
                     }
 
                     // Truly not found
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        ikey = format_args!("{:016x}", target_ikey),
+                        leaf_ptr = ?std::ptr::from_ref(leaf),
+                        perm_size = perm.size(),
+                        next_ptr = ?next_ptr,
+                        is_marked = is_marked(next_raw),
+                        "get: NOT_FOUND"
+                    );
+                    crate::tree::optimistic::SEARCH_NOT_FOUND_COUNT
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                     return None;
                 }
             }
@@ -593,7 +630,7 @@ where
                 continue;
             }
 
-            if inode.version().has_changed(v) {
+            if inode.version().has_changed_or_locked(v) {
                 if inode.version().has_split(v) {
                     node = start;
                     continue;
@@ -625,6 +662,7 @@ where
     ) -> CasInsertResultGeneric<V> {
         use crate::leaf_trait::TreePermutation;
         use crate::link::{is_marked, unmark_ptr};
+        use crate::tree::optimistic::CAS_INSERT_RETRY_COUNT;
         use std::ptr as StdPtr;
 
         let ikey: u64 = key.ikey();
@@ -709,6 +747,7 @@ where
                         .is_err()
                     {
                         let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
 
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
@@ -727,6 +766,7 @@ where
                                 let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
                             }
                         }
+                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -747,6 +787,7 @@ where
                                 let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
                             }
                         }
+                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -758,6 +799,7 @@ where
                     // 12. Verify slot ownership
                     if leaf.load_slot_value(slot) != arc_ptr {
                         let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -773,6 +815,7 @@ where
                                 let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
                             }
                         }
+                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -849,6 +892,7 @@ where
                                 return CasInsertResultGeneric::ContentionFallback;
                             }
 
+                            CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
                             retries += 1;
                             if retries > Self::MAX_CAS_RETRIES_GENERIC {
                                 return CasInsertResultGeneric::ContentionFallback;
@@ -1013,6 +1057,8 @@ where
 
             if key_ikey >= next_bound {
                 // Key belongs in next leaf or further
+                crate::tree::optimistic::ADVANCE_BLINK_COUNT
+                    .fetch_add(1, AtomicOrdering::Relaxed);
                 leaf = next;
                 version = leaf.version().stable();
                 continue;
@@ -1059,6 +1105,8 @@ where
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
+                crate::tree::optimistic::ADVANCE_BLINK_COUNT
+                    .fetch_add(1, AtomicOrdering::Relaxed);
                 leaf = next;
                 continue;
             }
@@ -1127,6 +1175,21 @@ where
         value: Arc<V>,
         guard: &LocalGuard<'_>,
     ) -> Result<Option<Arc<V>>, InsertError> {
+        #[cfg(feature = "tracing")]
+        let ikey_for_trace: u64 = key.ikey();
+
+        #[cfg(feature = "tracing")]
+        let insert_start = std::time::Instant::now();
+
+        #[cfg(feature = "tracing")]
+        let mut retry_count: u32 = 0;
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            ikey = format_args!("{:016x}", ikey_for_trace),
+            "INSERT_START"
+        );
+
         // Track current layer root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
 
@@ -1139,9 +1202,17 @@ where
 
             // Try CAS fast path first (only for simple cases at layer 0)
             // CAS path doesn't handle layers - it always starts from main tree root.
-            if !in_sublayer && !key.has_suffix() {
+            if Self::cas_insert_enabled() && !in_sublayer && !key.has_suffix() {
+                use crate::tree::optimistic::{CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_SUCCESS_COUNT};
+
                 match self.try_cas_insert_generic(key, &value, guard) {
                     CasInsertResultGeneric::Success(old) => {
+                        CAS_INSERT_SUCCESS_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            ikey = format_args!("{:016x}", ikey_for_trace),
+                            "insert: CAS_SUCCESS"
+                        );
                         return Ok(old);
                     }
                     CasInsertResultGeneric::ExistsNeedLock { .. }
@@ -1149,7 +1220,13 @@ where
                     | CasInsertResultGeneric::LayerNeedLock { .. }
                     | CasInsertResultGeneric::Slot0NeedLock
                     | CasInsertResultGeneric::ContentionFallback => {
+                        CAS_INSERT_FALLBACK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
                         // Fall through to locked path
+                        #[cfg(feature = "tracing")]
+                        tracing::trace!(
+                            ikey = format_args!("{:016x}", ikey_for_trace),
+                            "insert: CAS_FALLBACK_TO_LOCKED"
+                        );
                     }
                 }
             }
@@ -1163,7 +1240,75 @@ where
             let leaf: &L = self.advance_to_key_by_bound_generic(leaf, key, guard);
 
             // Lock the leaf
+            #[cfg(feature = "tracing")]
+            let lock_start = std::time::Instant::now();
+
             let mut lock = leaf.version().lock();
+
+            #[cfg(feature = "tracing")]
+            {
+                let lock_elapsed = lock_start.elapsed();
+                if lock_elapsed > std::time::Duration::from_millis(1) {
+                    tracing::warn!(
+                        ikey = format_args!("{:016x}", ikey_for_trace),
+                        leaf_ptr = ?std::ptr::from_ref(leaf),
+                        lock_elapsed_us = lock_elapsed.as_micros() as u64,
+                        retry_count = retry_count,
+                        "SLOW_LEAF_LOCK: acquiring leaf lock took >1ms"
+                    );
+                }
+            }
+
+            // Post-lock membership check (C++ masstree_insert/split pattern):
+            // The key may have moved to a newly-linked right sibling between:
+            // 1) `advance_to_key_by_bound_generic` and
+            // 2) acquiring the lock.
+            //
+            // If we insert into the wrong (left) leaf, the key becomes unreachable via the
+            // normal get path (which only follows B-links to the right).
+            {
+                use crate::link::{is_marked, unmark_ptr};
+
+                let next_raw: *mut L = leaf.next_raw();
+                if is_marked(next_raw) {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        ikey = format_args!("{:016x}", ikey_for_trace),
+                        leaf_ptr = ?std::ptr::from_ref(leaf),
+                        "INSERT_RETRY: leaf marked for split, waiting"
+                    );
+                    leaf.wait_for_split();
+                    drop(lock);
+                    #[cfg(feature = "tracing")]
+                    {
+                        retry_count += 1;
+                    }
+                    continue;
+                }
+
+                let next_ptr: *mut L = unmark_ptr(next_raw);
+                if !next_ptr.is_null() {
+                    // SAFETY: next_ptr is a valid leaf pointer (protected by the guard).
+                    let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+                    if key.ikey() >= next_bound {
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            ikey = format_args!("{:016x}", ikey_for_trace),
+                            leaf_ptr = ?std::ptr::from_ref(leaf),
+                            next_bound = format_args!("{:016x}", next_bound),
+                            "INSERT_RETRY: key moved to next sibling (post-lock check)"
+                        );
+                        crate::tree::optimistic::WRONG_LEAF_INSERT_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        drop(lock);
+                        #[cfg(feature = "tracing")]
+                        {
+                            retry_count += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
 
             // Get permutation (must not be frozen since we hold lock)
             let perm = leaf.permutation();
@@ -1201,6 +1346,8 @@ where
                             });
                         }
 
+                        crate::tree::optimistic::LOCKED_INSERT_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         return Ok(Some(old_arc));
                     }
                     drop(lock);
@@ -1257,14 +1404,27 @@ where
                         // Assign to alternative slot
                         self.assign_slot_generic(leaf, &mut lock, slot, key, &value, guard);
 
-                        // Update permutation with swap logic
+                        // Update permutation so `insert_from_back()` allocates `slot`.
+                        //
+                        // `Permuter24::swap_free_slots` takes absolute positions in the permuter
+                        // (0..=23), not "offsets" into the free region. The free slot returned by
+                        // `back()` lives at position 23, and `back_at_offset(1)` lives at 22.
+                        //
+                        // We swap positions 23 and 22 so the subsequent `insert_from_back()` pulls
+                        // the same `slot` we just populated.
                         let mut new_perm = perm;
-                        new_perm.swap_free_slots(0, 1);
-                        let _ = new_perm.insert_from_back(logical_pos);
+                        new_perm.swap_free_slots(23, 22);
+                        let allocated: usize = new_perm.insert_from_back(logical_pos);
+                        debug_assert_eq!(
+                            allocated, slot,
+                            "slot-0 avoidance allocated unexpected slot"
+                        );
                         leaf.set_permutation(new_perm);
 
                         drop(lock);
                         self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                        crate::tree::optimistic::LOCKED_INSERT_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         return Ok(None);
                     }
 
@@ -1277,6 +1437,8 @@ where
                     drop(lock);
 
                     self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                    crate::tree::optimistic::LOCKED_INSERT_COUNT
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                     return Ok(None);
                 }
 
@@ -1347,6 +1509,8 @@ where
                     drop(lock);
                     self.count.fetch_add(1, AtomicOrdering::Relaxed);
 
+                    crate::tree::optimistic::LOCKED_INSERT_COUNT
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                     return Ok(None);
                 }
             }
@@ -1430,7 +1594,19 @@ where
         ikey: u64,
         guard: &LocalGuard<'_>,
     ) -> Result<(), InsertError> {
+        #[cfg(feature = "tracing")]
+        let split_start = std::time::Instant::now();
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            left_leaf_ptr = ?left_leaf_ptr,
+            ikey = format_args!("{:016x}", ikey),
+            logical_pos = logical_pos,
+            "SPLIT_START: beginning leaf split"
+        );
+
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
+        crate::tree::optimistic::SPLIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
 
         // Calculate split point
         let split_point = left_leaf
@@ -1463,22 +1639,51 @@ where
         // will see NULL parent and wait in propagate_split_generic.
         unsafe { left_leaf.link_sibling(right_leaf_ptr) };
 
+        #[cfg(feature = "tracing")]
+        let propagate_start = std::time::Instant::now();
+
         // OPTIMIZATION: Release leaf lock BEFORE parent propagation.
         // Once link succeeds, the split is visible via B-link chain.
         // Readers use advance_to_key() to follow B-links.
         drop(lock);
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            left_leaf_ptr = ?left_leaf_ptr,
+            right_leaf_ptr = ?right_leaf_ptr,
+            split_ikey = format_args!("{:016x}", split_ikey),
+            is_layer_root = is_layer_root,
+            "SPLIT_PROPAGATE: leaf lock released, propagating to parent"
+        );
+
         // Propagate split to parent (lock already released)
         // Pass is_layer_root so propagate knows whether to promote or wait.
-        self.propagate_split_generic(
+        let result = self.propagate_split_generic(
             left_leaf_ptr,
             right_leaf_ptr,
             split_ikey,
             is_layer_root,
             guard,
-        )?;
+        );
 
-        Ok(())
+        #[cfg(feature = "tracing")]
+        {
+            let propagate_elapsed = propagate_start.elapsed();
+            let total_elapsed = split_start.elapsed();
+            if total_elapsed > std::time::Duration::from_millis(1) {
+                tracing::warn!(
+                    left_leaf_ptr = ?left_leaf_ptr,
+                    right_leaf_ptr = ?right_leaf_ptr,
+                    split_ikey = format_args!("{:016x}", split_ikey),
+                    total_elapsed_us = total_elapsed.as_micros() as u64,
+                    propagate_elapsed_us = propagate_elapsed.as_micros() as u64,
+                    is_layer_root = is_layer_root,
+                    "SLOW_SPLIT: leaf split took >1ms"
+                );
+            }
+        }
+
+        result
     }
 
     /// Lock a parent internode from a leaf with validation (generic version).
@@ -1501,9 +1706,9 @@ where
         let mut retries: usize = 0;
 
         #[cfg(feature = "tracing")]
-        eprintln!(
-            "[LOCKED_PARENT_LEAF] entering, leaf={:p}",
-            std::ptr::from_ref(leaf)
+        tracing::trace!(
+            leaf_ptr = ?std::ptr::from_ref(leaf),
+            "locked_parent_leaf: START"
         );
 
         loop {
@@ -1511,10 +1716,10 @@ where
             let parent_ptr: *mut u8 = leaf.parent();
 
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[LOCKED_PARENT_LEAF] parent_ptr={:p} is_null={}",
-                parent_ptr,
-                parent_ptr.is_null()
+            tracing::trace!(
+                parent_ptr = ?parent_ptr,
+                is_null = parent_ptr.is_null(),
+                "locked_parent_leaf: read parent"
             );
 
             debug_assert!(
@@ -1527,25 +1732,25 @@ where
             let parent: &L::Internode = unsafe { &*parent_ptr.cast::<L::Internode>() };
 
             #[cfg(feature = "tracing")]
-            eprintln!("[LOCKED_PARENT_LEAF] about to lock parent");
+            tracing::trace!("locked_parent_leaf: locking parent");
 
             let lock = parent.version().lock_with_yield();
 
             #[cfg(feature = "tracing")]
-            eprintln!("[LOCKED_PARENT_LEAF] locked, revalidating");
+            tracing::trace!("locked_parent_leaf: locked, revalidating");
 
             // Step 3: Revalidate - check parent pointer hasn't changed
             let current_parent: *mut u8 = leaf.parent();
             if current_parent == parent_ptr {
                 // Success: parent is stable
                 #[cfg(feature = "tracing")]
-                eprintln!("[LOCKED_PARENT_LEAF] success, returning");
+                tracing::trace!("locked_parent_leaf: SUCCESS");
                 return (parent_ptr.cast(), lock);
             }
 
             // Step 4: Parent changed, release lock and retry
             #[cfg(feature = "tracing")]
-            eprintln!("[LOCKED_PARENT_LEAF] parent changed, retrying");
+            tracing::trace!("locked_parent_leaf: parent changed, retrying");
 
             drop(lock);
 
@@ -1576,8 +1781,15 @@ where
         guard: &LocalGuard<'_>,
     ) -> Result<(), InsertError> {
         #[cfg(feature = "tracing")]
-        eprintln!(
-            "[SPLIT] propagate_split_generic: split_ikey={split_ikey:016x} left={left_leaf_ptr:p} right={right_leaf_ptr:p} is_layer_root={is_layer_root}"
+        let propagate_start = std::time::Instant::now();
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            split_ikey = format_args!("{:016x}", split_ikey),
+            left_leaf_ptr = ?left_leaf_ptr,
+            right_leaf_ptr = ?right_leaf_ptr,
+            is_layer_root = is_layer_root,
+            "PROPAGATE_START: propagating split to parent"
         );
 
         // Check if left leaf was the main tree root
@@ -1588,47 +1800,158 @@ where
 
         if left_was_main_root {
             #[cfg(feature = "tracing")]
-            eprintln!("[SPLIT] left was main tree root, creating root internode");
+            tracing::debug!(
+                left_leaf_ptr = ?left_leaf_ptr,
+                "PROPAGATE: left was main tree root, creating root internode"
+            );
             return self.create_root_internode_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
         }
 
-        // Handle NULL parent case - layer root split.
-        //
-        // NOTE: The previous wait loop for "newly split sibling" case is no longer needed.
-        // We now keep the right leaf LOCKED during split propagation (matching C++ behavior).
-        // This prevents other threads from splitting the right leaf while its parent is NULL.
+        // Handle NULL parent case - two possibilities:
+        // 1. Layer root: was created with is_root=true, should be promoted to layer internode
+        // 2. Newly split sibling: parent pointer not yet set by creating thread, should wait
         //
         // We use `is_layer_root` parameter (captured before lock drop) to distinguish.
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
 
-        if left_leaf.parent().is_null() && is_layer_root {
-            // LAYER ROOT SPLIT: promote to layer internode
+        if left_leaf.parent().is_null() {
+            if is_layer_root {
+                // LAYER ROOT SPLIT: promote to layer internode
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    left_leaf_ptr = ?left_leaf_ptr,
+                    "PROPAGATE: layer root, promoting to layer internode"
+                );
+                return self.promote_layer_root_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
+            }
+
+            // NEWLY SPLIT SIBLING: wait for creating thread to set parent pointer
+            // This happens when Thread A splits a leaf, creating right sibling R,
+            // then Thread B splits R before Thread A finishes propagate_split.
             #[cfg(feature = "tracing")]
-            eprintln!("[SPLIT] left is layer root, promoting to layer internode");
-            return self.promote_layer_root_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
+            tracing::warn!(
+                left_leaf_ptr = ?left_leaf_ptr,
+                right_leaf_ptr = ?right_leaf_ptr,
+                "PARENT_WAIT_START: NULL parent, not layer root - entering wait loop"
+            );
+
+            // Instrumentation: record parent-wait hit and timing
+            use crate::tree::optimistic::{
+                PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
+                PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS,
+            };
+            use std::sync::atomic::Ordering::Relaxed;
+
+            PARENT_WAIT_HIT_COUNT.fetch_add(1, Relaxed);
+            let wait_start = std::time::Instant::now();
+
+            let mut spins: usize = 0;
+            loop {
+                // Check if parent is now set
+                if !left_leaf.parent().is_null() {
+                    break;
+                }
+
+                spins += 1;
+
+                // Backoff strategy:
+                // Phase 1 (0-64): Spin - handles most cases (parent set quickly)
+                // Phase 2 (64-1024): Yield - moderate backoff
+                // Phase 3 (1024+): Short sleep - avoid burning CPU
+                if spins <= 64 {
+                    std::hint::spin_loop();
+                } else if spins <= 1024 {
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(std::time::Duration::from_micros(10));
+                }
+
+                // Safety limit - if we hit this, there's a bug
+                assert!(
+                    spins <= 1_000_000,
+                    "propagate_split_generic: parent pointer never set after {spins} iterations. \
+                     left_leaf_ptr={left_leaf_ptr:p}"
+                );
+            }
+
+            // Record instrumentation
+            let wait_ns = wait_start.elapsed().as_nanos() as u64;
+            let spins_u64 = spins as u64;
+
+            PARENT_WAIT_TOTAL_SPINS.fetch_add(spins_u64, Relaxed);
+            PARENT_WAIT_TOTAL_NS.fetch_add(wait_ns, Relaxed);
+
+            // Update max values (relaxed is fine for diagnostics)
+            let mut current_max = PARENT_WAIT_MAX_SPINS.load(Relaxed);
+            while spins_u64 > current_max {
+                match PARENT_WAIT_MAX_SPINS.compare_exchange_weak(
+                    current_max,
+                    spins_u64,
+                    Relaxed,
+                    Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(v) => current_max = v,
+                }
+            }
+
+            let mut current_max_ns = PARENT_WAIT_MAX_NS.load(Relaxed);
+            while wait_ns > current_max_ns {
+                match PARENT_WAIT_MAX_NS.compare_exchange_weak(
+                    current_max_ns,
+                    wait_ns,
+                    Relaxed,
+                    Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(v) => current_max_ns = v,
+                }
+            }
+
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                left_leaf_ptr = ?left_leaf_ptr,
+                spins = spins,
+                wait_us = wait_ns / 1000,
+                "PARENT_WAIT_END: parent pointer set"
+            );
         }
 
         // Lock parent with validation and find child index.
         // Use a retry loop to handle the case where child is not found in parent,
         // which can happen during concurrent splits (matches WIDTH=15 behavior).
+        #[cfg(feature = "tracing")]
+        let parent_lock_start = std::time::Instant::now();
+
         let mut retry_count: usize = 0;
         let (parent_ptr, mut parent_lock, child_idx) = loop {
             let (parent_ptr, parent_lock) = self.locked_parent_leaf_generic(left_leaf);
             let parent: &L::Internode = unsafe { &*parent_ptr };
 
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[SPLIT] locked parent={:p} nkeys={} is_full={}",
-                parent_ptr,
-                parent.nkeys(),
-                parent.is_full()
+            tracing::trace!(
+                parent_ptr = ?parent_ptr,
+                nkeys = parent.nkeys(),
+                is_full = parent.is_full(),
+                "PROPAGATE: locked parent"
             );
 
             // Find child index using pointer scan
             if let Some(idx) = self.try_find_child_index_generic(parent, left_leaf_ptr.cast::<u8>())
             {
                 #[cfg(feature = "tracing")]
-                eprintln!("[SPLIT] child_idx={idx}");
+                {
+                    let parent_lock_elapsed = parent_lock_start.elapsed();
+                    if parent_lock_elapsed > std::time::Duration::from_millis(1) || retry_count > 0 {
+                        tracing::warn!(
+                            parent_ptr = ?parent_ptr,
+                            child_idx = idx,
+                            retry_count = retry_count,
+                            parent_lock_elapsed_us = parent_lock_elapsed.as_micros() as u64,
+                            "SLOW_PARENT_LOCK: locking parent for propagation took >1ms or had retries"
+                        );
+                    }
+                }
                 break (parent_ptr, parent_lock, idx);
             }
 
@@ -1638,10 +1961,11 @@ where
             retry_count += 1;
 
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[SPLIT] child not found in parent, retry #{retry_count} parent={:p} nkeys={}",
-                parent_ptr,
-                parent.nkeys()
+            tracing::debug!(
+                parent_ptr = ?parent_ptr,
+                retry_count = retry_count,
+                nkeys = parent.nkeys(),
+                "PROPAGATE_RETRY: child not found in parent"
             );
 
             // Child not found - this happens during concurrent internode splits.
@@ -1672,9 +1996,10 @@ where
         if parent.is_full() {
             // Parent is full - split the parent internode
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[SPLIT] parent FULL (nkeys={}), triggering internode split",
-                parent.nkeys()
+            tracing::info!(
+                parent_ptr = ?parent_ptr,
+                nkeys = parent.nkeys(),
+                "PROPAGATE_INTERNODE_SPLIT: parent is full, triggering internode split"
             );
 
             // CRITICAL: Save is_root BEFORE unlocking, because SPLIT_UNLOCK_MASK clears ROOT_BIT
@@ -1696,25 +2021,36 @@ where
             // This matches WIDTH=15 behavior (locked.rs:1614-1616).
             drop(parent_lock);
 
-            // CRITICAL: Unlock right_leaf AFTER setting its parent pointer but BEFORE
-            // propagating further. This matches C++ hand-over-hand locking (masstree_split.hh:280).
-            // The right leaf is now reachable (parent set) and can be safely unlocked.
-            unsafe {
-                (*right_leaf_ptr).version().unlock_split_sibling();
-            }
-
-            self.propagate_internode_split_generic(
+            let result = self.propagate_internode_split_generic(
                 parent_ptr,
                 split_ikey,
                 right_leaf_ptr.cast::<u8>(),
                 parent_was_root,
                 guard,
-            )
+            );
+
+            #[cfg(feature = "tracing")]
+            {
+                let total_elapsed = propagate_start.elapsed();
+                if total_elapsed > std::time::Duration::from_millis(5) {
+                    tracing::warn!(
+                        left_leaf_ptr = ?left_leaf_ptr,
+                        right_leaf_ptr = ?right_leaf_ptr,
+                        total_elapsed_us = total_elapsed.as_micros() as u64,
+                        "SLOW_PROPAGATE: propagate_split with internode split took >5ms"
+                    );
+                }
+            }
+
+            result
         } else {
             // Parent has room - insert directly
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[SPLIT] parent has room, inserting at idx={child_idx} ikey={split_ikey:016x}"
+            tracing::debug!(
+                parent_ptr = ?parent_ptr,
+                child_idx = child_idx,
+                split_ikey = format_args!("{:016x}", split_ikey),
+                "PROPAGATE_INSERT: parent has room, inserting"
             );
 
             parent_lock.mark_insert();
@@ -1726,20 +2062,17 @@ where
             }
 
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[SPLIT] insert complete, parent now has nkeys={}",
-                parent.nkeys()
-            );
-
-            drop(parent_lock);
-
-            // CRITICAL: Unlock right_leaf AFTER setting its parent pointer.
-            // This matches C++ hand-over-hand locking (masstree_split.hh:280).
-            // The right leaf is now fully initialized and reachable via B-link chain.
-            unsafe {
-                (*right_leaf_ptr).version().unlock_split_sibling();
+            {
+                let total_elapsed = propagate_start.elapsed();
+                tracing::debug!(
+                    parent_ptr = ?parent_ptr,
+                    nkeys = parent.nkeys(),
+                    total_elapsed_us = total_elapsed.as_micros() as u64,
+                    "PROPAGATE_COMPLETE: insert complete"
+                );
             }
 
+            drop(parent_lock);
             Ok(())
         }
     }
@@ -1753,17 +2086,18 @@ where
         split_ikey: u64,
     ) -> Result<(), InsertError> {
         #[cfg(feature = "tracing")]
-        eprintln!(
-            "[CREATE_ROOT_INTERNODE] creating root internode for split_ikey={split_ikey:016x}"
+        tracing::debug!(
+            split_ikey = format_args!("{:016x}", split_ikey),
+            "CREATE_ROOT_INTERNODE: creating root internode"
         );
 
         // Create new root internode (height=0, children are leaves)
         let new_root: Box<L::Internode> = L::Internode::new_root_boxed(0);
 
         #[cfg(feature = "tracing")]
-        eprintln!(
-            "[CREATE_ROOT_INTERNODE] new_root created, is_root={}",
-            new_root.version().is_root()
+        tracing::debug!(
+            is_root = new_root.version().is_root(),
+            "CREATE_ROOT_INTERNODE: new_root created"
         );
 
         // Set up children: [left_leaf] -split_ikey- [right_leaf]
@@ -1780,10 +2114,10 @@ where
         #[cfg(feature = "tracing")]
         {
             let root_ref: &L::Internode = unsafe { &*new_root_ptr.cast::<L::Internode>() };
-            eprintln!(
-                "[CREATE_ROOT_INTERNODE] after alloc new_root_ptr={:p} is_root={}",
-                new_root_ptr,
-                root_ref.version().is_root()
+            tracing::debug!(
+                new_root_ptr = ?new_root_ptr,
+                is_root = root_ref.version().is_root(),
+                "CREATE_ROOT_INTERNODE: after alloc"
             );
         }
 
@@ -1810,19 +2144,11 @@ where
 
                     // Clear root flag on left leaf (it's no longer the root)
                     (*left_leaf_ptr).version().mark_nonroot();
-
-                    // CRITICAL: Unlock right_leaf after parent is set.
-                    // Matches C++ hand-over-hand locking (masstree_split.hh:280).
-                    (*right_leaf_ptr).version().unlock_split_sibling();
                 }
                 Ok(())
             }
             Err(_) => {
                 // Root changed concurrently - shouldn't happen if we hold lock
-                // Still need to unlock right_leaf even on failure
-                unsafe {
-                    (*right_leaf_ptr).version().unlock_split_sibling();
-                }
                 Err(InsertError::SplitFailed)
             }
         }
@@ -1868,10 +2194,6 @@ where
             // Clear root flag on both leaves - they're no longer layer roots
             (*left_leaf_ptr).version().mark_nonroot();
             (*right_leaf_ptr).version().mark_nonroot();
-
-            // CRITICAL: Unlock right_leaf after parent is set.
-            // Matches C++ hand-over-hand locking (masstree_split.hh:280).
-            (*right_leaf_ptr).version().unlock_split_sibling();
         }
 
         Ok(())
@@ -1995,8 +2317,12 @@ where
         use crate::leaf_trait::TreeInternode;
 
         #[cfg(feature = "tracing")]
-        eprintln!(
-            "[INTERNODE_SPLIT] propagate_internode_split_generic: parent={parent_ptr:p} insert_ikey={insert_ikey:016x} insert_child={insert_child:p} parent_was_root={parent_was_root}"
+        tracing::debug!(
+            parent_ptr = ?parent_ptr,
+            insert_ikey = format_args!("{:016x}", insert_ikey),
+            insert_child = ?insert_child,
+            parent_was_root,
+            "INTERNODE_SPLIT: propagate_internode_split_generic"
         );
 
         let mut retries: usize = 0;
@@ -2019,18 +2345,18 @@ where
             let child_idx: usize = parent.find_insert_position(insert_ikey);
 
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[INTERNODE_SPLIT] parent nkeys={} is_full={} child_idx={}",
-                parent.nkeys(),
-                parent.is_full(),
-                child_idx
+            tracing::debug!(
+                parent_nkeys = parent.nkeys(),
+                parent_is_full = parent.is_full(),
+                child_idx,
+                "INTERNODE_SPLIT: parent state"
             );
 
             // Check if parent is still full (another thread may have split it)
             if !parent.is_full() {
                 // Parent was split by another thread - just insert
                 #[cfg(feature = "tracing")]
-                eprintln!("[INTERNODE_SPLIT] parent not full, inserting directly");
+                tracing::debug!("INTERNODE_SPLIT: parent not full, inserting directly");
 
                 parent_lock.mark_insert();
                 parent.insert_key_and_child(child_idx, insert_ikey, insert_child);
@@ -2048,19 +2374,19 @@ where
 
             // Parent is full - must split
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[INTERNODE_SPLIT] parent FULL, splitting. height={} children_are_leaves={} is_root_BEFORE_mark_split={}",
-                parent.height(),
-                parent.children_are_leaves(),
-                parent.is_root()
+            tracing::debug!(
+                height = parent.height(),
+                children_are_leaves = parent.children_are_leaves(),
+                is_root_before_mark_split = parent.is_root(),
+                "INTERNODE_SPLIT: parent full, splitting"
             );
 
             parent_lock.mark_split();
 
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[INTERNODE_SPLIT] after mark_split, is_root={}",
-                parent.is_root()
+            tracing::debug!(
+                is_root = parent.is_root(),
+                "INTERNODE_SPLIT: after mark_split"
             );
 
             // Create new sibling internode
@@ -2068,7 +2394,10 @@ where
             let sibling_ptr: *mut L::Internode = Box::into_raw(sibling);
 
             #[cfg(feature = "tracing")]
-            eprintln!("[INTERNODE_SPLIT] created sibling={sibling_ptr:p}");
+            tracing::debug!(
+                sibling_ptr = ?sibling_ptr,
+                "INTERNODE_SPLIT: created sibling"
+            );
 
             // Track sibling for cleanup
             self.allocator
@@ -2090,12 +2419,12 @@ where
             #[cfg(feature = "tracing")]
             {
                 let sibling_ref: &L::Internode = unsafe { &*sibling_ptr };
-                eprintln!(
-                    "[INTERNODE_SPLIT] after split: popup_key={:016x} insert_went_left={} parent.nkeys={} sibling.nkeys={}",
-                    popup_key,
+                tracing::debug!(
+                    popup_key = format_args!("{:016x}", popup_key),
                     insert_went_left,
-                    parent.nkeys(),
-                    sibling_ref.nkeys()
+                    parent_nkeys = parent.nkeys(),
+                    sibling_nkeys = sibling_ref.nkeys(),
+                    "INTERNODE_SPLIT: after split"
                 );
             }
 
@@ -2131,16 +2460,16 @@ where
             // NOTE: We use parent_was_root instead of parent.is_root() because
             // SPLIT_UNLOCK_MASK clears ROOT_BIT when we unlocked in propagate_split_generic
             #[cfg(feature = "tracing")]
-            eprintln!(
-                "[INTERNODE_SPLIT] checking if parent is root: parent.parent()={:p} is_null={} parent_was_root={}",
-                parent.parent(),
-                parent.parent().is_null(),
-                parent_was_root
+            tracing::debug!(
+                parent_parent = ?parent.parent(),
+                parent_parent_is_null = parent.parent().is_null(),
+                parent_was_root,
+                "INTERNODE_SPLIT: checking root"
             );
 
             if parent.parent().is_null() && parent_was_root {
                 #[cfg(feature = "tracing")]
-                eprintln!("[INTERNODE_SPLIT] parent IS root, creating new root internode");
+                tracing::debug!("INTERNODE_SPLIT: parent is root, creating new root internode");
 
                 let current_root: *mut u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 

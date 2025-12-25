@@ -2,7 +2,7 @@
 
 A high-performance concurrent ordered map for Rust, supporting variable-length keys. This is an experimental branch implementing a major divergence from the original C++ Masstree: **WIDTH=24** (vs. the original WIDTH=15). This requires `AtomicU128` for the permutation field (24 slots × 5 bits = 120 bits).
 
-### Why WIDTH=24?
+## Why WIDTH=24?
 
 Larger leaf nodes mean fewer splits under concurrent writes. Benchmarks show:
 
