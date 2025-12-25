@@ -72,13 +72,12 @@ where
         // Default to disabled unless explicitly enabled for benchmarking/experiments.
         //
         // - Set `MASSTREE_ENABLE_CAS=1` to enable the CAS fast path.
-        // - Set `MASSTREE_DISABLE_CAS=1` to force-disable (takes precedence).
+        // - Set `MASSTREE_ENABLE_CAS=0` or unset to disable.
         static ENABLE_CAS: OnceLock<bool> = OnceLock::new();
         *ENABLE_CAS.get_or_init(|| {
-            if std::env::var_os("MASSTREE_DISABLE_CAS").is_some() {
-                return false;
-            }
-            std::env::var_os("MASSTREE_ENABLE_CAS").is_some()
+            std::env::var("MASSTREE_ENABLE_CAS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
         })
     }
 
@@ -724,63 +723,51 @@ where
         }
     }
 
-    /// Get a fresh root pointer, following parent pointers if the cached root is stale.
+    /// Get a fresh root pointer, following parent pointers if the start node is stale.
     ///
-    /// This implements the C++ `fix_root()` pattern from masstree_struct.hh:791-798:
+    /// This implements the C++ `reach_leaf` root-finding loop from masstree_struct.hh:644-654:
     /// ```cpp
-    /// node_base<P>* root = root_;           // Load cached root
-    /// if (!root->is_root()) {
-    ///     node_base<P>* old_root = root;    // Save what we loaded
-    ///     root = root->maybe_parent();      // Find fresh root
-    ///     cmpxchg(&root_, old_root, root);  // CAS: old_root → root
+    /// n[sense] = this;  // Start from passed-in node
+    /// while (true) {
+    ///     v[sense] = n[sense]->stable_annotated(...);
+    ///     if (v[sense].is_root()) break;
+    ///     n[sense] = n[sense]->maybe_parent();
     /// }
-    /// return root;
     /// ```
     ///
-    /// Key insight: The CAS must use the value loaded from `self.root_ptr`, not the
-    /// parameter passed in (which may have been transformed by `maybe_parent_generic`).
+    /// CRITICAL: Start from the `start` parameter (like C++), not from `self.root_ptr`.
+    /// The `start` parameter may already be fresh (from `maybe_parent_generic`), and
+    /// we just need to verify it's a root. If not, follow parent pointers.
     ///
-    /// This CAS update is critical for performance: without it, every operation starts from
-    /// a potentially outdated root and must walk up parent pointers, which is expensive
-    /// during heavy splitting.
+    /// After finding the true root, we CAS-update `self.root_ptr` as an optimization.
     #[cfg_attr(
         feature = "tracing",
-        tracing::instrument(level = "trace", skip(self, guard), fields(start_node = ?node))
+        tracing::instrument(level = "trace", skip(self, _guard), fields(start_node = ?start))
     )]
     #[inline]
-    fn get_fresh_root(&self, mut node: *const u8, guard: &LocalGuard<'_>) -> *const u8 {
-        // Load self.root_ptr FIRST - this is what we'll use for CAS comparison.
-        // This matches C++ fix_root(): `node_base<P>* root = root_;`
-        let cached_root: *const u8 = self.load_root_ptr_generic(guard);
+    fn get_fresh_root(&self, start: *const u8, _guard: &LocalGuard<'_>) -> *const u8 {
+        // Start from the passed-in node (like C++ reach_leaf)
+        let mut node: *const u8 = start;
 
+        // Save the original self.root_ptr for potential CAS update
+        let cached_root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
+
+        // Follow parent pointers until we find a root
+        // This matches C++ reach_leaf lines 646-654
         loop {
-            // SAFETY: node is valid, NodeVersion is first field
+            // SAFETY: node is valid (comes from tree structure)
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
             let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
             // Wait for stable version before checking root status
             let _ = version.stable();
 
-            // If this is a root, we're done
+            // If this node is a root, we're done
             if version.is_root() {
-                // C++ fix_root() pattern: if we found a different root than cached,
-                // CAS-update the cached root_ptr so future operations start from the fresh root.
-                // This is a best-effort optimization; if the CAS fails, another thread updated it.
-                //
-                // CRITICAL: Use `cached_root` (what we loaded from self.root_ptr), not `node`
-                // or any transformed value. The CAS expects the actual self.root_ptr value.
-                if !StdPtr::eq(node, cached_root) {
-                    let _ = self.root_ptr.compare_exchange(
-                        cached_root.cast_mut(),
-                        node.cast_mut(),
-                        AtomicOrdering::Release,
-                        AtomicOrdering::Relaxed,
-                    );
-                }
-                return node;
+                break;
             }
 
-            // Follow parent pointer
+            // Not a root - follow parent pointer
             let parent = if version.is_leaf() {
                 // SAFETY: version.is_leaf() confirmed
                 let leaf: &L = unsafe { &*(node.cast::<L>()) };
@@ -793,16 +780,40 @@ where
 
             if parent.is_null() {
                 // C++ `maybe_parent()` returns `this` when parent doesn't exist.
-                // This creates a spin loop: the node stays the same, stable() is called
-                // again next iteration (which may block if node is locked), and eventually
-                // is_root() will become true after split propagation completes.
-                // Add a spin hint to avoid burning CPU.
+                // This can happen during split propagation - spin and retry.
                 std::hint::spin_loop();
                 continue;
             }
 
             node = parent;
         }
+
+        // CAS-update self.root_ptr if we found a different (fresher) root.
+        // This is the fix_root() optimization - helps future operations start fresh.
+        //
+        // IMPORTANT: Only update if we actually followed parent pointers to find a fresher root
+        // (i.e., node != start). This handles two cases correctly:
+        //
+        // 1. Main tree: start was stale, we followed parents to find fresh root.
+        //    node != start, so we CAS-update. Good.
+        //
+        // 2. Sublayer: start is the sublayer root (is_root() == true).
+        //    We immediately break with node == start, so no CAS-update. Good.
+        //
+        // 3. Main tree but start was already fresh: node == start, no CAS-update. Fine.
+        //
+        // The CAS will only succeed if cached_root hasn't changed, which is the expected
+        // case when we started from a stale root and followed parents.
+        if !StdPtr::eq(node, start) {
+            let _ = self.root_ptr.compare_exchange(
+                cached_root.cast_mut(),
+                node.cast_mut(),
+                AtomicOrdering::Release,
+                AtomicOrdering::Relaxed,
+            );
+        }
+
+        node
     }
 
     /// Traverse from layer root to target leaf with version validation.
