@@ -76,7 +76,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 /// Initialize tracing with file and console output.
 ///
-/// Writes JSON-formatted logs to `logs/masstree.json` for structured analysis.
+/// Writes NDJSON logs to `logs/masstree.jsonl` for structured analysis.
 /// Also outputs to console unless `MASSTREE_LOG_CONSOLE=0` is set.
 ///
 /// Safe to call multiple times - only the first call takes effect.
@@ -94,7 +94,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 /// RUST_LOG=masstree=debug MASSTREE_LOG_CONSOLE=0 cargo run --features tracing
 ///
 /// # Analyze logs with jq
-/// cat logs/masstree.json | jq 'select(.fields.ikey != null)'
+/// cat logs/masstree.jsonl | jq 'select(.fields.ikey != null)'
 /// ```
 #[cfg(feature = "tracing")]
 pub fn init_tracing() {
@@ -107,18 +107,18 @@ pub fn init_tracing() {
     static mut GUARD: Option<tracing_appender::non_blocking::WorkerGuard> = None;
 
     INIT.call_once(|| {
-        use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+        use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
         // Configuration from environment
         let log_dir = env::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
-        let console_enabled = !env::var("MASSTREE_LOG_CONSOLE").is_ok_and(|v| v == "0");
+        let console_enabled = false;
         let filter_str = env::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
 
         // Create log directory
         let _ = std::fs::create_dir_all(&log_dir);
 
-        // File appender - non-rotating, writes to masstree.json
-        let file_appender = tracing_appender::rolling::never(&log_dir, "masstree.json");
+        // File appender - non-rotating, writes to masstree.jsonl (NDJSON)
+        let file_appender = tracing_appender::rolling::never(&log_dir, "masstree.jsonl");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
         // Store guard to prevent dropping (logs would be lost)
@@ -149,7 +149,7 @@ pub fn init_tracing() {
                     .with_thread_ids(true)
                     .compact()
                     .with_filter(
-                        EnvFilter::try_new(&filter_str).unwrap_or_else(|_| EnvFilter::new("info")),
+                        EnvFilter::try_new(&filter_str).unwrap_or_else(|_| EnvFilter::new("trace")),
                     ),
             )
         } else {

@@ -381,8 +381,9 @@ impl NodeVersion {
     /// to detect concurrent modifications.
     ///
     /// # Memory Ordering
-    /// Returns with an acquire fence to ensure subsequent reads see
-    /// modifications made by the writer who cleared the dirty bits.
+    /// Uses `Relaxed` loads during spinning for efficiency (especially on ARM),
+    /// then issues an `Acquire` fence only on success. This is equivalent to
+    /// `Acquire` on every load on x86, but saves ~1 cycle per spin on ARM.
     ///
     /// # Reference
     /// C++ `nodeversion.hh:36-48` - `stable()` template method
@@ -398,11 +399,13 @@ impl NodeVersion {
         let mut spins: u32 = 0;
 
         loop {
+            // Use Relaxed ordering for spin loop efficiency (saves ~1 cycle/spin on ARM).
+            // We only need Acquire semantics when we actually succeed.
             let value = self.value.load(Ordering::Relaxed);
 
             if (value & DIRTY_MASK) == 0 {
-                // Acquire fence after dirty check clears.
-                // Ensures we see all writes from the writer who set dirty bits.
+                // Acquire fence ensures subsequent reads see modifications made
+                // by the writer who cleared the dirty bits.
                 fence(Ordering::Acquire);
 
                 #[cfg(feature = "tracing")]
@@ -489,6 +492,24 @@ impl NodeVersion {
         // Compiler fence: ensures all prior reads complete before version check.
         compiler_fence(Ordering::SeqCst);
 
+        (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
+    }
+
+    /// Check if a split has occurred since `old`, without a fence.
+    ///
+    /// This is a faster variant of [`has_split`] that omits the compiler fence.
+    /// Use this only when you've already issued a fence (e.g., after an Acquire load).
+    ///
+    /// # Safety (Logical)
+    /// The caller must ensure that all reads that need to be validated have
+    /// already been completed and are visible before calling this method.
+    /// Typically this means you've already done an Acquire load or fence.
+    ///
+    /// # Reference
+    /// C++ `nodeversion.hh` has `simple_has_split()` for this purpose.
+    #[must_use]
+    #[inline(always)]
+    pub fn simple_has_split(&self, old: u32) -> bool {
         (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
     }
 
@@ -734,21 +755,25 @@ impl NodeVersion {
     /// Mark the node as a root.
     ///
     /// Does not require the lock. Used during tree initialization.
+    ///
+    /// # Implementation Note
+    /// Uses `fetch_or` for atomic read-modify-write. The previous implementation
+    /// used separate load/store which could lose concurrent modifications.
     #[inline(always)]
     pub fn mark_root(&self) {
-        let value: u32 = self.value.load(Ordering::Relaxed);
-
-        self.value.store(value | ROOT_BIT, Ordering::Release);
+        self.value.fetch_or(ROOT_BIT, Ordering::Release);
     }
 
     /// Clear the root bit.
     ///
     /// Called when a layer root leaf is demoted (layer root split).
+    ///
+    /// # Implementation Note
+    /// Uses `fetch_and` for atomic read-modify-write. The previous implementation
+    /// used separate load/store which could lose concurrent modifications.
     #[inline(always)]
     pub fn mark_nonroot(&self) {
-        let value: u32 = self.value.load(Ordering::Relaxed);
-
-        self.value.store(value & !ROOT_BIT, Ordering::Release);
+        self.value.fetch_and(!ROOT_BIT, Ordering::Release);
     }
 }
 
@@ -762,6 +787,152 @@ impl Clone for NodeVersion {
 
 impl Default for NodeVersion {
     /// Creates a new leaf node version.
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
+// ============================================================================
+//  SingleThreadedNodeVersion (for benchmarks)
+// ============================================================================
+
+/// A single-threaded node version that skips synchronization.
+///
+/// This is useful for single-threaded benchmarks where you want to measure
+/// the overhead of the data structure without synchronization costs.
+///
+/// All operations return immediately without any atomic operations or fences.
+/// This is NOT thread-safe and must only be used in single-threaded contexts.
+///
+/// # Reference
+/// C++ `nodeversion.hh` has `singlethreaded_nodeversion` for this purpose.
+#[derive(Debug, Clone)]
+pub struct SingleThreadedNodeVersion {
+    value: u32,
+}
+
+/// A no-op lock guard for single-threaded usage.
+///
+/// Does nothing on drop since there's no actual lock to release.
+#[derive(Debug)]
+#[must_use = "releasing a lock without using the guard is a logic error"]
+pub struct SingleThreadedLockGuard<'a> {
+    version: &'a mut SingleThreadedNodeVersion,
+}
+
+impl Drop for SingleThreadedLockGuard<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        // Same logic as the real LockGuard drop:
+        // - If splitting: increment split counter, clear dirty/lock bits
+        // - If inserting: increment insert counter, clear inserting/lock bits
+        let value = self.version.value;
+        self.version.value = if (value & SPLITTING_BIT) != 0 {
+            (value.wrapping_add(VSPLIT_LOWBIT)) & SPLIT_UNLOCK_MASK
+        } else {
+            value.wrapping_add(VINSERT_LOWBIT) & UNLOCK_MASK
+        };
+    }
+}
+
+impl SingleThreadedLockGuard<'_> {
+    /// Mark the node as being inserted into (no-op, for API compatibility).
+    #[inline(always)]
+    pub fn mark_insert(&mut self) {
+        // No-op - version increments on drop anyway
+    }
+
+    /// Mark the node as being split.
+    #[inline(always)]
+    pub fn mark_split(&mut self) {
+        self.version.value |= SPLITTING_BIT;
+    }
+
+    /// Mark the node as deleted.
+    #[inline(always)]
+    pub fn mark_deleted(&mut self) {
+        self.version.value |= DELETED_BIT | SPLITTING_BIT;
+    }
+
+    /// Clear the root bit.
+    #[inline(always)]
+    pub fn mark_nonroot(&mut self) {
+        self.version.value &= !ROOT_BIT;
+    }
+}
+
+impl SingleThreadedNodeVersion {
+    /// Create a new single-threaded node version.
+    #[must_use]
+    #[inline(always)]
+    pub const fn new(is_leaf: bool) -> Self {
+        let initial: u32 = if is_leaf { ISLEAF_BIT } else { 0 };
+        Self { value: initial }
+    }
+
+    /// Check if this is a leaf node.
+    #[must_use]
+    #[inline(always)]
+    pub const fn is_leaf(&self) -> bool {
+        (self.value & ISLEAF_BIT) != 0
+    }
+
+    /// Check if this is a root node.
+    #[must_use]
+    #[inline(always)]
+    pub const fn is_root(&self) -> bool {
+        (self.value & ROOT_BIT) != 0
+    }
+
+    /// Check if this node is logically deleted.
+    #[must_use]
+    #[inline(always)]
+    pub const fn is_deleted(&self) -> bool {
+        (self.value & DELETED_BIT) != 0
+    }
+
+    /// Get a stable version (returns immediately in single-threaded mode).
+    #[must_use]
+    #[inline(always)]
+    pub const fn stable(&self) -> u32 {
+        self.value
+    }
+
+    /// Check if the version has changed since `old`.
+    #[must_use]
+    #[inline(always)]
+    pub const fn has_changed(&self, old: u32) -> bool {
+        (old ^ self.value) > (LOCK_BIT | INSERTING_BIT)
+    }
+
+    /// Check if a split has occurred since `old`.
+    #[must_use]
+    #[inline(always)]
+    pub const fn has_split(&self, old: u32) -> bool {
+        (old ^ self.value) >= VSPLIT_LOWBIT
+    }
+
+    /// Acquire the "lock" (no-op, returns guard immediately).
+    #[must_use]
+    #[inline(always)]
+    pub fn lock(&mut self) -> SingleThreadedLockGuard<'_> {
+        SingleThreadedLockGuard { version: self }
+    }
+
+    /// Mark the node as a root.
+    #[inline(always)]
+    pub fn mark_root(&mut self) {
+        self.value |= ROOT_BIT;
+    }
+
+    /// Clear the root bit.
+    #[inline(always)]
+    pub fn mark_nonroot(&mut self) {
+        self.value &= !ROOT_BIT;
+    }
+}
+
+impl Default for SingleThreadedNodeVersion {
     fn default() -> Self {
         Self::new(true)
     }
@@ -1056,6 +1227,142 @@ mod tests {
 
         // Guard's locked_value should be unchanged (idempotent)
         assert_eq!(guard.locked_value(), initial_locked);
+    }
+
+    // =======================================================================
+    // Version Wraparound Stress Tests
+    // =======================================================================
+
+    #[test]
+    fn test_insert_counter_wraparound_stress() {
+        // The insert counter is 6 bits (bits 3-8), so it wraps after 64 increments.
+        // This test verifies the counter wraps correctly without corrupting other bits.
+        let v = NodeVersion::new(true);
+        v.mark_root();
+
+        // Do 100 lock/unlock cycles (more than 64 to trigger wraparound)
+        for i in 0..100 {
+            let stable_before = v.stable();
+
+            {
+                let _guard = v.lock();
+                // INSERTING_BIT set automatically, version increments on drop
+            }
+
+            // Version should always change after unlock
+            assert!(
+                v.has_changed(stable_before),
+                "Version should change after unlock (iteration {i})"
+            );
+
+            // Flags should be preserved through wraparound
+            assert!(v.is_leaf(), "is_leaf should persist through wraparound");
+            assert!(v.is_root(), "is_root should persist through wraparound");
+            assert!(!v.is_deleted(), "is_deleted should stay false");
+        }
+    }
+
+    #[test]
+    fn test_split_counter_wraparound() {
+        // The split counter is 19 bits (bits 9-27), wrapping after ~500K splits.
+        // We can't test full wraparound, but we can verify it increments correctly.
+        let v = NodeVersion::new(true);
+
+        let mut last_value = v.stable();
+
+        for _ in 0..10 {
+            {
+                let mut guard = v.lock();
+                guard.mark_split();
+            }
+
+            let new_value = v.stable();
+
+            // Split counter should have incremented (bits 9+)
+            assert!(
+                v.has_split(last_value),
+                "has_split should detect split counter change"
+            );
+
+            last_value = new_value;
+        }
+    }
+
+    #[test]
+    fn test_simple_has_split_no_fence() {
+        // Test that simple_has_split works correctly (same logic, no fence)
+        let v = NodeVersion::new(true);
+        let before = v.stable();
+
+        {
+            let mut guard = v.lock();
+            guard.mark_split();
+        }
+
+        // simple_has_split should detect the change
+        assert!(v.simple_has_split(before));
+
+        // And should match has_split
+        assert_eq!(v.has_split(before), v.simple_has_split(before));
+    }
+
+    // =======================================================================
+    // SingleThreadedNodeVersion Tests
+    // =======================================================================
+
+    #[test]
+    fn test_single_threaded_basic() {
+        let mut v = SingleThreadedNodeVersion::new(true);
+
+        assert!(v.is_leaf());
+        assert!(!v.is_root());
+        assert!(!v.is_deleted());
+
+        v.mark_root();
+        assert!(v.is_root());
+
+        v.mark_nonroot();
+        assert!(!v.is_root());
+    }
+
+    #[test]
+    fn test_single_threaded_lock_unlock() {
+        let mut v = SingleThreadedNodeVersion::new(true);
+        let stable_before = v.stable();
+
+        {
+            let mut guard = v.lock();
+            guard.mark_insert();
+            // Guard drops, version increments
+        }
+
+        // Version should have changed
+        assert!(v.has_changed(stable_before));
+    }
+
+    #[test]
+    fn test_single_threaded_split() {
+        let mut v = SingleThreadedNodeVersion::new(true);
+        let stable_before = v.stable();
+
+        {
+            let mut guard = v.lock();
+            guard.mark_split();
+        }
+
+        assert!(v.has_split(stable_before));
+    }
+
+    #[test]
+    fn test_single_threaded_deleted() {
+        let mut v = SingleThreadedNodeVersion::new(true);
+
+        {
+            let mut guard = v.lock();
+            guard.mark_deleted();
+        }
+
+        assert!(v.is_deleted());
     }
 }
 

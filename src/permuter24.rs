@@ -294,6 +294,7 @@ impl Permuter24 {
     /// # Panics
     ///
     /// Debug-panics if `i > size()` or `size() >= 24`.
+    #[inline]
     #[must_use]
     pub fn insert_from_back(&mut self, i: usize) -> usize {
         debug_assert!(i <= self.size(), "insert_from_back: i > size");
@@ -319,8 +320,8 @@ impl Permuter24 {
     /// Compute insert result without mutation (for CAS).
     ///
     /// Returns `(new_permuter, allocated_slot)`.
-    #[must_use]
     #[inline]
+    #[must_use]
     pub fn insert_from_back_immutable(&self, i: usize) -> (Self, usize) {
         debug_assert!(i <= self.size(), "insert_from_back_immutable: i > size");
         debug_assert!(self.size() < 24, "insert_from_back_immutable: full");
@@ -390,12 +391,14 @@ impl Permuter24 {
         // Fast path: removing last element
         if i + 1 == size {
             self.value -= 1;
+
             #[cfg(debug_assertions)]
             self.debug_assert_valid();
+
             return;
         }
 
-        let rot_amount = (size - i - 1) * SLOT_BITS;
+        let rot_amount: usize = (size - i - 1) * SLOT_BITS;
         // rot_mask covers positions i through size-1
         let rot_mask: u128 =
             (((1u128 << rot_amount) << SLOT_BITS) - 1) << (i * SLOT_BITS + SIZE_BITS);
@@ -424,9 +427,9 @@ impl Permuter24 {
         }
 
         // Position i is at bits (i * 5 + 5), position j at (j * 5 + 5)
-        let i_shift = i * SLOT_BITS + SIZE_BITS;
-        let j_shift = j * SLOT_BITS + SIZE_BITS;
-        let diff = ((self.value >> i_shift) ^ (self.value >> j_shift)) & SLOT_MASK;
+        let i_shift: usize = i * SLOT_BITS + SIZE_BITS;
+        let j_shift: usize = j * SLOT_BITS + SIZE_BITS;
+        let diff: u128 = ((self.value >> i_shift) ^ (self.value >> j_shift)) & SLOT_MASK;
         self.value ^= (diff << i_shift) | (diff << j_shift);
 
         #[cfg(debug_assertions)]
@@ -443,13 +446,13 @@ impl Permuter24 {
         }
 
         // Mask covers size + positions 0..(i-1), i.e., bits 0 to (i*5+5)-1
-        let i_shift = i * SLOT_BITS + SIZE_BITS;
+        let i_shift: usize = i * SLOT_BITS + SIZE_BITS;
         let mask: u128 = (1u128 << i_shift) - 1;
         let width_mask: u128 = (1u128 << 125) - 1;
-        let x = self.value & width_mask;
+        let x: u128 = self.value & width_mask;
 
-        let rotate_amount = (j - i) * SLOT_BITS;
-        let rotate_back = (24 - j) * SLOT_BITS;
+        let rotate_amount: usize = (j - i) * SLOT_BITS;
+        let rotate_back: usize = (24 - j) * SLOT_BITS;
 
         self.value = (x & mask) | ((x >> rotate_amount) & !mask) | ((x & !mask) << rotate_back);
 
@@ -489,16 +492,16 @@ impl Permuter24 {
             return;
         }
 
-        let size = self.size();
+        let size: usize = self.size();
         assert!(size <= 24, "invalid size: {size} > 24");
 
         // Check all slots 0-23 appear exactly once
         let mut seen: u32 = 0;
         for i in 0..24 {
-            let slot = self.get(i);
+            let slot: usize = self.get(i);
             assert!(slot < 24, "invalid slot index: {slot}");
 
-            let bit = 1u32 << slot;
+            let bit: u32 = 1u32 << slot;
             assert!(seen & bit == 0, "duplicate slot: {slot}");
             seen |= bit;
         }

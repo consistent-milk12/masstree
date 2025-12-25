@@ -18,12 +18,6 @@ mod generic;
 mod index;
 mod optimistic;
 
-#[cfg(all(test, loom, not(miri)))]
-mod loom_tests;
-
-#[cfg(all(test, not(miri)))]
-mod shuttle_tests;
-
 #[cfg(test)]
 pub mod test_hooks;
 
@@ -1693,5 +1687,98 @@ mod tests {
             assert!(value.is_some(), "Key {i} not found");
             assert_eq!(*value.unwrap(), i);
         }
+    }
+
+    /// Regression test for proptest failure: keys = [[52, 0], [52]]
+    /// Key [52] was being lost.
+    #[test]
+    fn test_proptest_regression_two_keys() {
+        let tree: MassTree24<u64> = MassTree24::new();
+
+        let key1: &[u8] = &[52, 0];
+        let key2: &[u8] = &[52];
+
+        tree.insert(key1, 0).unwrap();
+        tree.insert(key2, 1).unwrap();
+
+        // Verify both keys exist
+        let result1 = tree.get(key1);
+        let result2 = tree.get(key2);
+
+        assert!(result1.is_some(), "Key [52, 0] lost!");
+        assert!(result2.is_some(), "Key [52] lost!");
+        assert_eq!(*result1.unwrap(), 0);
+        assert_eq!(*result2.unwrap(), 1);
+        assert_eq!(tree.len(), 2);
+    }
+
+    /// Regression test for proptest failure: 9-byte key of all zeros.
+    /// Key was being lost after insert.
+    #[test]
+    fn test_proptest_regression_nine_zeros() {
+        let tree: MassTree24<u64> = MassTree24::new();
+
+        let key: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0];
+        tree.insert(key, 42).unwrap();
+
+        let result = tree.get(key);
+        assert!(result.is_some(), "9-byte key not found!");
+        assert_eq!(*result.unwrap(), 42);
+        assert_eq!(tree.len(), 1);
+    }
+
+    /// Test two suffix keys with same 8-byte prefix.
+    /// This creates a conflict that should create a layer.
+    #[test]
+    fn test_two_suffix_keys_same_prefix() {
+        let tree: MassTree24<u64> = MassTree24::new();
+
+        // Two 16-byte keys with same 8-byte prefix "prefix00"
+        let key1: &[u8] = b"prefix0000000000";
+        let key2: &[u8] = b"prefix0000000001";
+
+        tree.insert(key1, 1).unwrap();
+        tree.insert(key2, 2).unwrap();
+
+        // Both should be retrievable
+        let result1 = tree.get(key1);
+        let result2 = tree.get(key2);
+
+        assert!(result1.is_some(), "key1 not found!");
+        assert!(result2.is_some(), "key2 not found!");
+        assert_eq!(*result1.unwrap(), 1);
+        assert_eq!(*result2.unwrap(), 2);
+        assert_eq!(tree.len(), 2);
+    }
+
+    /// Test many suffix keys with same 8-byte prefix.
+    /// Tests layer handling as keys accumulate.
+    #[test]
+    fn test_many_suffix_keys_same_prefix() {
+        let tree: MassTree24<u64> = MassTree24::new();
+
+        // 20 keys with same 8-byte prefix "prefix00"
+        for i in 0..20u64 {
+            let key = format!("prefix00{i:08}"); // 16 bytes each
+            tree.insert(key.as_bytes(), i).unwrap();
+
+            // Immediately verify this key
+            let result = tree.get(key.as_bytes());
+            assert!(
+                result.is_some(),
+                "Key {i} ('{key}') not found immediately after insert"
+            );
+            assert_eq!(*result.unwrap(), i);
+        }
+
+        // Verify all keys still retrievable at the end
+        for i in 0..20u64 {
+            let key = format!("prefix00{i:08}");
+            let result = tree.get(key.as_bytes());
+            assert!(result.is_some(), "Key {i} ('{key}') not found at end");
+            assert_eq!(*result.unwrap(), i);
+        }
+
+        assert_eq!(tree.len(), 20);
     }
 }

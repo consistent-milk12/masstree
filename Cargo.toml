@@ -31,7 +31,7 @@ default = []
 # Alternative global allocators for benchmarking
 mimalloc = ["dep:mimalloc"]
 # When disabled (default), all tracing calls compile to no-ops with zero overhead.
-# When enabled, auto-initializes a subscriber that writes JSON logs to logs/masstree.json.
+# When enabled, auto-initializes a subscriber that writes NDJSON logs to logs/masstree.jsonl.
 # Respects RUST_LOG env var (default: info). Set MASSTREE_LOG_CONSOLE=0 to disable console.
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
 

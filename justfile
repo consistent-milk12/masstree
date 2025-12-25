@@ -36,6 +36,17 @@ test:
 next:
     cargo nextest run --no-fail-fast --features "tracing,mimalloc"
 
+# Run all tests with trace-level logging, then pretty-print logs to JSON
+next-trace:
+    #!/usr/bin/env bash
+    rm -f logs/masstree.jsonl logs/masstree.json
+    RUST_LOG=trace MASSTREE_LOG_CONSOLE=0 cargo nextest run --no-fail-fast --features "mimalloc,tracing"
+    if [ -f logs/masstree.jsonl ]; then
+        jaq -s '.' logs/masstree.jsonl > logs/masstree.json
+        rm -f logs/masstree.jsonl
+        echo "Logs written to logs/masstree.json"
+    fi
+
 # Run a specific test with nextest, tracing, and mimalloc
 next-one TEST:
     cargo nextest run --no-fail-fast --features "tracing,mimalloc" {{TEST}}
@@ -79,14 +90,9 @@ next-repeat N="10":
             echo "FAIL"
             echo "$output" | rg -n "(FAIL|Summary|error:|panicked at)" | head -n 20 || true
             mkdir -p logs/next-repeat
-            if [ -f logs/masstree.json ]; then
-                # Copy and finalize the JSON array (add closing bracket if missing)
-                cp -f logs/masstree.json "logs/next-repeat/run-${i}.json"
-                # Check if file ends with ] and add it if not
-                if ! tail -c 2 "logs/next-repeat/run-${i}.json" | grep -q ']'; then
-                    echo ']' >> "logs/next-repeat/run-${i}.json"
-                fi
-                echo "Saved logs to logs/next-repeat/run-${i}.json"
+            if [ -f logs/masstree.jsonl ]; then
+                cp -f logs/masstree.jsonl "logs/next-repeat/run-${i}.jsonl"
+                echo "Saved logs to logs/next-repeat/run-${i}.jsonl"
             fi
             printf '%s\n' "$output" > "logs/next-repeat/run-${i}.out"
             echo "Saved output to logs/next-repeat/run-${i}.out"

@@ -402,6 +402,16 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
         insert_ikey: u64,
         insert_child: *mut u8,
     ) -> (u64, bool);
+
+    // ========================================================================
+    //  Performance
+    // ========================================================================
+
+    /// Prefetch the internode's data into cache.
+    ///
+    /// Brings the node's key and child arrays into CPU cache before they're
+    /// accessed, reducing memory latency during traversal.
+    fn prefetch(&self);
 }
 
 // ============================================================================
