@@ -219,12 +219,26 @@ pub use tree::{MassTree, MassTree24, MassTreeGeneric, MassTreeIndex};
 
 // Re-export debug counters for diagnosis (lightweight, always-on)
 pub use tree::{
-    ADVANCE_BLINK_COUNT, BLINK_SHOULD_FOLLOW_COUNT, CAS_INSERT_FALLBACK_COUNT,
-    CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters, LOCKED_INSERT_COUNT,
-    BLINK_ADVANCE_ANOMALY_COUNT, SEARCH_NOT_FOUND_COUNT, SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT,
-    get_all_debug_counters,
-    get_debug_counters, reset_debug_counters,
+    ADVANCE_BLINK_COUNT,
+    BLINK_ADVANCE_ANOMALY_COUNT,
+    BLINK_SHOULD_FOLLOW_COUNT,
+    CAS_INSERT_FALLBACK_COUNT,
+    CAS_INSERT_RETRY_COUNT,
+    CAS_INSERT_SUCCESS_COUNT,
+    DebugCounters,
+    LOCKED_INSERT_COUNT,
     // Parent-wait instrumentation for variance analysis
-    PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
-    PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, get_parent_wait_stats,
+    PARENT_WAIT_HIT_COUNT,
+    PARENT_WAIT_MAX_NS,
+    PARENT_WAIT_MAX_SPINS,
+    PARENT_WAIT_TOTAL_NS,
+    PARENT_WAIT_TOTAL_SPINS,
+    ParentWaitStats,
+    SEARCH_NOT_FOUND_COUNT,
+    SPLIT_COUNT,
+    WRONG_LEAF_INSERT_COUNT,
+    get_all_debug_counters,
+    get_debug_counters,
+    get_parent_wait_stats,
+    reset_debug_counters,
 };

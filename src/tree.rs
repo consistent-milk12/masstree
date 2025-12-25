@@ -369,10 +369,13 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::panic)]
+    #[expect(clippy::too_many_lines)]
     fn concurrent_insert_then_get_does_not_lose_key() {
         // This reproduces the "insert returns Ok(None) but immediate get returns None" bug.
         // If it fails, we also scan the leaf B-link chain to determine whether the key
         // is truly missing from all leaves, or only unreachable via the normal get path.
+        #[expect(clippy::cast_ptr_alignment)]
         fn scan_leaf_chain_contains(tree: &MassTree24<u64>, ikey: u64) -> bool {
             use crate::internode::InternodeNode;
             use crate::leaf24::LeafNode24;

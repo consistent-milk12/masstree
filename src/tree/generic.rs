@@ -1,3 +1,5 @@
+#[cfg(feature = "tracing")]
+use std::time::Instant;
 use std::{
     cmp::Ordering,
     marker::PhantomData,
@@ -20,6 +22,14 @@ use crate::{
     tree::{CasInsertResultGeneric, InsertError, InsertSearchResultGeneric},
     value::LeafValue,
 };
+
+use crate::tree::optimistic::{
+    PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS, PARENT_WAIT_TOTAL_NS,
+    PARENT_WAIT_TOTAL_SPINS,
+};
+use std::sync::atomic::Ordering::Relaxed;
+
+const MAX_ANOMALY_RETRIES: u32 = 1000;
 
 impl<V, L, A> MassTreeGeneric<V, L, A>
 where
@@ -714,7 +724,10 @@ where
             }
 
             // Check for frozen permutation
+            // If frozen, wait briefly for version to stabilize before falling back.
+            // This prevents spinning on a transient frozen state (Fix B: freeze-wait protocol).
             let Ok(perm) = leaf.permutation_try() else {
+                let _ = leaf.version().stable();
                 return CasInsertResultGeneric::ContentionFallback;
             };
 
@@ -1067,8 +1080,7 @@ where
             if key_ikey >= next_bound {
                 advance_count += 1;
                 // Key belongs in next leaf or further
-                crate::tree::optimistic::ADVANCE_BLINK_COUNT
-                    .fetch_add(1, AtomicOrdering::Relaxed);
+                crate::tree::optimistic::ADVANCE_BLINK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
 
                 // DIAGNOSTIC: Check for backwards B-link chain
                 #[cfg(feature = "tracing")]
@@ -1300,7 +1312,7 @@ where
         let ikey_for_trace: u64 = key.ikey();
 
         #[cfg(feature = "tracing")]
-        let insert_start = std::time::Instant::now();
+        let _insert_start = Instant::now();
 
         #[cfg(feature = "tracing")]
         let mut retry_count: u32 = 0;
@@ -1319,7 +1331,6 @@ where
 
         // Retry counter to prevent infinite loops on persistent anomalies
         let mut anomaly_retries: u32 = 0;
-        const MAX_ANOMALY_RETRIES: u32 = 1000;
 
         loop {
             // Check for too many anomaly retries (indicates a bug or persistent race)
@@ -1410,11 +1421,12 @@ where
 
             // Lock the leaf
             #[cfg(feature = "tracing")]
-            let lock_start = std::time::Instant::now();
+            let lock_start = Instant::now();
 
             let mut lock = leaf.version().lock();
 
             #[cfg(feature = "tracing")]
+            #[expect(clippy::cast_possible_truncation)]
             {
                 let lock_elapsed = lock_start.elapsed();
                 if lock_elapsed > std::time::Duration::from_millis(1) {
@@ -1755,6 +1767,7 @@ where
     ///
     /// This function takes ownership of the lock and releases it before returning.
     #[inline]
+    #[expect(clippy::too_many_lines, reason = "Extensive looging.")]
     fn handle_leaf_split_generic(
         &self,
         left_leaf_ptr: *mut L,
@@ -1764,7 +1777,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> Result<(), InsertError> {
         #[cfg(feature = "tracing")]
-        let split_start = std::time::Instant::now();
+        let split_start = Instant::now();
 
         #[cfg(feature = "tracing")]
         tracing::info!(
@@ -1822,15 +1835,37 @@ where
         let is_layer_root: bool = left_leaf.parent().is_null() && left_leaf.version().is_root();
 
         // NOTE: Link leaves in B-link order
-        // right_leaf's parent pointer is NULL at this point. It will be set
-        // in propagate_split_generic after we insert into the parent internode.
-        //
-        // If another thread splits right_leaf before we set its parent, that thread
-        // will see NULL parent and wait in propagate_split_generic.
         unsafe { left_leaf.link_sibling(right_leaf_ptr) };
 
+        // FIX D Stage 2A: Early parent publication
+        // Set the right leaf's parent pointer BEFORE releasing the lock to reduce the
+        // NULL-parent wait window. If another thread tries to split the right leaf,
+        // it will find a non-NULL parent and can proceed immediately.
+        //
+        // Rules:
+        // - If left_leaf has a parent (non-root), set right_leaf.parent = left_leaf.parent
+        // - If left_leaf is a root (parent NULL), defer parent assignment (will be set when
+        //   the new root/layer internode is created)
+        //
+        // Note: The internode split path or insert path may move right_leaf to a different
+        // parent, but that's OK because:
+        // 1. Having a non-NULL parent allows the other thread to make progress
+        // 2. The "child not found" retry loop handles parent changes gracefully
+        let left_parent: *mut u8 = left_leaf.parent();
+        if !left_parent.is_null() {
+            unsafe {
+                (*right_leaf_ptr).set_parent(left_parent);
+            }
+            #[cfg(feature = "tracing")]
+            tracing::trace!(
+                right_leaf_ptr = ?right_leaf_ptr,
+                parent_ptr = ?left_parent,
+                "EARLY_PARENT_SET: set right_leaf.parent before lock drop"
+            );
+        }
+
         #[cfg(feature = "tracing")]
-        let propagate_start = std::time::Instant::now();
+        let propagate_start = Instant::now();
 
         // OPTIMIZATION: Release leaf lock BEFORE parent propagation.
         // Once link succeeds, the split is visible via B-link chain.
@@ -1857,6 +1892,7 @@ where
         );
 
         #[cfg(feature = "tracing")]
+        #[expect(clippy::cast_possible_truncation)]
         {
             let propagate_elapsed = propagate_start.elapsed();
             let total_elapsed = split_start.elapsed();
@@ -1960,7 +1996,17 @@ where
     /// # Arguments
     /// * `is_layer_root` - True if the left leaf was a layer root BEFORE the lock was dropped.
     ///   This must be captured before `drop(lock)` because `SPLIT_UNLOCK_MASK` clears `ROOT_BIT`.
+    ///
+    /// # Help-Along Protocol
+    ///
+    /// The right sibling (`right_leaf_ptr`) is created with a split-locked version
+    /// ([`LOCK_BIT`] | [`SPLITTING_BIT`] set). This function unlocks it after setting its
+    /// parent pointer. This prevents other threads from trying to split the right
+    /// sibling while its parent is NULL.
+    ///
+    /// All exit paths must call `(*right_leaf_ptr).version().unlock_for_split()`.
     #[expect(clippy::too_many_lines)]
+    #[expect(clippy::cast_possible_truncation)]
     #[expect(clippy::panic, reason = "FATAL: Cannot continue")]
     fn propagate_split_generic(
         &self,
@@ -1971,7 +2017,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> Result<(), InsertError> {
         #[cfg(feature = "tracing")]
-        let propagate_start = std::time::Instant::now();
+        let propagate_start = Instant::now();
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
@@ -1994,7 +2040,16 @@ where
                 left_leaf_ptr = ?left_leaf_ptr,
                 "PROPAGATE: left was main tree root, creating root internode"
             );
-            return self.create_root_internode_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
+            let result =
+                self.create_root_internode_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
+
+            // CRITICAL (Help-Along Protocol): Unlock right sibling AFTER parent is set.
+            // create_root_internode_generic sets both parent pointers before returning.
+            unsafe {
+                (*right_leaf_ptr).version().unlock_for_split();
+            }
+
+            return result;
         }
 
         // Handle NULL parent case - two possibilities:
@@ -2012,12 +2067,27 @@ where
                     left_leaf_ptr = ?left_leaf_ptr,
                     "PROPAGATE: layer root, promoting to layer internode"
                 );
-                return self.promote_layer_root_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
+                let result =
+                    self.promote_layer_root_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
+
+                // CRITICAL (Help-Along Protocol): Unlock right sibling AFTER parent is set.
+                unsafe {
+                    (*right_leaf_ptr).version().unlock_for_split();
+                }
+
+                return result;
             }
 
-            // NEWLY SPLIT SIBLING: wait for creating thread to set parent pointer
-            // This happens when Thread A splits a leaf, creating right sibling R,
-            // then Thread B splits R before Thread A finishes propagate_split.
+            // NEWLY SPLIT SIBLING: wait for creating thread to set parent pointer.
+            //
+            // NOTE (Help-Along Protocol): With the help-along protocol, this path
+            // should be EXTREMELY RARE because:
+            // 1. The right sibling is created with SPLITTING_BIT set
+            // 2. Other threads calling stable() will spin until unlock_for_split()
+            // 3. Therefore, other threads cannot lock/split the sibling until parent is set
+            //
+            // If we reach here frequently, something is wrong with the help-along implementation.
+            // We keep this wait loop as a safety net for production robustness.
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 left_leaf_ptr = ?left_leaf_ptr,
@@ -2026,12 +2096,6 @@ where
             );
 
             // Instrumentation: record parent-wait hit and timing
-            use crate::tree::optimistic::{
-                PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
-                PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS,
-            };
-            use std::sync::atomic::Ordering::Relaxed;
-
             PARENT_WAIT_HIT_COUNT.fetch_add(1, Relaxed);
             let wait_start = std::time::Instant::now();
 
@@ -2111,7 +2175,7 @@ where
         // Use a retry loop to handle the case where child is not found in parent,
         // which can happen during concurrent splits (matches WIDTH=15 behavior).
         #[cfg(feature = "tracing")]
-        let parent_lock_start = std::time::Instant::now();
+        let parent_lock_start = Instant::now();
 
         let mut retry_count: usize = 0;
         let (parent_ptr, mut parent_lock, child_idx) = loop {
@@ -2233,6 +2297,14 @@ where
                 }
             }
 
+            // CRITICAL (Help-Along Protocol): Unlock right sibling AFTER internode split
+            // propagation completes. The internode split may move children and update
+            // parent pointers; unlocking early reintroduces the "operate on an
+            // incompletely installed node" interleaving.
+            unsafe {
+                (*right_leaf_ptr).version().unlock_for_split();
+            }
+
             result
         } else {
             // Parent has room - insert directly
@@ -2264,6 +2336,12 @@ where
             }
 
             drop(parent_lock);
+
+            // CRITICAL (Help-Along Protocol): Unlock right_leaf AFTER setting its parent.
+            unsafe {
+                (*right_leaf_ptr).version().unlock_for_split();
+            }
+
             Ok(())
         }
     }

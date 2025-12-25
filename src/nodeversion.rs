@@ -419,6 +419,7 @@ impl NodeVersion {
                     continue;
                 }
 
+                #[expect(clippy::cast_possible_truncation)]
                 #[cfg(feature = "tracing")]
                 {
                     let elapsed = start.elapsed();
@@ -622,6 +623,7 @@ impl NodeVersion {
                     .compare_exchange_weak(value, locked, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
+                    #[expect(clippy::cast_possible_truncation)]
                     #[cfg(feature = "tracing")]
                     {
                         let elapsed = start.elapsed();
@@ -771,6 +773,7 @@ impl NodeVersion {
             // Try to acquire the lock
             if let Some(guard) = self.try_lock() {
                 #[cfg(feature = "tracing")]
+                #[expect(clippy::cast_possible_truncation)]
                 {
                     let elapsed = start.elapsed();
                     if elapsed > Duration::from_millis(1) || total_spins > 100 || yields > 10 {
@@ -835,6 +838,123 @@ impl NodeVersion {
     #[inline(always)]
     pub fn mark_nonroot(&self) {
         self.value.fetch_and(!ROOT_BIT, Ordering::Release);
+    }
+
+    // ========================================================================
+    // Split-Locked Node Creation (Help-Along Protocol)
+    // ========================================================================
+
+    /// Create a new node version for a split sibling.
+    ///
+    /// The new version is:
+    /// - Locked ([`LOCK_BIT`] set)
+    /// - Marked as splitting ([`SPLITTING_BIT`] set)
+    /// - Has the same [`ISLEAF_BIT`] as the source
+    /// - Has zeroed version counters (fresh node)
+    ///
+    /// This is used during splits to create a right sibling that starts locked.
+    /// The sibling remains locked until its parent pointer is set, preventing
+    /// other threads from trying to split it while parent is NULL.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `child->assign_version(*n_)` in `masstree_split.hh:198`.
+    /// However, we use [`SPLITTING_BIT`] instead of copying [`INSERTING_BIT`] because
+    /// the right sibling's unlock should increment the split counter.
+    ///
+    /// # Safety Considerations
+    ///
+    /// The caller must ensure:
+    /// 1. The source node is locked
+    /// 2. `unlock_for_split()` will be called on this node exactly once
+    /// 3. The new node is not visible to other threads until after `link_sibling()`
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses Relaxed ordering because the new node is not yet visible to other threads.
+    /// The fence in `link_sibling()` establishes visibility.
+    #[must_use]
+    pub fn new_for_split(source: &Self) -> Self {
+        let source_value = source.value.load(Ordering::Relaxed);
+        debug_assert!(
+            (source_value & LOCK_BIT) != 0,
+            "new_for_split: source must be locked"
+        );
+
+        // New version has:
+        // - ISLEAF_BIT from source (preserved)
+        // - LOCK_BIT (locked)
+        // - SPLITTING_BIT (will increment split counter on unlock)
+        // - Zero version counters (fresh node)
+        //
+        // We deliberately use SPLITTING_BIT (not INSERTING_BIT) because:
+        // 1. This is a split operation
+        // 2. unlock_for_split should increment vsplit, not vinsert
+        // 3. SPLIT_UNLOCK_MASK clears ROOT_BIT which is correct for split children
+        let new_value = (source_value & ISLEAF_BIT) | LOCK_BIT | SPLITTING_BIT;
+
+        Self {
+            value: AtomicU32::new(new_value),
+        }
+    }
+
+    /// Unlock a node that was created with `new_for_split`.
+    ///
+    /// This performs a split unlock (increments split version counter).
+    /// Must be called exactly once after the node's parent pointer is set.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches the unlock in `masstree_split.hh:280`: `child->unlock()`.
+    /// The C++ version uses the hand-over-hand pattern where the child
+    /// is unlocked after the parent insert completes.
+    ///
+    /// # Memory Ordering
+    ///
+    /// Issues a compiler fence before the store to ensure all prior writes
+    /// (parent pointer, data) are complete before the unlock is visible.
+    /// Uses Release ordering on the store to synchronize with readers'
+    /// Acquire loads in `stable()` and `has_changed()`.
+    ///
+    /// # Panics
+    ///
+    /// Debug-asserts that the node is locked with [`SPLITTING_BIT`] set.
+    pub fn unlock_for_split(&self) {
+        let locked_value = self.value.load(Ordering::Relaxed);
+
+        debug_assert!(
+            (locked_value & LOCK_BIT) != 0,
+            "unlock_for_split: node must be locked, got value={locked_value:#010x}"
+        );
+
+        debug_assert!(
+            (locked_value & SPLITTING_BIT) != 0,
+            "unlock_for_split: node must have SPLITTING_BIT, got value={locked_value:#010x}"
+        );
+
+        // Compute unlocked value: increment split counter, clear dirty/lock/root bits
+        // This matches the SPLITTING_BIT branch in LockGuard::drop
+        let new_value = (locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK;
+
+        // Compiler fence: ensures all prior writes are ordered before version store.
+        // This is critical - parent pointer and all data must be visible to readers
+        // before we unlock. Without this, a reader could see the unlocked version
+        // but read stale/missing parent pointer.
+        compiler_fence(Ordering::SeqCst);
+
+        // Release store: synchronizes with Acquire loads in stable()/has_changed()
+        self.value.store(new_value, Ordering::Release);
+    }
+
+    /// Check if this node was created for a split and hasn't been unlocked yet.
+    ///
+    /// Returns true if [`LOCK_BIT`] and [`SPLITTING_BIT`] are both set.
+    /// Used for debugging and assertions.
+    #[must_use]
+    #[inline(always)]
+    pub fn is_split_locked(&self) -> bool {
+        let value = self.value.load(Ordering::Relaxed);
+        (value & (LOCK_BIT | SPLITTING_BIT)) == (LOCK_BIT | SPLITTING_BIT)
     }
 }
 
@@ -1423,6 +1543,119 @@ mod tests {
         }
 
         assert!(v.is_deleted());
+    }
+
+    // =======================================================================
+    // Help-Along Protocol Tests
+    // =======================================================================
+
+    #[test]
+    fn test_new_for_split() {
+        let source = NodeVersion::new(true);
+        let _guard = source.lock();
+
+        let split_version = NodeVersion::new_for_split(&source);
+
+        // Should be locked with splitting bit
+        assert!(split_version.is_split_locked());
+        assert!(split_version.is_leaf());
+        assert!(!split_version.is_root());
+
+        // Should have LOCK_BIT and SPLITTING_BIT set
+        let value = split_version.value();
+        assert!((value & LOCK_BIT) != 0, "LOCK_BIT should be set");
+        assert!((value & SPLITTING_BIT) != 0, "SPLITTING_BIT should be set");
+        assert!((value & ISLEAF_BIT) != 0, "ISLEAF_BIT should be preserved");
+    }
+
+    #[test]
+    fn test_unlock_for_split() {
+        let source = NodeVersion::new(true);
+        let _guard = source.lock();
+
+        let split_version = NodeVersion::new_for_split(&source);
+        assert!(split_version.is_split_locked());
+
+        // Simulate setting parent pointer (would normally happen in propagate_split)
+
+        split_version.unlock_for_split();
+
+        // Should now be unlocked
+        assert!(!split_version.is_locked());
+        assert!(!split_version.is_splitting());
+        assert!(!split_version.is_split_locked());
+
+        // stable() should return immediately (no dirty bits)
+        let v = split_version.stable();
+        assert!((v & DIRTY_MASK) == 0);
+    }
+
+    #[test]
+    fn test_split_version_blocks_stable() {
+        // This test verifies that a split-locked version blocks stable()
+        // until unlock_for_split() is called.
+
+        // Create a split-locked version directly
+        let split_version = NodeVersion::from_value(ISLEAF_BIT | LOCK_BIT | SPLITTING_BIT);
+
+        // Verify it has the expected bits set
+        assert!(split_version.is_split_locked());
+        assert!(split_version.is_dirty());
+
+        // stable() would spin here, so we just verify the dirty check
+        let value = split_version.value();
+        assert!(
+            (value & DIRTY_MASK) != 0,
+            "Split-locked version should have dirty bits set"
+        );
+
+        // After unlock, stable() should work
+        split_version.unlock_for_split();
+        let stable = split_version.stable();
+        assert!((stable & DIRTY_MASK) == 0);
+    }
+
+    #[test]
+    fn test_new_for_split_preserves_isleaf() {
+        // Test with leaf node
+        let leaf_source = NodeVersion::new(true);
+        let guard1 = leaf_source.lock();
+        let split_leaf = NodeVersion::new_for_split(&leaf_source);
+        assert!(split_leaf.is_leaf());
+        drop(guard1);
+
+        // Test with internode
+        let inode_source = NodeVersion::new(false);
+        let _guard2 = inode_source.lock();
+        let split_inode = NodeVersion::new_for_split(&inode_source);
+        assert!(!split_inode.is_leaf());
+    }
+
+    #[test]
+    fn test_unlock_for_split_increments_split_counter() {
+        let source = NodeVersion::new(true);
+        let _guard = source.lock();
+
+        let split_version = NodeVersion::new_for_split(&source);
+        let before = split_version.value();
+
+        split_version.unlock_for_split();
+        let after = split_version.value();
+
+        // Split counter should have incremented (bits 9+)
+        // The split counter is in the upper bits, masked by SPLIT_UNLOCK_MASK
+        assert!(
+            after != before,
+            "Version should change after unlock_for_split"
+        );
+        assert!(
+            (after & DIRTY_MASK) == 0,
+            "Dirty bits should be cleared after unlock"
+        );
+        assert!(
+            (after & LOCK_BIT) == 0,
+            "Lock bit should be cleared after unlock"
+        );
     }
 }
 

@@ -160,6 +160,7 @@ pub struct ParentWaitStats {
 }
 
 /// Get parent-wait statistics summary.
+#[expect(clippy::cast_precision_loss)]
 pub fn get_parent_wait_stats() -> ParentWaitStats {
     let hits = PARENT_WAIT_HIT_COUNT.load(Relaxed);
     let total_spins = PARENT_WAIT_TOTAL_SPINS.load(Relaxed);
