@@ -775,6 +775,68 @@ impl NodeVersion {
     pub fn mark_nonroot(&self) {
         self.value.fetch_and(!ROOT_BIT, Ordering::Release);
     }
+
+    // ========================================================================
+    // Split-Locked Creation (C++ help-along protocol)
+    // ========================================================================
+
+    /// Copy version from another node INCLUDING the lock bit.
+    ///
+    /// This is used during splits to create a new sibling that starts locked.
+    /// Matches C++ behavior: `child->assign_version(*n_)` in masstree_split.hh:198.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// 1. The source node is locked (has LOCK_BIT set)
+    /// 2. The caller will eventually call `unlock_split_sibling()` on this node
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses Release ordering to ensure the locked state is visible to other threads.
+    #[inline]
+    pub fn copy_locked_from(&self, other: &Self) {
+        let other_value = other.value.load(Ordering::Acquire);
+        debug_assert!(
+            (other_value & LOCK_BIT) != 0,
+            "copy_locked_from: source must be locked"
+        );
+        // Copy the full version value including LOCK_BIT and INSERTING_BIT
+        self.value.store(other_value, Ordering::Release);
+    }
+
+    /// Unlock a split sibling that was created with `copy_locked_from`.
+    ///
+    /// This performs the same unlock logic as `LockGuard::drop()` but without
+    /// requiring a guard. Used at the end of split propagation to unlock the
+    /// right sibling that was kept locked during propagation.
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses Release ordering to ensure all modifications made while locked
+    /// are visible to subsequent readers.
+    ///
+    /// # Panics
+    ///
+    /// Debug-asserts that the node is currently locked.
+    #[inline]
+    pub fn unlock_split_sibling(&self) {
+        let locked_value = self.value.load(Ordering::Relaxed);
+        debug_assert!(
+            (locked_value & LOCK_BIT) != 0,
+            "unlock_split_sibling: node must be locked"
+        );
+
+        // Same logic as LockGuard::drop()
+        let new_value: u32 = if locked_value & SPLITTING_BIT != 0 {
+            (locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK
+        } else {
+            // INSERTING_BIT should be set from copy_locked_from
+            (locked_value + ((locked_value & INSERTING_BIT) << 2)) & UNLOCK_MASK
+        };
+
+        self.value.store(new_value, Ordering::Release);
+    }
 }
 
 impl Clone for NodeVersion {

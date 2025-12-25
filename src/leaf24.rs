@@ -1215,6 +1215,12 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_leaf: Box<Self>,
         guard: &seize::LocalGuard<'_>,
     ) -> (Box<Self>, u64, crate::value::InsertTarget) {
+        // CRITICAL: Copy locked version from left leaf to new right leaf.
+        // This keeps the new leaf locked until split propagation completes,
+        // preventing other threads from splitting it while parent is NULL.
+        // Matches C++ behavior: child->assign_version(*n_) in masstree_split.hh:198.
+        new_leaf.version.copy_locked_from(&self.version);
+
         // Always freeze during split - caller must hold lock
         let freeze_guard = Self::freeze_permutation(self);
 
@@ -1277,6 +1283,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_leaf: Box<Self>,
         guard: &seize::LocalGuard<'_>,
     ) -> (Box<Self>, u64, crate::value::InsertTarget) {
+        // CRITICAL: Copy locked version from left leaf to new right leaf.
+        // This keeps the new leaf locked until split propagation completes.
+        // Matches C++ behavior: child->assign_version(*n_) in masstree_split.hh:198.
+        new_leaf.version.copy_locked_from(&self.version);
+
         // Always freeze during split - caller must hold lock
         let freeze_guard = Self::freeze_permutation(self);
 

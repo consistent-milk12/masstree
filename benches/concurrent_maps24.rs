@@ -1369,8 +1369,8 @@ mod write_scaling_32b {
 mod single_hot_key {
     use super::*;
 
-    const N: usize = 10_000_000;
-    const OPS_PER_THREAD: usize = 50_000;
+    const N: usize = 100_000; // Reduced from 10M for faster setup
+    const OPS_PER_THREAD: usize = 10_000; // Reduced from 50k
 
     #[divan::bench(args = [2, 4, 8, 16, 32])]
     fn masstree24(bencher: Bencher, threads: usize) {

@@ -1592,58 +1592,20 @@ where
             return self.create_root_internode_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
         }
 
-        // Handle NULL parent case - two possibilities:
-        // 1. Layer root: was created with is_root=true, should be promoted to layer internode
-        // 2. Newly split sibling: parent pointer not yet set by creating thread, should wait
+        // Handle NULL parent case - layer root split.
+        //
+        // NOTE: The previous wait loop for "newly split sibling" case is no longer needed.
+        // We now keep the right leaf LOCKED during split propagation (matching C++ behavior).
+        // This prevents other threads from splitting the right leaf while its parent is NULL.
         //
         // We use `is_layer_root` parameter (captured before lock drop) to distinguish.
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
 
-        if left_leaf.parent().is_null() {
-            if is_layer_root {
-                // LAYER ROOT SPLIT: promote to layer internode
-                #[cfg(feature = "tracing")]
-                eprintln!("[SPLIT] left is layer root, promoting to layer internode");
-                return self.promote_layer_root_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
-            }
-
-            // NEWLY SPLIT SIBLING: wait for creating thread to set parent pointer
-            // This happens when Thread A splits a leaf, creating right sibling R,
-            // then Thread B splits R before Thread A finishes propagate_split.
+        if left_leaf.parent().is_null() && is_layer_root {
+            // LAYER ROOT SPLIT: promote to layer internode
             #[cfg(feature = "tracing")]
-            eprintln!("[SPLIT] NULL parent, not layer root - waiting for parent to be set");
-
-            let mut spins: usize = 0;
-            loop {
-                // Check if parent is now set
-                if !left_leaf.parent().is_null() {
-                    break;
-                }
-
-                spins += 1;
-
-                // Backoff strategy:
-                // Phase 1 (0-64): Spin - handles most cases (parent set quickly)
-                // Phase 2 (64-1024): Yield - moderate backoff
-                // Phase 3 (1024+): Short sleep - avoid burning CPU
-                if spins <= 64 {
-                    std::hint::spin_loop();
-                } else if spins <= 1024 {
-                    std::thread::yield_now();
-                } else {
-                    std::thread::sleep(std::time::Duration::from_micros(10));
-                }
-
-                // Safety limit - if we hit this, there's a bug
-                assert!(
-                    spins <= 1_000_000,
-                    "propagate_split_generic: parent pointer never set after {spins} iterations. \
-                     left_leaf_ptr={left_leaf_ptr:p}"
-                );
-            }
-
-            #[cfg(feature = "tracing")]
-            eprintln!("[SPLIT] Parent set after {spins} spins");
+            eprintln!("[SPLIT] left is layer root, promoting to layer internode");
+            return self.promote_layer_root_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
         }
 
         // Lock parent with validation and find child index.
@@ -1734,6 +1696,13 @@ where
             // This matches WIDTH=15 behavior (locked.rs:1614-1616).
             drop(parent_lock);
 
+            // CRITICAL: Unlock right_leaf AFTER setting its parent pointer but BEFORE
+            // propagating further. This matches C++ hand-over-hand locking (masstree_split.hh:280).
+            // The right leaf is now reachable (parent set) and can be safely unlocked.
+            unsafe {
+                (*right_leaf_ptr).version().unlock_split_sibling();
+            }
+
             self.propagate_internode_split_generic(
                 parent_ptr,
                 split_ikey,
@@ -1763,6 +1732,14 @@ where
             );
 
             drop(parent_lock);
+
+            // CRITICAL: Unlock right_leaf AFTER setting its parent pointer.
+            // This matches C++ hand-over-hand locking (masstree_split.hh:280).
+            // The right leaf is now fully initialized and reachable via B-link chain.
+            unsafe {
+                (*right_leaf_ptr).version().unlock_split_sibling();
+            }
+
             Ok(())
         }
     }
@@ -1833,11 +1810,19 @@ where
 
                     // Clear root flag on left leaf (it's no longer the root)
                     (*left_leaf_ptr).version().mark_nonroot();
+
+                    // CRITICAL: Unlock right_leaf after parent is set.
+                    // Matches C++ hand-over-hand locking (masstree_split.hh:280).
+                    (*right_leaf_ptr).version().unlock_split_sibling();
                 }
                 Ok(())
             }
             Err(_) => {
                 // Root changed concurrently - shouldn't happen if we hold lock
+                // Still need to unlock right_leaf even on failure
+                unsafe {
+                    (*right_leaf_ptr).version().unlock_split_sibling();
+                }
                 Err(InsertError::SplitFailed)
             }
         }
@@ -1883,6 +1868,10 @@ where
             // Clear root flag on both leaves - they're no longer layer roots
             (*left_leaf_ptr).version().mark_nonroot();
             (*right_leaf_ptr).version().mark_nonroot();
+
+            // CRITICAL: Unlock right_leaf after parent is set.
+            // Matches C++ hand-over-hand locking (masstree_split.hh:280).
+            (*right_leaf_ptr).version().unlock_split_sibling();
         }
 
         Ok(())
