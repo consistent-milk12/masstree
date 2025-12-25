@@ -44,7 +44,8 @@ portable-atomic = "1.12.0"
 mimalloc = { version = "0.1.48", optional = true }
 
 # Optional tracing (enabled via features) - zero overhead when disabled
-tracing = { version = "0.1.44", optional = true }
+# "attributes" enables #[instrument] for function-level tracing
+tracing = { version = "0.1.44", features = ["attributes"], optional = true }
 tracing-subscriber = { version = "0.3.22", features = [
 	"env-filter",
 	"fmt",

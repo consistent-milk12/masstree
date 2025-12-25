@@ -727,21 +727,31 @@ where
     /// Get a fresh root pointer, following parent pointers if the cached root is stale.
     ///
     /// This implements the C++ `fix_root()` pattern from masstree_struct.hh:791-798:
-    /// - If the current node is not a root, follow parent pointers to find the true root.
-    /// - If parent is null but node is not a root, spin until is_root() becomes true
-    ///   (matching C++ `maybe_parent()` which returns `this` when parent doesn't exist).
-    /// - **CAS-update the cached root_ptr** when we find a fresher root (key optimization!).
+    /// ```cpp
+    /// node_base<P>* root = root_;           // Load cached root
+    /// if (!root->is_root()) {
+    ///     node_base<P>* old_root = root;    // Save what we loaded
+    ///     root = root->maybe_parent();      // Find fresh root
+    ///     cmpxchg(&root_, old_root, root);  // CAS: old_root → root
+    /// }
+    /// return root;
+    /// ```
+    ///
+    /// Key insight: The CAS must use the value loaded from `self.root_ptr`, not the
+    /// parameter passed in (which may have been transformed by `maybe_parent_generic`).
     ///
     /// This CAS update is critical for performance: without it, every operation starts from
     /// a potentially outdated root and must walk up parent pointers, which is expensive
     /// during heavy splitting.
     #[cfg_attr(
         feature = "tracing",
-        tracing::instrument(level = "trace", skip(self, _guard), fields(start_node = ?node))
+        tracing::instrument(level = "trace", skip(self, guard), fields(start_node = ?node))
     )]
     #[inline]
-    fn get_fresh_root(&self, mut node: *const u8, _guard: &LocalGuard<'_>) -> *const u8 {
-        let original_node: *const u8 = node;
+    fn get_fresh_root(&self, mut node: *const u8, guard: &LocalGuard<'_>) -> *const u8 {
+        // Load self.root_ptr FIRST - this is what we'll use for CAS comparison.
+        // This matches C++ fix_root(): `node_base<P>* root = root_;`
+        let cached_root: *const u8 = self.load_root_ptr_generic(guard);
 
         loop {
             // SAFETY: node is valid, NodeVersion is first field
@@ -753,12 +763,15 @@ where
 
             // If this is a root, we're done
             if version.is_root() {
-                // C++ fix_root() pattern: if we found a different root than we started with,
+                // C++ fix_root() pattern: if we found a different root than cached,
                 // CAS-update the cached root_ptr so future operations start from the fresh root.
                 // This is a best-effort optimization; if the CAS fails, another thread updated it.
-                if !StdPtr::eq(node, original_node) {
+                //
+                // CRITICAL: Use `cached_root` (what we loaded from self.root_ptr), not `node`
+                // or any transformed value. The CAS expects the actual self.root_ptr value.
+                if !StdPtr::eq(node, cached_root) {
                     let _ = self.root_ptr.compare_exchange(
-                        original_node.cast_mut(),
+                        cached_root.cast_mut(),
                         node.cast_mut(),
                         AtomicOrdering::Release,
                         AtomicOrdering::Relaxed,
