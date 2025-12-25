@@ -400,6 +400,22 @@ impl<S: ValueSlot> LeafNode24<S> {
         );
 
         let old_ptr: *mut SuffixBag<WIDTH_24> = self.ksuf.load(RELAXED);
+
+        // FAST PATH: Try in-place assignment if bag exists and has room.
+        // This avoids clone + box allocation + defer_retire in the common case.
+        // SAFETY: We hold the lock, so no concurrent writers. Readers use version
+        // validation and will retry if they see partial state.
+        if !old_ptr.is_null() {
+            // SAFETY: old_ptr is non-null and came from Box::into_raw.
+            // We hold the lock, so we can mutate the bag in place.
+            let bag: &mut SuffixBag<WIDTH_24> = unsafe { &mut *old_ptr };
+            if bag.try_assign_in_place(slot, suffix) {
+                self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+                return;
+            }
+        }
+
+        // SLOW PATH: Need to allocate a new bag (either first allocation or bag is full)
         let mut new_bag: SuffixBag<WIDTH_24> = if old_ptr.is_null() {
             SuffixBag::new()
         } else {

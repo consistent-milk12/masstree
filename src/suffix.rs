@@ -207,6 +207,75 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     //  Suffix Assignment
     // ========================================================================
 
+    /// Try to assign a suffix to a slot in-place, without growing the buffer.
+    ///
+    /// This is an optimization for the common case where we hold the lock
+    /// and can mutate in place. It avoids the clone + box allocation overhead.
+    ///
+    /// # Returns
+    ///
+    /// - `true` if the suffix was assigned successfully (fits in existing capacity)
+    /// - `false` if the suffix doesn't fit and caller should reallocate
+    ///
+    /// # Fast Paths (like C++ stringbag::assign)
+    ///
+    /// 1. **Reuse existing slot**: If the new suffix fits in the old suffix's space
+    /// 2. **Append to end**: If there's room in the buffer
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot >= WIDTH` or if suffix length exceeds `u16::MAX`.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot bounds checked via debug_assert"
+    )]
+    #[inline]
+    pub fn try_assign_in_place(&mut self, slot: usize, suffix: &[u8]) -> bool {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        assert!(
+            u16::try_from(suffix.len()).is_ok(),
+            "suffix too long: {} > {}",
+            suffix.len(),
+            u16::MAX
+        );
+
+        let meta: SlotMeta = self.slots[slot];
+
+        // Fast path 1: Reuse existing slot if new suffix fits in old space
+        if meta.has_suffix() && suffix.len() <= meta.len as usize {
+            let start: usize = meta.offset as usize;
+            // SAFETY: meta is valid, we're writing within existing bounds
+            self.data[start..start + suffix.len()].copy_from_slice(suffix);
+
+            #[expect(clippy::cast_possible_truncation, reason = "len checked above")]
+            {
+                self.slots[slot] = SlotMeta {
+                    offset: meta.offset,
+                    len: suffix.len() as u16,
+                };
+            }
+            return true;
+        }
+
+        // Fast path 2: Append to end if there's room
+        let new_offset: usize = self.data.len();
+        if new_offset + suffix.len() <= self.data.capacity() {
+            self.data.extend_from_slice(suffix);
+
+            #[expect(clippy::cast_possible_truncation, reason = "offset and len checked")]
+            {
+                self.slots[slot] = SlotMeta {
+                    offset: new_offset as u32,
+                    len: suffix.len() as u16,
+                };
+            }
+            return true;
+        }
+
+        // Slow path: doesn't fit, caller should reallocate
+        false
+    }
+
     /// Assign a suffix to a slot.
     ///
     /// This always appends to the data buffer. If the buffer is full,
@@ -765,5 +834,113 @@ mod tests {
         bag.assign(2, b"c");
 
         assert_eq!(bag.count(), 3);
+    }
+
+    // ========================================================================
+    //  In-Place Assignment Tests
+    // ========================================================================
+
+    #[test]
+    fn test_try_assign_in_place_fresh_bag() {
+        let mut bag: SuffixBag<15> = SuffixBag::new();
+
+        // Fresh bag has capacity, should succeed
+        assert!(bag.try_assign_in_place(0, b"hello"));
+        assert_eq!(bag.get(0), Some(b"hello".as_slice()));
+    }
+
+    #[test]
+    fn test_try_assign_in_place_reuse_slot() {
+        let mut bag: SuffixBag<15> = SuffixBag::new();
+
+        // Assign a longer suffix first
+        bag.assign(0, b"hello world");
+        let used_before: usize = bag.used();
+
+        // Assign a shorter suffix - should reuse the slot
+        assert!(bag.try_assign_in_place(0, b"hi"));
+        assert_eq!(bag.get(0), Some(b"hi".as_slice()));
+
+        // Used bytes should not increase (reused existing space)
+        assert_eq!(bag.used(), used_before);
+    }
+
+    #[test]
+    fn test_try_assign_in_place_append() {
+        let mut bag: SuffixBag<15> = SuffixBag::new();
+
+        // Assign to slot 0
+        assert!(bag.try_assign_in_place(0, b"first"));
+
+        // Assign to slot 1 - should append
+        assert!(bag.try_assign_in_place(1, b"second"));
+
+        assert_eq!(bag.get(0), Some(b"first".as_slice()));
+        assert_eq!(bag.get(1), Some(b"second".as_slice()));
+    }
+
+    #[test]
+    fn test_try_assign_in_place_fails_when_full() {
+        // Create a bag with very small capacity
+        let mut bag: SuffixBag<15> = SuffixBag::with_capacity(10);
+
+        // First assignment should succeed
+        assert!(bag.try_assign_in_place(0, b"12345"));
+
+        // Second assignment that exceeds capacity should fail
+        assert!(!bag.try_assign_in_place(1, b"678901234567890"));
+
+        // First slot should still be valid
+        assert_eq!(bag.get(0), Some(b"12345".as_slice()));
+        // Second slot should not exist
+        assert_eq!(bag.get(1), None);
+    }
+
+    #[test]
+    fn test_try_assign_in_place_same_length() {
+        let mut bag: SuffixBag<15> = SuffixBag::new();
+
+        bag.assign(0, b"hello");
+        let used_before: usize = bag.used();
+
+        // Same length should reuse slot
+        assert!(bag.try_assign_in_place(0, b"world"));
+        assert_eq!(bag.get(0), Some(b"world".as_slice()));
+        assert_eq!(bag.used(), used_before);
+    }
+
+    #[test]
+    fn test_try_assign_in_place_longer_suffix_needs_append() {
+        let mut bag: SuffixBag<15> = SuffixBag::new();
+
+        bag.assign(0, b"hi");
+        let used_before: usize = bag.used();
+
+        // Longer suffix can't reuse slot, needs append
+        assert!(bag.try_assign_in_place(0, b"hello world"));
+        assert_eq!(bag.get(0), Some(b"hello world".as_slice()));
+
+        // Used bytes should increase
+        assert!(bag.used() > used_before);
+    }
+
+    #[test]
+    fn test_try_assign_in_place_mixed_usage() {
+        let mut bag: SuffixBag<15> = SuffixBag::new();
+
+        // Fill several slots
+        for i in 0..5 {
+            assert!(bag.try_assign_in_place(i, b"test"));
+        }
+
+        // Reuse slot 2 with shorter suffix
+        assert!(bag.try_assign_in_place(2, b"ab"));
+        assert_eq!(bag.get(2), Some(b"ab".as_slice()));
+
+        // Other slots unchanged
+        assert_eq!(bag.get(0), Some(b"test".as_slice()));
+        assert_eq!(bag.get(1), Some(b"test".as_slice()));
+        assert_eq!(bag.get(3), Some(b"test".as_slice()));
+        assert_eq!(bag.get(4), Some(b"test".as_slice()));
     }
 }
