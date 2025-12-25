@@ -41,8 +41,18 @@ where
     fn cas_insert_enabled() -> bool {
         use std::sync::OnceLock;
 
-        static DISABLE_CAS: OnceLock<bool> = OnceLock::new();
-        !*DISABLE_CAS.get_or_init(|| std::env::var_os("MASSTREE_DISABLE_CAS").is_some())
+        // CAS insert is currently correctness-sensitive under high contention.
+        // Default to disabled unless explicitly enabled for benchmarking/experiments.
+        //
+        // - Set `MASSTREE_ENABLE_CAS=1` to enable the CAS fast path.
+        // - Set `MASSTREE_DISABLE_CAS=1` to force-disable (takes precedence).
+        static ENABLE_CAS: OnceLock<bool> = OnceLock::new();
+        *ENABLE_CAS.get_or_init(|| {
+            if std::env::var_os("MASSTREE_DISABLE_CAS").is_some() {
+                return false;
+            }
+            std::env::var_os("MASSTREE_ENABLE_CAS").is_some()
+        })
     }
 
     /// Create a new empty `MassTreeGeneric` with the given allocator.
@@ -1243,6 +1253,8 @@ where
                 if advance_count >= Self::MAX_BLINK_ADVANCES {
                     let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = count;
                     // Rate-limit logging: only log first 10 anomalies
                     #[cfg(feature = "tracing")]
                     if count < 10 {
@@ -1351,6 +1363,8 @@ where
                 if advance_count >= Self::MAX_BLINK_ADVANCES {
                     let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = count;
                     // Rate-limit logging: only log first 10 anomalies
                     #[cfg(feature = "tracing")]
                     if count < 10 {

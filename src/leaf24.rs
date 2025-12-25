@@ -879,11 +879,6 @@ impl<S: ValueSlot> LeafNode24<S> {
         loop {
             let next: *mut Self = self.next.load(READ_ORD);
 
-            // NULL case: no need to mark
-            if next.is_null() {
-                return StdPtr::null_mut();
-            }
-
             // Already marked: another split is in progress, wait
             if is_marked(next) {
                 self.wait_for_split();
@@ -903,7 +898,10 @@ impl<S: ValueSlot> LeafNode24<S> {
                         next = ?next,
                         "lock_next: SUCCESS - marked next pointer"
                     );
-                    return next; // Return UNMARKED old next
+                    // Return UNMARKED old next (may be null). We intentionally mark even
+                    // `NULL` next pointers to avoid two concurrent splits both "seeing"
+                    // `NULL` and racing to publish different siblings, orphaning one.
+                    return next;
                 }
                 Err(_) => {
                     // CAS failed: someone else updated next, retry
@@ -1807,13 +1805,20 @@ mod tests {
 
     #[test]
     fn test_lock_next_null() {
-        // lock_next on a leaf with NULL next should return NULL
+        // lock_next on a leaf with NULL next should return NULL and mark the next pointer.
+        // This prevents two concurrent splits both observing NULL and racing to publish
+        // different siblings (orphaning one).
         let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
         assert!(leaf.safe_next().is_null());
 
         let result = leaf.lock_next();
         assert!(result.is_null());
-        // After lock_next with NULL, next should still be NULL (not marked)
+        // After lock_next with NULL, next is marked (but safe_next still reads as NULL)
+        assert!(leaf.next_is_marked());
+        assert!(leaf.safe_next().is_null());
+
+        // Unmark should restore a clean NULL next
+        leaf.unmark_next();
         assert!(!leaf.next_is_marked());
     }
 
