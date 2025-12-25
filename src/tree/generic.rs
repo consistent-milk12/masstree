@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering,
     marker::PhantomData,
+    ptr as StdPtr,
     sync::{
         Arc,
         atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering, fence as atomicFence},
@@ -479,8 +480,12 @@ where
                     // writer is actively mutating the node.
                     if leaf.version().has_changed_or_locked(version) {
                         // Version changed - follow B-link chain if split occurred
-                        let (advanced, new_version) =
-                            self.advance_to_key_generic(leaf, key, version, guard);
+                        let Some((advanced, new_version)) =
+                            self.advance_to_key_generic(leaf, key, version, guard)
+                        else {
+                            // Anomaly detected - restart from root
+                            continue 'leaf_loop;
+                        };
 
                         if !std::ptr::eq(advanced, leaf) {
                             // Different leaf - search there
@@ -692,7 +697,10 @@ where
             let leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let advanced: &L = self.advance_to_key_by_bound_generic(leaf, key, guard);
+            let Some(advanced) = self.advance_to_key_by_bound_generic(leaf, key, guard) else {
+                // Anomaly detected (cycle or limit) - fall back to locked path
+                return CasInsertResultGeneric::ContentionFallback;
+            };
             if !StdPtr::eq(advanced, leaf) {
                 leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
                 use_reach = false;
@@ -1010,9 +1018,8 @@ where
     /// This is called when `has_changed(old_version)` returns true, indicating
     /// a split may have occurred. It follows B-links to find the correct leaf.
     ///
-    /// Returns the correct leaf AND the stable version of that leaf.
-    /// This ensures the caller uses the same version that `advance_to_key` walked with,
-    /// avoiding race conditions from re-reading the version.
+    /// Returns `Some((leaf, version))` on success, or `None` if an anomaly is
+    /// detected (cycle or limit hit), indicating the caller should restart from root.
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_generic<'a>(
         &'a self,
@@ -1020,17 +1027,19 @@ where
         key: &Key<'_>,
         old_version: u32,
         _guard: &LocalGuard<'_>,
-    ) -> (&'a L, u32) {
+    ) -> Option<(&'a L, u32)> {
         use crate::link::{is_marked, unmark_ptr};
 
         let key_ikey: u64 = key.ikey();
+        let start_ptr: *const L = leaf as *const L;
+        let mut advance_count: usize = 0;
 
         // Only follow chain if split occurred or is in progress
         if !leaf.version().has_split(old_version) && !leaf.version().is_splitting() {
             // No split - return current leaf with fresh stable version
             let version: u32 = leaf.version().stable();
 
-            return (leaf, version);
+            return Some((leaf, version));
         }
 
         // Wait for any in-progress split to complete
@@ -1056,9 +1065,61 @@ where
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
+                advance_count += 1;
                 // Key belongs in next leaf or further
                 crate::tree::optimistic::ADVANCE_BLINK_COUNT
                     .fetch_add(1, AtomicOrdering::Relaxed);
+
+                // DIAGNOSTIC: Check for backwards B-link chain
+                #[cfg(feature = "tracing")]
+                {
+                    let current_bound: u64 = leaf.ikey_bound();
+                    if next_bound < current_bound {
+                        static BACKWARDS_COUNT_GET: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let count = BACKWARDS_COUNT_GET.fetch_add(1, AtomicOrdering::Relaxed);
+                        if count < 20 {
+                            tracing::error!(
+                                ikey = format_args!("{:016x}", key_ikey),
+                                current_ptr = ?StdPtr::from_ref(leaf),
+                                current_bound = format_args!("{:016x}", current_bound),
+                                next_ptr = ?next_ptr,
+                                next_bound = format_args!("{:016x}", next_bound),
+                                "BACKWARDS_CHAIN_GET: next_bound < current_bound in get path"
+                            );
+                        }
+                    }
+                }
+
+                // Cycle detection
+                if StdPtr::eq(next, start_ptr) {
+                    crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    return None;
+                }
+
+                // Limit check
+                if advance_count >= Self::MAX_BLINK_ADVANCES {
+                    let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    // Rate-limit logging: only log first 10 anomalies
+                    #[cfg(feature = "tracing")]
+                    if count < 10 {
+                        tracing::error!(
+                            ikey = format_args!("{:016x}", key_ikey),
+                            start_ptr = ?start_ptr,
+                            start_bound = format_args!("{:016x}", unsafe { (*start_ptr).ikey_bound() }),
+                            current_ptr = ?StdPtr::from_ref(leaf),
+                            current_bound = format_args!("{:016x}", leaf.ikey_bound()),
+                            next_ptr = ?next_ptr,
+                            next_bound = format_args!("{:016x}", next_bound),
+                            advance_count = advance_count,
+                            "BLINK_LIMIT_GET: ikey >> start_bound in get path"
+                        );
+                    }
+                    return None;
+                }
+
                 leaf = next;
                 version = leaf.version().stable();
                 continue;
@@ -1068,21 +1129,30 @@ where
             break;
         }
 
-        (leaf, version)
+        Some((leaf, version))
     }
+
+    /// Maximum B-link advances before bailing (anomaly detection).
+    /// Set high enough to handle legitimate long chains during heavy splitting.
+    const MAX_BLINK_ADVANCES: usize = 10_000;
 
     /// Advance to correct leaf via B-link (generic version).
     /// Used by insert path before locking.
+    ///
+    /// Returns `None` if an anomaly is detected (cycle or limit hit),
+    /// indicating the caller should restart from root.
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_by_bound_generic<'a>(
         &'a self,
         mut leaf: &'a L,
         key: &Key<'_>,
         _guard: &LocalGuard<'_>,
-    ) -> &'a L {
+    ) -> Option<&'a L> {
         use crate::link::{is_marked, unmark_ptr};
 
         let key_ikey: u64 = key.ikey();
+        let start_ptr: *const L = leaf as *const L;
+        let mut advance_count: usize = 0;
 
         if leaf.version().is_splitting() {
             let _ = leaf.version().stable();
@@ -1097,7 +1167,7 @@ where
 
             let next_ptr: *mut L = unmark_ptr(next_raw);
             if next_ptr.is_null() {
-                return leaf;
+                return Some(leaf);
             }
 
             // SAFETY: next_ptr is valid
@@ -1105,13 +1175,64 @@ where
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
-                crate::tree::optimistic::ADVANCE_BLINK_COUNT
-                    .fetch_add(1, AtomicOrdering::Relaxed);
+                advance_count += 1;
+                crate::tree::optimistic::ADVANCE_BLINK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+
+                // DIAGNOSTIC: Check for backwards B-link chain (bound should increase)
+                #[cfg(feature = "tracing")]
+                {
+                    let current_bound: u64 = leaf.ikey_bound();
+                    if next_bound < current_bound {
+                        static BACKWARDS_COUNT: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let count = BACKWARDS_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        if count < 20 {
+                            tracing::error!(
+                                ikey = format_args!("{:016x}", key_ikey),
+                                current_ptr = ?StdPtr::from_ref(leaf),
+                                current_bound = format_args!("{:016x}", current_bound),
+                                next_ptr = ?next_ptr,
+                                next_bound = format_args!("{:016x}", next_bound),
+                                "BACKWARDS_CHAIN: next_bound < current_bound - B-link ordering violated"
+                            );
+                        }
+                    }
+                }
+
+                // Cycle detection: check if we're back to start
+                if StdPtr::eq(next, start_ptr) {
+                    crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    return None;
+                }
+
+                // Limit check - if we've advanced too many times, something is wrong
+                if advance_count >= Self::MAX_BLINK_ADVANCES {
+                    let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    // Rate-limit logging: only log first 10 anomalies
+                    #[cfg(feature = "tracing")]
+                    if count < 10 {
+                        tracing::error!(
+                            ikey = format_args!("{:016x}", key_ikey),
+                            start_ptr = ?start_ptr,
+                            start_bound = format_args!("{:016x}", unsafe { (*start_ptr).ikey_bound() }),
+                            current_ptr = ?StdPtr::from_ref(leaf),
+                            current_bound = format_args!("{:016x}", leaf.ikey_bound()),
+                            next_ptr = ?next_ptr,
+                            next_bound = format_args!("{:016x}", next_bound),
+                            advance_count = advance_count,
+                            "BLINK_LIMIT: ikey >> start_bound suggests reach_leaf went wrong direction"
+                        );
+                    }
+                    return None;
+                }
+
                 leaf = next;
                 continue;
             }
 
-            return leaf;
+            return Some(leaf);
         }
     }
 
@@ -1196,14 +1317,32 @@ where
         // Track whether we're in a sublayer (don't use CAS path in sublayers)
         let mut in_sublayer: bool = false;
 
+        // Retry counter to prevent infinite loops on persistent anomalies
+        let mut anomaly_retries: u32 = 0;
+        const MAX_ANOMALY_RETRIES: u32 = 1000;
+
         loop {
+            // Check for too many anomaly retries (indicates a bug or persistent race)
+            if anomaly_retries >= MAX_ANOMALY_RETRIES {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    ikey = format_args!("{:016x}", ikey_for_trace),
+                    anomaly_retries = anomaly_retries,
+                    "INSERT_ABORT: exceeded max anomaly retries"
+                );
+                // Return existing value as None (insert failed but not an error)
+                // This prevents infinite loops while allowing the system to continue
+                return Ok(None);
+            }
             // Follow parent pointers to actual layer root
             layer_root = self.maybe_parent_generic(layer_root);
 
             // Try CAS fast path first (only for simple cases at layer 0)
             // CAS path doesn't handle layers - it always starts from main tree root.
             if Self::cas_insert_enabled() && !in_sublayer && !key.has_suffix() {
-                use crate::tree::optimistic::{CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_SUCCESS_COUNT};
+                use crate::tree::optimistic::{
+                    CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_SUCCESS_COUNT,
+                };
 
                 match self.try_cas_insert_generic(key, &value, guard) {
                     CasInsertResultGeneric::Success(old) => {
@@ -1236,8 +1375,38 @@ where
 
             let leaf: &L = unsafe { &*leaf_ptr };
 
+            // DIAGNOSTIC: Check if reach_leaf landed far from target
+            #[cfg(feature = "tracing")]
+            {
+                let leaf_bound: u64 = leaf.ikey_bound();
+                let target: u64 = key.ikey();
+                // If target is more than 100k away from leaf_bound, log it
+                if target > leaf_bound && target - leaf_bound > 100_000 {
+                    static FAR_LANDING_COUNT: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let count = FAR_LANDING_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                    if count < 20 {
+                        tracing::warn!(
+                            ikey = format_args!("{:016x}", target),
+                            leaf_ptr = ?leaf_ptr,
+                            leaf_bound = format_args!("{:016x}", leaf_bound),
+                            gap = target - leaf_bound,
+                            "FAR_LANDING: reach_leaf returned leaf far from target (gap > 100k)"
+                        );
+                    }
+                }
+            }
+
             // B-link advance if needed
-            let leaf: &L = self.advance_to_key_by_bound_generic(leaf, key, guard);
+            let Some(leaf) = self.advance_to_key_by_bound_generic(leaf, key, guard) else {
+                // Anomaly detected (cycle or limit) - restart from root
+                anomaly_retries += 1;
+                #[cfg(feature = "tracing")]
+                {
+                    retry_count += 1;
+                }
+                continue;
+            };
 
             // Lock the leaf
             #[cfg(feature = "tracing")]
@@ -1626,6 +1795,27 @@ where
         // Store new leaf in allocator
         let right_leaf_ptr: *mut L = self.allocator.alloc_leaf(new_leaf_box);
 
+        // DIAGNOSTIC: Verify split_ikey matches new leaf's ikey_bound (slot-0)
+        #[cfg(feature = "tracing")]
+        {
+            let right_leaf: &L = unsafe { &*right_leaf_ptr };
+            let right_bound: u64 = right_leaf.ikey_bound();
+            if split_ikey != right_bound {
+                static SPLIT_MISMATCH_COUNT: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let count = SPLIT_MISMATCH_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                if count < 20 {
+                    tracing::error!(
+                        left_leaf_ptr = ?left_leaf_ptr,
+                        right_leaf_ptr = ?right_leaf_ptr,
+                        split_ikey = format_args!("{:016x}", split_ikey),
+                        right_bound = format_args!("{:016x}", right_bound),
+                        "SPLIT_MISMATCH: split_ikey != right_leaf.ikey_bound() - separator wrong!"
+                    );
+                }
+            }
+        }
+
         // IMPORTANT: Capture is_layer_root BEFORE dropping the lock!
         // SPLIT_UNLOCK_MASK clears ROOT_BIT, so after drop(lock) we can't tell
         // if this was a layer root or a newly-split sibling (both have NULL parent).
@@ -1942,7 +2132,8 @@ where
                 #[cfg(feature = "tracing")]
                 {
                     let parent_lock_elapsed = parent_lock_start.elapsed();
-                    if parent_lock_elapsed > std::time::Duration::from_millis(1) || retry_count > 0 {
+                    if parent_lock_elapsed > std::time::Duration::from_millis(1) || retry_count > 0
+                    {
                         tracing::warn!(
                             parent_ptr = ?parent_ptr,
                             child_idx = idx,

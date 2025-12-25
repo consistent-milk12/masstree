@@ -47,24 +47,24 @@ next-trace:
         echo "Logs written to logs/masstree.json"
     fi
 
-# Run lock contention profiler with tracing (writes to logs/lock_contention.log)
+# Run lock contention profiler with tracing (writes to logs/lock_contention.json)
 # Usage: just profile-locks [RUST_LOG=masstree=warn]
 profile-locks LOG_LEVEL="masstree=warn":
     #!/usr/bin/env bash
-    rm -f logs/lock_contention.log
+    rm -f logs/lock_contention.json
     echo "Running lock contention profiler..."
     echo "Log level: {{LOG_LEVEL}}"
     RUST_LOG="{{LOG_LEVEL}}" cargo run --release --features "mimalloc,tracing" --bin lock_contention
-    if [ -f logs/lock_contention.log ]; then
+    if [ -f logs/lock_contention.json ]; then
         echo ""
         echo "=== SLOW Operations Summary ==="
-        grep -c "SLOW" logs/lock_contention.log || echo "0 slow operations"
+        rg -c "SLOW_(OP|LOCK)" logs/lock_contention.json || echo "0 slow operations"
         echo ""
         echo "=== Sample of slow operations ==="
-        grep "SLOW" logs/lock_contention.log | head -20 || true
+        rg "SLOW_(OP|LOCK)" logs/lock_contention.json | head -20 || true
         echo ""
-        echo "Full logs: logs/lock_contention.log"
-        echo "Filter: grep SLOW logs/lock_contention.log"
+        echo "Full logs: logs/lock_contention.json"
+        echo "Filter: rg \"SLOW_(OP|LOCK)\" logs/lock_contention.json"
     fi
 
 # Run lock contention profiler without tracing (fast, stats only)

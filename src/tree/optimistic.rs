@@ -35,6 +35,9 @@ pub static ADVANCE_BLINK_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Atomic counter for keys inserted into wrong leaf.
 pub static WRONG_LEAF_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Atomic counter for B-link advance anomalies (cycle or limit hit).
+pub static BLINK_ADVANCE_ANOMALY_COUNT: AtomicU64 = AtomicU64::new(0);
+
 // ============================================================================
 // Parent-Wait Instrumentation (for variance analysis)
 // ============================================================================
@@ -65,6 +68,7 @@ pub fn reset_debug_counters() {
     SPLIT_COUNT.store(0, Relaxed);
     ADVANCE_BLINK_COUNT.store(0, Relaxed);
     WRONG_LEAF_INSERT_COUNT.store(0, Relaxed);
+    BLINK_ADVANCE_ANOMALY_COUNT.store(0, Relaxed);
     PARENT_WAIT_HIT_COUNT.store(0, Relaxed);
     PARENT_WAIT_TOTAL_SPINS.store(0, Relaxed);
     PARENT_WAIT_MAX_SPINS.store(0, Relaxed);
@@ -93,6 +97,8 @@ pub struct DebugCounters {
     pub advance_blink: u64,
     /// Keys inserted into wrong leaf
     pub wrong_leaf_insert: u64,
+    /// B-link advance anomalies (cycle or limit hit)
+    pub blink_advance_anomaly: u64,
     /// Parent-wait loop hits (NULL parent on non-layer-root)
     pub parent_wait_hits: u64,
     /// Total spins in parent-wait loops
@@ -125,6 +131,7 @@ pub fn get_all_debug_counters() -> DebugCounters {
         split: SPLIT_COUNT.load(Relaxed),
         advance_blink: ADVANCE_BLINK_COUNT.load(Relaxed),
         wrong_leaf_insert: WRONG_LEAF_INSERT_COUNT.load(Relaxed),
+        blink_advance_anomaly: BLINK_ADVANCE_ANOMALY_COUNT.load(Relaxed),
         parent_wait_hits: PARENT_WAIT_HIT_COUNT.load(Relaxed),
         parent_wait_total_spins: PARENT_WAIT_TOTAL_SPINS.load(Relaxed),
         parent_wait_max_spins: PARENT_WAIT_MAX_SPINS.load(Relaxed),

@@ -3,18 +3,18 @@
 //! Profiles insert latency and debug counters to identify the source of
 //! multi-second outliers in concurrent write benchmarks. When tracing is
 //! enabled, slow locks from `NodeVersion` and slow ops from this binary are
-//! written to a human-readable log.
+//! written to a JSON log.
 //!
 //! Run with:
 //! ```bash
 //! # Without tracing (fast, just stats)
 //! cargo run --release --features mimalloc --bin lock_contention
 //!
-//! # With tracing (writes to logs/lock_contention.log - human readable)
+//! # With tracing (writes to logs/lock_contention.json)
 //! RUST_LOG=masstree=warn,lock_contention=warn cargo run --release --features "mimalloc,tracing" --bin lock_contention
 //!
 //! # View slow operations:
-//! rg "SLOW_(OP|LOCK)" logs/lock_contention.log
+//! rg "SLOW_(OP|LOCK)" logs/lock_contention.json
 //! ```
 
 #![allow(clippy::unwrap_used)]
@@ -33,11 +33,11 @@ type TracingGuard = tracing_appender::non_blocking::WorkerGuard;
 type TracingGuard = ();
 
 // =============================================================================
-// Custom Tracing Initialization (Pretty-printed to file)
+// Custom Tracing Initialization (JSON to file)
 // =============================================================================
 
 #[cfg(feature = "tracing")]
-fn init_pretty_tracing() -> TracingGuard {
+fn init_json_tracing() -> TracingGuard {
     use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
     let log_dir = "logs";
@@ -47,30 +47,30 @@ fn init_pretty_tracing() -> TracingGuard {
     // Create log directory
     let _ = std::fs::create_dir_all(log_dir);
 
-    // File appender - pretty format for human reading
-    let file_appender = tracing_appender::rolling::never(log_dir, "lock_contention.log");
+    // File appender - JSON format
+    let file_appender = tracing_appender::rolling::never(log_dir, "lock_contention.json");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    // Pretty file layer with full details
+    // JSON file layer with full details
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
         .with_thread_ids(true)
         .with_target(true)
         .with_file(true)
         .with_line_number(true)
-        .with_ansi(false) // No ANSI colors in file
-        .pretty()
+        .with_ansi(false)
+        .json()
         .with_filter(EnvFilter::try_new(&filter_str).unwrap_or_else(|_| EnvFilter::new("warn")));
 
     let _ = tracing_subscriber::registry().with(file_layer).try_init();
 
-    println!("Tracing enabled: logs/lock_contention.log (filter: {filter_str})");
+    println!("Tracing enabled: logs/lock_contention.json (filter: {filter_str})");
 
     guard
 }
 
 #[cfg(not(feature = "tracing"))]
-fn init_pretty_tracing() -> TracingGuard {
+fn init_json_tracing() -> TracingGuard {
     println!("Tracing disabled (compile with --features tracing)");
 }
 
@@ -315,8 +315,13 @@ fn print_stats(config: &BenchmarkConfig, result: &RunResult, baseline: Duration)
     println!("B-link should:     {}", debug.blink_should_follow);
     println!("Search not found:  {}", debug.search_not_found);
     println!("Wrong leaf insert: {}", debug.wrong_leaf_insert);
+    println!("B-link anomaly:    {}", debug.blink_advance_anomaly);
 
-    if debug.blink_should_follow > 0 || debug.search_not_found > 0 || debug.wrong_leaf_insert > 0 {
+    if debug.blink_should_follow > 0
+        || debug.search_not_found > 0
+        || debug.wrong_leaf_insert > 0
+        || debug.blink_advance_anomaly > 0
+    {
         println!("\n!!! Anomaly counters are non-zero, inspect logs");
     }
 
@@ -333,8 +338,8 @@ fn print_stats(config: &BenchmarkConfig, result: &RunResult, baseline: Duration)
 // =============================================================================
 
 fn main() {
-    // Initialize pretty tracing to logs/lock_contention.log
-    let _guard = init_pretty_tracing();
+    // Initialize JSON tracing to logs/lock_contention.json
+    let _guard = init_json_tracing();
 
     println!("Lock Contention Profiling");
     println!("=========================\n");

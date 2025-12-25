@@ -1344,8 +1344,8 @@ mod tests {
 /// Run with: `RUSTFLAGS="--cfg loom" cargo test --lib internode::loom_tests`
 #[cfg(loom)]
 mod loom_tests {
-    use loom::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
     use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
     use loom::thread;
 
     /// Simplified internode for loom testing.
