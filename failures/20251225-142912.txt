@@ -1,0 +1,1320 @@
+        FAIL [   0.134s] 05_masstree::stress_tests high_thread_16_threads_8byte_keys
+  stdout ───
+
+    running 1 test
+    test high_thread_16_threads_8byte_keys ... FAILED
+
+    failures:
+
+    failures:
+        high_thread_16_threads_8byte_keys
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.12s
+
+  stderr ───
+
+    thread 'high_thread_16_threads_8byte_keys' (286416) panicked at tests/stress_tests.rs:456:9:
+    high_thread_16: 3 immediate verification failures
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: stress_tests::high_thread_16_threads_8byte_keys
+                 at ./tests/stress_tests.rs:456:9
+       3: stress_tests::high_thread_16_threads_8byte_keys::{{closure}}
+                 at ./tests/stress_tests.rs:417:39
+       4: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       5: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        FAIL [   0.144s] 05_masstree::stress_tests large_volume_20k_keys_8_threads
+  stdout ───
+
+    running 1 test
+    test large_volume_20k_keys_8_threads ... FAILED
+
+    failures:
+
+    failures:
+        large_volume_20k_keys_8_threads
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.13s
+
+  stderr ───
+
+    thread 'large_volume_20k_keys_8_threads' (286424) panicked at tests/stress_tests.rs:607:9:
+    large_volume_20k: 2 immediate verification failures
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: stress_tests::large_volume_20k_keys_8_threads
+                 at ./tests/stress_tests.rs:607:9
+       3: stress_tests::large_volume_20k_keys_8_threads::{{closure}}
+                 at ./tests/stress_tests.rs:568:37
+       4: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       5: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        FAIL [   0.119s] 05_masstree::stress_tests pattern_pseudorandom_keys
+  stdout ───
+
+    running 1 test
+    test pattern_pseudorandom_keys ... FAILED
+
+    failures:
+
+    failures:
+        pattern_pseudorandom_keys
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.11s
+
+  stderr ───
+
+    thread 'pattern_pseudorandom_keys' (286499) panicked at tests/stress_tests.rs:774:9:
+    pattern_pseudorandom: 1 immediate verification failures
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: stress_tests::pattern_pseudorandom_keys
+                 at ./tests/stress_tests.rs:774:9
+       3: stress_tests::pattern_pseudorandom_keys::{{closure}}
+                 at ./tests/stress_tests.rs:723:31
+       4: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       5: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.017s] 05_masstree::stress_tests pattern_sequential_keys_high_splits
+        FAIL [   0.124s] 05_masstree::stress_tests pattern_reverse_sequential
+  stdout ───
+
+    running 1 test
+    test pattern_reverse_sequential ... FAILED
+
+    failures:
+
+    failures:
+        pattern_reverse_sequential
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.11s
+
+  stderr ───
+
+    thread 'pattern_reverse_sequential' (286517) panicked at tests/stress_tests.rs:712:9:
+    pattern_reverse: 1 immediate verification failures
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: stress_tests::pattern_reverse_sequential
+                 at ./tests/stress_tests.rs:712:9
+       3: stress_tests::pattern_reverse_sequential::{{closure}}
+                 at ./tests/stress_tests.rs:672:32
+       4: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       5: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        FAIL [   0.120s] 05_masstree::stress_tests repeated_10_runs_4_threads_8byte
+  stdout ───
+
+    running 1 test
+    test repeated_10_runs_4_threads_8byte ... FAILED
+
+    failures:
+
+    failures:
+        repeated_10_runs_4_threads_8byte
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.11s
+
+  stderr ───
+
+    thread 'repeated_10_runs_4_threads_8byte' (286541) panicked at tests/stress_tests.rs:1051:13:
+    repeated_10_runs: run 1 failed with 1 verification failures
+    blink_follow=0, search_notfound=0
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: stress_tests::repeated_10_runs_4_threads_8byte
+                 at ./tests/stress_tests.rs:1051:13
+       3: stress_tests::repeated_10_runs_4_threads_8byte::{{closure}}
+                 at ./tests/stress_tests.rs:1015:38
+       4: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       5: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        SLOW [> 60.000s] 05_masstree::concurrent_regression concurrent_insert_long_keys
+        SLOW [> 60.000s] 05_masstree::phase2_regression test_layer_growth_beyond_width
+        SLOW [> 60.000s] 05_masstree::phase2_regression test_nested_layer_growth
+        SLOW [> 60.000s] 05_masstree::phase2_regression test_layer_internode_mixed_operations
+        SLOW [> 60.000s] 05_masstree::stress_tests high_thread_8_threads_24byte_keys
+        SLOW [> 60.000s] 05_masstree::stress_tests multilayer_16byte_keys_4_threads
+        SLOW [> 60.000s] 05_masstree::stress_tests multilayer_24byte_keys_4_threads
+        SLOW [> 60.000s] 05_masstree::stress_tests multilayer_32byte_keys_4_threads
+        SLOW [> 60.000s] 05_masstree::stress_tests multilayer_mixed_lengths
+        SLOW [> 60.000s] 05_masstree::stress_tests pattern_shared_prefix
+        SLOW [> 60.000s] 05_masstree::stress_tests repeated_10_runs_4_threads_24byte
+        SLOW [> 60.000s] 05_masstree::stress_tests repeated_20_runs_8_threads_mixed
+        FAIL [  68.855s] 05_masstree::concurrent_regression concurrent_insert_long_keys
+  stdout ───
+
+    running 1 test
+    test concurrent_insert_long_keys has been running for over 60 seconds
+    test concurrent_insert_long_keys ... FAILED
+
+    failures:
+
+    failures:
+        concurrent_insert_long_keys
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 68.84s
+
+  stderr ───
+
+    thread '<unnamed>' (286081) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7c57c4001500 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: concurrent_regression::concurrent_insert_long_keys::{{closure}}::{{closure}}
+                 at ./tests/concurrent_regression.rs:702:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286079) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7c57c8001140 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: concurrent_regression::concurrent_insert_long_keys::{{closure}}::{{closure}}
+                 at ./tests/concurrent_regression.rs:702:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286080) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7c57c0001500 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: concurrent_regression::concurrent_insert_long_keys::{{closure}}::{{closure}}
+                 at ./tests/concurrent_regression.rs:702:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286076) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7c57b8001500 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: concurrent_regression::concurrent_insert_long_keys::{{closure}}::{{closure}}
+                 at ./tests/concurrent_regression.rs:702:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread 'concurrent_insert_long_keys' (286049) panicked at tests/concurrent_regression.rs:709:18:
+    called `Result::unwrap()` on an `Err` value: Any { .. }
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::result::unwrap_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/result.rs:1862:5
+       3: core::result::Result<T,E>::unwrap
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1233:23
+       4: concurrent_regression::concurrent_insert_long_keys
+                 at ./tests/concurrent_regression.rs:709:18
+       5: concurrent_regression::concurrent_insert_long_keys::{{closure}}
+                 at ./tests/concurrent_regression.rs:691:33
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.015s] 05_masstree::tree_proptests binary_keys_with_nulls
+        PASS [   0.139s] 05_masstree::tree_proptests differential_insert_get
+        FAIL [  68.776s] 05_masstree::stress_tests high_thread_8_threads_24byte_keys
+  stdout ───
+
+    running 1 test
+    test high_thread_8_threads_24byte_keys has been running for over 60 seconds
+    test high_thread_8_threads_24byte_keys ... FAILED
+
+    failures:
+
+    failures:
+        high_thread_8_threads_24byte_keys
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 68.76s
+
+  stderr ───
+
+    thread '<unnamed>' (286458) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x704004001280 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::high_thread_8_threads_24byte_keys::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:487:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286453) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x704008001140 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::high_thread_8_threads_24byte_keys::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:487:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286463) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x703ffc001280 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::high_thread_8_threads_24byte_keys::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:487:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286460) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x703ff8001280 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::high_thread_8_threads_24byte_keys::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:487:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286456) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x70400c000ec0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::high_thread_8_threads_24byte_keys::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:487:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286448) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7040140012c0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::high_thread_8_threads_24byte_keys::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:487:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread 'high_thread_8_threads_24byte_keys' (286422) panicked at tests/stress_tests.rs:498:18:
+    called `Result::unwrap()` on an `Err` value: Any { .. }
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::result::unwrap_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/result.rs:1862:5
+       3: core::result::Result<T,E>::unwrap
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1233:23
+       4: stress_tests::high_thread_8_threads_24byte_keys
+                 at ./tests/stress_tests.rs:498:18
+       5: stress_tests::high_thread_8_threads_24byte_keys::{{closure}}
+                 at ./tests/stress_tests.rs:466:39
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        FAIL [  68.834s] 05_masstree::phase2_regression test_layer_internode_mixed_operations
+  stdout ───
+
+    running 1 test
+    test test_layer_internode_mixed_operations has been running for over 60 seconds
+    test test_layer_internode_mixed_operations ... FAILED
+
+    failures:
+
+    failures:
+        test_layer_internode_mixed_operations
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 68.82s
+
+  stderr ───
+
+    thread 'test_layer_internode_mixed_operations' (286381) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x780f540052c0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert
+                 at ./src/tree/generic.rs:1090:14
+       7: phase2_regression::test_layer_internode_mixed_operations
+                 at ./tests/phase2_regression.rs:458:14
+       8: phase2_regression::test_layer_internode_mixed_operations::{{closure}}
+                 at ./tests/phase2_regression.rs:442:43
+       9: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+      10: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.020s] 05_masstree::tree_proptests empty_key_works
+        FAIL [  68.856s] 05_masstree::phase2_regression test_layer_growth_beyond_width
+  stdout ───
+
+    running 1 test
+    test test_layer_growth_beyond_width has been running for over 60 seconds
+    test test_layer_growth_beyond_width ... FAILED
+
+    failures:
+
+    failures:
+        test_layer_growth_beyond_width
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 68.85s
+
+  stderr ───
+
+    thread 'test_layer_growth_beyond_width' (286369) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7098300052c0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert
+                 at ./src/tree/generic.rs:1090:14
+       7: phase2_regression::test_layer_growth_beyond_width
+                 at ./tests/phase2_regression.rs:351:14
+       8: phase2_regression::test_layer_growth_beyond_width::{{closure}}
+                 at ./tests/phase2_regression.rs:340:36
+       9: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+      10: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.026s] 05_masstree::tree_proptests index_get_returns_copy
+        FAIL [  68.804s] 05_masstree::stress_tests multilayer_32byte_keys_4_threads
+  stdout ───
+
+    running 1 test
+    test multilayer_32byte_keys_4_threads has been running for over 60 seconds
+    test multilayer_32byte_keys_4_threads ... FAILED
+
+    failures:
+
+    failures:
+        multilayer_32byte_keys_4_threads
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 68.79s
+
+  stderr ───
+
+    thread '<unnamed>' (286508) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x79ea44001380 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_32byte_keys_4_threads::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:251:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286509) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x79ea3c001100 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_32byte_keys_4_threads::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:251:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread 'multilayer_32byte_keys_4_threads' (286496) panicked at tests/stress_tests.rs:262:18:
+    called `Result::unwrap()` on an `Err` value: Any { .. }
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::result::unwrap_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/result.rs:1862:5
+       3: core::result::Result<T,E>::unwrap
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1233:23
+       4: stress_tests::multilayer_32byte_keys_4_threads
+                 at ./tests/stress_tests.rs:262:18
+       5: stress_tests::multilayer_32byte_keys_4_threads::{{closure}}
+                 at ./tests/stress_tests.rs:229:38
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        FAIL [  68.800s] 05_masstree::stress_tests multilayer_mixed_lengths
+  stdout ───
+
+    running 1 test
+    test multilayer_mixed_lengths has been running for over 60 seconds
+    test multilayer_mixed_lengths ... FAILED
+
+    failures:
+
+    failures:
+        multilayer_mixed_lengths
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 68.79s
+
+  stderr ───
+
+    thread '<unnamed>' (286506) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7c6190001600 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_mixed_lengths::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:325:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286504) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7c6198001580 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_mixed_lengths::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:325:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread 'multilayer_mixed_lengths' (286498) panicked at tests/stress_tests.rs:336:18:
+    called `Result::unwrap()` on an `Err` value: Any { .. }
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::result::unwrap_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/result.rs:1862:5
+       3: core::result::Result<T,E>::unwrap
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1233:23
+       4: stress_tests::multilayer_mixed_lengths
+                 at ./tests/stress_tests.rs:336:18
+       5: stress_tests::multilayer_mixed_lengths::{{closure}}
+                 at ./tests/stress_tests.rs:300:30
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286505) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7c619c0015c0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_mixed_lengths::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:325:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.049s] 05_masstree::tree_proptests get_missing_returns_none
+        FAIL [  68.853s] 05_masstree::stress_tests multilayer_16byte_keys_4_threads
+  stdout ───
+
+    running 1 test
+    test multilayer_16byte_keys_4_threads has been running for over 60 seconds
+    test multilayer_16byte_keys_4_threads ... FAILED
+
+    failures:
+
+    failures:
+        multilayer_16byte_keys_4_threads
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 68.84s
+
+  stderr ───
+
+    thread '<unnamed>' (286468) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7402a8001280 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_16byte_keys_4_threads::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:109:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286467) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7402a4001280 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_16byte_keys_4_threads::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:109:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286465) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7402ac000ec0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_16byte_keys_4_threads::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:109:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread 'multilayer_16byte_keys_4_threads' (286443) panicked at tests/stress_tests.rs:121:18:
+    called `Result::unwrap()` on an `Err` value: Any { .. }
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::result::unwrap_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/result.rs:1862:5
+       3: core::result::Result<T,E>::unwrap
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1233:23
+       4: stress_tests::multilayer_16byte_keys_4_threads
+                 at ./tests/stress_tests.rs:121:18
+       5: stress_tests::multilayer_16byte_keys_4_threads::{{closure}}
+                 at ./tests/stress_tests.rs:87:38
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        FAIL [  68.904s] 05_masstree::phase2_regression test_nested_layer_growth
+  stdout ───
+
+    running 1 test
+    test test_nested_layer_growth has been running for over 60 seconds
+    test test_nested_layer_growth ... FAILED
+
+    failures:
+
+    failures:
+        test_nested_layer_growth
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 68.89s
+
+  stderr ───
+
+    thread 'test_nested_layer_growth' (286384) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x784a58005540 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert
+                 at ./src/tree/generic.rs:1090:14
+       7: phase2_regression::test_nested_layer_growth
+                 at ./tests/phase2_regression.rs:402:14
+       8: phase2_regression::test_nested_layer_growth::{{closure}}
+                 at ./tests/phase2_regression.rs:392:30
+       9: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+      10: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        FAIL [  68.836s] 05_masstree::stress_tests multilayer_24byte_keys_4_threads
+  stdout ───
+
+    running 1 test
+    test multilayer_24byte_keys_4_threads has been running for over 60 seconds
+    test multilayer_24byte_keys_4_threads ... FAILED
+
+    failures:
+
+    failures:
+        multilayer_24byte_keys_4_threads
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 68.82s
+
+  stderr ───
+
+    thread '<unnamed>' (286503) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x712238001280 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_24byte_keys_4_threads::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:181:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286501) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x712240000ec0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_24byte_keys_4_threads::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:181:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286502) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x712248001240 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_24byte_keys_4_threads::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:181:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286500) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x712244001140 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::multilayer_24byte_keys_4_threads::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:181:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread 'multilayer_24byte_keys_4_threads' (286494) panicked at tests/stress_tests.rs:192:18:
+    called `Result::unwrap()` on an `Err` value: Any { .. }
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::result::unwrap_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/result.rs:1862:5
+       3: core::result::Result<T,E>::unwrap
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1233:23
+       4: stress_tests::multilayer_24byte_keys_4_threads
+                 at ./tests/stress_tests.rs:192:18
+       5: stress_tests::multilayer_24byte_keys_4_threads::{{closure}}
+                 at ./tests/stress_tests.rs:159:38
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.033s] 05_masstree::tree_proptests interleaved_inserts
+        PASS [   0.054s] 05_masstree::tree_proptests insert_duplicate_returns_old_value
+        PASS [   0.079s] 05_masstree::tree_proptests index_mode_matches_arc_mode
+        PASS [   0.045s] 05_masstree::tree_proptests insert_then_get_returns_value
+        PASS [   0.026s] 05_masstree::tree_proptests keys_differ_in_last_byte
+        PASS [   0.061s] 05_masstree::tree_proptests insert_long_key_works
+        PASS [   0.037s] 05_masstree::tree_proptests is_empty_consistent_with_len
+        PASS [   0.026s] 05_masstree::tree_proptests max_length_key_works
+        PASS [   0.042s] 05_masstree::tree_proptests sequential_descending_inserts
+        PASS [   0.053s] 05_masstree::tree_proptests sequential_ascending_inserts
+        PASS [   0.052s] 05_masstree::tree_proptests splits_preserve_all_keys
+        PASS [   0.075s] 05_masstree::tree_proptests len_equals_unique_key_count
+        FAIL [  68.814s] 05_masstree::stress_tests pattern_shared_prefix
+  stdout ───
+
+    running 1 test
+    test pattern_shared_prefix has been running for over 60 seconds
+    test pattern_shared_prefix ... FAILED
+
+    failures:
+
+    failures:
+        pattern_shared_prefix
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 68.80s
+
+  stderr ───
+
+    thread '<unnamed>' (286533) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x746d6c001740 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::pattern_shared_prefix::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:829:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286534) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x746d70001240 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::pattern_shared_prefix::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:829:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286531) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x746d74000ec0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::pattern_shared_prefix::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:829:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread 'pattern_shared_prefix' (286525) panicked at tests/stress_tests.rs:840:18:
+    called `Result::unwrap()` on an `Err` value: Any { .. }
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::result::unwrap_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/result.rs:1862:5
+       3: core::result::Result<T,E>::unwrap
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1233:23
+       4: stress_tests::pattern_shared_prefix
+                 at ./tests/stress_tests.rs:840:18
+       5: stress_tests::pattern_shared_prefix::{{closure}}
+                 at ./tests/stress_tests.rs:807:27
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.144s] 05_masstree::tree_proptests stress_test_many_operations
+        FAIL [  68.893s] 05_masstree::stress_tests repeated_10_runs_4_threads_24byte
+  stdout ───
+
+    running 1 test
+    test repeated_10_runs_4_threads_24byte has been running for over 60 seconds
+    test repeated_10_runs_4_threads_24byte ... FAILED
+
+    failures:
+
+    failures:
+        repeated_10_runs_4_threads_24byte
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 68.88s
+
+  stderr ───
+
+    thread '<unnamed>' (286538) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7d244c001240 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::repeated_10_runs_4_threads_24byte::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:1082:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286537) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7d2458001140 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::repeated_10_runs_4_threads_24byte::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:1082:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286536) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7d2454000ec0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::repeated_10_runs_4_threads_24byte::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:1082:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286539) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x7d2450001280 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::repeated_10_runs_4_threads_24byte::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:1082:34
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread 'repeated_10_runs_4_threads_24byte' (286535) panicked at tests/stress_tests.rs:1093:22:
+    called `Result::unwrap()` on an `Err` value: Any { .. }
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::result::unwrap_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/result.rs:1862:5
+       3: core::result::Result<T,E>::unwrap
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1233:23
+       4: stress_tests::repeated_10_runs_4_threads_24byte
+                 at ./tests/stress_tests.rs:1093:22
+       5: stress_tests::repeated_10_runs_4_threads_24byte::{{closure}}
+                 at ./tests/stress_tests.rs:1063:39
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+        PASS [   0.323s] 05_masstree::tree_proptests differential_random_ops
+        FAIL [  68.789s] 05_masstree::stress_tests repeated_20_runs_8_threads_mixed
+  stdout ───
+
+    running 1 test
+    test repeated_20_runs_8_threads_mixed has been running for over 60 seconds
+    test repeated_20_runs_8_threads_mixed ... FAILED
+
+    failures:
+
+    failures:
+        repeated_20_runs_8_threads_mixed
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 20 filtered out; finished in 68.77s
+
+  stderr ───
+
+    thread '<unnamed>' (286553) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x75a318001180 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::repeated_20_runs_8_threads_mixed::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:1136:38
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286554) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x75a31c000f00 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::repeated_20_runs_8_threads_mixed::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:1136:38
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286558) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x75a30c001300 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::repeated_20_runs_8_threads_mixed::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:1136:38
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286560) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x75a304001540 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::repeated_20_runs_8_threads_mixed::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:1136:38
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread '<unnamed>' (286557) panicked at /home/milk/Desktop/Programming/Rust/extreme_perf_data_structures/05_masstree/src/tree/generic.rs:1615:17:
+    propagate_split_generic: parent pointer never set after 1000001 iterations. left_leaf_ptr=0x75a3080012c0 is_root=false
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::propagate_split_generic
+                 at ./src/tree/generic.rs:1615:17
+       3: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::handle_leaf_split_generic
+                 at ./src/tree/generic.rs:1467:14
+       4: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_concurrent_generic
+                 at ./src/tree/generic.rs:1218:30
+       5: 05_masstree::tree::generic::<impl 05_masstree::tree::05_masstreeGeneric<V,L,A>>::insert_with_guard
+                 at ./src/tree/generic.rs:1119:14
+       6: stress_tests::repeated_20_runs_8_threads_mixed::{{closure}}::{{closure}}
+                 at ./tests/stress_tests.rs:1136:38
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    thread 'repeated_20_runs_8_threads_mixed' (286552) panicked at tests/stress_tests.rs:1147:22:
+    called `Result::unwrap()` on an `Err` value: Any { .. }
+    stack backtrace:
+       0: __rustc::rust_begin_unwind
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+       1: core::panicking::panic_fmt
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+       2: core::result::unwrap_failed
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/result.rs:1862:5
+       3: core::result::Result<T,E>::unwrap
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1233:23
+       4: stress_tests::repeated_20_runs_8_threads_mixed
+                 at ./tests/stress_tests.rs:1147:22
+       5: stress_tests::repeated_20_runs_8_threads_mixed::{{closure}}
+                 at ./tests/stress_tests.rs:1111:38
+       6: core::ops::function::FnOnce::call_once
+                 at /home/milk/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+       7: core::ops::function::FnOnce::call_once
+                 at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+    note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+────────────
+        FAIL [  68.855s] 05_masstree::concurrent_regression concurrent_insert_long_keys
+        FAIL [  68.856s] 05_masstree::phase2_regression test_layer_growth_beyond_width
+        FAIL [  68.834s] 05_masstree::phase2_regression test_layer_internode_mixed_operations
+        FAIL [  68.904s] 05_masstree::phase2_regression test_nested_layer_growth
+        FAIL [   0.134s] 05_masstree::stress_tests high_thread_16_threads_8byte_keys
+        FAIL [  68.776s] 05_masstree::stress_tests high_thread_8_threads_24byte_keys
+        FAIL [   0.144s] 05_masstree::stress_tests large_volume_20k_keys_8_threads
+        FAIL [  68.853s] 05_masstree::stress_tests multilayer_16byte_keys_4_threads
+        FAIL [  68.836s] 05_masstree::stress_tests multilayer_24byte_keys_4_threads
+        FAIL [  68.804s] 05_masstree::stress_tests multilayer_32byte_keys_4_threads
+        FAIL [  68.800s] 05_masstree::stress_tests multilayer_mixed_lengths
+        FAIL [   0.119s] 05_masstree::stress_tests pattern_pseudorandom_keys
+        FAIL [   0.124s] 05_masstree::stress_tests pattern_reverse_sequential
+        FAIL [  68.814s] 05_masstree::stress_tests pattern_shared_prefix
+        FAIL [  68.893s] 05_masstree::stress_tests repeated_10_runs_4_threads_24byte
+        FAIL [   0.120s] 05_masstree::stress_tests repeated_10_runs_4_threads_8byte
+        FAIL [  68.789s] 05_masstree::stress_tests repeated_20_runs_8_threads_mixed
+error: test run failed

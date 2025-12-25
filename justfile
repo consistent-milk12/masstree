@@ -36,6 +36,41 @@ test:
 next:
     cargo nextest run --no-fail-fast --features "tracing,mimalloc"
 
+# Run all tests with trace-level logging, then pretty-print logs to JSON
+next-trace:
+    #!/usr/bin/env bash
+    rm -f logs/masstree.jsonl logs/masstree.json
+    RUST_LOG=trace MASSTREE_LOG_CONSOLE=0 cargo nextest run --no-fail-fast --features "mimalloc,tracing"
+    if [ -f logs/masstree.jsonl ]; then
+        jaq -s '.' logs/masstree.jsonl > logs/masstree.json
+        rm -f logs/masstree.jsonl
+        echo "Logs written to logs/masstree.json"
+    fi
+
+# Run lock contention profiler with tracing (writes to logs/lock_contention.log)
+# Usage: just profile-locks [RUST_LOG=masstree=warn]
+profile-locks LOG_LEVEL="masstree=warn":
+    #!/usr/bin/env bash
+    rm -f logs/lock_contention.log
+    echo "Running lock contention profiler..."
+    echo "Log level: {{LOG_LEVEL}}"
+    RUST_LOG="{{LOG_LEVEL}}" cargo run --release --features "mimalloc,tracing" --bin lock_contention
+    if [ -f logs/lock_contention.log ]; then
+        echo ""
+        echo "=== SLOW Operations Summary ==="
+        grep -c "SLOW" logs/lock_contention.log || echo "0 slow operations"
+        echo ""
+        echo "=== Sample of slow operations ==="
+        grep "SLOW" logs/lock_contention.log | head -20 || true
+        echo ""
+        echo "Full logs: logs/lock_contention.log"
+        echo "Filter: grep SLOW logs/lock_contention.log"
+    fi
+
+# Run lock contention profiler without tracing (fast, stats only)
+profile-locks-fast:
+    cargo run --release --features mimalloc --bin lock_contention
+
 # Run a specific test with nextest, tracing, and mimalloc
 next-one TEST:
     cargo nextest run --no-fail-fast --features "tracing,mimalloc" {{TEST}}
@@ -79,14 +114,9 @@ next-repeat N="10":
             echo "FAIL"
             echo "$output" | rg -n "(FAIL|Summary|error:|panicked at)" | head -n 20 || true
             mkdir -p logs/next-repeat
-            if [ -f logs/masstree.json ]; then
-                # Copy and finalize the JSON array (add closing bracket if missing)
-                cp -f logs/masstree.json "logs/next-repeat/run-${i}.json"
-                # Check if file ends with ] and add it if not
-                if ! tail -c 2 "logs/next-repeat/run-${i}.json" | grep -q ']'; then
-                    echo ']' >> "logs/next-repeat/run-${i}.json"
-                fi
-                echo "Saved logs to logs/next-repeat/run-${i}.json"
+            if [ -f logs/masstree.jsonl ]; then
+                cp -f logs/masstree.jsonl "logs/next-repeat/run-${i}.jsonl"
+                echo "Saved logs to logs/next-repeat/run-${i}.jsonl"
             fi
             printf '%s\n' "$output" > "logs/next-repeat/run-${i}.out"
             echo "Saved output to logs/next-repeat/run-${i}.out"
@@ -230,6 +260,47 @@ apples:
 # Build with debug symbols for profiling
 build-profile:
     cargo build --profile release-with-debug
+
+# === Flamegraph (requires cargo-flamegraph) ===
+
+# Run flamegraph on the profile example
+# Usage: just flamegraph [workload]
+# Workloads: key, permuter, tree, all (default: tree)
+flamegraph workload="tree":
+    CARGO_PROFILE_PROFILING_DEBUG=2 \
+    RUSTFLAGS="-C force-frame-pointers=yes" \
+    cargo flamegraph --profile profiling --example profile -- {{workload}}
+    @echo "Output: flamegraph.svg"
+
+# Run flamegraph with mimalloc (allocator symbols may be incomplete)
+flamegraph-mimalloc workload="tree":
+    CARGO_PROFILE_PROFILING_DEBUG=2 \
+    RUSTFLAGS="-C force-frame-pointers=yes" \
+    CFLAGS="-fno-omit-frame-pointer" \
+    cargo flamegraph --profile profiling --example profile --features mimalloc -- {{workload}}
+    @echo "Output: flamegraph.svg"
+
+# Run flamegraph on a specific benchmark
+# Usage: just flamegraph-bench concurrent_maps "08a_read_scaling"
+flamegraph-bench bench filter="":
+    CARGO_PROFILE_PROFILING_DEBUG=2 \
+    RUSTFLAGS="-C force-frame-pointers=yes" \
+    cargo flamegraph --profile profiling --bench {{bench}} -- {{filter}}
+    @echo "Output: flamegraph.svg"
+
+# Run perf record manually (for more control)
+# Usage: just perf-record [workload]
+perf-record workload="tree":
+    RUSTFLAGS="-C force-frame-pointers=yes -C debuginfo=2" \
+    cargo build --profile profiling --example profile
+    perf record -g --call-graph dwarf ./target/profiling/examples/profile {{workload}}
+    @echo "Output: perf.data"
+    @echo "View:   perf report -g"
+
+# Generate flamegraph from existing perf.data
+perf-flamegraph:
+    perf script | stackcollapse-perf.pl | flamegraph.pl > perf-flamegraph.svg
+    @echo "Output: perf-flamegraph.svg"
 
 # Build the callgrind profiling example (with debug symbols)
 build-callgrind:

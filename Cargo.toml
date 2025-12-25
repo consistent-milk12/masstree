@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -31,12 +31,14 @@ default = []
 # Alternative global allocators for benchmarking
 mimalloc = ["dep:mimalloc"]
 # When disabled (default), all tracing calls compile to no-ops with zero overhead.
-# When enabled, auto-initializes a subscriber that respects RUST_LOG env var.
-tracing = ["dep:tracing", "dep:tracing-subscriber"]
+# When enabled, auto-initializes a subscriber that writes NDJSON logs to logs/masstree.jsonl.
+# Respects RUST_LOG env var (default: info). Set MASSTREE_LOG_CONSOLE=0 to disable console.
+tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
 
 [dependencies]
 seize = "0.5.1"
 parking_lot = "0.12.5"
+portable-atomic = "1.12.0"
 
 # Optional allocators (enabled via features)
 mimalloc = { version = "0.1.48", optional = true }
@@ -46,7 +48,9 @@ tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.22", features = [
 	"env-filter",
 	"fmt",
+	"json",
 ], optional = true }
+tracing-appender = { version = "0.2.3", optional = true }
 
 [dev-dependencies]
 divan = "0.1.21"
@@ -57,7 +61,6 @@ dashmap = "6.1.0"
 congee = "0.4.1"
 crossbeam-skiplist = "0.1.3"
 crossbeam-epoch = "0.9.18"
-concurrent-map = "5.0.37"
 indexset = { version = "0.12.3", features = ["concurrent"] }
 tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.22", features = [
@@ -70,7 +73,7 @@ tracing-subscriber = { version = "0.3.22", features = [
 # Note: integration tests need "no-env-filter" feature
 tracing-test = { version = "0.2.5", features = ["no-env-filter"] }
 # For formatting JSON logs
-serde_json = "1.0.146"
+serde_json = "1.0.147"
 
 [lints.rust]
 # Allow loom and shuttle cfg for deterministic concurrency testing
@@ -141,47 +144,36 @@ debug = 2
 strip = "none"
 lto = false
 
+# Profiling profile - optimized for flamegraph/perf
+# Frame pointers required for accurate stack traces
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = "none"
+lto = false
+
+# Force frame pointers in our code (dependencies need RUSTFLAGS)
+[profile.profiling.package."*"]
+debug = true
+
 [profile.bench]
 inherits = "release"
 debug = true
 strip = "none"
 
 [[bench]]
-name = "key"
+name = "concurrent_maps24"
 harness = false
 
-[[bench]]
-name = "permuter"
-harness = false
 
 [[bench]]
-name = "nodeversion"
+name = "core_benches"
 harness = false
 
-[[bench]]
-name = "leaf"
-harness = false
+# =============================================================================
+# Profiling Binaries
+# =============================================================================
 
-[[bench]]
-name = "internode"
-harness = false
-
-[[bench]]
-name = "ksearch"
-harness = false
-
-[[bench]]
-name = "tree"
-harness = false
-
-[[bench]]
-name = "comparison"
-harness = false
-
-[[bench]]
-name = "lock_comparison"
-harness = false
-
-[[bench]]
-name = "concurrent_maps"
-harness = false
+[[bin]]
+name = "lock_contention"
+path = "bin/lock_contention.rs"

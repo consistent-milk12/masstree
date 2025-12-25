@@ -25,7 +25,7 @@
 use std::mem as StdMem;
 use std::sync::Arc;
 
-use crate::leaf::{LeafValue, LeafValueIndex};
+use crate::value::{LeafValue, LeafValueIndex};
 
 // ================================================================================
 //  ValueSlot Trait

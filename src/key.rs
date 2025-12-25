@@ -86,7 +86,7 @@ impl<'a> Key<'a> {
     /// assert_eq!(key.len(), 4);
     /// ```
     #[must_use]
-    #[inline(always)]
+    #[inline]
     pub fn new(data: &'a [u8]) -> Self {
         assert!(
             data.len() <= MAX_KEY_LENGTH,
@@ -111,7 +111,7 @@ impl<'a> Key<'a> {
     /// The key will have length equal to the significant bytes in the ikey
     /// (trailing zeros are not counted).
     #[must_use]
-    #[inline(always)]
+    #[inline]
     pub const fn from_ikey(ikey: u64) -> Self {
         // Calculate length: 8 minus trailing zero bytes
         let len: usize = if ikey == 0 {

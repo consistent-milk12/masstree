@@ -6,7 +6,7 @@
 #![expect(clippy::unwrap_used, reason = "fail fast in tests")]
 
 use masstree::key::MAX_KEY_LENGTH;
-use masstree::tree::{MassTree, MassTreeIndex};
+use masstree::tree::{MassTree24, MassTreeIndex};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -84,7 +84,7 @@ proptest! {
     /// Every inserted short key should be retrievable.
     #[test]
     fn insert_then_get_returns_value(key in short_key(), value: u64) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         tree.insert(&key, value).unwrap();
 
         let result = tree.get(&key);
@@ -95,7 +95,7 @@ proptest! {
     /// Inserting duplicate key should return the old value.
     #[test]
     fn insert_duplicate_returns_old_value(key in short_key_nonempty(), v1: u64, v2: u64) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
 
         let old1 = tree.insert(&key, v1).unwrap();
         prop_assert!(old1.is_none(), "First insert should return None");
@@ -117,7 +117,7 @@ proptest! {
     ) {
         prop_assume!(inserted_key != missing_key);
 
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         tree.insert(&inserted_key, value).unwrap();
 
         prop_assert!(tree.get(&missing_key).is_none());
@@ -126,7 +126,7 @@ proptest! {
     /// Long keys (requiring layers) should work.
     #[test]
     fn insert_long_key_works(key in long_key(), value: u64) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         tree.insert(&key, value).unwrap();
 
         let result = tree.get(&key);
@@ -145,7 +145,7 @@ proptest! {
     /// MassTree should behave identically to BTreeMap for insert/get.
     #[test]
     fn differential_insert_get(pairs in key_value_pairs(100)) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for (key, value) in pairs {
@@ -176,7 +176,7 @@ proptest! {
     /// Random operation sequences should match BTreeMap behavior.
     #[test]
     fn differential_random_ops(ops in operations(150)) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for op in ops {
@@ -226,7 +226,7 @@ proptest! {
     /// All keys survive splits intact.
     #[test]
     fn splits_preserve_all_keys(keys in unique_keys(50)) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
 
         // Insert all keys
         for (i, key) in keys.iter().enumerate() {
@@ -251,7 +251,7 @@ proptest! {
     /// Sequential ascending inserts work correctly (right-edge splits).
     #[test]
     fn sequential_ascending_inserts(count in 1usize..100) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
 
         for i in 0..count {
             let key = format!("{i:08}");
@@ -271,7 +271,7 @@ proptest! {
     /// Sequential descending inserts work correctly (left-edge splits).
     #[test]
     fn sequential_descending_inserts(count in 1usize..100) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
 
         for i in (0..count).rev() {
             let key = format!("{i:08}");
@@ -291,7 +291,7 @@ proptest! {
     /// Interleaved inserts (even then odd) work correctly.
     #[test]
     fn interleaved_inserts(count in 1usize..50) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
 
         // Insert evens first
         for i in (0..count).filter(|x| x % 2 == 0) {
@@ -324,7 +324,7 @@ proptest! {
     /// len() should equal the number of unique keys inserted.
     #[test]
     fn len_equals_unique_key_count(pairs in key_value_pairs(100)) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         let mut unique_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
         for (key, value) in pairs {
@@ -342,7 +342,7 @@ proptest! {
     /// is_empty() should be true only when len() == 0.
     #[test]
     fn is_empty_consistent_with_len(pairs in key_value_pairs(20)) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
 
         prop_assert!(tree.is_empty());
         prop_assert_eq!(tree.len(), 0);
@@ -376,7 +376,7 @@ proptest! {
     /// MassTreeIndex should behave like MassTree but return V directly.
     #[test]
     fn index_mode_matches_arc_mode(pairs in key_value_pairs(50)) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         let mut index: MassTreeIndex<u64> = MassTreeIndex::new();
 
         for (key, value) in pairs {
@@ -409,44 +409,7 @@ proptest! {
 //  Smaller WIDTH Properties
 // ============================================================================
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
-
-    /// Tree with WIDTH=3 should work correctly (more splits).
-    #[test]
-    fn small_width_tree_works(keys in unique_keys(30)) {
-        let mut tree: MassTree<u64, 3> = MassTree::new();
-
-        for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
-        }
-
-        for (i, key) in keys.iter().enumerate() {
-            let result = tree.get(key);
-            prop_assert!(result.is_some(), "Key {:?} not found in WIDTH=3 tree", key);
-            prop_assert_eq!(*result.unwrap(), i as u64);
-        }
-
-        prop_assert_eq!(tree.len(), keys.len());
-    }
-
-    /// Tree with WIDTH=5 should work correctly.
-    #[test]
-    fn medium_width_tree_works(keys in unique_keys(40)) {
-        let mut tree: MassTree<u64, 5> = MassTree::new();
-
-        for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
-        }
-
-        for (i, key) in keys.iter().enumerate() {
-            prop_assert!(tree.get(key).is_some());
-            prop_assert_eq!(*tree.get(key).unwrap(), i as u64);
-        }
-
-        prop_assert_eq!(tree.len(), keys.len());
-    }
-}
+// Note: WIDTH=3 and WIDTH=5 tests removed as we now only support WIDTH=24
 
 // ============================================================================
 //  Edge Cases
@@ -458,7 +421,7 @@ proptest! {
     /// Empty key should work.
     #[test]
     fn empty_key_works(value: u64) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
 
         tree.insert(b"", value).unwrap();
         prop_assert_eq!(*tree.get(b"").unwrap(), value);
@@ -468,7 +431,7 @@ proptest! {
     /// Max-length key (8 bytes) should work.
     #[test]
     fn max_length_key_works(key in prop::collection::vec(any::<u8>(), 8..=8), value: u64) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
 
         tree.insert(&key, value).unwrap();
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
@@ -486,7 +449,7 @@ proptest! {
         key.extend(suffix);
         key.truncate(SHORT_KEY_LEN);
 
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         tree.insert(&key, value).unwrap();
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
     }
@@ -508,7 +471,7 @@ proptest! {
         let mut key2 = prefix;
         key2.push(byte2);
 
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         tree.insert(&key1, v1).unwrap();
         tree.insert(&key2, v2).unwrap();
 
@@ -528,7 +491,7 @@ proptest! {
     /// Large number of operations should maintain consistency.
     #[test]
     fn stress_test_many_operations(ops in operations(500)) {
-        let mut tree: MassTree<u64> = MassTree::new();
+        let tree: MassTree24<u64> = MassTree24::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for op in ops {

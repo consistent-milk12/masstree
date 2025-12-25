@@ -29,7 +29,7 @@
 
 mod common;
 
-use masstree::{MassTree, get_debug_counters, reset_debug_counters};
+use masstree::{MassTree24, get_debug_counters, reset_debug_counters};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,7 +41,7 @@ use std::thread;
 
 #[test]
 fn concurrent_insert_2_threads_disjoint_keys() {
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..2)
         .map(|t| {
@@ -65,7 +65,7 @@ fn concurrent_insert_2_threads_disjoint_keys() {
 
 #[test]
 fn concurrent_insert_4_threads_disjoint_keys() {
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..4)
         .map(|t| {
@@ -89,7 +89,7 @@ fn concurrent_insert_4_threads_disjoint_keys() {
 
 #[test]
 fn concurrent_insert_8_threads_disjoint_keys() {
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..8)
         .map(|t| {
@@ -128,7 +128,7 @@ fn concurrent_insert_2_threads_overlapping_keys() {
         "Starting overlapping keys test"
     );
 
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
     let success_count = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -204,7 +204,7 @@ fn concurrent_insert_4_threads_overlapping_keys() {
         "Starting 4-thread overlapping keys test"
     );
 
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..NUM_THREADS)
         .map(|t| {
@@ -279,7 +279,7 @@ fn concurrent_read_write_2_threads() {
         "Starting concurrent read/write test"
     );
 
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     // Pre-populate
     {
@@ -373,7 +373,7 @@ fn concurrent_read_write_2_threads() {
 
 #[test]
 fn concurrent_read_write_4_threads() {
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     // Pre-populate
     {
@@ -430,7 +430,7 @@ fn stress_concurrent_insert_many_keys() {
     const KEYS_PER_THREAD: usize = 500;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     tracing::info!(
         threads = NUM_THREADS,
@@ -567,7 +567,7 @@ fn stress_concurrent_insert_many_keys() {
 #[test]
 fn stress_concurrent_insert_sequential_keys() {
     // Sequential keys cause more splits
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..4)
         .map(|t| {
@@ -594,7 +594,7 @@ fn stress_concurrent_insert_sequential_keys() {
 fn stress_repeated_runs() {
     // Run multiple times to catch intermittent issues
     for run in 0..10 {
-        let tree = Arc::new(MassTree::<u64>::new());
+        let tree = Arc::new(MassTree24::<u64>::new());
 
         let handles: Vec<_> = (0..4)
             .map(|t| {
@@ -624,7 +624,7 @@ fn stress_repeated_runs() {
 #[test]
 fn concurrent_insert_triggers_splits() {
     // Insert enough keys to trigger multiple splits
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..2)
         .map(|t| {
@@ -659,7 +659,7 @@ fn concurrent_insert_triggers_splits() {
 #[test]
 fn concurrent_insert_adjacent_keys_same_leaf() {
     // Keys that likely land in the same leaf
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..4)
         .map(|t| {
@@ -689,7 +689,7 @@ fn concurrent_insert_adjacent_keys_same_leaf() {
 
 #[test]
 fn concurrent_insert_long_keys() {
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..4)
         .map(|t| {
@@ -718,7 +718,7 @@ fn concurrent_insert_long_keys() {
 
 #[test]
 fn concurrent_insert_all_values_correct() {
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..4)
         .map(|t| {
@@ -757,7 +757,7 @@ fn concurrent_insert_all_values_correct() {
 
 #[test]
 fn concurrent_insert_no_duplicates() {
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let handles: Vec<_> = (0..4)
         .map(|t| {
@@ -797,7 +797,7 @@ fn concurrent_insert_no_duplicates() {
 
 #[test]
 fn concurrent_insert_empty_then_read() {
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
 
     let tree1 = Arc::clone(&tree);
     let writer = thread::spawn(move || {
@@ -838,7 +838,7 @@ fn concurrent_insert_empty_then_read() {
 #[test]
 fn single_key_concurrent_updates() {
     // Multiple threads updating the same key
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
     let update_count = Arc::new(AtomicUsize::new(0));
 
     // Insert initial value

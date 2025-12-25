@@ -1,18 +1,24 @@
 //! Debug binary for concurrent write benchmarks (05 and 06).
 //!
-//! Diagnoses hangs/deadlocks in MassTree concurrent writes.
+//! Diagnoses hangs/deadlocks in `MassTree` concurrent writes.
 //!
 //! Run with:
 //! ```bash
 //! RUST_LOG=masstree=debug cargo run --features tracing
 //! ```
 
+#![allow(dead_code)]
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::indexing_slicing)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::too_many_lines
+)]
 
 use masstree::MassTree;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,7 +34,7 @@ const MULTIPLIERS: [u64; 4] = [
 ];
 
 fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
-    assert!(K % 8 == 0, "key size must be a multiple of 8");
+    assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=32).contains(&K), "key size must be 8..=32");
 
     let chunks = K / 8;
@@ -36,19 +42,19 @@ fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
 
     for i in 0..n {
         let mut key = [0u8; K];
-        for c in 0..chunks {
+        (0..chunks).for_each(|c| {
             let v = (i as u64).wrapping_mul(MULTIPLIERS[c]);
             let bytes = v.to_be_bytes();
             let start = c * 8;
             key[start..start + 8].copy_from_slice(&bytes);
-        }
+        });
         out.push(key);
     }
     out
 }
 
 fn setup_masstree<const K: usize>(keys: &[[u8; K]]) -> MassTree<u64> {
-    let mut tree = MassTree::new();
+    let tree = MassTree::new();
     for (i, key) in keys.iter().enumerate() {
         let _ = tree.insert(key, i as u64);
     }
@@ -86,10 +92,8 @@ impl ThreadProgress {
     fn update(&self, thread_id: usize, op: usize, key: u64) {
         self.current_op[thread_id].store(op, Ordering::Relaxed);
         self.current_key[thread_id].store(key, Ordering::Relaxed);
-        self.last_progress_ms[thread_id].store(
-            self.start.elapsed().as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        self.last_progress_ms[thread_id]
+            .store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
 
     fn mark_done(&self, thread_id: usize) {
@@ -128,10 +132,7 @@ impl ThreadProgress {
 
 fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
     println!("\n{}", "=".repeat(80));
-    println!(
-        "05: DISJOINT WRITES ({} threads, {} ops/thread)",
-        threads, ops_per_thread
-    );
+    println!("05: DISJOINT WRITES ({threads} threads, {ops_per_thread} ops/thread)");
     println!("{}", "=".repeat(80));
 
     let tree = Arc::new(MassTree::<u64>::new());
@@ -148,8 +149,7 @@ fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
                 let stuck = progress.report_stuck(2000); // 2 second timeout
                 for (tid, op, key, stall_ms) in &stuck {
                     eprintln!(
-                        "!!! STUCK: Thread {} at op {} key=0x{:016x} for {}ms",
-                        tid, op, key, stall_ms
+                        "!!! STUCK: Thread {tid} at op {op} key=0x{key:016x} for {stall_ms}ms"
                     );
                 }
                 if progress.all_done() {
@@ -169,7 +169,12 @@ fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
                 let guard = tree.guard();
                 let base = t * ops_per_thread;
 
-                eprintln!("[T{:02}] Start: keys {}..{}", t, base, base + ops_per_thread - 1);
+                eprintln!(
+                    "[T{:02}] Start: keys {}..{}",
+                    t,
+                    base,
+                    base + ops_per_thread - 1
+                );
 
                 for i in 0..ops_per_thread {
                     let key_val = (base + i) as u64;
@@ -184,24 +189,21 @@ fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
 
                     // Log slow operations
                     if op_elapsed > Duration::from_millis(100) {
-                        eprintln!(
-                            "[T{:02}] SLOW op {} key=0x{:016x} took {:?}",
-                            t, i, key_val, op_elapsed
-                        );
+                        eprintln!("[T{t:02}] SLOW op {i} key=0x{key_val:016x} took {op_elapsed:?}");
                     }
 
                     // Log every 10000th op (less spam for large runs)
                     if i % 10000 == 0 && i > 0 {
-                        eprintln!("[T{:02}] op {}/{}", t, i, ops_per_thread);
+                        eprintln!("[T{t:02}] op {i}/{ops_per_thread}");
                     }
 
                     if let Err(e) = result {
-                        eprintln!("[T{:02}] ERROR op {} key=0x{:016x}: {:?}", t, i, key_val, e);
+                        eprintln!("[T{t:02}] ERROR op {i} key=0x{key_val:016x}: {e:?}");
                     }
                 }
 
                 progress.mark_done(t);
-                eprintln!("[T{:02}] DONE", t);
+                eprintln!("[T{t:02}] DONE");
             })
         })
         .collect();
@@ -230,8 +232,7 @@ fn run_05_disjoint_writes(threads: usize, ops_per_thread: usize) {
 fn run_06_contention_writes(threads: usize, ops_per_thread: usize, key_space: usize) {
     println!("\n{}", "=".repeat(80));
     println!(
-        "06: CONTENTION WRITES ({} threads, {} ops/thread, {} keys)",
-        threads, ops_per_thread, key_space
+        "06: CONTENTION WRITES ({threads} threads, {ops_per_thread} ops/thread, {key_space} keys)"
     );
     println!("{}", "=".repeat(80));
 
@@ -253,8 +254,7 @@ fn run_06_contention_writes(threads: usize, ops_per_thread: usize, key_space: us
                 let stuck = progress.report_stuck(2000);
                 for (tid, op, key, stall_ms) in &stuck {
                     eprintln!(
-                        "!!! STUCK: Thread {} at op {} key=0x{:016x} for {}ms",
-                        tid, op, key, stall_ms
+                        "!!! STUCK: Thread {tid} at op {op} key=0x{key:016x} for {stall_ms}ms"
                     );
                 }
                 if progress.all_done() {
@@ -276,7 +276,12 @@ fn run_06_contention_writes(threads: usize, ops_per_thread: usize, key_space: us
                 let guard = tree.guard();
                 let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
 
-                eprintln!("[T{:02}] Start: {} ops over {} keys", t, ops_per_thread, keys.len());
+                eprintln!(
+                    "[T{:02}] Start: {} ops over {} keys",
+                    t,
+                    ops_per_thread,
+                    keys.len()
+                );
 
                 for op in 0..ops_per_thread {
                     state = state
@@ -294,23 +299,20 @@ fn run_06_contention_writes(threads: usize, ops_per_thread: usize, key_space: us
                     let op_elapsed = op_start.elapsed();
 
                     if op_elapsed > Duration::from_millis(100) {
-                        eprintln!(
-                            "[T{:02}] SLOW op {} key=0x{:016x} took {:?}",
-                            t, op, ikey, op_elapsed
-                        );
+                        eprintln!("[T{t:02}] SLOW op {op} key=0x{ikey:016x} took {op_elapsed:?}");
                     }
 
                     if op % 500 == 0 {
-                        eprintln!("[T{:02}] op {}/{}", t, op, ops_per_thread);
+                        eprintln!("[T{t:02}] op {op}/{ops_per_thread}");
                     }
 
                     if let Err(e) = result {
-                        eprintln!("[T{:02}] ERROR op {} key=0x{:016x}: {:?}", t, op, ikey, e);
+                        eprintln!("[T{t:02}] ERROR op {op} key=0x{ikey:016x}: {e:?}");
                     }
                 }
 
                 progress.mark_done(t);
-                eprintln!("[T{:02}] DONE", t);
+                eprintln!("[T{t:02}] DONE");
             })
         })
         .collect();
@@ -336,20 +338,152 @@ fn run_06_contention_writes(threads: usize, ops_per_thread: usize, key_space: us
 // Main
 // =============================================================================
 
+// =============================================================================
+// Verification Test - Debug insert/get failures
+// =============================================================================
+
+fn run_verification_test() {
+    use masstree::MassTree24;
+
+    println!("\n{}", "=".repeat(80));
+    println!("VERIFICATION TEST (4 threads, 500 ops/thread)");
+    println!("{}", "=".repeat(80));
+
+    for run in 0..20 {
+        let tree = Arc::new(MassTree24::<u64>::new());
+        let failures = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..4)
+            .map(|t| {
+                let tree = Arc::clone(&tree);
+                let failures = Arc::clone(&failures);
+                thread::spawn(move || {
+                    let guard = tree.guard();
+                    for i in 0..500 {
+                        let key_val = (t * 10000 + i) as u64;
+                        let key = key_val.to_be_bytes();
+
+                        let insert_result = tree.insert_with_guard(&key, key_val, &guard);
+
+                        // Immediate verification - try multiple times
+                        let get1 = tree.get_with_guard(&key, &guard);
+                        if get1.is_none() {
+                            // Retry with delays
+                            for _ in 0..100 { std::hint::spin_loop(); }
+                            let get2 = tree.get_with_guard(&key, &guard);
+                            std::thread::sleep(std::time::Duration::from_micros(100));
+                            let get3 = tree.get_with_guard(&key, &guard);
+
+                            // Log tree state
+                            let tree_len = tree.len();
+
+                            failures.fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "!!! VERIFY FAIL: t={} i={} key=0x{:016x} insert={:?} get1={:?} get2={:?} get3={:?} tree_len={}",
+                                t, i, key_val, insert_result, get1, get2, get3, tree_len
+                            );
+                            // Stop this thread to reduce noise
+                            return;
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let fail_count = failures.load(Ordering::Relaxed);
+        if fail_count > 0 {
+            eprintln!(
+                "Run {}: {} verification failures, tree.len()={}",
+                run, fail_count, tree.len()
+            );
+            return; // Stop on first failure
+        } else {
+            println!("Run {}: OK (tree.len()={})", run, tree.len());
+        }
+    }
+
+    println!("\nAll 20 runs passed!");
+}
+
+fn run_parent_wait_benchmark() {
+    println!("\n{}", "=".repeat(80));
+    println!("PARENT WAIT STATS BENCHMARK");
+    println!("{}", "=".repeat(80));
+
+    // Reset counters
+    masstree::reset_debug_counters();
+
+    let threads = 32;
+    let ops_per_thread = 100_000; // 3.2M total (matches benchmark)
+
+    let tree = Arc::new(masstree::MassTree24::<u64>::new());
+    let start = Instant::now();
+
+    let handles: Vec<_> = (0..threads)
+        .map(|t| {
+            let tree = Arc::clone(&tree);
+            thread::spawn(move || {
+                let guard = tree.guard();
+                let base = t * ops_per_thread;
+                for i in 0..ops_per_thread {
+                    let key_val = (base + i) as u64;
+                    let key = key_val.to_be_bytes();
+                    let _ = tree.insert_with_guard(&key, key_val, &guard);
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let elapsed = start.elapsed();
+    let stats = masstree::get_parent_wait_stats();
+    let debug = masstree::get_all_debug_counters();
+
+    println!("\nRun completed in {:?}", elapsed);
+    println!("Tree size: {}", tree.len());
+    println!("\n=== Parent Wait Stats ===");
+    println!("Hits:        {}", stats.hits);
+    println!("Total spins: {}", stats.total_spins);
+    println!("Max spins:   {}", stats.max_spins);
+    println!("Avg spins:   {:.2}", stats.avg_spins);
+    println!("Total wait:  {:.2} us ({:.2} ms)", stats.total_us, stats.total_us / 1000.0);
+    println!("Max wait:    {:.2} us ({:.2} ms)", stats.max_us, stats.max_us / 1000.0);
+    println!("Avg wait:    {:.2} us", stats.avg_us);
+    println!("\n=== Debug Counters ===");
+    println!("Splits:      {}", debug.split);
+    println!("CAS success: {}", debug.cas_insert_success);
+    println!("CAS retry:   {}", debug.cas_insert_retry);
+    println!("CAS fallbk:  {}", debug.cas_insert_fallback);
+    println!("Locked ins:  {}", debug.locked_insert);
+    println!("B-link adv:  {}", debug.advance_blink);
+    println!("Wrong leaf:  {}", debug.wrong_leaf_insert);
+
+    // Check if elapsed >> parent_wait - indicates other bottleneck
+    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+    let unexplained_ms = elapsed_ms - (stats.total_us / 1000.0);
+    if unexplained_ms > 100.0 && stats.total_us > 0.0 {
+        println!("\n!!! WARNING: {:.1}ms unexplained (elapsed={:.1}ms, parent_wait={:.1}ms)",
+            unexplained_ms, elapsed_ms, stats.total_us / 1000.0);
+    }
+}
+
 fn main() {
     masstree::init_tracing();
 
-    eprintln!("MassTree Concurrent Write Hang Detector");
-    eprintln!("========================================");
-    eprintln!("Watchdog will report any thread stuck for >2 seconds.");
+    eprintln!("MassTree Verification Test");
+    eprintln!("===========================");
     eprintln!();
 
-    // Run the exact benchmark config that shows variance: 8 threads, 50k ops
-    eprintln!("=== EXACT BENCHMARK CONFIG: 8 threads, 50k ops/thread ===");
+    // Run parent wait stats benchmark
     for run in 1..=10 {
-        eprintln!("\n--- Run {}/10 ---", run);
-        run_05_disjoint_writes(8, 50_000);
+        println!("\n\n>>> Run {}/10 <<<", run);
+        run_parent_wait_benchmark();
     }
-
-    eprintln!("\nAll tests completed!");
 }
