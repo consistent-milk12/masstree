@@ -750,10 +750,15 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.leaf_values[slot].load(READ_ORD)
     }
 
-    /// Store key data for a slot after successful CAS claim.
+    /// Store key metadata (`ikey`, `keylenx`) for a CAS insert attempt.
     ///
     /// # Safety
-    /// - Caller must have successfully claimed the slot via `cas_slot_value`
+    /// - The caller must have successfully claimed the slot via `cas_slot_value` and ensured
+    ///   the slot still belongs to the CAS attempt (i.e. `leaf_values[slot]` still equals the
+    ///   claimed pointer).
+    ///
+    /// Note: writing key metadata *before* claiming the slot is not safe in this design because
+    /// multiple concurrent CAS attempts can overwrite each other's metadata before publish.
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {

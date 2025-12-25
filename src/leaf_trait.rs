@@ -668,11 +668,16 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// - No concurrent writer should be modifying this slot
     unsafe fn store_slot_for_cas(&self, slot: usize, ikey: u64, keylenx: u8, value_ptr: *mut u8);
 
-    /// Store key data for a slot after successful CAS claim.
+    /// Store key metadata (`ikey`, `keylenx`) for a CAS insert attempt.
     ///
     /// # Safety
     ///
-    /// Caller must have successfully claimed the slot via `cas_slot_value`.
+    /// - The caller must have successfully claimed the slot via `cas_slot_value` and ensured
+    ///   the slot still belongs to the CAS attempt (i.e. `leaf_values[slot]` still equals the
+    ///   claimed pointer).
+    ///
+    /// Note: writing key metadata *before* claiming the slot is not safe in this design because
+    /// multiple concurrent CAS attempts can overwrite each other's metadata before publish.
     unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8);
 
     /// Clear a slot after failed CAS insert.
