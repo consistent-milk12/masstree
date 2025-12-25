@@ -1450,6 +1450,11 @@ where
         // Store new leaf in allocator
         let right_leaf_ptr: *mut L = self.allocator.alloc_leaf(new_leaf_box);
 
+        // IMPORTANT: Capture is_layer_root BEFORE dropping the lock!
+        // SPLIT_UNLOCK_MASK clears ROOT_BIT, so after drop(lock) we can't tell
+        // if this was a layer root or a newly-split sibling (both have NULL parent).
+        let is_layer_root: bool = left_leaf.parent().is_null() && left_leaf.version().is_root();
+
         // NOTE: Link leaves in B-link order
         // right_leaf's parent pointer is NULL at this point. It will be set
         // in propagate_split_generic after we insert into the parent internode.
@@ -1464,7 +1469,14 @@ where
         drop(lock);
 
         // Propagate split to parent (lock already released)
-        self.propagate_split_generic(left_leaf_ptr, right_leaf_ptr, split_ikey, guard)?;
+        // Pass is_layer_root so propagate knows whether to promote or wait.
+        self.propagate_split_generic(
+            left_leaf_ptr,
+            right_leaf_ptr,
+            split_ikey,
+            is_layer_root,
+            guard,
+        )?;
 
         Ok(())
     }
@@ -1549,6 +1561,10 @@ where
     }
 
     /// Propagate a leaf split to the parent.
+    ///
+    /// # Arguments
+    /// * `is_layer_root` - True if the left leaf was a layer root BEFORE the lock was dropped.
+    ///   This must be captured before `drop(lock)` because `SPLIT_UNLOCK_MASK` clears `ROOT_BIT`.
     #[expect(clippy::too_many_lines)]
     #[expect(clippy::panic, reason = "FATAL: Cannot continue")]
     fn propagate_split_generic(
@@ -1556,11 +1572,12 @@ where
         left_leaf_ptr: *mut L,
         right_leaf_ptr: *mut L,
         split_ikey: u64,
+        is_layer_root: bool,
         guard: &LocalGuard<'_>,
     ) -> Result<(), InsertError> {
         #[cfg(feature = "tracing")]
         eprintln!(
-            "[SPLIT] propagate_split_generic: split_ikey={split_ikey:016x} left={left_leaf_ptr:p} right={right_leaf_ptr:p}"
+            "[SPLIT] propagate_split_generic: split_ikey={split_ikey:016x} left={left_leaf_ptr:p} right={right_leaf_ptr:p} is_layer_root={is_layer_root}"
         );
 
         // Check if left leaf was the main tree root
@@ -1575,21 +1592,27 @@ where
             return self.create_root_internode_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
         }
 
-        // Check if this is a layer root (is_root flag + null parent)
+        // Handle NULL parent case - two possibilities:
+        // 1. Layer root: was created with is_root=true, should be promoted to layer internode
+        // 2. Newly split sibling: parent pointer not yet set by creating thread, should wait
+        //
+        // We use `is_layer_root` parameter (captured before lock drop) to distinguish.
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
 
-        // Handle NULL parent case
         if left_leaf.parent().is_null() {
-            // Actual layer root - promote
-            if left_leaf.version().is_root() {
+            if is_layer_root {
+                // LAYER ROOT SPLIT: promote to layer internode
                 #[cfg(feature = "tracing")]
-                eprintln!("[SPLIT] left is layer root, promoting");
+                eprintln!("[SPLIT] left is layer root, promoting to layer internode");
                 return self.promote_layer_root_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
             }
 
-            // NULL parent but NOT a root: newly split sibling whose parent hasn't
-            // been set yet. Wait for the creating thread to set it.
-            // Strategy: spin briefly, then yield, then short sleep.
+            // NEWLY SPLIT SIBLING: wait for creating thread to set parent pointer
+            // This happens when Thread A splits a leaf, creating right sibling R,
+            // then Thread B splits R before Thread A finishes propagate_split.
+            #[cfg(feature = "tracing")]
+            eprintln!("[SPLIT] NULL parent, not layer root - waiting for parent to be set");
+
             let mut spins: usize = 0;
             loop {
                 // Check if parent is now set
@@ -1599,10 +1622,10 @@ where
 
                 spins += 1;
 
-                // Backoff strategy tuned for parent-set latency (typically < 1µs):
-                // Phase 1 (0-64): Spin - handles majority of cases
+                // Backoff strategy:
+                // Phase 1 (0-64): Spin - handles most cases (parent set quickly)
                 // Phase 2 (64-1024): Yield - moderate backoff
-                // Phase 3 (1024+): Sleep 10µs - shorter sleep for faster recovery
+                // Phase 3 (1024+): Short sleep - avoid burning CPU
                 if spins <= 64 {
                     std::hint::spin_loop();
                 } else if spins <= 1024 {
@@ -1611,15 +1634,16 @@ where
                     std::thread::sleep(std::time::Duration::from_micros(10));
                 }
 
-                // Safety limit
+                // Safety limit - if we hit this, there's a bug
                 assert!(
                     spins <= 1_000_000,
-                    "propagate_split_generic: parent pointer never set after {} iterations. \
-                     left_leaf_ptr={left_leaf_ptr:p} is_root={}",
-                    spins,
-                    left_leaf.version().is_root()
+                    "propagate_split_generic: parent pointer never set after {spins} iterations. \
+                     left_leaf_ptr={left_leaf_ptr:p}"
                 );
             }
+
+            #[cfg(feature = "tracing")]
+            eprintln!("[SPLIT] Parent set after {spins} spins");
         }
 
         // Lock parent with validation and find child index.

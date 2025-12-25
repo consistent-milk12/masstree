@@ -1,10 +1,22 @@
 # masstree
 
-A high-performance concurrent ordered map for Rust, supporting variable-length keys.
+A high-performance concurrent ordered map for Rust, supporting variable-length keys. This is an experimental branch implementing a major divergence from the original C++ Masstree: **WIDTH=24** (vs. the original WIDTH=15). This requires `AtomicU128` for the permutation field (24 slots × 5 bits = 120 bits).
 
-[![Crates.io](https://img.shields.io/crates/v/masstree.svg)](https://crates.io/crates/masstree)
-[![Documentation](https://docs.rs/masstree/badge.svg)](https://docs.rs/masstree)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+### Why WIDTH=24?
+
+Larger leaf nodes mean fewer splits under concurrent writes. Benchmarks show:
+
+| Workload | WIDTH=15 | WIDTH=24 | Improvement |
+|----------|----------|----------|-------------|
+| 16 threads, high contention | 17-88ms | 6-29ms | **~3x faster** |
+| 32 threads, high contention | 46-235ms | 11-70ms | **~3-4x faster** |
+| Single-threaded insert | 7.8-9.5ms | 13-20ms | *slower* (larger nodes) |
+
+**Trade-off**: WIDTH=24 excels at concurrent writes with contention but is slower for single-threaded workloads due to larger node sizes.
+
+### Branch Name
+
+Named `atomic_abstraction` because the implementation uses traits (`TreeLeaf`, `TreePermutation`, `LayerCapableLeaf`) to abstract over the atomic type. This makes it easier to generalize to other widths/atomic types in the future.
 
 ## What This Is
 
@@ -35,7 +47,7 @@ A Rust implementation of the [Masstree algorithm](https://pdos.csail.mit.edu/pap
 | Range scans | Planned |
 | Deletion | Planned |
 
-**341 tests passing** (unit, integration, property, loom, shuttle)
+**312+ tests passing** (unit, property-based; some concurrent stress tests are flaky)
 
 ## Benchmarks
 
@@ -127,11 +139,11 @@ These numbers are best-case for MassTree's design:
 ## Quick Start
 
 ```rust
-use masstree::MassTree;
+use masstree::MassTree24;
 use std::sync::Arc;
 use std::thread;
 
-let tree = Arc::new(MassTree::<u64>::new());
+let tree = Arc::new(MassTree24::<u64>::new());
 
 let handles: Vec<_> = (0..8).map(|i| {
     let tree = Arc::clone(&tree);
@@ -150,6 +162,8 @@ let handles: Vec<_> = (0..8).map(|i| {
 
 for h in handles { h.join().unwrap(); }
 ```
+
+> **Note**: `MassTree24` is the WIDTH=24 variant. `MassTree<V>` (WIDTH=15) is also available for compatibility.
 
 ### Use mimalloc for Best Performance
 
@@ -183,7 +197,7 @@ This is not a direct port. Key differences from the [original C++ implementation
 | Aspect | C++ Masstree | Rust MassTree |
 |--------|--------------|---------------|
 | **Memory Reclamation** | Epoch-Based RCU | Hyaline via [seize](https://github.com/ibraheemdev/seize) |
-| **Node Width** | 15 slots (u64 permuter) | 15 slots (planning 24 via u128) |
+| **Node Width** | 15 slots (u64 permuter) | **24 slots** (u128 permuter) |
 
 ### Why Hyaline over Epoch-Based RCU?
 
@@ -196,15 +210,15 @@ We use [seize](https://github.com/ibraheemdev/seize)'s Hyaline scheme which:
 - Handles nested critical sections naturally
 - Is the state-of-the-art for Rust concurrent data structures
 
-### Planned: WIDTH=24 (Novel Optimization)
+### WIDTH=24 (Novel Optimization)
 
-The original C++ and our current implementation use WIDTH=15 because the permutation encoding fits in a `u64` (15 slots × 4 bits + 4 bits size = 64 bits).
+The original C++ uses WIDTH=15 because the permutation encoding fits in a `u64` (15 slots × 4 bits + 4 bits size = 64 bits).
 
-We're implementing WIDTH=24 using `u128` storage via the [`portable-atomic`](https://crates.io/crates/portable-atomic) crate:
+This branch (`atomic_abstraction`) implements **WIDTH=24** using `AtomicU128` via [`portable-atomic`](https://crates.io/crates/portable-atomic):
 
 - 24 slots × 5 bits + 5 bits size = 125 bits (fits in u128)
-- 60% more capacity per node = ~40% fewer splits
-- Reduces lock contention under high thread counts
+- 60% more capacity per node = fewer splits under concurrent writes
+- ~3x faster for high-contention concurrent writes (see benchmarks at top)
 
 This optimization wasn't practical for the 2012 C++ implementation but is feasible now with modern 128-bit atomic support.
 
@@ -219,7 +233,10 @@ This optimization wasn't practical for the 2012 C++ implementation but is feasib
 ## Running Benchmarks
 
 ```bash
-# Full comparison (recommended)
+# WIDTH=24 concurrent benchmarks
+cargo bench --bench concurrent_maps24 --features mimalloc
+
+# Full comparison with other structures
 cargo bench --bench concurrent_maps --features mimalloc
 
 # Just the throughput scaling benchmarks
@@ -229,6 +246,19 @@ cargo bench --bench concurrent_maps --features mimalloc -- 08b_read_scaling
 # vs lock-wrapped BTreeMap
 cargo bench --bench lock_comparison --features mimalloc
 ```
+
+### WIDTH=24 Concurrent Writes (50k ops/thread)
+
+| Threads | Fastest | Slowest | Median |
+|---------|---------|---------|--------|
+| 1 | 6.56ms | 10.18ms | 7.16ms |
+| 2 | 8.12ms | 15.96ms | 12.14ms |
+| 4 | 13.49ms | 16.9ms | 14.22ms |
+| 8 | 21.47ms | 30.35ms | 24.31ms |
+| 16 | 40.37ms | 954.8ms | 42.16ms |
+| 32 | 78.54ms | 983ms | 82.64ms |
+
+Median times scale well. Occasional outliers at 16+ threads due to contention.
 
 ## References
 

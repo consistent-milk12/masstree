@@ -1133,11 +1133,8 @@ mod tests {
     // ========================================================================
     //  Layer Tests
     // ========================================================================
-    // NOTE: Layer creation is not yet implemented in the generic tree.
-    // These tests are ignored until layer support is added to MassTreeGeneric.
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree (see tree/generic.rs:1151)"]
     fn test_layer_creation_same_prefix() {
         let tree: MassTree<u64> = MassTree::new();
 
@@ -1153,7 +1150,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_deep_layer_chain() {
         let tree: MassTree<u64> = MassTree::new();
 
@@ -1174,7 +1170,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_layer_with_suffixes() {
         let tree: MassTree<u64> = MassTree::new();
 
@@ -1191,7 +1186,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_insert_into_existing_layer() {
         let tree: MassTree<u64> = MassTree::new();
 
@@ -1208,7 +1202,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_update_in_layer() {
         let tree: MassTree<u64> = MassTree::new();
 
@@ -1224,7 +1217,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_get_nonexistent_in_layer() {
         let tree: MassTree<u64> = MassTree::new();
 
@@ -1237,7 +1229,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_long_key_insert_and_get() {
         let tree: MassTree<u64> = MassTree::new();
 
@@ -1253,7 +1244,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_mixed_short_and_long_keys() {
         let tree: MassTree<u64> = MassTree::new();
 
@@ -1270,7 +1260,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_layer_differential_vs_btreemap() {
         use std::collections::BTreeMap;
 
@@ -1301,7 +1290,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_layer_count_tracking() {
         let tree: MassTree<u64> = MassTree::new();
 
@@ -1325,7 +1313,6 @@ mod tests {
     // ========================================================================
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_layer_growth_beyond_width() {
         // Test that a layer can grow beyond WIDTH entries by promoting to internode
         let tree: MassTree<u64> = MassTree::new();
@@ -1351,7 +1338,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_layer_root_becomes_internode() {
         // Test with default WIDTH - insert enough keys to trigger layer split
         let tree: MassTree<u64> = MassTree::new();
@@ -1380,7 +1366,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Layer creation not yet implemented in generic tree"]
     fn test_layer_split_preserves_all_keys() {
         // Comprehensive test: insert many keys with shared prefix, verify all retrievable
         let tree: MassTree<u64> = MassTree::new();
