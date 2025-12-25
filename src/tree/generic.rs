@@ -604,56 +604,185 @@ where
         }
     }
 
+    /// Compare key against internode's last key with stability validation.
+    ///
+    /// Implements the C++ `stable_last_key_compare` loop from `reference/masstree_struct.hh`.
+    /// Retries until the comparison is stable with respect to `version`.
+    ///
+    /// # Returns
+    /// - `Ordering::Greater` if key > last key in internode (key escaped right)
+    /// - `Ordering::Less` if key < last key
+    /// - `Ordering::Equal` if key == last key
+    #[inline(always)]
+    fn stable_last_key_compare(
+        inode: &L::Internode,
+        target_ikey: u64,
+        mut version: u32,
+    ) -> std::cmp::Ordering {
+        use crate::leaf_trait::TreeInternode;
+
+        loop {
+            let nkeys = inode.nkeys();
+            let cmp = if nkeys == 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                let last_key = inode.ikey(nkeys - 1);
+                target_ikey.cmp(&last_key)
+            };
+
+            if !inode.version().has_changed_or_locked(version) {
+                return cmp;
+            }
+
+            version = inode.version().stable();
+        }
+    }
+
+    /// Get a fresh root pointer, following parent pointers if the cached root is stale.
+    ///
+    /// This implements the C++ `fix_root()` pattern from masstree_struct.hh:791-798.
+    /// If the current node is not a root, follow parent pointers to find the true root.
+    #[inline]
+    fn get_fresh_root(&self, mut node: *const u8, _guard: &LocalGuard<'_>) -> *const u8 {
+        loop {
+            // SAFETY: node is valid, NodeVersion is first field
+            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+
+            // Wait for stable version before checking root status
+            let _ = version.stable();
+
+            // If this is a root, we're done
+            if version.is_root() {
+                return node;
+            }
+
+            // Follow parent pointer
+            let parent = if version.is_leaf() {
+                // SAFETY: version.is_leaf() confirmed
+                let leaf: &L = unsafe { &*(node.cast::<L>()) };
+                leaf.parent()
+            } else {
+                // SAFETY: !version.is_leaf() confirmed
+                let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+                inode.parent()
+            };
+
+            if parent.is_null() {
+                // If this ever happens with a stable version, treat it as a transient state
+                // and let the caller handle retries (defensive; expected to be rare/unreachable).
+                return node;
+            }
+
+            node = parent;
+        }
+        // Note: Loop always returns from inside, so this is unreachable.
+        // The guard parameter is for future CAS update of root_ptr (C++ fix_root pattern).
+    }
+
     /// Traverse from layer root to target leaf with version validation.
+    ///
+    /// This implements the C++ two-phase traversal pattern from masstree_struct.hh:633-685:
+    /// 1. Double-buffered nodes and versions (`n[2]`, `v[2]`, `sense` toggle)
+    /// 2. Root freshness check via `get_fresh_root`
+    /// 3. `stable_last_key_compare` check before root retry on split
     #[expect(clippy::unused_self, reason = "Method signature pattern")]
     fn reach_leaf_concurrent_generic(
         &self,
         start: *const u8,
         key: &Key<'_>,
-        _guard: &LocalGuard<'_>,
+        guard: &LocalGuard<'_>,
     ) -> *mut L {
         use crate::ksearch::upper_bound_internode_generic;
+        use crate::leaf_trait::TreeInternode;
         use crate::prefetch::prefetch_read;
 
         let target_ikey: u64 = key.ikey();
-        let mut node: *const u8 = start;
 
-        loop {
-            // SAFETY: node is valid
+        // Double-buffered nodes and versions (C++ pattern: n[2], v[2])
+        let mut nodes: [*const u8; 2] = [std::ptr::null(); 2];
+        let mut versions: [u32; 2] = [0; 2];
+        // Phase 1: Find fresh (non-stale) root
+        'retry: loop {
+            let mut sense: usize = 0;
+            nodes[sense] = self.get_fresh_root(start, guard);
+
+            // SAFETY: node is valid, NodeVersion is first field
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+            let version: &NodeVersion = unsafe { &*(nodes[sense].cast::<NodeVersion>()) };
+            versions[sense] = version.stable();
 
-            let v: u32 = version.stable();
-
-            if version.is_leaf() {
-                // Cast const to mut, then to L
-                return node.cast_mut().cast::<L>();
+            // If we somehow didn't land on a root (should be rare), restart and try again.
+            // This matches the C++ "retry to true root" behavior, but stays defensive
+            // against transient parent/root-bit inconsistencies.
+            if !version.is_root() {
+                continue 'retry;
             }
 
-            // It's an internode
-            // SAFETY: !is_leaf() confirmed
-            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+            // Phase 2: Descend through internodes
+            loop {
+                let node = nodes[sense];
+                let v = versions[sense];
 
-            let child_idx: usize =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
-            let child: *mut u8 = inode.child(child_idx);
+                // SAFETY: node is valid
+                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+                let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
-            prefetch_read(child);
+                if version.is_leaf() {
+                    // Found leaf - return it
+                    return node.cast_mut().cast::<L>();
+                }
 
-            if child.is_null() {
-                node = start;
-                continue;
-            }
+                // It's an internode
+                // SAFETY: !is_leaf() confirmed
+                let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
 
-            if inode.version().has_changed_or_locked(v) {
-                if inode.version().has_split(v) {
-                    node = start;
+                // Find child for this key
+                let child_idx: usize =
+                    upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
+                let child: *mut u8 = inode.child(child_idx);
+
+                // Store child in OTHER buffer (double-buffering)
+                let other = sense ^ 1;
+                nodes[other] = child;
+
+                if child.is_null() {
+                    // NULL child - retry from fresh root
+                    continue 'retry;
+                }
+
+                // Prefetch child for next iteration
+                prefetch_read(child);
+
+                // Get child's stable version BEFORE checking parent
+                // SAFETY: child is valid, NodeVersion is first field
+                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+                let child_version: &NodeVersion = unsafe { &*(child.cast::<NodeVersion>()) };
+                versions[other] = child_version.stable();
+
+                // Now check if parent changed
+                if !inode.version().has_changed_or_locked(v) {
+                    // Parent stable - adopt child's buffer
+                    sense = other;
                     continue;
                 }
+
+                // Parent version changed - refresh parent version and decide whether to root-retry.
+                let old_v = v;
+                let new_v = inode.version().stable();
+                versions[sense] = new_v;
+
+                if inode.version().has_split(old_v)
+                    && Self::stable_last_key_compare(inode, target_ikey, new_v)
+                        == std::cmp::Ordering::Greater
+                {
+                    // Key escaped to the right due to a split: restart from fresh root.
+                    continue 'retry;
+                }
+
+                // Otherwise retry reading this internode (same node, updated version).
                 continue;
             }
-
-            node = child;
         }
     }
 
