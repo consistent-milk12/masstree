@@ -2,6 +2,29 @@
 
 A high-performance concurrent ordered map for Rust, supporting variable-length keys. This is an experimental branch implementing a major divergence from the original C++ Masstree: **WIDTH=24** (vs. the original WIDTH=15). This requires `AtomicU128` for the permutation field (24 slots × 5 bits = 120 bits).
 
+The current Rust implementation releases the left leaf lock BEFORE calling `propagate_split_generic`, breaking the C++ hand-over-hand invariant:
+
+```text
+Current Rust (BROKEN):
+  handle_leaf_split_generic:
+    lock.mark_split()
+    split_into()
+    link_sibling()
+    drop(lock)                   <- WRONG: released too early
+    propagate_split_generic()    <- left is unlocked during propagation
+
+C++ Pattern (CORRECT):
+  make_split:
+    while (true) {
+      // n and child are BOTH locked throughout
+      p = n->locked_parent()
+      // ... insert into parent ...
+      // hand-over-hand unlock at END of iteration
+      if (n != n_) n->unlock()
+      if (child != n_) child->unlock()
+    }
+```
+
 ## Why WIDTH=24?
 
 Larger leaf nodes mean fewer splits under concurrent writes. Benchmarks show:

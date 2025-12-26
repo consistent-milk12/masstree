@@ -288,6 +288,28 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Create a new root internode with specified height.
     fn new_root_boxed(height: u32) -> Box<Self>;
 
+    /// Create a new internode sibling for a split operation.
+    ///
+    /// The new internode is created with a **split-locked** version copied from the
+    /// locked parent. This prevents other threads from locking the sibling until
+    /// it is installed into the tree and its parent pointer is set.
+    ///
+    /// # Help-Along Protocol
+    ///
+    /// This is the internode equivalent of leaf `NodeVersion::new_for_split()`.
+    /// The caller MUST call `version().unlock_for_split()` exactly once after:
+    /// 1. The sibling is inserted into its parent (grandparent or new root)
+    /// 2. The sibling's parent pointer is set
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `next_child->assign_version(*p)` in `masstree_split.hh:234`.
+    ///
+    /// # Safety
+    ///
+    /// The `parent_version` must be from a locked node (the parent being split).
+    fn new_boxed_for_split(parent_version: &NodeVersion, height: u32) -> Box<Self>;
+
     // ========================================================================
     //  Version / Locking
     // ========================================================================

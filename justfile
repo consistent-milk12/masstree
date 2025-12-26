@@ -71,6 +71,68 @@ profile-locks LOG_LEVEL="masstree=warn":
 profile-locks-fast:
     cargo run --release --features mimalloc --bin lock_contention
 
+# Run lock contention with CAS enabled (optimistic fast path)
+cas:
+    #!/usr/bin/env bash
+    rm -f logs/lock_contention.json
+    RUST_LOG=masstree=warn,lock_contention=warn MASSTREE_ENABLE_CAS=1 cargo run --release --features "mimalloc,tracing" --bin lock_contention
+
+# Run lock contention with CAS disabled (locked path only)
+lock:
+    #!/usr/bin/env bash
+    rm -f logs/lock_contention.json
+    RUST_LOG=masstree=warn,lock_contention=warn MASSTREE_ENABLE_CAS=0 cargo run --release --features "mimalloc,tracing" --bin lock_contention
+
+# Run CAS path with debug-level tracing (verbose, for diagnosing issues)
+cas_debug:
+    #!/usr/bin/env bash
+    rm -f logs/lock_contention.json
+    RUST_LOG=masstree=debug,lock_contention=warn MASSTREE_ENABLE_CAS=1 cargo run --release --features "mimalloc,tracing" --bin lock_contention
+
+# Run locked path with debug-level tracing (verbose, for diagnosing issues)
+lock_debug:
+    #!/usr/bin/env bash
+    rm -f logs/lock_contention.json
+    RUST_LOG=masstree=debug,lock_contention=warn MASSTREE_ENABLE_CAS=0 cargo run --release --features "mimalloc,tracing" --bin lock_contention
+
+# Stress test: run N iterations of CAS benchmark, saving logs sequentially
+# Usage: just stress [N=10]
+stress N="10":
+    #!/usr/bin/env bash
+    rm -rf logs/runs
+    mkdir -p logs/runs
+    echo "Running {{N}} stress test iterations..."
+    for i in $(seq 1 {{N}}); do
+        echo "=== Run $i/{{N}} ==="
+        RUST_LOG=masstree=warn,lock_contention=warn MASSTREE_ENABLE_CAS=1 \
+            cargo run --release --features "mimalloc,tracing" --bin lock_contention 2>&1 \
+            | grep -E '(Run [0-9]+/10|Slowest|B-link advance|Fastest|Throughput)'
+        mv logs/lock_contention.json "logs/runs/run_$(printf '%02d' $i).json" 2>/dev/null || true
+    done
+    echo ""
+    echo "Logs saved to logs/runs/run_*.json"
+
+# Stress test with debug-level tracing (verbose, for diagnosing issues)
+# Usage: just stress_debug [N=10]
+stress_debug N="10":
+    #!/usr/bin/env bash
+    rm -rf logs/runs
+    mkdir -p logs/runs
+    echo "Running {{N}} stress test iterations (debug level)..."
+    for i in $(seq 1 {{N}}); do
+        echo "=== Run $i/{{N}} ==="
+        RUST_LOG=masstree=debug,lock_contention=warn MASSTREE_ENABLE_CAS=1 \
+            cargo run --release --features "mimalloc,tracing" --bin lock_contention 2>&1 \
+            | grep -E '(Run [0-9]+/10|Slowest|B-link advance|Fastest|Throughput)'
+        mv logs/lock_contention.json "logs/runs/run_$(printf '%02d' $i).json" 2>/dev/null || true
+    done
+    echo ""
+    echo "Logs saved to logs/runs/run_*.json"
+
+# Analyze stress test logs
+analyze:
+    cargo run --release --bin analyze_runs
+
 # Run a specific test with nextest, tracing, and mimalloc
 next-one TEST:
     cargo nextest run --no-fail-fast --features "tracing,mimalloc" {{TEST}}

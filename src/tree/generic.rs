@@ -914,7 +914,12 @@ where
         // Coverage collapse: child[i]'s subtree doesn't cover up to the expected upper bound.
         // If expected_upper - leaf_bound > this threshold, the child's coverage is insufficient.
         const COVERAGE_COLLAPSE_GAP: u64 = 100_000;
+        // Coverage collapse indicates permanent routing inconsistency from split propagation.
+        // Limited retries since the tree structure won't self-heal - B-link walking is the
+        // only way forward for affected keys.
+        const COVERAGE_COLLAPSE_MAX_RETRIES: u16 = 10;
         let mut far_landing_retries: u8 = 0;
+        let mut coverage_collapse_retries: u16 = 0;
 
         // Phase 1: Find fresh (non-stale) root
         'retry: loop {
@@ -992,44 +997,65 @@ where
                         0
                     };
 
-                    // Trigger on coverage collapse: child's subtree doesn't cover enough AND
-                    // target would require excessive B-link walking
-                    if coverage_gap > COVERAGE_COLLAPSE_GAP
-                        && target_gap > FAR_LANDING_GAP
-                        && far_landing_retries < FAR_LANDING_MAX_RETRIES
-                    {
-                        far_landing_retries += 1;
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!(
-                            ikey = format_args!("{:016x}", target_ikey),
-                            leaf_ptr = ?node,
-                            leaf_bound = format_args!("{:016x}", leaf_bound),
-                            expected_lower = format_args!("{:016x}", expected_lower[sense]),
-                            expected_upper = format_args!("{:016x}", exp_upper),
-                            coverage_gap = coverage_gap,
-                            target_gap = target_gap,
-                            retry = far_landing_retries,
-                            "COVERAGE_COLLAPSE: child subtree doesn't cover expected range"
-                        );
+                    // Trigger on coverage collapse in two cases:
+                    // 1. Normal: coverage_gap > threshold AND target_gap > threshold
+                    // 2. Rightmost-child: expected_upper == MAX (no separator to constrain)
+                    //    but target_gap is extremely large (10x threshold), indicating
+                    //    the rightmost subtree doesn't cover the expected range.
+                    let is_rightmost_collapse =
+                        exp_upper == u64::MAX && target_gap > FAR_LANDING_GAP * 10;
+                    let is_normal_collapse =
+                        coverage_gap > COVERAGE_COLLAPSE_GAP && target_gap > FAR_LANDING_GAP;
 
-                        // Backoff before retry
-                        let backoff_spins: u32 =
-                            u32::from(far_landing_retries) * u32::from(far_landing_retries) * 100;
-                        for _ in 0..backoff_spins {
-                            std::hint::spin_loop();
+                    if is_normal_collapse || is_rightmost_collapse {
+                        coverage_collapse_retries += 1;
+                        if coverage_collapse_retries <= COVERAGE_COLLAPSE_MAX_RETRIES {
+                            #[cfg(feature = "tracing")]
+                            if coverage_collapse_retries <= 5 || coverage_collapse_retries % 20 == 0
+                            {
+                                tracing::warn!(
+                                    ikey = format_args!("{:016x}", target_ikey),
+                                    leaf_ptr = ?node,
+                                    leaf_bound = format_args!("{:016x}", leaf_bound),
+                                    expected_lower = format_args!("{:016x}", expected_lower[sense]),
+                                    expected_upper = format_args!("{:016x}", exp_upper),
+                                    coverage_gap = coverage_gap,
+                                    target_gap = target_gap,
+                                    retry = coverage_collapse_retries,
+                                    "COVERAGE_COLLAPSE: child subtree doesn't cover expected range"
+                                );
+                            }
+
+                            // Brief backoff: spin then yield
+                            if coverage_collapse_retries <= 3 {
+                                let backoff_spins: u32 = u32::from(coverage_collapse_retries)
+                                    * u32::from(coverage_collapse_retries)
+                                    * 100;
+                                for _ in 0..backoff_spins {
+                                    std::hint::spin_loop();
+                                }
+                            } else {
+                                std::thread::yield_now();
+                            }
+
+                            continue 'retry;
                         }
-
-                        continue 'retry;
+                        // Exhausted coverage collapse retries - fall through to B-link walking
+                        // as last resort (will likely hit anomaly limit but preserves liveness)
                     }
 
                     // Original FAR_LANDING check (simpler: just target vs leaf_bound gap)
+                    // Skip if coverage collapse was detected - routing is broken, retrying won't help.
                     let gap: u64 = if target_ikey >= leaf_bound {
                         target_ikey - leaf_bound
                     } else {
                         leaf_bound - target_ikey
                     };
 
-                    if gap > FAR_LANDING_GAP && far_landing_retries < FAR_LANDING_MAX_RETRIES {
+                    if coverage_collapse_retries == 0
+                        && gap > FAR_LANDING_GAP
+                        && far_landing_retries < FAR_LANDING_MAX_RETRIES
+                    {
                         far_landing_retries += 1;
                         #[cfg(feature = "tracing")]
                         tracing::warn!(
@@ -1229,8 +1255,7 @@ where
             if use_reach {
                 let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
                 layer_root = self.maybe_parent_generic(layer_root);
-                leaf_ptr =
-                    self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
+                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
             } else {
                 use_reach = true;
             }
@@ -2490,6 +2515,71 @@ where
         result
     }
 
+    /// Find the correct parent internode for a key by descending from root.
+    ///
+    /// This is used when a leaf's parent pointer is stale (pointing to an internode
+    /// that is not on the traversal path for the key). We re-descend from root to
+    /// find the internode that IS on the correct path.
+    ///
+    /// # Arguments
+    ///
+    /// * `ikey` - The key to find the parent for
+    /// * `guard` - Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// Pointer to the internode that should be the parent for a leaf containing `ikey`.
+    #[expect(clippy::unused_self, reason = "API Consistency")]
+    fn find_parent_for_key_generic(&self, ikey: u64, _guard: &LocalGuard<'_>) -> *mut L::Internode {
+        use crate::ksearch::upper_bound_internode_generic;
+        use crate::leaf_trait::TreeInternode;
+        use std::sync::atomic::Ordering::Acquire;
+
+        // Get fresh root
+        let root_ptr: *const u8 = self.root_ptr.load(Acquire);
+        let mut node: *const u8 = root_ptr;
+
+        // SAFETY: root is valid
+        #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+        let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+        let _ = version.stable();
+
+        // If root is a leaf, there's no internode parent
+        if version.is_leaf() {
+            // This shouldn't happen in normal operation, but handle gracefully
+            // by returning a null-ish value that will cause the caller to retry
+            return std::ptr::null_mut();
+        }
+
+        // Descend through internodes until we find a leaf child
+        loop {
+            // SAFETY: node is valid internode
+            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+
+            // Find child index for ikey
+            let child_idx =
+                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(ikey, inode) as usize;
+
+            // Get child pointer
+            let child: *mut u8 = inode.child(child_idx);
+
+            // Check if child is a leaf
+            // SAFETY: child is valid
+            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+            let child_version: &NodeVersion = unsafe { &*(child.cast::<NodeVersion>()) };
+            let _ = child_version.stable();
+
+            if child_version.is_leaf() {
+                // Current internode is the parent of the leaf
+                return node.cast_mut().cast::<L::Internode>();
+            }
+
+            // Child is another internode, continue descent
+            node = child;
+        }
+    }
+
     /// Lock a parent internode from a leaf with validation (generic version).
     ///
     /// Handles the race where the parent pointer may change between reading
@@ -2775,21 +2865,121 @@ where
             // Find child index using pointer scan
             if let Some(idx) = self.try_find_child_index_generic(parent, left_leaf_ptr.cast::<u8>())
             {
-                #[cfg(feature = "tracing")]
-                {
-                    let parent_lock_elapsed = parent_lock_start.elapsed();
-                    if parent_lock_elapsed > std::time::Duration::from_millis(1) || retry_count > 0
+                // CRITICAL FIX: Validate split_ikey is within the expected range for this
+                // child position. This catches the case where the parent pointer is stale
+                // and points to an internode that is NOT on the traversal path for split_ikey.
+                //
+                // The expected range for child at position idx is:
+                //   lower = (idx == 0) ? 0 : parent.ikey(idx - 1)
+                //   upper = (idx < nkeys) ? parent.ikey(idx) : u64::MAX
+                // split_ikey must satisfy: lower <= split_ikey < upper
+                let nkeys = parent.nkeys();
+                let expected_lower: u64 = if idx == 0 { 0 } else { parent.ikey(idx - 1) };
+                let expected_upper: u64 = if idx < nkeys {
+                    parent.ikey(idx)
+                } else {
+                    u64::MAX
+                };
+
+                // Check if split_ikey is within expected range
+                if split_ikey >= expected_lower && split_ikey < expected_upper {
+                    // split_ikey is valid for this parent position
+                    #[cfg(feature = "tracing")]
                     {
-                        tracing::warn!(
-                            parent_ptr = ?parent_ptr,
-                            child_idx = idx,
-                            retry_count = retry_count,
-                            parent_lock_elapsed_us = parent_lock_elapsed.as_micros() as u64,
-                            "SLOW_PARENT_LOCK: locking parent for propagation took >1ms or had retries"
-                        );
+                        let parent_lock_elapsed = parent_lock_start.elapsed();
+                        if parent_lock_elapsed > std::time::Duration::from_millis(1)
+                            || retry_count > 0
+                        {
+                            tracing::warn!(
+                                parent_ptr = ?parent_ptr,
+                                child_idx = idx,
+                                retry_count = retry_count,
+                                parent_lock_elapsed_us = parent_lock_elapsed.as_micros() as u64,
+                                "SLOW_PARENT_LOCK: locking parent for propagation took >1ms or had retries"
+                            );
+                        }
                     }
+                    break (parent_ptr, parent_lock, idx);
                 }
-                break (parent_ptr, parent_lock, idx);
+
+                // split_ikey is OUTSIDE the expected range for this child position.
+                // This means the parent pointer is stale - this internode is NOT on the
+                // traversal path for split_ikey.
+                //
+                // This is a PERMANENT condition - the leaf's parent pointer won't change.
+                // We must re-descend from root to find the correct parent for split_ikey.
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    parent_ptr = ?parent_ptr,
+                    child_idx = idx,
+                    split_ikey = format_args!("{:016x}", split_ikey),
+                    expected_lower = format_args!("{:016x}", expected_lower),
+                    expected_upper = format_args!("{:016x}", expected_upper),
+                    retry_count = retry_count,
+                    "PROPAGATE_RANGE_MISMATCH: split_ikey outside expected range, re-descending from root"
+                );
+
+                drop(parent_lock);
+
+                // Re-descend from root to find the correct parent for split_ikey.
+                // This is expensive but necessary when the leaf's parent pointer is permanently stale.
+                let correct_parent_ptr = self.find_parent_for_key_generic(split_ikey, guard);
+
+                // If null (root is a leaf), just retry - tree structure too simple for this case
+                if correct_parent_ptr.is_null() {
+                    retry_count += 1;
+                    std::thread::yield_now();
+                    continue;
+                }
+
+                #[cfg(feature = "tracing")]
+                tracing::info!(
+                    old_parent_ptr = ?parent_ptr,
+                    correct_parent_ptr = ?correct_parent_ptr,
+                    split_ikey = format_args!("{:016x}", split_ikey),
+                    "PROPAGATE_FOUND_CORRECT_PARENT: re-descent found different parent"
+                );
+
+                // Update left_leaf's parent pointer only if the candidate parent actually
+                // contains left_leaf as a child.
+                //
+                // If we set left_leaf.parent to an internode that doesn't contain left_leaf,
+                // subsequent propagations will repeatedly lock the wrong parent and thrash.
+                //
+                // Locking the candidate parent narrows the window where we read an
+                // in-flight child array during concurrent splits.
+                let correct_parent: &L::Internode = unsafe { &*correct_parent_ptr };
+                let correct_lock = correct_parent.version().lock_with_yield();
+                let candidate_contains_child = self
+                    .try_find_child_index_generic(correct_parent, left_leaf_ptr.cast::<u8>())
+                    .is_some();
+                drop(correct_lock);
+
+                if candidate_contains_child {
+                    left_leaf.set_parent(correct_parent_ptr.cast::<u8>());
+                } else {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        old_parent_ptr = ?parent_ptr,
+                        correct_parent_ptr = ?correct_parent_ptr,
+                        split_ikey = format_args!("{:016x}", split_ikey),
+                        left_leaf_ptr = ?left_leaf_ptr,
+                        "PROPAGATE_PARENT_CANDIDATE_REJECTED: re-descent parent does not contain left leaf; not updating parent pointer"
+                    );
+                }
+
+                // Now retry with the corrected parent pointer
+                retry_count += 1;
+
+                // Check safety limit
+                if retry_count >= 100_000 {
+                    panic!(
+                        "propagate_split_generic: split_ikey range mismatch after {retry_count} retries. \
+                         split_ikey={split_ikey:016x} expected=[{expected_lower:016x}, {expected_upper:016x}) \
+                         parent_ptr={parent_ptr:p}"
+                    );
+                }
+                continue;
             }
 
             // Child not found - this can happen if the parent was split and
@@ -3178,7 +3368,7 @@ where
 
         let mut retries: usize = 0;
 
-        'retry: loop {
+        loop {
             retries += 1;
             assert!(
                 retries <= Self::MAX_PROPAGATION_RETRIES,
@@ -3240,14 +3430,26 @@ where
                 "INTERNODE_SPLIT: after mark_split"
             );
 
-            // Create new sibling internode
-            let sibling: Box<L::Internode> = L::Internode::new_boxed(parent.height());
+            // Create new sibling internode with SPLIT-LOCKED version (Help-Along Protocol).
+            //
+            // CRITICAL: The sibling is created with LOCK_BIT | SPLITTING_BIT set, copied
+            // from the locked parent. This prevents other threads from locking the sibling
+            // until we call unlock_for_split() after:
+            // 1. The sibling is inserted into grandparent (or new root)
+            // 2. The sibling's parent pointer is set
+            //
+            // C++ reference: masstree_split.hh:234
+            //   next_child->assign_version(*p);
+            //   next_child->mark_nonroot();
+            let sibling: Box<L::Internode> =
+                L::Internode::new_boxed_for_split(parent.version(), parent.height());
             let sibling_ptr: *mut L::Internode = Box::into_raw(sibling);
 
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 sibling_ptr = ?sibling_ptr,
-                "INTERNODE_SPLIT: created sibling"
+                sibling_is_split_locked = unsafe { (*sibling_ptr).version().is_split_locked() },
+                "INTERNODE_SPLIT: created sibling (split-locked)"
             );
 
             // Track sibling for cleanup
@@ -3288,12 +3490,28 @@ where
 
                 if parent.children_are_leaves() {
                     // Update all leaf children's parent pointers in sibling
+                    #[cfg(feature = "tracing")]
+                    let mut updated_children: usize = 0;
+
                     for i in 0..=sibling_ref.nkeys() {
                         let child: *mut u8 = sibling_ref.child(i);
                         if !child.is_null() {
                             (*child.cast::<L>()).set_parent(sibling_ptr.cast::<u8>());
+                            #[cfg(feature = "tracing")]
+                            {
+                                updated_children += 1;
+                            }
                         }
                     }
+
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        sibling_ptr = ?sibling_ptr,
+                        sibling_nkeys = sibling_ref.nkeys(),
+                        updated_children,
+                        sibling_is_split_locked = sibling_ref.version().is_split_locked(),
+                        "INTERNODE_SPLIT: updated leaf children parent pointers to sibling"
+                    );
                 }
                 // For internode children, split_into already updated them
 
@@ -3304,6 +3522,14 @@ where
                     } else {
                         (*insert_child.cast::<L::Internode>()).set_parent(parent_ptr.cast::<u8>());
                     }
+
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        insert_child = ?insert_child,
+                        parent_ptr = ?parent_ptr,
+                        children_are_leaves = parent.children_are_leaves(),
+                        "INTERNODE_SPLIT: insert_child stayed in LEFT parent"
+                    );
                 }
             }
 
@@ -3331,6 +3557,22 @@ where
                         sibling_ptr,
                         popup_key,
                     );
+
+                    // CRITICAL (Help-Along Protocol): Unlock sibling AFTER parent is set.
+                    // create_root_internode_from_internode_split_generic sets parent pointers.
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        sibling_ptr = ?sibling_ptr,
+                        popup_key = format_args!("{:016x}", popup_key),
+                        new_parent = "NEW_ROOT",
+                        result_ok = result.is_ok(),
+                        "INTERNODE_SPLIT_UNLOCK: unlocking sibling after main tree root creation"
+                    );
+
+                    unsafe {
+                        (*sibling_ptr).version().unlock_for_split();
+                    }
+
                     drop(parent_lock);
                     return result;
                 }
@@ -3338,23 +3580,45 @@ where
                 // LAYER ROOT INTERNODE SPLIT
                 let result =
                     self.promote_layer_root_internode_generic(parent_ptr, sibling_ptr, popup_key);
+
+                // CRITICAL (Help-Along Protocol): Unlock sibling AFTER parent is set.
+                // promote_layer_root_internode_generic sets parent pointers.
+                #[cfg(feature = "tracing")]
+                tracing::info!(
+                    sibling_ptr = ?sibling_ptr,
+                    popup_key = format_args!("{:016x}", popup_key),
+                    new_parent = "LAYER_ROOT",
+                    result_ok = result.is_ok(),
+                    "INTERNODE_SPLIT_UNLOCK: unlocking sibling after layer root creation"
+                );
+
+                unsafe {
+                    (*sibling_ptr).version().unlock_for_split();
+                }
+
                 drop(parent_lock);
                 return result;
             }
 
             // Not a root - propagate to grandparent
-            #[expect(
-                clippy::manual_let_else,
-                reason = "Unnecessary refactor would add complexity"
-            )]
+            //
+            // CRITICAL: At this point, sibling has been created and children have been moved.
+            // We MUST successfully install the sibling - retrying would orphan it.
             let (grandparent_ptr, mut grandparent_lock) =
-                if let Some(result) = self.locked_parent_internode_generic(parent) {
-                    result
-                } else {
-                    // Parent became a root while we were working - retry
-                    drop(parent_lock);
-                    continue 'retry;
-                };
+                self.locked_parent_internode_generic(parent).unwrap_or_else(|| {
+                    // This should not happen: we already checked parent.parent().is_null()
+                    // && parent_was_root at line 3523 and handled that case.
+                    // If we get here, there's a serious concurrency bug.
+                    //
+                    // Unlock the sibling before panicking to avoid leaving a locked orphan.
+                    unsafe {
+                        (*sibling_ptr).version().unlock_for_split();
+                    }
+                    panic!(
+                        "INTERNODE_SPLIT: locked_parent_internode_generic returned None \
+                         after sibling creation. parent_ptr={parent_ptr:p}, sibling_ptr={sibling_ptr:p}"
+                    );
+                });
 
             let grandparent: &L::Internode = unsafe { &*grandparent_ptr };
 
@@ -3370,11 +3634,20 @@ where
                 found
             };
 
+            // CRITICAL: Parent MUST be found in grandparent.
+            // We hold the parent lock, so it cannot be removed from grandparent.
+            // If not found, there's a serious bug.
             let Some(_parent_idx) = parent_idx else {
-                // Parent not found in grandparent - structure changed, retry
+                // Unlock the sibling before panicking to avoid leaving a locked orphan.
+                unsafe {
+                    (*sibling_ptr).version().unlock_for_split();
+                }
                 drop(grandparent_lock);
                 drop(parent_lock);
-                continue 'retry;
+                panic!(
+                    "INTERNODE_SPLIT: parent not found in grandparent after sibling creation. \
+                     parent_ptr={parent_ptr:p}, grandparent_ptr={grandparent_ptr:p}, sibling_ptr={sibling_ptr:p}"
+                );
             };
 
             // Check if grandparent has space
@@ -3382,9 +3655,49 @@ where
                 // Grandparent has space - insert separator and sibling
                 grandparent_lock.mark_insert();
                 let insert_pos = grandparent.find_insert_position(popup_key);
+
+                #[cfg(feature = "tracing")]
+                {
+                    // Log the key range that the sibling will cover in grandparent
+                    let gp_nkeys = grandparent.nkeys();
+                    let sibling_lower: u64 = if insert_pos == 0 {
+                        0
+                    } else {
+                        grandparent.ikey(insert_pos - 1)
+                    };
+                    let sibling_upper: u64 = if insert_pos < gp_nkeys {
+                        grandparent.ikey(insert_pos)
+                    } else {
+                        u64::MAX
+                    };
+                    tracing::info!(
+                        grandparent_ptr = ?grandparent_ptr,
+                        sibling_ptr = ?sibling_ptr,
+                        popup_key = format_args!("{:016x}", popup_key),
+                        insert_pos,
+                        gp_nkeys,
+                        sibling_lower = format_args!("{:016x}", sibling_lower),
+                        sibling_upper = format_args!("{:016x}", sibling_upper),
+                        "INTERNODE_SPLIT_INSTALL: inserting sibling into grandparent"
+                    );
+                }
+
                 grandparent.insert_key_and_child(insert_pos, popup_key, sibling_ptr.cast::<u8>());
                 unsafe {
                     (*sibling_ptr).set_parent(grandparent_ptr.cast::<u8>());
+                }
+
+                // CRITICAL (Help-Along Protocol): Unlock sibling AFTER parent is set.
+                #[cfg(feature = "tracing")]
+                tracing::info!(
+                    sibling_ptr = ?sibling_ptr,
+                    grandparent_ptr = ?grandparent_ptr,
+                    popup_key = format_args!("{:016x}", popup_key),
+                    "INTERNODE_SPLIT_UNLOCK: unlocking sibling after grandparent insert"
+                );
+
+                unsafe {
+                    (*sibling_ptr).version().unlock_for_split();
                 }
 
                 // Release locks in order
@@ -3397,11 +3710,23 @@ where
             // CRITICAL: Save is_root BEFORE unlocking, because SPLIT_UNLOCK_MASK clears ROOT_BIT
             let grandparent_was_root: bool = grandparent.is_root();
 
+            #[cfg(feature = "tracing")]
+            tracing::info!(
+                grandparent_ptr = ?grandparent_ptr,
+                sibling_ptr = ?sibling_ptr,
+                popup_key = format_args!("{:016x}", popup_key),
+                grandparent_was_root,
+                grandparent_nkeys = grandparent.nkeys(),
+                "INTERNODE_SPLIT_RECURSIVE: grandparent full, recursing"
+            );
+
             // Release grandparent lock without mark_split - recursive call will handle it
             // The recursive call will re-acquire the lock and mark_split when appropriate
             drop(grandparent_lock);
 
-            // Recursive call to split grandparent
+            // Recursive call to split grandparent.
+            // NOTE: The recursive call will set sibling's parent pointer and install it
+            // into the grandparent (or a new root if grandparent splits).
             let result = self.propagate_internode_split_generic(
                 grandparent_ptr,
                 popup_key,
@@ -3409,6 +3734,21 @@ where
                 grandparent_was_root,
                 guard,
             );
+
+            // CRITICAL (Help-Along Protocol): Unlock sibling AFTER recursive propagation.
+            // At this point, sibling should be installed and have its parent set.
+            // We unlock regardless of result to avoid leaving a locked orphan.
+            #[cfg(feature = "tracing")]
+            tracing::info!(
+                sibling_ptr = ?sibling_ptr,
+                popup_key = format_args!("{:016x}", popup_key),
+                result_ok = result.is_ok(),
+                "INTERNODE_SPLIT_UNLOCK: unlocking sibling after recursive propagation"
+            );
+
+            unsafe {
+                (*sibling_ptr).version().unlock_for_split();
+            }
 
             drop(parent_lock);
             return result;

@@ -327,6 +327,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::thread;
+    use tracing_test::traced_test;
 
     // ========================================================================
     // Send/Sync Verification
@@ -369,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    #[traced_test]
     #[expect(clippy::panic)]
     #[expect(clippy::too_many_lines)]
     fn concurrent_insert_then_get_does_not_lose_key() {

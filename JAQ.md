@@ -350,7 +350,7 @@ jaq -s '[.[] | select(.fields.ikey == "0000000000061a83")] | sort_by(.timestamp)
 | Null check | `select(.field != null)` |
 | AND | `and` |
 | OR | `or` |
-| NOT | `| not` |
+| NOT | `\| not` |
 
 ## Generating Logs
 
@@ -372,3 +372,217 @@ RUST_LOG=masstree=warn,lock_contention=warn cargo run --release --bin lock_conte
 4. **Use `.[0:5]`** to preview results before processing entire file
 5. **Pipe to `less`** for large outputs: `jaq -s '...' file.json | less`
 6. **Save complex queries** in shell scripts for reuse
+
+---
+
+## Advanced Techniques for Large Logs
+
+### Handling Multi-GB Log Files
+
+For logs > 1GB, avoid loading everything into memory:
+
+```bash
+# Sample first N lines only
+head -10000 logs/lock_contention.json | jaq -s 'QUERY'
+
+# Sample last N lines
+tail -10000 logs/lock_contention.json | jaq -s 'QUERY'
+
+# Sample middle section
+head -50000 logs/lock_contention.json | tail -10000 | jaq -s 'QUERY'
+
+# Count message types (streaming approach - get counts first)
+head -50000 logs/lock_contention.json | jaq -s '
+  [.[] | .fields.message] | group_by(.) | map({msg: .[0], count: length}) | sort_by(.count) | reverse'
+```
+
+### Multi-Stage Filtering
+
+Filter by multiple conditions with parentheses:
+
+```bash
+# AND with contains (note parentheses)
+jaq -s '[.[] | select((.fields.message | contains("DESCENT")) and (.fields.target_ikey == "0000000000030d40"))]'
+
+# Complex OR conditions
+jaq -s '[.[] | select(
+  (.fields.message | contains("FAR_LANDING")) or
+  (.fields.message | contains("BLINK_LIMIT")) or
+  (.fields.message | contains("INSERT_ABORT"))
+)]'
+```
+
+### Tracing Event Sequences for Specific Keys
+
+```bash
+# Full trace for one ikey
+head -20000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.target_ikey == "0000000000030d40")]
+| map({
+  msg: .fields.message,
+  retry: .fields.retry,
+  nkeys: .fields.nkeys,
+  child_idx: .fields.child_idx
+})'
+
+# Group events by ikey and list event types
+head -10000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.target_ikey != null)]
+| group_by(.fields.target_ikey)
+| map({ikey: .[0].fields.target_ikey, events: [.[].fields.message]})'
+```
+
+### Tracking State Changes Across Retries
+
+```bash
+# Version changes between retries for FAR_LANDING
+head -10000 logs/lock_contention.json | jaq -s '
+[.[] | select((.fields.message | contains("INTERNODE_DESCENT")) and (.fields.target_ikey == "0000000000030d40"))]
+| map({retry: .fields.retry, version: .fields.inode_version, nkeys: .fields.nkeys})'
+
+# Check if same root returned on retry
+head -10000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.message | contains("FRESH_ROOT"))]
+| map({ikey: .fields.target_ikey, retry: .fields.retry, same_as_start: .fields.same_as_start})
+| .[0:10]'
+```
+
+### Correlating Splits with Propagations
+
+```bash
+# Count splits vs propagations
+head -100000 logs/lock_contention.json | jaq -s '
+{
+  splits: ([.[] | select(.fields.message | contains("SPLIT_START"))] | length),
+  propagate_start: ([.[] | select(.fields.message | contains("PROPAGATE_START"))] | length),
+  propagate_complete: ([.[] | select(.fields.message | contains("PROPAGATE_COMPLETE"))] | length),
+  delta: (
+    ([.[] | select(.fields.message | contains("PROPAGATE_START"))] | length) -
+    ([.[] | select(.fields.message | contains("PROPAGATE_COMPLETE"))] | length)
+  )
+}'
+```
+
+### Analyzing Internode Growth Over Time
+
+```bash
+# nkeys distribution in internodes
+head -50000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.message | contains("INTERNODE_DESCENT")) | .fields.nkeys]
+| group_by(.)
+| map({nkeys: .[0], count: length})
+| sort_by(.nkeys)'
+
+# Sample internode state at different times
+head -50000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.message | contains("INTERNODE_DESCENT"))]
+| [.[0], .[100], .[500], .[-1]]
+| map({timestamp: .timestamp, nkeys: .fields.nkeys, k0: .fields.k0, k_last: .fields.k_last})'
+```
+
+### Timeline Correlation Across Event Types
+
+```bash
+# Compare timing of different event types
+head -50000 logs/lock_contention.json | jaq -s '
+{
+  first_far_landing: ([.[] | select(.fields.message | contains("FAR_LANDING_RETRY"))] | .[0].timestamp),
+  last_far_landing: ([.[] | select(.fields.message | contains("FAR_LANDING_RETRY"))] | .[-1].timestamp),
+  first_propagate: ([.[] | select(.fields.message | contains("PROPAGATE_COMPLETE"))] | .[0].timestamp),
+  last_propagate: ([.[] | select(.fields.message | contains("PROPAGATE_COMPLETE"))] | .[-1].timestamp)
+}'
+```
+
+### Extracting Internode Keys for Analysis
+
+```bash
+# All keys in internodes during FAR_LANDING
+head -5000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.message | contains("INTERNODE_DESCENT"))]
+| map({
+  target: .fields.target_ikey,
+  k0: .fields.k0,
+  k1: .fields.k1,
+  k2: .fields.k2,
+  k_last: .fields.k_last
+})
+| .[0:10]'
+
+# Largest k_last values (how far tree has grown)
+head -100000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.message | contains("INTERNODE_DESCENT"))]
+| map(.fields.k_last)
+| unique
+| sort
+| .[-10:]'
+```
+
+### Thread Hotspot Analysis
+
+```bash
+# Which threads have most FAR_LANDING events
+head -100000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.message | contains("FAR_LANDING_RETRY")) | .threadId]
+| group_by(.)
+| map({thread: .[0], count: length})
+| sort_by(.count)
+| reverse
+| .[0:10]'
+```
+
+### Direction Analysis for FAR_LANDING
+
+```bash
+# Check if landing too far LEFT (key > bound) or RIGHT (bound > key)
+# This requires hex comparison which jaq supports
+head -10000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.message | contains("FAR_LANDING_RETRY")) |
+  {direction: (if (.fields.ikey > .fields.leaf_bound) then "LEFT" else "RIGHT" end)}]
+| group_by(.direction)
+| map({direction: .[0].direction, count: length})'
+```
+
+### Combined Statistics Report
+
+```bash
+# Generate a full analysis report
+head -100000 logs/lock_contention.json | jaq -s '
+{
+  total_events: length,
+
+  message_counts: (
+    [.[] | .fields.message] | group_by(.) |
+    map({msg: .[0], count: length}) | sort_by(.count) | reverse | .[0:10]
+  ),
+
+  gap_stats: (
+    [.[] | select(.fields.gap != null) | .fields.gap] |
+    {min: min, max: max, avg: (add / length), count: length}
+  ),
+
+  nkeys_distribution: (
+    [.[] | select(.fields.nkeys != null) | .fields.nkeys] |
+    group_by(.) | map({nkeys: .[0], count: length}) | sort_by(.nkeys)
+  ),
+
+  thread_hotspots: (
+    [.[] | select(.level == "WARN" or .level == "ERROR") | .threadId] |
+    group_by(.) | map({thread: .[0], count: length}) |
+    sort_by(.count) | reverse | .[0:5]
+  )
+}'
+```
+
+### Debugging Specific Anomalies
+
+```bash
+# Full context around an INSERT_ABORT
+# First find the timestamp:
+head -100000 logs/lock_contention.json | jaq -s '
+[.[] | select(.fields.message | contains("INSERT_ABORT"))] | .[0].timestamp'
+# Output: "2025-12-26T08:09:24.916494Z"
+
+# Then get events around that time:
+head -100000 logs/lock_contention.json | jaq -s '
+[.[] | select(.timestamp > "2025-12-26T08:09:24.91" and .timestamp < "2025-12-26T08:09:24.92")]'
+```
