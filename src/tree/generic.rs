@@ -489,13 +489,15 @@ where
 
         // Start at tree root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
+        let mut in_sublayer: bool = false;
 
         'layer_loop: loop {
             // Find the actual layer root (handles layer root promotion)
             layer_root = self.maybe_parent_generic(layer_root);
 
             // Traverse to leaf for current layer
-            let mut leaf_ptr: *mut L = self.reach_leaf_concurrent_generic(layer_root, key, guard);
+            let mut leaf_ptr: *mut L =
+                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             // Inner loop for searching within a leaf (may follow B-links)
             'leaf_loop: loop {
@@ -602,6 +604,7 @@ where
                             // Layer pointer - descend into sublayer
                             key.shift();
                             layer_root = ptr;
+                            in_sublayer = true;
                             continue 'layer_loop;
                         }
 
@@ -745,7 +748,12 @@ where
         tracing::instrument(level = "trace", skip(self, _guard), fields(start_node = ?start))
     )]
     #[inline]
-    fn get_fresh_root(&self, start: *const u8, _guard: &LocalGuard<'_>) -> *const u8 {
+    fn get_fresh_root(
+        &self,
+        start: *const u8,
+        is_sublayer: bool,
+        _guard: &LocalGuard<'_>,
+    ) -> *const u8 {
         // Start from the passed-in node (like C++ reach_leaf)
         let mut node: *const u8 = start;
 
@@ -788,23 +796,71 @@ where
             node = parent;
         }
 
-        // CAS-update self.root_ptr if we found a different (fresher) root.
-        // This is the fix_root() optimization - helps future operations start fresh.
+        // Post-loop staleness check:
         //
-        // IMPORTANT: Only update if we actually followed parent pointers to find a fresher root
-        // (i.e., node != start). This handles two cases correctly:
+        // If we found a root without following any parents (node == start), there's a race
+        // window where start might be stale:
+        // 1. Thread loads old_root from self.root_ptr
+        // 2. Another thread CAS-updates self.root_ptr to new_root
+        // 3. old_root still has is_root=true (brief window before demotion)
+        // 4. We return old_root, missing the new_root
         //
-        // 1. Main tree: start was stale, we followed parents to find fresh root.
-        //    node != start, so we CAS-update. Good.
+        // The key indicator of staleness is: start != cached_root (self.root_ptr was updated).
+        // When this happens and we didn't follow parents (node == start), we should use
+        // cached_root instead (it's fresher).
         //
-        // 2. Sublayer: start is the sublayer root (is_root() == true).
-        //    We immediately break with node == start, so no CAS-update. Good.
+        // SUBLAYER HANDLING: For sublayers, start is a sublayer root passed by the caller,
+        // which will differ from cached_root (main tree root). Both have is_root=true.
+        // We CANNOT simply prefer cached_root here because it would break sublayers.
         //
-        // 3. Main tree but start was already fresh: node == start, no CAS-update. Fine.
+        // The distinguishing factor: sublayer roots are NOT stored in self.root_ptr.
+        // So if start differs from cached_root AND cached_root is a root, either:
+        // 1. We're in a sublayer (start is sublayer root) - should use start
+        // 2. start is stale main tree root - should use cached_root
         //
-        // The CAS will only succeed if cached_root hasn't changed, which is the expected
-        // case when we started from a stale root and followed parents.
-        if !StdPtr::eq(node, start) {
+        // To distinguish, we check if cached_root's is_root bit is set. If it is, AND
+        // start differs from it, we're likely in case 2 (stale). But this would also
+        // match case 1 (sublayer)...
+        //
+        // SOLUTION: For main tree, start originally came from self.root_ptr via
+        // load_root_ptr_generic + maybe_parent_generic. If self.root_ptr was CASed
+        // after we loaded but before we got here, cached_root will be different AND
+        // fresher. We prefer it.
+        //
+        // For sublayers, start came from a layer pointer, NOT from self.root_ptr.
+        // The caller would have set `in_sublayer = true` flag. But we don't have that here...
+        //
+        // PRAGMATIC FIX: If node == start (didn't follow parents) AND cached_root differs
+        // AND cached_root.is_root = true, return cached_root. This fixes the stale case.
+        // For sublayers, this would incorrectly return main tree root, BUT sublayer traversal
+        // should still work because reach_leaf will descend from the main tree root and
+        // eventually find the right leaf (it's just less efficient).
+        //
+        // Actually, that's wrong - for sublayers we need to stay in the sublayer tree.
+        // The real fix needs caller context. For now, let's be conservative and only
+        // prefer cached_root when both conditions are met:
+        // 1. node == start (didn't follow parents)
+        // 2. cached_root differs from node
+        // 3. cached_root has is_root=true
+        //
+        // Now we can properly distinguish main tree from sublayer using is_sublayer.
+        // For sublayers, trust the passed-in start node (it came from a layer pointer).
+        // For main tree, check if self.root_ptr was updated and use the fresher value.
+        if StdPtr::eq(node, start) && !StdPtr::eq(node, cached_root) && !is_sublayer {
+            // Main tree mode: we found start as root without following parents,
+            // but cached_root differs. This is the stale root scenario.
+            // SAFETY: cached_root is valid (from atomic load at function start)
+            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+            let cached_version: &NodeVersion = unsafe { &*(cached_root.cast::<NodeVersion>()) };
+            let _ = cached_version.stable();
+            if cached_version.is_root() {
+                // cached_root is a valid, fresher root. Use it.
+                return cached_root;
+            }
+            // cached_root is not a root (shouldn't happen), fall through
+        } else if !StdPtr::eq(node, start) {
+            // We followed parent pointers to find a fresher root.
+            // CAS-update self.root_ptr as an optimization for future operations.
             let _ = self.root_ptr.compare_exchange(
                 cached_root.cast_mut(),
                 node.cast_mut(),
@@ -831,6 +887,7 @@ where
         &self,
         start: *const u8,
         key: &Key<'_>,
+        is_sublayer: bool,
         guard: &LocalGuard<'_>,
     ) -> *mut L {
         use crate::ksearch::upper_bound_internode_generic;
@@ -842,10 +899,30 @@ where
         // Double-buffered nodes and versions (C++ pattern: n[2], v[2])
         let mut nodes: [*const u8; 2] = [std::ptr::null(); 2];
         let mut versions: [u32; 2] = [0; 2];
+
+        // Defensive: if we repeatedly land far from the target leaf, retry from fresh root.
+        // Bounded to preserve liveness even on sparse keyspaces where (key - ikey_bound) can be large
+        // even for a correct leaf.
+        const FAR_LANDING_GAP: u64 = 100_000;
+        const FAR_LANDING_MAX_RETRIES: u8 = 5;
+        let mut far_landing_retries: u8 = 0;
         // Phase 1: Find fresh (non-stale) root
         'retry: loop {
             let mut sense: usize = 0;
-            nodes[sense] = self.get_fresh_root(start, guard);
+            nodes[sense] = self.get_fresh_root(start, is_sublayer, guard);
+
+            // DIAGNOSTIC: Log root obtained during FAR_LANDING retry
+            #[cfg(feature = "tracing")]
+            if far_landing_retries > 0 {
+                tracing::debug!(
+                    target_ikey = format_args!("{:016x}", target_ikey),
+                    root_ptr = ?nodes[sense],
+                    start_ptr = ?start,
+                    retry = far_landing_retries,
+                    same_as_start = std::ptr::eq(nodes[sense], start),
+                    "FRESH_ROOT: get_fresh_root returned during FAR_LANDING retry"
+                );
+            }
 
             // SAFETY: node is valid, NodeVersion is first field
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
@@ -869,7 +946,48 @@ where
                 let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
                 if version.is_leaf() {
-                    // Found leaf - return it
+                    // Found leaf - sanity check that we didn't land *far* from target.
+                    //
+                    // In a B-link tree, a too-far-left landing can be corrected by walking `next`,
+                    // but that can turn into heavy thrash when FAR_LANDING occurs. Prefer retrying
+                    // from a fresh root a few times before falling back to bound-walk.
+                    let leaf: &L = unsafe { &*(node.cast::<L>()) };
+                    let leaf_bound: u64 = leaf.ikey_bound();
+
+                    let gap: u64 = if target_ikey >= leaf_bound {
+                        target_ikey - leaf_bound
+                    } else {
+                        leaf_bound - target_ikey
+                    };
+
+                    if gap > FAR_LANDING_GAP && far_landing_retries < FAR_LANDING_MAX_RETRIES {
+                        far_landing_retries += 1;
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            ikey = format_args!("{:016x}", target_ikey),
+                            leaf_ptr = ?node,
+                            leaf_bound = format_args!("{:016x}", leaf_bound),
+                            gap = gap,
+                            retry = far_landing_retries,
+                            "FAR_LANDING_RETRY: reach_leaf landed far from target; retrying from fresh root"
+                        );
+
+                        // Backoff before retry: spin to let split propagation complete.
+                        // The tree may be in early growth phase where internode has few keys
+                        // and leaves are chained via B-links. Propagation will add keys to
+                        // the internode, narrowing down future searches.
+                        //
+                        // Exponential backoff: 100, 400, 900 spins for retries 1, 2, 3.
+                        // (retry^2 * 100 gives quadratic growth)
+                        let backoff_spins: u32 =
+                            u32::from(far_landing_retries) * u32::from(far_landing_retries) * 100;
+                        for _ in 0..backoff_spins {
+                            std::hint::spin_loop();
+                        }
+
+                        continue 'retry;
+                    }
+
                     return node.cast_mut().cast::<L>();
                 }
 
@@ -878,9 +996,47 @@ where
                 let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
 
                 // Find child for this key
+                let nkeys_snapshot: usize = inode.nkeys();
                 let child_idx: usize =
                     upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
                 let child: *mut u8 = inode.child(child_idx);
+
+                // DIAGNOSTIC: Log internode descent for FAR_LANDING analysis
+                #[cfg(feature = "tracing")]
+                {
+                    use crate::leaf_trait::TreeInternode;
+                    // Capture first 4 keys for debugging (or fewer if nkeys < 4)
+                    let k0: u64 = if nkeys_snapshot > 0 { inode.ikey(0) } else { 0 };
+                    let k1: u64 = if nkeys_snapshot > 1 { inode.ikey(1) } else { 0 };
+                    let k2: u64 = if nkeys_snapshot > 2 { inode.ikey(2) } else { 0 };
+                    let k3: u64 = if nkeys_snapshot > 3 { inode.ikey(3) } else { 0 };
+                    // Also capture the last key if there are more than 4
+                    let k_last: u64 = if nkeys_snapshot > 4 {
+                        inode.ikey(nkeys_snapshot - 1)
+                    } else {
+                        0
+                    };
+
+                    // Only log if we're in a FAR_LANDING retry scenario (far_landing_retries > 0)
+                    // or if the gap seems suspicious
+                    if far_landing_retries > 0 {
+                        tracing::debug!(
+                            target_ikey = format_args!("{:016x}", target_ikey),
+                            inode_ptr = ?node,
+                            inode_version = v,
+                            nkeys = nkeys_snapshot,
+                            child_idx = child_idx,
+                            child_ptr = ?child,
+                            k0 = format_args!("{:016x}", k0),
+                            k1 = format_args!("{:016x}", k1),
+                            k2 = format_args!("{:016x}", k2),
+                            k3 = format_args!("{:016x}", k3),
+                            k_last = format_args!("{:016x}", k_last),
+                            retry = far_landing_retries,
+                            "INTERNODE_DESCENT: traversing internode during FAR_LANDING retry"
+                        );
+                    }
+                }
 
                 // Store child in OTHER buffer (double-buffering)
                 let other = sense ^ 1;
@@ -888,6 +1044,14 @@ where
 
                 if child.is_null() {
                     // NULL child - retry from fresh root
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        target_ikey = format_args!("{:016x}", target_ikey),
+                        inode_ptr = ?node,
+                        child_idx = child_idx,
+                        nkeys = nkeys_snapshot,
+                        "NULL_CHILD: internode returned null child pointer"
+                    );
                     continue 'retry;
                 }
 
@@ -964,10 +1128,12 @@ where
 
         loop {
             // 1. Optimistic traversal to find target leaf
+            // CAS path only operates on layer 0 (no suffix keys), so is_sublayer=false
             if use_reach {
                 let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
                 layer_root = self.maybe_parent_generic(layer_root);
-                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, guard);
+                leaf_ptr =
+                    self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
             } else {
                 use_reach = true;
             }
@@ -1711,7 +1877,8 @@ where
             }
 
             // Locked path
-            let leaf_ptr: *mut L = self.reach_leaf_concurrent_generic(layer_root, key, guard);
+            let leaf_ptr: *mut L =
+                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             let leaf: &L = unsafe { &*leaf_ptr };
 
