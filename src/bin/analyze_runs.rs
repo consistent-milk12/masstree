@@ -2,6 +2,7 @@
 //!
 //! Usage: `cargo run --release --bin analyze_runs [logs/runs]`
 
+#[cfg(feature = "rayon")]
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
@@ -41,9 +42,16 @@ fn main() {
         logs_dir.display()
     );
 
-    // Parallel analysis of all runs
+    // Parallel analysis of all runs (if rayon feature enabled)
+    #[cfg(feature = "rayon")]
     let all_runs: Vec<RunAnalysis> = entries
         .par_iter()
+        .map(|entry| analyze_run(&entry.path()))
+        .collect();
+
+    #[cfg(not(feature = "rayon"))]
+    let all_runs: Vec<RunAnalysis> = entries
+        .iter()
         .map(|entry| analyze_run(&entry.path()))
         .collect();
 
