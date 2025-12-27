@@ -306,8 +306,16 @@ impl<V> ValueSlot for LeafValue<V> {
 }
 
 // ============================================================================
-//  ValueSlot impl for LeafValueIndex<V: Copy> (True Inline Mode)
+//  ValueSlot impl for LeafValueIndex<V: Copy> (Inline Mode)
 // ============================================================================
+//
+// NOTE: We use Box<V> for storage instead of pointer-punning because:
+// - `get_ref()` returns `&V`, which requires V to exist at a valid memory address
+// - Pointer-punning stores the value IN the pointer bits, with no backing memory
+// - Dereferencing a punned pointer causes SIGSEGV
+//
+// Future optimization: Add `get_copy()` API that returns V by value, then
+// pointer-punning could be used for that path while keeping `get_ref()` working.
 
 impl<V: Copy> ValueSlot for LeafValueIndex<V> {
     type Value = V;
@@ -315,7 +323,7 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
 
     #[inline(always)]
     fn into_output(value: V) -> V {
-        value // Identity - no allocation!
+        value // Identity - no allocation at this stage
     }
 
     #[inline(always)]
@@ -390,20 +398,21 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
 
     #[inline(always)]
     fn output_to_raw(output: &V) -> *mut u8 {
-        // For Copy types, box the value to get a stable pointer
+        // Box the value to get a stable pointer that can be dereferenced.
+        // This is required for `get_ref()` to work (returns &V).
         Box::into_raw(Box::new(*output)).cast::<u8>()
     }
 
     #[inline(always)]
     unsafe fn output_from_raw(ptr: *const u8) -> V {
-        // SAFETY: Caller guarantees ptr is valid V pointer
-        // For Copy types, just read the value (don't consume the Box)
+        // SAFETY: Caller guarantees ptr is valid V pointer from Box::into_raw.
+        // V is Copy, so we just read the value (don't consume the Box).
         unsafe { *ptr.cast::<V>() }
     }
 
     #[inline(always)]
     fn output_consume_to_raw(output: V) -> *mut u8 {
-        // For Copy types, same as output_to_raw since we can't avoid boxing
+        // Box the value to get a stable pointer.
         Box::into_raw(Box::new(output)).cast::<u8>()
     }
 }

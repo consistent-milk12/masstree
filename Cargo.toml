@@ -183,6 +183,10 @@ harness = false
 name = "sota"
 harness = false
 
+[[bench]]
+name = "core_benches_quick"
+harness = false
+
 # =============================================================================
 # Profiling Binaries
 # =============================================================================

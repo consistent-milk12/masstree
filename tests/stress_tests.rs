@@ -31,10 +31,6 @@ use masstree::MassTree24;
 use masstree::get_debug_counters;
 
 /// Reset debug counters (no-op when tracing is disabled)
-#[cfg(feature = "tracing")]
-fn reset_counters() {
-    masstree::reset_counters();
-}
 
 #[cfg(not(feature = "tracing"))]
 fn reset_counters() {}
@@ -101,7 +97,6 @@ where
 #[test]
 fn multilayer_16byte_keys_4_threads() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
@@ -173,7 +168,6 @@ fn multilayer_16byte_keys_4_threads() {
 #[test]
 fn multilayer_24byte_keys_4_threads() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
@@ -243,7 +237,6 @@ fn multilayer_24byte_keys_4_threads() {
 #[test]
 fn multilayer_32byte_keys_4_threads() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
@@ -314,7 +307,6 @@ fn multilayer_32byte_keys_4_threads() {
 #[test]
 fn multilayer_mixed_lengths() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 400;
@@ -371,7 +363,6 @@ fn multilayer_mixed_lengths() {
 #[test]
 fn high_thread_8_threads_8byte_keys() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 8;
     const KEYS_PER_THREAD: usize = 500;
@@ -431,7 +422,6 @@ fn high_thread_8_threads_8byte_keys() {
 #[test]
 fn high_thread_16_threads_8byte_keys() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 16;
     const KEYS_PER_THREAD: usize = 250;
@@ -480,7 +470,6 @@ fn high_thread_16_threads_8byte_keys() {
 #[test]
 fn high_thread_8_threads_24byte_keys() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 8;
     const KEYS_PER_THREAD: usize = 400;
@@ -533,7 +522,6 @@ fn high_thread_8_threads_24byte_keys() {
 #[test]
 fn large_volume_10k_keys_4_threads() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 2500;
@@ -582,7 +570,6 @@ fn large_volume_10k_keys_4_threads() {
 #[test]
 fn large_volume_20k_keys_8_threads() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 8;
     const KEYS_PER_THREAD: usize = 2500;
@@ -636,7 +623,6 @@ fn large_volume_20k_keys_8_threads() {
 #[test]
 fn pattern_sequential_keys_high_splits() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
@@ -686,7 +672,6 @@ fn pattern_sequential_keys_high_splits() {
 #[test]
 fn pattern_reverse_sequential() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
@@ -737,7 +722,6 @@ fn pattern_reverse_sequential() {
 #[test]
 fn pattern_pseudorandom_keys() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
@@ -821,7 +805,6 @@ fn pattern_pseudorandom_keys() {
 #[test]
 fn pattern_shared_prefix() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
@@ -876,7 +859,6 @@ fn pattern_shared_prefix() {
 #[test]
 fn mixed_heavy_reads_during_writes() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_WRITERS: usize = 2;
     const NUM_READERS: usize = 6;
@@ -969,7 +951,6 @@ fn mixed_heavy_reads_during_writes() {
 #[test]
 fn mixed_continuous_readwrite() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 8;
     const OPS_PER_THREAD: usize = 500;
@@ -1031,8 +1012,6 @@ fn repeated_10_runs_4_threads_8byte() {
     common::init_tracing();
 
     for run in 0..10 {
-        reset_counters();
-
         let tree = Arc::new(MassTree24::<u64>::new());
         let verify_failures = Arc::new(AtomicUsize::new(0));
 
@@ -1082,8 +1061,6 @@ fn repeated_10_runs_4_threads_24byte() {
     common::init_tracing();
 
     for run in 0..10 {
-        reset_counters();
-
         let tree = Arc::new(MassTree24::<u64>::new());
         let verify_failures = Arc::new(AtomicUsize::new(0));
 
@@ -1133,8 +1110,6 @@ fn repeated_20_runs_8_threads_mixed() {
     common::init_tracing();
 
     for run in 0..20 {
-        reset_counters();
-
         let tree = Arc::new(MassTree24::<u64>::new());
         let verify_failures = Arc::new(AtomicUsize::new(0));
 
@@ -1196,8 +1171,6 @@ fn extreme_100_runs_stress() {
     common::init_tracing();
 
     for run in 0..100 {
-        reset_counters();
-
         let tree = Arc::new(MassTree24::<u64>::new());
         let verify_failures = Arc::new(AtomicUsize::new(0));
 
@@ -1253,7 +1226,6 @@ fn extreme_100_runs_stress() {
 #[ignore]
 fn extreme_100k_keys() {
     common::init_tracing();
-    reset_counters();
 
     const NUM_THREADS: usize = 16;
     const KEYS_PER_THREAD: usize = 6250;

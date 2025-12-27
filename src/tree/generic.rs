@@ -853,6 +853,7 @@ where
     /// Simple loop that descends through internodes to find the target leaf.
     /// B-link walking in `advance_to_key` handles any splits that occur.
     #[expect(clippy::unused_self, reason = "API Consistency")]
+    #[expect(clippy::used_underscore_binding, reason = "Lock guard")]
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(level = "trace", skip(self, _guard), fields(ikey = %format_args!("{:016x}", key.ikey())))

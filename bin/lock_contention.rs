@@ -260,7 +260,7 @@ fn run_benchmark(config: &BenchmarkConfig) -> RunResult {
     }
 }
 
-fn print_stats(config: &BenchmarkConfig, result: &RunResult, _baseline: Duration) {
+fn print_stats(config: &BenchmarkConfig, result: &RunResult, baseline: Duration) {
     let elapsed = result.elapsed;
     let stats = &result.stats;
 

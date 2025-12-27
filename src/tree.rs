@@ -421,6 +421,7 @@ mod tests {
     #[traced_test]
     #[expect(clippy::panic)]
     #[expect(clippy::too_many_lines)]
+    #[cfg_attr(miri, ignore)] // Miri struggles with multi-threaded tests
     fn concurrent_insert_then_get_does_not_lose_key() {
         // This reproduces the "insert returns Ok(None) but immediate get returns None" bug.
         // If it fails, we also scan the leaf B-link chain to determine whether the key
