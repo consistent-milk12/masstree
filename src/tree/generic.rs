@@ -560,22 +560,11 @@ where
                         }
                     }
 
-                    // Validate version AFTER all reads.
-                    //
-                    // IMPORTANT: Use `has_changed_or_locked` rather than `has_changed`.
-                    // With the "always-dirty-on-lock" strategy, a writer can acquire the lock
-                    // (setting `LOCK_BIT | INSERTING_BIT`) after our initial `stable()` read but
-                    // before this validation. `has_changed()` intentionally ignores those bits,
-                    // which could allow an optimistic reader to validate successfully while a
-                    // writer is actively mutating the node.
-                    if leaf.version().has_changed_or_locked(version) {
+                    // Validate version AFTER all reads
+                    if leaf.version().has_changed(version) {
                         // Version changed - follow B-link chain if split occurred
-                        let Some((advanced, new_version)) =
-                            self.advance_to_key_generic(leaf, key, version, guard)
-                        else {
-                            // Anomaly detected - restart from root
-                            continue 'leaf_loop;
-                        };
+                        let (advanced, new_version) =
+                            self.advance_to_key_generic(leaf, key, version, guard);
 
                         if !std::ptr::eq(advanced, leaf) {
                             // Different leaf - search there
@@ -687,309 +676,73 @@ where
         }
     }
 
-    /// Compare key against internode's last key with stability validation.
+            /// Traverse from layer root to target leaf with version validation.
     ///
-    /// Implements the C++ `stable_last_key_compare` loop from `reference/masstree_struct.hh`.
-    /// Retries until the comparison is stable with respect to `version`.
-    ///
-    /// # Returns
-    /// - `Ordering::Greater` if key > last key in internode (key escaped right)
-    /// - `Ordering::Less` if key < last key
-    /// - `Ordering::Equal` if key == last key
-    #[inline(always)]
-    fn stable_last_key_compare(
-        inode: &L::Internode,
-        target_ikey: u64,
-        mut version: u32,
-    ) -> std::cmp::Ordering {
-        use crate::leaf_trait::TreeInternode;
-
-        loop {
-            let nkeys = inode.nkeys();
-            let cmp = if nkeys == 0 {
-                std::cmp::Ordering::Greater
-            } else {
-                let last_key = inode.ikey(nkeys - 1);
-                target_ikey.cmp(&last_key)
-            };
-
-            if !inode.version().has_changed_or_locked(version) {
-                return cmp;
-            }
-
-            version = inode.version().stable();
-        }
-    }
-
-    /// Get a fresh root pointer, following parent pointers if the start node is stale.
-    ///
-    /// This implements the C++ `reach_leaf` root-finding loop from masstree_struct.hh:644-654:
-    /// ```cpp
-    /// n[sense] = this;  // Start from passed-in node
-    /// while (true) {
-    ///     v[sense] = n[sense]->stable_annotated(...);
-    ///     if (v[sense].is_root()) break;
-    ///     n[sense] = n[sense]->maybe_parent();
-    /// }
-    /// ```
-    ///
-    /// CRITICAL: Start from the `start` parameter (like C++), not from `self.root_ptr`.
-    /// The `start` parameter may already be fresh (from `maybe_parent_generic`), and
-    /// we just need to verify it's a root. If not, follow parent pointers.
-    ///
-    /// After finding the true root, we CAS-update `self.root_ptr` as an optimization.
+    /// Simple loop that descends through internodes to find the target leaf.
+    /// B-link walking in `advance_to_key` handles any splits that occur.
     #[cfg_attr(
         feature = "tracing",
-        tracing::instrument(level = "trace", skip(self, _guard), fields(start_node = ?start))
+        tracing::instrument(level = "trace", skip(self, _guard), fields(ikey = %format_args!("{:016x}", key.ikey())))
     )]
-    #[inline]
-    fn get_fresh_root(
-        &self,
-        start: *const u8,
-        is_sublayer: bool,
-        _guard: &LocalGuard<'_>,
-    ) -> *const u8 {
-        // FAST PATH: Check if start is already a root (common case)
-        // SAFETY: start is valid (comes from tree structure)
-        #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-        let version: &NodeVersion = unsafe { &*(start.cast::<NodeVersion>()) };
-
-        // Quick check without stable() - is_root is a single bit check
-        if version.is_root() {
-            return start;
-        }
-
-        // SLOW PATH: start is not a root, need to find one
-        let mut node: *const u8 = start;
-
-        // Only load cached_root when we need it for the slow path
-        let cached_root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
-
-        // Follow parent pointers until we find a root
-        loop {
-            // SAFETY: node is valid (comes from tree structure)
-            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
-
-            // Wait for stable version before checking root status
-            let _ = version.stable();
-
-            // If this node is a root, we're done
-            if version.is_root() {
-                break;
-            }
-
-            // Not a root - follow parent pointer
-            let parent = if version.is_leaf() {
-                // SAFETY: version.is_leaf() confirmed
-                let leaf: &L = unsafe { &*(node.cast::<L>()) };
-                leaf.parent()
-            } else {
-                // SAFETY: !version.is_leaf() confirmed
-                let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
-                inode.parent()
-            };
-
-            if parent.is_null() {
-                // C++ `maybe_parent()` returns `this` when parent doesn't exist.
-                // This can happen during split propagation - spin and retry.
-                std::hint::spin_loop();
-                continue;
-            }
-
-            node = parent;
-        }
-
-        // Post-loop staleness check:
-        //
-        // If we found a root without following any parents (node == start), there's a race
-        // window where start might be stale:
-        // 1. Thread loads old_root from self.root_ptr
-        // 2. Another thread CAS-updates self.root_ptr to new_root
-        // 3. old_root still has is_root=true (brief window before demotion)
-        // 4. We return old_root, missing the new_root
-        //
-        // The key indicator of staleness is: start != cached_root (self.root_ptr was updated).
-        // When this happens and we didn't follow parents (node == start), we should use
-        // cached_root instead (it's fresher).
-        //
-        // SUBLAYER HANDLING: For sublayers, start is a sublayer root passed by the caller,
-        // which will differ from cached_root (main tree root). Both have is_root=true.
-        // We CANNOT simply prefer cached_root here because it would break sublayers.
-        //
-        // The distinguishing factor: sublayer roots are NOT stored in self.root_ptr.
-        // So if start differs from cached_root AND cached_root is a root, either:
-        // 1. We're in a sublayer (start is sublayer root) - should use start
-        // 2. start is stale main tree root - should use cached_root
-        //
-        // To distinguish, we check if cached_root's is_root bit is set. If it is, AND
-        // start differs from it, we're likely in case 2 (stale). But this would also
-        // match case 1 (sublayer)...
-        //
-        // SOLUTION: For main tree, start originally came from self.root_ptr via
-        // load_root_ptr_generic + maybe_parent_generic. If self.root_ptr was CASed
-        // after we loaded but before we got here, cached_root will be different AND
-        // fresher. We prefer it.
-        //
-        // For sublayers, start came from a layer pointer, NOT from self.root_ptr.
-        // The caller would have set `in_sublayer = true` flag. But we don't have that here...
-        //
-        // PRAGMATIC FIX: If node == start (didn't follow parents) AND cached_root differs
-        // AND cached_root.is_root = true, return cached_root. This fixes the stale case.
-        // For sublayers, this would incorrectly return main tree root, BUT sublayer traversal
-        // should still work because reach_leaf will descend from the main tree root and
-        // eventually find the right leaf (it's just less efficient).
-        //
-        // Actually, that's wrong - for sublayers we need to stay in the sublayer tree.
-        // The real fix needs caller context. For now, let's be conservative and only
-        // prefer cached_root when both conditions are met:
-        // 1. node == start (didn't follow parents)
-        // 2. cached_root differs from node
-        // 3. cached_root has is_root=true
-        //
-        // Now we can properly distinguish main tree from sublayer using is_sublayer.
-        // For sublayers, trust the passed-in start node (it came from a layer pointer).
-        // For main tree, check if self.root_ptr was updated and use the fresher value.
-        if StdPtr::eq(node, start) && !StdPtr::eq(node, cached_root) && !is_sublayer {
-            // Main tree mode: we found start as root without following parents,
-            // but cached_root differs. This is the stale root scenario.
-            // SAFETY: cached_root is valid (from atomic load at function start)
-            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let cached_version: &NodeVersion = unsafe { &*(cached_root.cast::<NodeVersion>()) };
-            let _ = cached_version.stable();
-            if cached_version.is_root() {
-                // cached_root is a valid, fresher root. Use it.
-                return cached_root;
-            }
-            // cached_root is not a root (shouldn't happen), fall through
-        } else if !StdPtr::eq(node, start) {
-            // We followed parent pointers to find a fresher root.
-            // CAS-update self.root_ptr as an optimization for future operations.
-            let _ = self.root_ptr.compare_exchange(
-                cached_root.cast_mut(),
-                node.cast_mut(),
-                AtomicOrdering::Release,
-                AtomicOrdering::Relaxed,
-            );
-        }
-
-        node
-    }
-
-    /// Traverse from layer root to target leaf with version validation.
-    ///
-    /// This implements the C++ two-phase traversal pattern from masstree_struct.hh:633-685:
-    /// 1. Double-buffered nodes and versions (`n[2]`, `v[2]`, `sense` toggle)
-    /// 2. Root freshness check via `get_fresh_root`
-    /// 3. `stable_last_key_compare` check before root retry on split
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(level = "trace", skip(self, guard), fields(ikey = %format_args!("{:016x}", key.ikey())))
-    )]
-    #[expect(clippy::indexing_slicing, reason = "Checked")]
     fn reach_leaf_concurrent_generic(
         &self,
         start: *const u8,
         key: &Key<'_>,
-        is_sublayer: bool,
-        guard: &LocalGuard<'_>,
+        _is_sublayer: bool,
+        _guard: &LocalGuard<'_>,
     ) -> *mut L {
         use crate::ksearch::upper_bound_internode_generic;
         use crate::leaf_trait::TreeInternode;
         use crate::prefetch::prefetch_read;
 
         let target_ikey: u64 = key.ikey();
+        let mut node: *const u8 = start;
 
-        // Double-buffered nodes and versions (C++ pattern: n[2], v[2])
-        let mut nodes: [*const u8; 2] = [std::ptr::null(); 2];
-        let mut versions: [u32; 2] = [0; 2];
-
-        // Phase 1: Find fresh (non-stale) root
-        'retry: loop {
-            let mut sense: usize = 0;
-            nodes[sense] = self.get_fresh_root(start, is_sublayer, guard);
-
-            // SAFETY: node is valid, NodeVersion is first field
+        loop {
+            // SAFETY: node is valid, both node types have NodeVersion as first field
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let version: &NodeVersion = unsafe { &*(nodes[sense].cast::<NodeVersion>()) };
-            versions[sense] = version.stable();
+            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
-            // If we somehow didn't land on a root (should be rare), restart and try again.
-            if !version.is_root() {
-                continue 'retry;
+            // Get stable version (spins if dirty)
+            let v: u32 = version.stable();
+
+            if version.is_leaf() {
+                // Reached a leaf
+                return node.cast_mut().cast::<L>();
             }
 
-            // Phase 2: Descend through internodes
-            loop {
-                let node = nodes[sense];
-                let v = versions[sense];
+            // It's an internode - traverse down
+            // SAFETY: !is_leaf() confirmed above
+            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
 
-                // SAFETY: node is valid
-                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-                let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+            // Binary search for child
+            let child_idx: usize =
+                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
+            let child: *mut u8 = inode.child(child_idx);
 
-                if version.is_leaf() {
-                    // Found leaf - return it. B-link walking handles any needed advancement.
-                    return node.cast_mut().cast::<L>();
-                }
+            // Prefetch child node while we validate version (hides memory latency)
+            prefetch_read(child);
 
-                // It's an internode
-                // SAFETY: !is_leaf() confirmed
-                let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+            if child.is_null() {
+                // Concurrent split in progress - retry from start
+                node = start;
+                continue;
+            }
 
-                // Find child for this key
-                let child_idx: usize =
-                    upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
-                let child: *mut u8 = inode.child(child_idx);
-
-                // Store child in OTHER buffer (double-buffering)
-                let other = sense ^ 1;
-                nodes[other] = child;
-
-                if child.is_null() {
-                    // NULL child - retry from fresh root
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        target_ikey = format_args!("{:016x}", target_ikey),
-                        inode_ptr = ?node,
-                        child_idx = child_idx,
-                        nkeys = nkeys_snapshot,
-                        "NULL_CHILD: internode returned null child pointer"
-                    );
-                    continue 'retry;
-                }
-
-                // Prefetch child for next iteration
-                prefetch_read(child);
-
-                // Get child's stable version BEFORE checking parent
-                // SAFETY: child is valid, NodeVersion is first field
-                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-                let child_version: &NodeVersion = unsafe { &*(child.cast::<NodeVersion>()) };
-                versions[other] = child_version.stable();
-
-                // Now check if parent changed
-                if !inode.version().has_changed_or_locked(v) {
-                    // Parent stable - adopt child's buffer
-                    sense = other;
+            // Check if internode changed during our read
+            if inode.version().has_changed(v) {
+                // Version changed - check for split
+                if inode.version().has_split(v) {
+                    // Key might have escaped to sibling - retry from start
+                    node = start;
                     continue;
                 }
-
-                // Parent version changed - refresh parent version and decide whether to root-retry.
-                let old_v = v;
-                let new_v = inode.version().stable();
-                versions[sense] = new_v;
-
-                if inode.version().has_split(old_v)
-                    && Self::stable_last_key_compare(inode, target_ikey, new_v)
-                        == std::cmp::Ordering::Greater
-                {
-                    // Key escaped to the right due to a split: restart from fresh root.
-                    continue 'retry;
-                }
-
-                // Otherwise retry reading this internode (same node, updated version).
+                // Just retry this internode
+                continue;
             }
+
+            // Descend to child
+            node = child;
         }
     }
 
@@ -1043,10 +796,7 @@ where
             let leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let Some(advanced) = self.advance_to_key_by_bound_generic(leaf, key, guard) else {
-                // Anomaly detected (cycle or limit) - fall back to locked path
-                return CasInsertResultGeneric::ContentionFallback;
-            };
+            let advanced = self.advance_to_key_by_bound_generic(leaf, key, guard);
             if !StdPtr::eq(advanced, leaf) {
                 leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
                 use_reach = false;
@@ -1429,9 +1179,6 @@ where
     ///
     /// This is called when `has_changed(old_version)` returns true, indicating
     /// a split may have occurred. It follows B-links to find the correct leaf.
-    ///
-    /// Returns `Some((leaf, version))` on success, or `None` if an anomaly is
-    /// detected (cycle or limit hit), indicating the caller should restart from root.
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_generic<'a>(
         &'a self,
@@ -1439,23 +1186,22 @@ where
         key: &Key<'_>,
         old_version: u32,
         _guard: &LocalGuard<'_>,
-    ) -> Option<(&'a L, u32)> {
+    ) -> (&'a L, u32) {
         use crate::link::{is_marked, unmark_ptr};
 
         let key_ikey: u64 = key.ikey();
-        let start_ptr: *const L = leaf as *const L;
-        let mut advance_count: usize = 0;
+        let mut version: u32 = leaf.version().stable();
 
         // Only follow chain if split occurred or is in progress
-        if !leaf.version().has_split(old_version) && !leaf.version().is_splitting() {
-            // No split - return current leaf with fresh stable version
-            let version: u32 = leaf.version().stable();
-
-            return Some((leaf, version));
+        if !leaf.version().has_split(old_version) {
+            // Double-check: split could have started after has_split check
+            if !leaf.version().is_splitting() {
+                return (leaf, version);
+            }
         }
 
         // Wait for any in-progress split to complete
-        let mut version: u32 = leaf.version().stable();
+        version = leaf.version().stable();
 
         while !leaf.version().is_deleted() {
             let next_raw: *mut L = leaf.next_raw();
@@ -1463,7 +1209,6 @@ where
             // Check for marked pointer (split in progress)
             if is_marked(next_raw) {
                 leaf.wait_for_split();
-                version = leaf.version().stable();
                 continue;
             }
 
@@ -1477,63 +1222,7 @@ where
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
-                advance_count += 1;
                 // Key belongs in next leaf or further
-                #[cfg(feature = "tracing")]
-                crate::tree::optimistic::ADVANCE_BLINK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-
-                // DIAGNOSTIC: Check for backwards B-link chain
-                #[cfg(feature = "tracing")]
-                {
-                    let current_bound: u64 = leaf.ikey_bound();
-                    if next_bound < current_bound {
-                        static BACKWARDS_COUNT_GET: std::sync::atomic::AtomicU64 =
-                            std::sync::atomic::AtomicU64::new(0);
-                        let count = BACKWARDS_COUNT_GET.fetch_add(1, AtomicOrdering::Relaxed);
-                        if count < 20 {
-                            tracing::error!(
-                                ikey = format_args!("{:016x}", key_ikey),
-                                current_ptr = ?StdPtr::from_ref(leaf),
-                                current_bound = format_args!("{:016x}", current_bound),
-                                next_ptr = ?next_ptr,
-                                next_bound = format_args!("{:016x}", next_bound),
-                                "BACKWARDS_CHAIN_GET: next_bound < current_bound in get path"
-                            );
-                        }
-                    }
-                }
-
-                // Cycle detection
-                if StdPtr::eq(next, start_ptr) {
-                    #[cfg(feature = "tracing")]
-                    crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    return None;
-                }
-
-                // Limit check
-                if advance_count >= Self::MAX_BLINK_ADVANCES {
-                    #[cfg(feature = "tracing")]
-                    {
-                        let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        if count < 10 {
-                            tracing::error!(
-                                ikey = format_args!("{:016x}", key_ikey),
-                                start_ptr = ?start_ptr,
-                                start_bound = format_args!("{:016x}", unsafe { (*start_ptr).ikey_bound() }),
-                                current_ptr = ?StdPtr::from_ref(leaf),
-                                current_bound = format_args!("{:016x}", leaf.ikey_bound()),
-                                next_ptr = ?next_ptr,
-                                next_bound = format_args!("{:016x}", next_bound),
-                                advance_count = advance_count,
-                                "BLINK_LIMIT_GET: ikey >> start_bound in get path"
-                            );
-                        }
-                    }
-                    return None;
-                }
-
                 leaf = next;
                 version = leaf.version().stable();
                 continue;
@@ -1543,18 +1232,11 @@ where
             break;
         }
 
-        Some((leaf, version))
+        (leaf, version)
     }
-
-    /// Maximum B-link advances before bailing (anomaly detection).
-    /// Should be enough for legitimate chains during concurrent splits.
-    const MAX_BLINK_ADVANCES: usize = 256;
 
     /// Advance to correct leaf via B-link (generic version).
     /// Used by insert path before locking.
-    ///
-    /// Returns `None` if an anomaly is detected (cycle or limit hit),
-    /// indicating the caller should restart from root.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(level = "trace", skip_all, fields(ikey = %format_args!("{:016x}", key.ikey())))
@@ -1565,13 +1247,12 @@ where
         mut leaf: &'a L,
         key: &Key<'_>,
         _guard: &LocalGuard<'_>,
-    ) -> Option<&'a L> {
+    ) -> &'a L {
         use crate::link::{is_marked, unmark_ptr};
 
         let key_ikey: u64 = key.ikey();
-        let start_ptr: *const L = leaf as *const L;
-        let mut advance_count: usize = 0;
 
+        // Wait for any in-progress split to complete
         if leaf.version().is_splitting() {
             let _ = leaf.version().stable();
         }
@@ -1585,7 +1266,7 @@ where
 
             let next_ptr: *mut L = unmark_ptr(next_raw);
             if next_ptr.is_null() {
-                return Some(leaf);
+                break;
             }
 
             // SAFETY: next_ptr is valid
@@ -1593,68 +1274,15 @@ where
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
-                advance_count += 1;
-                #[cfg(feature = "tracing")]
-                crate::tree::optimistic::ADVANCE_BLINK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-
-                // DIAGNOSTIC: Check for backwards B-link chain (bound should increase)
-                #[cfg(feature = "tracing")]
-                {
-                    let current_bound: u64 = leaf.ikey_bound();
-                    if next_bound < current_bound {
-                        static BACKWARDS_COUNT: std::sync::atomic::AtomicU64 =
-                            std::sync::atomic::AtomicU64::new(0);
-                        let count = BACKWARDS_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-                        if count < 20 {
-                            tracing::error!(
-                                ikey = format_args!("{:016x}", key_ikey),
-                                current_ptr = ?StdPtr::from_ref(leaf),
-                                current_bound = format_args!("{:016x}", current_bound),
-                                next_ptr = ?next_ptr,
-                                next_bound = format_args!("{:016x}", next_bound),
-                                "BACKWARDS_CHAIN: next_bound < current_bound - B-link ordering violated"
-                            );
-                        }
-                    }
-                }
-
-                // Cycle detection: check if we're back to start
-                if StdPtr::eq(next, start_ptr) {
-                    #[cfg(feature = "tracing")]
-                    crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    return None;
-                }
-
-                // Limit check - if we've advanced too many times, something is wrong
-                if advance_count >= Self::MAX_BLINK_ADVANCES {
-                    #[cfg(feature = "tracing")]
-                    {
-                        let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        if count < 10 {
-                            tracing::error!(
-                                ikey = format_args!("{:016x}", key_ikey),
-                                start_ptr = ?start_ptr,
-                                start_bound = format_args!("{:016x}", unsafe { (*start_ptr).ikey_bound() }),
-                                current_ptr = ?StdPtr::from_ref(leaf),
-                                current_bound = format_args!("{:016x}", leaf.ikey_bound()),
-                                next_ptr = ?next_ptr,
-                                next_bound = format_args!("{:016x}", next_bound),
-                                advance_count = advance_count,
-                                "BLINK_LIMIT: ikey >> start_bound suggests reach_leaf went wrong direction"
-                            );
-                        }
-                    }
-                    return None;
-                }
-
+                // Key belongs in next leaf or further
                 leaf = next;
                 continue;
             }
 
-            return Some(leaf);
+            break;
         }
+
+        leaf
     }
 
     // ========================================================================
@@ -1786,14 +1414,7 @@ where
             let leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let Some(leaf) = self.advance_to_key_by_bound_generic(leaf, key, guard) else {
-                // Anomaly detected - restart from root
-                #[cfg(feature = "tracing")]
-                {
-                    retry_count += 1;
-                }
-                continue;
-            };
+            let leaf = self.advance_to_key_by_bound_generic(leaf, key, guard);
 
             // Lock the leaf
             #[cfg(feature = "tracing")]
