@@ -7,31 +7,35 @@
 
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering};
 
-use crate::value::LeafValue;
+use crate::slot::ValueSlot;
+use crate::value::{LeafValue, LeafValueIndex};
 use parking_lot::{Condvar, Mutex};
 use seize::Collector;
 
 mod generic;
 mod index;
 mod optimistic;
+mod split;
 
 #[cfg(test)]
 pub mod test_hooks;
 
 pub use index::MassTreeIndex;
 
-// Re-export debug counters
+// Re-export RAII helpers for crate-wide use
+pub(crate) use split::ExitGuard;
+
+// Re-export debug counters (only when tracing is enabled)
+#[cfg(feature = "tracing")]
 pub use optimistic::{
-    ADVANCE_BLINK_COUNT, BLINK_SHOULD_FOLLOW_COUNT, CAS_INSERT_FALLBACK_COUNT,
-    CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters, LOCKED_INSERT_COUNT,
-    SEARCH_NOT_FOUND_COUNT, SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters,
-    get_debug_counters, reset_debug_counters,
-    // Parent-wait instrumentation for variance analysis
-    PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
-    PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, get_parent_wait_stats,
+    ADVANCE_BLINK_COUNT, BLINK_ADVANCE_ANOMALY_COUNT, BLINK_SHOULD_FOLLOW_COUNT,
+    CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters,
+    LOCKED_INSERT_COUNT, PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
+    PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, SEARCH_NOT_FOUND_COUNT,
+    SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters, get_debug_counters,
+    get_parent_wait_stats, reset_debug_counters,
 };
 
 // ============================================================================
@@ -139,10 +143,11 @@ use crate::leaf_trait::{TreeInternode, TreeLeafNode};
 /// let tree: MassTreeGeneric<u64, LeafNode24<_>, SeizeAllocator24<_>> =
 ///     MassTreeGeneric::new();
 /// ```
-pub struct MassTreeGeneric<V, L, A>
+pub struct MassTreeGeneric<S, L, A>
 where
-    L: TreeLeafNode<LeafValue<V>>,
-    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+    S: ValueSlot,
+    L: TreeLeafNode<S>,
+    A: NodeAllocatorGeneric<S, L>,
 {
     /// Memory reclamation collector for safe concurrent access.
     collector: Collector,
@@ -168,14 +173,15 @@ where
     /// Mutex paired with the condvar (required by [`parking_lot`] API).
     parent_set_mutex: Mutex<()>,
 
-    /// Marker to indicate V and L must be Send + Sync for concurrent access.
-    _marker: PhantomData<(V, L)>,
+    /// Marker to indicate slot and leaf types.
+    _marker: PhantomData<(S, L)>,
 }
 
-impl<V, L, A> StdFmt::Debug for MassTreeGeneric<V, L, A>
+impl<S, L, A> StdFmt::Debug for MassTreeGeneric<S, L, A>
 where
-    L: TreeLeafNode<LeafValue<V>>,
-    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+    S: ValueSlot,
+    L: TreeLeafNode<S>,
+    A: NodeAllocatorGeneric<S, L>,
 {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("MassTreeGeneric")
@@ -189,9 +195,9 @@ where
 /// Result of a CAS insert attempt (generic version).
 #[derive(Debug)]
 #[allow(dead_code)]
-pub(crate) enum CasInsertResultGeneric<V> {
+pub(crate) enum CasInsertResultGeneric<O> {
     /// CAS insert succeeded.
-    Success(Option<Arc<V>>),
+    Success(Option<O>),
     /// Key already exists - need locked update.
     ExistsNeedLock { slot: usize },
     /// Leaf is full - need locked split.
@@ -218,14 +224,23 @@ pub(crate) enum InsertSearchResultGeneric {
     Layer { slot: usize, shift_amount: usize },
 }
 
-impl<V, L, A> Drop for MassTreeGeneric<V, L, A>
+impl<S, L, A> Drop for MassTreeGeneric<S, L, A>
 where
-    L: TreeLeafNode<LeafValue<V>>,
-    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+    S: ValueSlot,
+    L: TreeLeafNode<S>,
+    A: NodeAllocatorGeneric<S, L>,
 {
     fn drop(&mut self) {
         // No concurrent access is possible here (Drop requires unique access).
-        // Load the root pointer and delegate teardown to the allocator.
+        //
+        // Step 1: Process all deferred retirements (suffix bags, etc.)
+        // This MUST be called before teardown_tree to ensure any objects
+        // retired via defer_retire() are reclaimed before we free nodes.
+        //
+        // SAFETY: &mut self guarantees no threads are active with guards.
+        unsafe { self.collector.reclaim_all() };
+
+        // Step 2: Free all nodes via allocator traversal.
         let root: *mut u8 = self.root_ptr.load(AtomicOrdering::Acquire);
         self.allocator.teardown_tree(root);
     }
@@ -246,14 +261,15 @@ where
 //  Type Aliases for MassTreeGeneric
 // ============================================================================
 
-/// The main [`MassTree`] type alias using WIDTH=24 nodes.
+/// The main [`MassTree`] type alias using WIDTH=24 nodes with Arc-based storage.
 ///
 /// This is a type alias for [`MassTreeGeneric`] with:
+/// - `LeafValue<V>` for Arc-based value storage
 /// - `LeafNode24<LeafValue<V>>` for leaf nodes (24 slots per node)
 /// - `SeizeAllocator24<LeafValue<V>>` for memory management
 ///
-/// WIDTH=24 nodes use u128 permutation (vs u64 for WIDTH=15), providing
-/// 60% more capacity per node and significantly fewer splits under load.
+/// VALUES ARE STORED AS `Arc<V>` - each insert allocates. For small `Copy` types
+/// like `u64`, consider [`MassTree24Inline`] which stores values inline.
 ///
 /// # Example
 ///
@@ -265,15 +281,46 @@ where
 /// tree.insert_with_guard(b"key", 42, &guard).unwrap();
 /// ```
 pub type MassTree<V> = MassTreeGeneric<
-    V,
+    LeafValue<V>,
     crate::leaf24::LeafNode24<LeafValue<V>>,
     crate::alloc24::SeizeAllocator24<LeafValue<V>>,
 >;
 
-/// Alias for [`MassTree`] (WIDTH=24 implementation).
+/// Alias for [`MassTree`] (WIDTH=24, Arc-based storage).
 ///
 /// Provided for backwards compatibility and explicit naming.
 pub type MassTree24<V> = MassTree<V>;
+
+/// High-performance inline storage variant for `Copy` types.
+///
+/// This is a type alias for [`MassTreeGeneric`] with:
+/// - `LeafValueIndex<V>` for inline value storage (NO heap allocation per insert)
+/// - `LeafNode24<LeafValueIndex<V>>` for leaf nodes (24 slots per node)
+/// - `SeizeAllocator24<LeafValueIndex<V>>` for memory management
+///
+/// **Use this for small, `Copy` types** like `u64`, `i32`, `*const T`, etc.
+/// Values are stored directly in leaf nodes without `Arc` overhead.
+///
+/// # Performance
+///
+/// For `u64` values, this eliminates ~30-50ns of heap allocation overhead per insert,
+/// making it competitive with other inline-storage structures like `scc::TreeIndex`.
+///
+/// # Example
+///
+/// ```ignore
+/// use masstree::MassTree24Inline;
+///
+/// let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+/// let guard = tree.guard();
+/// tree.insert_with_guard(b"key", 42, &guard).unwrap();
+/// assert_eq!(tree.get_with_guard(b"key", &guard), Some(42)); // Returns u64 directly!
+/// ```
+pub type MassTree24Inline<V> = MassTreeGeneric<
+    LeafValueIndex<V>,
+    crate::leaf24::LeafNode24<LeafValueIndex<V>>,
+    crate::alloc24::SeizeAllocator24<LeafValueIndex<V>>,
+>;
 
 // ============================================================================
 //  Constructor implementations for type aliases
@@ -295,6 +342,22 @@ impl<V: Send + Sync + 'static> Default for MassTree<V> {
     }
 }
 
+impl<V: Copy + Send + Sync + 'static> MassTree24Inline<V> {
+    /// Create a new empty `MassTree24Inline`.
+    #[must_use]
+    #[inline(always)]
+    pub fn new() -> Self {
+        let allocator = crate::alloc24::SeizeAllocator24::new();
+        Self::with_allocator(allocator)
+    }
+}
+
+impl<V: Copy + Send + Sync + 'static> Default for MassTree24Inline<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 //  Tests
 // ============================================================================
@@ -309,9 +372,10 @@ mod tests {
     use super::*;
     use crate::nodeversion::NodeVersion;
     use crate::value::LeafValue;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::thread;
+    use tracing_test::traced_test;
 
     // ========================================================================
     // Send/Sync Verification
@@ -354,13 +418,18 @@ mod tests {
     }
 
     #[test]
+    #[traced_test]
+    #[expect(clippy::panic)]
+    #[expect(clippy::too_many_lines)]
+    #[cfg_attr(miri, ignore)] // Miri struggles with multi-threaded tests
     fn concurrent_insert_then_get_does_not_lose_key() {
         // This reproduces the "insert returns Ok(None) but immediate get returns None" bug.
         // If it fails, we also scan the leaf B-link chain to determine whether the key
         // is truly missing from all leaves, or only unreachable via the normal get path.
+        #[expect(clippy::cast_ptr_alignment)]
         fn scan_leaf_chain_contains(tree: &MassTree24<u64>, ikey: u64) -> bool {
-            use crate::leaf24::LeafNode24;
             use crate::internode::InternodeNode;
+            use crate::leaf24::LeafNode24;
 
             let _guard = tree.guard();
 
@@ -1534,7 +1603,7 @@ mod tests {
         // Create via with_allocator
         let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
         let tree: MassTreeGeneric<
-            u64,
+            LeafValue<u64>,
             LeafNode24<LeafValue<u64>>,
             SeizeAllocator24<LeafValue<u64>>,
         > = MassTreeGeneric::with_allocator(alloc);
@@ -1550,7 +1619,7 @@ mod tests {
 
         let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
         let tree: MassTreeGeneric<
-            u64,
+            LeafValue<u64>,
             LeafNode24<LeafValue<u64>>,
             SeizeAllocator24<LeafValue<u64>>,
         > = MassTreeGeneric::with_allocator(alloc);
@@ -1567,7 +1636,7 @@ mod tests {
 
         let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
         let tree: MassTreeGeneric<
-            u64,
+            LeafValue<u64>,
             LeafNode24<LeafValue<u64>>,
             SeizeAllocator24<LeafValue<u64>>,
         > = MassTreeGeneric::with_allocator(alloc);
@@ -1583,7 +1652,7 @@ mod tests {
     fn _assert_masstree_generic_send_sync()
     where
         MassTreeGeneric<
-            u64,
+            LeafValue<u64>,
             crate::leaf24::LeafNode24<LeafValue<u64>>,
             crate::alloc24::SeizeAllocator24<LeafValue<u64>>,
         >: Send + Sync,
@@ -1782,6 +1851,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_masstree24_internode_splits_stress() {
         // Stress test to verify multi-level internode splits work
         // Uses 50,000 keys to trigger deep tree with multiple internode levels

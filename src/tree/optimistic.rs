@@ -1,60 +1,81 @@
 //! Debug counters for concurrent operations.
 //!
 //! Lightweight atomic counters for diagnosing concurrent behavior.
+//! All counters are gated behind the `tracing` feature.
 
+#[cfg(feature = "tracing")]
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 // ============================================================================
-// Lightweight Debug Counters (near-zero overhead)
+// Lightweight Debug Counters (only when tracing is enabled)
 // ============================================================================
 
 /// Atomic counter for B-link navigation issues.
+#[cfg(feature = "tracing")]
 pub static BLINK_SHOULD_FOLLOW_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for total `NotFound` results in `search_leaf_concurrent`.
+#[cfg(feature = "tracing")]
 pub static SEARCH_NOT_FOUND_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for successful CAS inserts.
+#[cfg(feature = "tracing")]
 pub static CAS_INSERT_SUCCESS_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for CAS insert retries (contention).
+#[cfg(feature = "tracing")]
 pub static CAS_INSERT_RETRY_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for CAS insert fallbacks to locked path.
+#[cfg(feature = "tracing")]
 pub static CAS_INSERT_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for locked insert completions.
+#[cfg(feature = "tracing")]
 pub static LOCKED_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for leaf splits.
+#[cfg(feature = "tracing")]
 pub static SPLIT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for `advance_to_key` B-link follows.
+#[cfg(feature = "tracing")]
 pub static ADVANCE_BLINK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic counter for keys inserted into wrong leaf.
+#[cfg(feature = "tracing")]
 pub static WRONG_LEAF_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic counter for B-link advance anomalies (cycle or limit hit).
+#[cfg(feature = "tracing")]
+pub static BLINK_ADVANCE_ANOMALY_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ============================================================================
 // Parent-Wait Instrumentation (for variance analysis)
 // ============================================================================
 
 /// Number of times we entered the parent-wait loop (NULL parent on non-layer-root).
+#[cfg(feature = "tracing")]
 pub static PARENT_WAIT_HIT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Total spin iterations across all parent-wait events.
+#[cfg(feature = "tracing")]
 pub static PARENT_WAIT_TOTAL_SPINS: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum spins in any single parent-wait event.
+#[cfg(feature = "tracing")]
 pub static PARENT_WAIT_MAX_SPINS: AtomicU64 = AtomicU64::new(0);
 
 /// Total nanoseconds spent in parent-wait loops.
+#[cfg(feature = "tracing")]
 pub static PARENT_WAIT_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum nanoseconds in any single parent-wait event.
+#[cfg(feature = "tracing")]
 pub static PARENT_WAIT_MAX_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Reset debug counters (call before test).
+#[cfg(feature = "tracing")]
 pub fn reset_debug_counters() {
     BLINK_SHOULD_FOLLOW_COUNT.store(0, Relaxed);
     SEARCH_NOT_FOUND_COUNT.store(0, Relaxed);
@@ -65,6 +86,7 @@ pub fn reset_debug_counters() {
     SPLIT_COUNT.store(0, Relaxed);
     ADVANCE_BLINK_COUNT.store(0, Relaxed);
     WRONG_LEAF_INSERT_COUNT.store(0, Relaxed);
+    BLINK_ADVANCE_ANOMALY_COUNT.store(0, Relaxed);
     PARENT_WAIT_HIT_COUNT.store(0, Relaxed);
     PARENT_WAIT_TOTAL_SPINS.store(0, Relaxed);
     PARENT_WAIT_MAX_SPINS.store(0, Relaxed);
@@ -73,6 +95,7 @@ pub fn reset_debug_counters() {
 }
 
 /// Debug counter values.
+#[cfg(feature = "tracing")]
 #[derive(Debug, Clone, Copy)]
 pub struct DebugCounters {
     /// B-link should have been followed in `get()`
@@ -93,6 +116,8 @@ pub struct DebugCounters {
     pub advance_blink: u64,
     /// Keys inserted into wrong leaf
     pub wrong_leaf_insert: u64,
+    /// B-link advance anomalies (cycle or limit hit)
+    pub blink_advance_anomaly: u64,
     /// Parent-wait loop hits (NULL parent on non-layer-root)
     pub parent_wait_hits: u64,
     /// Total spins in parent-wait loops
@@ -106,6 +131,7 @@ pub struct DebugCounters {
 }
 
 /// Get debug counter values (legacy).
+#[cfg(feature = "tracing")]
 pub fn get_debug_counters() -> (u64, u64) {
     (
         BLINK_SHOULD_FOLLOW_COUNT.load(Relaxed),
@@ -114,6 +140,7 @@ pub fn get_debug_counters() -> (u64, u64) {
 }
 
 /// Get all debug counter values.
+#[cfg(feature = "tracing")]
 pub fn get_all_debug_counters() -> DebugCounters {
     DebugCounters {
         blink_should_follow: BLINK_SHOULD_FOLLOW_COUNT.load(Relaxed),
@@ -125,6 +152,7 @@ pub fn get_all_debug_counters() -> DebugCounters {
         split: SPLIT_COUNT.load(Relaxed),
         advance_blink: ADVANCE_BLINK_COUNT.load(Relaxed),
         wrong_leaf_insert: WRONG_LEAF_INSERT_COUNT.load(Relaxed),
+        blink_advance_anomaly: BLINK_ADVANCE_ANOMALY_COUNT.load(Relaxed),
         parent_wait_hits: PARENT_WAIT_HIT_COUNT.load(Relaxed),
         parent_wait_total_spins: PARENT_WAIT_TOTAL_SPINS.load(Relaxed),
         parent_wait_max_spins: PARENT_WAIT_MAX_SPINS.load(Relaxed),
@@ -134,6 +162,7 @@ pub fn get_all_debug_counters() -> DebugCounters {
 }
 
 /// Get parent-wait statistics for variance analysis.
+#[cfg(feature = "tracing")]
 #[derive(Debug, Clone, Copy)]
 pub struct ParentWaitStats {
     /// Number of parent-wait events
@@ -153,6 +182,8 @@ pub struct ParentWaitStats {
 }
 
 /// Get parent-wait statistics summary.
+#[cfg(feature = "tracing")]
+#[expect(clippy::cast_precision_loss)]
 pub fn get_parent_wait_stats() -> ParentWaitStats {
     let hits = PARENT_WAIT_HIT_COUNT.load(Relaxed);
     let total_spins = PARENT_WAIT_TOTAL_SPINS.load(Relaxed);

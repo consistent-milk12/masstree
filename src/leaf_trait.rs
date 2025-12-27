@@ -16,12 +16,10 @@
 //! - [`TreeLeafNode`]: `LeafNode<S, WIDTH>`, `LeafNode24<S>`
 
 use std::fmt::Debug;
-use std::sync::Arc;
 
 use crate::key::Key;
 use crate::nodeversion::NodeVersion;
 use crate::slot::ValueSlot;
-use crate::value::LeafValue;
 use seize::LocalGuard;
 
 // ============================================================================
@@ -288,6 +286,28 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Create a new root internode with specified height.
     fn new_root_boxed(height: u32) -> Box<Self>;
 
+    /// Create a new internode sibling for a split operation.
+    ///
+    /// The new internode is created with a **split-locked** version copied from the
+    /// locked parent. This prevents other threads from locking the sibling until
+    /// it is installed into the tree and its parent pointer is set.
+    ///
+    /// # Help-Along Protocol
+    ///
+    /// This is the internode equivalent of leaf `NodeVersion::new_for_split()`.
+    /// The caller MUST call `version().unlock_for_split()` exactly once after:
+    /// 1. The sibling is inserted into its parent (grandparent or new root)
+    /// 2. The sibling's parent pointer is set
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `next_child->assign_version(*p)` in `masstree_split.hh:234`.
+    ///
+    /// # Safety
+    ///
+    /// The `parent_version` must be from a locked node (the parent being split).
+    fn new_boxed_for_split(parent_version: &NodeVersion, height: u32) -> Box<Self>;
+
     // ========================================================================
     //  Version / Locking
     // ========================================================================
@@ -538,6 +558,24 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// for navigating to the correct sibling during splits.
     fn ikey_bound(&self) -> u64;
 
+    /// Find all physical slots with matching ikey, returning a bitmask.
+    ///
+    /// Returns a `u32` where bit `i` is set if `self.ikey(i) == target_ikey`.
+    /// Used for SIMD-accelerated key search.
+    ///
+    /// The default implementation uses a scalar loop. Implementations may
+    /// override with SIMD for better performance.
+    #[inline]
+    fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
+        let mut mask: u32 = 0;
+        for slot in 0..Self::WIDTH {
+            if self.ikey(slot) == target_ikey {
+                mask |= 1 << slot;
+            }
+        }
+        mask
+    }
+
     /// Get keylenx at physical slot.
     ///
     /// Values:
@@ -660,27 +698,17 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     //  CAS Insert Support
     // ========================================================================
 
-    /// Pre-store slot data for CAS-based insert.
+    /// Store key metadata (`ikey`, `keylenx`) for a CAS insert attempt.
     ///
     /// # Safety
     ///
-    /// - `slot` must be in the free region of the current permutation
-    /// - No concurrent writer should be modifying this slot
-    unsafe fn store_slot_for_cas(&self, slot: usize, ikey: u64, keylenx: u8, value_ptr: *mut u8);
-
-    /// Store key data for a slot after successful CAS claim.
+    /// - The caller must have successfully claimed the slot via `cas_slot_value` and ensured
+    ///   the slot still belongs to the CAS attempt (i.e. `leaf_values[slot]` still equals the
+    ///   claimed pointer).
     ///
-    /// # Safety
-    ///
-    /// Caller must have successfully claimed the slot via `cas_slot_value`.
+    /// Note: writing key metadata *before* claiming the slot is not safe in this design because
+    /// multiple concurrent CAS attempts can overwrite each other's metadata before publish.
     unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8);
-
-    /// Clear a slot after failed CAS insert.
-    ///
-    /// # Safety
-    ///
-    /// Caller must have already reclaimed/freed the value that was stored.
-    unsafe fn clear_slot_for_cas(&self, slot: usize);
 
     /// Load the raw slot value pointer atomically.
     ///
@@ -970,7 +998,11 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 /// # Implementors
 ///
 /// - `LeafNode24<LeafValue<V>>`
-pub trait LayerCapableLeaf<V: Send + Sync + 'static>: TreeLeafNode<LeafValue<V>> {
+pub trait LayerCapableLeaf<S: ValueSlot>: TreeLeafNode<S>
+where
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+{
     /// Try to clone the Arc value from a slot.
     ///
     /// Returns `None` if:
@@ -989,7 +1021,7 @@ pub trait LayerCapableLeaf<V: Send + Sync + 'static>: TreeLeafNode<LeafValue<V>>
     /// # Panics
     ///
     /// Panics in debug mode if `slot >= WIDTH`.
-    fn try_clone_arc(&self, slot: usize) -> Option<Arc<V>>;
+    fn try_clone_output(&self, slot: usize) -> Option<S::Output>;
 
     /// Assign a slot from a Key iterator with an Arc value.
     ///
@@ -1022,7 +1054,7 @@ pub trait LayerCapableLeaf<V: Send + Sync + 'static>: TreeLeafNode<LeafValue<V>>
         &self,
         slot: usize,
         key: &Key<'_>,
-        value: Option<Arc<V>>,
+        value: Option<S::Output>,
         guard: &LocalGuard<'_>,
     );
 }

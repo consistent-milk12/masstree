@@ -689,37 +689,6 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.permutation.store_raw(raw, WRITE_ORD);
     }
 
-    /// Pre-store slot data for CAS-based insert.
-    ///
-    /// # Safety
-    /// - `slot` is in the free region of the current permutation
-    /// - No concurrent writer is modifying this slot
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
-    pub unsafe fn store_slot_for_cas(
-        &self,
-        slot: usize,
-        ikey: u64,
-        keylenx: u8,
-        value_ptr: *mut u8,
-    ) {
-        debug_assert!(slot < WIDTH_24, "store_slot_for_cas: slot out of bounds");
-        self.ikey0[slot].store(ikey, WRITE_ORD);
-        self.keylenx[slot].store(keylenx, WRITE_ORD);
-        self.leaf_values[slot].store(value_ptr, WRITE_ORD);
-    }
-
-    /// Clear a slot after a failed CAS insert.
-    ///
-    /// # Safety
-    /// - Caller must have already reclaimed/freed the value that was stored
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
-    pub unsafe fn clear_slot_for_cas(&self, slot: usize) {
-        debug_assert!(slot < WIDTH_24, "clear_slot_for_cas: slot out of bounds");
-        self.leaf_values[slot].store(std::ptr::null_mut(), WRITE_ORD);
-    }
-
     /// Atomically claim a slot for CAS insert.
     ///
     /// # Errors
@@ -750,10 +719,15 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.leaf_values[slot].load(READ_ORD)
     }
 
-    /// Store key data for a slot after successful CAS claim.
+    /// Store key metadata (`ikey`, `keylenx`) for a CAS insert attempt.
     ///
     /// # Safety
-    /// - Caller must have successfully claimed the slot via `cas_slot_value`
+    /// - The caller must have successfully claimed the slot via `cas_slot_value` and ensured
+    ///   the slot still belongs to the CAS attempt (i.e. `leaf_values[slot]` still equals the
+    ///   claimed pointer).
+    ///
+    /// Note: writing key metadata *before* claiming the slot is not safe in this design because
+    /// multiple concurrent CAS attempts can overwrite each other's metadata before publish.
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
@@ -858,6 +832,69 @@ impl<S: ValueSlot> LeafNode24<S> {
                 break;
             }
         }
+    }
+
+    /// CAS-based lock of the next pointer for split linking.
+    ///
+    /// Marks the next pointer (LSB) to signal a split is in progress.
+    /// Other threads seeing a marked pointer will wait via `wait_for_split`.
+    ///
+    /// Reference: C++ `btree_leaflink.hh:39-56` (`lock_next`)
+    ///
+    /// # Returns
+    /// The unmarked old next pointer (may be null).
+    ///
+    /// # Ordering
+    /// Uses CAS with AcqRel/Acquire ordering to ensure visibility.
+    fn lock_next(&self) -> *mut Self {
+        use crate::link::{is_marked, mark_ptr};
+        use crate::ordering::{CAS_FAILURE, CAS_SUCCESS};
+
+        loop {
+            let next: *mut Self = self.next.load(READ_ORD);
+
+            // Already marked: another split is in progress, wait
+            if is_marked(next) {
+                self.wait_for_split();
+                continue;
+            }
+
+            // Try to mark the pointer via CAS
+            let marked: *mut Self = mark_ptr(next);
+            match self
+                .next
+                .compare_exchange(next, marked, CAS_SUCCESS, CAS_FAILURE)
+            {
+                Ok(_) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::trace!(
+                        self_ptr = ?StdPtr::from_ref(self),
+                        next = ?next,
+                        "lock_next: SUCCESS - marked next pointer"
+                    );
+                    // Return UNMARKED old next (may be null). We intentionally mark even
+                    // `NULL` next pointers to avoid two concurrent splits both "seeing"
+                    // `NULL` and racing to publish different siblings, orphaning one.
+                    return next;
+                }
+                Err(_) => {
+                    // CAS failed: someone else updated next, retry
+                    std::hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    /// CAS-based compare-and-swap on the next pointer.
+    ///
+    /// # Errors
+    /// Returns `Err(current_value)` if the CAS failed.
+    #[inline]
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn cas_next(&self, current: *mut Self, new: *mut Self) -> Result<*mut Self, *mut Self> {
+        use crate::ordering::{CAS_FAILURE, CAS_SUCCESS};
+        self.next
+            .compare_exchange(current, new, CAS_SUCCESS, CAS_FAILURE)
     }
 
     /// Get the previous leaf pointer.
@@ -1003,6 +1040,15 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         Self::ikey_bound(self)
     }
 
+    /// SIMD-accelerated ikey matching for WIDTH=24.
+    ///
+    /// Uses `load_all_ikeys()` + SIMD comparison instead of
+    /// sequential per-slot atomic loads.
+    #[inline]
+    fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
+        crate::ksearch::find_ikey_matches_leaf24(target_ikey, self)
+    }
+
     #[inline(always)]
     fn keylenx(&self, slot: usize) -> u8 {
         Self::keylenx(self, slot)
@@ -1094,21 +1140,9 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     }
 
     #[inline(always)]
-    unsafe fn store_slot_for_cas(&self, slot: usize, ikey: u64, keylenx: u8, value_ptr: *mut u8) {
-        // SAFETY: Caller guarantees slot is in free region and no concurrent modification
-        unsafe { Self::store_slot_for_cas(self, slot, ikey, keylenx, value_ptr) }
-    }
-
-    #[inline(always)]
     unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
         // SAFETY: Caller guarantees slot was claimed via cas_slot_value
         unsafe { Self::store_key_data_for_cas(self, slot, ikey, keylenx) }
-    }
-
-    #[inline(always)]
-    unsafe fn clear_slot_for_cas(&self, slot: usize) {
-        // SAFETY: Caller guarantees value has been reclaimed
-        unsafe { Self::clear_slot_for_cas(self, slot) }
     }
 
     #[inline(always)]
@@ -1215,80 +1249,107 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_leaf: Box<Self>,
         guard: &seize::LocalGuard<'_>,
     ) -> (Box<Self>, u64, crate::value::InsertTarget) {
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            self_ptr = ?std::ptr::from_ref(self),
-            new_leaf_ptr = ?std::ptr::from_ref(new_leaf.as_ref()),
-            split_pos = split_pos,
-            "split_into_preallocated: START"
-        );
+        // CRITICAL (Help-Along Protocol): Initialize new leaf's version for split
+        // BEFORE any data is written. This creates a locked version with SPLITTING_BIT set.
+        // The new leaf will remain locked until propagate_split sets its parent.
+        //
+        // # Why This Works
+        //
+        // 1. new_leaf is allocated but not yet linked into the tree
+        // 2. We replace its default NodeVersion with a split-locked version
+        // 3. After link_sibling(), other threads see new_leaf via B-link chain
+        // 4. Those threads call stable() on new_leaf.version, which spins because dirty
+        // 5. propagate_split sets parent pointer and calls unlock_for_split
+        // 6. Now stable() returns and threads can proceed
+        //
+        // # Safety
+        //
+        // We're writing to a field of a Box we own, before it's shared.
+        // Using ptr::write because NodeVersion doesn't implement Copy.
+        unsafe {
+            let split_version = crate::nodeversion::NodeVersion::new_for_split(&self.version);
 
-        // Always freeze during split - caller must hold lock
-        let freeze_guard = Self::freeze_permutation(self);
+            std::ptr::write(
+                std::ptr::addr_of!(new_leaf.version).cast_mut(),
+                split_version,
+            );
 
-        let old_perm: Permuter24 = freeze_guard.snapshot();
-        let old_size = old_perm.size();
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                self_ptr = ?std::ptr::from_ref(self),
+                new_leaf_ptr = ?std::ptr::from_ref(new_leaf.as_ref()),
+                split_pos = split_pos,
+                new_leaf_is_split_locked = new_leaf.version.is_split_locked(),
+                "split_into_preallocated: START (new leaf is split-locked)"
+            );
 
-        debug_assert!(
-            split_pos > 0 && split_pos < old_size,
-            "invalid split_pos {split_pos} for size {old_size}"
-        );
+            // Always freeze during split - caller must hold lock
+            let freeze_guard = Self::freeze_permutation(self);
 
-        let entries_to_move = old_size - split_pos;
+            let old_perm: Permuter24 = freeze_guard.snapshot();
+            let old_size = old_perm.size();
 
-        // Move entries to new leaf
-        for i in 0..entries_to_move {
-            let old_logical_pos = split_pos + i;
-            let old_slot = old_perm.get(old_logical_pos);
-            let new_slot = i;
+            debug_assert!(
+                split_pos > 0 && split_pos < old_size,
+                "invalid split_pos {split_pos} for size {old_size}"
+            );
 
-            let ikey = self.ikey(old_slot);
-            let keylenx = self.keylenx(old_slot);
+            let entries_to_move = old_size - split_pos;
 
-            new_leaf.set_ikey(new_slot, ikey);
-            new_leaf.set_keylenx(new_slot, keylenx);
+            // Move entries to new leaf
+            for i in 0..entries_to_move {
+                let old_logical_pos = split_pos + i;
+                let old_slot = old_perm.get(old_logical_pos);
+                let new_slot = i;
 
-            // Move value pointer
-            let old_ptr = self.take_leaf_value_ptr(old_slot);
-            new_leaf.set_leaf_value_ptr(new_slot, old_ptr);
+                let ikey = self.ikey(old_slot);
+                let keylenx = self.keylenx(old_slot);
 
-            // Migrate suffix if present
-            if keylenx == KSUF_KEYLENX {
-                if let Some(suffix) = self.ksuf(old_slot) {
-                    // SAFETY: new_leaf is freshly allocated and caller holds lock
-                    unsafe { new_leaf.assign_ksuf(new_slot, suffix, guard) };
+                new_leaf.set_ikey(new_slot, ikey);
+                new_leaf.set_keylenx(new_slot, keylenx);
+
+                // Move value pointer
+                let old_ptr = self.take_leaf_value_ptr(old_slot);
+                new_leaf.set_leaf_value_ptr(new_slot, old_ptr);
+
+                // Migrate suffix if present
+                if keylenx == KSUF_KEYLENX {
+                    if let Some(suffix) = self.ksuf(old_slot) {
+                        // SAFETY: new_leaf is freshly allocated and caller holds lock
+                        new_leaf.assign_ksuf(new_slot, suffix, guard);
+                    }
+                    // SAFETY: caller holds lock
+                    self.clear_ksuf(old_slot, guard);
                 }
-                // SAFETY: caller holds lock
-                unsafe { self.clear_ksuf(old_slot, guard) };
             }
+
+            // Build new leaf's permutation
+            let new_perm = Permuter24::make_sorted(entries_to_move);
+            new_leaf.set_permutation(new_perm);
+
+            // Update old leaf's permutation
+            let mut old_perm_updated = old_perm;
+            old_perm_updated.set_size(split_pos);
+
+            // Publish truncated permutation and unfreeze
+            Self::unfreeze_set_permutation(self, freeze_guard, old_perm_updated);
+
+            // Get split key from new leaf's first entry
+            let split_ikey = new_leaf.ikey(new_perm.get(0));
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                self_ptr = ?std::ptr::from_ref(self),
+                new_leaf_ptr = ?std::ptr::from_ref(new_leaf.as_ref()),
+                split_ikey = format_args!("{:016x}", split_ikey),
+                entries_moved = entries_to_move,
+                old_size_after = split_pos,
+                new_size = new_perm.size(),
+                "split_into_preallocated: DONE (new leaf still split-locked)"
+            );
+
+            (new_leaf, split_ikey, crate::value::InsertTarget::Left)
         }
-
-        // Build new leaf's permutation
-        let new_perm = Permuter24::make_sorted(entries_to_move);
-        new_leaf.set_permutation(new_perm);
-
-        // Update old leaf's permutation
-        let mut old_perm_updated = old_perm;
-        old_perm_updated.set_size(split_pos);
-
-        // Publish truncated permutation and unfreeze
-        Self::unfreeze_set_permutation(self, freeze_guard, old_perm_updated);
-
-        // Get split key from new leaf's first entry
-        let split_ikey = new_leaf.ikey(new_perm.get(0));
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            self_ptr = ?std::ptr::from_ref(self),
-            new_leaf_ptr = ?std::ptr::from_ref(new_leaf.as_ref()),
-            split_ikey = format_args!("{:016x}", split_ikey),
-            entries_moved = entries_to_move,
-            old_size_after = split_pos,
-            new_size = new_perm.size(),
-            "split_into_preallocated: DONE"
-        );
-
-        (new_leaf, split_ikey, crate::value::InsertTarget::Left)
     }
 
     unsafe fn split_all_to_right_preallocated(
@@ -1296,6 +1357,17 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_leaf: Box<Self>,
         guard: &seize::LocalGuard<'_>,
     ) -> (Box<Self>, u64, crate::value::InsertTarget) {
+        // CRITICAL (Help-Along Protocol): Initialize new leaf's version for split
+        // (same as split_into_preallocated)
+        let split_version = crate::nodeversion::NodeVersion::new_for_split(&self.version);
+        // SAFETY: new_leaf is not yet visible to other threads, we own the Box.
+        unsafe {
+            std::ptr::write(
+                std::ptr::addr_of!(new_leaf.version).cast_mut(),
+                split_version,
+            );
+        }
+
         // Always freeze during split - caller must hold lock
         let freeze_guard = Self::freeze_permutation(self);
 
@@ -1358,44 +1430,62 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 
     #[inline(always)]
     unsafe fn link_sibling(&self, new_sibling: *mut Self) {
-        // CRITICAL: Match C++ btree_leaflink.hh ordering:
-        // 1. Set up new_sibling's pointers FIRST
-        // 2. Fence to ensure visibility
-        // 3. Update self.next LAST
+        // CAS-based link_sibling matching C++ btree_leaflink.hh:56-69 (link_split).
         //
-        // This prevents readers from following self.next to new_sibling
-        // before new_sibling's pointers are initialized.
-        let old_next = <Self as crate::leaf_trait::TreeLeafNode<S>>::safe_next(self);
+        // The key insight is that we must use CAS to "lock" the next pointer before
+        // modifying it. This prevents concurrent splits from clobbering each other's
+        // next pointer updates. The mark bit (LSB) signals a split is in progress.
+        //
+        // Sequence:
+        // 1. CAS to mark self.next (lock_next)
+        // 2. Set up new_sibling's prev/next pointers
+        // 3. Update old_next.prev if non-null
+        // 4. Release fence for visibility
+        // 5. Store new_sibling into self.next (unmarked), completing the link
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
             self_ptr = ?StdPtr::from_ref(self),
             new_sibling = ?new_sibling,
+            "link_sibling: START (CAS-based)"
+        );
+
+        // Step 1: Lock the next pointer via CAS mark
+        // This returns the unmarked old_next pointer
+        let old_next: *mut Self = self.lock_next();
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            self_ptr = ?StdPtr::from_ref(self),
             old_next = ?old_next,
-            "link_sibling: START"
+            "link_sibling: locked next pointer"
         );
 
         // SAFETY: Caller guarantees new_sibling is valid
         unsafe {
-            // Step 1: Set up new_sibling's pointers
+            // Step 2: Set up new_sibling's pointers
             (*new_sibling).set_prev(StdPtr::from_ref(self).cast_mut());
             (*new_sibling).set_next(old_next);
+
+            // Step 3: Update old_next.prev if non-null
             if !old_next.is_null() {
                 (*old_next).set_prev(new_sibling);
             }
         }
 
-        // Step 2: Fence ensures new_sibling is fully visible before linking
+        // Step 4: Release fence ensures new_sibling is fully visible before publishing
         std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
 
-        // Step 3: Update self.next LAST - makes new_sibling reachable
+        // Step 5: Store new_sibling (unmarked) - atomically publishes the link
+        // This also "unlocks" the next pointer by clearing the mark bit
         <Self as crate::leaf_trait::TreeLeafNode<S>>::set_next(self, new_sibling);
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
             self_ptr = ?StdPtr::from_ref(self),
             new_sibling = ?new_sibling,
-            "link_sibling: DONE"
+            old_next = ?old_next,
+            "link_sibling: DONE (CAS-based)"
         );
     }
 
@@ -1499,10 +1589,10 @@ impl<S: ValueSlot> Drop for LeafNode24<S> {
 // LayerCapableLeaf Implementation
 // =============================================================================
 
-impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<V>
+impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value::LeafValue<V>>
     for LeafNode24<crate::value::LeafValue<V>>
 {
-    fn try_clone_arc(&self, slot: usize) -> Option<std::sync::Arc<V>> {
+    fn try_clone_output(&self, slot: usize) -> Option<std::sync::Arc<V>> {
         debug_assert!(
             slot < WIDTH_24,
             "try_clone_arc: slot {slot} >= WIDTH_24 {WIDTH_24}"
@@ -1569,6 +1659,94 @@ impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<V>
         // NOTE: Arc ownership transfers to the slot; the slot now owns one strong reference.
         // The caller must NOT drop `value` again - it's been consumed via into_raw.
         let ptr: *mut u8 = std::sync::Arc::into_raw(arc).cast_mut().cast::<u8>();
+        self.set_leaf_value_ptr(slot, ptr);
+
+        // Set keylenx and suffix based on whether key has remaining bytes
+        if key.has_suffix() {
+            // Key has suffix bytes beyond the 8-byte ikey
+            self.set_keylenx(slot, KSUF_KEYLENX);
+
+            // Store suffix in suffix bag
+            // SAFETY: Caller guarantees guard is from this tree's collector
+            unsafe { self.assign_ksuf(slot, key.suffix(), guard) };
+        } else {
+            // Inline key (0-8 bytes total, no suffix)
+            self.set_keylenx(slot, inline_len);
+        }
+    }
+}
+
+// =============================================================================
+// LayerCapableLeaf Implementation for LeafValueIndex (Inline Mode)
+// =============================================================================
+
+impl<V: Copy + Send + Sync + 'static>
+    crate::leaf_trait::LayerCapableLeaf<crate::value::LeafValueIndex<V>>
+    for LeafNode24<crate::value::LeafValueIndex<V>>
+{
+    fn try_clone_output(&self, slot: usize) -> Option<V> {
+        debug_assert!(
+            slot < WIDTH_24,
+            "try_clone_output: slot {slot} >= WIDTH_24 {WIDTH_24}"
+        );
+
+        // Check for layer pointer - layer pointers are NOT values
+        if self.keylenx(slot) >= LAYER_KEYLENX {
+            return None;
+        }
+
+        let ptr: *mut u8 = self.leaf_value_ptr(slot);
+        if ptr.is_null() {
+            return None;
+        }
+
+        // SAFETY:
+        // - ptr is non-null (checked above)
+        // - ptr is not a layer pointer (keylenx < LAYER_KEYLENX, checked above)
+        // - ptr came from Box::into_raw during insert
+        // - V is Copy, so we just read the value
+        // - Caller ensures slot is stable (lock or version validation)
+        unsafe { Some(*ptr.cast::<V>()) }
+    }
+
+    unsafe fn assign_from_key_arc(
+        &self,
+        slot: usize,
+        key: &crate::key::Key<'_>,
+        value: Option<V>,
+        guard: &seize::LocalGuard<'_>,
+    ) {
+        debug_assert!(
+            slot < WIDTH_24,
+            "assign_from_key_arc: slot {slot} >= WIDTH_24 {WIDTH_24}"
+        );
+
+        // Calculate inline length (0-8 bytes)
+        // current_len() returns the remaining key length at current layer
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "current_len() capped at slice length, min(8) ensures <= 8"
+        )]
+        let inline_len: u8 = key.current_len().min(8) as u8;
+
+        // INVARIANT: value must be Some for layer creation
+        // Conflict case always has a value, not a layer pointer.
+        // If this panics, caller incorrectly identified a layer pointer as a conflict.
+        #[expect(
+            clippy::expect_used,
+            reason = "invariant: source slot must contain value"
+        )]
+        let v: V = value.expect(
+            "assign_from_key_arc: value cannot be None (source slot was not a value); \
+             this indicates a bug in conflict detection",
+        );
+
+        // Store ikey (8 bytes, big-endian encoded)
+        self.set_ikey(slot, key.ikey());
+
+        // Store value as boxed raw pointer
+        // NOTE: Value ownership transfers to the slot.
+        let ptr: *mut u8 = Box::into_raw(Box::new(v)).cast::<u8>();
         self.set_leaf_value_ptr(slot, ptr);
 
         // Set keylenx and suffix based on whether key has remaining bytes
@@ -1682,5 +1860,151 @@ mod tests {
         let dummy_ptr: *mut u8 = std::ptr::from_ref(&dummy).cast_mut().cast();
         leaf.set_parent(dummy_ptr);
         assert_eq!(leaf.parent(), dummy_ptr);
+    }
+
+    #[test]
+    fn test_lock_next_null() {
+        // lock_next on a leaf with NULL next should return NULL and mark the next pointer.
+        // This prevents two concurrent splits both observing NULL and racing to publish
+        // different siblings (orphaning one).
+        let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+        assert!(leaf.safe_next().is_null());
+
+        let result = leaf.lock_next();
+        assert!(result.is_null());
+        // After lock_next with NULL, next is marked (but safe_next still reads as NULL)
+        assert!(leaf.next_is_marked());
+        assert!(leaf.safe_next().is_null());
+
+        // Unmark should restore a clean NULL next
+        leaf.unmark_next();
+        assert!(!leaf.next_is_marked());
+    }
+
+    #[test]
+    fn test_lock_next_marks_and_unmarks() {
+        // lock_next should mark the next pointer, returned value is unmarked
+        let leaf1: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+        let leaf2: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+
+        let leaf2_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf2);
+        leaf1.set_next(leaf2_ptr);
+
+        // Before lock_next: not marked
+        assert!(!leaf1.next_is_marked());
+
+        // Call lock_next
+        let result = leaf1.lock_next();
+
+        // Returned value should be the unmarked pointer
+        assert_eq!(result, leaf2_ptr);
+        // But the next pointer should now be marked
+        assert!(leaf1.next_is_marked());
+        // safe_next still returns the unmarked pointer
+        assert_eq!(leaf1.safe_next(), leaf2_ptr);
+
+        // "Unlock" by storing the unmarked pointer
+        leaf1.set_next(leaf2_ptr);
+        assert!(!leaf1.next_is_marked());
+
+        // Cleanup
+        let _ = unsafe { Box::from_raw(leaf2_ptr) };
+    }
+
+    #[test]
+    #[expect(clippy::similar_names)]
+    fn test_link_sibling_preserves_existing_next() {
+        // Set up chain: A -> B
+        // After link A -> C: should have A -> C -> B with correct prev pointers
+        use crate::leaf_trait::TreeLeafNode;
+
+        let leaf_a: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+        let leaf_b: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+        let leaf_c: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+
+        let leaf_a_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf_a);
+        let leaf_b_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf_b);
+        let leaf_c_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf_c);
+
+        // Reconstruct references
+        let leaf_a: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_a_ptr };
+        let leaf_b: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_b_ptr };
+        let leaf_c: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_c_ptr };
+
+        // Initial chain: A -> B
+        leaf_a.set_next(leaf_b_ptr);
+        leaf_b.set_prev(leaf_a_ptr);
+
+        // Link C after A: A -> C -> B
+        unsafe { TreeLeafNode::<LeafValue<u64>>::link_sibling(leaf_a, leaf_c_ptr) };
+
+        // Verify chain structure
+        assert_eq!(leaf_a.safe_next(), leaf_c_ptr, "A.next should be C");
+        assert_eq!(leaf_c.safe_next(), leaf_b_ptr, "C.next should be B");
+        assert_eq!(leaf_c.prev(), leaf_a_ptr, "C.prev should be A");
+        assert_eq!(leaf_b.prev(), leaf_c_ptr, "B.prev should be C");
+
+        // Verify not marked after link
+        assert!(!leaf_a.next_is_marked());
+        assert!(!leaf_c.next_is_marked());
+
+        // Cleanup
+        let _ = unsafe { Box::from_raw(leaf_a_ptr) };
+        let _ = unsafe { Box::from_raw(leaf_b_ptr) };
+        let _ = unsafe { Box::from_raw(leaf_c_ptr) };
+    }
+
+    #[test]
+    #[expect(clippy::similar_names)]
+    fn test_link_sibling_null_next() {
+        // Link sibling when next is NULL: A -> NULL becomes A -> C -> NULL
+        use crate::leaf_trait::TreeLeafNode;
+
+        let leaf_a: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+        let leaf_c: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+
+        let leaf_a_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf_a);
+        let leaf_c_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf_c);
+
+        let leaf_a: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_a_ptr };
+        let leaf_c: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_c_ptr };
+
+        // A has no next
+        assert!(leaf_a.safe_next().is_null());
+
+        // Link C after A
+        unsafe { TreeLeafNode::<LeafValue<u64>>::link_sibling(leaf_a, leaf_c_ptr) };
+
+        // Verify chain
+        assert_eq!(leaf_a.safe_next(), leaf_c_ptr, "A.next should be C");
+        assert!(leaf_c.safe_next().is_null(), "C.next should be NULL");
+        assert_eq!(leaf_c.prev(), leaf_a_ptr, "C.prev should be A");
+        assert!(!leaf_a.next_is_marked());
+
+        // Cleanup
+        let _ = unsafe { Box::from_raw(leaf_a_ptr) };
+        let _ = unsafe { Box::from_raw(leaf_c_ptr) };
+    }
+
+    #[test]
+    #[expect(clippy::unwrap_used)]
+    fn test_cas_next() {
+        let leaf1: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+        let leaf2: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+
+        let leaf2_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf2);
+
+        // CAS from NULL to leaf2_ptr should succeed
+        let result = leaf1.cas_next(std::ptr::null_mut(), leaf2_ptr);
+        assert!(result.is_ok());
+        assert_eq!(leaf1.safe_next(), leaf2_ptr);
+
+        // CAS with wrong expected should fail
+        let result = leaf1.cas_next(std::ptr::null_mut(), std::ptr::null_mut());
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), leaf2_ptr);
+
+        // Cleanup
+        let _ = unsafe { Box::from_raw(leaf2_ptr) };
     }
 }

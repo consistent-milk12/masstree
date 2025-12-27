@@ -217,7 +217,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// - `true` if the suffix was assigned successfully (fits in existing capacity)
     /// - `false` if the suffix doesn't fit and caller should reallocate
     ///
-    /// # Fast Paths (like C++ stringbag::assign)
+    /// # Fast Paths (like C++ `stringbag::assign`)
     ///
     /// 1. **Reuse existing slot**: If the new suffix fits in the old suffix's space
     /// 2. **Append to end**: If there's room in the buffer

@@ -163,6 +163,41 @@ pub trait ValueSlot: Default + Sized {
     /// - `ptr` must not have been already cleaned up
     /// - Caller must ensure no concurrent access to this pointer
     unsafe fn cleanup_value_ptr(ptr: *mut u8);
+
+    // ========================================================================
+    //  Raw Pointer Operations (for leaf storage)
+    // ========================================================================
+
+    /// Convert an output to a raw pointer for storage in leaf nodes.
+    ///
+    /// This clones the output and converts it to a raw pointer. The caller
+    /// is responsible for either calling `output_from_raw` to recover it or
+    /// `cleanup_value_ptr` to clean it up.
+    ///
+    /// - For `LeafValue<V>`: `Arc::into_raw(Arc::clone(&output))`
+    /// - For `LeafValueIndex<V>`: `Box::into_raw(Box::new(output))`
+    fn output_to_raw(output: &Self::Output) -> *mut u8;
+
+    /// Reconstruct an output from a raw pointer.
+    ///
+    /// This increments the refcount (for Arc) or copies the value (for Copy types),
+    /// then returns an owned Output. The raw pointer remains valid.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must be non-null
+    /// - `ptr` must have been created by `output_to_raw` or equivalent
+    /// - For Arc mode: the Arc must still be live (not cleaned up)
+    unsafe fn output_from_raw(ptr: *const u8) -> Self::Output;
+
+    /// Convert an output to a raw pointer, consuming the output.
+    ///
+    /// Unlike `output_to_raw`, this takes ownership and doesn't clone.
+    /// More efficient when the output is no longer needed.
+    ///
+    /// - For `LeafValue<V>`: `Arc::into_raw(output)` directly
+    /// - For `LeafValueIndex<V>`: `Box::into_raw(Box::new(output))`
+    fn output_consume_to_raw(output: Self::Output) -> *mut u8;
 }
 
 // ============================================================================
@@ -249,11 +284,38 @@ impl<V> ValueSlot for LeafValue<V> {
             drop(Arc::from_raw(ptr.cast::<V>()));
         }
     }
+
+    #[inline(always)]
+    fn output_to_raw(output: &Arc<V>) -> *mut u8 {
+        Arc::into_raw(Arc::clone(output)) as *mut u8
+    }
+
+    #[inline(always)]
+    unsafe fn output_from_raw(ptr: *const u8) -> Arc<V> {
+        // SAFETY: Caller guarantees ptr is valid Arc<V> pointer
+        unsafe {
+            Arc::increment_strong_count(ptr.cast::<V>());
+            Arc::from_raw(ptr.cast::<V>())
+        }
+    }
+
+    #[inline(always)]
+    fn output_consume_to_raw(output: Arc<V>) -> *mut u8 {
+        Arc::into_raw(output) as *mut u8
+    }
 }
 
 // ============================================================================
-//  ValueSlot impl for LeafValueIndex<V: Copy> (True Inline Mode)
+//  ValueSlot impl for LeafValueIndex<V: Copy> (Inline Mode)
 // ============================================================================
+//
+// NOTE: We use Box<V> for storage instead of pointer-punning because:
+// - `get_ref()` returns `&V`, which requires V to exist at a valid memory address
+// - Pointer-punning stores the value IN the pointer bits, with no backing memory
+// - Dereferencing a punned pointer causes SIGSEGV
+//
+// Future optimization: Add `get_copy()` API that returns V by value, then
+// pointer-punning could be used for that path while keeping `get_ref()` working.
 
 impl<V: Copy> ValueSlot for LeafValueIndex<V> {
     type Value = V;
@@ -261,7 +323,7 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
 
     #[inline(always)]
     fn into_output(value: V) -> V {
-        value // Identity - no allocation!
+        value // Identity - no allocation at this stage
     }
 
     #[inline(always)]
@@ -332,6 +394,26 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
         unsafe {
             drop(Box::from_raw(ptr.cast::<V>()));
         }
+    }
+
+    #[inline(always)]
+    fn output_to_raw(output: &V) -> *mut u8 {
+        // Box the value to get a stable pointer that can be dereferenced.
+        // This is required for `get_ref()` to work (returns &V).
+        Box::into_raw(Box::new(*output)).cast::<u8>()
+    }
+
+    #[inline(always)]
+    unsafe fn output_from_raw(ptr: *const u8) -> V {
+        // SAFETY: Caller guarantees ptr is valid V pointer from Box::into_raw.
+        // V is Copy, so we just read the value (don't consume the Box).
+        unsafe { *ptr.cast::<V>() }
+    }
+
+    #[inline(always)]
+    fn output_consume_to_raw(output: V) -> *mut u8 {
+        // Box the value to get a stable pointer.
+        Box::into_raw(Box::new(output)).cast::<u8>()
     }
 }
 

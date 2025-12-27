@@ -180,6 +180,54 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
         node
     }
 
+    /// Create a new internode sibling for a split operation.
+    ///
+    /// The new internode is created with a **split-locked** version copied from the
+    /// locked parent. This prevents other threads from locking the sibling until
+    /// it is installed into the tree and its parent pointer is set.
+    ///
+    /// # Help-Along Protocol
+    ///
+    /// This is the internode equivalent of leaf `NodeVersion::new_for_split()`.
+    /// The caller MUST call `version().unlock_for_split()` exactly once after:
+    /// 1. The sibling is inserted into its parent (grandparent or new root)
+    /// 2. The sibling's parent pointer is set
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `next_child->assign_version(*p)` in `masstree_split.hh:234`:
+    /// ```cpp
+    /// next_child = internode_type::make(height + 1, ti);
+    /// next_child->assign_version(*p);
+    /// next_child->mark_nonroot();
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// The `parent_version` must be from a locked node (the parent being split).
+    #[must_use]
+    #[inline]
+    pub fn new_for_split(parent_version: &NodeVersion, height: u32) -> Box<Self> {
+        // Trigger compile-time WIDTH check
+        let _: () = Self::WIDTH_CHECK;
+
+        // Create split-locked version from parent's locked version.
+        // This ensures the sibling cannot be locked by other threads until
+        // we call unlock_for_split() after installation.
+        let split_version: NodeVersion = NodeVersion::new_for_split(parent_version);
+
+        Box::new(Self {
+            version: split_version,
+            nkeys: AtomicU8::new(0),
+            height,
+            ikey0: std::array::from_fn(|_| AtomicU64::new(0)),
+            child: std::array::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
+            rightmost_child: AtomicPtr::new(StdPtr::null_mut()),
+            parent: AtomicPtr::new(StdPtr::null_mut()),
+            _marker: PhantomData,
+        })
+    }
+
     // ========================================================================
     //  Version Accessors
     // ========================================================================
@@ -605,6 +653,9 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
             let nr_nkeys: usize = new_right.nkeys.load(RELAXED) as usize;
             let new_right_ptr_u8: *mut u8 = new_right_ptr.cast::<u8>();
 
+            #[cfg(feature = "tracing")]
+            let mut updated_internode_children: usize = 0;
+
             for i in 0..=nr_nkeys {
                 let child: *mut u8 = new_right.child(i);
                 if !child.is_null() {
@@ -612,8 +663,22 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
                     unsafe {
                         (*child.cast::<Self>()).set_parent(new_right_ptr_u8);
                     }
+                    #[cfg(feature = "tracing")]
+                    {
+                        updated_internode_children += 1;
+                    }
                 }
             }
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                new_right_ptr = ?new_right_ptr,
+                height = self.height,
+                nr_nkeys,
+                updated_internode_children,
+                popup_key = format_args!("{:016x}", popup_key),
+                "INTERNODE_SPLIT_INTO: updated internode children parent pointers"
+            );
         }
         // NOTE: For height == 0 (leaf children), the caller is responsible for
         // updating parent pointers. This must be done immediately after split_into
@@ -855,6 +920,14 @@ where
     #[inline(always)]
     fn new_root_boxed(height: u32) -> Box<Self> {
         Self::new_root(height)
+    }
+
+    #[inline(always)]
+    fn new_boxed_for_split(
+        parent_version: &crate::nodeversion::NodeVersion,
+        height: u32,
+    ) -> Box<Self> {
+        Self::new_for_split(parent_version, height)
     }
 
     #[inline(always)]
@@ -1344,8 +1417,8 @@ mod tests {
 /// Run with: `RUSTFLAGS="--cfg loom" cargo test --lib internode::loom_tests`
 #[cfg(loom)]
 mod loom_tests {
-    use loom::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
     use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
     use loom::thread;
 
     /// Simplified internode for loom testing.

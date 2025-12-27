@@ -1,10 +1,10 @@
+#[cfg(feature = "tracing")]
+use std::time::Instant;
 use std::{
     cmp::Ordering,
     marker::PhantomData,
-    sync::{
-        Arc,
-        atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering, fence as atomicFence},
-    },
+    ptr as StdPtr,
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering},
 };
 
 use parking_lot::{Condvar, Mutex};
@@ -16,22 +16,113 @@ use crate::{
     leaf_trait::LayerCapableLeaf,
     leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::NodeVersion,
+    slot::ValueSlot,
+    tree::split::Propagation,
     tree::{CasInsertResultGeneric, InsertError, InsertSearchResultGeneric},
-    value::LeafValue,
 };
 
-impl<V, L, A> MassTreeGeneric<V, L, A>
+/// Sentinel for the CLAIMING state in the Option A (Safe) CAS insert protocol.
+///
+/// When a slot's value pointer equals this sentinel, the slot is reserved by an in-progress
+/// CAS insert attempt. The inserter has exclusive right to write key metadata, but hasn't
+/// yet installed the real value pointer.
+///
+/// State machine: `NULL -> CLAIMING -> arc_ptr -> (permutation publish) -> visible`
+///
+/// This sentinel:
+/// - Must be non-null (to distinguish from "free")
+/// - Must never be dereferenced
+/// - Must be stable for the program lifetime
+/// - Must be easy to recognize (`== claiming_ptr()`)
+static CLAIMING_SENTINEL: u8 = 0;
+
+/// Returns the CLAIMING sentinel pointer (provenance-sound).
+#[inline(always)]
+fn claiming_ptr() -> *mut u8 {
+    StdPtr::from_ref(&CLAIMING_SENTINEL).cast_mut()
+}
+
+/// Returns true if `ptr` is the CLAIMING sentinel.
+#[inline(always)]
+#[expect(dead_code, reason = "CAS path disabled")]
+fn is_claiming_ptr(ptr: *mut u8) -> bool {
+    StdPtr::eq(ptr, claiming_ptr())
+}
+
+impl<S, L, A> MassTreeGeneric<S, L, A>
 where
-    V: Send + Sync + 'static,
-    L: LayerCapableLeaf<V>,
-    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
 {
     #[inline]
+    #[expect(dead_code, reason = "CAS path disabled")]
     fn cas_insert_enabled() -> bool {
         use std::sync::OnceLock;
 
-        static DISABLE_CAS: OnceLock<bool> = OnceLock::new();
-        !*DISABLE_CAS.get_or_init(|| std::env::var_os("MASSTREE_DISABLE_CAS").is_some())
+        // CAS insert is currently correctness-sensitive under high contention.
+        // Default to disabled unless explicitly enabled for benchmarking/experiments.
+        //
+        // - Set `MASSTREE_ENABLE_CAS=1` to enable the CAS fast path.
+        // - Set `MASSTREE_ENABLE_CAS=0` or unset to disable.
+        static ENABLE_CAS: OnceLock<bool> = OnceLock::new();
+        *ENABLE_CAS.get_or_init(|| {
+            std::env::var("MASSTREE_ENABLE_CAS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Pick a free physical slot from the permutation's free region, skipping reserved slots.
+    ///
+    /// The Option A (Safe) CAS insert protocol uses a 3-phase state machine:
+    /// `NULL -> CLAIMING -> arc_ptr -> (permutation publish) -> visible`
+    ///
+    /// A CAS inserter can temporarily set `leaf_values[slot]` to `CLAIMING` or `arc_ptr` while
+    /// the slot is still in the permutation's free region (not yet published by permutation CAS).
+    ///
+    /// The locked insert path must treat such slots as **reserved** and avoid reusing them,
+    /// otherwise it can overwrite a CAS-reserved slot and later publish it, creating an
+    /// inconsistent (ikey/keylenx/ptr) tuple visible to readers.
+    ///
+    /// Returns `(slot, back_offset)` where `slot == perm.back_at_offset(back_offset)`.
+    #[inline(always)]
+    #[expect(dead_code, reason = "CAS path disabled")]
+    fn pick_free_slot_avoiding_reserved(
+        leaf: &L,
+        perm: &L::Perm,
+        ikey: u64,
+    ) -> Option<(usize, usize)> {
+        use crate::leaf_trait::TreePermutation;
+
+        let size: usize = perm.size();
+        debug_assert!(
+            size < L::WIDTH,
+            "pick_free_slot_avoiding_reserved: no free slots"
+        );
+
+        let free_count: usize = L::WIDTH - size;
+        for offset in 0..free_count {
+            let slot: usize = perm.back_at_offset(offset);
+
+            // Slot-0 / ikey_bound invariant: skip slot 0 if it can't be reused.
+            if slot == 0 && !leaf.can_reuse_slot0(ikey) {
+                continue;
+            }
+
+            // Option A (Safe): treat non-null in free region as reserved.
+            // This includes both CLAIMING (reservation sentinel) and arc_ptr (value installed
+            // but not yet published via permutation CAS).
+            if !leaf.leaf_value_ptr(slot).is_null() {
+                continue;
+            }
+
+            return Some((slot, offset));
+        }
+
+        None
     }
 
     /// Create a new empty `MassTreeGeneric` with the given allocator.
@@ -233,7 +324,7 @@ where
         loop {
             // Find child index using generic search
             let child_idx: usize =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
+                upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
             let child_ptr: *mut u8 = inode.child(child_idx);
 
             // Prefetch child node
@@ -287,7 +378,7 @@ where
 
             let ikey: u64 = key.ikey();
             let child_idx: usize =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(ikey, internode);
+                upper_bound_internode_generic::<S, L::Internode>(ikey, internode);
             let start_ptr: *mut u8 = internode.child(child_idx);
 
             // Prefetch child node
@@ -319,7 +410,7 @@ where
             // SAFETY: current is a valid internode pointer from traversal
             let internode: &L::Internode = unsafe { &*(current.cast::<L::Internode>()) };
             let child_idx: usize =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(ikey, internode);
+                upper_bound_internode_generic::<S, L::Internode>(ikey, internode);
             let child_ptr: *mut u8 = internode.child(child_idx);
 
             // Prefetch child node
@@ -349,7 +440,7 @@ where
     /// * `None` - If the key was not found
     #[must_use]
     #[inline]
-    pub fn get(&self, key: &[u8]) -> Option<Arc<V>> {
+    pub fn get(&self, key: &[u8]) -> Option<S::Output> {
         let guard = self.guard();
         self.get_with_guard(key, &guard)
     }
@@ -369,14 +460,189 @@ where
     /// * `None` - If the key was not found
     #[must_use]
     #[inline(always)]
-    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<Arc<V>> {
+    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<S::Output> {
         let mut search_key: Key<'_> = Key::new(key);
         self.get_concurrent_generic(&mut search_key, guard)
     }
 
+    /// Get a borrowed reference to a value by key.
+    ///
+    /// This is significantly faster than [`get_with_guard`] for read-heavy workloads
+    /// because it avoids atomic reference count operations (Arc clone/drop).
+    ///
+    /// # Performance
+    ///
+    /// Under high concurrency, `get_ref` can be **2-5x faster** than `get_with_guard`
+    /// because it eliminates cache line bouncing on shared Arc reference counts.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up (byte slice)
+    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
+    ///
+    /// # Returns
+    ///
+    /// * `Some(&V)` - A reference to the value, valid for the guard's lifetime
+    /// * `None` - If the key was not found
+    #[must_use]
+    #[inline(always)]
+    pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g S::Value> {
+        let mut search_key: Key<'_> = Key::new(key);
+        self.get_ref_generic(&mut search_key, guard)
+    }
+
+    /// Internal concurrent get implementation returning a reference.
+    ///
+    /// Same protocol as [`get_concurrent_generic`] but returns `&V` instead of `Arc<V>`.
+    /// Eliminates Arc clone overhead for maximum read performance.
+    #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
+    fn get_ref_generic<'g>(
+        &self,
+        key: &mut Key<'_>,
+        guard: &'g LocalGuard<'_>,
+    ) -> Option<&'g S::Value> {
+        use crate::leaf_trait::TreePermutation;
+        use crate::leaf24::KSUF_KEYLENX;
+        use crate::leaf24::LAYER_KEYLENX;
+        use crate::link::{is_marked, unmark_ptr};
+
+        // Start at tree root
+        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
+        let mut in_sublayer: bool = false;
+
+        'layer_loop: loop {
+            // Find the actual layer root (handles layer root promotion for sublayers)
+            layer_root = self.maybe_parent_generic(layer_root);
+
+            // Traverse to leaf for current layer
+            let mut leaf_ptr: *mut L =
+                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
+
+            // Inner loop for searching within a leaf (may follow B-links)
+            'leaf_loop: loop {
+                // SAFETY: leaf_ptr protected by guard
+                let leaf: &L = unsafe { &*leaf_ptr };
+
+                // Take version snapshot (spins if dirty)
+                let mut version: u32 = leaf.version().stable();
+
+                'search_loop: loop {
+                    // Check for deleted node
+                    if leaf.version().is_deleted() {
+                        continue 'layer_loop;
+                    }
+
+                    // Load permutation - if frozen, a split is in progress
+                    let Ok(perm) = leaf.permutation_try() else {
+                        version = leaf.version().stable();
+                        continue 'search_loop;
+                    };
+
+                    let target_ikey: u64 = key.ikey();
+
+                    #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+                    let search_keylenx: u8 = if key.has_suffix() {
+                        KSUF_KEYLENX
+                    } else {
+                        key.current_len() as u8
+                    };
+
+                    // Search for matching key with early-exit sequential scan.
+                    // Record snapshot only - do NOT interpret until version validated.
+                    let mut match_snapshot: Option<(u8, *mut u8)> = None;
+
+                    for i in 0..perm.size() {
+                        let slot: usize = perm.get(i);
+                        let slot_ikey: u64 = leaf.ikey(slot);
+
+                        if slot_ikey != target_ikey {
+                            continue;
+                        }
+
+                        let slot_keylenx: u8 = leaf.keylenx(slot);
+                        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                        if slot_ptr.is_null() {
+                            continue;
+                        }
+
+                        if slot_keylenx == search_keylenx {
+                            let suffix_match: bool = if slot_keylenx == KSUF_KEYLENX {
+                                leaf.ksuf_equals(slot, key.suffix())
+                            } else {
+                                true
+                            };
+
+                            if suffix_match {
+                                match_snapshot = Some((slot_keylenx, slot_ptr));
+                                break;
+                            }
+                        } else if slot_keylenx >= LAYER_KEYLENX && key.has_suffix() {
+                            match_snapshot = Some((slot_keylenx, slot_ptr));
+                            break;
+                        }
+                    }
+
+                    // Validate version AFTER all reads
+                    if leaf.version().has_changed(version) {
+                        let (advanced, new_version) =
+                            self.advance_to_key_generic(leaf, key, version, guard);
+
+                        if !std::ptr::eq(advanced, leaf) {
+                            leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
+                            continue 'leaf_loop;
+                        }
+
+                        version = new_version;
+                        continue 'search_loop;
+                    }
+
+                    // VERSION VALIDATED - NOW SAFE TO INTERPRET SNAPSHOT
+                    if let Some((keylenx, ptr)) = match_snapshot {
+                        if keylenx >= LAYER_KEYLENX {
+                            // Layer pointer - descend into sublayer
+                            key.shift();
+                            layer_root = ptr;
+                            in_sublayer = true;
+                            continue 'layer_loop;
+                        }
+
+                        // Value - return reference WITHOUT cloning Arc
+                        // SAFETY: version validated, guard protects from deallocation,
+                        // ptr points to valid Arc<V> data
+                        let value_ref: &'g S::Value = unsafe { &*(ptr.cast::<S::Value>()) };
+                        return Some(value_ref);
+                    }
+
+                    // Not found - check for dirty or B-link
+                    if leaf.version().is_dirty() {
+                        version = leaf.version().stable();
+                        continue 'search_loop;
+                    }
+
+                    let next_raw: *mut L = leaf.next_raw();
+                    let next_ptr: *mut L = unmark_ptr(next_raw);
+                    if !next_ptr.is_null() && !is_marked(next_raw) {
+                        let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+                        if target_ikey >= next_bound {
+                            leaf_ptr = next_ptr;
+                            continue 'leaf_loop;
+                        }
+                    }
+
+                    return None;
+                }
+            }
+        }
+    }
+
     /// Internal concurrent get implementation with layer descent support.
     #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
-    fn get_concurrent_generic(&self, key: &mut Key<'_>, guard: &LocalGuard<'_>) -> Option<Arc<V>> {
+    fn get_concurrent_generic(
+        &self,
+        key: &mut Key<'_>,
+        guard: &LocalGuard<'_>,
+    ) -> Option<S::Output> {
         use crate::leaf_trait::TreePermutation;
         use crate::leaf24::KSUF_KEYLENX;
         use crate::leaf24::LAYER_KEYLENX;
@@ -393,13 +659,15 @@ where
 
         // Start at tree root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
+        let mut in_sublayer: bool = false;
 
         'layer_loop: loop {
-            // Find the actual layer root (handles layer root promotion)
+            // Find the actual layer root (handles layer root promotion for sublayers)
             layer_root = self.maybe_parent_generic(layer_root);
 
             // Traverse to leaf for current layer
-            let mut leaf_ptr: *mut L = self.reach_leaf_concurrent_generic(layer_root, key, guard);
+            let mut leaf_ptr: *mut L =
+                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             // Inner loop for searching within a leaf (may follow B-links)
             'leaf_loop: loop {
@@ -430,9 +698,13 @@ where
                         key.current_len() as u8
                     };
 
-                    // Search for matching key
+                    // Search for matching key with early-exit sequential scan.
                     // CRITICAL: Only RECORD the snapshot (keylenx, ptr) here.
                     // Do NOT interpret the pointer until AFTER version validation.
+                    //
+                    // Note: SIMD bulk-load is available via `leaf.find_ikey_matches()` but
+                    // is slower for point lookups where keys are typically found early.
+                    // SIMD will be used for range scans where full leaf iteration is needed.
                     let mut match_snapshot: Option<(u8, *mut u8)> = None;
 
                     for i in 0..perm.size() {
@@ -469,15 +741,8 @@ where
                         }
                     }
 
-                    // Validate version AFTER all reads.
-                    //
-                    // IMPORTANT: Use `has_changed_or_locked` rather than `has_changed`.
-                    // With the "always-dirty-on-lock" strategy, a writer can acquire the lock
-                    // (setting `LOCK_BIT | INSERTING_BIT`) after our initial `stable()` read but
-                    // before this validation. `has_changed()` intentionally ignores those bits,
-                    // which could allow an optimistic reader to validate successfully while a
-                    // writer is actively mutating the node.
-                    if leaf.version().has_changed_or_locked(version) {
+                    // Validate version AFTER all reads
+                    if leaf.version().has_changed(version) {
                         // Version changed - follow B-link chain if split occurred
                         let (advanced, new_version) =
                             self.advance_to_key_generic(leaf, key, version, guard);
@@ -502,17 +767,14 @@ where
                             // Layer pointer - descend into sublayer
                             key.shift();
                             layer_root = ptr;
+                            in_sublayer = true;
                             continue 'layer_loop;
                         }
 
-                        // Value Arc - NOW safe to clone
-                        // SAFETY: version validated, so keylenx correctly identifies ptr as Arc<V>
-                        let arc: Arc<V> = unsafe {
-                            let value_ptr: *const V = ptr.cast();
-                            Arc::increment_strong_count(value_ptr);
-                            Arc::from_raw(value_ptr)
-                        };
-                        return Some(arc);
+                        // Value - NOW safe to clone
+                        // SAFETY: version validated, so keylenx correctly identifies ptr as value
+                        let output: S::Output = unsafe { S::output_from_raw(ptr) };
+                        return Some(output);
                     }
 
                     // Not found - but might be in wrong leaf due to split!
@@ -538,6 +800,7 @@ where
                                 next_bound = next_bound,
                                 "get: NotFound but ikey >= next_bound; following B-link"
                             );
+                            #[cfg(feature = "tracing")]
                             crate::tree::optimistic::BLINK_SHOULD_FOLLOW_COUNT
                                 .fetch_add(1, AtomicOrdering::Relaxed);
                             leaf_ptr = next_ptr;
@@ -555,6 +818,7 @@ where
                         is_marked = is_marked(next_raw),
                         "get: NOT_FOUND"
                     );
+                    #[cfg(feature = "tracing")]
                     crate::tree::optimistic::SEARCH_NOT_FOUND_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return None;
@@ -590,60 +854,79 @@ where
     }
 
     /// Traverse from layer root to target leaf with version validation.
-    #[expect(clippy::unused_self, reason = "Method signature pattern")]
+    ///
+    /// Simple loop that descends through internodes to find the target leaf.
+    /// B-link walking in `advance_to_key` handles any splits that occur.
+    #[expect(clippy::unused_self, reason = "API Consistency")]
+    #[expect(clippy::used_underscore_binding, reason = "Lock guard")]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(level = "trace", skip(self, _guard), fields(ikey = %format_args!("{:016x}", key.ikey())))
+    )]
     fn reach_leaf_concurrent_generic(
         &self,
         start: *const u8,
         key: &Key<'_>,
+        _is_sublayer: bool,
         _guard: &LocalGuard<'_>,
     ) -> *mut L {
         use crate::ksearch::upper_bound_internode_generic;
+        use crate::leaf_trait::TreeInternode;
         use crate::prefetch::prefetch_read;
 
         let target_ikey: u64 = key.ikey();
         let mut node: *const u8 = start;
 
         loop {
-            // SAFETY: node is valid
+            // SAFETY: node is valid, both node types have NodeVersion as first field
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
             let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
+            // Get stable version (spins if dirty)
             let v: u32 = version.stable();
 
             if version.is_leaf() {
-                // Cast const to mut, then to L
+                // Reached a leaf
                 return node.cast_mut().cast::<L>();
             }
 
-            // It's an internode
-            // SAFETY: !is_leaf() confirmed
+            // It's an internode - traverse down
+            // SAFETY: !is_leaf() confirmed above
             let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
 
+            // Binary search for child
             let child_idx: usize =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
+                upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
             let child: *mut u8 = inode.child(child_idx);
 
+            // Prefetch child node while we validate version (hides memory latency)
             prefetch_read(child);
 
             if child.is_null() {
+                // Concurrent split in progress - retry from start
                 node = start;
                 continue;
             }
 
-            if inode.version().has_changed_or_locked(v) {
+            // Check if internode changed during our read
+            if inode.version().has_changed(v) {
+                // Version changed - check for split
                 if inode.version().has_split(v) {
+                    // Key might have escaped to sibling - retry from start
                     node = start;
                     continue;
                 }
+                // Just retry this internode
                 continue;
             }
 
+            // Descend to child
             node = child;
         }
     }
 
     // ========================================================================
-    //  Generic CAS Insert Path
+    //  Generic CAS Insert Path (disabled - kept for future reference)
     // ========================================================================
 
     /// Maximum CAS retry attempts before falling back to locked path.
@@ -653,16 +936,15 @@ where
     ///
     /// Attempts to insert a new key-value pair using optimistic concurrency.
     /// Returns result indicating success or reason for fallback.
+    #[expect(dead_code, reason = "CAS path disabled")]
     #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
     pub(crate) fn try_cas_insert_generic(
         &self,
         key: &Key<'_>,
-        value: &Arc<V>,
+        value: &S::Output,
         guard: &LocalGuard<'_>,
-    ) -> CasInsertResultGeneric<V> {
+    ) -> CasInsertResultGeneric<S::Output> {
         use crate::leaf_trait::TreePermutation;
-        use crate::link::{is_marked, unmark_ptr};
-        use crate::tree::optimistic::CAS_INSERT_RETRY_COUNT;
         use std::ptr as StdPtr;
 
         let ikey: u64 = key.ikey();
@@ -681,10 +963,11 @@ where
 
         loop {
             // 1. Optimistic traversal to find target leaf
+            // CAS path only operates on layer 0 (no suffix keys), so is_sublayer=false
             if use_reach {
-                let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
-                layer_root = self.maybe_parent_generic(layer_root);
-                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, guard);
+                let layer_root: *const u8 = self.load_root_ptr_generic(guard);
+                // Note: get_fresh_root inside reach_leaf_concurrent_generic handles parent traversal
+                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
             } else {
                 use_reach = true;
             }
@@ -692,7 +975,14 @@ where
             let leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let advanced: &L = self.advance_to_key_by_bound_generic(leaf, key, guard);
+            let (advanced, exceeded_hop_limit) =
+                self.advance_to_key_by_bound_generic(leaf, key, guard);
+
+            // If we exceeded the hop limit, fall back to locked path which will re-traverse
+            if exceeded_hop_limit {
+                return CasInsertResultGeneric::ContentionFallback;
+            }
+
             if !StdPtr::eq(advanced, leaf) {
                 leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
                 use_reach = false;
@@ -706,7 +996,10 @@ where
             }
 
             // Check for frozen permutation
+            // If frozen, wait briefly for version to stabilize before falling back.
+            // This prevents spinning on a transient frozen state (Fix B: freeze-wait protocol).
             let Ok(perm) = leaf.permutation_try() else {
+                let _ = leaf.version().stable();
                 return CasInsertResultGeneric::ContentionFallback;
             };
 
@@ -729,44 +1022,103 @@ where
                         return CasInsertResultGeneric::FullNeedLock;
                     }
 
-                    // 5. Check slot-0 rule
-                    let next_free: usize = perm.back();
-                    if next_free == 0 && !leaf.can_reuse_slot0(ikey) {
-                        return CasInsertResultGeneric::Slot0NeedLock;
+                    // 5. Pick a free slot from the free region, scanning for usable slots.
+                    //
+                    // This mirrors the locked path's `pick_free_slot_avoiding_reserved`:
+                    // - Skip slot 0 if it can't be reused (ikey_bound invariant)
+                    // - Skip slots that are already reserved (non-null in free region)
+                    //
+                    // This is a key optimization: instead of only trying perm.back(),
+                    // we scan all free slots to find one that's actually available.
+                    let size: usize = perm.size();
+                    let free_count: usize = L::WIDTH - size;
+
+                    let mut found_slot: Option<(usize, usize)> = None; // (slot, offset)
+                    for offset in 0..free_count {
+                        let slot: usize = perm.back_at_offset(offset);
+
+                        // Slot-0 / ikey_bound invariant: skip slot 0 if it can't be reused
+                        if slot == 0 && !leaf.can_reuse_slot0(ikey) {
+                            continue;
+                        }
+
+                        // Skip reserved slots (CLAIMING or arc_ptr from another CAS in progress)
+                        if !leaf.load_slot_value(slot).is_null() {
+                            continue;
+                        }
+
+                        found_slot = Some((slot, offset));
+                        break;
                     }
 
-                    // 6. Compute new permutation
-                    let (new_perm, slot) = perm.insert_from_back_immutable(logical_pos);
+                    let Some((slot, back_offset)) = found_slot else {
+                        // No usable slot found - all free slots are either:
+                        // - slot 0 that can't be reused, or
+                        // - reserved by another CAS in progress
+                        // Fall back to locked path which can wait for reservations to clear
+                        return CasInsertResultGeneric::ContentionFallback;
+                    };
 
-                    // 7. Prepare Arc pointer
-                    let arc_ptr: *mut u8 = Arc::into_raw(Arc::clone(value)) as *mut u8;
+                    // 6. Compute new permutation with the chosen slot.
+                    //
+                    // If the slot is not at offset 0 (the natural back position),
+                    // we need to swap it to the back before inserting.
+                    let (new_perm, allocated_slot) = if back_offset == 0 {
+                        // Slot is already at back, use directly
+                        perm.insert_from_back_immutable(logical_pos)
+                    } else {
+                        // Swap the chosen slot to back position, then insert
+                        let mut perm_copy = perm;
+                        let back_pos: usize = L::WIDTH - 1;
+                        let chosen_pos: usize = back_pos - back_offset;
+                        perm_copy.swap_free_slots(back_pos, chosen_pos);
+                        let allocated = perm_copy.insert_from_back(logical_pos);
+                        (perm_copy, allocated)
+                    };
+                    debug_assert_eq!(allocated_slot, slot, "slot mismatch after insert");
 
-                    // 8. CAS slot value (NULL-claim semantics)
+                    // ============================================================
+                    // Option A (Safe) Protocol: 3-phase CAS insert
+                    //
+                    // State machine: NULL -> CLAIMING -> arc_ptr -> (perm publish)
+                    //
+                    // Phase 1: Reserve slot (NULL -> CLAIMING)
+                    // Phase 2: Write key metadata (exclusive access via CLAIMING)
+                    // Phase 3: Install value (CLAIMING -> arc_ptr)
+                    // Phase 4: Publish (permutation CAS)
+                    // ============================================================
+
+                    // 8. Phase 1: Reserve the slot (NULL -> CLAIMING).
+                    //
+                    // This gives us exclusive right to write key metadata into this slot.
+                    // The CLAIMING sentinel is non-null, so other CAS attempts and the
+                    // locked path will see it as "reserved".
+                    let claiming: *mut u8 = claiming_ptr();
                     if leaf
-                        .cas_slot_value(slot, StdPtr::null_mut(), arc_ptr)
+                        .cas_slot_value(slot, StdPtr::null_mut(), claiming)
                         .is_err()
                     {
-                        let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        // Contention: another thread claimed this slot first.
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
-
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
                         }
-
                         Self::backoff_generic(retries);
-
                         continue;
                     }
 
-                    // 9. Validate version before writing key data
+                    // 9. Version check before writing metadata.
+                    //
+                    // If version changed (split, etc.), release the reservation and retry.
                     if leaf.version().has_changed_or_locked(version) {
-                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
-                            Ok(()) | Err(_) => {
-                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
-                            }
-                        }
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        // Release reservation: CLAIMING -> NULL
+                        let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -775,19 +1127,82 @@ where
                         continue;
                     }
 
-                    // 10. Store key data
+                    // 10. Phase 2: Write key metadata.
+                    //
+                    // We have exclusive access to this slot via CLAIMING. No other CAS
+                    // attempt can write metadata here until we release the reservation.
+                    // The slot is not visible to readers until permutation publishes.
                     unsafe {
                         leaf.store_key_data_for_cas(slot, ikey, keylenx);
                     }
 
-                    // 11. Secondary version check
+                    // 11. Version check after metadata.
                     if leaf.version().has_changed_or_locked(version) {
-                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                        // Release reservation: CLAIMING -> NULL
+                        let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        retries += 1;
+                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
+                            return CasInsertResultGeneric::ContentionFallback;
+                        }
+                        Self::backoff_generic(retries);
+                        continue;
+                    }
+
+                    // 12. Phase 3: Install the value pointer (CLAIMING -> arc_ptr).
+                    //
+                    // Prepare the value pointer and transition from CLAIMING to the real value.
+                    let value_ptr: *mut u8 = S::output_to_raw(value);
+                    match leaf.cas_slot_value(slot, claiming, value_ptr) {
+                        Ok(()) => {
+                            // Successfully installed value pointer.
+                        }
+                        Err(actual) => {
+                            // Invariant violation: nobody else should touch a CLAIMING slot
+                            // in the free region. If this fires, prefer leaking over double-free.
+                            debug_assert!(
+                                false,
+                                "CLAIMING->value_ptr CAS failed; expected CLAIMING, actual={actual:p}"
+                            );
+                            // Drop the value we just created (it was never installed).
+                            // SAFETY: value_ptr was just created by output_to_raw
+                            unsafe { S::cleanup_value_ptr(value_ptr) };
+                            // Best-effort release: try to reset to NULL.
+                            let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
+                            return CasInsertResultGeneric::ContentionFallback;
+                        }
+                    }
+
+                    // 13. Verify slot ownership (should still be value_ptr).
+                    if leaf.load_slot_value(slot) != value_ptr {
+                        // Slot was stolen after we installed value_ptr. This is unexpected
+                        // but we handle it by cleaning up our value and falling back.
+                        // SAFETY: value_ptr was just created by output_to_raw
+                        unsafe { S::cleanup_value_ptr(value_ptr) };
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        retries += 1;
+                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
+                            return CasInsertResultGeneric::ContentionFallback;
+                        }
+                        Self::backoff_generic(retries);
+                        continue;
+                    }
+
+                    // 14. Final version check before permutation publish.
+                    if leaf.version().has_changed_or_locked(version) {
+                        match leaf.cas_slot_value(slot, value_ptr, StdPtr::null_mut()) {
                             Ok(()) | Err(_) => {
-                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                                // SAFETY: value_ptr was just created by output_to_raw
+                                unsafe { S::cleanup_value_ptr(value_ptr) };
                             }
                         }
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -796,95 +1211,28 @@ where
                         continue;
                     }
 
-                    // 12. Verify slot ownership
-                    if leaf.load_slot_value(slot) != arc_ptr {
-                        let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 13. Final version check
-                    if leaf.version().has_changed_or_locked(version) {
-                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
-                            Ok(()) | Err(_) => {
-                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
-                            }
-                        }
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 14. CAS permutation to publish
+                    // 15. Phase 4: CAS permutation to publish.
+                    //
+                    // The permutation CAS is the linearization point. Once it succeeds,
+                    // the insert is logically complete and visible to other threads.
+                    // No post-publish waits or checks are needed because:
+                    //
+                    // 1. Permutation freezing prevents CAS racing with splits
+                    // 2. If a split happens immediately after, entry migrates correctly
+                    // 3. Post-publish waits (stable(), wait_for_split(), permutation_wait())
+                    //    defeat the purpose of a fast path and can take milliseconds
                     match leaf.cas_permutation_raw(perm, new_perm) {
                         Ok(()) => {
-                            // Verify slot wasn't stolen
-                            // CRITICAL: If slot was stolen AFTER we published, we MUST increment
-                            // count because:
-                            // 1. Our permutation CAS succeeded - slot is now visible in tree
-                            // 2. Our key metadata (ikey, keylenx) is in the slot
-                            // 3. The locked path retry will find "key exists" and do UPDATE
-                            // 4. Updates don't increment count (not a new key)
-                            //
-                            // If we don't increment here, the key ends up visible but uncounted.
-                            if leaf.load_slot_value(slot) != arc_ptr {
-                                self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                                return CasInsertResultGeneric::ContentionFallback;
-                            }
-
-                            // Check for concurrent split
-                            if leaf.version().is_splitting() {
-                                let _ = leaf.version().stable();
-                            }
-
-                            let next_raw = leaf.next_raw();
-                            if is_marked(next_raw) {
-                                leaf.wait_for_split();
-                            }
-
-                            // Check if split moved our entry
-                            let current_perm = leaf.permutation_wait();
-                            let mut slot_in_perm = false;
-                            for i in 0..current_perm.size() {
-                                if current_perm.get(i) == slot {
-                                    slot_in_perm = true;
-                                    break;
-                                }
-                            }
-
-                            if !slot_in_perm {
-                                // Split moved our entry - success
-                                self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                                return CasInsertResultGeneric::Success(None);
-                            }
-
-                            // Check for orphan
-                            let next_ptr = unmark_ptr(next_raw);
-                            if !next_ptr.is_null() {
-                                let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
-                                if ikey >= next_bound {
-                                    return CasInsertResultGeneric::ContentionFallback;
-                                }
-                            }
-
-                            // Success!
+                            // Success! Increment count and return.
                             self.count.fetch_add(1, AtomicOrdering::Relaxed);
                             return CasInsertResultGeneric::Success(None);
                         }
 
                         Err(failure) => {
-                            match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                            match leaf.cas_slot_value(slot, value_ptr, StdPtr::null_mut()) {
                                 Ok(()) | Err(_) => {
-                                    let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                                    // SAFETY: value_ptr was just created by output_to_raw
+                                    unsafe { S::cleanup_value_ptr(value_ptr) };
                                 }
                             }
 
@@ -892,7 +1240,9 @@ where
                                 return CasInsertResultGeneric::ContentionFallback;
                             }
 
-                            CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                            #[cfg(feature = "tracing")]
+                            crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                                .fetch_add(1, AtomicOrdering::Relaxed);
                             retries += 1;
                             if retries > Self::MAX_CAS_RETRIES_GENERIC {
                                 return CasInsertResultGeneric::ContentionFallback;
@@ -1009,10 +1359,6 @@ where
     ///
     /// This is called when `has_changed(old_version)` returns true, indicating
     /// a split may have occurred. It follows B-links to find the correct leaf.
-    ///
-    /// Returns the correct leaf AND the stable version of that leaf.
-    /// This ensures the caller uses the same version that `advance_to_key` walked with,
-    /// avoiding race conditions from re-reading the version.
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_generic<'a>(
         &'a self,
@@ -1024,17 +1370,18 @@ where
         use crate::link::{is_marked, unmark_ptr};
 
         let key_ikey: u64 = key.ikey();
+        let mut version: u32 = leaf.version().stable();
 
         // Only follow chain if split occurred or is in progress
-        if !leaf.version().has_split(old_version) && !leaf.version().is_splitting() {
-            // No split - return current leaf with fresh stable version
-            let version: u32 = leaf.version().stable();
-
-            return (leaf, version);
+        if !leaf.version().has_split(old_version) {
+            // Double-check: split could have started after has_split check
+            if !leaf.version().is_splitting() {
+                return (leaf, version);
+            }
         }
 
         // Wait for any in-progress split to complete
-        let mut version: u32 = leaf.version().stable();
+        version = leaf.version().stable();
 
         while !leaf.version().is_deleted() {
             let next_raw: *mut L = leaf.next_raw();
@@ -1042,7 +1389,6 @@ where
             // Check for marked pointer (split in progress)
             if is_marked(next_raw) {
                 leaf.wait_for_split();
-                version = leaf.version().stable();
                 continue;
             }
 
@@ -1057,8 +1403,6 @@ where
 
             if key_ikey >= next_bound {
                 // Key belongs in next leaf or further
-                crate::tree::optimistic::ADVANCE_BLINK_COUNT
-                    .fetch_add(1, AtomicOrdering::Relaxed);
                 leaf = next;
                 version = leaf.version().stable();
                 continue;
@@ -1071,24 +1415,51 @@ where
         (leaf, version)
     }
 
+    /// Maximum B-link hops before giving up and signaling re-descent.
+    ///
+    /// This prevents unbounded sibling walks when routing is inconsistent.
+    /// After this many hops, we return the current leaf and let the caller
+    /// detect the mismatch and retry from the root.
+    const MAX_BLINK_HOPS: usize = 128;
+
     /// Advance to correct leaf via B-link (generic version).
     /// Used by insert path before locking.
+    ///
+    /// Returns `(leaf, exceeded_hop_limit)`. If `exceeded_hop_limit` is true,
+    /// the caller should retry from the root instead of trusting this leaf.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(level = "trace", skip_all, fields(ikey = %format_args!("{:016x}", key.ikey())))
+    )]
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_by_bound_generic<'a>(
         &'a self,
         mut leaf: &'a L,
         key: &Key<'_>,
         _guard: &LocalGuard<'_>,
-    ) -> &'a L {
+    ) -> (&'a L, bool) {
         use crate::link::{is_marked, unmark_ptr};
 
         let key_ikey: u64 = key.ikey();
+        let mut hops: usize = 0;
 
+        // Wait for any in-progress split to complete
         if leaf.version().is_splitting() {
             let _ = leaf.version().stable();
         }
 
         loop {
+            // Check hop limit to prevent unbounded B-link walks
+            if hops >= Self::MAX_BLINK_HOPS {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    ikey = format_args!("{:016x}", key_ikey),
+                    hops = hops,
+                    "BLINK_HOP_LIMIT_EXCEEDED: too many sibling hops, signaling re-descent"
+                );
+                return (leaf, true);
+            }
+
             let next_raw: *mut L = leaf.next_raw();
             if is_marked(next_raw) {
                 leaf.wait_for_split();
@@ -1097,7 +1468,7 @@ where
 
             let next_ptr: *mut L = unmark_ptr(next_raw);
             if next_ptr.is_null() {
-                return leaf;
+                break;
             }
 
             // SAFETY: next_ptr is valid
@@ -1105,14 +1476,16 @@ where
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
-                crate::tree::optimistic::ADVANCE_BLINK_COUNT
-                    .fetch_add(1, AtomicOrdering::Relaxed);
+                // Key belongs in next leaf or further
                 leaf = next;
+                hops += 1;
                 continue;
             }
 
-            return leaf;
+            break;
         }
+
+        (leaf, false)
     }
 
     // ========================================================================
@@ -1133,7 +1506,7 @@ where
     /// # Errors
     /// If insert fails.
     #[inline]
-    pub fn insert(&self, key: &[u8], value: V) -> Result<Option<Arc<V>>, InsertError> {
+    pub fn insert(&self, key: &[u8], value: S::Value) -> Result<Option<S::Output>, InsertError> {
         let guard = self.guard();
         self.insert_with_guard(key, value, &guard)
     }
@@ -1159,27 +1532,31 @@ where
     pub fn insert_with_guard(
         &self,
         key: &[u8],
-        value: V,
+        value: S::Value,
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<Arc<V>>, InsertError> {
+    ) -> Result<Option<S::Output>, InsertError> {
         let mut key = Key::new(key);
-        let arc = Arc::new(value);
-        self.insert_concurrent_generic(&mut key, arc, guard)
+        let output = S::into_output(value);
+        self.insert_concurrent_generic(&mut key, output, guard)
     }
 
     /// Internal concurrent insert with CAS fast path and locked fallback.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(level = "debug", skip_all, fields(ikey = %format_args!("{:016x}", key.ikey())))
+    )]
     #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
     fn insert_concurrent_generic(
         &self,
         key: &mut Key<'_>,
-        value: Arc<V>,
+        value: S::Output,
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<Arc<V>>, InsertError> {
+    ) -> Result<Option<S::Output>, InsertError> {
         #[cfg(feature = "tracing")]
         let ikey_for_trace: u64 = key.ikey();
 
         #[cfg(feature = "tracing")]
-        let insert_start = std::time::Instant::now();
+        let _insert_start = Instant::now();
 
         #[cfg(feature = "tracing")]
         let mut retry_count: u32 = 0;
@@ -1193,59 +1570,36 @@ where
         // Track current layer root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
 
-        // Track whether we're in a sublayer (don't use CAS path in sublayers)
+        // Track whether we're in a sublayer (for layer traversal)
         let mut in_sublayer: bool = false;
 
         loop {
-            // Follow parent pointers to actual layer root
+            // Find the actual layer root (handles layer root promotion for sublayers)
             layer_root = self.maybe_parent_generic(layer_root);
 
-            // Try CAS fast path first (only for simple cases at layer 0)
-            // CAS path doesn't handle layers - it always starts from main tree root.
-            if Self::cas_insert_enabled() && !in_sublayer && !key.has_suffix() {
-                use crate::tree::optimistic::{CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_SUCCESS_COUNT};
-
-                match self.try_cas_insert_generic(key, &value, guard) {
-                    CasInsertResultGeneric::Success(old) => {
-                        CAS_INSERT_SUCCESS_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            ikey = format_args!("{:016x}", ikey_for_trace),
-                            "insert: CAS_SUCCESS"
-                        );
-                        return Ok(old);
-                    }
-                    CasInsertResultGeneric::ExistsNeedLock { .. }
-                    | CasInsertResultGeneric::FullNeedLock
-                    | CasInsertResultGeneric::LayerNeedLock { .. }
-                    | CasInsertResultGeneric::Slot0NeedLock
-                    | CasInsertResultGeneric::ContentionFallback => {
-                        CAS_INSERT_FALLBACK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-                        // Fall through to locked path
-                        #[cfg(feature = "tracing")]
-                        tracing::trace!(
-                            ikey = format_args!("{:016x}", ikey_for_trace),
-                            "insert: CAS_FALLBACK_TO_LOCKED"
-                        );
-                    }
-                }
-            }
-
-            // Locked path
-            let leaf_ptr: *mut L = self.reach_leaf_concurrent_generic(layer_root, key, guard);
+            // Locked path - traverse to leaf
+            let leaf_ptr: *mut L =
+                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             let leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let leaf: &L = self.advance_to_key_by_bound_generic(leaf, key, guard);
+            let (leaf, exceeded_hop_limit) = self.advance_to_key_by_bound_generic(leaf, key, guard);
+
+            // If we exceeded the hop limit, re-traverse from root
+            if exceeded_hop_limit {
+                layer_root = self.load_root_ptr_generic(guard);
+                continue;
+            }
 
             // Lock the leaf
             #[cfg(feature = "tracing")]
-            let lock_start = std::time::Instant::now();
+            let lock_start = Instant::now();
 
             let mut lock = leaf.version().lock();
 
             #[cfg(feature = "tracing")]
+            #[expect(clippy::cast_possible_truncation)]
             {
                 let lock_elapsed = lock_start.elapsed();
                 if lock_elapsed > std::time::Duration::from_millis(1) {
@@ -1298,6 +1652,7 @@ where
                             next_bound = format_args!("{:016x}", next_bound),
                             "INSERT_RETRY: key moved to next sibling (post-lock check)"
                         );
+                        #[cfg(feature = "tracing")]
                         crate::tree::optimistic::WRONG_LEAF_INSERT_COUNT
                             .fetch_add(1, AtomicOrdering::Relaxed);
                         drop(lock);
@@ -1321,34 +1676,31 @@ where
                     // Key exists - update value
                     let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
                     if !old_ptr.is_null() {
-                        // Clone old Arc for return value BEFORE we store new pointer.
-                        // SAFETY: old_ptr is non-null and came from Arc::into_raw
-                        let old_arc: Arc<V> = unsafe {
-                            let arc_ptr: *const V = old_ptr.cast();
-                            Arc::increment_strong_count(arc_ptr);
-                            Arc::from_raw(arc_ptr)
-                        };
+                        // Clone old value for return BEFORE we store new pointer.
+                        // SAFETY: old_ptr is non-null and came from output_to_raw
+                        let old_output: S::Output = unsafe { S::output_from_raw(old_ptr) };
 
-                        let new_ptr: *mut u8 = Arc::into_raw(value) as *mut u8;
+                        let new_ptr: *mut u8 = S::output_consume_to_raw(value);
 
                         // Mark insert, store value, unlock happens on drop
                         lock.mark_insert();
                         leaf.set_leaf_value_ptr(slot, new_ptr);
                         drop(lock);
 
-                        // Defer retirement of the old Arc.
+                        // Defer retirement of the old value.
                         // This ensures readers who captured old_ptr before our store
                         // can safely complete their validation and retry.
-                        // SAFETY: old_ptr came from Arc::into_raw
+                        // SAFETY: old_ptr came from output_to_raw
                         unsafe {
-                            guard.defer_retire(old_ptr.cast::<V>(), |ptr, _| {
-                                drop(Arc::from_raw(ptr));
+                            guard.defer_retire(old_ptr, |ptr, _| {
+                                S::cleanup_value_ptr(ptr);
                             });
                         }
 
+                        #[cfg(feature = "tracing")]
                         crate::tree::optimistic::LOCKED_INSERT_COUNT
                             .fetch_add(1, AtomicOrdering::Relaxed);
-                        return Ok(Some(old_arc));
+                        return Ok(Some(old_output));
                     }
                     drop(lock);
                 }
@@ -1375,68 +1727,69 @@ where
                         continue;
                     }
 
-                    // Check slot-0 rule
-                    let next_free: usize = perm.back();
+                    // Pick a free slot, handling slot-0 / ikey_bound invariant.
+                    // Since we hold the lock, we can use perm.back() directly.
+                    let slot: usize = perm.back();
 
-                    if next_free == 0 && !leaf.can_reuse_slot0(ikey) {
-                        // Slot-0 violation - need swap logic
-                        // For now, try to use a different slot via back_at_offset
-                        let slot = if perm.size() < L::WIDTH - 1 {
-                            perm.back_at_offset(1)
-                        } else {
-                            // Leaf is full and slot-0 violation - need split
-                            let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
+                    // Check slot-0 rule: slot 0 stores ikey_bound and can only be
+                    // reused if the new key has the same ikey as the current bound.
+                    if slot == 0 && !leaf.can_reuse_slot0(ikey) {
+                        // Need to find another slot or split.
+                        // Scan free region for a non-zero slot.
+                        let free_count: usize = L::WIDTH - perm.size();
+                        let mut found_slot: Option<(usize, usize)> = None;
 
-                            // Split using SPLIT-THEN-RETRY pattern (takes lock ownership)
-                            self.handle_leaf_split_generic(
-                                leaf_ptr_current,
-                                lock, // Move lock ownership
-                                logical_pos,
-                                ikey,
-                                guard,
-                            )?;
+                        for offset in 1..free_count {
+                            let candidate: usize = perm.back_at_offset(offset);
+                            if candidate != 0 {
+                                found_slot = Some((candidate, offset));
+                                break;
+                            }
+                        }
 
-                            // Lock was released by handle_leaf_split_generic.
-                            // Retry the insert.
-                            continue;
-                        };
+                        if let Some((alt_slot, back_offset)) = found_slot {
+                            // Use the alternative slot
+                            self.assign_slot_generic(leaf, &mut lock, alt_slot, key, &value, guard);
 
-                        // Assign to alternative slot
-                        self.assign_slot_generic(leaf, &mut lock, slot, key, &value, guard);
+                            let mut new_perm = perm;
+                            let back_pos: usize = L::WIDTH - 1;
+                            let chosen_pos: usize = back_pos - back_offset;
+                            new_perm.swap_free_slots(back_pos, chosen_pos);
+                            let allocated: usize = new_perm.insert_from_back(logical_pos);
+                            debug_assert_eq!(allocated, alt_slot, "allocated unexpected slot");
+                            leaf.set_permutation(new_perm);
+                            drop(lock);
 
-                        // Update permutation so `insert_from_back()` allocates `slot`.
-                        //
-                        // `Permuter24::swap_free_slots` takes absolute positions in the permuter
-                        // (0..=23), not "offsets" into the free region. The free slot returned by
-                        // `back()` lives at position 23, and `back_at_offset(1)` lives at 22.
-                        //
-                        // We swap positions 23 and 22 so the subsequent `insert_from_back()` pulls
-                        // the same `slot` we just populated.
-                        let mut new_perm = perm;
-                        new_perm.swap_free_slots(23, 22);
-                        let allocated: usize = new_perm.insert_from_back(logical_pos);
-                        debug_assert_eq!(
-                            allocated, slot,
-                            "slot-0 avoidance allocated unexpected slot"
-                        );
-                        leaf.set_permutation(new_perm);
+                            self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                            #[cfg(feature = "tracing")]
+                            crate::tree::optimistic::LOCKED_INSERT_COUNT
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                            return Ok(None);
+                        }
 
-                        drop(lock);
-                        self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                        crate::tree::optimistic::LOCKED_INSERT_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        return Ok(None);
+                        // Only slot 0 is free and can't be reused - must split
+                        let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
+                        self.handle_leaf_split_generic(
+                            leaf_ptr_current,
+                            lock,
+                            logical_pos,
+                            ikey,
+                            guard,
+                        )?;
+                        continue;
                     }
 
-                    // Normal insert
-                    let (new_perm, slot) = perm.insert_from_back_immutable(logical_pos);
+                    // Use perm.back() directly - simple case
                     self.assign_slot_generic(leaf, &mut lock, slot, key, &value, guard);
 
-                    // Update permutation
+                    let mut new_perm = perm;
+                    let allocated: usize = new_perm.insert_from_back(logical_pos);
+                    debug_assert_eq!(allocated, slot, "allocated unexpected slot");
                     leaf.set_permutation(new_perm);
                     drop(lock);
 
                     self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                    #[cfg(feature = "tracing")]
                     crate::tree::optimistic::LOCKED_INSERT_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return Ok(None);
@@ -1468,28 +1821,30 @@ where
                     // - We hold the lock on `leaf`
                     // - `guard` is from this tree's collector
                     let layer_ptr: *mut u8 = unsafe {
-                        self.create_layer_concurrent_generic(
-                            leaf,
-                            slot,
-                            key,
-                            Arc::clone(&value),
-                            guard,
-                        )
+                        self.create_layer_concurrent_generic(leaf, slot, key, value.clone(), guard)
                     };
 
-                    // CRITICAL: Drop the existing Arc in the conflict slot.
+                    // CRITICAL: Defer retirement of the existing value in the conflict slot.
                     //
-                    // The create_layer_concurrent_generic function cloned it via try_clone_arc(),
-                    // so the slot's reference is now redundant. We must drop it to avoid
+                    // The create_layer_concurrent_generic function cloned it via try_clone_output(),
+                    // so the slot's reference is now redundant. We must retire it to avoid
                     // leaking memory when we overwrite with the layer pointer.
                     //
+                    // IMPORTANT: We use defer_retire instead of immediate cleanup because
+                    // concurrent get_ref() readers may still hold references to this value.
+                    // The guard ensures the value isn't freed until all readers have completed.
+                    //
                     // SAFETY:
-                    // - We hold the lock, so no concurrent access
+                    // - We hold the lock, so no concurrent modification
+                    // - old_ptr came from output_to_raw during the original insert
+                    // - defer_retire ensures readers complete before cleanup
                     let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
                     if !old_ptr.is_null() {
-                        // SAFETY: old_ptr came from Arc::into_raw during the original insert
-                        let _old_arc: Arc<V> = unsafe { Arc::from_raw(old_ptr.cast::<V>()) };
-                        // _old_arc is dropped here, decrementing refcount
+                        unsafe {
+                            guard.defer_retire(old_ptr, |ptr, _| {
+                                S::cleanup_value_ptr(ptr);
+                            });
+                        }
                     }
 
                     // Clear any existing suffix for this slot
@@ -1509,6 +1864,7 @@ where
                     drop(lock);
                     self.count.fetch_add(1, AtomicOrdering::Relaxed);
 
+                    #[cfg(feature = "tracing")]
                     crate::tree::optimistic::LOCKED_INSERT_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return Ok(None);
@@ -1530,11 +1886,11 @@ where
         lock: &mut crate::nodeversion::LockGuard<'_>,
         slot: usize,
         key: &Key<'_>,
-        value: &Arc<V>,
+        value: &S::Output,
         guard: &LocalGuard<'_>,
     ) {
         let ikey: u64 = key.ikey();
-        let value_ptr: *mut u8 = Arc::into_raw(Arc::clone(value)) as *mut u8;
+        let value_ptr: *mut u8 = S::output_to_raw(value);
 
         // Mark insert dirty
         lock.mark_insert();
@@ -1563,49 +1919,72 @@ where
 
     /// Handle a leaf split when the leaf is full.
     ///
-    /// This method:
-    /// 1. Calculates the split point
-    /// 2. Allocates a new leaf
-    /// 3. Performs the split (moves entries)
-    /// 4. Links the leaves in B-link order
-    /// 5. Propagates the split to the parent
+    /// This function implements the SPLIT-THEN-RETRY pattern:
+    /// 1. Calculate split point
+    /// 2. Allocate new leaf (pre-allocation before marking split)
+    /// 3. Mark split in progress
+    /// 4. Perform split (creates split-locked right sibling)
+    /// 5. Link leaves (B-link)
+    /// 6. Propagate to parent using TRUE hand-over-hand
+    /// 7. Return Ok - caller retries insert
     ///
     /// # Arguments
     ///
-    /// * `left_leaf_ptr` - Pointer to the leaf being split
-    /// * `lock` - Lock guard (takes ownership, will mark split and release)
-    /// * `logical_pos` - Insert position in the leaf (for split point calculation)
-    /// * `ikey` - The key being inserted (for split point calculation)
-    /// * `guard` - Memory reclamation guard
+    /// - `left_leaf_ptr`: Pointer to the leaf being split
+    /// - `lock`: Lock guard (ownership transferred to propagation)
+    /// - `logical_pos`: Insert position for split point calculation
+    /// - `ikey`: Key being inserted
+    /// - `guard`: Memory reclamation guard
     ///
-    /// # Returns
+    /// # Lock Protocol
     ///
-    /// `Ok(())` on success. The caller should retry the insert (SPLIT-THEN-RETRY pattern).
+    /// The left leaf's lock is maintained throughout propagation. This is the
+    /// key difference from the previous (broken) implementation that dropped
+    /// the lock before propagation.
     ///
-    /// # Note
+    /// # Split-Locked Right Sibling
     ///
-    /// This function takes ownership of the lock and releases it before returning.
+    /// The right sibling is created with a split-locked version in
+    /// `split_into_preallocated()`. This is NOT done by the allocator.
+    /// The split-locked version prevents other threads from operating on
+    /// the right sibling until its parent pointer is set.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `tcursor::make_split()` in `reference/masstree_split.hh:179-297`.
+    #[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        level = "debug",
+        skip(self, lock, guard),
+        fields(
+            left_leaf = ?left_leaf_ptr,
+            ikey = %format_args!("{:016x}", ikey)
+        )
+    )
+)]
     #[inline]
     fn handle_leaf_split_generic(
         &self,
         left_leaf_ptr: *mut L,
-        mut lock: crate::nodeversion::LockGuard<'_>,
+        lock: crate::nodeversion::LockGuard<'_>,
         logical_pos: usize,
         ikey: u64,
         guard: &LocalGuard<'_>,
     ) -> Result<(), InsertError> {
         #[cfg(feature = "tracing")]
-        let split_start = std::time::Instant::now();
+        let split_start = Instant::now();
 
         #[cfg(feature = "tracing")]
         tracing::info!(
             left_leaf_ptr = ?left_leaf_ptr,
             ikey = format_args!("{:016x}", ikey),
-            logical_pos = logical_pos,
+            logical_pos,
             "SPLIT_START: beginning leaf split"
         );
 
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
+        #[cfg(feature = "tracing")]
         crate::tree::optimistic::SPLIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
 
         // Calculate split point
@@ -1613,62 +1992,102 @@ where
             .calculate_split_point(logical_pos, ikey)
             .ok_or(InsertError::SplitFailed)?;
 
-        // Allocate new leaf
+        // =========================================================================
+        //  CRITICAL: Capture root status BEFORE mark_split
+        // =========================================================================
+        //
+        // SPLIT_UNLOCK_MASK clears ROOT_BIT on unlock. We must capture both
+        // booleans separately BEFORE marking:
+        //
+        // - is_main_root: This leaf is THE main tree root (root_ptr points here)
+        // - is_layer_root: This leaf is a layer root (null parent, root flag, NOT main)
+        //
+        // These are MUTUALLY EXCLUSIVE for handling:
+        // - Main root: CAS on root_ptr to install new internode
+        // - Layer root: NO CAS, just parent pointer updates
+
+        let root_flag_set: bool = left_leaf.version().is_root();
+        let parent_is_null: bool = left_leaf.parent().is_null();
+
+        let is_main_root: bool = root_flag_set && {
+            let current_root: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
+            std::ptr::eq(current_root, left_leaf_ptr)
+        };
+
+        // Layer root: has root flag, null parent, but is NOT the main tree root
+        let is_layer_root: bool = root_flag_set && parent_is_null && !is_main_root;
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            root_flag_set,
+            parent_is_null,
+            is_main_root,
+            is_layer_root,
+            "SPLIT_START: captured root status BEFORE mark_split"
+        );
+
+        // Allocate new leaf BEFORE marking split
+        // This ensures allocation doesn't happen while we hold the split lock
         let new_leaf: Box<L> = L::new_boxed();
 
-        // Mark split in progress (must be called before freeze_permutation)
+        // Mark split in progress (sets SPLITTING_BIT)
+        let mut lock = lock;
         lock.mark_split();
 
-        // Perform the split (insert_target ignored - we use SPLIT-THEN-RETRY)
+        // Perform the split
+        // NOTE: The right sibling receives a split-locked version from
+        // split_into_preallocated() - this is NOT done by the allocator!
+        // insert_target is ignored - we use SPLIT-THEN-RETRY pattern
         let (new_leaf_box, split_ikey, _insert_target) =
             unsafe { left_leaf.split_into_preallocated(split_point.pos, new_leaf, guard) };
 
-        // Store new leaf in allocator
+        // Allocate new leaf in allocator (just tracks it, doesn't set version)
         let right_leaf_ptr: *mut L = self.allocator.alloc_leaf(new_leaf_box);
 
-        // IMPORTANT: Capture is_layer_root BEFORE dropping the lock!
-        // SPLIT_UNLOCK_MASK clears ROOT_BIT, so after drop(lock) we can't tell
-        // if this was a layer root or a newly-split sibling (both have NULL parent).
-        let is_layer_root: bool = left_leaf.parent().is_null() && left_leaf.version().is_root();
-
-        // NOTE: Link leaves in B-link order
-        // right_leaf's parent pointer is NULL at this point. It will be set
-        // in propagate_split_generic after we insert into the parent internode.
-        //
-        // If another thread splits right_leaf before we set its parent, that thread
-        // will see NULL parent and wait in propagate_split_generic.
-        unsafe { left_leaf.link_sibling(right_leaf_ptr) };
-
         #[cfg(feature = "tracing")]
-        let propagate_start = std::time::Instant::now();
+        {
+            let right_leaf: &L = unsafe { &*right_leaf_ptr };
+            tracing::debug!(
+                right_leaf_ptr = ?right_leaf_ptr,
+                split_ikey = format_args!("{:016x}", split_ikey),
+                right_is_split_locked = right_leaf.version().is_split_locked(),
+                "SPLIT_CREATED: right sibling allocated (split-locked by split_into_preallocated)"
+            );
+        }
 
-        // OPTIMIZATION: Release leaf lock BEFORE parent propagation.
-        // Once link succeeds, the split is visible via B-link chain.
-        // Readers use advance_to_key() to follow B-links.
-        drop(lock);
+        // Link leaves in B-link order (while left is still locked)
+        unsafe { left_leaf.link_sibling(right_leaf_ptr) };
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
             left_leaf_ptr = ?left_leaf_ptr,
             right_leaf_ptr = ?right_leaf_ptr,
-            split_ikey = format_args!("{:016x}", split_ikey),
-            is_layer_root = is_layer_root,
-            "SPLIT_PROPAGATE: leaf lock released, propagating to parent"
+            "SPLIT_LINKED: B-link established"
         );
 
-        // Propagate split to parent (lock already released)
-        // Pass is_layer_root so propagate knows whether to promote or wait.
-        let result = self.propagate_split_generic(
+        // =========================================================================
+        // TRUE HAND-OVER-HAND PROPAGATION
+        // =========================================================================
+        //
+        // Pass ownership of the lock to Propagation::make_split_leaf.
+        // The lock is maintained throughout propagation - this is the key
+        // difference from the previous (broken) implementation.
+
+        let result: Result<(), InsertError> = Propagation::make_split_leaf::<S, L, A>(
+            &self.root_ptr,
+            &self.allocator,
             left_leaf_ptr,
+            lock, // Ownership transferred - lock maintained during propagation
             right_leaf_ptr,
             split_ikey,
+            is_main_root,
             is_layer_root,
             guard,
         );
 
         #[cfg(feature = "tracing")]
+        #[expect(clippy::cast_possible_truncation, reason = "logs")]
         {
-            let propagate_elapsed = propagate_start.elapsed();
             let total_elapsed = split_start.elapsed();
             if total_elapsed > std::time::Duration::from_millis(1) {
                 tracing::warn!(
@@ -1676,8 +2095,6 @@ where
                     right_leaf_ptr = ?right_leaf_ptr,
                     split_ikey = format_args!("{:016x}", split_ikey),
                     total_elapsed_us = total_elapsed.as_micros() as u64,
-                    propagate_elapsed_us = propagate_elapsed.as_micros() as u64,
-                    is_layer_root = is_layer_root,
                     "SLOW_SPLIT: leaf split took >1ms"
                 );
             }
@@ -1686,519 +2103,20 @@ where
         result
     }
 
-    /// Lock a parent internode from a leaf with validation (generic version).
-    ///
-    /// Handles the race where the parent pointer may change between reading
-    /// and locking. Uses an optimistic lock-then-validate pattern.
-    ///
-    /// # Returns
-    ///
-    /// `(parent_ptr, lock_guard)` - Successfully locked parent
-    ///
-    /// # Panics
-    ///
-    /// Panics if the leaf has no parent (is a root).
-    #[expect(clippy::unused_self, reason = "API Consistency")]
-    fn locked_parent_leaf_generic(
-        &self,
-        leaf: &L,
-    ) -> (*mut L::Internode, crate::nodeversion::LockGuard<'_>) {
-        let mut retries: usize = 0;
-
-        #[cfg(feature = "tracing")]
-        tracing::trace!(
-            leaf_ptr = ?std::ptr::from_ref(leaf),
-            "locked_parent_leaf: START"
-        );
-
-        loop {
-            // Step 1: Read parent pointer
-            let parent_ptr: *mut u8 = leaf.parent();
-
-            #[cfg(feature = "tracing")]
-            tracing::trace!(
-                parent_ptr = ?parent_ptr,
-                is_null = parent_ptr.is_null(),
-                "locked_parent_leaf: read parent"
-            );
-
-            debug_assert!(
-                !parent_ptr.is_null(),
-                "locked_parent_leaf_generic called on root"
-            );
-
-            // Step 2: Lock the parent
-            // SAFETY: parent_ptr is non-null, seize guard ensures it won't be freed
-            let parent: &L::Internode = unsafe { &*parent_ptr.cast::<L::Internode>() };
-
-            #[cfg(feature = "tracing")]
-            tracing::trace!("locked_parent_leaf: locking parent");
-
-            let lock = parent.version().lock_with_yield();
-
-            #[cfg(feature = "tracing")]
-            tracing::trace!("locked_parent_leaf: locked, revalidating");
-
-            // Step 3: Revalidate - check parent pointer hasn't changed
-            let current_parent: *mut u8 = leaf.parent();
-            if current_parent == parent_ptr {
-                // Success: parent is stable
-                #[cfg(feature = "tracing")]
-                tracing::trace!("locked_parent_leaf: SUCCESS");
-                return (parent_ptr.cast(), lock);
-            }
-
-            // Step 4: Parent changed, release lock and retry
-            #[cfg(feature = "tracing")]
-            tracing::trace!("locked_parent_leaf: parent changed, retrying");
-
-            drop(lock);
-
-            retries += 1;
-            assert!(
-                retries < Self::MAX_PROPAGATION_RETRIES,
-                "locked_parent_leaf_generic: exceeded {} retries",
-                Self::MAX_PROPAGATION_RETRIES
-            );
-
-            std::hint::spin_loop();
-        }
-    }
-
     /// Propagate a leaf split to the parent.
     ///
     /// # Arguments
     /// * `is_layer_root` - True if the left leaf was a layer root BEFORE the lock was dropped.
     ///   This must be captured before `drop(lock)` because `SPLIT_UNLOCK_MASK` clears `ROOT_BIT`.
-    #[expect(clippy::too_many_lines)]
-    #[expect(clippy::panic, reason = "FATAL: Cannot continue")]
-    fn propagate_split_generic(
-        &self,
-        left_leaf_ptr: *mut L,
-        right_leaf_ptr: *mut L,
-        split_ikey: u64,
-        is_layer_root: bool,
-        guard: &LocalGuard<'_>,
-    ) -> Result<(), InsertError> {
-        #[cfg(feature = "tracing")]
-        let propagate_start = std::time::Instant::now();
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            split_ikey = format_args!("{:016x}", split_ikey),
-            left_leaf_ptr = ?left_leaf_ptr,
-            right_leaf_ptr = ?right_leaf_ptr,
-            is_layer_root = is_layer_root,
-            "PROPAGATE_START: propagating split to parent"
-        );
-
-        // Check if left leaf was the main tree root
-        let left_was_main_root: bool = self.root_is_leaf_generic() && {
-            let root_ptr: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
-            std::ptr::eq(root_ptr, left_leaf_ptr)
-        };
-
-        if left_was_main_root {
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                left_leaf_ptr = ?left_leaf_ptr,
-                "PROPAGATE: left was main tree root, creating root internode"
-            );
-            return self.create_root_internode_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
-        }
-
-        // Handle NULL parent case - two possibilities:
-        // 1. Layer root: was created with is_root=true, should be promoted to layer internode
-        // 2. Newly split sibling: parent pointer not yet set by creating thread, should wait
-        //
-        // We use `is_layer_root` parameter (captured before lock drop) to distinguish.
-        let left_leaf: &L = unsafe { &*left_leaf_ptr };
-
-        if left_leaf.parent().is_null() {
-            if is_layer_root {
-                // LAYER ROOT SPLIT: promote to layer internode
-                #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    left_leaf_ptr = ?left_leaf_ptr,
-                    "PROPAGATE: layer root, promoting to layer internode"
-                );
-                return self.promote_layer_root_generic(left_leaf_ptr, right_leaf_ptr, split_ikey);
-            }
-
-            // NEWLY SPLIT SIBLING: wait for creating thread to set parent pointer
-            // This happens when Thread A splits a leaf, creating right sibling R,
-            // then Thread B splits R before Thread A finishes propagate_split.
-            #[cfg(feature = "tracing")]
-            tracing::warn!(
-                left_leaf_ptr = ?left_leaf_ptr,
-                right_leaf_ptr = ?right_leaf_ptr,
-                "PARENT_WAIT_START: NULL parent, not layer root - entering wait loop"
-            );
-
-            // Instrumentation: record parent-wait hit and timing
-            use crate::tree::optimistic::{
-                PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
-                PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS,
-            };
-            use std::sync::atomic::Ordering::Relaxed;
-
-            PARENT_WAIT_HIT_COUNT.fetch_add(1, Relaxed);
-            let wait_start = std::time::Instant::now();
-
-            let mut spins: usize = 0;
-            loop {
-                // Check if parent is now set
-                if !left_leaf.parent().is_null() {
-                    break;
-                }
-
-                spins += 1;
-
-                // Backoff strategy:
-                // Phase 1 (0-64): Spin - handles most cases (parent set quickly)
-                // Phase 2 (64-1024): Yield - moderate backoff
-                // Phase 3 (1024+): Short sleep - avoid burning CPU
-                if spins <= 64 {
-                    std::hint::spin_loop();
-                } else if spins <= 1024 {
-                    std::thread::yield_now();
-                } else {
-                    std::thread::sleep(std::time::Duration::from_micros(10));
-                }
-
-                // Safety limit - if we hit this, there's a bug
-                assert!(
-                    spins <= 1_000_000,
-                    "propagate_split_generic: parent pointer never set after {spins} iterations. \
-                     left_leaf_ptr={left_leaf_ptr:p}"
-                );
-            }
-
-            // Record instrumentation
-            let wait_ns = wait_start.elapsed().as_nanos() as u64;
-            let spins_u64 = spins as u64;
-
-            PARENT_WAIT_TOTAL_SPINS.fetch_add(spins_u64, Relaxed);
-            PARENT_WAIT_TOTAL_NS.fetch_add(wait_ns, Relaxed);
-
-            // Update max values (relaxed is fine for diagnostics)
-            let mut current_max = PARENT_WAIT_MAX_SPINS.load(Relaxed);
-            while spins_u64 > current_max {
-                match PARENT_WAIT_MAX_SPINS.compare_exchange_weak(
-                    current_max,
-                    spins_u64,
-                    Relaxed,
-                    Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(v) => current_max = v,
-                }
-            }
-
-            let mut current_max_ns = PARENT_WAIT_MAX_NS.load(Relaxed);
-            while wait_ns > current_max_ns {
-                match PARENT_WAIT_MAX_NS.compare_exchange_weak(
-                    current_max_ns,
-                    wait_ns,
-                    Relaxed,
-                    Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(v) => current_max_ns = v,
-                }
-            }
-
-            #[cfg(feature = "tracing")]
-            tracing::warn!(
-                left_leaf_ptr = ?left_leaf_ptr,
-                spins = spins,
-                wait_us = wait_ns / 1000,
-                "PARENT_WAIT_END: parent pointer set"
-            );
-        }
-
-        // Lock parent with validation and find child index.
-        // Use a retry loop to handle the case where child is not found in parent,
-        // which can happen during concurrent splits (matches WIDTH=15 behavior).
-        #[cfg(feature = "tracing")]
-        let parent_lock_start = std::time::Instant::now();
-
-        let mut retry_count: usize = 0;
-        let (parent_ptr, mut parent_lock, child_idx) = loop {
-            let (parent_ptr, parent_lock) = self.locked_parent_leaf_generic(left_leaf);
-            let parent: &L::Internode = unsafe { &*parent_ptr };
-
-            #[cfg(feature = "tracing")]
-            tracing::trace!(
-                parent_ptr = ?parent_ptr,
-                nkeys = parent.nkeys(),
-                is_full = parent.is_full(),
-                "PROPAGATE: locked parent"
-            );
-
-            // Find child index using pointer scan
-            if let Some(idx) = self.try_find_child_index_generic(parent, left_leaf_ptr.cast::<u8>())
-            {
-                #[cfg(feature = "tracing")]
-                {
-                    let parent_lock_elapsed = parent_lock_start.elapsed();
-                    if parent_lock_elapsed > std::time::Duration::from_millis(1) || retry_count > 0 {
-                        tracing::warn!(
-                            parent_ptr = ?parent_ptr,
-                            child_idx = idx,
-                            retry_count = retry_count,
-                            parent_lock_elapsed_us = parent_lock_elapsed.as_micros() as u64,
-                            "SLOW_PARENT_LOCK: locking parent for propagation took >1ms or had retries"
-                        );
-                    }
-                }
-                break (parent_ptr, parent_lock, idx);
-            }
-
-            // Child not found - this can happen if the parent was split and
-            // the child moved to a sibling, but the child's parent pointer
-            // was updated AFTER we validated in locked_parent_leaf_generic.
-            retry_count += 1;
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                parent_ptr = ?parent_ptr,
-                retry_count = retry_count,
-                nkeys = parent.nkeys(),
-                "PROPAGATE_RETRY: child not found in parent"
-            );
-
-            // Child not found - this happens during concurrent internode splits.
-            // The child was moved to a sibling but its parent pointer hasn't been
-            // updated yet. Yield and retry - the window is small.
-            drop(parent_lock);
-
-            if retry_count < 1000 {
-                std::hint::spin_loop();
-            } else {
-                // After many retries, yield to let the splitting thread complete
-                std::thread::yield_now();
-            }
-
-            // Safety valve - but with much higher limit since this is a valid race
-            if retry_count >= 100_000 {
-                let current_parent = left_leaf.parent();
-                panic!(
-                    "propagate_split_generic: child not found after {retry_count} retries. \
-                     left_leaf_ptr={left_leaf_ptr:p} parent_ptr={parent_ptr:p} \
-                     current_parent={current_parent:p}"
-                );
-            }
-        };
-
-        let parent: &L::Internode = unsafe { &*parent_ptr };
-
-        if parent.is_full() {
-            // Parent is full - split the parent internode
-            #[cfg(feature = "tracing")]
-            tracing::info!(
-                parent_ptr = ?parent_ptr,
-                nkeys = parent.nkeys(),
-                "PROPAGATE_INTERNODE_SPLIT: parent is full, triggering internode split"
-            );
-
-            // CRITICAL: Save is_root BEFORE unlocking, because SPLIT_UNLOCK_MASK clears ROOT_BIT
-            let parent_was_root: bool = parent.is_root();
-
-            // CRITICAL FIX: Set right_leaf's parent pointer BEFORE releasing the lock.
-            // This prevents a race where another thread tries to split right_leaf and
-            // finds NULL parent (not a root), causing it to spin forever waiting.
-            // The internode split may move right_leaf to a different parent, but:
-            // 1. Having a non-NULL parent allows the other thread to make progress
-            // 2. The "child not found" retry loop handles parent changes gracefully
-            // 3. propagate_internode_split_generic will update the parent if needed
-            unsafe {
-                (*right_leaf_ptr).set_parent(parent_ptr.cast::<u8>());
-            }
-
-            // Release parent lock WITHOUT mark_split - propagate_internode_split_generic
-            // will re-acquire the lock and call mark_split when it performs the split.
-            // This matches WIDTH=15 behavior (locked.rs:1614-1616).
-            drop(parent_lock);
-
-            let result = self.propagate_internode_split_generic(
-                parent_ptr,
-                split_ikey,
-                right_leaf_ptr.cast::<u8>(),
-                parent_was_root,
-                guard,
-            );
-
-            #[cfg(feature = "tracing")]
-            {
-                let total_elapsed = propagate_start.elapsed();
-                if total_elapsed > std::time::Duration::from_millis(5) {
-                    tracing::warn!(
-                        left_leaf_ptr = ?left_leaf_ptr,
-                        right_leaf_ptr = ?right_leaf_ptr,
-                        total_elapsed_us = total_elapsed.as_micros() as u64,
-                        "SLOW_PROPAGATE: propagate_split with internode split took >5ms"
-                    );
-                }
-            }
-
-            result
-        } else {
-            // Parent has room - insert directly
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                parent_ptr = ?parent_ptr,
-                child_idx = child_idx,
-                split_ikey = format_args!("{:016x}", split_ikey),
-                "PROPAGATE_INSERT: parent has room, inserting"
-            );
-
-            parent_lock.mark_insert();
-            parent.insert_key_and_child(child_idx, split_ikey, right_leaf_ptr.cast::<u8>());
-
-            // Update right leaf's parent pointer
-            unsafe {
-                (*right_leaf_ptr).set_parent(parent_ptr.cast::<u8>());
-            }
-
-            #[cfg(feature = "tracing")]
-            {
-                let total_elapsed = propagate_start.elapsed();
-                tracing::debug!(
-                    parent_ptr = ?parent_ptr,
-                    nkeys = parent.nkeys(),
-                    total_elapsed_us = total_elapsed.as_micros() as u64,
-                    "PROPAGATE_COMPLETE: insert complete"
-                );
-            }
-
-            drop(parent_lock);
-            Ok(())
-        }
-    }
-
-    /// Create a new root internode when the root was a leaf.
-    #[inline]
-    fn create_root_internode_generic(
-        &self,
-        left_leaf_ptr: *mut L,
-        right_leaf_ptr: *mut L,
-        split_ikey: u64,
-    ) -> Result<(), InsertError> {
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            split_ikey = format_args!("{:016x}", split_ikey),
-            "CREATE_ROOT_INTERNODE: creating root internode"
-        );
-
-        // Create new root internode (height=0, children are leaves)
-        let new_root: Box<L::Internode> = L::Internode::new_root_boxed(0);
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            is_root = new_root.version().is_root(),
-            "CREATE_ROOT_INTERNODE: new_root created"
-        );
-
-        // Set up children: [left_leaf] -split_ikey- [right_leaf]
-        new_root.set_child(0, left_leaf_ptr.cast());
-        new_root.set_ikey(0, split_ikey);
-        new_root.set_child(1, right_leaf_ptr.cast());
-        new_root.set_nkeys(1);
-
-        // Allocate internode
-        let new_root_ptr: *mut u8 = self
-            .allocator
-            .alloc_internode_erased(Box::into_raw(new_root).cast());
-
-        #[cfg(feature = "tracing")]
-        {
-            let root_ref: &L::Internode = unsafe { &*new_root_ptr.cast::<L::Internode>() };
-            tracing::debug!(
-                new_root_ptr = ?new_root_ptr,
-                is_root = root_ref.version().is_root(),
-                "CREATE_ROOT_INTERNODE: after alloc"
-            );
-        }
-
-        // Atomically update root pointer
-        // NOTE: We set parent pointers AFTER CAS succeeds to avoid dangling pointers
-        // if another thread already installed a new root. This matches WIDTH=15 behavior.
-        let expected: *mut u8 = left_leaf_ptr.cast();
-        match self.root_ptr.compare_exchange(
-            expected,
-            new_root_ptr,
-            AtomicOrdering::AcqRel,
-            AtomicOrdering::Acquire,
-        ) {
-            Ok(_) => {
-                // CAS succeeded - now safe to update parent pointers
-                unsafe {
-                    // Fence before making the new root reachable via parent pointers.
-                    // Ensures the new internode is fully constructed before it becomes visible.
-                    // Required for correctness on weakly-ordered architectures (ARM, etc.).
-                    atomicFence(AtomicOrdering::Release);
-
-                    (*left_leaf_ptr).set_parent(new_root_ptr);
-                    (*right_leaf_ptr).set_parent(new_root_ptr);
-
-                    // Clear root flag on left leaf (it's no longer the root)
-                    (*left_leaf_ptr).version().mark_nonroot();
-                }
-                Ok(())
-            }
-            Err(_) => {
-                // Root changed concurrently - shouldn't happen if we hold lock
-                Err(InsertError::SplitFailed)
-            }
-        }
-    }
-
-    /// Promote a layer root to a new layer root internode.
-    #[inline]
-    #[expect(clippy::unnecessary_wraps, reason = "API consistency")]
-    fn promote_layer_root_generic(
-        &self,
-        left_leaf_ptr: *mut L,
-        right_leaf_ptr: *mut L,
-        split_ikey: u64,
-    ) -> Result<(), InsertError> {
-        // Create new internode root for this layer (height=0, children are leaves)
-        let new_inode: Box<L::Internode> = L::Internode::new_boxed(0);
-
-        // Set up children
-        new_inode.set_child(0, left_leaf_ptr.cast());
-        new_inode.set_ikey(0, split_ikey);
-        new_inode.set_child(1, right_leaf_ptr.cast());
-        new_inode.set_nkeys(1);
-
-        // Mark as root (layer roots have the root flag)
-        new_inode.version().mark_root();
-
-        // Allocate internode
-        let new_inode_ptr = self
-            .allocator
-            .alloc_internode_erased(Box::into_raw(new_inode).cast());
-
-        // Update children's parent pointers
-        // Now left_leaf.parent() != null, so maybe_parent pattern works
-        unsafe {
-            // Fence before making the new root reachable via parent pointers.
-            // Ensures the new internode is fully constructed before it becomes visible.
-            // Required for correctness on weakly-ordered architectures (ARM, etc.).
-            atomicFence(AtomicOrdering::Release);
-
-            (*left_leaf_ptr).set_parent(new_inode_ptr);
-            (*right_leaf_ptr).set_parent(new_inode_ptr);
-
-            // Clear root flag on both leaves - they're no longer layer roots
-            (*left_leaf_ptr).version().mark_nonroot();
-            (*right_leaf_ptr).version().mark_nonroot();
-        }
-
-        Ok(())
-    }
-
+    ///
+    /// # Help-Along Protocol
+    ///
+    /// The right sibling (`right_leaf_ptr`) is created with a split-locked version
+    /// ([`LOCK_BIT`] | [`SPLITTING_BIT`] set). This function unlocks it after setting its
+    /// parent pointer. This prevents other threads from trying to split the right
+    /// sibling while its parent is NULL.
+    ///
+    /// All exit paths must call `(*right_leaf_ptr).version().unlock_for_split()`.
     /// Try to find the child index for a given child pointer in an internode.
     ///
     /// Returns `Some(index)` if found, `None` if not found. Use this in retry loops
@@ -2218,458 +2136,19 @@ where
         self.try_find_child_index_generic(parent, child)
             .expect("Child not found in parent internode")
     }
-
-    // ========================================================================
-    //  Internode Split Propagation (Generic)
-    // ========================================================================
-
-    /// Maximum number of retries for split propagation before panicking.
-    ///
-    /// This bounds retry loops to prevent livelock. If exceeded, it indicates
-    /// a bug in the concurrency logic rather than normal contention.
-    const MAX_PROPAGATION_RETRIES: usize = 64;
-
-    /// Lock a parent internode with validation (generic version).
-    ///
-    /// Handles the race where the parent pointer may change between reading
-    /// and locking. Uses an optimistic lock-then-validate pattern.
-    ///
-    /// # Returns
-    ///
-    /// - `Some((parent_ptr, lock_guard))` - Successfully locked parent
-    /// - `None` - Node has no parent (is a root)
-    #[expect(clippy::unused_self, reason = "API Consistency")]
-    fn locked_parent_internode_generic(
-        &self,
-        inode: &L::Internode,
-    ) -> Option<(*mut L::Internode, crate::nodeversion::LockGuard<'_>)> {
-        use crate::leaf_trait::TreeInternode;
-
-        let mut retries: usize = 0;
-
-        loop {
-            // Step 1: Optimistic read of parent pointer
-            let parent_ptr: *mut u8 = inode.parent();
-
-            // No parent means this is a root node
-            if parent_ptr.is_null() {
-                return None;
-            }
-
-            // Step 2: Lock the parent using yield-based locking
-            // SAFETY: parent_ptr is non-null, seize guard ensures it won't be freed
-            let parent: &L::Internode = unsafe { &*parent_ptr.cast::<L::Internode>() };
-            let lock = parent.version().lock_with_yield();
-
-            // Step 3: Revalidate - check parent pointer hasn't changed
-            let current_parent: *mut u8 = inode.parent();
-            if current_parent == parent_ptr {
-                // Success: parent is stable
-                return Some((parent_ptr.cast(), lock));
-            }
-
-            // Step 4: Parent changed, release lock and retry
-            drop(lock);
-
-            retries += 1;
-            assert!(
-                retries < Self::MAX_PROPAGATION_RETRIES,
-                "locked_parent_internode_generic: exceeded {} retries",
-                Self::MAX_PROPAGATION_RETRIES
-            );
-
-            // Brief pause to reduce contention
-            std::hint::spin_loop();
-        }
-    }
-
-    /// Propagate an internode split up the tree (generic version).
-    ///
-    /// When a parent internode becomes full during leaf split propagation,
-    /// this function splits the parent and propagates the separator key upward.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Lock the parent internode
-    /// 2. If parent has space (another thread split it), insert directly
-    /// 3. If parent is full, split it:
-    ///    - Create new sibling internode
-    ///    - Split keys and children between parent and sibling
-    ///    - Update children's parent pointers
-    /// 4. If parent is a root, create new root internode
-    /// 5. Otherwise, recursively propagate to grandparent
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Complex node splitting logic with conditionally compiled logs"
-    )]
-    #[expect(
-        clippy::only_used_in_recursion,
-        reason = "TODO: Consider iterative algorithm (may be too complex)"
-    )]
-    fn propagate_internode_split_generic(
-        &self,
-        parent_ptr: *mut L::Internode,
-        insert_ikey: u64,
-        insert_child: *mut u8,
-        parent_was_root: bool,
-        guard: &LocalGuard<'_>,
-    ) -> Result<(), InsertError> {
-        use crate::leaf_trait::TreeInternode;
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            parent_ptr = ?parent_ptr,
-            insert_ikey = format_args!("{:016x}", insert_ikey),
-            insert_child = ?insert_child,
-            parent_was_root,
-            "INTERNODE_SPLIT: propagate_internode_split_generic"
-        );
-
-        let mut retries: usize = 0;
-
-        'retry: loop {
-            retries += 1;
-            assert!(
-                retries <= Self::MAX_PROPAGATION_RETRIES,
-                "propagate_internode_split_generic: exceeded {} retries",
-                Self::MAX_PROPAGATION_RETRIES
-            );
-
-            // SAFETY: parent_ptr is valid (from locked_parent or caller)
-            let parent: &L::Internode = unsafe { &*parent_ptr };
-
-            // Lock the parent using yield-based locking
-            let mut parent_lock = parent.version().lock_with_yield();
-
-            // Recompute child index after acquiring lock (may have changed)
-            let child_idx: usize = parent.find_insert_position(insert_ikey);
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                parent_nkeys = parent.nkeys(),
-                parent_is_full = parent.is_full(),
-                child_idx,
-                "INTERNODE_SPLIT: parent state"
-            );
-
-            // Check if parent is still full (another thread may have split it)
-            if !parent.is_full() {
-                // Parent was split by another thread - just insert
-                #[cfg(feature = "tracing")]
-                tracing::debug!("INTERNODE_SPLIT: parent not full, inserting directly");
-
-                parent_lock.mark_insert();
-                parent.insert_key_and_child(child_idx, insert_ikey, insert_child);
-
-                // Update child's parent pointer
-                unsafe {
-                    if parent.children_are_leaves() {
-                        (*insert_child.cast::<L>()).set_parent(parent_ptr.cast::<u8>());
-                    } else {
-                        (*insert_child.cast::<L::Internode>()).set_parent(parent_ptr.cast::<u8>());
-                    }
-                }
-                return Ok(());
-            }
-
-            // Parent is full - must split
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                height = parent.height(),
-                children_are_leaves = parent.children_are_leaves(),
-                is_root_before_mark_split = parent.is_root(),
-                "INTERNODE_SPLIT: parent full, splitting"
-            );
-
-            parent_lock.mark_split();
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                is_root = parent.is_root(),
-                "INTERNODE_SPLIT: after mark_split"
-            );
-
-            // Create new sibling internode
-            let sibling: Box<L::Internode> = L::Internode::new_boxed(parent.height());
-            let sibling_ptr: *mut L::Internode = Box::into_raw(sibling);
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                sibling_ptr = ?sibling_ptr,
-                "INTERNODE_SPLIT: created sibling"
-            );
-
-            // Track sibling for cleanup
-            self.allocator
-                .track_internode_erased(sibling_ptr.cast::<u8>());
-
-            // Split and insert simultaneously
-            // NOTE: split_into now updates all children's parent pointers in sibling internally
-            // (matching C++ masstree_split.hh:163-165). This is critical for correctness.
-            let (popup_key, insert_went_left) = unsafe {
-                parent.split_into(
-                    &mut *sibling_ptr,
-                    sibling_ptr,
-                    child_idx,
-                    insert_ikey,
-                    insert_child,
-                )
-            };
-
-            #[cfg(feature = "tracing")]
-            {
-                let sibling_ref: &L::Internode = unsafe { &*sibling_ptr };
-                tracing::debug!(
-                    popup_key = format_args!("{:016x}", popup_key),
-                    insert_went_left,
-                    parent_nkeys = parent.nkeys(),
-                    sibling_nkeys = sibling_ref.nkeys(),
-                    "INTERNODE_SPLIT: after split"
-                );
-            }
-
-            // NOTE: split_into updates internode children's parents internally (height > 0).
-            // For leaf children (height == 0), we must update them here because split_into
-            // doesn't know the actual leaf type (could be LeafNode<S, WIDTH> or LeafNode24<S>).
-            // This must happen while still holding the parent lock to prevent races.
-            unsafe {
-                let sibling_ref: &L::Internode = &*sibling_ptr;
-
-                if parent.children_are_leaves() {
-                    // Update all leaf children's parent pointers in sibling
-                    for i in 0..=sibling_ref.nkeys() {
-                        let child: *mut u8 = sibling_ref.child(i);
-                        if !child.is_null() {
-                            (*child.cast::<L>()).set_parent(sibling_ptr.cast::<u8>());
-                        }
-                    }
-                }
-                // For internode children, split_into already updated them
-
-                // If insert_child stayed in the LEFT parent, set its parent explicitly
-                if insert_went_left {
-                    if parent.children_are_leaves() {
-                        (*insert_child.cast::<L>()).set_parent(parent_ptr.cast::<u8>());
-                    } else {
-                        (*insert_child.cast::<L::Internode>()).set_parent(parent_ptr.cast::<u8>());
-                    }
-                }
-            }
-
-            // Check if parent is a root (null parent AND was_root flag passed from caller)
-            // NOTE: We use parent_was_root instead of parent.is_root() because
-            // SPLIT_UNLOCK_MASK clears ROOT_BIT when we unlocked in propagate_split_generic
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                parent_parent = ?parent.parent(),
-                parent_parent_is_null = parent.parent().is_null(),
-                parent_was_root,
-                "INTERNODE_SPLIT: checking root"
-            );
-
-            if parent.parent().is_null() && parent_was_root {
-                #[cfg(feature = "tracing")]
-                tracing::debug!("INTERNODE_SPLIT: parent is root, creating new root internode");
-
-                let current_root: *mut u8 = self.root_ptr.load(AtomicOrdering::Acquire);
-
-                if current_root == parent_ptr.cast::<u8>() {
-                    // MAIN TREE ROOT INTERNODE SPLIT
-                    let result = self.create_root_internode_from_internode_split_generic(
-                        parent_ptr,
-                        sibling_ptr,
-                        popup_key,
-                    );
-                    drop(parent_lock);
-                    return result;
-                }
-
-                // LAYER ROOT INTERNODE SPLIT
-                let result =
-                    self.promote_layer_root_internode_generic(parent_ptr, sibling_ptr, popup_key);
-                drop(parent_lock);
-                return result;
-            }
-
-            // Not a root - propagate to grandparent
-            #[expect(
-                clippy::manual_let_else,
-                reason = "Unnecessary refactor would add complexity"
-            )]
-            let (grandparent_ptr, mut grandparent_lock) =
-                if let Some(result) = self.locked_parent_internode_generic(parent) {
-                    result
-                } else {
-                    // Parent became a root while we were working - retry
-                    drop(parent_lock);
-                    continue 'retry;
-                };
-
-            let grandparent: &L::Internode = unsafe { &*grandparent_ptr };
-
-            // Find parent's position in grandparent
-            let parent_idx: Option<usize> = {
-                let mut found: Option<usize> = None;
-                for i in 0..=grandparent.nkeys() {
-                    if grandparent.child(i) == parent_ptr.cast::<u8>() {
-                        found = Some(i);
-                        break;
-                    }
-                }
-                found
-            };
-
-            let Some(_parent_idx) = parent_idx else {
-                // Parent not found in grandparent - structure changed, retry
-                drop(grandparent_lock);
-                drop(parent_lock);
-                continue 'retry;
-            };
-
-            // Check if grandparent has space
-            if !grandparent.is_full() {
-                // Grandparent has space - insert separator and sibling
-                grandparent_lock.mark_insert();
-                let insert_pos = grandparent.find_insert_position(popup_key);
-                grandparent.insert_key_and_child(insert_pos, popup_key, sibling_ptr.cast::<u8>());
-                unsafe {
-                    (*sibling_ptr).set_parent(grandparent_ptr.cast::<u8>());
-                }
-
-                // Release locks in order
-                drop(grandparent_lock);
-                drop(parent_lock);
-                return Ok(());
-            }
-
-            // Grandparent full - need recursive split
-            // CRITICAL: Save is_root BEFORE unlocking, because SPLIT_UNLOCK_MASK clears ROOT_BIT
-            let grandparent_was_root: bool = grandparent.is_root();
-
-            // Release grandparent lock without mark_split - recursive call will handle it
-            // The recursive call will re-acquire the lock and mark_split when appropriate
-            drop(grandparent_lock);
-
-            // Recursive call to split grandparent
-            let result = self.propagate_internode_split_generic(
-                grandparent_ptr,
-                popup_key,
-                sibling_ptr.cast::<u8>(),
-                grandparent_was_root,
-                guard,
-            );
-
-            drop(parent_lock);
-            return result;
-        }
-    }
-
-    /// Create a new root internode from an internode split (generic version).
-    fn create_root_internode_from_internode_split_generic(
-        &self,
-        left_ptr: *mut L::Internode,
-        right_ptr: *mut L::Internode,
-        split_ikey: u64,
-    ) -> Result<(), InsertError> {
-        use crate::leaf_trait::TreeInternode;
-
-        // SAFETY: left_ptr is valid
-        let left: &L::Internode = unsafe { &*left_ptr };
-
-        // Create new root with height = left.height + 1
-        let new_root: Box<L::Internode> = L::Internode::new_root_boxed(left.height() + 1);
-
-        // Set up children: [left] -split_ikey- [right]
-        new_root.set_child(0, left_ptr.cast::<u8>());
-        new_root.set_ikey(0, split_ikey);
-        new_root.set_child(1, right_ptr.cast::<u8>());
-        new_root.set_nkeys(1);
-
-        // Allocate and track
-        let new_root_ptr: *mut u8 = self
-            .allocator
-            .alloc_internode_erased(Box::into_raw(new_root).cast());
-
-        // Atomically install new root
-        let expected: *mut u8 = left_ptr.cast::<u8>();
-
-        match self.root_ptr.compare_exchange(
-            expected,
-            new_root_ptr,
-            AtomicOrdering::AcqRel,
-            AtomicOrdering::Acquire,
-        ) {
-            Ok(_) => {
-                // CAS succeeded - update parent pointers
-                unsafe {
-                    // Fence before making the new root reachable via parent pointers.
-                    atomicFence(AtomicOrdering::Release);
-
-                    (*left_ptr).set_parent(new_root_ptr);
-                    (*right_ptr).set_parent(new_root_ptr);
-                    (*left_ptr).version().mark_nonroot();
-                }
-                Ok(())
-            }
-            Err(_) => {
-                // CAS failed - another thread already updated root
-                Err(InsertError::SplitFailed)
-            }
-        }
-    }
-
-    /// Promote a layer root internode to a new layer root internode (generic version).
-    #[expect(clippy::unnecessary_wraps, reason = "API Consistency")]
-    fn promote_layer_root_internode_generic(
-        &self,
-        left_ptr: *mut L::Internode,
-        right_ptr: *mut L::Internode,
-        split_ikey: u64,
-    ) -> Result<(), InsertError> {
-        use crate::leaf_trait::TreeInternode;
-
-        // SAFETY: left_ptr is valid
-        let left: &L::Internode = unsafe { &*left_ptr };
-
-        // Create new root for this layer
-        let new_root: Box<L::Internode> = L::Internode::new_boxed(left.height() + 1);
-
-        // Set up children
-        new_root.set_child(0, left_ptr.cast::<u8>());
-        new_root.set_ikey(0, split_ikey);
-        new_root.set_child(1, right_ptr.cast::<u8>());
-        new_root.set_nkeys(1);
-
-        // Mark as layer root
-        new_root.version().mark_root();
-
-        // Allocate and track
-        let new_root_ptr: *mut u8 = self
-            .allocator
-            .alloc_internode_erased(Box::into_raw(new_root).cast());
-
-        // Update parent pointers
-        unsafe {
-            atomicFence(AtomicOrdering::Release);
-
-            (*left_ptr).set_parent(new_root_ptr);
-            (*right_ptr).set_parent(new_root_ptr);
-            (*left_ptr).version().mark_nonroot();
-        }
-
-        Ok(())
-    }
 }
 
 // =============================================================================
 // Generic Layer Creation
 // =============================================================================
 
-impl<V, L, A> MassTreeGeneric<V, L, A>
+impl<S, L, A> MassTreeGeneric<S, L, A>
 where
-    V: Send + Sync + 'static,
-    L: LayerCapableLeaf<V>,
-    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
 {
     /// Create a new layer for suffix conflict (generic version).
     ///
@@ -2710,7 +2189,7 @@ where
         parent_leaf: &L,
         conflict_slot: usize,
         new_key: &mut Key<'_>,
-        new_value: Arc<V>,
+        new_value: S::Output,
         guard: &LocalGuard<'_>,
     ) -> *mut u8 {
         // =====================================================================
@@ -2723,11 +2202,11 @@ where
         // Create a Key iterator from the existing suffix for comparison
         let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
 
-        // Clone the existing Arc value from the conflict slot
+        // Clone the existing value from the conflict slot
         // INVARIANT: Conflict case means the slot contains a value, not a layer pointer.
-        let existing_arc: Option<Arc<V>> = parent_leaf.try_clone_arc(conflict_slot);
+        let existing_output: Option<S::Output> = parent_leaf.try_clone_output(conflict_slot);
         debug_assert!(
-            existing_arc.is_some(),
+            existing_output.is_some(),
             "create_layer_concurrent_generic: conflict slot {} should contain a value, \
              not a layer pointer. keylenx={}",
             conflict_slot,
@@ -2809,7 +2288,7 @@ where
             self.assign_final_layer_entries(
                 final_ptr,
                 &existing_key,
-                existing_arc,
+                existing_output,
                 new_key,
                 Some(new_value),
                 cmp,
@@ -2853,9 +2332,9 @@ where
         &self,
         final_ptr: *mut L,
         existing_key: &Key<'_>,
-        existing_arc: Option<Arc<V>>,
+        existing_output: Option<S::Output>,
         new_key: &Key<'_>,
-        new_arc: Option<Arc<V>>,
+        new_arc: Option<S::Output>,
         cmp: Ordering,
         guard: &LocalGuard<'_>,
     ) {
@@ -2868,7 +2347,7 @@ where
                 // existing goes in slot 0, new goes in slot 1
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
-                    final_leaf.assign_from_key_arc(0, existing_key, existing_arc, guard);
+                    final_leaf.assign_from_key_arc(0, existing_key, existing_output, guard);
                     final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
                 }
             }
@@ -2878,7 +2357,7 @@ where
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
                     final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
-                    final_leaf.assign_from_key_arc(1, existing_key, existing_arc, guard);
+                    final_leaf.assign_from_key_arc(1, existing_key, existing_output, guard);
                 }
             }
             Ordering::Equal => {
@@ -2889,7 +2368,7 @@ where
                     // existing is shorter or equal length -> existing first
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
-                        final_leaf.assign_from_key_arc(0, existing_key, existing_arc, guard);
+                        final_leaf.assign_from_key_arc(0, existing_key, existing_output, guard);
                         final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
                     }
                 } else {
@@ -2897,7 +2376,7 @@ where
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
                         final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
-                        final_leaf.assign_from_key_arc(1, existing_key, existing_arc, guard);
+                        final_leaf.assign_from_key_arc(1, existing_key, existing_output, guard);
                     }
                 }
             }

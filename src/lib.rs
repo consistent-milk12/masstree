@@ -215,15 +215,19 @@ pub use link::{is_marked, mark_ptr, unmark_ptr};
 // Re-export main types for convenience
 pub use slot::ValueSlot;
 pub use suffix::{PermutationProvider, SuffixBag};
-pub use tree::{MassTree, MassTree24, MassTreeGeneric, MassTreeIndex};
+pub use tree::{MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTreeIndex};
 
-// Re-export debug counters for diagnosis (lightweight, always-on)
+// Re-export debug counters for diagnosis (only when tracing is enabled)
+#[cfg(feature = "tracing")]
 pub use tree::{
-    ADVANCE_BLINK_COUNT, BLINK_SHOULD_FOLLOW_COUNT, CAS_INSERT_FALLBACK_COUNT,
-    CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters, LOCKED_INSERT_COUNT,
-    SEARCH_NOT_FOUND_COUNT, SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters,
-    get_debug_counters, reset_debug_counters,
-    // Parent-wait instrumentation for variance analysis
-    PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
-    PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, get_parent_wait_stats,
+    ADVANCE_BLINK_COUNT, BLINK_ADVANCE_ANOMALY_COUNT, BLINK_SHOULD_FOLLOW_COUNT,
+    CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters,
+    LOCKED_INSERT_COUNT, PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
+    PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, SEARCH_NOT_FOUND_COUNT,
+    SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters, get_debug_counters,
+    get_parent_wait_stats, reset_debug_counters,
 };
+
+// Re-export RAII helpers for internal use
+#[expect(unused_imports, reason = "Used by split propagation code paths")]
+pub(crate) use tree::ExitGuard;

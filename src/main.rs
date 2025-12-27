@@ -353,6 +353,7 @@ fn run_verification_test() {
         let tree = Arc::new(MassTree24::<u64>::new());
         let failures = Arc::new(AtomicUsize::new(0));
 
+        #[expect(clippy::cast_sign_loss)]
         let handles: Vec<_> = (0..4)
             .map(|t| {
                 let tree = Arc::clone(&tree);
@@ -379,8 +380,7 @@ fn run_verification_test() {
 
                             failures.fetch_add(1, Ordering::Relaxed);
                             eprintln!(
-                                "!!! VERIFY FAIL: t={} i={} key=0x{:016x} insert={:?} get1={:?} get2={:?} get3={:?} tree_len={}",
-                                t, i, key_val, insert_result, get1, get2, get3, tree_len
+                                "!!! VERIFY FAIL: t={t} i={i} key=0x{key_val:016x} insert={insert_result:?} get1={get1:?} get2={get2:?} get3={get3:?} tree_len={tree_len}"
                             );
                             // Stop this thread to reduce noise
                             return;
@@ -398,17 +398,22 @@ fn run_verification_test() {
         if fail_count > 0 {
             eprintln!(
                 "Run {}: {} verification failures, tree.len()={}",
-                run, fail_count, tree.len()
+                run,
+                fail_count,
+                tree.len()
             );
+
             return; // Stop on first failure
-        } else {
-            println!("Run {}: OK (tree.len()={})", run, tree.len());
         }
+
+        println!("Run {}: OK (tree.len()={})", run, tree.len());
     }
 
     println!("\nAll 20 runs passed!");
 }
 
+#[expect(clippy::cast_sign_loss)]
+#[cfg(feature = "tracing")]
 fn run_parent_wait_benchmark() {
     println!("\n{}", "=".repeat(80));
     println!("PARENT WAIT STATS BENCHMARK");
@@ -446,15 +451,23 @@ fn run_parent_wait_benchmark() {
     let stats = masstree::get_parent_wait_stats();
     let debug = masstree::get_all_debug_counters();
 
-    println!("\nRun completed in {:?}", elapsed);
+    println!("\nRun completed in {elapsed:?}");
     println!("Tree size: {}", tree.len());
     println!("\n=== Parent Wait Stats ===");
     println!("Hits:        {}", stats.hits);
     println!("Total spins: {}", stats.total_spins);
     println!("Max spins:   {}", stats.max_spins);
     println!("Avg spins:   {:.2}", stats.avg_spins);
-    println!("Total wait:  {:.2} us ({:.2} ms)", stats.total_us, stats.total_us / 1000.0);
-    println!("Max wait:    {:.2} us ({:.2} ms)", stats.max_us, stats.max_us / 1000.0);
+    println!(
+        "Total wait:  {:.2} us ({:.2} ms)",
+        stats.total_us,
+        stats.total_us / 1000.0
+    );
+    println!(
+        "Max wait:    {:.2} us ({:.2} ms)",
+        stats.max_us,
+        stats.max_us / 1000.0
+    );
     println!("Avg wait:    {:.2} us", stats.avg_us);
     println!("\n=== Debug Counters ===");
     println!("Splits:      {}", debug.split);
@@ -469,8 +482,12 @@ fn run_parent_wait_benchmark() {
     let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
     let unexplained_ms = elapsed_ms - (stats.total_us / 1000.0);
     if unexplained_ms > 100.0 && stats.total_us > 0.0 {
-        println!("\n!!! WARNING: {:.1}ms unexplained (elapsed={:.1}ms, parent_wait={:.1}ms)",
-            unexplained_ms, elapsed_ms, stats.total_us / 1000.0);
+        println!(
+            "\n!!! WARNING: {:.1}ms unexplained (elapsed={:.1}ms, parent_wait={:.1}ms)",
+            unexplained_ms,
+            elapsed_ms,
+            stats.total_us / 1000.0
+        );
     }
 }
 
@@ -481,9 +498,10 @@ fn main() {
     eprintln!("===========================");
     eprintln!();
 
-    // Run parent wait stats benchmark
+    // Run parent wait stats benchmark (requires tracing feature)
+    #[cfg(feature = "tracing")]
     for run in 1..=10 {
-        println!("\n\n>>> Run {}/10 <<<", run);
+        println!("\n\n>>> Run {run}/10 <<<");
         run_parent_wait_benchmark();
     }
 }
