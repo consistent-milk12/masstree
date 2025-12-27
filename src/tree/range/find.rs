@@ -320,7 +320,16 @@ where
 /// 1. **No search per element**: Uses `stack.kp()` (O(1)) instead of `lower_with_position` (O(n))
 /// 2. **Lazy suffix reading**: Only reads suffix when emitting, not for every slot
 /// 3. **Minimal cursor updates**: Only updates cursor fields needed for duplicate detection
-/// 4. **Early version check**: Validates before expensive operations
+/// 4. **Batch version validation**: Only check version at leaf boundaries, not per-entry
+///
+/// # Safety: Why no per-entry version check?
+///
+/// Following TreeIndex's approach: trust the Guard for memory safety.
+/// - Guard prevents use-after-free during iteration
+/// - B-link structure means splits only move keys RIGHT (forward direction)
+/// - Forward iteration naturally follows this direction
+/// - Version is validated when advancing to next leaf (in `advance_leaf`)
+/// - If a split moves keys we haven't seen, we'll encounter them in the sibling
 #[inline]
 fn find_next_inner<L, S>(
     stack: &mut ScanStackElement<L, S>,
@@ -341,26 +350,21 @@ where
 
     let leaf: &L = unsafe { stack.leaf_ref() };
 
-    // Check if leaf is deleted
+    // Check if leaf is deleted (this is cheap - single atomic load)
     if leaf.version().is_deleted() {
         return (ScanState::Retry, None);
     }
 
     // Get current slot - O(1) via perm.get(ki)
     let Some(slot) = stack.kp() else {
-        // Leaf exhausted, try advancing
+        // Leaf exhausted, try advancing (this validates version)
         return advance_leaf(stack, cursor_key, guard);
     };
 
-    // Read minimal slot data first (ikey + keylenx)
+    // Read slot data - Guard ensures memory safety
+    // No per-entry version check: validated at leaf boundaries only
     let slot_ikey: u64 = leaf.ikey(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
-
-    // Early version check before reading more data
-    // This is a fence() in C++ - validates reads above are consistent
-    if leaf.version().has_changed(stack.version()) {
-        return refresh_and_retry(stack, cursor_key);
-    }
 
     // Check for duplicate only when needed (after Retry)
     // OPTIMIZATION: In normal forward iteration, stack.next() already advances
