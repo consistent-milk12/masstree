@@ -1275,6 +1275,7 @@ where
         use crate::leaf_trait::TreePermutation;
         use crate::leaf24::KSUF_KEYLENX;
         use crate::leaf24::LAYER_KEYLENX;
+        use std::cmp::Ordering;
 
         let target_ikey: u64 = key.ikey();
 
@@ -1306,9 +1307,8 @@ where
                             shift_amount: 8,
                         };
                     }
-                    // Key terminates here - it's distinct from layer contents
-                    // Continue searching for an exact match or insert position
-                    continue;
+                    // Key terminates here - it must sort before the layer pointer.
+                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
                 }
 
                 // Exact match check
@@ -1340,7 +1340,12 @@ where
                     // Both have suffixes with same 8-byte prefix - need layer
                     return InsertSearchResultGeneric::Conflict { slot };
                 }
-                // One inline, one suffix - distinct keys, continue searching
+
+                // Distinct keys with the same ikey: insertion order is determined by
+                // Masstree `key.compare(ikey, keylenx)` semantics (length vs keylenx).
+                if key.compare(slot_ikey, slot_keylenx as usize) == Ordering::Less {
+                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
+                }
             }
 
             // Sorted order - found insert position

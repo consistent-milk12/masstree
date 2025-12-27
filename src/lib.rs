@@ -216,6 +216,7 @@ pub use link::{is_marked, mark_ptr, unmark_ptr};
 pub use slot::ValueSlot;
 pub use suffix::{PermutationProvider, SuffixBag};
 pub use tree::{MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTreeIndex};
+pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 
 // Re-export debug counters for diagnosis (only when tracing is enabled)
 #[cfg(feature = "tracing")]

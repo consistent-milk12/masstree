@@ -17,12 +17,14 @@ use seize::Collector;
 mod generic;
 mod index;
 mod optimistic;
+mod range;
 mod split;
 
 #[cfg(test)]
 pub mod test_hooks;
 
 pub use index::MassTreeIndex;
+pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 
 // Re-export RAII helpers for crate-wide use
 pub(crate) use split::ExitGuard;

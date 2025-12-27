@@ -1,0 +1,650 @@
+//! Filepath: `src/tree/range/scan_state.rs`
+//!
+//! Scan state machine types for range scan operations.
+//!
+//! # State Machine Design
+//!
+//! Range scans are implemented as an explicit state machine that transitions
+//! between states as it navigates the trie structure. This design matches
+//! the C++ reference (`masstree_scan.hh`) and handles:
+//!
+//! - Concurrent modifications (version-triggered retries)
+//! - Multi-layer navigation (sublayer descent and ascent)
+//! - B-link chain traversal
+//!
+//! # States
+//!
+//! ```text
+//!                    ┌────────────────────────────────────────┐
+//!                    │                                        │
+//!                    ▼                                        │
+//!              ┌──────────┐                                   │
+//!         ┌───▶│  Emit    │───── emit entry ─────────────────▶│
+//!         │    └──────────┘                                   │
+//!         │         │                                         │
+//!         │         │ advance ki                              │
+//!         │         ▼                                         │
+//!         │    ┌──────────┐                                   │
+//!         ├────│ FindNext │◀──────────────────────────────────┤
+//!         │    └──────────┘                                   │
+//!         │         │                                         │
+//!         │    ┌────┴────┬────────────┐                       │
+//!         │    ▼         ▼            ▼                       │
+//!         │  found    layer_ptr    exhausted                  │
+//!         │    │         │            │                       │
+//!         │    │    ┌────┴────┐  ┌────┴────┐                  │
+//!         │    │    │  Down   │  │   Up    │                  │
+//!         │    │    └────┬────┘  └────┬────┘                  │
+//!         │    │         │            │                       │
+//!         │    │  shift_clear()   unshift()                   │
+//!         │    │         │            │                       │
+//!         │    │         ▼            │                       │
+//!         │    │    ┌──────────┐      │                       │
+//!         │    │    │  Retry   │◀─────┘                       │
+//!         │    │    └────┬─────┘                              │
+//!         │    │         │                                    │
+//!         │    │    find_retry()                              │
+//!         │    │         │                                    │
+//!         └────┴─────────┴────────────────────────────────────┘
+//!
+use std::marker::PhantomData;
+
+use smallvec::SmallVec;
+
+use crate::leaf_trait::{TreeLeafNode, TreePermutation};
+use crate::slot::ValueSlot;
+
+// ============================================================================
+//  ScanState Enum
+// ============================================================================
+
+/// State machine states for range scan operations.
+///
+/// Each state represents a phase in the scan algorithm:
+///
+/// - [`Emit`](ScanState::Emit): Ready to yield current entry to visitor
+/// - [`FindNext`](ScanState::FindNext): Searching for next entry in current leaf
+/// - [`Down`](ScanState::Down): Descending into a sublayer (encountered layer pointer)
+/// - [`Up`](ScanState::Up): Ascending to parent layer (current layer exhausted)
+/// - [`Retry`](ScanState::Retry): Repositioning after version change or layer transition
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanState {
+    /// Ready to emit the current entry to the visitor.
+    ///
+    /// The scan has identified a valid key-value pair that passes the
+    /// duplicate filter and is within bounds. The caller should:
+    /// 1. Check end bound
+    /// 2. Extract key from `CursorKey::full_key()`
+    /// 3. Clone value from captured snapshot
+    /// 4. Advance `ki` and transition to `FindNext`
+    Emit,
+
+    /// Searching for the next entry within the current leaf/layer.
+    ///
+    /// This is the main iteration state. The scan will:
+    /// 1. Check if current position has a valid slot
+    /// 2. If yes: validate version, check duplicate, prepare for emit
+    /// 3. If no: advance to next leaf or transition to `Up`
+    FindNext,
+
+    /// Descending into a sublayer (encountered a layer pointer).
+    ///
+    /// When a slot contains a layer pointer (`keylenx >= LAYER_KEYLENX`),
+    /// the scan must descend to enumerate that sublayer's keys.
+    ///
+    /// The caller should:
+    /// 1. Push current `(root, leaf)` to `LayerStack`
+    /// 2. Set `root = layer_ptr`
+    /// 3. Call `cursor_key.shift_clear()`
+    /// 4. Transition to `Retry`
+    Down,
+
+    /// Ascending to parent layer (current layer exhausted).
+    ///
+    /// When the scan reaches the end of a sublayer (no more leaves in
+    /// the B-link chain), it must return to the parent layer.
+    ///
+    /// The caller should:
+    /// 1. If `LayerStack` is empty: scan is complete
+    /// 2. Else: pop `(root, leaf)` from stack
+    /// 3. Call `cursor_key.unshift()`
+    /// 4. Refresh leaf state (version, perm)
+    /// 5. Continue with `FindNext`
+    Up,
+
+    /// Repositioning after a conflict or layer transition.
+    ///
+    /// This state is entered after:
+    /// - Version validation failure
+    /// - Layer descent (`Down` → `shift_clear()`)
+    /// - Layer ascent (`Up` → `unshift()`)
+    ///
+    /// The scan will call `find_retry()` to reposition at the correct
+    /// leaf and slot for the current `CursorKey` state.
+    Retry,
+}
+
+impl ScanState {
+    /// Check if scan should continue (not in terminal state).
+    ///
+    /// Returns `false` only when scan is complete (after handling `Up`
+    /// with empty layer stack).
+    #[inline(always)]
+    #[expect(clippy::unused_self)]
+    pub const fn should_continue(self) -> bool {
+        // All states continue; Up becomes terminal only when layer_stack is empty
+        true
+    }
+
+    /// Check if this state will yield an entry.
+    #[inline(always)]
+    pub const fn is_emit(self) -> bool {
+        matches!(self, Self::Emit)
+    }
+
+    /// Check if this state requires layer stack manipulation.
+    #[inline(always)]
+    pub const fn is_layer_transition(self) -> bool {
+        matches!(self, Self::Down | Self::Up)
+    }
+}
+
+// ============================================================================
+//  ScanStackElement
+// ============================================================================
+
+/// Current layer position during a range scan.
+///
+/// Tracks the scanning state within a single trie layer:
+/// - Current leaf node pointer
+/// - Version snapshot for optimistic validation
+/// - Cached permutation
+/// - Logical position within permutation
+///
+/// # Thread Safety
+///
+/// The pointers stored here are only valid while the `LocalGuard` is held.
+/// The guard prevents the garbage collector from reclaiming nodes.
+///
+/// # C++ Reference
+///
+/// Corresponds to `scanstackelt` in `masstree_scan.hh`.
+pub struct ScanStackElement<L, S>
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    /// Current layer root (may be leaf or internode).
+    ///
+    /// Used for repositioning after retries.
+    root: *const u8,
+
+    /// Current leaf in this layer.
+    ///
+    /// This is a raw pointer because we need to hold it across operations
+    /// while the guard is active. The pointer is valid as long as the
+    /// guard passed to scan APIs remains alive.
+    leaf: *mut L,
+
+    /// Version snapshot for optimistic validation.
+    ///
+    /// Captured via `leaf.version().stable()`. After reading leaf fields,
+    /// we check `leaf.version().has_changed(version)` to validate.
+    version: u32,
+
+    /// Cached permutation snapshot.
+    ///
+    /// Loaded via `leaf.permutation_try()`. Must be refreshed when version
+    /// changes or when moving to a new leaf.
+    perm: L::Perm,
+
+    /// Current logical position in permutation.
+    ///
+    /// Range: `0..=perm.size()`.
+    /// - `ki < perm.size()`: Valid position, physical slot = `perm.get(ki)`
+    /// - `ki == perm.size()`: Leaf exhausted, need to advance or go up
+    ki: usize,
+
+    /// Marker for the slot type.
+    _marker: PhantomData<S>,
+}
+
+impl<L, S> Clone for ScanStackElement<L, S>
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            leaf: self.leaf,
+            version: self.version,
+            perm: self.perm,
+            ki: self.ki,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<L, S> std::fmt::Debug for ScanStackElement<L, S>
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScanStackElement")
+            .field("root", &self.root)
+            .field("leaf", &self.leaf)
+            .field("version", &self.version)
+            .field("ki", &self.ki)
+            .field("perm_size", &self.perm.size())
+            .finish()
+    }
+}
+
+impl<L, S> ScanStackElement<L, S>
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    // ========================================================================
+    //  Construction
+    // ========================================================================
+
+    /// Create a new stack element for a layer.
+    ///
+    /// The element starts uninitialized (null leaf, invalid version).
+    /// Call `initialize()` or `set_leaf()` before using.
+    #[must_use]
+    pub fn new(root: *const u8) -> Self {
+        Self {
+            root,
+            leaf: std::ptr::null_mut(),
+            version: 0,
+            perm: L::Perm::empty(),
+            ki: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Create a stack element with all fields initialized.
+    #[must_use]
+    pub const fn with_leaf(
+        root: *const u8,
+        leaf: *mut L,
+        version: u32,
+        perm: L::Perm,
+        ki: usize,
+    ) -> Self {
+        Self {
+            root,
+            leaf,
+            version,
+            perm,
+            ki,
+            _marker: PhantomData,
+        }
+    }
+
+    // ========================================================================
+    //  Accessors
+    // ========================================================================
+
+    /// Get the layer root pointer.
+    #[inline(always)]
+    pub const fn root(&self) -> *const u8 {
+        self.root
+    }
+
+    /// Get the current leaf pointer.
+    #[inline(always)]
+    pub const fn leaf_ptr(&self) -> *mut L {
+        self.leaf
+    }
+
+    /// Get a reference to the current leaf.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - `self.leaf` is non-null
+    /// - The guard that protects this pointer is still alive
+    #[inline(always)]
+    pub unsafe fn leaf_ref(&self) -> &L {
+        debug_assert!(!self.leaf.is_null(), "leaf_ref called on null leaf");
+        // SAFETY: Caller ensures leaf is valid
+        unsafe { &*self.leaf }
+    }
+
+    /// Get the cached version.
+    #[inline(always)]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Get the cached permutation.
+    #[inline(always)]
+    pub const fn perm(&self) -> L::Perm {
+        self.perm
+    }
+
+    /// Get the current logical position.
+    #[inline(always)]
+    pub const fn ki(&self) -> usize {
+        self.ki
+    }
+
+    /// Get the physical slot at current position, or `None` if exhausted.
+    ///
+    /// Returns `Some(perm.get(ki))` if `ki < perm.size()`, else `None`.
+    #[inline]
+    pub fn kp(&self) -> Option<usize> {
+        if self.ki < self.perm.size() {
+            Some(self.perm.get(self.ki))
+        } else {
+            None
+        }
+    }
+
+    /// Check if the leaf is exhausted (no more slots at current position).
+    #[inline(always)]
+    pub fn is_exhausted(&self) -> bool {
+        self.ki >= self.perm.size()
+    }
+
+    /// Check if the leaf pointer is null.
+    #[inline(always)]
+    pub const fn is_null(&self) -> bool {
+        self.leaf.is_null()
+    }
+
+    // ========================================================================
+    //  Mutation
+    // ========================================================================
+
+    /// Set the layer root pointer.
+    #[inline(always)]
+    pub const fn set_root(&mut self, root: *const u8) {
+        self.root = root;
+    }
+
+    /// Set the leaf pointer.
+    #[inline(always)]
+    pub const fn set_leaf(&mut self, leaf: *mut L) {
+        self.leaf = leaf;
+    }
+
+    /// Set the cached version.
+    #[inline(always)]
+    pub const fn set_version(&mut self, version: u32) {
+        self.version = version;
+    }
+
+    /// Set the cached permutation.
+    #[inline(always)]
+    pub const fn set_perm(&mut self, perm: L::Perm) {
+        self.perm = perm;
+    }
+
+    /// Set the logical position.
+    #[inline(always)]
+    pub const fn set_ki(&mut self, ki: usize) {
+        self.ki = ki;
+    }
+
+    /// Advance to the next logical position.
+    #[inline(always)]
+    pub const fn next(&mut self) {
+        self.ki += 1;
+    }
+
+    /// Update all leaf state (version, perm, ki).
+    ///
+    /// Used when moving to a new leaf or after version change.
+    #[inline]
+    pub const fn update_state(&mut self, version: u32, perm: L::Perm, ki: usize) {
+        self.version = version;
+        self.perm = perm;
+        self.ki = ki;
+    }
+
+    /// Refresh state from the current leaf.
+    ///
+    /// Loads a fresh version and permutation from the leaf node.
+    /// Sets `ki` to the provided value.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `self.leaf` is non-null and valid.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if permutation loaded successfully.
+    /// `Err(())` if permutation is frozen (split in progress).
+    pub unsafe fn refresh_from_leaf(&mut self, ki: usize) -> Result<(), ()> {
+        // SAFETY: Caller ensures leaf is valid
+        let leaf: &L = unsafe { &*self.leaf };
+
+        self.version = leaf.version().stable();
+
+        match leaf.permutation_try() {
+            Ok(perm) => {
+                self.perm = perm;
+                self.ki = ki;
+                Ok(())
+            }
+            Err(_frozen) => {
+                // Split in progress, caller should wait and retry
+                Err(())
+            }
+        }
+    }
+}
+
+// ============================================================================
+//  LayerContext and LayerStack
+// ============================================================================
+
+/// Parent layer context stored during sublayer descent.
+///
+/// When the scan descends into a sublayer (encounters a layer pointer),
+/// it saves the current layer's root and leaf pointers. After exhausting
+/// the sublayer, these are restored to continue scanning the parent.
+///
+/// # Design Note
+///
+/// We only store `(root, leaf)` and recompute `(version, perm, ki)` on
+/// ascent. This matches the C++ approach and is correct because:
+///
+/// 1. The parent leaf may have been modified while scanning the sublayer
+/// 2. We need to reload version/perm anyway to validate
+/// 3. We use `unshift()` to set `len=9` which makes `lower_bound` find
+///    the position after the layer pointer slot
+#[derive(Clone, Copy)]
+pub struct LayerContext<L> {
+    /// Parent layer root.
+    pub root: *const u8,
+
+    /// Parent leaf (where the layer pointer was found).
+    pub leaf: *mut L,
+}
+
+impl<L> std::fmt::Debug for LayerContext<L> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayerContext")
+            .field("root", &self.root)
+            .field("leaf", &self.leaf)
+            .finish()
+    }
+}
+
+impl<L> LayerContext<L> {
+    /// Create a new layer context.
+    #[inline(always)]
+    pub const fn new(root: *const u8, leaf: *mut L) -> Self {
+        Self { root, leaf }
+    }
+}
+
+/// Stack of parent layer contexts for sublayer navigation.
+///
+/// Most keys need very few layers (32 bytes = 4 layers maximum in typical
+/// use). We use `SmallVec` to avoid heap allocation for common cases.
+///
+/// # Capacity
+///
+/// - Inline storage: 4 elements (handles keys up to 32 bytes)
+/// - Spills to heap for deeper nesting (rare)
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut layer_stack = LayerStack::<LeafNode24<S>>::new();
+///
+/// // On layer descent
+/// layer_stack.push(LayerContext::new(current_root, current_leaf));
+///
+/// // On layer ascent
+/// if let Some(parent) = layer_stack.pop() {
+///     stack.set_root(parent.root);
+///     stack.set_leaf(parent.leaf);
+/// }
+///
+pub type LayerStack<L> = SmallVec<[LayerContext<L>; 4]>;
+
+// ============================================================================
+//  ScanSnapshot - Captured slot data for emission
+// ============================================================================
+
+/// Snapshot of slot data captured for emission.
+///
+/// After version validation succeeds, we capture the value output and
+/// key length so the caller can emit them without re-reading the leaf.
+///
+/// # Lifetime
+///
+/// The `value` is cloned (for Arc types) or copied (for inline types)
+/// at capture time. This makes it safe to use even if the leaf is
+/// modified after validation.
+#[derive(Debug, Clone)]
+pub struct ScanSnapshot<S: ValueSlot> {
+    /// The value output (Arc<V> clone or V copy).
+    pub value: S::Output,
+
+    /// The key length at current layer.
+    ///
+    /// For inline keys: 0-8 (actual length)
+    /// For suffix keys:`8 + suffix.len()`
+    pub key_len: usize,
+}
+
+impl<S: ValueSlot> ScanSnapshot<S> {
+    /// Create a new scan snapshot.
+    #[inline(always)]
+    pub const fn new(value: S::Output, key_len: usize) -> Self {
+        Self { value, key_len }
+    }
+}
+
+// ============================================================================
+//  Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Note: These tests use mock types since we can't easily construct
+    // real LeafNode24 in unit tests. Integration tests in CODE_005 will
+    // test with real types.
+
+    #[test]
+    fn test_scan_state_properties() {
+        assert!(ScanState::Emit.is_emit());
+        assert!(!ScanState::FindNext.is_emit());
+
+        assert!(ScanState::Down.is_layer_transition());
+        assert!(ScanState::Up.is_layer_transition());
+        assert!(!ScanState::Emit.is_layer_transition());
+        assert!(!ScanState::FindNext.is_layer_transition());
+        assert!(!ScanState::Retry.is_layer_transition());
+
+        assert!(ScanState::Emit.should_continue());
+        assert!(ScanState::FindNext.should_continue());
+        assert!(ScanState::Down.should_continue());
+        assert!(ScanState::Up.should_continue());
+        assert!(ScanState::Retry.should_continue());
+    }
+
+    #[test]
+    fn test_scan_state_equality() {
+        assert_eq!(ScanState::Emit, ScanState::Emit);
+        assert_ne!(ScanState::Emit, ScanState::FindNext);
+    }
+
+    #[test]
+    fn test_scan_state_debug() {
+        let state = ScanState::FindNext;
+        let debug_str = format!("{state:?}");
+        assert_eq!(debug_str, "FindNext");
+    }
+
+    #[test]
+    fn test_layer_context_creation() {
+        let root: *const u8 = 0x1000 as *const u8;
+        let leaf: *mut u8 = 0x2000 as *mut u8;
+
+        let ctx: LayerContext<u8> = LayerContext::new(root, leaf);
+
+        assert_eq!(ctx.root, root);
+        assert_eq!(ctx.leaf, leaf);
+    }
+
+    #[test]
+    #[expect(clippy::unwrap_used)]
+    fn test_layer_stack_operations() {
+        let mut stack: LayerStack<u8> = SmallVec::new();
+
+        assert!(stack.is_empty());
+
+        // Push some contexts
+        stack.push(LayerContext::new(0x1000 as *const u8, 0x2000 as *mut u8));
+        stack.push(LayerContext::new(0x3000 as *const u8, 0x4000 as *mut u8));
+
+        assert_eq!(stack.len(), 2);
+
+        // Pop
+        let ctx = stack.pop().unwrap();
+        assert_eq!(ctx.root, 0x3000 as *const u8);
+        assert_eq!(ctx.leaf, 0x4000 as *mut u8);
+
+        assert_eq!(stack.len(), 1);
+
+        // Pop again
+        let ctx = stack.pop().unwrap();
+        assert_eq!(ctx.root, 0x1000 as *const u8);
+
+        assert!(stack.is_empty());
+        assert!(stack.pop().is_none());
+    }
+
+    #[test]
+    fn test_layer_stack_inline_capacity() {
+        let mut stack: LayerStack<u8> = SmallVec::new();
+
+        // Push 4 elements (should stay inline)
+        for i in 0..4 {
+            stack.push(LayerContext::new(
+                (i * 0x1000) as *const u8,
+                (i * 0x2000) as *mut u8,
+            ));
+        }
+
+        // SmallVec with capacity 4 should not spill
+        assert!(!stack.spilled());
+
+        // Push one more (should spill to heap)
+        stack.push(LayerContext::new(0x5000 as *const u8, 0x6000 as *mut u8));
+        assert!(stack.spilled());
+    }
+}
