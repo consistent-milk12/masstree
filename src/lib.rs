@@ -242,3 +242,6 @@ pub use tree::{
     get_parent_wait_stats,
     reset_debug_counters,
 };
+
+// Re-export RAII helpers for internal use
+pub(crate) use tree::ExitGuard;

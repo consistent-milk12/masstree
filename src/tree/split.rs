@@ -40,7 +40,5 @@ mod propagation;
 mod propagation_context;
 mod root_creation;
 
-pub use exit_guard::ExitGuard;
 pub use propagation::Propagation;
-pub use propagation_context::PropagationContext;
-pub use root_creation::RootCreation;
+pub(crate) use exit_guard::ExitGuard;

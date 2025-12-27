@@ -24,6 +24,9 @@ pub mod test_hooks;
 
 pub use index::MassTreeIndex;
 
+// Re-export RAII helpers for crate-wide use
+pub(crate) use split::ExitGuard;
+
 // Re-export debug counters
 pub use optimistic::{
     ADVANCE_BLINK_COUNT,
