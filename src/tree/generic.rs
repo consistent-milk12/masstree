@@ -19,6 +19,7 @@ use crate::{
     leaf_trait::LayerCapableLeaf,
     leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::NodeVersion,
+    tree::split::Propagation,
     tree::{CasInsertResultGeneric, InsertError, InsertSearchResultGeneric},
     value::LeafValue,
 };
@@ -1719,8 +1720,10 @@ where
                 if advance_count >= Self::MAX_BLINK_ADVANCES {
                     let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
+
                     #[cfg(not(feature = "tracing"))]
                     let _ = count;
+
                     // Rate-limit logging: only log first 10 anomalies
                     #[cfg(feature = "tracing")]
                     if count < 10 {
@@ -2343,38 +2346,55 @@ where
 
     /// Handle a leaf split when the leaf is full.
     ///
-    /// This method:
-    /// 1. Calculates the split point
-    /// 2. Allocates a new leaf
-    /// 3. Performs the split (moves entries)
-    /// 4. Links the leaves in B-link order
-    /// 5. Propagates the split to the parent
+    /// This function implements the SPLIT-THEN-RETRY pattern:
+    /// 1. Calculate split point
+    /// 2. Allocate new leaf (pre-allocation before marking split)
+    /// 3. Mark split in progress
+    /// 4. Perform split (creates split-locked right sibling)
+    /// 5. Link leaves (B-link)
+    /// 6. Propagate to parent using TRUE hand-over-hand
+    /// 7. Return Ok - caller retries insert
     ///
     /// # Arguments
     ///
-    /// * `left_leaf_ptr` - Pointer to the leaf being split
-    /// * `lock` - Lock guard (takes ownership, will mark split and release)
-    /// * `logical_pos` - Insert position in the leaf (for split point calculation)
-    /// * `ikey` - The key being inserted (for split point calculation)
-    /// * `guard` - Memory reclamation guard
+    /// - `left_leaf_ptr`: Pointer to the leaf being split
+    /// - `lock`: Lock guard (ownership transferred to propagation)
+    /// - `logical_pos`: Insert position for split point calculation
+    /// - `ikey`: Key being inserted
+    /// - `guard`: Memory reclamation guard
     ///
-    /// # Returns
+    /// # Lock Protocol
     ///
-    /// `Ok(())` on success. The caller should retry the insert (SPLIT-THEN-RETRY pattern).
+    /// The left leaf's lock is maintained throughout propagation. This is the
+    /// key difference from the previous (broken) implementation that dropped
+    /// the lock before propagation.
     ///
-    /// # Note
+    /// # Split-Locked Right Sibling
     ///
-    /// This function takes ownership of the lock and releases it before returning.
+    /// The right sibling is created with a split-locked version in
+    /// `split_into_preallocated()`. This is NOT done by the allocator.
+    /// The split-locked version prevents other threads from operating on
+    /// the right sibling until its parent pointer is set.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `tcursor::make_split()` in `reference/masstree_split.hh:179-297`.
     #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(level = "debug", skip(self, lock, guard), fields(left_leaf = ?left_leaf_ptr, ikey = %format_args!("{:016x}", ikey)))
-    )]
+    feature = "tracing",
+    tracing::instrument(
+        level = "debug",
+        skip(self, lock, guard),
+        fields(
+            left_leaf = ?left_leaf_ptr,
+            ikey = %format_args!("{:016x}", ikey)
+        )
+    )
+)]
     #[inline]
-    #[expect(clippy::too_many_lines, reason = "Extensive looging.")]
     fn handle_leaf_split_generic(
         &self,
         left_leaf_ptr: *mut L,
-        mut lock: crate::nodeversion::LockGuard<'_>,
+        lock: crate::nodeversion::LockGuard<'_>,
         logical_pos: usize,
         ikey: u64,
         guard: &LocalGuard<'_>,
@@ -2386,7 +2406,7 @@ where
         tracing::info!(
             left_leaf_ptr = ?left_leaf_ptr,
             ikey = format_args!("{:016x}", ikey),
-            logical_pos = logical_pos,
+            logical_pos,
             "SPLIT_START: beginning leaf split"
         );
 
@@ -2398,106 +2418,101 @@ where
             .calculate_split_point(logical_pos, ikey)
             .ok_or(InsertError::SplitFailed)?;
 
-        // Allocate new leaf
+        // =========================================================================
+        //  CRITICAL: Capture root status BEFORE mark_split
+        // =========================================================================
+        //
+        // SPLIT_UNLOCK_MASK clears ROOT_BIT on unlock. We must capture both
+        // booleans separately BEFORE marking:
+        //
+        // - is_main_root: This leaf is THE main tree root (root_ptr points here)
+        // - is_layer_root: This leaf is a layer root (null parent, root flag, NOT main)
+        //
+        // These are MUTUALLY EXCLUSIVE for handling:
+        // - Main root: CAS on root_ptr to install new internode
+        // - Layer root: NO CAS, just parent pointer updates
+
+        let root_flag_set: bool = left_leaf.version().is_root();
+        let parent_is_null: bool = left_leaf.parent().is_null();
+
+        let is_main_root: bool = root_flag_set && {
+            let current_root: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
+            std::ptr::eq(current_root, left_leaf_ptr)
+        };
+
+        // Layer root: has root flag, null parent, but is NOT the main tree root
+        let is_layer_root: bool = root_flag_set && parent_is_null && !is_main_root;
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            root_flag_set,
+            parent_is_null,
+            is_main_root,
+            is_layer_root,
+            "SPLIT_START: captured root status BEFORE mark_split"
+        );
+
+        // Allocate new leaf BEFORE marking split
+        // This ensures allocation doesn't happen while we hold the split lock
         let new_leaf: Box<L> = L::new_boxed();
 
-        // Mark split in progress (must be called before freeze_permutation)
+        // Mark split in progress (sets SPLITTING_BIT)
+        let mut lock = lock;
         lock.mark_split();
 
-        // Perform the split (insert_target ignored - we use SPLIT-THEN-RETRY)
+        // Perform the split
+        // NOTE: The right sibling receives a split-locked version from
+        // split_into_preallocated() - this is NOT done by the allocator!
+        // insert_target is ignored - we use SPLIT-THEN-RETRY pattern
         let (new_leaf_box, split_ikey, _insert_target) =
             unsafe { left_leaf.split_into_preallocated(split_point.pos, new_leaf, guard) };
 
-        // Store new leaf in allocator
+        // Allocate new leaf in allocator (just tracks it, doesn't set version)
         let right_leaf_ptr: *mut L = self.allocator.alloc_leaf(new_leaf_box);
 
-        // DIAGNOSTIC: Verify split_ikey matches new leaf's ikey_bound (slot-0)
         #[cfg(feature = "tracing")]
         {
             let right_leaf: &L = unsafe { &*right_leaf_ptr };
-            let right_bound: u64 = right_leaf.ikey_bound();
-            if split_ikey != right_bound {
-                static SPLIT_MISMATCH_COUNT: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                let count = SPLIT_MISMATCH_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-                if count < 20 {
-                    tracing::error!(
-                        left_leaf_ptr = ?left_leaf_ptr,
-                        right_leaf_ptr = ?right_leaf_ptr,
-                        split_ikey = format_args!("{:016x}", split_ikey),
-                        right_bound = format_args!("{:016x}", right_bound),
-                        "SPLIT_MISMATCH: split_ikey != right_leaf.ikey_bound() - separator wrong!"
-                    );
-                }
-            }
-        }
-
-        // IMPORTANT: Capture is_layer_root BEFORE dropping the lock!
-        // SPLIT_UNLOCK_MASK clears ROOT_BIT, so after drop(lock) we can't tell
-        // if this was a layer root or a newly-split sibling (both have NULL parent).
-        let is_layer_root: bool = left_leaf.parent().is_null() && left_leaf.version().is_root();
-
-        // NOTE: Link leaves in B-link order
-        unsafe { left_leaf.link_sibling(right_leaf_ptr) };
-
-        // FIX D Stage 2A: Early parent publication
-        // Set the right leaf's parent pointer BEFORE releasing the lock to reduce the
-        // NULL-parent wait window. If another thread tries to split the right leaf,
-        // it will find a non-NULL parent and can proceed immediately.
-        //
-        // Rules:
-        // - If left_leaf has a parent (non-root), set right_leaf.parent = left_leaf.parent
-        // - If left_leaf is a root (parent NULL), defer parent assignment (will be set when
-        //   the new root/layer internode is created)
-        //
-        // Note: The internode split path or insert path may move right_leaf to a different
-        // parent, but that's OK because:
-        // 1. Having a non-NULL parent allows the other thread to make progress
-        // 2. The "child not found" retry loop handles parent changes gracefully
-        let left_parent: *mut u8 = left_leaf.parent();
-        if !left_parent.is_null() {
-            unsafe {
-                (*right_leaf_ptr).set_parent(left_parent);
-            }
-            #[cfg(feature = "tracing")]
-            tracing::trace!(
+            tracing::debug!(
                 right_leaf_ptr = ?right_leaf_ptr,
-                parent_ptr = ?left_parent,
-                "EARLY_PARENT_SET: set right_leaf.parent before lock drop"
+                split_ikey = format_args!("{:016x}", split_ikey),
+                right_is_split_locked = right_leaf.version().is_split_locked(),
+                "SPLIT_CREATED: right sibling allocated (split-locked by split_into_preallocated)"
             );
         }
 
-        #[cfg(feature = "tracing")]
-        let propagate_start = Instant::now();
-
-        // OPTIMIZATION: Release leaf lock BEFORE parent propagation.
-        // Once link succeeds, the split is visible via B-link chain.
-        // Readers use advance_to_key() to follow B-links.
-        drop(lock);
+        // Link leaves in B-link order (while left is still locked)
+        unsafe { left_leaf.link_sibling(right_leaf_ptr) };
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
             left_leaf_ptr = ?left_leaf_ptr,
             right_leaf_ptr = ?right_leaf_ptr,
-            split_ikey = format_args!("{:016x}", split_ikey),
-            is_layer_root = is_layer_root,
-            "SPLIT_PROPAGATE: leaf lock released, propagating to parent"
+            "SPLIT_LINKED: B-link established"
         );
 
-        // Propagate split to parent (lock already released)
-        // Pass is_layer_root so propagate knows whether to promote or wait.
-        let result = self.propagate_split_generic(
+        // =========================================================================
+        // TRUE HAND-OVER-HAND PROPAGATION
+        // =========================================================================
+        //
+        // Pass ownership of the lock to Propagation::make_split_leaf.
+        // The lock is maintained throughout propagation - this is the key
+        // difference from the previous (broken) implementation.
+
+        let result: Result<(), InsertError> = Propagation::make_split_leaf::<V, L, A>(
+            &self.root_ptr,
+            &self.allocator,
             left_leaf_ptr,
+            lock, // Ownership transferred - lock maintained during propagation
             right_leaf_ptr,
             split_ikey,
+            is_main_root,
             is_layer_root,
             guard,
         );
 
         #[cfg(feature = "tracing")]
-        #[expect(clippy::cast_possible_truncation)]
         {
-            let propagate_elapsed = propagate_start.elapsed();
             let total_elapsed = split_start.elapsed();
             if total_elapsed > std::time::Duration::from_millis(1) {
                 tracing::warn!(
@@ -2505,8 +2520,6 @@ where
                     right_leaf_ptr = ?right_leaf_ptr,
                     split_ikey = format_args!("{:016x}", split_ikey),
                     total_elapsed_us = total_elapsed.as_micros() as u64,
-                    propagate_elapsed_us = propagate_elapsed.as_micros() as u64,
-                    is_layer_root = is_layer_root,
                     "SLOW_SPLIT: leaf split took >1ms"
                 );
             }

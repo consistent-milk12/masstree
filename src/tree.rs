@@ -17,6 +17,7 @@ use seize::Collector;
 mod generic;
 mod index;
 mod optimistic;
+mod split;
 
 #[cfg(test)]
 pub mod test_hooks;
@@ -240,7 +241,15 @@ where
 {
     fn drop(&mut self) {
         // No concurrent access is possible here (Drop requires unique access).
-        // Load the root pointer and delegate teardown to the allocator.
+        //
+        // Step 1: Process all deferred retirements (suffix bags, etc.)
+        // This MUST be called before teardown_tree to ensure any objects
+        // retired via defer_retire() are reclaimed before we free nodes.
+        //
+        // SAFETY: &mut self guarantees no threads are active with guards.
+        unsafe { self.collector.reclaim_all() };
+
+        // Step 2: Free all nodes via allocator traversal.
         let root: *mut u8 = self.root_ptr.load(AtomicOrdering::Acquire);
         self.allocator.teardown_tree(root);
     }

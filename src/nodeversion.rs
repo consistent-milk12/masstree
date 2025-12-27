@@ -153,13 +153,15 @@ pub struct NodeVersion {
 /// until 1.92.0.
 ///
 /// NOTE: This is sufficient for our use case. The guard holds a reference to
-/// `NodeVersion` which already prevents the guard from outliving the version.
+/// `NodeVersion` (via a lifetime marker) which already prevents the guard from
+/// outliving the version.
 #[derive(Debug)]
 #[must_use = "releasing a lock without using the guard is a logic error"]
 pub struct LockGuard<'a> {
-    version: &'a NodeVersion,
+    version: *const NodeVersion,
     locked_value: u32,
 
+    _lifetime: PhantomData<&'a NodeVersion>,
     // PhantomData<*mut ()> makes this type !Send + !Sync (these are still nightly features)
     _marker: PhantomData<*mut ()>,
 }
@@ -180,11 +182,20 @@ impl Drop for LockGuard<'_> {
             (self.locked_value + ((self.locked_value & INSERTING_BIT) << 2)) & UNLOCK_MASK
         };
 
-        self.version.value.store(new_value, Ordering::Release);
+        // SAFETY: The guard's lifetime is tied to the `NodeVersion` it was created from.
+        // Nodes are only freed via deferred reclamation; holding the lock implies the node
+        // remains valid until this guard is dropped.
+        unsafe { (*self.version).value.store(new_value, Ordering::Release) };
     }
 }
 
 impl LockGuard<'_> {
+    #[inline(always)]
+    fn version(&self) -> &NodeVersion {
+        // SAFETY: `version` is non-null and valid for the guard’s lifetime.
+        unsafe { &*self.version }
+    }
+
     /// Get the locked version value.
     #[must_use]
     #[inline(always)]
@@ -206,9 +217,9 @@ impl LockGuard<'_> {
         if (self.locked_value & INSERTING_BIT) == 0 {
             // This shouldn't happen with the always dirty on lock strategy
             // we are currently going for. But still handle it gracefully.
-            let value: u32 = self.version.value.load(Ordering::Relaxed);
+            let value: u32 = self.version().value.load(Ordering::Relaxed);
 
-            self.version
+            self.version()
                 .value
                 .store(value | INSERTING_BIT, Ordering::Release);
 
@@ -237,9 +248,9 @@ impl LockGuard<'_> {
     #[inline]
     pub fn mark_split(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
-        let value: u32 = self.version.value.load(Ordering::Relaxed);
+        let value: u32 = self.version().value.load(Ordering::Relaxed);
 
-        self.version
+        self.version()
             .value
             .store(value | SPLITTING_BIT, Ordering::Release);
 
@@ -259,10 +270,10 @@ impl LockGuard<'_> {
     #[inline(always)]
     pub fn mark_deleted(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
-        let value: u32 = self.version.value.load(Ordering::Relaxed);
+        let value: u32 = self.version().value.load(Ordering::Relaxed);
         let new_value: u32 = value | DELETED_BIT | SPLITTING_BIT;
 
-        self.version.value.store(new_value, Ordering::Release);
+        self.version().value.store(new_value, Ordering::Release);
 
         // Acquire fence ensures subsequent structural modifications
         // cannot be reordered before the dirty bit becomes visible.
@@ -275,9 +286,9 @@ impl LockGuard<'_> {
     #[inline(always)]
     pub fn mark_nonroot(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
-        let value: u32 = self.version.value.load(Ordering::Relaxed);
+        let value: u32 = self.version().value.load(Ordering::Relaxed);
 
-        self.version
+        self.version()
             .value
             .store(value & !ROOT_BIT, Ordering::Release);
         self.locked_value &= !ROOT_BIT;
@@ -368,6 +379,16 @@ impl NodeVersion {
     #[inline(always)]
     pub fn value(&self) -> u32 {
         self.value.load(Ordering::Relaxed)
+    }
+
+    /// Get a raw pointer to this `NodeVersion`.
+    ///
+    /// Used for APIs that need to lock nodes via raw pointers
+    /// (e.g., `PropagationContext::lock_node`).
+    #[must_use]
+    #[inline(always)]
+    pub const fn as_ptr(&self) -> *const Self {
+        std::ptr::from_ref(self)
     }
 
     // ========================================================================
@@ -639,9 +660,10 @@ impl NodeVersion {
                     }
 
                     return LockGuard {
-                        version: self,
+                        version: std::ptr::from_ref(self),
                         // locked_value now includes INSERTING_BIT
                         locked_value: locked,
+                        _lifetime: PhantomData,
                         _marker: PhantomData,
                     };
                 }
@@ -688,8 +710,9 @@ impl NodeVersion {
             .compare_exchange(value, locked, Ordering::Acquire, Ordering::Relaxed)
         {
             Ok(_) => Some(LockGuard {
-                version: self,
+                version: std::ptr::from_ref(self),
                 locked_value: locked,
+                _lifetime: PhantomData,
                 _marker: PhantomData,
             }),
 

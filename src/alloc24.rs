@@ -173,7 +173,18 @@ impl<S: ValueSlot> NodeAllocator24<S> for SeizeAllocator24<S> {
     }
 
     unsafe fn retire_leaf24(&self, ptr: *mut LeafNode24<S>, guard: &LocalGuard<'_>) {
-        // SAFETY: Caller ensures ptr is valid and unreachable
+        // Step 1: Remove from tracking to prevent double-free.
+        // The allocator's Drop iterates leaf_ptrs and frees everything,
+        // so we must remove the pointer before deferring retirement.
+        {
+            let mut ptrs = self.leaf_ptrs.lock();
+            if let Some(pos) = ptrs.iter().position(|&p| p == ptr) {
+                ptrs.swap_remove(pos);
+            }
+        }
+
+        // Step 2: Defer retirement via seize.
+        // SAFETY: Caller ensures ptr is valid and unreachable from tree.
         unsafe {
             guard.defer_retire(ptr, |p, _| {
                 drop(Box::from_raw(p));
@@ -186,7 +197,16 @@ impl<S: ValueSlot> NodeAllocator24<S> for SeizeAllocator24<S> {
         ptr: *mut InternodeNode<S, INTERNODE_WIDTH>,
         guard: &LocalGuard<'_>,
     ) {
-        // SAFETY: Caller ensures ptr is valid and unreachable
+        // Step 1: Remove from tracking to prevent double-free.
+        {
+            let mut ptrs = self.internode_ptrs.lock();
+            if let Some(pos) = ptrs.iter().position(|&p| p == ptr) {
+                ptrs.swap_remove(pos);
+            }
+        }
+
+        // Step 2: Defer retirement via seize.
+        // SAFETY: Caller ensures ptr is valid and unreachable from tree.
         unsafe {
             guard.defer_retire(ptr, |p, _| {
                 drop(Box::from_raw(p));
