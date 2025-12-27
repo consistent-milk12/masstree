@@ -689,37 +689,6 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.permutation.store_raw(raw, WRITE_ORD);
     }
 
-    /// Pre-store slot data for CAS-based insert.
-    ///
-    /// # Safety
-    /// - `slot` is in the free region of the current permutation
-    /// - No concurrent writer is modifying this slot
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
-    pub unsafe fn store_slot_for_cas(
-        &self,
-        slot: usize,
-        ikey: u64,
-        keylenx: u8,
-        value_ptr: *mut u8,
-    ) {
-        debug_assert!(slot < WIDTH_24, "store_slot_for_cas: slot out of bounds");
-        self.ikey0[slot].store(ikey, WRITE_ORD);
-        self.keylenx[slot].store(keylenx, WRITE_ORD);
-        self.leaf_values[slot].store(value_ptr, WRITE_ORD);
-    }
-
-    /// Clear a slot after a failed CAS insert.
-    ///
-    /// # Safety
-    /// - Caller must have already reclaimed/freed the value that was stored
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
-    pub unsafe fn clear_slot_for_cas(&self, slot: usize) {
-        debug_assert!(slot < WIDTH_24, "clear_slot_for_cas: slot out of bounds");
-        self.leaf_values[slot].store(std::ptr::null_mut(), WRITE_ORD);
-    }
-
     /// Atomically claim a slot for CAS insert.
     ///
     /// # Errors
@@ -1162,21 +1131,9 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     }
 
     #[inline(always)]
-    unsafe fn store_slot_for_cas(&self, slot: usize, ikey: u64, keylenx: u8, value_ptr: *mut u8) {
-        // SAFETY: Caller guarantees slot is in free region and no concurrent modification
-        unsafe { Self::store_slot_for_cas(self, slot, ikey, keylenx, value_ptr) }
-    }
-
-    #[inline(always)]
     unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
         // SAFETY: Caller guarantees slot was claimed via cas_slot_value
         unsafe { Self::store_key_data_for_cas(self, slot, ikey, keylenx) }
-    }
-
-    #[inline(always)]
-    unsafe fn clear_slot_for_cas(&self, slot: usize) {
-        // SAFETY: Caller guarantees value has been reclaimed
-        unsafe { Self::clear_slot_for_cas(self, slot) }
     }
 
     #[inline(always)]

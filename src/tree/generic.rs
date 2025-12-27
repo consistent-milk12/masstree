@@ -41,12 +41,14 @@ static CLAIMING_SENTINEL: u8 = 0;
 
 /// Returns the CLAIMING sentinel pointer (provenance-sound).
 #[inline(always)]
+#[expect(dead_code, reason = "CAS path disabled")]
 fn claiming_ptr() -> *mut u8 {
     StdPtr::from_ref(&CLAIMING_SENTINEL).cast_mut()
 }
 
 /// Returns true if `ptr` is the CLAIMING sentinel.
 #[inline(always)]
+#[expect(dead_code, reason = "CAS path disabled")]
 fn is_claiming_ptr(ptr: *mut u8) -> bool {
     StdPtr::eq(ptr, claiming_ptr())
 }
@@ -58,6 +60,7 @@ where
     A: NodeAllocatorGeneric<LeafValue<V>, L>,
 {
     #[inline]
+    #[expect(dead_code, reason = "CAS path disabled")]
     fn cas_insert_enabled() -> bool {
         use std::sync::OnceLock;
 
@@ -88,6 +91,7 @@ where
     ///
     /// Returns `(slot, back_offset)` where `slot == perm.back_at_offset(back_offset)`.
     #[inline(always)]
+    #[expect(dead_code, reason = "CAS path disabled")]
     fn pick_free_slot_avoiding_reserved(
         leaf: &L,
         perm: &L::Perm,
@@ -913,16 +917,18 @@ where
     }
 
     // ========================================================================
-    //  Generic CAS Insert Path
+    //  Generic CAS Insert Path (disabled - kept for future reference)
     // ========================================================================
 
     /// Maximum CAS retry attempts before falling back to locked path.
+    #[expect(dead_code, reason = "CAS path disabled")]
     const MAX_CAS_RETRIES_GENERIC: usize = 3;
 
     /// Try CAS-based lock-free insert.
     ///
     /// Attempts to insert a new key-value pair using optimistic concurrency.
     /// Returns result indicating success or reason for fallback.
+    #[expect(dead_code, reason = "CAS path disabled")]
     #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
     pub(crate) fn try_cas_insert_generic(
         &self,
@@ -961,7 +967,14 @@ where
             let leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let advanced = self.advance_to_key_by_bound_generic(leaf, key, guard);
+            let (advanced, exceeded_hop_limit) =
+                self.advance_to_key_by_bound_generic(leaf, key, guard);
+
+            // If we exceeded the hop limit, fall back to locked path which will re-traverse
+            if exceeded_hop_limit {
+                return CasInsertResultGeneric::ContentionFallback;
+            }
+
             if !StdPtr::eq(advanced, leaf) {
                 leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
                 use_reach = false;
@@ -1001,14 +1014,60 @@ where
                         return CasInsertResultGeneric::FullNeedLock;
                     }
 
-                    // 5. Check slot-0 rule
-                    let next_free: usize = perm.back();
-                    if next_free == 0 && !leaf.can_reuse_slot0(ikey) {
-                        return CasInsertResultGeneric::Slot0NeedLock;
+                    // 5. Pick a free slot from the free region, scanning for usable slots.
+                    //
+                    // This mirrors the locked path's `pick_free_slot_avoiding_reserved`:
+                    // - Skip slot 0 if it can't be reused (ikey_bound invariant)
+                    // - Skip slots that are already reserved (non-null in free region)
+                    //
+                    // This is a key optimization: instead of only trying perm.back(),
+                    // we scan all free slots to find one that's actually available.
+                    let size: usize = perm.size();
+                    let free_count: usize = L::WIDTH - size;
+
+                    let mut found_slot: Option<(usize, usize)> = None; // (slot, offset)
+                    for offset in 0..free_count {
+                        let slot: usize = perm.back_at_offset(offset);
+
+                        // Slot-0 / ikey_bound invariant: skip slot 0 if it can't be reused
+                        if slot == 0 && !leaf.can_reuse_slot0(ikey) {
+                            continue;
+                        }
+
+                        // Skip reserved slots (CLAIMING or arc_ptr from another CAS in progress)
+                        if !leaf.load_slot_value(slot).is_null() {
+                            continue;
+                        }
+
+                        found_slot = Some((slot, offset));
+                        break;
                     }
 
-                    // 6. Compute new permutation
-                    let (new_perm, slot) = perm.insert_from_back_immutable(logical_pos);
+                    let Some((slot, back_offset)) = found_slot else {
+                        // No usable slot found - all free slots are either:
+                        // - slot 0 that can't be reused, or
+                        // - reserved by another CAS in progress
+                        // Fall back to locked path which can wait for reservations to clear
+                        return CasInsertResultGeneric::ContentionFallback;
+                    };
+
+                    // 6. Compute new permutation with the chosen slot.
+                    //
+                    // If the slot is not at offset 0 (the natural back position),
+                    // we need to swap it to the back before inserting.
+                    let (new_perm, allocated_slot) = if back_offset == 0 {
+                        // Slot is already at back, use directly
+                        perm.insert_from_back_immutable(logical_pos)
+                    } else {
+                        // Swap the chosen slot to back position, then insert
+                        let mut perm_copy = perm;
+                        let back_pos: usize = L::WIDTH - 1;
+                        let chosen_pos: usize = back_pos - back_offset;
+                        perm_copy.swap_free_slots(back_pos, chosen_pos);
+                        let allocated = perm_copy.insert_from_back(logical_pos);
+                        (perm_copy, allocated)
+                    };
+                    debug_assert_eq!(allocated_slot, slot, "slot mismatch after insert");
 
                     // ============================================================
                     // Option A (Safe) Protocol: 3-phase CAS insert
@@ -1020,22 +1079,6 @@ where
                     // Phase 3: Install value (CLAIMING -> arc_ptr)
                     // Phase 4: Publish (permutation CAS)
                     // ============================================================
-
-                    // 7. If the chosen free slot is already reserved/used, retry.
-                    //
-                    // With a stale `perm` snapshot, `slot` might no longer be free.
-                    // This early check avoids unnecessary CAS attempts.
-                    if !leaf.load_slot_value(slot).is_null() {
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
 
                     // 8. Phase 1: Reserve the slot (NULL -> CLAIMING).
                     //
@@ -1202,6 +1245,7 @@ where
 
     /// Exponential backoff for CAS retries.
     #[inline(always)]
+    #[expect(dead_code, reason = "CAS path disabled")]
     fn backoff_generic(retries: usize) {
         let spins = 1usize << retries.min(6);
         for _ in 0..spins {
@@ -1360,8 +1404,18 @@ where
         (leaf, version)
     }
 
+    /// Maximum B-link hops before giving up and signaling re-descent.
+    ///
+    /// This prevents unbounded sibling walks when routing is inconsistent.
+    /// After this many hops, we return the current leaf and let the caller
+    /// detect the mismatch and retry from the root.
+    const MAX_BLINK_HOPS: usize = 128;
+
     /// Advance to correct leaf via B-link (generic version).
     /// Used by insert path before locking.
+    ///
+    /// Returns `(leaf, exceeded_hop_limit)`. If `exceeded_hop_limit` is true,
+    /// the caller should retry from the root instead of trusting this leaf.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(level = "trace", skip_all, fields(ikey = %format_args!("{:016x}", key.ikey())))
@@ -1372,10 +1426,11 @@ where
         mut leaf: &'a L,
         key: &Key<'_>,
         _guard: &LocalGuard<'_>,
-    ) -> &'a L {
+    ) -> (&'a L, bool) {
         use crate::link::{is_marked, unmark_ptr};
 
         let key_ikey: u64 = key.ikey();
+        let mut hops: usize = 0;
 
         // Wait for any in-progress split to complete
         if leaf.version().is_splitting() {
@@ -1383,6 +1438,17 @@ where
         }
 
         loop {
+            // Check hop limit to prevent unbounded B-link walks
+            if hops >= Self::MAX_BLINK_HOPS {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    ikey = format_args!("{:016x}", key_ikey),
+                    hops = hops,
+                    "BLINK_HOP_LIMIT_EXCEEDED: too many sibling hops, signaling re-descent"
+                );
+                return (leaf, true);
+            }
+
             let next_raw: *mut L = leaf.next_raw();
             if is_marked(next_raw) {
                 leaf.wait_for_split();
@@ -1401,13 +1467,14 @@ where
             if key_ikey >= next_bound {
                 // Key belongs in next leaf or further
                 leaf = next;
+                hops += 1;
                 continue;
             }
 
             break;
         }
 
-        leaf
+        (leaf, false)
     }
 
     // ========================================================================
@@ -1492,54 +1559,28 @@ where
         // Track current layer root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
 
-        // Track whether we're in a sublayer (don't use CAS path in sublayers)
+        // Track whether we're in a sublayer (for layer traversal)
         let mut in_sublayer: bool = false;
 
         loop {
             // Find the actual layer root (handles layer root promotion for sublayers)
             layer_root = self.maybe_parent_generic(layer_root);
 
-            // Try CAS fast path first (only for simple cases at layer 0)
-            // CAS path doesn't handle layers - it always starts from main tree root.
-            if Self::cas_insert_enabled() && !in_sublayer && !key.has_suffix() {
-                match self.try_cas_insert_generic(key, &value, guard) {
-                    CasInsertResultGeneric::Success(old) => {
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_SUCCESS_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            ikey = format_args!("{:016x}", ikey_for_trace),
-                            "insert: CAS_SUCCESS"
-                        );
-                        return Ok(old);
-                    }
-                    CasInsertResultGeneric::ExistsNeedLock { .. }
-                    | CasInsertResultGeneric::FullNeedLock
-                    | CasInsertResultGeneric::LayerNeedLock { .. }
-                    | CasInsertResultGeneric::Slot0NeedLock
-                    | CasInsertResultGeneric::ContentionFallback => {
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_FALLBACK_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        // Fall through to locked path
-                        #[cfg(feature = "tracing")]
-                        tracing::trace!(
-                            ikey = format_args!("{:016x}", ikey_for_trace),
-                            "insert: CAS_FALLBACK_TO_LOCKED"
-                        );
-                    }
-                }
-            }
-
-            // Locked path
+            // Locked path - traverse to leaf
             let leaf_ptr: *mut L =
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             let leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let leaf = self.advance_to_key_by_bound_generic(leaf, key, guard);
+            let (leaf, exceeded_hop_limit) =
+                self.advance_to_key_by_bound_generic(leaf, key, guard);
+
+            // If we exceeded the hop limit, re-traverse from root
+            if exceeded_hop_limit {
+                layer_root = self.load_root_ptr_generic(guard);
+                continue;
+            }
 
             // Lock the leaf
             #[cfg(feature = "tracing")]
@@ -1680,43 +1721,62 @@ where
                         continue;
                     }
 
-                    // Pick a free slot that is legal w.r.t. the slot-0 / ikey_bound invariant
-                    // and not reserved by an in-progress CAS insert attempt (Option A).
-                    let Some((slot, back_offset)) =
-                        Self::pick_free_slot_avoiding_reserved(leaf, &perm, ikey)
-                    else {
-                        // If the only free slot is 0 and it can't be reused, we must split.
+                    // Pick a free slot, handling slot-0 / ikey_bound invariant.
+                    // Since we hold the lock, we can use perm.back() directly.
+                    let slot: usize = perm.back();
+
+                    // Check slot-0 rule: slot 0 stores ikey_bound and can only be
+                    // reused if the new key has the same ikey as the current bound.
+                    if slot == 0 && !leaf.can_reuse_slot0(ikey) {
+                        // Need to find another slot or split.
+                        // Scan free region for a non-zero slot.
                         let free_count: usize = L::WIDTH - perm.size();
-                        if free_count == 1 {
-                            let only_slot: usize = perm.back();
-                            if only_slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                                let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
-                                self.handle_leaf_split_generic(
-                                    leaf_ptr_current,
-                                    lock, // Move lock ownership
-                                    logical_pos,
-                                    ikey,
-                                    guard,
-                                )?;
-                                continue;
+                        let mut found_slot: Option<(usize, usize)> = None;
+
+                        for offset in 1..free_count {
+                            let candidate: usize = perm.back_at_offset(offset);
+                            if candidate != 0 {
+                                found_slot = Some((candidate, offset));
+                                break;
                             }
                         }
 
-                        // Otherwise it's likely a transient CAS reservation in the free region.
-                        // Drop the lock and retry from the top-level insert loop.
-                        drop(lock);
-                        continue;
-                    };
+                        if let Some((alt_slot, back_offset)) = found_slot {
+                            // Use the alternative slot
+                            self.assign_slot_generic(leaf, &mut lock, alt_slot, key, &value, guard);
 
-                    // Assign key/value to the chosen slot under the leaf lock.
+                            let mut new_perm = perm;
+                            let back_pos: usize = L::WIDTH - 1;
+                            let chosen_pos: usize = back_pos - back_offset;
+                            new_perm.swap_free_slots(back_pos, chosen_pos);
+                            let allocated: usize = new_perm.insert_from_back(logical_pos);
+                            debug_assert_eq!(allocated, alt_slot, "allocated unexpected slot");
+                            leaf.set_permutation(new_perm);
+                            drop(lock);
+
+                            self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                            #[cfg(feature = "tracing")]
+                            crate::tree::optimistic::LOCKED_INSERT_COUNT
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                            return Ok(None);
+                        }
+
+                        // Only slot 0 is free and can't be reused - must split
+                        let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
+                        self.handle_leaf_split_generic(
+                            leaf_ptr_current,
+                            lock,
+                            logical_pos,
+                            ikey,
+                            guard,
+                        )?;
+                        continue;
+                    }
+
+                    // Use perm.back() directly - simple case
                     self.assign_slot_generic(leaf, &mut lock, slot, key, &value, guard);
 
-                    // Publish by updating the permutation so `insert_from_back()` allocates `slot`.
-                    // Swap the selected free slot into the back position, then insert.
                     let mut new_perm = perm;
-                    let back_pos: usize = L::WIDTH - 1;
-                    let chosen_pos: usize = back_pos - back_offset;
-                    new_perm.swap_free_slots(back_pos, chosen_pos);
                     let allocated: usize = new_perm.insert_from_back(logical_pos);
                     debug_assert_eq!(allocated, slot, "allocated unexpected slot");
                     leaf.set_permutation(new_perm);
@@ -2032,71 +2092,6 @@ where
         }
 
         result
-    }
-
-    /// Find the correct parent internode for a key by descending from root.
-    ///
-    /// This is used when a leaf's parent pointer is stale (pointing to an internode
-    /// that is not on the traversal path for the key). We re-descend from root to
-    /// find the internode that IS on the correct path.
-    ///
-    /// # Arguments
-    ///
-    /// * `ikey` - The key to find the parent for
-    /// * `guard` - Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// Pointer to the internode that should be the parent for a leaf containing `ikey`.
-    #[expect(clippy::unused_self, reason = "API Consistency")]
-    fn find_parent_for_key_generic(&self, ikey: u64, _guard: &LocalGuard<'_>) -> *mut L::Internode {
-        use crate::ksearch::upper_bound_internode_generic;
-        use crate::leaf_trait::TreeInternode;
-        use std::sync::atomic::Ordering::Acquire;
-
-        // Get fresh root
-        let root_ptr: *const u8 = self.root_ptr.load(Acquire);
-        let mut node: *const u8 = root_ptr;
-
-        // SAFETY: root is valid
-        #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-        let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
-        let _ = version.stable();
-
-        // If root is a leaf, there's no internode parent
-        if version.is_leaf() {
-            // This shouldn't happen in normal operation, but handle gracefully
-            // by returning a null-ish value that will cause the caller to retry
-            return std::ptr::null_mut();
-        }
-
-        // Descend through internodes until we find a leaf child
-        loop {
-            // SAFETY: node is valid internode
-            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
-
-            // Find child index for ikey
-            let child_idx =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(ikey, inode) as usize;
-
-            // Get child pointer
-            let child: *mut u8 = inode.child(child_idx);
-
-            // Check if child is a leaf
-            // SAFETY: child is valid
-            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let child_version: &NodeVersion = unsafe { &*(child.cast::<NodeVersion>()) };
-            let _ = child_version.stable();
-
-            if child_version.is_leaf() {
-                // Current internode is the parent of the leaf
-                return node.cast_mut().cast::<L::Internode>();
-            }
-
-            // Child is another internode, continue descent
-            node = child;
-        }
     }
 
     /// Propagate a leaf split to the parent.

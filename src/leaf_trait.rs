@@ -682,14 +682,6 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     //  CAS Insert Support
     // ========================================================================
 
-    /// Pre-store slot data for CAS-based insert.
-    ///
-    /// # Safety
-    ///
-    /// - `slot` must be in the free region of the current permutation
-    /// - No concurrent writer should be modifying this slot
-    unsafe fn store_slot_for_cas(&self, slot: usize, ikey: u64, keylenx: u8, value_ptr: *mut u8);
-
     /// Store key metadata (`ikey`, `keylenx`) for a CAS insert attempt.
     ///
     /// # Safety
@@ -701,13 +693,6 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Note: writing key metadata *before* claiming the slot is not safe in this design because
     /// multiple concurrent CAS attempts can overwrite each other's metadata before publish.
     unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8);
-
-    /// Clear a slot after failed CAS insert.
-    ///
-    /// # Safety
-    ///
-    /// Caller must have already reclaimed/freed the value that was stored.
-    unsafe fn clear_slot_for_cas(&self, slot: usize);
 
     /// Load the raw slot value pointer atomically.
     ///
