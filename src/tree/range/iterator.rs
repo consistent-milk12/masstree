@@ -611,56 +611,38 @@ where
     ///
     /// Returns `(&[u8], S::Output)` where the key slice is borrowed from
     /// the internal cursor_key buffer.
-    #[inline]
+    ///
+    /// # Performance: Inlined Hot Path
+    ///
+    /// This function inlines the common case (FindNext → Emit) to avoid:
+    /// - State machine dispatch overhead
+    /// - Function call overhead to `find_next()`
+    ///
+    /// Only rare cases (Down, Up, Retry) use function calls.
+    #[inline(always)]
     fn advance_no_alloc(&mut self) -> Option<(&[u8], S::Output)> {
+        // Fast path: if we have a pending emit, process it first
+        if self.state == ScanState::Emit {
+            if let Some(snapshot) = self.snapshot.take() {
+                let key = self.cursor_key.full_key();
+                if !self.end_bound.contains(key) {
+                    self.exhausted = true;
+                    return None;
+                }
+                self.state = ScanState::FindNext;
+                return Some((key, snapshot.value));
+            }
+        }
+
         loop {
+            // Handle rare states first (will break out of loop on Emit)
             match self.state {
-                ScanState::Emit => {
-                    // Check end bound
-                    let key = self.cursor_key.full_key();
-                    if !self.end_bound.contains(key) {
-                        self.exhausted = true;
-                        return None;
-                    }
-
-                    // Take snapshot
-                    let snapshot = self.snapshot.take()?;
-
-                    // Transition to FindNext
-                    self.state = ScanState::FindNext;
-
-                    // Return reference to key in cursor_key buffer
-                    return Some((key, snapshot.value));
-                }
-
-                ScanState::FindNext => {
-                    let (new_state, snapshot) = if self.needs_duplicate_check {
-                        self.needs_duplicate_check = false;
-                        find_next_with_duplicate_check(
-                            &mut self.stack,
-                            &mut self.cursor_key,
-                            &mut self.layer_stack,
-                            self.guard,
-                        )
-                    } else {
-                        find_next(
-                            &mut self.stack,
-                            &mut self.cursor_key,
-                            &mut self.layer_stack,
-                            self.guard,
-                        )
-                    };
-
-                    self.state = new_state;
-                    self.snapshot = snapshot;
-                }
-
                 ScanState::Down => {
                     handle_down(&mut self.stack, &mut self.cursor_key);
                     self.state = ScanState::Retry;
                     self.needs_duplicate_check = true;
+                    continue;
                 }
-
                 ScanState::Up => {
                     if !handle_up(
                         &mut self.stack,
@@ -673,13 +655,50 @@ where
                     }
                     self.state = ScanState::FindNext;
                     self.needs_duplicate_check = true;
+                    continue;
                 }
-
                 ScanState::Retry => {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
                     self.needs_duplicate_check = true;
+                    continue;
+                }
+                ScanState::Emit | ScanState::FindNext => {}
+            }
+
+            // Main hot path: FindNext (inlined from find_next)
+            let (new_state, snapshot) = if self.needs_duplicate_check {
+                self.needs_duplicate_check = false;
+                find_next_with_duplicate_check(
+                    &mut self.stack,
+                    &mut self.cursor_key,
+                    &mut self.layer_stack,
+                    self.guard,
+                )
+            } else {
+                find_next(
+                    &mut self.stack,
+                    &mut self.cursor_key,
+                    &mut self.layer_stack,
+                    self.guard,
+                )
+            };
+
+            self.state = new_state;
+
+            // Fast path: if Emit, return immediately without another loop iteration
+            if new_state == ScanState::Emit {
+                if let Some(snap) = snapshot {
+                    let key = self.cursor_key.full_key();
+                    if !self.end_bound.contains(key) {
+                        self.exhausted = true;
+                        return None;
+                    }
+                    self.state = ScanState::FindNext;
+                    return Some((key, snap.value));
                 }
             }
+
+            self.snapshot = snapshot;
         }
     }
 }
