@@ -547,22 +547,18 @@ where
                         key.current_len() as u8
                     };
 
-                    // Search for matching key using SIMD-accelerated ikey comparison.
+                    // Search for matching key with early-exit sequential scan.
                     // Record snapshot only - do NOT interpret until version validated.
                     let mut match_snapshot: Option<(u8, *mut u8)> = None;
 
-                    // SIMD: Find all physical slots with matching ikey in parallel.
-                    let ikey_matches: u32 = leaf.find_ikey_matches(target_ikey);
-
                     for i in 0..perm.size() {
                         let slot: usize = perm.get(i);
+                        let slot_ikey: u64 = leaf.ikey(slot);
 
-                        // O(1) bit test instead of atomic load + compare
-                        if (ikey_matches & (1 << slot)) == 0 {
+                        if slot_ikey != target_ikey {
                             continue;
                         }
 
-                        // ikey matches - now load keylenx and ptr
                         let slot_keylenx: u8 = leaf.keylenx(slot);
                         let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
@@ -702,24 +698,23 @@ where
                         key.current_len() as u8
                     };
 
-                    // Search for matching key using SIMD-accelerated ikey comparison.
+                    // Search for matching key with early-exit sequential scan.
                     // CRITICAL: Only RECORD the snapshot (keylenx, ptr) here.
                     // Do NOT interpret the pointer until AFTER version validation.
+                    //
+                    // Note: SIMD bulk-load is available via `leaf.find_ikey_matches()` but
+                    // is slower for point lookups where keys are typically found early.
+                    // SIMD will be used for range scans where full leaf iteration is needed.
                     let mut match_snapshot: Option<(u8, *mut u8)> = None;
-
-                    // SIMD: Find all physical slots with matching ikey in parallel.
-                    // Returns bitmask where bit i is set if ikey[i] == target_ikey.
-                    let ikey_matches: u32 = leaf.find_ikey_matches(target_ikey);
 
                     for i in 0..perm.size() {
                         let slot: usize = perm.get(i);
+                        let slot_ikey: u64 = leaf.ikey(slot);
 
-                        // O(1) bit test instead of atomic load + compare
-                        if (ikey_matches & (1 << slot)) == 0 {
+                        if slot_ikey != target_ikey {
                             continue;
                         }
 
-                        // ikey matches - now load keylenx and ptr
                         let slot_keylenx: u8 = leaf.keylenx(slot);
                         let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
