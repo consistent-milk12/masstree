@@ -547,7 +547,7 @@ where
     }
 }
 
-impl<'a, 'g, S, L, A> RangeIter<'a, 'g, S, L, A>
+impl<S, L, A> RangeIter<'_, '_, S, L, A>
 where
     S: ValueSlot,
     S::Value: Send + Sync + 'static,
@@ -592,15 +592,15 @@ where
 
         let mut count: usize = 0;
 
-        loop {
+        'l: loop {
             // Fast path: process current entry without allocation
             if let Some(entry) = self.advance_no_alloc() {
                 count += 1;
                 if !visitor(entry.0, entry.1) {
-                    break;
+                    break 'l;
                 }
             } else {
-                break;
+                break 'l;
             }
         }
 
@@ -610,11 +610,11 @@ where
     /// Advance without allocating key Vec.
     ///
     /// Returns `(&[u8], S::Output)` where the key slice is borrowed from
-    /// the internal cursor_key buffer.
+    /// the internal `cursor_key` buffer.
     ///
     /// # Performance: Inlined Hot Path
     ///
-    /// This function inlines the common case (FindNext → Emit) to avoid:
+    /// This function inlines the common case `(FindNext → Emit)` to avoid:
     /// - State machine dispatch overhead
     /// - Function call overhead to `find_next()`
     ///
@@ -622,16 +622,18 @@ where
     #[inline(always)]
     fn advance_no_alloc(&mut self) -> Option<(&[u8], S::Output)> {
         // Fast path: if we have a pending emit, process it first
-        if self.state == ScanState::Emit {
-            if let Some(snapshot) = self.snapshot.take() {
-                let key = self.cursor_key.full_key();
-                if !self.end_bound.contains(key) {
-                    self.exhausted = true;
-                    return None;
-                }
-                self.state = ScanState::FindNext;
-                return Some((key, snapshot.value));
+        if self.state == ScanState::Emit
+            && let Some(snapshot) = self.snapshot.take()
+        {
+            let key = self.cursor_key.full_key();
+
+            if !self.end_bound.contains(key) {
+                self.exhausted = true;
+                return None;
             }
+
+            self.state = ScanState::FindNext;
+            return Some((key, snapshot.value));
         }
 
         loop {
@@ -686,16 +688,18 @@ where
             self.state = new_state;
 
             // Fast path: if Emit, return immediately without another loop iteration
-            if new_state == ScanState::Emit {
-                if let Some(snap) = snapshot {
-                    let key = self.cursor_key.full_key();
-                    if !self.end_bound.contains(key) {
-                        self.exhausted = true;
-                        return None;
-                    }
-                    self.state = ScanState::FindNext;
-                    return Some((key, snap.value));
+            if new_state == ScanState::Emit
+                && let Some(snap) = snapshot
+            {
+                let key = self.cursor_key.full_key();
+
+                if !self.end_bound.contains(key) {
+                    self.exhausted = true;
+                    return None;
                 }
+
+                self.state = ScanState::FindNext;
+                return Some((key, snap.value));
             }
 
             self.snapshot = snapshot;
@@ -703,7 +707,7 @@ where
     }
 }
 
-impl<'a, 'g, S, L, A> std::iter::FusedIterator for RangeIter<'a, 'g, S, L, A>
+impl<S, L, A> std::iter::FusedIterator for RangeIter<'_, '_, S, L, A>
 where
     S: ValueSlot,
     S::Value: Send + Sync + 'static,
@@ -740,7 +744,7 @@ where
     }
 }
 
-impl<'a, 'g, S, L, A> Iterator for KeysIter<'a, 'g, S, L, A>
+impl<S, L, A> Iterator for KeysIter<'_, '_, S, L, A>
 where
     S: ValueSlot,
     S::Value: Send + Sync + 'static,
@@ -759,7 +763,7 @@ where
     }
 }
 
-impl<'a, 'g, S, L, A> std::iter::FusedIterator for KeysIter<'a, 'g, S, L, A>
+impl<S, L, A> std::iter::FusedIterator for KeysIter<'_, '_, S, L, A>
 where
     S: ValueSlot,
     S::Value: Send + Sync + 'static,
@@ -834,12 +838,12 @@ where
     A: NodeAllocatorGeneric<S, L>,
 {
     /// Convert to a keys-only iterator.
-    pub fn keys(self) -> KeysIter<'a, 'g, S, L, A> {
+    pub const fn keys(self) -> KeysIter<'a, 'g, S, L, A> {
         KeysIter { inner: self }
     }
 
     /// Convert to a values-only iterator.
-    pub fn values(self) -> ValuesIter<'a, 'g, S, L, A> {
+    pub const fn values(self) -> ValuesIter<'a, 'g, S, L, A> {
         ValuesIter { inner: self }
     }
 }

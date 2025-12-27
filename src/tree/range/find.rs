@@ -28,7 +28,9 @@ use crate::prefetch::prefetch_read;
 use crate::slot::ValueSlot;
 
 use super::cursor_key::CursorKey;
-use super::helper::{ForwardScanHelper, KeyIndexedPosition, lower_with_position, lower_with_suffix};
+use super::helper::{
+    ForwardScanHelper, KeyIndexedPosition, lower_with_position, lower_with_suffix,
+};
 use super::scan_state::{LayerContext, LayerStack, ScanSnapshot, ScanStackElement, ScanState};
 
 // ============================================================================
@@ -121,7 +123,9 @@ where
     let (next_state, snapshot) = kx.p.map_or_else(
         || (ScanState::FindNext, None),
         |slot| {
-            handle_initial_match::<L, S>(leaf, slot, cursor_key, stack, emit_equal, version, &perm, kx.i)
+            handle_initial_match::<L, S>(
+                leaf, slot, cursor_key, stack, emit_equal, version, &perm, kx.i,
+            )
         },
     );
 
@@ -152,6 +156,7 @@ where
 }
 
 /// Handle an exact ikey match in `find_initial`.
+#[expect(clippy::too_many_arguments, reason = "Internals")]
 fn handle_initial_match<L, S>(
     leaf: &L,
     slot: usize,
@@ -324,7 +329,7 @@ where
 ///
 /// # Safety: Why no per-entry version check?
 ///
-/// Following TreeIndex's approach: trust the Guard for memory safety.
+/// Following `TreeIndex`'s approach: trust the Guard for memory safety.
 /// - Guard prevents use-after-free during iteration
 /// - B-link structure means splits only move keys RIGHT (forward direction)
 /// - Forward iteration naturally follows this direction
@@ -371,21 +376,20 @@ where
     // past the previous entry, so duplicates can't occur
     if needs_duplicate_check {
         // First check ikey + keylenx level
-        let cmp = cursor_key.compare(slot_ikey, slot_keylenx as usize);
+        let cmp: Ordering = cursor_key.compare(slot_ikey, slot_keylenx as usize);
 
-        let is_dup = match cmp {
-            Ordering::Greater => true,  // cursor > slot, definitely duplicate
-            Ordering::Less => false,    // cursor < slot, not duplicate
+        let is_dup: bool = match cmp {
+            Ordering::Greater => true, // cursor > slot, definitely duplicate
+
+            Ordering::Less => false, // cursor < slot, not duplicate
+
             Ordering::Equal => {
                 // Need suffix comparison if both have suffixes
                 if slot_keylenx == KSUF_KEYLENX && cursor_key.has_suffix() {
                     // Read suffix and compare
-                    if let Some(stored_suffix) = leaf.ksuf(slot) {
-                        // Duplicate if cursor suffix >= stored suffix
+                    leaf.ksuf(slot).is_none_or(|stored_suffix| {
                         cursor_key.compare_suffix(stored_suffix) != Ordering::Less
-                    } else {
-                        true // No suffix found, treat as duplicate
-                    }
+                    })
                 } else {
                     true // Equal at ikey+keylenx level, is duplicate
                 }
@@ -557,6 +561,7 @@ where
 }
 
 /// Follow B-links to find the correct leaf after a split.
+#[expect(clippy::similar_names)]
 fn follow_blinks_or_retry<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &CursorKey,

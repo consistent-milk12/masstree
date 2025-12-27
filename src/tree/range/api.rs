@@ -1,6 +1,6 @@
 //! Filepath: src/tree/range/api.rs
 //!
-//! Public API methods for range scans on MassTreeGeneric.
+//! Public API methods for range scans on [`MassTreeGeneric`].
 
 use seize::LocalGuard;
 
@@ -218,10 +218,9 @@ where
         // e.g., "abc" -> "abd", "ab\xff" -> "ac", etc.
         let upper_bound: Option<Vec<u8>> = compute_prefix_upper_bound(prefix);
 
-        let end: RangeBound<'_> = match upper_bound {
-            Some(ref bound) => RangeBound::Excluded(bound),
-            None => RangeBound::Unbounded, // Prefix ends with all 0xFF bytes
-        };
+        let end: RangeBound<'_> = upper_bound
+            .as_ref()
+            .map_or(RangeBound::Unbounded, |bound| RangeBound::Excluded(bound));
 
         // Use zero-allocation for_each with prefix check
         self.range(RangeBound::Included(prefix), end, guard)
@@ -285,6 +284,7 @@ where
 /// Compute the exclusive upper bound for a prefix scan.
 ///
 /// Returns `None` if the prefix cannot be incremented (all 0xFF bytes).
+#[expect(clippy::indexing_slicing, reason = "Checked")]
 fn compute_prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     if prefix.is_empty() {
         return None; // Unbounded
@@ -297,6 +297,7 @@ fn compute_prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
         if upper[i] < 0xFF {
             upper[i] += 1;
             upper.truncate(i + 1);
+
             return Some(upper);
         }
     }
