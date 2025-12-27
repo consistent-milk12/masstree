@@ -56,10 +56,10 @@ mod bench_utils;
 
 use bench_utils::{
     keys, keys_adversarial_splits, keys_blink_stress, keys_clustered, keys_hierarchical,
-    keys_interleaved_ranges, keys_reverse, keys_sequential, keys_shared_prefix,
-    keys_sparse, keys_suffix_only_differ,
+    keys_interleaved_ranges, keys_reverse, keys_sequential, keys_shared_prefix, keys_sparse,
+    keys_suffix_only_differ,
 };
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::{MassTree24, RangeBound};
 use scc::TreeIndex;
@@ -118,7 +118,7 @@ fn setup_indexset<const K: usize>(keys: &[[u8; K]]) -> IndexSetBTreeMap<[u8; K],
 mod sequential_full_scan {
     use super::*;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sequential::<8>(N));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -137,7 +137,7 @@ mod sequential_full_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -159,7 +159,7 @@ mod sequential_full_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sequential::<8>(N));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -190,7 +190,7 @@ mod sequential_full_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sequential::<8>(N));
         let map = Arc::new(setup_indexset(&keys));
@@ -229,7 +229,7 @@ mod sequential_full_scan {
 mod reverse_scan {
     use super::*;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_reverse::<8>(N));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -248,7 +248,7 @@ mod reverse_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -270,7 +270,7 @@ mod reverse_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_reverse::<8>(N));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -301,7 +301,7 @@ mod reverse_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_reverse::<8>(N));
         let map = Arc::new(setup_indexset(&keys));
@@ -344,7 +344,7 @@ mod clustered_scan {
     const KEYS_PER_CLUSTER: usize = N / CLUSTERS;
     const GAP_SIZE: u64 = 10_000;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_clustered::<8>(CLUSTERS, KEYS_PER_CLUSTER, GAP_SIZE));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -363,7 +363,7 @@ mod clustered_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -385,7 +385,7 @@ mod clustered_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_clustered::<8>(CLUSTERS, KEYS_PER_CLUSTER, GAP_SIZE));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -416,7 +416,7 @@ mod clustered_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_clustered::<8>(CLUSTERS, KEYS_PER_CLUSTER, GAP_SIZE));
         let map = Arc::new(setup_indexset(&keys));
@@ -457,7 +457,7 @@ mod sparse_scan {
 
     const SPACING: u64 = 1000;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sparse::<8>(N, SPACING));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -476,7 +476,7 @@ mod sparse_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -498,7 +498,7 @@ mod sparse_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sparse::<8>(N, SPACING));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -529,7 +529,7 @@ mod sparse_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sparse::<8>(N, SPACING));
         let map = Arc::new(setup_indexset(&keys));
@@ -570,7 +570,7 @@ mod shared_prefix_scan {
 
     const PREFIX_BUCKETS: u64 = 100; // 10k keys per prefix
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_shared_prefix::<16>(N, PREFIX_BUCKETS));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -589,7 +589,7 @@ mod shared_prefix_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -611,7 +611,7 @@ mod shared_prefix_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_shared_prefix::<16>(N, PREFIX_BUCKETS));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -642,7 +642,7 @@ mod shared_prefix_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_shared_prefix::<16>(N, PREFIX_BUCKETS));
         let map = Arc::new(setup_indexset(&keys));
@@ -681,7 +681,7 @@ mod shared_prefix_scan {
 mod suffix_differ_scan {
     use super::*;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_suffix_only_differ::<32>(N));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -700,7 +700,7 @@ mod suffix_differ_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -722,7 +722,7 @@ mod suffix_differ_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_suffix_only_differ::<32>(N));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -753,7 +753,7 @@ mod suffix_differ_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_suffix_only_differ::<32>(N));
         let map = Arc::new(setup_indexset(&keys));
@@ -797,7 +797,7 @@ mod hierarchical_scan {
     const CATEGORIES: usize = 100;
     const ITEMS: usize = 100;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_hierarchical::<32>(NAMESPACES, CATEGORIES, ITEMS));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -816,7 +816,7 @@ mod hierarchical_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -838,7 +838,7 @@ mod hierarchical_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_hierarchical::<32>(NAMESPACES, CATEGORIES, ITEMS));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -869,7 +869,7 @@ mod hierarchical_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_hierarchical::<32>(NAMESPACES, CATEGORIES, ITEMS));
         let map = Arc::new(setup_indexset(&keys));
@@ -908,7 +908,7 @@ mod hierarchical_scan {
 mod adversarial_splits_scan {
     use super::*;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_adversarial_splits::<8>(N));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -927,7 +927,7 @@ mod adversarial_splits_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -949,7 +949,7 @@ mod adversarial_splits_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_adversarial_splits::<8>(N));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -980,7 +980,7 @@ mod adversarial_splits_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_adversarial_splits::<8>(N));
         let map = Arc::new(setup_indexset(&keys));
@@ -1023,9 +1023,13 @@ mod interleaved_scan {
     const KEYS_PER_RANGE: usize = N / HOT_RANGES;
     const COLD_GAP: u64 = 100_000;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_interleaved_ranges::<8>(HOT_RANGES, KEYS_PER_RANGE, COLD_GAP));
+        let keys = Arc::new(keys_interleaved_ranges::<8>(
+            HOT_RANGES,
+            KEYS_PER_RANGE,
+            COLD_GAP,
+        ));
         let tree = Arc::new(setup_masstree24(&keys));
 
         bencher
@@ -1042,7 +1046,7 @@ mod interleaved_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -1064,9 +1068,13 @@ mod interleaved_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_interleaved_ranges::<8>(HOT_RANGES, KEYS_PER_RANGE, COLD_GAP));
+        let keys = Arc::new(keys_interleaved_ranges::<8>(
+            HOT_RANGES,
+            KEYS_PER_RANGE,
+            COLD_GAP,
+        ));
         let tree = Arc::new(setup_tree_index(&keys));
 
         bencher
@@ -1095,9 +1103,13 @@ mod interleaved_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_interleaved_ranges::<8>(HOT_RANGES, KEYS_PER_RANGE, COLD_GAP));
+        let keys = Arc::new(keys_interleaved_ranges::<8>(
+            HOT_RANGES,
+            KEYS_PER_RANGE,
+            COLD_GAP,
+        ));
         let map = Arc::new(setup_indexset(&keys));
 
         bencher
@@ -1134,7 +1146,7 @@ mod interleaved_scan {
 mod blink_stress_scan {
     use super::*;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_blink_stress::<8>(N));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -1153,7 +1165,7 @@ mod blink_stress_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -1175,7 +1187,7 @@ mod blink_stress_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_blink_stress::<8>(N));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -1206,7 +1218,7 @@ mod blink_stress_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_blink_stress::<8>(N));
         let map = Arc::new(setup_indexset(&keys));
@@ -1245,7 +1257,7 @@ mod blink_stress_scan {
 mod random_keys_scan {
     use super::*;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<8>(N));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -1264,7 +1276,7 @@ mod random_keys_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -1286,7 +1298,7 @@ mod random_keys_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<8>(N));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -1317,7 +1329,7 @@ mod random_keys_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<8>(N));
         let map = Arc::new(setup_indexset(&keys));
@@ -1356,7 +1368,7 @@ mod random_keys_scan {
 mod long_keys_scan {
     use super::*;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<64>(N));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -1375,7 +1387,7 @@ mod long_keys_scan {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -1397,7 +1409,7 @@ mod long_keys_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<64>(N));
         let tree = Arc::new(setup_tree_index(&keys));
@@ -1428,7 +1440,7 @@ mod long_keys_scan {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<64>(N));
         let map = Arc::new(setup_indexset(&keys));
@@ -1514,7 +1526,7 @@ mod scan_while_insert {
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -1605,7 +1617,7 @@ mod prefix_scan {
 
     const PREFIX_BUCKETS: u64 = 100;
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_shared_prefix::<16>(N, PREFIX_BUCKETS));
         let tree = Arc::new(setup_masstree24(&keys));
@@ -1652,13 +1664,15 @@ mod full_scan_aggregate {
 
     const SCAN_N: usize = 100_000; // Smaller dataset for full scans
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sequential::<8>(SCAN_N));
         let tree = Arc::new(setup_masstree24(&keys));
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * (OPS_PER_THREAD / 10)))
+            .counter(divan::counter::ItemsCount::new(
+                threads * (OPS_PER_THREAD / 10),
+            ))
             .bench_local(|| {
                 let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -1671,7 +1685,7 @@ mod full_scan_aggregate {
                             for _ in 0..(OPS_PER_THREAD / 10) {
                                 let guard = tree.guard();
                                 let mut sum = 0u64;
-                                tree.scan(
+                                tree.scan_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, v| {
@@ -1693,13 +1707,15 @@ mod full_scan_aggregate {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sequential::<8>(SCAN_N));
         let tree = Arc::new(setup_tree_index(&keys));
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * (OPS_PER_THREAD / 10)))
+            .counter(divan::counter::ItemsCount::new(
+                threads * (OPS_PER_THREAD / 10),
+            ))
             .bench_local(|| {
                 let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -1725,13 +1741,15 @@ mod full_scan_aggregate {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sequential::<8>(SCAN_N));
         let map = Arc::new(setup_indexset(&keys));
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * (OPS_PER_THREAD / 10)))
+            .counter(divan::counter::ItemsCount::new(
+                threads * (OPS_PER_THREAD / 10),
+            ))
             .bench_local(|| {
                 let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)

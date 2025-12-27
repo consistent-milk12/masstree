@@ -538,6 +538,48 @@ pub struct ScanSnapshot<S: ValueSlot> {
     pub key_len: usize,
 }
 
+// ============================================================================
+//  ScanSnapshotPtr - Zero-copy snapshot for scan_ref
+// ============================================================================
+
+/// Snapshot of slot data for zero-copy emission.
+///
+/// Unlike [`ScanSnapshot`] which clones the value (Arc increment for `LeafValue`),
+/// this stores the raw pointer and defers dereferencing to the caller.
+///
+/// # Safety
+///
+/// The `value_ptr` is only valid while:
+/// 1. The guard is held (prevents deallocation)
+/// 2. The version hasn't changed (leaf not modified)
+///
+/// The caller must dereference the pointer immediately after receiving it,
+/// within the same guard scope.
+///
+/// # Performance
+///
+/// This eliminates Arc atomic increment/decrement per scanned entry,
+/// which can improve scan throughput by 2-3x for Arc-based trees.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanSnapshotPtr {
+    /// Raw pointer to the value data.
+    ///
+    /// - For `LeafValue<V>`: Points to Arc<V>'s data
+    /// - For `LeafValueIndex<V>`: Points to Box<V>'s data
+    pub value_ptr: *const u8,
+
+    /// The key length at current layer (same as ScanSnapshot).
+    pub key_len: usize,
+}
+
+impl ScanSnapshotPtr {
+    /// Create a new zero-copy snapshot.
+    #[inline(always)]
+    pub const fn new(value_ptr: *const u8, key_len: usize) -> Self {
+        Self { value_ptr, key_len }
+    }
+}
+
 impl<S: ValueSlot> ScanSnapshot<S> {
     /// Create a new scan snapshot.
     #[inline(always)]

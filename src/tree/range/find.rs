@@ -31,7 +31,9 @@ use super::cursor_key::CursorKey;
 use super::helper::{
     ForwardScanHelper, KeyIndexedPosition, lower_with_position, lower_with_suffix,
 };
-use super::scan_state::{LayerContext, LayerStack, ScanSnapshot, ScanStackElement, ScanState};
+use super::scan_state::{
+    LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr, ScanStackElement, ScanState,
+};
 
 // ============================================================================
 //  find_initial
@@ -450,6 +452,227 @@ where
     stack.next();
 
     (ScanState::Emit, Some(ScanSnapshot::new(output, key_len)))
+}
+
+// ============================================================================
+//  Zero-Copy Variants (for scan_ref)
+// ============================================================================
+
+/// Find the next entry, returning a raw pointer instead of cloning.
+///
+/// This is the zero-copy variant of [`find_next`] for use with `scan_ref`.
+/// Instead of calling `S::output_from_raw` (which clones Arc values),
+/// it returns the raw pointer directly.
+///
+/// # Safety
+///
+/// The returned pointer is only valid while:
+/// 1. The guard is held
+/// 2. The version hasn't changed
+///
+/// Callers must dereference immediately within the same guard scope.
+#[inline]
+pub fn find_next_ptr<L, S>(
+    stack: &mut ScanStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<L>,
+    guard: &LocalGuard<'_>,
+) -> (ScanState, Option<ScanSnapshotPtr>)
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    find_next_inner_ptr(stack, cursor_key, layer_stack, guard, false)
+}
+
+/// Find the next entry with duplicate checking, returning raw pointer.
+///
+/// Zero-copy variant of [`find_next_with_duplicate_check`].
+#[inline]
+pub fn find_next_with_duplicate_check_ptr<L, S>(
+    stack: &mut ScanStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<L>,
+    guard: &LocalGuard<'_>,
+) -> (ScanState, Option<ScanSnapshotPtr>)
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    find_next_inner_ptr(stack, cursor_key, layer_stack, guard, true)
+}
+
+/// Inner implementation for zero-copy find_next.
+///
+/// Nearly identical to [`find_next_inner`] but:
+/// - Does NOT call `S::output_from_raw` (no Arc clone)
+/// - Returns `ScanSnapshotPtr` with raw pointer instead
+///
+/// This eliminates 2 atomic operations per entry (increment + decrement).
+#[inline]
+fn find_next_inner_ptr<L, S>(
+    stack: &mut ScanStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<L>,
+    guard: &LocalGuard<'_>,
+    needs_duplicate_check: bool,
+) -> (ScanState, Option<ScanSnapshotPtr>)
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    // SAFETY: Stack should have valid leaf at this point
+    if stack.is_null() {
+        return (ScanState::Up, None);
+    }
+
+    let leaf: &L = unsafe { stack.leaf_ref() };
+
+    // Check if leaf is deleted (this is cheap - single atomic load)
+    if leaf.version().is_deleted() {
+        return (ScanState::Retry, None);
+    }
+
+    // Get current slot - O(1) via perm.get(ki)
+    let Some(slot) = stack.kp() else {
+        // Leaf exhausted, try advancing (this validates version)
+        return advance_leaf_ptr(stack, cursor_key, guard);
+    };
+
+    // Read slot data - Guard ensures memory safety
+    let slot_ikey: u64 = leaf.ikey(slot);
+    let slot_keylenx: u8 = leaf.keylenx(slot);
+
+    // Check for duplicate only when needed (after Retry)
+    if needs_duplicate_check {
+        let cmp: Ordering = cursor_key.compare(slot_ikey, slot_keylenx as usize);
+
+        let is_dup: bool = match cmp {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => {
+                if slot_keylenx == KSUF_KEYLENX && cursor_key.has_suffix() {
+                    leaf.ksuf(slot).is_none_or(|stored_suffix| {
+                        cursor_key.compare_suffix(stored_suffix) != Ordering::Less
+                    })
+                } else {
+                    true
+                }
+            }
+        };
+
+        if is_dup {
+            stack.next();
+            return (ScanState::FindNext, None);
+        }
+    }
+
+    // Handle layer pointer - descend into sublayer
+    if slot_keylenx >= LAYER_KEYLENX {
+        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
+        cursor_key.assign_store_ikey(slot_ikey);
+        stack.set_root(slot_ptr);
+        return (ScanState::Down, None);
+    }
+
+    // Value slot - prepare for emit (NO CLONING)
+    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+    if slot_ptr.is_null() {
+        stack.next();
+        return (ScanState::FindNext, None);
+    }
+
+    // KEY DIFFERENCE: We do NOT call S::output_from_raw here!
+    // The caller will dereference the pointer directly.
+
+    // Compute key length - only read suffix NOW if needed
+    let key_len: usize = if slot_keylenx == KSUF_KEYLENX {
+        if let Some(suffix) = leaf.ksuf(slot) {
+            let suffix_len = suffix.len();
+            cursor_key.assign_store_ikey(slot_ikey);
+            let _ = cursor_key.assign_store_suffix(suffix);
+            cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
+            IKEY_SIZE + suffix_len
+        } else {
+            cursor_key.assign_store_ikey(slot_ikey);
+            cursor_key.assign_store_length(IKEY_SIZE);
+            IKEY_SIZE
+        }
+    } else {
+        let len = slot_keylenx as usize;
+        cursor_key.assign_store_ikey(slot_ikey);
+        cursor_key.assign_store_length(len);
+        len
+    };
+
+    cursor_key.mark_key_complete();
+
+    // Advance position for next call
+    stack.next();
+
+    // Return raw pointer - caller will dereference
+    (ScanState::Emit, Some(ScanSnapshotPtr::new(slot_ptr, key_len)))
+}
+
+/// Advance to next leaf, zero-copy variant.
+///
+/// Same as [`advance_leaf`] but returns `ScanSnapshotPtr`.
+fn advance_leaf_ptr<L, S>(
+    stack: &mut ScanStackElement<L, S>,
+    cursor_key: &CursorKey,
+    _guard: &LocalGuard<'_>,
+) -> (ScanState, Option<ScanSnapshotPtr>)
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    let leaf: &L = unsafe { stack.leaf_ref() };
+    let version: u32 = stack.version();
+
+    // Check if version changed (concurrent modification)
+    if leaf.version().has_changed(version) {
+        return (ScanState::Retry, None);
+    }
+
+    // Get next leaf
+    let next: *mut L = ForwardScanHelper::advance(leaf);
+
+    if next.is_null() {
+        // No more leaves in this layer
+        return (ScanState::Up, None);
+    }
+
+    // Move to next leaf
+    stack.set_leaf(next);
+
+    // SAFETY: next is non-null and protected by guard
+    let next_leaf: &L = unsafe { &*next };
+
+    // Prefetch the next leaf's data arrays
+    next_leaf.prefetch();
+
+    // Get stable version
+    let next_version: u32 = next_leaf.version().stable();
+
+    // Check if deleted
+    if next_leaf.version().is_deleted() {
+        return (ScanState::Retry, None);
+    }
+
+    // Load permutation
+    let perm: L::Perm = match next_leaf.permutation_try() {
+        Ok(p) => p,
+        Err(_frozen) => {
+            return (ScanState::Retry, None);
+        }
+    };
+
+    // Reposition using full key comparison
+    let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
+    stack.update_state(next_version, perm, kx.i);
+
+    (ScanState::FindNext, None)
 }
 
 /// Advance to the next leaf when current is exhausted.
