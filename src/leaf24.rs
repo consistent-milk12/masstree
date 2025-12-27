@@ -1040,6 +1040,15 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         Self::ikey_bound(self)
     }
 
+    /// SIMD-accelerated ikey matching for WIDTH=24.
+    ///
+    /// Uses `load_all_ikeys()` + SIMD comparison instead of
+    /// sequential per-slot atomic loads.
+    #[inline]
+    fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
+        crate::ksearch::find_ikey_matches_leaf24(target_ikey, self)
+    }
+
     #[inline(always)]
     fn keylenx(&self, slot: usize) -> u8 {
         Self::keylenx(self, slot)

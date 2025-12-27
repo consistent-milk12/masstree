@@ -558,6 +558,24 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// for navigating to the correct sibling during splits.
     fn ikey_bound(&self) -> u64;
 
+    /// Find all physical slots with matching ikey, returning a bitmask.
+    ///
+    /// Returns a `u32` where bit `i` is set if `self.ikey(i) == target_ikey`.
+    /// Used for SIMD-accelerated key search.
+    ///
+    /// The default implementation uses a scalar loop. Implementations may
+    /// override with SIMD for better performance.
+    #[inline]
+    fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
+        let mut mask: u32 = 0;
+        for slot in 0..Self::WIDTH {
+            if self.ikey(slot) == target_ikey {
+                mask |= 1 << slot;
+            }
+        }
+        mask
+    }
+
     /// Get keylenx at physical slot.
     ///
     /// Values:

@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -54,7 +54,7 @@ tracing-subscriber = { version = "0.3.22", features = [
 tracing-appender = { version = "0.2.4", optional = true }
 
 # For formatting JSON logs
-serde_json = "1.0.147"
+serde_json = "1.0.148"
 serde = { version = "1.0.228", features = ["derive"] }
 rayon = { version = "1.11.0", optional = true }
 chrono = "0.4.42"

@@ -3,8 +3,16 @@
 //! Provides binary search for:
 //! - Upper bound in internodes (routing to children)
 //!
+//! SIMD-accelerated search for:
+//! - Leaf ikey matching (find all slots with target ikey)
+//!
 //! # Reference
 //! Based on `ksearch.hh` from the C++ Masstree implementation.
+
+pub mod simd;
+pub mod simd_search;
+
+pub use simd_search::find_ikey_matches_leaf24;
 
 use crate::internode::InternodeNode;
 use crate::leaf_trait::TreeInternode;

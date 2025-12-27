@@ -1851,6 +1851,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_masstree24_internode_splits_stress() {
         // Stress test to verify multi-level internode splits work
         // Uses 50,000 keys to trigger deep tree with multiple internode levels
