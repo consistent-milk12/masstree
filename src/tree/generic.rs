@@ -24,11 +24,6 @@ use crate::{
     value::LeafValue,
 };
 
-
-
-
-const MAX_ANOMALY_RETRIES: u32 = 1000;
-
 /// Sentinel for the CLAIMING state in the Option A (Safe) CAS insert protocol.
 ///
 /// When a slot's value pointer equals this sentinel, the slot is reserved by an in-progress
@@ -490,7 +485,7 @@ where
         let mut in_sublayer: bool = false;
 
         'layer_loop: loop {
-            // Find the actual layer root (handles layer root promotion)
+            // Find the actual layer root (handles layer root promotion for sublayers)
             layer_root = self.maybe_parent_generic(layer_root);
 
             // Traverse to leaf for current layer
@@ -639,6 +634,7 @@ where
                                 next_bound = next_bound,
                                 "get: NotFound but ikey >= next_bound; following B-link"
                             );
+                            #[cfg(feature = "tracing")]
                             crate::tree::optimistic::BLINK_SHOULD_FOLLOW_COUNT
                                 .fetch_add(1, AtomicOrdering::Relaxed);
                             leaf_ptr = next_ptr;
@@ -656,6 +652,7 @@ where
                         is_marked = is_marked(next_raw),
                         "get: NOT_FOUND"
                     );
+                    #[cfg(feature = "tracing")]
                     crate::tree::optimistic::SEARCH_NOT_FOUND_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return None;
@@ -752,14 +749,23 @@ where
         is_sublayer: bool,
         _guard: &LocalGuard<'_>,
     ) -> *const u8 {
-        // Start from the passed-in node (like C++ reach_leaf)
+        // FAST PATH: Check if start is already a root (common case)
+        // SAFETY: start is valid (comes from tree structure)
+        #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+        let version: &NodeVersion = unsafe { &*(start.cast::<NodeVersion>()) };
+
+        // Quick check without stable() - is_root is a single bit check
+        if version.is_root() {
+            return start;
+        }
+
+        // SLOW PATH: start is not a root, need to find one
         let mut node: *const u8 = start;
 
-        // Save the original self.root_ptr for potential CAS update
+        // Only load cached_root when we need it for the slow path
         let cached_root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 
         // Follow parent pointers until we find a root
-        // This matches C++ reach_leaf lines 646-654
         loop {
             // SAFETY: node is valid (comes from tree structure)
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
@@ -898,29 +904,10 @@ where
         let mut nodes: [*const u8; 2] = [std::ptr::null(); 2];
         let mut versions: [u32; 2] = [0; 2];
 
-        // FAR_LANDING: if we land far from target, retry from fresh root
-        const FAR_LANDING_GAP: u64 = 100_000;
-        const FAR_LANDING_MAX_RETRIES: u8 = 5;
-        let mut far_landing_retries: u8 = 0;
-
         // Phase 1: Find fresh (non-stale) root
         'retry: loop {
             let mut sense: usize = 0;
             nodes[sense] = self.get_fresh_root(start, is_sublayer, guard);
-
-
-            // DIAGNOSTIC: Log root obtained during FAR_LANDING retry
-            #[cfg(feature = "tracing")]
-            if far_landing_retries > 0 {
-                tracing::debug!(
-                    target_ikey = format_args!("{:016x}", target_ikey),
-                    root_ptr = ?nodes[sense],
-                    start_ptr = ?start,
-                    retry = far_landing_retries,
-                    same_as_start = std::ptr::eq(nodes[sense], start),
-                    "FRESH_ROOT: get_fresh_root returned during FAR_LANDING retry"
-                );
-            }
 
             // SAFETY: node is valid, NodeVersion is first field
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
@@ -928,8 +915,6 @@ where
             versions[sense] = version.stable();
 
             // If we somehow didn't land on a root (should be rare), restart and try again.
-            // This matches the C++ "retry to true root" behavior, but stays defensive
-            // against transient parent/root-bit inconsistencies.
             if !version.is_root() {
                 continue 'retry;
             }
@@ -944,51 +929,7 @@ where
                 let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
                 if version.is_leaf() {
-                    // Found leaf - sanity check that we didn't land *far* from target.
-                    //
-                    // In a B-link tree, a too-far-left landing can be corrected by walking `next`,
-                    // but that can turn into heavy thrash when FAR_LANDING occurs. Prefer retrying
-                    // from a fresh root a few times before falling back to bound-walk.
-                    let leaf: &L = unsafe { &*(node.cast::<L>()) };
-                    let leaf_bound: u64 = leaf.ikey_bound();
-
-                    // FAR_LANDING check: if we landed far from target, retry from fresh root
-                    let gap: u64 = if target_ikey >= leaf_bound {
-                        target_ikey - leaf_bound
-                    } else {
-                        leaf_bound - target_ikey
-                    };
-
-                    if gap > FAR_LANDING_GAP
-                        && far_landing_retries < FAR_LANDING_MAX_RETRIES
-                    {
-                        far_landing_retries += 1;
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!(
-                            ikey = format_args!("{:016x}", target_ikey),
-                            leaf_ptr = ?node,
-                            leaf_bound = format_args!("{:016x}", leaf_bound),
-                            gap = gap,
-                            retry = far_landing_retries,
-                            "FAR_LANDING_RETRY: reach_leaf landed far from target; retrying from fresh root"
-                        );
-
-                        // Backoff before retry: spin to let split propagation complete.
-                        // The tree may be in early growth phase where internode has few keys
-                        // and leaves are chained via B-links. Propagation will add keys to
-                        // the internode, narrowing down future searches.
-                        //
-                        // Exponential backoff: 100, 400, 900 spins for retries 1, 2, 3.
-                        // (retry^2 * 100 gives quadratic growth)
-                        let backoff_spins: u32 =
-                            u32::from(far_landing_retries) * u32::from(far_landing_retries) * 100;
-                        for _ in 0..backoff_spins {
-                            std::hint::spin_loop();
-                        }
-
-                        continue 'retry;
-                    }
-
+                    // Found leaf - return it. B-link walking handles any needed advancement.
                     return node.cast_mut().cast::<L>();
                 }
 
@@ -997,53 +938,13 @@ where
                 let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
 
                 // Find child for this key
-                let nkeys_snapshot: usize = inode.nkeys();
                 let child_idx: usize =
                     upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
                 let child: *mut u8 = inode.child(child_idx);
 
-                // DIAGNOSTIC: Log internode descent for FAR_LANDING analysis
-                #[cfg(feature = "tracing")]
-                {
-                    use crate::leaf_trait::TreeInternode;
-                    // Capture first 4 keys for debugging (or fewer if nkeys < 4)
-                    let k0: u64 = if nkeys_snapshot > 0 { inode.ikey(0) } else { 0 };
-                    let k1: u64 = if nkeys_snapshot > 1 { inode.ikey(1) } else { 0 };
-                    let k2: u64 = if nkeys_snapshot > 2 { inode.ikey(2) } else { 0 };
-                    let k3: u64 = if nkeys_snapshot > 3 { inode.ikey(3) } else { 0 };
-                    // Also capture the last key if there are more than 4
-                    let k_last: u64 = if nkeys_snapshot > 4 {
-                        inode.ikey(nkeys_snapshot - 1)
-                    } else {
-                        0
-                    };
-
-                    // Only log if we're in a FAR_LANDING retry scenario (far_landing_retries > 0)
-                    // or if the gap seems suspicious
-                    if far_landing_retries > 0 {
-                        tracing::debug!(
-                            target_ikey = format_args!("{:016x}", target_ikey),
-                            inode_ptr = ?node,
-                            inode_version = v,
-                            nkeys = nkeys_snapshot,
-                            child_idx = child_idx,
-                            child_ptr = ?child,
-                            k0 = format_args!("{:016x}", k0),
-                            k1 = format_args!("{:016x}", k1),
-                            k2 = format_args!("{:016x}", k2),
-                            k3 = format_args!("{:016x}", k3),
-                            k_last = format_args!("{:016x}", k_last),
-                            retry = far_landing_retries,
-                            "INTERNODE_DESCENT: traversing internode during FAR_LANDING retry"
-                        );
-                    }
-                }
-
                 // Store child in OTHER buffer (double-buffering)
                 let other = sense ^ 1;
                 nodes[other] = child;
-
-
 
                 if child.is_null() {
                     // NULL child - retry from fresh root
@@ -1112,7 +1013,6 @@ where
     ) -> CasInsertResultGeneric<V> {
         use crate::leaf_trait::TreePermutation;
         use crate::link::{is_marked, unmark_ptr};
-        use crate::tree::optimistic::CAS_INSERT_RETRY_COUNT;
         use std::ptr as StdPtr;
 
         let ikey: u64 = key.ikey();
@@ -1133,8 +1033,8 @@ where
             // 1. Optimistic traversal to find target leaf
             // CAS path only operates on layer 0 (no suffix keys), so is_sublayer=false
             if use_reach {
-                let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
-                layer_root = self.maybe_parent_generic(layer_root);
+                let layer_root: *const u8 = self.load_root_ptr_generic(guard);
+                // Note: get_fresh_root inside reach_leaf_concurrent_generic handles parent traversal
                 leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
             } else {
                 use_reach = true;
@@ -1211,7 +1111,9 @@ where
                     // With a stale `perm` snapshot, `slot` might no longer be free.
                     // This early check avoids unnecessary CAS attempts.
                     if !leaf.load_slot_value(slot).is_null() {
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -1231,7 +1133,9 @@ where
                         .is_err()
                     {
                         // Contention: another thread claimed this slot first.
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -1246,7 +1150,9 @@ where
                     if leaf.version().has_changed_or_locked(version) {
                         // Release reservation: CLAIMING -> NULL
                         let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -1268,7 +1174,9 @@ where
                     if leaf.version().has_changed_or_locked(version) {
                         // Release reservation: CLAIMING -> NULL
                         let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -1305,7 +1213,9 @@ where
                         // Slot was stolen after we installed arc_ptr. This is unexpected
                         // but we handle it by dropping our Arc and falling back.
                         let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -1321,7 +1231,9 @@ where
                                 let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
                             }
                         }
-                        CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         retries += 1;
                         if retries > Self::MAX_CAS_RETRIES_GENERIC {
                             return CasInsertResultGeneric::ContentionFallback;
@@ -1398,7 +1310,9 @@ where
                                 return CasInsertResultGeneric::ContentionFallback;
                             }
 
-                            CAS_INSERT_RETRY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                            #[cfg(feature = "tracing")]
+                            crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
+                                .fetch_add(1, AtomicOrdering::Relaxed);
                             retries += 1;
                             if retries > Self::MAX_CAS_RETRIES_GENERIC {
                                 return CasInsertResultGeneric::ContentionFallback;
@@ -1565,6 +1479,7 @@ where
             if key_ikey >= next_bound {
                 advance_count += 1;
                 // Key belongs in next leaf or further
+                #[cfg(feature = "tracing")]
                 crate::tree::optimistic::ADVANCE_BLINK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
 
                 // DIAGNOSTIC: Check for backwards B-link chain
@@ -1590,6 +1505,7 @@ where
 
                 // Cycle detection
                 if StdPtr::eq(next, start_ptr) {
+                    #[cfg(feature = "tracing")]
                     crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return None;
@@ -1597,26 +1513,23 @@ where
 
                 // Limit check
                 if advance_count >= Self::MAX_BLINK_ADVANCES {
-                    let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-
-                    #[cfg(not(feature = "tracing"))]
-                    let _ = count;
-
-                    // Rate-limit logging: only log first 10 anomalies
                     #[cfg(feature = "tracing")]
-                    if count < 10 {
-                        tracing::error!(
-                            ikey = format_args!("{:016x}", key_ikey),
-                            start_ptr = ?start_ptr,
-                            start_bound = format_args!("{:016x}", unsafe { (*start_ptr).ikey_bound() }),
-                            current_ptr = ?StdPtr::from_ref(leaf),
-                            current_bound = format_args!("{:016x}", leaf.ikey_bound()),
-                            next_ptr = ?next_ptr,
-                            next_bound = format_args!("{:016x}", next_bound),
-                            advance_count = advance_count,
-                            "BLINK_LIMIT_GET: ikey >> start_bound in get path"
-                        );
+                    {
+                        let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        if count < 10 {
+                            tracing::error!(
+                                ikey = format_args!("{:016x}", key_ikey),
+                                start_ptr = ?start_ptr,
+                                start_bound = format_args!("{:016x}", unsafe { (*start_ptr).ikey_bound() }),
+                                current_ptr = ?StdPtr::from_ref(leaf),
+                                current_bound = format_args!("{:016x}", leaf.ikey_bound()),
+                                next_ptr = ?next_ptr,
+                                next_bound = format_args!("{:016x}", next_bound),
+                                advance_count = advance_count,
+                                "BLINK_LIMIT_GET: ikey >> start_bound in get path"
+                            );
+                        }
                     }
                     return None;
                 }
@@ -1634,8 +1547,8 @@ where
     }
 
     /// Maximum B-link advances before bailing (anomaly detection).
-    /// Set high enough to handle legitimate long chains during heavy splitting.
-    const MAX_BLINK_ADVANCES: usize = 10_000;
+    /// Should be enough for legitimate chains during concurrent splits.
+    const MAX_BLINK_ADVANCES: usize = 256;
 
     /// Advance to correct leaf via B-link (generic version).
     /// Used by insert path before locking.
@@ -1681,6 +1594,7 @@ where
 
             if key_ikey >= next_bound {
                 advance_count += 1;
+                #[cfg(feature = "tracing")]
                 crate::tree::optimistic::ADVANCE_BLINK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
 
                 // DIAGNOSTIC: Check for backwards B-link chain (bound should increase)
@@ -1706,6 +1620,7 @@ where
 
                 // Cycle detection: check if we're back to start
                 if StdPtr::eq(next, start_ptr) {
+                    #[cfg(feature = "tracing")]
                     crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return None;
@@ -1713,24 +1628,23 @@ where
 
                 // Limit check - if we've advanced too many times, something is wrong
                 if advance_count >= Self::MAX_BLINK_ADVANCES {
-                    let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    #[cfg(not(feature = "tracing"))]
-                    let _ = count;
-                    // Rate-limit logging: only log first 10 anomalies
                     #[cfg(feature = "tracing")]
-                    if count < 10 {
-                        tracing::error!(
-                            ikey = format_args!("{:016x}", key_ikey),
-                            start_ptr = ?start_ptr,
-                            start_bound = format_args!("{:016x}", unsafe { (*start_ptr).ikey_bound() }),
-                            current_ptr = ?StdPtr::from_ref(leaf),
-                            current_bound = format_args!("{:016x}", leaf.ikey_bound()),
-                            next_ptr = ?next_ptr,
-                            next_bound = format_args!("{:016x}", next_bound),
-                            advance_count = advance_count,
-                            "BLINK_LIMIT: ikey >> start_bound suggests reach_leaf went wrong direction"
-                        );
+                    {
+                        let count = crate::tree::optimistic::BLINK_ADVANCE_ANOMALY_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        if count < 10 {
+                            tracing::error!(
+                                ikey = format_args!("{:016x}", key_ikey),
+                                start_ptr = ?start_ptr,
+                                start_bound = format_args!("{:016x}", unsafe { (*start_ptr).ikey_bound() }),
+                                current_ptr = ?StdPtr::from_ref(leaf),
+                                current_bound = format_args!("{:016x}", leaf.ikey_bound()),
+                                next_ptr = ?next_ptr,
+                                next_bound = format_args!("{:016x}", next_bound),
+                                advance_count = advance_count,
+                                "BLINK_LIMIT: ikey >> start_bound suggests reach_leaf went wrong direction"
+                            );
+                        }
                     }
                     return None;
                 }
@@ -1828,35 +1742,18 @@ where
         // Track whether we're in a sublayer (don't use CAS path in sublayers)
         let mut in_sublayer: bool = false;
 
-        // Retry counter to prevent infinite loops on persistent anomalies
-        let mut anomaly_retries: u32 = 0;
-
         loop {
-            // Check for too many anomaly retries (indicates a bug or persistent race)
-            if anomaly_retries >= MAX_ANOMALY_RETRIES {
-                #[cfg(feature = "tracing")]
-                tracing::error!(
-                    ikey = format_args!("{:016x}", ikey_for_trace),
-                    anomaly_retries = anomaly_retries,
-                    "INSERT_ABORT: exceeded max anomaly retries"
-                );
-                // Return existing value as None (insert failed but not an error)
-                // This prevents infinite loops while allowing the system to continue
-                return Ok(None);
-            }
-            // Follow parent pointers to actual layer root
+            // Find the actual layer root (handles layer root promotion for sublayers)
             layer_root = self.maybe_parent_generic(layer_root);
 
             // Try CAS fast path first (only for simple cases at layer 0)
             // CAS path doesn't handle layers - it always starts from main tree root.
             if Self::cas_insert_enabled() && !in_sublayer && !key.has_suffix() {
-                use crate::tree::optimistic::{
-                    CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_SUCCESS_COUNT,
-                };
-
                 match self.try_cas_insert_generic(key, &value, guard) {
                     CasInsertResultGeneric::Success(old) => {
-                        CAS_INSERT_SUCCESS_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_SUCCESS_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         #[cfg(feature = "tracing")]
                         tracing::debug!(
                             ikey = format_args!("{:016x}", ikey_for_trace),
@@ -1869,7 +1766,9 @@ where
                     | CasInsertResultGeneric::LayerNeedLock { .. }
                     | CasInsertResultGeneric::Slot0NeedLock
                     | CasInsertResultGeneric::ContentionFallback => {
-                        CAS_INSERT_FALLBACK_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::CAS_INSERT_FALLBACK_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         // Fall through to locked path
                         #[cfg(feature = "tracing")]
                         tracing::trace!(
@@ -1886,32 +1785,9 @@ where
 
             let leaf: &L = unsafe { &*leaf_ptr };
 
-            // DIAGNOSTIC: Check if reach_leaf landed far from target
-            #[cfg(feature = "tracing")]
-            {
-                let leaf_bound: u64 = leaf.ikey_bound();
-                let target: u64 = key.ikey();
-                // If target is more than 100k away from leaf_bound, log it
-                if target > leaf_bound && target - leaf_bound > 100_000 {
-                    static FAR_LANDING_COUNT: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(0);
-                    let count = FAR_LANDING_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-                    if count < 20 {
-                        tracing::warn!(
-                            ikey = format_args!("{:016x}", target),
-                            leaf_ptr = ?leaf_ptr,
-                            leaf_bound = format_args!("{:016x}", leaf_bound),
-                            gap = target - leaf_bound,
-                            "FAR_LANDING: reach_leaf returned leaf far from target (gap > 100k)"
-                        );
-                    }
-                }
-            }
-
             // B-link advance if needed
             let Some(leaf) = self.advance_to_key_by_bound_generic(leaf, key, guard) else {
-                // Anomaly detected (cycle or limit) - restart from root
-                anomaly_retries += 1;
+                // Anomaly detected - restart from root
                 #[cfg(feature = "tracing")]
                 {
                     retry_count += 1;
@@ -1979,6 +1855,7 @@ where
                             next_bound = format_args!("{:016x}", next_bound),
                             "INSERT_RETRY: key moved to next sibling (post-lock check)"
                         );
+                        #[cfg(feature = "tracing")]
                         crate::tree::optimistic::WRONG_LEAF_INSERT_COUNT
                             .fetch_add(1, AtomicOrdering::Relaxed);
                         drop(lock);
@@ -2027,6 +1904,7 @@ where
                             });
                         }
 
+                        #[cfg(feature = "tracing")]
                         crate::tree::optimistic::LOCKED_INSERT_COUNT
                             .fetch_add(1, AtomicOrdering::Relaxed);
                         return Ok(Some(old_arc));
@@ -2099,6 +1977,7 @@ where
                     drop(lock);
 
                     self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                    #[cfg(feature = "tracing")]
                     crate::tree::optimistic::LOCKED_INSERT_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return Ok(None);
@@ -2171,6 +2050,7 @@ where
                     drop(lock);
                     self.count.fetch_add(1, AtomicOrdering::Relaxed);
 
+                    #[cfg(feature = "tracing")]
                     crate::tree::optimistic::LOCKED_INSERT_COUNT
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     return Ok(None);
@@ -2290,6 +2170,7 @@ where
         );
 
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
+        #[cfg(feature = "tracing")]
         crate::tree::optimistic::SPLIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
 
         // Calculate split point
@@ -2472,8 +2353,6 @@ where
         }
     }
 
-
-
     /// Propagate a leaf split to the parent.
     ///
     /// # Arguments
@@ -2488,10 +2367,6 @@ where
     /// sibling while its parent is NULL.
     ///
     /// All exit paths must call `(*right_leaf_ptr).version().unlock_for_split()`.
-
-
-
-
 
     /// Try to find the child index for a given child pointer in an internode.
     ///
@@ -2512,16 +2387,6 @@ where
         self.try_find_child_index_generic(parent, child)
             .expect("Child not found in parent internode")
     }
-
-
-
-
-
-
-
-
-
-
 }
 
 // =============================================================================

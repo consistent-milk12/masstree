@@ -150,11 +150,11 @@ impl<S: ValueSlot> LeafNode24<S> {
         }
     }
 
-    /// Wait for permutation to be unfrozen, with bounded retries.
+    /// Wait for permutation to be unfrozen.
+    ///
+    /// This spins with progressive backoff until the permutation is no longer frozen.
+    /// A frozen permutation indicates a split is in progress.
     pub(crate) fn permutation_wait(&self) -> Permuter24 {
-        const MAX_STABLE_RETRIES: u32 = 100;
-        let mut stable_retries: u32 = 0;
-
         #[cfg(feature = "tracing")]
         tracing::debug!(
             leaf_ptr = ?std::ptr::from_ref(self),
@@ -168,18 +168,14 @@ impl<S: ValueSlot> LeafNode24<S> {
                 #[cfg(feature = "tracing")]
                 tracing::trace!(
                     leaf_ptr = ?std::ptr::from_ref(self),
-                    stable_retries,
                     "permutation_wait: EXIT - permutation unfrozen"
                 );
                 return Permuter24::from_value(raw);
             }
 
             // Progressive backoff: spin briefly before blocking on stable()
-            let mut spun: u32 = 0;
-
-            while spun < MAX_SPIN_ITERS {
+            for _ in 0..MAX_SPIN_ITERS {
                 StdHint::spin_loop();
-                spun += 1;
 
                 let raw: u128 = self.permutation.load_raw(READ_ORD);
 
@@ -187,8 +183,6 @@ impl<S: ValueSlot> LeafNode24<S> {
                     #[cfg(feature = "tracing")]
                     tracing::trace!(
                         leaf_ptr = ?std::ptr::from_ref(self),
-                        stable_retries,
-                        spun,
                         "permutation_wait: EXIT - unfrozen during spin"
                     );
                     return Permuter24::from_value(raw);
@@ -196,28 +190,14 @@ impl<S: ValueSlot> LeafNode24<S> {
             }
 
             // A frozen permutation implies a split is in progress.
+            // Wait for the version to stabilize (split to complete).
             #[cfg(feature = "tracing")]
             tracing::trace!(
                 leaf_ptr = ?std::ptr::from_ref(self),
-                stable_retries,
                 version = self.version().value(),
                 "permutation_wait: calling stable() - waiting for split"
             );
             let _ = self.version().stable();
-
-            stable_retries += 1;
-
-            // Bounded wait: if we've waited too long, return an empty permutation.
-            if stable_retries >= MAX_STABLE_RETRIES {
-                #[cfg(feature = "tracing")]
-                tracing::warn!(
-                    stable_retries,
-                    leaf_ptr = ?std::ptr::from_ref(self),
-                    version = self.version().value(),
-                    "permutation_wait: TIMEOUT - exceeded max retries, returning empty"
-                );
-                return Permuter24::empty();
-            }
         }
     }
 

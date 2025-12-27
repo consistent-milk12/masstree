@@ -5,10 +5,10 @@
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::fmt::Write as FmtWrite;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -127,8 +127,8 @@ struct RunAnalysis {
     blink_limit: EventStats,
     insert_abort: EventStats, // INSERT_ABORT: exceeded max anomaly retries
     internode_descent: EventStats,
-    slow_events: SlowEventStats, // All SLOW_* events
-    split_stats: SplitStats,    // SLOW_SPLIT propagation analysis
+    slow_events: SlowEventStats,                // All SLOW_* events
+    split_stats: SplitStats,                    // SLOW_SPLIT propagation analysis
     internode_split_stats: InternodeSplitStats, // INTERNODE_SPLIT* events
     // Per-key analysis
     key_events: HashMap<String, KeyStats>,
@@ -155,7 +155,7 @@ struct SlowEventStats {
 #[derive(Debug, Default)]
 struct SplitStats {
     total: usize,
-    zero_propagate: usize,   // propagate_elapsed_us == 0
+    zero_propagate: usize,    // propagate_elapsed_us == 0
     nonzero_propagate: usize, // propagate_elapsed_us > 0
     max_propagate_us: u64,
     splits_near_stuck: Vec<SplitEvent>, // Splits near the stuck leaf bound
@@ -213,7 +213,7 @@ struct StuckLeafAnalysis {
     max_count: usize,
     stuck_ratio: f64,
     severity: Severity,
-    onset_line: Option<usize>,           // Line where stuck behavior starts
+    onset_line: Option<usize>, // Line where stuck behavior starts
     stuck_ikey_range: Option<(u64, u64)>, // (min, max) ikey values stuck
 }
 
@@ -447,13 +447,16 @@ fn analyze_run(path: &PathBuf) -> RunAnalysis {
                     analysis.internode_split_stats.sibling_split_locked += 1;
                 }
                 if analysis.internode_split_stats.samples.len() < 10 {
-                    analysis.internode_split_stats.samples.push(InternodeSplitSample {
-                        event_type: "created".to_string(),
-                        sibling_ptr: entry.fields.sibling_ptr.clone(),
-                        popup_key: None,
-                        grandparent_ptr: None,
-                        result_ok: None,
-                    });
+                    analysis
+                        .internode_split_stats
+                        .samples
+                        .push(InternodeSplitSample {
+                            event_type: "created".to_string(),
+                            sibling_ptr: entry.fields.sibling_ptr.clone(),
+                            popup_key: None,
+                            grandparent_ptr: None,
+                            result_ok: None,
+                        });
                 }
             }
             m if m.contains("INTERNODE_SPLIT: updated leaf children") => {
@@ -465,13 +468,16 @@ fn analyze_run(path: &PathBuf) -> RunAnalysis {
             m if m.contains("INTERNODE_SPLIT_INSTALL") => {
                 analysis.internode_split_stats.grandparent_installs += 1;
                 if analysis.internode_split_stats.samples.len() < 10 {
-                    analysis.internode_split_stats.samples.push(InternodeSplitSample {
-                        event_type: "install".to_string(),
-                        sibling_ptr: entry.fields.sibling_ptr.clone(),
-                        popup_key: entry.fields.popup_key.clone(),
-                        grandparent_ptr: entry.fields.grandparent_ptr.clone(),
-                        result_ok: None,
-                    });
+                    analysis
+                        .internode_split_stats
+                        .samples
+                        .push(InternodeSplitSample {
+                            event_type: "install".to_string(),
+                            sibling_ptr: entry.fields.sibling_ptr.clone(),
+                            popup_key: entry.fields.popup_key.clone(),
+                            grandparent_ptr: entry.fields.grandparent_ptr.clone(),
+                            result_ok: None,
+                        });
                 }
             }
             m if m.contains("INTERNODE_SPLIT_RECURSIVE") => {
@@ -491,13 +497,16 @@ fn analyze_run(path: &PathBuf) -> RunAnalysis {
                     }
                 }
                 if analysis.internode_split_stats.samples.len() < 10 {
-                    analysis.internode_split_stats.samples.push(InternodeSplitSample {
-                        event_type: "unlock".to_string(),
-                        sibling_ptr: entry.fields.sibling_ptr.clone(),
-                        popup_key: entry.fields.popup_key.clone(),
-                        grandparent_ptr: entry.fields.grandparent_ptr.clone(),
-                        result_ok: entry.fields.result_ok,
-                    });
+                    analysis
+                        .internode_split_stats
+                        .samples
+                        .push(InternodeSplitSample {
+                            event_type: "unlock".to_string(),
+                            sibling_ptr: entry.fields.sibling_ptr.clone(),
+                            popup_key: entry.fields.popup_key.clone(),
+                            grandparent_ptr: entry.fields.grandparent_ptr.clone(),
+                            result_ok: entry.fields.result_ok,
+                        });
                 }
             }
             _ => {}
@@ -505,7 +514,11 @@ fn analyze_run(path: &PathBuf) -> RunAnalysis {
 
         // Track stuck leaf analysis
         if let Some(lb) = &entry.fields.leaf_bound {
-            *analysis.stuck_leaf.leaf_bound_counts.entry(lb.clone()).or_insert(0) += 1;
+            *analysis
+                .stuck_leaf
+                .leaf_bound_counts
+                .entry(lb.clone())
+                .or_insert(0) += 1;
 
             // Track onset line for the eventual max leaf bound
             let count = *analysis.stuck_leaf.leaf_bound_counts.get(lb).unwrap();
@@ -650,9 +663,18 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
     writeln!(md, "## Executive Summary\n").unwrap();
 
     let total_runs = all_runs.len();
-    let critical_runs: Vec<_> = all_runs.iter().filter(|r| r.stuck_leaf.severity == Severity::Critical).collect();
-    let elevated_runs: Vec<_> = all_runs.iter().filter(|r| r.stuck_leaf.severity == Severity::Elevated).collect();
-    let aborted_runs: Vec<_> = all_runs.iter().filter(|r| r.insert_abort.count > 0).collect();
+    let critical_runs: Vec<_> = all_runs
+        .iter()
+        .filter(|r| r.stuck_leaf.severity == Severity::Critical)
+        .collect();
+    let elevated_runs: Vec<_> = all_runs
+        .iter()
+        .filter(|r| r.stuck_leaf.severity == Severity::Elevated)
+        .collect();
+    let aborted_runs: Vec<_> = all_runs
+        .iter()
+        .filter(|r| r.insert_abort.count > 0)
+        .collect();
 
     let total_cc: usize = all_runs.iter().map(|r| r.coverage_collapse.count).sum();
     let total_fl: usize = all_runs.iter().map(|r| r.far_landing.count).sum();
@@ -661,8 +683,20 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
     writeln!(md, "| Metric | Value |").unwrap();
     writeln!(md, "|--------|-------|").unwrap();
     writeln!(md, "| Total Runs | {} |", total_runs).unwrap();
-    writeln!(md, "| Critical Runs | {} ({:.1}%) |", critical_runs.len(), 100.0 * critical_runs.len() as f64 / total_runs as f64).unwrap();
-    writeln!(md, "| Elevated Runs | {} ({:.1}%) |", elevated_runs.len(), 100.0 * elevated_runs.len() as f64 / total_runs as f64).unwrap();
+    writeln!(
+        md,
+        "| Critical Runs | {} ({:.1}%) |",
+        critical_runs.len(),
+        100.0 * critical_runs.len() as f64 / total_runs as f64
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "| Elevated Runs | {} ({:.1}%) |",
+        elevated_runs.len(),
+        100.0 * elevated_runs.len() as f64 / total_runs as f64
+    )
+    .unwrap();
     writeln!(md, "| Runs with Aborts | {} |", aborted_runs.len()).unwrap();
     writeln!(md, "| Total Coverage Collapse | {} |", total_cc).unwrap();
     writeln!(md, "| Total Far Landing | {} |", total_fl).unwrap();
@@ -671,19 +705,40 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
 
     // Status indicator
     if critical_runs.is_empty() && aborted_runs.is_empty() {
-        writeln!(md, "> ✅ **Status:** All runs completed without critical failures\n").unwrap();
+        writeln!(
+            md,
+            "> ✅ **Status:** All runs completed without critical failures\n"
+        )
+        .unwrap();
     } else {
-        writeln!(md, "> ⚠️ **Status:** {} critical failures detected\n", critical_runs.len() + aborted_runs.len()).unwrap();
+        writeln!(
+            md,
+            "> ⚠️ **Status:** {} critical failures detected\n",
+            critical_runs.len() + aborted_runs.len()
+        )
+        .unwrap();
     }
 
     // Per-Run Summary Table
     writeln!(md, "## Per-Run Summary\n").unwrap();
-    writeln!(md, "| Run | Lines | CoverageCollapse | FarLanding | Aborts | MaxStuckLeaf | Ratio | Severity |").unwrap();
-    writeln!(md, "|-----|------:|----------------:|-----------:|-------:|-------------:|------:|----------|").unwrap();
+    writeln!(
+        md,
+        "| Run | Lines | CoverageCollapse | FarLanding | Aborts | MaxStuckLeaf | Ratio | Severity |"
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "|-----|------:|----------------:|-----------:|-------:|-------------:|------:|----------|"
+    )
+    .unwrap();
 
     for run in all_runs {
         let max_lb = run.stuck_leaf.max_leaf_bound.as_deref().unwrap_or("N/A");
-        let max_lb_short = if max_lb.len() > 12 { &max_lb[4..16] } else { max_lb };
+        let max_lb_short = if max_lb.len() > 12 {
+            &max_lb[4..16]
+        } else {
+            max_lb
+        };
         let severity_icon = match run.stuck_leaf.severity {
             Severity::Critical => "🔴",
             Severity::Elevated => "🟡",
@@ -701,20 +756,33 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
             max_lb_short,
             run.stuck_leaf.stuck_ratio * 100.0,
             severity_icon
-        ).unwrap();
+        )
+        .unwrap();
     }
     writeln!(md).unwrap();
 
     // Stuck Leaf Bound Analysis
     writeln!(md, "## Stuck Leaf Bound Analysis\n").unwrap();
-    writeln!(md, "| Run | MaxStuckLeaf | Count | Ratio | StuckIkeyMin | StuckIkeyMax | GapFromLeaf |").unwrap();
-    writeln!(md, "|-----|-------------:|------:|------:|-------------:|-------------:|------------:|").unwrap();
+    writeln!(
+        md,
+        "| Run | MaxStuckLeaf | Count | Ratio | StuckIkeyMin | StuckIkeyMax | GapFromLeaf |"
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "|-----|-------------:|------:|------:|-------------:|-------------:|------------:|"
+    )
+    .unwrap();
 
     for run in all_runs {
         let max_lb = run.stuck_leaf.max_leaf_bound.as_deref().unwrap_or("N/A");
         let (min_ikey, max_ikey) = run.stuck_leaf.stuck_ikey_range.unwrap_or((0, 0));
         let leaf_val = u64::from_str_radix(max_lb, 16).unwrap_or(0);
-        let gap = if max_ikey > leaf_val { max_ikey - leaf_val } else { 0 };
+        let gap = if max_ikey > leaf_val {
+            max_ikey - leaf_val
+        } else {
+            0
+        };
 
         writeln!(
             md,
@@ -726,12 +794,14 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
             min_ikey,
             max_ikey,
             gap
-        ).unwrap();
+        )
+        .unwrap();
     }
     writeln!(md).unwrap();
 
     // Critical/Elevated Run Details
-    let problem_runs: Vec<_> = all_runs.iter()
+    let problem_runs: Vec<_> = all_runs
+        .iter()
         .filter(|r| r.stuck_leaf.severity != Severity::Normal || r.insert_abort.count > 0)
         .collect();
 
@@ -754,14 +824,24 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
                 if let Some(ref lb) = run.stuck_leaf.max_leaf_bound {
                     let leaf_val = u64::from_str_radix(lb, 16).unwrap_or(0);
                     writeln!(md, "- Stuck leaf bound: `{}` ({})", lb, leaf_val).unwrap();
-                    writeln!(md, "- Events on this leaf: {} ({:.1}%)",
-                        run.stuck_leaf.max_count, run.stuck_leaf.stuck_ratio * 100.0).unwrap();
+                    writeln!(
+                        md,
+                        "- Events on this leaf: {} ({:.1}%)",
+                        run.stuck_leaf.max_count,
+                        run.stuck_leaf.stuck_ratio * 100.0
+                    )
+                    .unwrap();
 
                     if let Some((min_ikey, max_ikey)) = run.stuck_leaf.stuck_ikey_range {
                         let min_gap = min_ikey.saturating_sub(leaf_val);
                         let max_gap = max_ikey.saturating_sub(leaf_val);
                         writeln!(md, "- Stuck ikey range: {} to {}", min_ikey, max_ikey).unwrap();
-                        writeln!(md, "- Gap from leaf: {} to {} (keys being misrouted)", min_gap, max_gap).unwrap();
+                        writeln!(
+                            md,
+                            "- Gap from leaf: {} to {} (keys being misrouted)",
+                            min_gap, max_gap
+                        )
+                        .unwrap();
                     }
                 }
                 writeln!(md).unwrap();
@@ -771,12 +851,26 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
             if run.split_stats.total > 0 {
                 writeln!(md, "**Split Propagation:**").unwrap();
                 writeln!(md, "- Total splits: {}", run.split_stats.total).unwrap();
-                writeln!(md, "- Zero propagation: {} ({:.1}%)",
+                writeln!(
+                    md,
+                    "- Zero propagation: {} ({:.1}%)",
                     run.split_stats.zero_propagate,
-                    100.0 * run.split_stats.zero_propagate as f64 / run.split_stats.total as f64).unwrap();
-                writeln!(md, "- Non-zero propagation: {}", run.split_stats.nonzero_propagate).unwrap();
+                    100.0 * run.split_stats.zero_propagate as f64 / run.split_stats.total as f64
+                )
+                .unwrap();
+                writeln!(
+                    md,
+                    "- Non-zero propagation: {}",
+                    run.split_stats.nonzero_propagate
+                )
+                .unwrap();
                 if run.split_stats.max_propagate_us > 0 {
-                    writeln!(md, "- Max propagation time: {}µs", run.split_stats.max_propagate_us).unwrap();
+                    writeln!(
+                        md,
+                        "- Max propagation time: {}µs",
+                        run.split_stats.max_propagate_us
+                    )
+                    .unwrap();
                 }
 
                 if !run.split_stats.splits_near_stuck.is_empty() {
@@ -785,38 +879,53 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
                     writeln!(md, "|------------|------:|-------------:|:----------:|").unwrap();
                     for split in run.split_stats.splits_near_stuck.iter().take(10) {
                         let prop_icon = if split.propagate_us > 0 { "✓" } else { "✗" };
-                        writeln!(md, "| `{}` | {} | {} {} | {} |",
+                        writeln!(
+                            md,
+                            "| `{}` | {} | {} {} | {} |",
                             split.split_ikey,
                             split.split_val,
                             split.propagate_us,
                             prop_icon,
                             if split.is_layer_root { "Yes" } else { "No" }
-                        ).unwrap();
+                        )
+                        .unwrap();
                     }
                 }
                 writeln!(md).unwrap();
             }
 
             // Top stuck keys
-            let mut stuck_keys: Vec<_> = run.key_events.iter()
+            let mut stuck_keys: Vec<_> = run
+                .key_events
+                .iter()
                 .filter(|(_, v)| v.coverage_collapse > 100 || v.far_landing > 100)
                 .collect();
-            stuck_keys.sort_by(|a, b| (b.1.coverage_collapse + b.1.far_landing).cmp(&(a.1.coverage_collapse + a.1.far_landing)));
+            stuck_keys.sort_by(|a, b| {
+                (b.1.coverage_collapse + b.1.far_landing)
+                    .cmp(&(a.1.coverage_collapse + a.1.far_landing))
+            });
 
             if !stuck_keys.is_empty() {
                 writeln!(md, "**Top Stuck Keys (>100 events):**").unwrap();
                 writeln!(md, "| IKey | CC | FL | Aborts | MaxRetry | Pattern |").unwrap();
                 writeln!(md, "|------|---:|---:|-------:|--------:|---------|").unwrap();
                 for (ikey, stats) in stuck_keys.iter().take(10) {
-                    let pattern = if stats.sticky_leaf().is_some() { "🔴 Sticky" } else { "🟡 Churn" };
-                    writeln!(md, "| `{}` | {} | {} | {} | {} | {} |",
+                    let pattern = if stats.sticky_leaf().is_some() {
+                        "🔴 Sticky"
+                    } else {
+                        "🟡 Churn"
+                    };
+                    writeln!(
+                        md,
+                        "| `{}` | {} | {} | {} | {} | {} |",
                         ikey,
                         stats.coverage_collapse,
                         stats.far_landing,
                         stats.insert_abort,
                         stats.max_retry,
                         pattern
-                    ).unwrap();
+                    )
+                    .unwrap();
                 }
                 writeln!(md).unwrap();
             }
@@ -830,18 +939,26 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
     for run in all_runs {
         for (ikey, stats) in &run.key_events {
             if stats.coverage_collapse > 10 || stats.far_landing > 10 {
-                key_appearances.entry(ikey.clone()).or_default().push(run.name.clone());
+                key_appearances
+                    .entry(ikey.clone())
+                    .or_default()
+                    .push(run.name.clone());
             }
         }
     }
 
-    let mut multi_run_keys: Vec<_> = key_appearances.iter()
+    let mut multi_run_keys: Vec<_> = key_appearances
+        .iter()
         .filter(|(_, runs)| runs.len() > 1)
         .collect();
     multi_run_keys.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
     if multi_run_keys.is_empty() {
-        writeln!(md, "No keys stuck in multiple runs (failures are independent).\n").unwrap();
+        writeln!(
+            md,
+            "No keys stuck in multiple runs (failures are independent).\n"
+        )
+        .unwrap();
     } else {
         writeln!(md, "**Keys stuck in multiple runs:**\n").unwrap();
         writeln!(md, "| Key | Runs | Run Names |").unwrap();
@@ -857,25 +974,56 @@ fn generate_markdown_report(all_runs: &[RunAnalysis]) -> String {
 
     if !critical_runs.is_empty() {
         writeln!(md, "### 🔴 Critical: Permanent Routing Inconsistency\n").unwrap();
-        writeln!(md, "**{} run(s)** have >50% of events stuck on a single leaf bound.\n", critical_runs.len()).unwrap();
-        writeln!(md, "**Root Cause:** Internode keys don't cover child subtree bounds after a split.").unwrap();
-        writeln!(md, "This means the parent internode's routing keys weren't updated correctly").unwrap();
-        writeln!(md, "when a leaf split occurred, causing all keys above a certain value to be").unwrap();
+        writeln!(
+            md,
+            "**{} run(s)** have >50% of events stuck on a single leaf bound.\n",
+            critical_runs.len()
+        )
+        .unwrap();
+        writeln!(
+            md,
+            "**Root Cause:** Internode keys don't cover child subtree bounds after a split."
+        )
+        .unwrap();
+        writeln!(
+            md,
+            "This means the parent internode's routing keys weren't updated correctly"
+        )
+        .unwrap();
+        writeln!(
+            md,
+            "when a leaf split occurred, causing all keys above a certain value to be"
+        )
+        .unwrap();
         writeln!(md, "misrouted to the wrong leaf.\n").unwrap();
     }
 
     if !elevated_runs.is_empty() {
         writeln!(md, "### 🟡 Elevated: Significant Routing Issues\n").unwrap();
-        writeln!(md, "**{} run(s)** have 30-50% of events stuck on a single leaf.\n", elevated_runs.len()).unwrap();
+        writeln!(
+            md,
+            "**{} run(s)** have 30-50% of events stuck on a single leaf.\n",
+            elevated_runs.len()
+        )
+        .unwrap();
     }
 
     if total_aborts > 0 {
         writeln!(md, "### ⚠️ Insert Aborts\n").unwrap();
-        writeln!(md, "**{} insert(s)** exceeded maximum retry count and were aborted.\n", total_aborts).unwrap();
+        writeln!(
+            md,
+            "**{} insert(s)** exceeded maximum retry count and were aborted.\n",
+            total_aborts
+        )
+        .unwrap();
     }
 
     if critical_runs.is_empty() && elevated_runs.is_empty() && total_aborts == 0 {
-        writeln!(md, "✅ No critical issues detected. Normal transient routing events observed.\n").unwrap();
+        writeln!(
+            md,
+            "✅ No critical issues detected. Normal transient routing events observed.\n"
+        )
+        .unwrap();
     }
 
     md
@@ -908,12 +1056,12 @@ fn print_summary(all_runs: &[RunAnalysis]) {
             + run.slow_events.split
             + run.slow_events.stable;
 
-        let max_lb = run
-            .stuck_leaf
-            .max_leaf_bound
-            .as_deref()
-            .unwrap_or("N/A");
-        let max_lb_short = if max_lb.len() > 16 { &max_lb[..16] } else { max_lb };
+        let max_lb = run.stuck_leaf.max_leaf_bound.as_deref().unwrap_or("N/A");
+        let max_lb_short = if max_lb.len() > 16 {
+            &max_lb[..16]
+        } else {
+            max_lb
+        };
 
         println!(
             "{:<12} {:>10} {:>12} {:>12} {:>10} {:>10} {:>18} {:>6.1}% {:>14}",
@@ -941,11 +1089,19 @@ fn print_summary(all_runs: &[RunAnalysis]) {
 
     for run in all_runs {
         let max_lb = run.stuck_leaf.max_leaf_bound.as_deref().unwrap_or("N/A");
-        let max_lb_short = if max_lb.len() > 16 { &max_lb[..16] } else { max_lb };
+        let max_lb_short = if max_lb.len() > 16 {
+            &max_lb[..16]
+        } else {
+            max_lb
+        };
 
         let (min_ikey, max_ikey) = run.stuck_leaf.stuck_ikey_range.unwrap_or((0, 0));
         let leaf_val = u64::from_str_radix(max_lb, 16).unwrap_or(0);
-        let gap = if max_ikey > leaf_val { max_ikey - leaf_val } else { 0 };
+        let gap = if max_ikey > leaf_val {
+            max_ikey - leaf_val
+        } else {
+            0
+        };
 
         println!(
             "{:<12} {:>18} {:>14} {:>6.1}% {:>20} {:>20} {:>14}",
@@ -1021,16 +1177,10 @@ fn print_summary(all_runs: &[RunAnalysis]) {
 
             // Stuck leaf analysis (CRITICAL/ELEVATED runs)
             if run.stuck_leaf.severity != Severity::Normal {
-                println!(
-                    "\n  📍 STUCK LEAF ANALYSIS: {}",
-                    run.stuck_leaf.severity
-                );
+                println!("\n  📍 STUCK LEAF ANALYSIS: {}", run.stuck_leaf.severity);
                 if let Some(ref lb) = run.stuck_leaf.max_leaf_bound {
                     let leaf_val = u64::from_str_radix(lb, 16).unwrap_or(0);
-                    println!(
-                        "    Stuck leaf bound: {} ({} decimal)",
-                        lb, leaf_val
-                    );
+                    println!("    Stuck leaf bound: {} ({} decimal)", lb, leaf_val);
                     println!(
                         "    Events on this leaf: {} ({:.1}% of all events)",
                         run.stuck_leaf.max_count,
@@ -1040,10 +1190,7 @@ fn print_summary(all_runs: &[RunAnalysis]) {
                     if let Some((min_ikey, max_ikey)) = run.stuck_leaf.stuck_ikey_range {
                         let min_gap = min_ikey.saturating_sub(leaf_val);
                         let max_gap = max_ikey.saturating_sub(leaf_val);
-                        println!(
-                            "    Stuck ikey range: {} to {}",
-                            min_ikey, max_ikey
-                        );
+                        println!("    Stuck ikey range: {} to {}", min_ikey, max_ikey);
                         println!(
                             "    Gap from leaf: {} to {} (keys being misrouted)",
                             min_gap, max_gap
@@ -1110,16 +1257,16 @@ fn print_summary(all_runs: &[RunAnalysis]) {
                     "    Installations: grandparent={}, new_root={}, layer_root={}",
                     is.grandparent_installs, is.new_root_created, is.layer_root_created
                 );
-                println!(
-                    "    Recursive splits: {}",
-                    is.recursive_splits
-                );
+                println!("    Recursive splits: {}", is.recursive_splits);
                 println!(
                     "    Unlocks: {} (failures: {})",
                     is.sibling_unlocks, is.unlock_failures
                 );
                 if is.unlock_failures > 0 {
-                    println!("    ⚠️  WARNING: {} unlock failures detected!", is.unlock_failures);
+                    println!(
+                        "    ⚠️  WARNING: {} unlock failures detected!",
+                        is.unlock_failures
+                    );
                 }
             }
 

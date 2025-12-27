@@ -282,7 +282,8 @@ impl Propagation {
             let parent: &L::Internode = unsafe { &*left_parent.cast::<L::Internode>() };
 
             // SAFETY: parent is valid (reclamation guard protects for 'op)
-            let mut parent_lock: LockGuard<'op> = unsafe { ctx.lock_node(parent.version().as_ptr()) };
+            let mut parent_lock: LockGuard<'op> =
+                unsafe { ctx.lock_node(parent.version().as_ptr()) };
 
             // =========================================================
             // STEP 3: Revalidate parent pointer after locking

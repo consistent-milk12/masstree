@@ -29,7 +29,18 @@
 
 mod common;
 
-use masstree::{MassTree24, get_debug_counters, reset_debug_counters};
+use masstree::MassTree24;
+#[cfg(feature = "tracing")]
+use masstree::get_debug_counters;
+
+/// Reset debug counters (no-op when tracing is disabled)
+#[cfg(feature = "tracing")]
+fn reset_counters() {
+    masstree::reset_debug_counters();
+}
+
+#[cfg(not(feature = "tracing"))]
+fn reset_counters() {}
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -424,7 +435,7 @@ fn stress_concurrent_insert_many_keys() {
     common::init_tracing();
 
     // Reset debug counters at start
-    reset_debug_counters();
+    reset_counters();
 
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
@@ -545,23 +556,26 @@ fn stress_concurrent_insert_many_keys() {
 
     assert_eq!(actual_len, TOTAL_KEYS);
 
-    // Report debug counters
-    let (blink_should_follow, search_not_found) = get_debug_counters();
-    if blink_should_follow > 0 {
-        eprintln!(
-            "\n*** - DIAGNOSTIC ***\n\
-             B-link should have been followed: {} times\n\
-             Total search NotFound: {} times\n\
-             This indicates stale routing after splits.\n",
-            blink_should_follow, search_not_found
+    // Report debug counters (only with tracing)
+    #[cfg(feature = "tracing")]
+    {
+        let (blink_should_follow, search_not_found) = get_debug_counters();
+        if blink_should_follow > 0 {
+            eprintln!(
+                "\n*** - DIAGNOSTIC ***\n\
+                 B-link should have been followed: {} times\n\
+                 Total search NotFound: {} times\n\
+                 This indicates stale routing after splits.\n",
+                blink_should_follow, search_not_found
+            );
+        }
+
+        tracing::info!(
+            blink_should_follow = blink_should_follow,
+            search_not_found = search_not_found,
+            "Stress test passed"
         );
     }
-
-    tracing::info!(
-        blink_should_follow = blink_should_follow,
-        search_not_found = search_not_found,
-        "Stress test passed"
-    );
 }
 
 #[test]

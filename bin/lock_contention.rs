@@ -21,7 +21,9 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_precision_loss)]
 
-use masstree::{DebugCounters, MassTree24, ParentWaitStats};
+use masstree::MassTree24;
+#[cfg(feature = "tracing")]
+use masstree::{DebugCounters, ParentWaitStats};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -137,7 +139,9 @@ struct BenchmarkConfig {
 struct RunResult {
     elapsed: Duration,
     stats: ThreadOpStats,
+    #[cfg(feature = "tracing")]
     parent_wait: ParentWaitStats,
+    #[cfg(feature = "tracing")]
     debug: DebugCounters,
 }
 
@@ -147,7 +151,8 @@ struct RunResult {
 fn run_benchmark(config: &BenchmarkConfig) -> RunResult {
     let tree = Arc::new(MassTree24::<u64>::new());
 
-    // Reset debug counters
+    // Reset debug counters (only with tracing)
+    #[cfg(feature = "tracing")]
     masstree::reset_debug_counters();
 
     let start = Instant::now();
@@ -240,22 +245,24 @@ fn run_benchmark(config: &BenchmarkConfig) -> RunResult {
     }
 
     let elapsed = start.elapsed();
+    #[cfg(feature = "tracing")]
     let parent_wait = masstree::get_parent_wait_stats();
+    #[cfg(feature = "tracing")]
     let debug = masstree::get_all_debug_counters();
 
     RunResult {
         elapsed,
         stats: merged,
+        #[cfg(feature = "tracing")]
         parent_wait,
+        #[cfg(feature = "tracing")]
         debug,
     }
 }
 
-fn print_stats(config: &BenchmarkConfig, result: &RunResult, baseline: Duration) {
+fn print_stats(config: &BenchmarkConfig, result: &RunResult, _baseline: Duration) {
     let elapsed = result.elapsed;
     let stats = &result.stats;
-    let parent_wait = result.parent_wait;
-    let debug = result.debug;
 
     let total_ops = config.threads * config.ops_per_thread;
     let ops_per_sec = total_ops as f64 / elapsed.as_secs_f64();
@@ -280,56 +287,62 @@ fn print_stats(config: &BenchmarkConfig, result: &RunResult, baseline: Duration)
     println!("Slow >100ms: {}", stats.slow_ops_100ms);
     println!("Slow >1s:    {}", stats.slow_ops_1s);
 
-    println!("\n--- Parent Wait (NULL parent spin loop) ---");
-    println!("Hits:        {}", parent_wait.hits);
-    println!("Total spins: {}", parent_wait.total_spins);
-    println!("Max spins:   {}", parent_wait.max_spins);
-    println!("Avg spins:   {:.2}", parent_wait.avg_spins);
-    println!("Max wait:    {:.2} ms", parent_wait.max_us / 1000.0);
-    println!("Avg wait:    {:.2} us", parent_wait.avg_us);
-
-    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
-    let parent_wait_ms = parent_wait.total_us / 1000.0;
-    let avg_thread_wait_ms = if config.threads > 0 {
-        parent_wait_ms / config.threads as f64
-    } else {
-        0.0
-    };
-    println!("Total wait:  {parent_wait_ms:.2} ms (thread-time)");
-    println!("Avg/thread:  {avg_thread_wait_ms:.2} ms");
-
-    if parent_wait.hits > 0 && elapsed_ms > 0.0 {
-        let avg_thread_pct = (avg_thread_wait_ms / elapsed_ms) * 100.0;
-        println!("Avg/thread share: {avg_thread_pct:.1}% of elapsed (approx)");
-    }
-
-    println!("\n--- Debug Counters ---");
-    println!("Splits:            {}", debug.split);
-    println!("CAS success:       {}", debug.cas_insert_success);
-    println!("CAS retry:         {}", debug.cas_insert_retry);
-    println!("CAS fallback:      {}", debug.cas_insert_fallback);
-    println!("Locked inserts:    {}", debug.locked_insert);
-    println!("B-link advance:    {}", debug.advance_blink);
-
-    println!("\n--- Anomaly Counters ---");
-    println!("B-link should:     {}", debug.blink_should_follow);
-    println!("Search not found:  {}", debug.search_not_found);
-    println!("Wrong leaf insert: {}", debug.wrong_leaf_insert);
-    println!("B-link anomaly:    {}", debug.blink_advance_anomaly);
-
-    if debug.blink_should_follow > 0
-        || debug.search_not_found > 0
-        || debug.wrong_leaf_insert > 0
-        || debug.blink_advance_anomaly > 0
+    #[cfg(feature = "tracing")]
     {
-        println!("\n!!! Anomaly counters are non-zero, inspect logs");
-    }
+        let parent_wait = result.parent_wait;
+        let debug = result.debug;
+        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
 
-    // Check for outliers
-    let baseline_ms = baseline.as_secs_f64() * 1000.0;
-    if baseline_ms > 0.0 && elapsed_ms > baseline_ms * 3.0 {
-        let ratio = elapsed_ms / baseline_ms;
-        println!("\n!!! OUTLIER DETECTED: This run was ~{ratio:.1}x slower than median");
+        println!("\n--- Parent Wait (NULL parent spin loop) ---");
+        println!("Hits:        {}", parent_wait.hits);
+        println!("Total spins: {}", parent_wait.total_spins);
+        println!("Max spins:   {}", parent_wait.max_spins);
+        println!("Avg spins:   {:.2}", parent_wait.avg_spins);
+        println!("Max wait:    {:.2} ms", parent_wait.max_us / 1000.0);
+        println!("Avg wait:    {:.2} us", parent_wait.avg_us);
+
+        let parent_wait_ms = parent_wait.total_us / 1000.0;
+        let avg_thread_wait_ms = if config.threads > 0 {
+            parent_wait_ms / config.threads as f64
+        } else {
+            0.0
+        };
+        println!("Total wait:  {parent_wait_ms:.2} ms (thread-time)");
+        println!("Avg/thread:  {avg_thread_wait_ms:.2} ms");
+
+        if parent_wait.hits > 0 && elapsed_ms > 0.0 {
+            let avg_thread_pct = (avg_thread_wait_ms / elapsed_ms) * 100.0;
+            println!("Avg/thread share: {avg_thread_pct:.1}% of elapsed (approx)");
+        }
+
+        println!("\n--- Debug Counters ---");
+        println!("Splits:            {}", debug.split);
+        println!("CAS success:       {}", debug.cas_insert_success);
+        println!("CAS retry:         {}", debug.cas_insert_retry);
+        println!("CAS fallback:      {}", debug.cas_insert_fallback);
+        println!("Locked inserts:    {}", debug.locked_insert);
+        println!("B-link advance:    {}", debug.advance_blink);
+
+        println!("\n--- Anomaly Counters ---");
+        println!("B-link should:     {}", debug.blink_should_follow);
+        println!("Search not found:  {}", debug.search_not_found);
+        println!("Wrong leaf insert: {}", debug.wrong_leaf_insert);
+        println!("B-link anomaly:    {}", debug.blink_advance_anomaly);
+
+        if debug.blink_should_follow > 0
+            || debug.search_not_found > 0
+            || debug.wrong_leaf_insert > 0
+            || debug.blink_advance_anomaly > 0
+        {
+            println!("\n!!! Anomaly counters are non-zero, inspect logs");
+        }
+
+        // Check for outliers
+        let baseline_ms = baseline.as_secs_f64() * 1000.0;
+        if baseline_ms > 0.0 && elapsed_ms > baseline_ms * 3.0 {
+            let ratio = elapsed_ms / baseline_ms;
+            println!("\n!!! OUTLIER DETECTED: This run was ~{ratio:.1}x slower than median");
+        }
     }
 }
 

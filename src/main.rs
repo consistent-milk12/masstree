@@ -413,6 +413,7 @@ fn run_verification_test() {
 }
 
 #[expect(clippy::cast_sign_loss)]
+#[cfg(feature = "tracing")]
 fn run_parent_wait_benchmark() {
     println!("\n{}", "=".repeat(80));
     println!("PARENT WAIT STATS BENCHMARK");
@@ -497,7 +498,8 @@ fn main() {
     eprintln!("===========================");
     eprintln!();
 
-    // Run parent wait stats benchmark
+    // Run parent wait stats benchmark (requires tracing feature)
+    #[cfg(feature = "tracing")]
     for run in 1..=10 {
         println!("\n\n>>> Run {run}/10 <<<");
         run_parent_wait_benchmark();
