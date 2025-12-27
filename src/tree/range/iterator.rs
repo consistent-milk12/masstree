@@ -37,8 +37,9 @@ use crate::tree::MassTreeGeneric;
 
 use super::cursor_key::CursorKey;
 use super::find::{
-    find_initial, find_next, find_next_ptr, find_next_with_duplicate_check,
-    find_next_with_duplicate_check_ptr, find_retry, handle_down, handle_up,
+    find_initial, find_next, find_next_ptr, find_next_single_layer_ptr,
+    find_next_with_duplicate_check, find_next_with_duplicate_check_ptr, find_retry, handle_down,
+    handle_up,
 };
 use super::scan_state::{LayerContext, LayerStack, ScanSnapshot, ScanStackElement, ScanState};
 
@@ -306,6 +307,18 @@ where
     /// past the previous entry.
     needs_duplicate_check: bool,
 
+    /// Whether we're in single-layer mode (keys ≤ 8 bytes).
+    ///
+    /// When true, we use an optimized fast path that:
+    /// - Skips checking for layer pointers (`keylenx >= LAYER_KEYLENX`)
+    /// - Never handles `Down`/`Up` state transitions
+    /// - Doesn't maintain the `layer_stack`
+    ///
+    /// This is set based on the start/end bounds at initialization.
+    /// If we encounter a layer pointer unexpectedly (defensive), we fall
+    /// back to the standard multi-layer path.
+    single_layer_mode: bool,
+
     /// Marker for lifetime covariance.
     _marker: PhantomData<&'a ()>,
 }
@@ -361,6 +374,18 @@ where
         // Create initial stack element
         let stack = ScanStackElement::new(root);
 
+        // Determine if we can use single-layer fast path.
+        // Single-layer mode is valid when both bounds are ≤ 8 bytes.
+        // If we encounter a layer pointer during iteration, we fall back.
+        let single_layer_mode = {
+            let start_ok = start_key.len() <= 8;
+            let end_ok = match &end {
+                RangeBound::Unbounded => true,
+                RangeBound::Included(k) | RangeBound::Excluded(k) => k.len() <= 8,
+            };
+            start_ok && end_ok
+        };
+
         Self {
             tree,
             guard,
@@ -374,6 +399,7 @@ where
             initialized: false,
             emit_equal,
             needs_duplicate_check: false,
+            single_layer_mode,
             _marker: PhantomData,
         }
     }
@@ -823,6 +849,67 @@ where
         }
 
         loop {
+            // ================================================================
+            // Single-layer fast path (keys ≤ 8 bytes)
+            // ================================================================
+            if self.single_layer_mode {
+                // Retry handling in single-layer mode
+                if self.state == ScanState::Retry {
+                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
+                    self.needs_duplicate_check = true;
+                    continue;
+                }
+
+                let (new_state, snapshot_ptr) = find_next_single_layer_ptr(
+                    &mut self.stack,
+                    &mut self.cursor_key,
+                    self.guard,
+                    self.needs_duplicate_check,
+                );
+
+                if self.needs_duplicate_check {
+                    self.needs_duplicate_check = false;
+                }
+
+                self.state = new_state;
+
+                match new_state {
+                    ScanState::Emit => {
+                        if let Some(snap) = snapshot_ptr {
+                            let key = self.cursor_key.full_key();
+                            if !self.end_bound.contains(key) {
+                                self.exhausted = true;
+                                return None;
+                            }
+                            self.state = ScanState::FindNext;
+                            let value_ref: &S::Value = unsafe { &*snap.value_ptr };
+                            return Some((key, value_ref));
+                        }
+                    }
+                    ScanState::FindNext => {
+                        if self.stack.is_null() {
+                            self.exhausted = true;
+                            return None;
+                        }
+                        continue;
+                    }
+                    ScanState::Retry => continue,
+                    ScanState::Down => {
+                        // Encountered layer pointer - fall back to multi-layer
+                        self.single_layer_mode = false;
+                        // Don't continue; fall through to handle Down below
+                    }
+                    ScanState::Up => {
+                        self.exhausted = true;
+                        return None;
+                    }
+                }
+            }
+
+            // ================================================================
+            // Multi-layer path (handles Down/Up transitions)
+            // ================================================================
+
             // Handle rare states first
             match self.state {
                 ScanState::Down => {
@@ -912,6 +999,8 @@ where
             return None;
         }
     }
+
+
 }
 
 impl<S, L, A> std::iter::FusedIterator for RangeIter<'_, '_, S, L, A>

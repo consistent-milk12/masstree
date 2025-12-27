@@ -618,6 +618,168 @@ where
     )
 }
 
+
+/// Single-layer fast path for zero-copy find_next.
+///
+/// Optimized for scans where all keys are ≤ 8 bytes (no layer pointers).
+/// This eliminates:
+/// - Layer pointer checks (`keylenx >= LAYER_KEYLENX`)
+/// - Layer stack operations
+/// - Down/Up state handling
+///
+/// # Fallback
+///
+/// If we unexpectedly encounter a layer pointer (shouldn't happen for truly
+/// single-layer data), we return `(ScanState::Down, None)` to signal the
+/// caller to fall back to the standard multi-layer path.
+///
+/// # Performance
+///
+/// This function is `#[inline(always)]` for maximum inlining into the hot loop.
+#[inline(always)]
+pub fn find_next_single_layer_ptr<L, S>(
+    stack: &mut ScanStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    guard: &LocalGuard<'_>,
+    needs_duplicate_check: bool,
+) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    // SAFETY: Stack should have valid leaf at this point
+    if stack.is_null() {
+        // In single-layer mode, null leaf means exhausted (no Up transition)
+        return (ScanState::FindNext, None);
+    }
+
+    let leaf: &L = unsafe { stack.leaf_ref() };
+
+    // Check if leaf is deleted (cheap - single atomic load)
+    if leaf.version().is_deleted() {
+        return (ScanState::Retry, None);
+    }
+
+    // Get current slot - O(1) via perm.get(ki)
+    let Some(slot) = stack.kp() else {
+        // Leaf exhausted, try advancing to next leaf
+        return advance_leaf_single_layer(stack, cursor_key, guard);
+    };
+
+    // Read slot data
+    let slot_ikey: u64 = leaf.ikey(slot);
+    let slot_keylenx: u8 = leaf.keylenx(slot);
+
+    // Check for duplicate only when needed (after Retry)
+    if needs_duplicate_check {
+        let cmp: Ordering = cursor_key.compare(slot_ikey, slot_keylenx as usize);
+
+        let is_dup: bool = match cmp {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => {
+                // For single-layer, no suffix comparison needed (keylenx <= 8)
+                true
+            }
+        };
+
+        if is_dup {
+            stack.next();
+            return (ScanState::FindNext, None);
+        }
+    }
+
+    // DEFENSIVE: If we encounter a layer pointer, signal fallback
+    // This shouldn't happen for truly single-layer data
+    if slot_keylenx >= LAYER_KEYLENX {
+        return (ScanState::Down, None);
+    }
+
+    // Value slot - prepare for emit
+    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+    if slot_ptr.is_null() {
+        stack.next();
+        return (ScanState::FindNext, None);
+    }
+
+    // Single-layer keys are always ≤ 8 bytes, no suffix handling
+    let key_len: usize = slot_keylenx as usize;
+    cursor_key.assign_store_ikey(slot_ikey);
+    cursor_key.assign_store_length(key_len);
+    cursor_key.mark_key_complete();
+
+    // Advance position for next call
+    stack.next();
+
+    // Return raw pointer
+    (
+        ScanState::Emit,
+        Some(ScanSnapshotPtr::from_raw(slot_ptr, key_len)),
+    )
+}
+
+/// Advance to next leaf in single-layer mode.
+///
+/// Simplified version of `advance_leaf_ptr` that doesn't handle Up transitions.
+#[inline(always)]
+fn advance_leaf_single_layer<L, S>(
+    stack: &mut ScanStackElement<L, S>,
+    cursor_key: &CursorKey,
+    _guard: &LocalGuard<'_>,
+) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    let leaf: &L = unsafe { stack.leaf_ref() };
+    let version: u32 = stack.version();
+
+    // Check if version changed (concurrent modification)
+    if leaf.version().has_changed(version) {
+        return (ScanState::Retry, None);
+    }
+
+    // Get next leaf
+    let next: *mut L = ForwardScanHelper::advance(leaf);
+
+    if next.is_null() {
+        // No more leaves - scan exhausted (no Up in single-layer)
+        stack.set_leaf(std::ptr::null_mut());
+        return (ScanState::FindNext, None);
+    }
+
+    // Move to next leaf
+    stack.set_leaf(next);
+
+    // SAFETY: next is non-null and protected by guard
+    let next_leaf: &L = unsafe { &*next };
+
+    // Prefetch the next leaf's data arrays
+    next_leaf.prefetch();
+
+    // Get stable version
+    let next_version: u32 = next_leaf.version().stable();
+
+    // Check if deleted
+    if next_leaf.version().is_deleted() {
+        return (ScanState::Retry, None);
+    }
+
+    // Load permutation
+    let perm: L::Perm = match next_leaf.permutation_try() {
+        Ok(p) => p,
+        Err(_frozen) => {
+            return (ScanState::Retry, None);
+        }
+    };
+
+    // Reposition using full key comparison
+    let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
+    stack.update_state(next_version, perm, kx.i);
+
+    (ScanState::FindNext, None)
+}
+
 /// Advance to next leaf, zero-copy variant.
 ///
 /// Same as [`advance_leaf`] but returns `ScanSnapshotPtr`.
