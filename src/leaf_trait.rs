@@ -16,12 +16,10 @@
 //! - [`TreeLeafNode`]: `LeafNode<S, WIDTH>`, `LeafNode24<S>`
 
 use std::fmt::Debug;
-use std::sync::Arc;
 
 use crate::key::Key;
 use crate::nodeversion::NodeVersion;
 use crate::slot::ValueSlot;
-use crate::value::LeafValue;
 use seize::LocalGuard;
 
 // ============================================================================
@@ -982,7 +980,11 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 /// # Implementors
 ///
 /// - `LeafNode24<LeafValue<V>>`
-pub trait LayerCapableLeaf<V: Send + Sync + 'static>: TreeLeafNode<LeafValue<V>> {
+pub trait LayerCapableLeaf<S: ValueSlot>: TreeLeafNode<S>
+where
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+{
     /// Try to clone the Arc value from a slot.
     ///
     /// Returns `None` if:
@@ -1001,7 +1003,7 @@ pub trait LayerCapableLeaf<V: Send + Sync + 'static>: TreeLeafNode<LeafValue<V>>
     /// # Panics
     ///
     /// Panics in debug mode if `slot >= WIDTH`.
-    fn try_clone_arc(&self, slot: usize) -> Option<Arc<V>>;
+    fn try_clone_output(&self, slot: usize) -> Option<S::Output>;
 
     /// Assign a slot from a Key iterator with an Arc value.
     ///
@@ -1034,7 +1036,7 @@ pub trait LayerCapableLeaf<V: Send + Sync + 'static>: TreeLeafNode<LeafValue<V>>
         &self,
         slot: usize,
         key: &Key<'_>,
-        value: Option<Arc<V>>,
+        value: Option<S::Output>,
         guard: &LocalGuard<'_>,
     );
 }

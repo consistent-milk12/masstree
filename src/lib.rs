@@ -215,7 +215,7 @@ pub use link::{is_marked, mark_ptr, unmark_ptr};
 // Re-export main types for convenience
 pub use slot::ValueSlot;
 pub use suffix::{PermutationProvider, SuffixBag};
-pub use tree::{MassTree, MassTree24, MassTreeGeneric, MassTreeIndex};
+pub use tree::{MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTreeIndex};
 
 // Re-export debug counters for diagnosis (only when tracing is enabled)
 #[cfg(feature = "tracing")]

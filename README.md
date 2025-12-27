@@ -57,6 +57,70 @@ A Rust implementation of the [Masstree algorithm](https://pdos.csail.mit.edu/pap
 
 **MassTree's niche**: When you need a concurrent ordered map with arbitrary byte-sequence keys and high read throughput.
 
+## Why MassTree? Theoretical Strengths
+
+### 1. Variable-Length Keys with Shared Prefixes
+
+MassTree is a **trie of B+trees**. Each 8-byte slice of a key is handled by a separate B+tree layer.
+
+```text
+Key: "users/alice/profile"
+     Layer 0: "users/al" → Layer 1: "ice/prof" → Layer 2: "ile\0\0\0\0\0"
+```
+
+**Why this wins:**
+- Keys with common prefixes share tree nodes (cache efficient)
+- No key comparison beyond the current 8-byte slice
+- O(key_length/8) layers, each with O(log n) B+tree lookup
+
+**Others can't match this** because:
+- B+trees compare full keys at every node
+- Skip lists compare full keys at every level
+- Hash maps don't preserve order and can't do range scans
+
+### 2. Lock-Free Reads with Version Validation
+
+Readers never acquire locks. They:
+1. Read version number
+2. Do work
+3. Validate version unchanged
+4. Retry if changed
+
+**Why this wins:**
+- Zero contention on read-heavy workloads
+- No cache line bouncing from atomic increments (unlike Arc refcounts)
+- Readers scale linearly with cores
+
+### 3. Fine-Grained Per-Node Locking
+
+Writers only lock the specific leaf node being modified, not the whole tree or path.
+
+**Hot key advantage:** When many threads hit the same key:
+- MassTree: Only that leaf locks, other leaves unaffected
+- Global locks: Everyone waits
+
+### 4. Range Scans on Ordered Data
+
+MassTree maintains sorted order within each layer's B+tree. Hash maps can't do this at all. Skip lists can, but with worse cache locality.
+
+### Where MassTree is Theoretically Optimal
+
+| Workload | Why MassTree Wins |
+|----------|-------------------|
+| **Read-heavy (>90% reads)** | Lock-free reads scale perfectly |
+| **Hot keys** | Per-node locking isolates contention |
+| **Long keys with shared prefixes** | Trie structure shares work |
+| **Mixed key lengths** | Layer structure adapts naturally |
+| **Range scans needed** | Ordered B+tree leaves |
+
+### Where Others Win Theoretically
+
+| Workload | Better Choice | Why |
+|----------|---------------|-----|
+| **Pure hash lookups** | DashMap | O(1) vs O(log n) |
+| **Write-dominated, no order needed** | DashMap | Simpler write path |
+| **Integer keys only** | Congee (ART) | Direct byte indexing, no comparisons |
+
 ## Status: Alpha
 
 **Not production ready.** Core functionality works; APIs may change.

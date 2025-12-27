@@ -1,7 +1,7 @@
 //! Root and layer-root creation helpers.
 //!
 //! Provides atomic root installation for both main tree roots and layer roots.
-//! Layer roots use parent pointer updates only (no CAS on root_ptr).
+//! Layer roots use parent pointer updates only (no CAS on `root_ptr`).
 //!
 //! # CAS Failure Policy
 //!
@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering, fence as atomic_f
 
 use crate::NodeAllocatorGeneric;
 use crate::leaf_trait::{LayerCapableLeaf, TreeInternode};
+use crate::slot::ValueSlot;
 use crate::tree::InsertError;
-use crate::value::LeafValue;
 
 /// Unit struct namespace for root creation operations.
 ///
@@ -66,7 +66,7 @@ impl RootCreation {
             )
         )
     )]
-    pub fn create_root_from_leaves<V, L, A>(
+    pub fn create_root_from_leaves<S, L, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
         left_leaf_ptr: *mut L,
@@ -74,9 +74,11 @@ impl RootCreation {
         split_ikey: u64,
     ) -> Result<*mut L::Internode, InsertError>
     where
-        V: Send + Sync + 'static,
-        L: LayerCapableLeaf<V>,
-        A: NodeAllocatorGeneric<LeafValue<V>, L>,
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
     {
         #[cfg(feature = "tracing")]
         tracing::debug!("RootCreation: creating root from leaves");
@@ -153,7 +155,7 @@ impl RootCreation {
             )
         )
     )]
-    pub fn create_root_from_internodes<V, L, A>(
+    pub fn create_root_from_internodes<S, L, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
         left_inode_ptr: *mut L::Internode,
@@ -161,9 +163,11 @@ impl RootCreation {
         split_ikey: u64,
     ) -> Result<*mut L::Internode, InsertError>
     where
-        V: Send + Sync + 'static,
-        L: LayerCapableLeaf<V>,
-        A: NodeAllocatorGeneric<LeafValue<V>, L>,
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
     {
         let left: &L::Internode = unsafe { &*left_inode_ptr };
 
@@ -241,16 +245,18 @@ impl RootCreation {
             )
         )
     )]
-    pub fn promote_layer_root_leaves<V, L, A>(
+    pub fn promote_layer_root_leaves<S, L, A>(
         allocator: &A,
         left_leaf_ptr: *mut L,
         right_leaf_ptr: *mut L,
         split_ikey: u64,
     ) -> *mut L::Internode
     where
-        V: Send + Sync + 'static,
-        L: LayerCapableLeaf<V>,
-        A: NodeAllocatorGeneric<LeafValue<V>, L>,
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
     {
         #[cfg(feature = "tracing")]
         tracing::debug!("RootCreation: promoting layer root leaves");
@@ -303,16 +309,18 @@ impl RootCreation {
             )
         )
     )]
-    pub fn promote_layer_root_internodes<V, L, A>(
+    pub fn promote_layer_root_internodes<S, L, A>(
         allocator: &A,
         left_inode_ptr: *mut L::Internode,
         right_inode_ptr: *mut L::Internode,
         split_ikey: u64,
     ) -> *mut L::Internode
     where
-        V: Send + Sync + 'static,
-        L: LayerCapableLeaf<V>,
-        A: NodeAllocatorGeneric<LeafValue<V>, L>,
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
     {
         let left: &L::Internode = unsafe { &*left_inode_ptr };
 

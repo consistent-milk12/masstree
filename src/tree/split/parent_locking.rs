@@ -4,6 +4,7 @@
 //! during split propagation.
 
 use crate::leaf_trait::{LayerCapableLeaf, TreeInternode};
+use crate::slot::ValueSlot;
 
 /// Unit struct namespace for parent validation operations.
 pub struct ParentLocking;
@@ -18,10 +19,12 @@ impl ParentLocking {
     /// # Returns
     /// `Some(index)` if child found, [`None`] otherwise.
     #[inline(always)]
-    pub fn find_child_index<V, L>(parent: &L::Internode, child_ptr: *mut u8) -> Option<usize>
+    pub fn find_child_index<S, L>(parent: &L::Internode, child_ptr: *mut u8) -> Option<usize>
     where
-        V: Send + Sync + 'static,
-        L: LayerCapableLeaf<V>,
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
     {
         let nkeys: usize = parent.nkeys();
 
@@ -32,11 +35,13 @@ impl ParentLocking {
     ///
     /// Must be called after locking parent, before inserting.
     #[inline(always)]
-    pub fn validate_membership<V, L>(parent: &L::Internode, child_ptr: *mut u8) -> Option<usize>
+    pub fn validate_membership<S, L>(parent: &L::Internode, child_ptr: *mut u8) -> Option<usize>
     where
-        V: Send + Sync + 'static,
-        L: LayerCapableLeaf<V>,
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
     {
-        Self::find_child_index::<V, L>(parent, child_ptr)
+        Self::find_child_index::<S, L>(parent, child_ptr)
     }
 }

@@ -4,10 +4,7 @@ use std::{
     cmp::Ordering,
     marker::PhantomData,
     ptr as StdPtr,
-    sync::{
-        Arc,
-        atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering},
-    },
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering},
 };
 
 use parking_lot::{Condvar, Mutex};
@@ -19,9 +16,9 @@ use crate::{
     leaf_trait::LayerCapableLeaf,
     leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::NodeVersion,
+    slot::ValueSlot,
     tree::split::Propagation,
     tree::{CasInsertResultGeneric, InsertError, InsertSearchResultGeneric},
-    value::LeafValue,
 };
 
 /// Sentinel for the CLAIMING state in the Option A (Safe) CAS insert protocol.
@@ -41,7 +38,6 @@ static CLAIMING_SENTINEL: u8 = 0;
 
 /// Returns the CLAIMING sentinel pointer (provenance-sound).
 #[inline(always)]
-#[expect(dead_code, reason = "CAS path disabled")]
 fn claiming_ptr() -> *mut u8 {
     StdPtr::from_ref(&CLAIMING_SENTINEL).cast_mut()
 }
@@ -53,11 +49,13 @@ fn is_claiming_ptr(ptr: *mut u8) -> bool {
     StdPtr::eq(ptr, claiming_ptr())
 }
 
-impl<V, L, A> MassTreeGeneric<V, L, A>
+impl<S, L, A> MassTreeGeneric<S, L, A>
 where
-    V: Send + Sync + 'static,
-    L: LayerCapableLeaf<V>,
-    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
 {
     #[inline]
     #[expect(dead_code, reason = "CAS path disabled")]
@@ -326,7 +324,7 @@ where
         loop {
             // Find child index using generic search
             let child_idx: usize =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
+                upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
             let child_ptr: *mut u8 = inode.child(child_idx);
 
             // Prefetch child node
@@ -380,7 +378,7 @@ where
 
             let ikey: u64 = key.ikey();
             let child_idx: usize =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(ikey, internode);
+                upper_bound_internode_generic::<S, L::Internode>(ikey, internode);
             let start_ptr: *mut u8 = internode.child(child_idx);
 
             // Prefetch child node
@@ -412,7 +410,7 @@ where
             // SAFETY: current is a valid internode pointer from traversal
             let internode: &L::Internode = unsafe { &*(current.cast::<L::Internode>()) };
             let child_idx: usize =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(ikey, internode);
+                upper_bound_internode_generic::<S, L::Internode>(ikey, internode);
             let child_ptr: *mut u8 = internode.child(child_idx);
 
             // Prefetch child node
@@ -442,7 +440,7 @@ where
     /// * `None` - If the key was not found
     #[must_use]
     #[inline]
-    pub fn get(&self, key: &[u8]) -> Option<Arc<V>> {
+    pub fn get(&self, key: &[u8]) -> Option<S::Output> {
         let guard = self.guard();
         self.get_with_guard(key, &guard)
     }
@@ -462,7 +460,7 @@ where
     /// * `None` - If the key was not found
     #[must_use]
     #[inline(always)]
-    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<Arc<V>> {
+    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<S::Output> {
         let mut search_key: Key<'_> = Key::new(key);
         self.get_concurrent_generic(&mut search_key, guard)
     }
@@ -488,7 +486,7 @@ where
     /// * `None` - If the key was not found
     #[must_use]
     #[inline(always)]
-    pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g V> {
+    pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g S::Value> {
         let mut search_key: Key<'_> = Key::new(key);
         self.get_ref_generic(&mut search_key, guard)
     }
@@ -498,7 +496,11 @@ where
     /// Same protocol as [`get_concurrent_generic`] but returns `&V` instead of `Arc<V>`.
     /// Eliminates Arc clone overhead for maximum read performance.
     #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
-    fn get_ref_generic<'g>(&self, key: &mut Key<'_>, guard: &'g LocalGuard<'_>) -> Option<&'g V> {
+    fn get_ref_generic<'g>(
+        &self,
+        key: &mut Key<'_>,
+        guard: &'g LocalGuard<'_>,
+    ) -> Option<&'g S::Value> {
         use crate::leaf_trait::TreePermutation;
         use crate::leaf24::KSUF_KEYLENX;
         use crate::leaf24::LAYER_KEYLENX;
@@ -607,7 +609,7 @@ where
                         // Value - return reference WITHOUT cloning Arc
                         // SAFETY: version validated, guard protects from deallocation,
                         // ptr points to valid Arc<V> data
-                        let value_ref: &'g V = unsafe { &*(ptr.cast::<V>()) };
+                        let value_ref: &'g S::Value = unsafe { &*(ptr.cast::<S::Value>()) };
                         return Some(value_ref);
                     }
 
@@ -635,7 +637,11 @@ where
 
     /// Internal concurrent get implementation with layer descent support.
     #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
-    fn get_concurrent_generic(&self, key: &mut Key<'_>, guard: &LocalGuard<'_>) -> Option<Arc<V>> {
+    fn get_concurrent_generic(
+        &self,
+        key: &mut Key<'_>,
+        guard: &LocalGuard<'_>,
+    ) -> Option<S::Output> {
         use crate::leaf_trait::TreePermutation;
         use crate::leaf24::KSUF_KEYLENX;
         use crate::leaf24::LAYER_KEYLENX;
@@ -760,14 +766,10 @@ where
                             continue 'layer_loop;
                         }
 
-                        // Value Arc - NOW safe to clone
-                        // SAFETY: version validated, so keylenx correctly identifies ptr as Arc<V>
-                        let arc: Arc<V> = unsafe {
-                            let value_ptr: *const V = ptr.cast();
-                            Arc::increment_strong_count(value_ptr);
-                            Arc::from_raw(value_ptr)
-                        };
-                        return Some(arc);
+                        // Value - NOW safe to clone
+                        // SAFETY: version validated, so keylenx correctly identifies ptr as value
+                        let output: S::Output = unsafe { S::output_from_raw(ptr) };
+                        return Some(output);
                     }
 
                     // Not found - but might be in wrong leaf due to split!
@@ -846,10 +848,11 @@ where
         }
     }
 
-            /// Traverse from layer root to target leaf with version validation.
+    /// Traverse from layer root to target leaf with version validation.
     ///
     /// Simple loop that descends through internodes to find the target leaf.
     /// B-link walking in `advance_to_key` handles any splits that occur.
+    #[expect(clippy::unused_self, reason = "API Consistency")]
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(level = "trace", skip(self, _guard), fields(ikey = %format_args!("{:016x}", key.ikey())))
@@ -887,7 +890,7 @@ where
 
             // Binary search for child
             let child_idx: usize =
-                upper_bound_internode_generic::<LeafValue<V>, L::Internode>(target_ikey, inode);
+                upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
             let child: *mut u8 = inode.child(child_idx);
 
             // Prefetch child node while we validate version (hides memory latency)
@@ -921,7 +924,6 @@ where
     // ========================================================================
 
     /// Maximum CAS retry attempts before falling back to locked path.
-    #[expect(dead_code, reason = "CAS path disabled")]
     const MAX_CAS_RETRIES_GENERIC: usize = 3;
 
     /// Try CAS-based lock-free insert.
@@ -933,9 +935,9 @@ where
     pub(crate) fn try_cas_insert_generic(
         &self,
         key: &Key<'_>,
-        value: &Arc<V>,
+        value: &S::Output,
         guard: &LocalGuard<'_>,
-    ) -> CasInsertResultGeneric<V> {
+    ) -> CasInsertResultGeneric<S::Output> {
         use crate::leaf_trait::TreePermutation;
         use std::ptr as StdPtr;
 
@@ -1145,9 +1147,9 @@ where
 
                     // 12. Phase 3: Install the value pointer (CLAIMING -> arc_ptr).
                     //
-                    // Prepare the Arc pointer and transition from CLAIMING to the real value.
-                    let arc_ptr: *mut u8 = Arc::into_raw(Arc::clone(value)) as *mut u8;
-                    match leaf.cas_slot_value(slot, claiming, arc_ptr) {
+                    // Prepare the value pointer and transition from CLAIMING to the real value.
+                    let value_ptr: *mut u8 = S::output_to_raw(value);
+                    match leaf.cas_slot_value(slot, claiming, value_ptr) {
                         Ok(()) => {
                             // Successfully installed value pointer.
                         }
@@ -1156,21 +1158,23 @@ where
                             // in the free region. If this fires, prefer leaking over double-free.
                             debug_assert!(
                                 false,
-                                "CLAIMING->arc_ptr CAS failed; expected CLAIMING, actual={actual:p}"
+                                "CLAIMING->value_ptr CAS failed; expected CLAIMING, actual={actual:p}"
                             );
-                            // Drop the Arc we just created (it was never installed).
-                            let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                            // Drop the value we just created (it was never installed).
+                            // SAFETY: value_ptr was just created by output_to_raw
+                            unsafe { S::cleanup_value_ptr(value_ptr) };
                             // Best-effort release: try to reset to NULL.
                             let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
                             return CasInsertResultGeneric::ContentionFallback;
                         }
                     }
 
-                    // 13. Verify slot ownership (should still be arc_ptr).
-                    if leaf.load_slot_value(slot) != arc_ptr {
-                        // Slot was stolen after we installed arc_ptr. This is unexpected
-                        // but we handle it by dropping our Arc and falling back.
-                        let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                    // 13. Verify slot ownership (should still be value_ptr).
+                    if leaf.load_slot_value(slot) != value_ptr {
+                        // Slot was stolen after we installed value_ptr. This is unexpected
+                        // but we handle it by cleaning up our value and falling back.
+                        // SAFETY: value_ptr was just created by output_to_raw
+                        unsafe { S::cleanup_value_ptr(value_ptr) };
                         #[cfg(feature = "tracing")]
                         crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
                             .fetch_add(1, AtomicOrdering::Relaxed);
@@ -1184,9 +1188,10 @@ where
 
                     // 14. Final version check before permutation publish.
                     if leaf.version().has_changed_or_locked(version) {
-                        match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                        match leaf.cas_slot_value(slot, value_ptr, StdPtr::null_mut()) {
                             Ok(()) | Err(_) => {
-                                let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                                // SAFETY: value_ptr was just created by output_to_raw
+                                unsafe { S::cleanup_value_ptr(value_ptr) };
                             }
                         }
                         #[cfg(feature = "tracing")]
@@ -1218,9 +1223,10 @@ where
                         }
 
                         Err(failure) => {
-                            match leaf.cas_slot_value(slot, arc_ptr, StdPtr::null_mut()) {
+                            match leaf.cas_slot_value(slot, value_ptr, StdPtr::null_mut()) {
                                 Ok(()) | Err(_) => {
-                                    let _ = unsafe { Arc::from_raw(arc_ptr as *const V) };
+                                    // SAFETY: value_ptr was just created by output_to_raw
+                                    unsafe { S::cleanup_value_ptr(value_ptr) };
                                 }
                             }
 
@@ -1245,7 +1251,6 @@ where
 
     /// Exponential backoff for CAS retries.
     #[inline(always)]
-    #[expect(dead_code, reason = "CAS path disabled")]
     fn backoff_generic(retries: usize) {
         let spins = 1usize << retries.min(6);
         for _ in 0..spins {
@@ -1495,7 +1500,7 @@ where
     /// # Errors
     /// If insert fails.
     #[inline]
-    pub fn insert(&self, key: &[u8], value: V) -> Result<Option<Arc<V>>, InsertError> {
+    pub fn insert(&self, key: &[u8], value: S::Value) -> Result<Option<S::Output>, InsertError> {
         let guard = self.guard();
         self.insert_with_guard(key, value, &guard)
     }
@@ -1521,12 +1526,12 @@ where
     pub fn insert_with_guard(
         &self,
         key: &[u8],
-        value: V,
+        value: S::Value,
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<Arc<V>>, InsertError> {
+    ) -> Result<Option<S::Output>, InsertError> {
         let mut key = Key::new(key);
-        let arc = Arc::new(value);
-        self.insert_concurrent_generic(&mut key, arc, guard)
+        let output = S::into_output(value);
+        self.insert_concurrent_generic(&mut key, output, guard)
     }
 
     /// Internal concurrent insert with CAS fast path and locked fallback.
@@ -1538,9 +1543,9 @@ where
     fn insert_concurrent_generic(
         &self,
         key: &mut Key<'_>,
-        value: Arc<V>,
+        value: S::Output,
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<Arc<V>>, InsertError> {
+    ) -> Result<Option<S::Output>, InsertError> {
         #[cfg(feature = "tracing")]
         let ikey_for_trace: u64 = key.ikey();
 
@@ -1573,8 +1578,7 @@ where
             let leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let (leaf, exceeded_hop_limit) =
-                self.advance_to_key_by_bound_generic(leaf, key, guard);
+            let (leaf, exceeded_hop_limit) = self.advance_to_key_by_bound_generic(leaf, key, guard);
 
             // If we exceeded the hop limit, re-traverse from root
             if exceeded_hop_limit {
@@ -1666,35 +1670,31 @@ where
                     // Key exists - update value
                     let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
                     if !old_ptr.is_null() {
-                        // Clone old Arc for return value BEFORE we store new pointer.
-                        // SAFETY: old_ptr is non-null and came from Arc::into_raw
-                        let old_arc: Arc<V> = unsafe {
-                            let arc_ptr: *const V = old_ptr.cast();
-                            Arc::increment_strong_count(arc_ptr);
-                            Arc::from_raw(arc_ptr)
-                        };
+                        // Clone old value for return BEFORE we store new pointer.
+                        // SAFETY: old_ptr is non-null and came from output_to_raw
+                        let old_output: S::Output = unsafe { S::output_from_raw(old_ptr) };
 
-                        let new_ptr: *mut u8 = Arc::into_raw(value) as *mut u8;
+                        let new_ptr: *mut u8 = S::output_consume_to_raw(value);
 
                         // Mark insert, store value, unlock happens on drop
                         lock.mark_insert();
                         leaf.set_leaf_value_ptr(slot, new_ptr);
                         drop(lock);
 
-                        // Defer retirement of the old Arc.
+                        // Defer retirement of the old value.
                         // This ensures readers who captured old_ptr before our store
                         // can safely complete their validation and retry.
-                        // SAFETY: old_ptr came from Arc::into_raw
+                        // SAFETY: old_ptr came from output_to_raw
                         unsafe {
-                            guard.defer_retire(old_ptr.cast::<V>(), |ptr, _| {
-                                drop(Arc::from_raw(ptr));
+                            guard.defer_retire(old_ptr, |ptr, _| {
+                                S::cleanup_value_ptr(ptr);
                             });
                         }
 
                         #[cfg(feature = "tracing")]
                         crate::tree::optimistic::LOCKED_INSERT_COUNT
                             .fetch_add(1, AtomicOrdering::Relaxed);
-                        return Ok(Some(old_arc));
+                        return Ok(Some(old_output));
                     }
                     drop(lock);
                 }
@@ -1815,28 +1815,30 @@ where
                     // - We hold the lock on `leaf`
                     // - `guard` is from this tree's collector
                     let layer_ptr: *mut u8 = unsafe {
-                        self.create_layer_concurrent_generic(
-                            leaf,
-                            slot,
-                            key,
-                            Arc::clone(&value),
-                            guard,
-                        )
+                        self.create_layer_concurrent_generic(leaf, slot, key, value.clone(), guard)
                     };
 
-                    // CRITICAL: Drop the existing Arc in the conflict slot.
+                    // CRITICAL: Defer retirement of the existing value in the conflict slot.
                     //
-                    // The create_layer_concurrent_generic function cloned it via try_clone_arc(),
-                    // so the slot's reference is now redundant. We must drop it to avoid
+                    // The create_layer_concurrent_generic function cloned it via try_clone_output(),
+                    // so the slot's reference is now redundant. We must retire it to avoid
                     // leaking memory when we overwrite with the layer pointer.
                     //
+                    // IMPORTANT: We use defer_retire instead of immediate cleanup because
+                    // concurrent get_ref() readers may still hold references to this value.
+                    // The guard ensures the value isn't freed until all readers have completed.
+                    //
                     // SAFETY:
-                    // - We hold the lock, so no concurrent access
+                    // - We hold the lock, so no concurrent modification
+                    // - old_ptr came from output_to_raw during the original insert
+                    // - defer_retire ensures readers complete before cleanup
                     let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
                     if !old_ptr.is_null() {
-                        // SAFETY: old_ptr came from Arc::into_raw during the original insert
-                        let _old_arc: Arc<V> = unsafe { Arc::from_raw(old_ptr.cast::<V>()) };
-                        // _old_arc is dropped here, decrementing refcount
+                        unsafe {
+                            guard.defer_retire(old_ptr, |ptr, _| {
+                                S::cleanup_value_ptr(ptr);
+                            });
+                        }
                     }
 
                     // Clear any existing suffix for this slot
@@ -1878,11 +1880,11 @@ where
         lock: &mut crate::nodeversion::LockGuard<'_>,
         slot: usize,
         key: &Key<'_>,
-        value: &Arc<V>,
+        value: &S::Output,
         guard: &LocalGuard<'_>,
     ) {
         let ikey: u64 = key.ikey();
-        let value_ptr: *mut u8 = Arc::into_raw(Arc::clone(value)) as *mut u8;
+        let value_ptr: *mut u8 = S::output_to_raw(value);
 
         // Mark insert dirty
         lock.mark_insert();
@@ -2065,7 +2067,7 @@ where
         // The lock is maintained throughout propagation - this is the key
         // difference from the previous (broken) implementation.
 
-        let result: Result<(), InsertError> = Propagation::make_split_leaf::<V, L, A>(
+        let result: Result<(), InsertError> = Propagation::make_split_leaf::<S, L, A>(
             &self.root_ptr,
             &self.allocator,
             left_leaf_ptr,
@@ -2078,6 +2080,7 @@ where
         );
 
         #[cfg(feature = "tracing")]
+        #[expect(clippy::cast_possible_truncation, reason = "logs")]
         {
             let total_elapsed = split_start.elapsed();
             if total_elapsed > std::time::Duration::from_millis(1) {
@@ -2108,7 +2111,6 @@ where
     /// sibling while its parent is NULL.
     ///
     /// All exit paths must call `(*right_leaf_ptr).version().unlock_for_split()`.
-
     /// Try to find the child index for a given child pointer in an internode.
     ///
     /// Returns `Some(index)` if found, `None` if not found. Use this in retry loops
@@ -2134,11 +2136,13 @@ where
 // Generic Layer Creation
 // =============================================================================
 
-impl<V, L, A> MassTreeGeneric<V, L, A>
+impl<S, L, A> MassTreeGeneric<S, L, A>
 where
-    V: Send + Sync + 'static,
-    L: LayerCapableLeaf<V>,
-    A: NodeAllocatorGeneric<LeafValue<V>, L>,
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
 {
     /// Create a new layer for suffix conflict (generic version).
     ///
@@ -2179,7 +2183,7 @@ where
         parent_leaf: &L,
         conflict_slot: usize,
         new_key: &mut Key<'_>,
-        new_value: Arc<V>,
+        new_value: S::Output,
         guard: &LocalGuard<'_>,
     ) -> *mut u8 {
         // =====================================================================
@@ -2192,11 +2196,11 @@ where
         // Create a Key iterator from the existing suffix for comparison
         let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
 
-        // Clone the existing Arc value from the conflict slot
+        // Clone the existing value from the conflict slot
         // INVARIANT: Conflict case means the slot contains a value, not a layer pointer.
-        let existing_arc: Option<Arc<V>> = parent_leaf.try_clone_arc(conflict_slot);
+        let existing_output: Option<S::Output> = parent_leaf.try_clone_output(conflict_slot);
         debug_assert!(
-            existing_arc.is_some(),
+            existing_output.is_some(),
             "create_layer_concurrent_generic: conflict slot {} should contain a value, \
              not a layer pointer. keylenx={}",
             conflict_slot,
@@ -2278,7 +2282,7 @@ where
             self.assign_final_layer_entries(
                 final_ptr,
                 &existing_key,
-                existing_arc,
+                existing_output,
                 new_key,
                 Some(new_value),
                 cmp,
@@ -2322,9 +2326,9 @@ where
         &self,
         final_ptr: *mut L,
         existing_key: &Key<'_>,
-        existing_arc: Option<Arc<V>>,
+        existing_output: Option<S::Output>,
         new_key: &Key<'_>,
-        new_arc: Option<Arc<V>>,
+        new_arc: Option<S::Output>,
         cmp: Ordering,
         guard: &LocalGuard<'_>,
     ) {
@@ -2337,7 +2341,7 @@ where
                 // existing goes in slot 0, new goes in slot 1
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
-                    final_leaf.assign_from_key_arc(0, existing_key, existing_arc, guard);
+                    final_leaf.assign_from_key_arc(0, existing_key, existing_output, guard);
                     final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
                 }
             }
@@ -2347,7 +2351,7 @@ where
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
                     final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
-                    final_leaf.assign_from_key_arc(1, existing_key, existing_arc, guard);
+                    final_leaf.assign_from_key_arc(1, existing_key, existing_output, guard);
                 }
             }
             Ordering::Equal => {
@@ -2358,7 +2362,7 @@ where
                     // existing is shorter or equal length -> existing first
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
-                        final_leaf.assign_from_key_arc(0, existing_key, existing_arc, guard);
+                        final_leaf.assign_from_key_arc(0, existing_key, existing_output, guard);
                         final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
                     }
                 } else {
@@ -2366,7 +2370,7 @@ where
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
                         final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
-                        final_leaf.assign_from_key_arc(1, existing_key, existing_arc, guard);
+                        final_leaf.assign_from_key_arc(1, existing_key, existing_output, guard);
                     }
                 }
             }

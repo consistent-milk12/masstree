@@ -191,7 +191,7 @@ impl Drop for LockGuard<'_> {
 
 impl LockGuard<'_> {
     #[inline(always)]
-    fn version(&self) -> &NodeVersion {
+    const fn version(&self) -> &NodeVersion {
         // SAFETY: `version` is non-null and valid for the guard’s lifetime.
         unsafe { &*self.version }
     }

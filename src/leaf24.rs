@@ -1580,10 +1580,10 @@ impl<S: ValueSlot> Drop for LeafNode24<S> {
 // LayerCapableLeaf Implementation
 // =============================================================================
 
-impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<V>
+impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value::LeafValue<V>>
     for LeafNode24<crate::value::LeafValue<V>>
 {
-    fn try_clone_arc(&self, slot: usize) -> Option<std::sync::Arc<V>> {
+    fn try_clone_output(&self, slot: usize) -> Option<std::sync::Arc<V>> {
         debug_assert!(
             slot < WIDTH_24,
             "try_clone_arc: slot {slot} >= WIDTH_24 {WIDTH_24}"
@@ -1650,6 +1650,94 @@ impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<V>
         // NOTE: Arc ownership transfers to the slot; the slot now owns one strong reference.
         // The caller must NOT drop `value` again - it's been consumed via into_raw.
         let ptr: *mut u8 = std::sync::Arc::into_raw(arc).cast_mut().cast::<u8>();
+        self.set_leaf_value_ptr(slot, ptr);
+
+        // Set keylenx and suffix based on whether key has remaining bytes
+        if key.has_suffix() {
+            // Key has suffix bytes beyond the 8-byte ikey
+            self.set_keylenx(slot, KSUF_KEYLENX);
+
+            // Store suffix in suffix bag
+            // SAFETY: Caller guarantees guard is from this tree's collector
+            unsafe { self.assign_ksuf(slot, key.suffix(), guard) };
+        } else {
+            // Inline key (0-8 bytes total, no suffix)
+            self.set_keylenx(slot, inline_len);
+        }
+    }
+}
+
+// =============================================================================
+// LayerCapableLeaf Implementation for LeafValueIndex (Inline Mode)
+// =============================================================================
+
+impl<V: Copy + Send + Sync + 'static>
+    crate::leaf_trait::LayerCapableLeaf<crate::value::LeafValueIndex<V>>
+    for LeafNode24<crate::value::LeafValueIndex<V>>
+{
+    fn try_clone_output(&self, slot: usize) -> Option<V> {
+        debug_assert!(
+            slot < WIDTH_24,
+            "try_clone_output: slot {slot} >= WIDTH_24 {WIDTH_24}"
+        );
+
+        // Check for layer pointer - layer pointers are NOT values
+        if self.keylenx(slot) >= LAYER_KEYLENX {
+            return None;
+        }
+
+        let ptr: *mut u8 = self.leaf_value_ptr(slot);
+        if ptr.is_null() {
+            return None;
+        }
+
+        // SAFETY:
+        // - ptr is non-null (checked above)
+        // - ptr is not a layer pointer (keylenx < LAYER_KEYLENX, checked above)
+        // - ptr came from Box::into_raw during insert
+        // - V is Copy, so we just read the value
+        // - Caller ensures slot is stable (lock or version validation)
+        unsafe { Some(*ptr.cast::<V>()) }
+    }
+
+    unsafe fn assign_from_key_arc(
+        &self,
+        slot: usize,
+        key: &crate::key::Key<'_>,
+        value: Option<V>,
+        guard: &seize::LocalGuard<'_>,
+    ) {
+        debug_assert!(
+            slot < WIDTH_24,
+            "assign_from_key_arc: slot {slot} >= WIDTH_24 {WIDTH_24}"
+        );
+
+        // Calculate inline length (0-8 bytes)
+        // current_len() returns the remaining key length at current layer
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "current_len() capped at slice length, min(8) ensures <= 8"
+        )]
+        let inline_len: u8 = key.current_len().min(8) as u8;
+
+        // INVARIANT: value must be Some for layer creation
+        // Conflict case always has a value, not a layer pointer.
+        // If this panics, caller incorrectly identified a layer pointer as a conflict.
+        #[expect(
+            clippy::expect_used,
+            reason = "invariant: source slot must contain value"
+        )]
+        let v: V = value.expect(
+            "assign_from_key_arc: value cannot be None (source slot was not a value); \
+             this indicates a bug in conflict detection",
+        );
+
+        // Store ikey (8 bytes, big-endian encoded)
+        self.set_ikey(slot, key.ikey());
+
+        // Store value as boxed raw pointer
+        // NOTE: Value ownership transfers to the slot.
+        let ptr: *mut u8 = Box::into_raw(Box::new(v)).cast::<u8>();
         self.set_leaf_value_ptr(slot, ptr);
 
         // Set keylenx and suffix based on whether key has remaining bytes
