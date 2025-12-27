@@ -197,6 +197,7 @@ struct InternodeSplitStats {
 }
 
 #[derive(Debug, Clone)]
+#[expect(dead_code, reason = "Fields used for debug output via Debug derive")]
 struct InternodeSplitSample {
     event_type: String,
     sibling_ptr: Option<String>,

@@ -92,6 +92,18 @@ proptest! {
         prop_assert_eq!(*result.unwrap(), value);
     }
 
+    /// get_ref should return borrowed reference to the same value.
+    #[test]
+    fn get_ref_returns_borrowed_value(key in short_key(), value: u64) {
+        let tree: MassTree24<u64> = MassTree24::new();
+        tree.insert(&key, value).unwrap();
+
+        let guard = tree.guard();
+        let result = tree.get_ref(&key, &guard);
+        prop_assert!(result.is_some(), "Key {:?} not found via get_ref after insert", key);
+        prop_assert_eq!(*result.unwrap(), value);
+    }
+
     /// Inserting duplicate key should return the old value.
     #[test]
     fn insert_duplicate_returns_old_value(key in short_key_nonempty(), v1: u64, v2: u64) {

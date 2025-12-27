@@ -229,4 +229,5 @@ pub use tree::{
 };
 
 // Re-export RAII helpers for internal use
+#[expect(unused_imports, reason = "Used by split propagation code paths")]
 pub(crate) use tree::ExitGuard;

@@ -383,7 +383,7 @@ mod read_after_write {
                             let base = t * ops;
                             for i in 0..ops {
                                 let key = ((base + i) as u64).to_be_bytes();
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_ref(&key, &guard));
                             }
                         })
                     })
@@ -468,7 +468,7 @@ mod get_by_key_size {
             let guard = tree.guard();
             let mut sum = 0u64;
             for &idx in &lookup_keys {
-                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                     sum += *v;
                 }
             }
@@ -711,7 +711,7 @@ mod concurrent_reads_scaling {
                         let offset = t * 7919; // Prime offset per thread
                         for i in 0..OPS_PER_THREAD {
                             let idx = indices[(i + offset) % indices.len()];
-                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                            if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                 sum += *v;
                             }
                         }
@@ -820,7 +820,7 @@ mod concurrent_reads_long_keys {
                         let offset = t * 7919;
                         for i in 0..OPS_PER_THREAD {
                             let idx = indices[(i + offset) % indices.len()];
-                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                            if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                 sum += *v;
                             }
                         }
@@ -935,7 +935,7 @@ mod mixed_uniform {
 
                                 if i % WRITE_RATIO == 0 {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                     sum += *v;
                                 }
                             }
@@ -1059,7 +1059,7 @@ mod read_scaling_8b {
                             let start = (t * 7919) % keys.len();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = (start + i) % keys.len();
-                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                     sum += *v;
                                 }
                             }
@@ -1168,7 +1168,7 @@ mod read_scaling_32b {
                             let start = (t * 7919) % keys.len();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = (start + i) % keys.len();
-                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                     sum += *v;
                                 }
                             }
@@ -1404,7 +1404,7 @@ mod single_hot_key {
                                         (t * OPS_PER_THREAD + i) as u64,
                                         &guard,
                                     );
-                                } else if let Some(v) = tree.get_with_guard(&hot_key, &guard) {
+                                } else if let Some(v) = tree.get_ref(&hot_key, &guard) {
                                     sum += *v;
                                 }
                             }
@@ -1509,7 +1509,7 @@ mod get_by_key_size_shared_prefix {
             let guard = tree.guard();
             let mut sum = 0u64;
             for &idx in &lookup_keys {
-                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                     sum += *v;
                 }
             }
@@ -1625,7 +1625,7 @@ mod concurrent_reads_long_keys_shared_prefix {
                         let offset = t * 7919;
                         for i in 0..OPS_PER_THREAD {
                             let idx = indices[(i + offset) % indices.len()];
-                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                            if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                 sum += *v;
                             }
                         }
@@ -1743,7 +1743,7 @@ mod random_read_8b {
                             let start = t * OPS_PER_THREAD;
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[start + i];
-                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                     sum += *v;
                                 }
                             }
@@ -1854,7 +1854,7 @@ mod random_read_32b {
                             let start = t * OPS_PER_THREAD;
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[start + i];
-                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
                                     sum += *v;
                                 }
                             }
