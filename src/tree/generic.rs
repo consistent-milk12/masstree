@@ -898,35 +898,16 @@ where
         let mut nodes: [*const u8; 2] = [std::ptr::null(); 2];
         let mut versions: [u32; 2] = [0; 2];
 
-        // Double-buffered expected bounds for coverage collapse detection.
-        // These track the [expected_lower, expected_upper) range for the current child branch.
-        // Must be double-buffered to match sense toggling during internode descent.
-        let mut expected_lower: [u64; 2] = [0; 2];
-        let mut expected_upper: [u64; 2] = [u64::MAX; 2];
-
-        // Defensive: if we repeatedly land far from the target leaf, retry from fresh root.
-        // Bounded to preserve liveness even on sparse keyspaces where (key - ikey_bound) can be large
-        // even for a correct leaf.
+        // FAR_LANDING: if we land far from target, retry from fresh root
         const FAR_LANDING_GAP: u64 = 100_000;
         const FAR_LANDING_MAX_RETRIES: u8 = 5;
-        // Coverage collapse: child[i]'s subtree doesn't cover up to the expected upper bound.
-        // If expected_upper - leaf_bound > this threshold, the child's coverage is insufficient.
-        const COVERAGE_COLLAPSE_GAP: u64 = 100_000;
-        // Coverage collapse indicates permanent routing inconsistency from split propagation.
-        // Limited retries since the tree structure won't self-heal - B-link walking is the
-        // only way forward for affected keys.
-        const COVERAGE_COLLAPSE_MAX_RETRIES: u16 = 10;
         let mut far_landing_retries: u8 = 0;
-        let mut coverage_collapse_retries: u16 = 0;
 
         // Phase 1: Find fresh (non-stale) root
         'retry: loop {
             let mut sense: usize = 0;
             nodes[sense] = self.get_fresh_root(start, is_sublayer, guard);
 
-            // Reset expected bounds for each retry (root covers full keyspace)
-            expected_lower[sense] = 0;
-            expected_upper[sense] = u64::MAX;
 
             // DIAGNOSTIC: Log root obtained during FAR_LANDING retry
             #[cfg(feature = "tracing")]
@@ -971,87 +952,14 @@ where
                     let leaf: &L = unsafe { &*(node.cast::<L>()) };
                     let leaf_bound: u64 = leaf.ikey_bound();
 
-                    // Coverage collapse detection:
-                    // Check if the child's subtree doesn't cover up to the expected upper bound.
-                    // This catches the "left-gap" failure mode where:
-                    //   - target < k0, so we went to child[0]
-                    //   - child[0]'s subtree only covers up to leaf_bound << expected_upper
-                    //   - target is within [expected_lower, expected_upper) but unreachable efficiently
-                    //
-                    // Example from logs:
-                    //   target = 2,114,434, expected_upper = k0 = 2,200,002
-                    //   leaf_bound = 2,003,984
-                    //   coverage_gap = 2,200,002 - 2,003,984 = 196,018 (child doesn't reach k0!)
-                    //   target_gap = 2,114,434 - 2,003,984 = 110,450 (need excessive B-link walk)
-                    let exp_upper = expected_upper[sense];
-                    let coverage_gap = if exp_upper != u64::MAX && exp_upper > leaf_bound {
-                        exp_upper - leaf_bound
-                    } else {
-                        0
-                    };
-                    let target_gap = if target_ikey > leaf_bound {
-                        target_ikey - leaf_bound
-                    } else {
-                        0
-                    };
-
-                    // Trigger on coverage collapse in two cases:
-                    // 1. Normal: coverage_gap > threshold AND target_gap > threshold
-                    // 2. Rightmost-child: expected_upper == MAX (no separator to constrain)
-                    //    but target_gap is extremely large (10x threshold), indicating
-                    //    the rightmost subtree doesn't cover the expected range.
-                    let is_rightmost_collapse =
-                        exp_upper == u64::MAX && target_gap > FAR_LANDING_GAP * 10;
-                    let is_normal_collapse =
-                        coverage_gap > COVERAGE_COLLAPSE_GAP && target_gap > FAR_LANDING_GAP;
-
-                    if is_normal_collapse || is_rightmost_collapse {
-                        coverage_collapse_retries += 1;
-                        if coverage_collapse_retries <= COVERAGE_COLLAPSE_MAX_RETRIES {
-                            #[cfg(feature = "tracing")]
-                            if coverage_collapse_retries <= 5 || coverage_collapse_retries % 20 == 0
-                            {
-                                tracing::warn!(
-                                    ikey = format_args!("{:016x}", target_ikey),
-                                    leaf_ptr = ?node,
-                                    leaf_bound = format_args!("{:016x}", leaf_bound),
-                                    expected_lower = format_args!("{:016x}", expected_lower[sense]),
-                                    expected_upper = format_args!("{:016x}", exp_upper),
-                                    coverage_gap = coverage_gap,
-                                    target_gap = target_gap,
-                                    retry = coverage_collapse_retries,
-                                    "COVERAGE_COLLAPSE: child subtree doesn't cover expected range"
-                                );
-                            }
-
-                            // Brief backoff: spin then yield
-                            if coverage_collapse_retries <= 3 {
-                                let backoff_spins: u32 = u32::from(coverage_collapse_retries)
-                                    * u32::from(coverage_collapse_retries)
-                                    * 100;
-                                for _ in 0..backoff_spins {
-                                    std::hint::spin_loop();
-                                }
-                            } else {
-                                std::thread::yield_now();
-                            }
-
-                            continue 'retry;
-                        }
-                        // Exhausted coverage collapse retries - fall through to B-link walking
-                        // as last resort (will likely hit anomaly limit but preserves liveness)
-                    }
-
-                    // Original FAR_LANDING check (simpler: just target vs leaf_bound gap)
-                    // Skip if coverage collapse was detected - routing is broken, retrying won't help.
+                    // FAR_LANDING check: if we landed far from target, retry from fresh root
                     let gap: u64 = if target_ikey >= leaf_bound {
                         target_ikey - leaf_bound
                     } else {
                         leaf_bound - target_ikey
                     };
 
-                    if coverage_collapse_retries == 0
-                        && gap > FAR_LANDING_GAP
+                    if gap > FAR_LANDING_GAP
                         && far_landing_retries < FAR_LANDING_MAX_RETRIES
                     {
                         far_landing_retries += 1;
@@ -1135,33 +1043,7 @@ where
                 let other = sense ^ 1;
                 nodes[other] = child;
 
-                // Update expected bounds for the child branch (on OTHER buffer).
-                // For child[i]:
-                //   - expected_lower = (i == 0) ? inherited_lower : inode.ikey(i - 1)
-                //   - expected_upper = (i < nkeys) ? inode.ikey(i) : inherited_upper
-                // expected_lower can only INCREASE as we descend (tighter lower bound)
-                expected_lower[other] = if child_idx == 0 {
-                    expected_lower[sense] // Inherit from parent
-                } else {
-                    std::cmp::max(expected_lower[sense], inode.ikey(child_idx - 1))
-                };
-                // expected_upper: Only update if the separator is a valid constraint.
-                // If target >= separator[child_idx], we're being routed to a child
-                // that's "too early" for our target (routing inconsistency).
-                // In that case, PRESERVE parent's expected_upper to detect coverage collapse.
-                expected_upper[other] = if child_idx < nkeys_snapshot {
-                    let sep = inode.ikey(child_idx);
-                    if target_ikey >= sep {
-                        // Target exceeds separator - we're in wrong subtree!
-                        // Keep parent's constraint to detect coverage collapse at leaf.
-                        expected_upper[sense]
-                    } else {
-                        // Target below separator - valid constraint
-                        std::cmp::min(expected_upper[sense], sep)
-                    }
-                } else {
-                    expected_upper[sense] // Inherit from parent
-                };
+
 
                 if child.is_null() {
                     // NULL child - retry from fresh root
