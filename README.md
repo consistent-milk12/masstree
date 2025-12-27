@@ -2,29 +2,6 @@
 
 A high-performance concurrent ordered map for Rust, supporting variable-length keys. This is an experimental branch implementing a major divergence from the original C++ Masstree: **WIDTH=24** (vs. the original WIDTH=15). This requires `AtomicU128` for the permutation field (24 slots × 5 bits = 120 bits).
 
-The current Rust implementation releases the left leaf lock BEFORE calling `propagate_split_generic`, breaking the C++ hand-over-hand invariant:
-
-```text
-Current Rust (BROKEN):
-  handle_leaf_split_generic:
-    lock.mark_split()
-    split_into()
-    link_sibling()
-    drop(lock)                   <- WRONG: released too early
-    propagate_split_generic()    <- left is unlocked during propagation
-
-C++ Pattern (CORRECT):
-  make_split:
-    while (true) {
-      // n and child are BOTH locked throughout
-      p = n->locked_parent()
-      // ... insert into parent ...
-      // hand-over-hand unlock at END of iteration
-      if (n != n_) n->unlock()
-      if (child != n_) child->unlock()
-    }
-```
-
 ## Why WIDTH=24?
 
 Larger leaf nodes mean fewer splits under concurrent writes. Benchmarks show:
@@ -57,7 +34,7 @@ A Rust implementation of the [Masstree algorithm](https://pdos.csail.mit.edu/pap
 
 **MassTree's niche**: When you need a concurrent ordered map with arbitrary byte-sequence keys and high read throughput.
 
-## Why MassTree? Theoretical Strengths
+## Theoretical Strengths of Masstree
 
 ### 1. Variable-Length Keys with Shared Prefixes
 
@@ -69,11 +46,13 @@ Key: "users/alice/profile"
 ```
 
 **Why this wins:**
+
 - Keys with common prefixes share tree nodes (cache efficient)
 - No key comparison beyond the current 8-byte slice
 - O(key_length/8) layers, each with O(log n) B+tree lookup
 
 **Others can't match this** because:
+
 - B+trees compare full keys at every node
 - Skip lists compare full keys at every level
 - Hash maps don't preserve order and can't do range scans
@@ -81,12 +60,14 @@ Key: "users/alice/profile"
 ### 2. Lock-Free Reads with Version Validation
 
 Readers never acquire locks. They:
+
 1. Read version number
 2. Do work
 3. Validate version unchanged
 4. Retry if changed
 
 **Why this wins:**
+
 - Zero contention on read-heavy workloads
 - No cache line bouncing from atomic increments (unlike Arc refcounts)
 - Readers scale linearly with cores
@@ -96,6 +77,7 @@ Readers never acquire locks. They:
 Writers only lock the specific leaf node being modified, not the whole tree or path.
 
 **Hot key advantage:** When many threads hit the same key:
+
 - MassTree: Only that leaf locks, other leaves unaffected
 - Global locks: Everyone waits
 
