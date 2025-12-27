@@ -121,7 +121,7 @@ where
     let (next_state, snapshot) = kx.p.map_or_else(
         || (ScanState::FindNext, None),
         |slot| {
-            handle_initial_match::<L, S>(leaf, slot, cursor_key, emit_equal, version, &perm, kx.i)
+            handle_initial_match::<L, S>(leaf, slot, cursor_key, stack, emit_equal, version, &perm, kx.i)
         },
     );
 
@@ -156,6 +156,7 @@ fn handle_initial_match<L, S>(
     leaf: &L,
     slot: usize,
     cursor_key: &mut CursorKey,
+    stack: &mut ScanStackElement<L, S>,
     emit_equal: bool,
     _version: u32,
     _perm: &L::Perm,
@@ -169,14 +170,19 @@ where
     let keylenx: u8 = leaf.keylenx(slot);
 
     if keylenx >= LAYER_KEYLENX {
-        // Layer pointer
-        if cursor_key.has_suffix() {
-            // Need to descend into layer using start key
-            return (ScanState::Down, None);
-        }
-        // Start key ends here, but there's a layer - emit keys in layer first
-        // This is handled by returning FindNext and letting normal iteration find it
-        return (ScanState::FindNext, None);
+        // Layer pointer - always descend to scan layer contents
+        // C++ reference (masstree_scan.hh:218-222):
+        //   if (n_->keylenx_is_layer(keylenx)) {
+        //       node_stack_.push_back(root_); node_stack_.push_back(n_);
+        //       root_ = entry.layer(); return scan_down;
+        //   }
+        // This is needed even when start key has no suffix (exact 8-byte prefix)
+        // because we want to scan all keys under this layer pointer.
+        let slot_ikey: u64 = leaf.ikey(slot);
+        let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        cursor_key.assign_store_ikey(slot_ikey);
+        stack.set_root(layer_ptr);
+        return (ScanState::Down, None);
     }
 
     if keylenx == KSUF_KEYLENX {

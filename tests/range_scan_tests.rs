@@ -471,3 +471,134 @@ fn scan_deep_layers_concurrent() {
         assert!(window[0].key < window[1].key, "not sorted");
     }
 }
+
+/// Test that prefix scan correctly descends into layer pointers.
+///
+/// This test mimics the benchmark setup in `08_masstree_prefix_scan`:
+/// - Keys are 16 bytes with first 8 bytes as bucketed prefix
+/// - Prefix scan should descend into the layer and return all matching entries
+///
+/// Previously, 8-byte prefix scans would return 0 entries due to a bug
+/// where `handle_initial_match` didn't descend into layer pointers when
+/// the cursor key had no suffix.
+#[test]
+fn scan_prefix_layer_descent() {
+    let tree: MassTree<u64> = MassTree::new();
+    let guard = tree.guard();
+
+    const N: usize = 1000;
+    const PREFIX_BUCKETS: u64 = 10;
+
+    // Generate keys similar to benchmark: 16 bytes with bucketed prefix
+    for i in 0..N {
+        let mut key = [0u8; 16];
+        // First 8 bytes: bucketed prefix
+        let prefix = ((i as u64) % PREFIX_BUCKETS).to_be_bytes();
+        key[0..8].copy_from_slice(&prefix);
+        // Next 8 bytes: unique suffix based on i
+        let suffix = (i as u64).wrapping_mul(0x517c_c1b7_2722_0a95).to_be_bytes();
+        key[8..16].copy_from_slice(&suffix);
+
+        tree.insert(&key, i as u64).unwrap();
+    }
+
+    // Scan with 8-byte prefix (bucket 0)
+    let prefix = 0u64.to_be_bytes();
+    let mut count = 0usize;
+    let mut keys_found: Vec<Vec<u8>> = Vec::new();
+
+    tree.scan_prefix(
+        &prefix,
+        |k, _v| {
+            count += 1;
+            keys_found.push(k.to_vec());
+            true
+        },
+        &guard,
+    );
+
+    // With N=1000 and 10 buckets, bucket 0 should have ~100 entries
+    let expected = N / PREFIX_BUCKETS as usize;
+    assert_eq!(
+        count, expected,
+        "prefix scan returned {count} entries, expected {expected}"
+    );
+
+    // Verify all returned keys have the correct prefix
+    for k in &keys_found {
+        assert!(
+            k.starts_with(&prefix),
+            "key {:?} doesn't start with prefix {:?}",
+            k,
+            prefix
+        );
+    }
+
+    // Verify keys are sorted
+    for window in keys_found.windows(2) {
+        assert!(
+            window[0] < window[1],
+            "keys not sorted: {:?} >= {:?}",
+            window[0],
+            window[1]
+        );
+    }
+}
+
+/// Test 8-byte exact prefix scan where prefix key itself exists.
+///
+/// This tests the edge case where:
+/// 1. An exact 8-byte key exists in the tree
+/// 2. Longer keys with the same 8-byte prefix also exist (creating a layer)
+/// 3. Prefix scan should return both the exact key and all layer contents
+#[test]
+fn scan_prefix_exact_8byte_with_layer() {
+    let tree: MassTree<u64> = MassTree::new();
+    let guard = tree.guard();
+
+    let prefix: [u8; 8] = *b"PREFIXXX";
+
+    // Insert longer keys first (creates layer)
+    for i in 0..10u64 {
+        let mut key = [0u8; 16];
+        key[0..8].copy_from_slice(&prefix);
+        key[8..16].copy_from_slice(&i.to_be_bytes());
+        tree.insert(&key, i).unwrap();
+    }
+
+    // Insert exact 8-byte prefix key
+    tree.insert(&prefix, 100).unwrap();
+
+    // Scan with 8-byte prefix
+    let mut keys_found: Vec<Vec<u8>> = Vec::new();
+    let count = tree.scan_prefix(
+        &prefix,
+        |k, _v| {
+            keys_found.push(k.to_vec());
+            true
+        },
+        &guard,
+    );
+
+    // Should find: 1 exact prefix key + 10 longer keys = 11 total
+    assert_eq!(
+        count, 11,
+        "expected 11 entries (1 exact + 10 longer), got {count}"
+    );
+
+    // First key should be the exact 8-byte prefix
+    assert_eq!(
+        keys_found[0].as_slice(),
+        &prefix,
+        "first key should be exact prefix"
+    );
+
+    // Remaining keys should be the longer ones, sorted
+    for i in 1..keys_found.len() {
+        assert_eq!(keys_found[i].len(), 16, "longer keys should be 16 bytes");
+        assert!(
+            keys_found[i].starts_with(&prefix),
+            "key should start with prefix"
+        );
+    }
+}

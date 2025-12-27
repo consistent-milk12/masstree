@@ -175,22 +175,14 @@ where
         &self,
         start: RangeBound<'_>,
         end: RangeBound<'_>,
-        mut visitor: F,
+        visitor: F,
         guard: &LocalGuard<'_>,
     ) -> usize
     where
         F: FnMut(&[u8], S::Output) -> bool,
     {
-        let mut count: usize = 0;
-
-        for entry in self.range(start, end, guard) {
-            count += 1;
-            if !visitor(&entry.key, entry.value) {
-                break;
-            }
-        }
-
-        count
+        // Use zero-allocation for_each internally
+        self.range(start, end, guard).for_each(visitor)
     }
 
     /// Scan all entries with a prefix.
@@ -231,21 +223,15 @@ where
             None => RangeBound::Unbounded, // Prefix ends with all 0xFF bytes
         };
 
-        let mut count: usize = 0;
-
-        for entry in self.range(RangeBound::Included(prefix), end, guard) {
-            // Double-check prefix match (handles edge cases)
-            if !entry.key.starts_with(prefix) {
-                break;
-            }
-
-            count += 1;
-            if !visitor(&entry.key, entry.value) {
-                break;
-            }
-        }
-
-        count
+        // Use zero-allocation for_each with prefix check
+        self.range(RangeBound::Included(prefix), end, guard)
+            .for_each(|key, value| {
+                // Double-check prefix match (handles edge cases)
+                if !key.starts_with(prefix) {
+                    return false;
+                }
+                visitor(key, value)
+            })
     }
 
     // ========================================================================
