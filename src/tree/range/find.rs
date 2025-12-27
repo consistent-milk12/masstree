@@ -477,7 +477,7 @@ pub fn find_next_ptr<L, S>(
     cursor_key: &mut CursorKey,
     layer_stack: &mut LayerStack<L>,
     guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshotPtr>)
+) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
@@ -494,7 +494,7 @@ pub fn find_next_with_duplicate_check_ptr<L, S>(
     cursor_key: &mut CursorKey,
     layer_stack: &mut LayerStack<L>,
     guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshotPtr>)
+) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
@@ -516,7 +516,7 @@ fn find_next_inner_ptr<L, S>(
     layer_stack: &mut LayerStack<L>,
     guard: &LocalGuard<'_>,
     needs_duplicate_check: bool,
-) -> (ScanState, Option<ScanSnapshotPtr>)
+) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
@@ -612,7 +612,10 @@ where
     stack.next();
 
     // Return raw pointer - caller will dereference
-    (ScanState::Emit, Some(ScanSnapshotPtr::new(slot_ptr, key_len)))
+    (
+        ScanState::Emit,
+        Some(ScanSnapshotPtr::from_raw(slot_ptr, key_len)),
+    )
 }
 
 /// Advance to next leaf, zero-copy variant.
@@ -622,7 +625,7 @@ fn advance_leaf_ptr<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &CursorKey,
     _guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshotPtr>)
+) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
@@ -1035,14 +1038,14 @@ where
 
     // Restore parent state
     stack.set_root(parent.root);
-    stack.set_leaf(parent.leaf);
+    stack.set_leaf(parent.leaf_ptr());
 
     // Unshift cursor (sets len=9 sentinel)
     cursor_key.unshift();
 
     // Refresh parent leaf state
     // SAFETY: parent.leaf is protected by guard
-    let leaf: &L = unsafe { &*parent.leaf };
+    let leaf: &L = unsafe { parent.leaf.as_ref() };
 
     let version: u32 = leaf.version().stable();
 

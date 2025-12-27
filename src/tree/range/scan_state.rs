@@ -48,6 +48,7 @@
 //!         └────┴─────────┴────────────────────────────────────┘
 //!
 use std::marker::PhantomData;
+use std::ptr::NonNull;
 
 use smallvec::SmallVec;
 
@@ -181,10 +182,10 @@ where
 
     /// Current leaf in this layer.
     ///
-    /// This is a raw pointer because we need to hold it across operations
-    /// while the guard is active. The pointer is valid as long as the
-    /// guard passed to scan APIs remains alive.
-    leaf: *mut L,
+    /// Uses `Option<NonNull<L>>` for explicit null representation with niche
+    /// optimization. The pointer is valid as long as the guard passed to scan
+    /// APIs remains alive.
+    leaf: Option<NonNull<L>>,
 
     /// Version snapshot for optimistic validation.
     ///
@@ -259,7 +260,7 @@ where
     pub fn new(root: *const u8) -> Self {
         Self {
             root,
-            leaf: std::ptr::null_mut(),
+            leaf: None,
             version: 0,
             perm: L::Perm::empty(),
             ki: 0,
@@ -268,8 +269,12 @@ where
     }
 
     /// Create a stack element with all fields initialized.
+    ///
+    /// # Arguments
+    ///
+    /// - `leaf`: Raw pointer to the leaf node (may be null)
     #[must_use]
-    pub const fn with_leaf(
+    pub fn with_leaf(
         root: *const u8,
         leaf: *mut L,
         version: u32,
@@ -278,7 +283,7 @@ where
     ) -> Self {
         Self {
             root,
-            leaf,
+            leaf: NonNull::new(leaf),
             version,
             perm,
             ki,
@@ -296,10 +301,15 @@ where
         self.root
     }
 
-    /// Get the current leaf pointer.
+    /// Get the current leaf pointer as a raw pointer.
+    ///
+    /// Returns null if the leaf is not set.
     #[inline(always)]
-    pub const fn leaf_ptr(&self) -> *mut L {
-        self.leaf
+    pub fn leaf_ptr(&self) -> *mut L {
+        match self.leaf {
+            Some(nn) => nn.as_ptr(),
+            None => std::ptr::null_mut(),
+        }
     }
 
     /// Get a reference to the current leaf.
@@ -307,13 +317,13 @@ where
     /// # Safety
     ///
     /// The caller must ensure:
-    /// - `self.leaf` is non-null
+    /// - `self.leaf` is `Some` (not null)
     /// - The guard that protects this pointer is still alive
     #[inline(always)]
     pub unsafe fn leaf_ref(&self) -> &L {
-        debug_assert!(!self.leaf.is_null(), "leaf_ref called on null leaf");
-        // SAFETY: Caller ensures leaf is valid
-        unsafe { &*self.leaf }
+        debug_assert!(self.leaf.is_some(), "leaf_ref called on null leaf");
+        // SAFETY: Caller ensures leaf is valid and Some
+        unsafe { self.leaf.unwrap_unchecked().as_ref() }
     }
 
     /// Get the cached version.
@@ -355,7 +365,7 @@ where
     /// Check if the leaf pointer is null.
     #[inline(always)]
     pub const fn is_null(&self) -> bool {
-        self.leaf.is_null()
+        self.leaf.is_none()
     }
 
     // ========================================================================
@@ -368,10 +378,12 @@ where
         self.root = root;
     }
 
-    /// Set the leaf pointer.
+    /// Set the leaf pointer from a raw pointer.
+    ///
+    /// Accepts null pointers (converts to `None` internally).
     #[inline(always)]
-    pub const fn set_leaf(&mut self, leaf: *mut L) {
-        self.leaf = leaf;
+    pub fn set_leaf(&mut self, leaf: *mut L) {
+        self.leaf = NonNull::new(leaf);
     }
 
     /// Set the cached version.
@@ -415,15 +427,16 @@ where
     ///
     /// # Safety
     ///
-    /// The caller must ensure `self.leaf` is non-null and valid.
+    /// The caller must ensure `self.leaf` is `Some` and valid.
     ///
     /// # Returns
     ///
     /// `Ok(())` if permutation loaded successfully.
     /// `Err(())` if permutation is frozen (split in progress).
     pub unsafe fn refresh_from_leaf(&mut self, ki: usize) -> Result<(), ()> {
+        debug_assert!(self.leaf.is_some(), "refresh_from_leaf called on null leaf");
         // SAFETY: Caller ensures leaf is valid
-        let leaf: &L = unsafe { &*self.leaf };
+        let leaf: &L = unsafe { self.leaf.unwrap_unchecked().as_ref() };
 
         self.version = leaf.version().stable();
 
@@ -460,13 +473,21 @@ where
 /// 2. We need to reload version/perm anyway to validate
 /// 3. We use `unshift()` to set `len=9` which makes `lower_bound` find
 ///    the position after the layer pointer slot
+///
+/// # Invariant
+///
+/// `leaf` is always non-null. A `LayerContext` is only created when
+/// descending into a sublayer from a valid leaf position.
 #[derive(Clone, Copy)]
 pub struct LayerContext<L> {
     /// Parent layer root.
     pub root: *const u8,
 
     /// Parent leaf (where the layer pointer was found).
-    pub leaf: *mut L,
+    ///
+    /// Uses `NonNull` because a layer context is only created from a valid
+    /// leaf - we never push a null leaf to the layer stack.
+    pub leaf: NonNull<L>,
 }
 
 impl<L> std::fmt::Debug for LayerContext<L> {
@@ -480,9 +501,24 @@ impl<L> std::fmt::Debug for LayerContext<L> {
 
 impl<L> LayerContext<L> {
     /// Create a new layer context.
+    ///
+    /// # Panics
+    ///
+    /// Debug-panics if `leaf` is null (indicates a bug in scan logic).
     #[inline(always)]
-    pub const fn new(root: *const u8, leaf: *mut L) -> Self {
-        Self { root, leaf }
+    pub fn new(root: *const u8, leaf: *mut L) -> Self {
+        debug_assert!(!leaf.is_null(), "LayerContext::new called with null leaf");
+        Self {
+            root,
+            // SAFETY: We just checked that leaf is non-null
+            leaf: unsafe { NonNull::new_unchecked(leaf) },
+        }
+    }
+
+    /// Get the leaf as a raw mutable pointer.
+    #[inline(always)]
+    pub fn leaf_ptr(&self) -> *mut L {
+        self.leaf.as_ptr()
     }
 }
 
@@ -507,7 +543,7 @@ impl<L> LayerContext<L> {
 /// // On layer ascent
 /// if let Some(parent) = layer_stack.pop() {
 ///     stack.set_root(parent.root);
-///     stack.set_leaf(parent.leaf);
+///     stack.set_leaf(parent.leaf_ptr());
 /// }
 ///
 pub type LayerStack<L> = SmallVec<[LayerContext<L>; 4]>;
@@ -545,7 +581,11 @@ pub struct ScanSnapshot<S: ValueSlot> {
 /// Snapshot of slot data for zero-copy emission.
 ///
 /// Unlike [`ScanSnapshot`] which clones the value (Arc increment for `LeafValue`),
-/// this stores the raw pointer and defers dereferencing to the caller.
+/// this stores a typed pointer and defers dereferencing to the caller.
+///
+/// # Type Parameter
+///
+/// - `V`: The value type stored in the tree (e.g., `u64` for `MassTree24<u64>`)
 ///
 /// # Safety
 ///
@@ -561,22 +601,48 @@ pub struct ScanSnapshot<S: ValueSlot> {
 /// This eliminates Arc atomic increment/decrement per scanned entry,
 /// which can improve scan throughput by 2-3x for Arc-based trees.
 #[derive(Debug, Clone, Copy)]
-pub struct ScanSnapshotPtr {
-    /// Raw pointer to the value data.
+pub struct ScanSnapshotPtr<V> {
+    /// Typed pointer to the value data.
     ///
     /// - For `LeafValue<V>`: Points to Arc<V>'s data
     /// - For `LeafValueIndex<V>`: Points to Box<V>'s data
-    pub value_ptr: *const u8,
+    pub value_ptr: *const V,
 
-    /// The key length at current layer (same as ScanSnapshot).
+    /// The key length at current layer (same as [`ScanSnapshot`]).
     pub key_len: usize,
 }
 
-impl ScanSnapshotPtr {
+impl<V> ScanSnapshotPtr<V> {
     /// Create a new zero-copy snapshot.
     #[inline(always)]
-    pub const fn new(value_ptr: *const u8, key_len: usize) -> Self {
+    pub const fn new(value_ptr: *const V, key_len: usize) -> Self {
         Self { value_ptr, key_len }
+    }
+
+    /// Create from a raw `*const u8` pointer by casting.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the pointer actually points to a valid `V`.
+    #[inline(always)]
+    pub const fn from_raw(ptr: *const u8, key_len: usize) -> Self {
+        Self {
+            value_ptr: ptr.cast::<V>(),
+            key_len,
+        }
+    }
+
+    /// Get a reference to the value.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// 1. The guard is still held
+    /// 2. The version hasn't changed since the snapshot was created
+    #[inline(always)]
+    pub unsafe fn value_ref(&self) -> &V {
+        // SAFETY: Caller ensures pointer is valid
+        unsafe { &*self.value_ptr }
     }
 }
 
@@ -639,7 +705,7 @@ mod tests {
         let ctx: LayerContext<u8> = LayerContext::new(root, leaf);
 
         assert_eq!(ctx.root, root);
-        assert_eq!(ctx.leaf, leaf);
+        assert_eq!(ctx.leaf_ptr(), leaf);
     }
 
     #[test]
@@ -658,7 +724,7 @@ mod tests {
         // Pop
         let ctx = stack.pop().unwrap();
         assert_eq!(ctx.root, 0x3000 as *const u8);
-        assert_eq!(ctx.leaf, 0x4000 as *mut u8);
+        assert_eq!(ctx.leaf_ptr(), 0x4000 as *mut u8);
 
         assert_eq!(stack.len(), 1);
 
@@ -675,7 +741,7 @@ mod tests {
         let mut stack: LayerStack<u8> = SmallVec::new();
 
         // Push 4 elements (should stay inline)
-        for i in 0..4 {
+        for i in 1..=4 {
             stack.push(LayerContext::new(
                 (i * 0x1000) as *const u8,
                 (i * 0x2000) as *mut u8,
@@ -688,5 +754,32 @@ mod tests {
         // Push one more (should spill to heap)
         stack.push(LayerContext::new(0x5000 as *const u8, 0x6000 as *mut u8));
         assert!(stack.spilled());
+    }
+
+    #[test]
+    fn test_scan_snapshot_ptr_generic() {
+        // Test with u64
+        let ptr: *const u64 = 0x1000 as *const u64;
+        let snap: ScanSnapshotPtr<u64> = ScanSnapshotPtr::new(ptr, 8);
+        assert_eq!(snap.value_ptr, ptr);
+        assert_eq!(snap.key_len, 8);
+
+        // Test from_raw
+        let raw: *const u8 = 0x2000 as *const u8;
+        let snap2: ScanSnapshotPtr<u64> = ScanSnapshotPtr::from_raw(raw, 4);
+        assert_eq!(snap2.value_ptr, raw as *const u64);
+        assert_eq!(snap2.key_len, 4);
+    }
+
+    #[test]
+    fn test_nonnull_niche_optimization() {
+        // Verify that Option<NonNull<L>> has the same size as *mut L
+        // due to niche optimization
+        use std::mem::size_of;
+        assert_eq!(
+            size_of::<Option<NonNull<u8>>>(),
+            size_of::<*mut u8>(),
+            "NonNull niche optimization should make Option<NonNull> same size as raw pointer"
+        );
     }
 }

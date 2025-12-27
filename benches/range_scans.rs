@@ -98,7 +98,12 @@ mod full_scan_10k {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -144,7 +149,12 @@ mod full_scan_10k {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -201,7 +211,12 @@ mod full_scan_100k {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -247,7 +262,12 @@ mod full_scan_100k {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -306,10 +326,15 @@ mod range_first_1k {
         bencher.bench(|| {
             let guard = tree.guard();
             let mut count = 0usize;
-            tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| {
-                count += 1;
-                count < LIMIT
-            }, &guard);
+            tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| {
+                    count += 1;
+                    count < LIMIT
+                },
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -356,10 +381,15 @@ mod range_first_1k {
         bencher.bench(|| {
             let guard = tree.guard();
             let mut count = 0usize;
-            tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| {
-                count += 1;
-                count < LIMIT
-            }, &guard);
+            tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| {
+                    count += 1;
+                    count < LIMIT
+                },
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -417,7 +447,12 @@ mod shared_prefix_scan {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -463,7 +498,12 @@ mod shared_prefix_scan {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -521,10 +561,15 @@ mod scan_aggregate {
         bencher.bench(|| {
             let guard = tree.guard();
             let mut sum = 0u64;
-            tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, v| {
-                sum += *v;
-                true
-            }, &guard);
+            tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, v| {
+                    sum += *v;
+                    true
+                },
+                &guard,
+            );
             black_box(sum)
         });
     }
@@ -571,10 +616,15 @@ mod scan_aggregate {
         bencher.bench(|| {
             let guard = tree.guard();
             let mut sum = 0u64;
-            tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, v| {
-                sum += *v;
-                true
-            }, &guard);
+            tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, v| {
+                    sum += *v;
+                    true
+                },
+                &guard,
+            );
             black_box(sum)
         });
     }
@@ -642,7 +692,12 @@ mod concurrent_scan_4t {
                         let mut total = 0usize;
                         for _ in 0..SCANS_PER_THREAD {
                             let guard = tree.guard();
-                            total += tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+                            total += tree.scan(
+                                RangeBound::Unbounded,
+                                RangeBound::Unbounded,
+                                |_, _| true,
+                                &guard,
+                            );
                         }
                         total
                     })
@@ -794,7 +849,12 @@ mod scan_while_insert {
                             let mut total = 0usize;
                             for _ in 0..SCANS_PER_READER {
                                 let guard = tree.guard();
-                                total += tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+                                total += tree.scan(
+                                    RangeBound::Unbounded,
+                                    RangeBound::Unbounded,
+                                    |_, _| true,
+                                    &guard,
+                                );
                             }
                             total
                         })
@@ -969,7 +1029,12 @@ mod masstree_prefix_scan {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Included(&start), RangeBound::Excluded(&end), |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Included(&start),
+                RangeBound::Excluded(&end),
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -983,7 +1048,12 @@ mod masstree_prefix_scan {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Included(&start), RangeBound::Excluded(&end), |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Included(&start),
+                RangeBound::Excluded(&end),
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -1006,7 +1076,12 @@ mod iterator_overhead {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }
@@ -1030,7 +1105,12 @@ mod iterator_overhead {
 
         bencher.bench(|| {
             let guard = tree.guard();
-            let count = tree.scan(RangeBound::Unbounded, RangeBound::Unbounded, |_, _| true, &guard);
+            let count = tree.scan(
+                RangeBound::Unbounded,
+                RangeBound::Unbounded,
+                |_, _| true,
+                &guard,
+            );
             black_box(count)
         });
     }

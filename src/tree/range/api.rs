@@ -397,11 +397,10 @@ mod tests {
         assert_eq!(compute_prefix_upper_bound(b"\xff"), None);
     }
 
-
     #[test]
     fn test_scan_ref_returns_same_values_as_scan() {
-        use crate::MassTree24;
         use super::RangeBound;
+        use crate::MassTree24;
 
         let tree: MassTree24<u64> = MassTree24::new();
         let guard = tree.guard();
@@ -445,8 +444,8 @@ mod tests {
 
     #[test]
     fn test_scan_ref_with_range_bounds() {
-        use crate::MassTree24;
         use super::RangeBound;
+        use crate::MassTree24;
 
         let tree: MassTree24<u64> = MassTree24::new();
         let guard = tree.guard();
@@ -486,8 +485,8 @@ mod tests {
 
     #[test]
     fn test_scan_ref_early_stop() {
-        use crate::MassTree24;
         use super::RangeBound;
+        use crate::MassTree24;
 
         let tree: MassTree24<u64> = MassTree24::new();
         let guard = tree.guard();

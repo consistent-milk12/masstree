@@ -428,7 +428,10 @@ pub fn keys_hierarchical<const K: usize>(
     items_per_cat: usize,
 ) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
-    assert!((24..=128).contains(&K), "key size must be 24..=128 for hierarchical keys");
+    assert!(
+        (24..=128).contains(&K),
+        "key size must be 24..=128 for hierarchical keys"
+    );
 
     let mut out = Vec::with_capacity(namespaces * categories_per_ns * items_per_cat);
 
@@ -487,7 +490,9 @@ pub fn keys_variable_length(n: usize, seed: u64) -> VariableLengthKeys {
 
     for i in 0..n {
         // Pseudo-random size selection
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let size_idx = ((state >> 62) as usize) % 4;
         let size = sizes[size_idx];
         distribution[size_idx] += 1;
@@ -544,7 +549,9 @@ pub fn string_keys_urls(n: usize, domains: usize) -> Vec<String> {
 pub fn string_keys_paths(n: usize, users: usize, projects_per_user: usize) -> Vec<String> {
     let mut keys = Vec::with_capacity(n);
 
-    let modules = ["core", "util", "api", "db", "cache", "net", "auth", "config"];
+    let modules = [
+        "core", "util", "api", "db", "cache", "net", "auth", "config",
+    ];
     let extensions = ["rs", "toml", "md", "json", "yaml"];
 
     for i in 0..n {
@@ -653,7 +660,9 @@ pub fn keys_random_length_simulation<const K: usize>(n: usize, seed: u64) -> Vec
 
     for i in 0..n {
         // Determine "effective length" for this key (1 to chunks)
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let effective_chunks = 1 + ((state >> 60) as usize % chunks);
 
         let mut key = [0u8; K];

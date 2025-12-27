@@ -409,8 +409,14 @@ where
                     self.layer_stack
                         .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
 
-                    // Key shift (not shift_clear, using start key bytes)
-                    self.cursor_key.shift();
+                    // If the key has more bytes (suffix), shift to use them.
+                    // Otherwise, the prefix exactly matches the layer pointer's ikey,
+                    // so we shift_clear to scan all keys in the sublayer.
+                    if self.cursor_key.has_suffix() {
+                        self.cursor_key.shift();
+                    } else {
+                        self.cursor_key.shift_clear();
+                    }
 
                     // Update root to layer pointer
                     // (find_initial would have set this in a real impl)
@@ -882,12 +888,17 @@ where
 
                 // SAFETY: Guard prevents deallocation, version was validated
                 // in find_next_inner_ptr before returning the pointer.
-                let value_ref: &S::Value = unsafe { &*snap.value_ptr.cast::<S::Value>() };
+                // We dereference the raw pointer directly (not via snap.value_ref())
+                // because the reference must outlive the local `snap` variable.
+                let value_ref: &S::Value = unsafe { &*snap.value_ptr };
                 return Some((key, value_ref));
             }
 
             // For non-Emit states, continue the loop
-            if new_state == ScanState::Up || new_state == ScanState::Down || new_state == ScanState::Retry {
+            if new_state == ScanState::Up
+                || new_state == ScanState::Down
+                || new_state == ScanState::Retry
+            {
                 continue;
             }
 

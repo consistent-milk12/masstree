@@ -3456,7 +3456,11 @@ mod aggressive_shared_prefix_read {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree24(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
         let tree = Arc::new(setup_masstree24::<32>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
@@ -3494,7 +3498,11 @@ mod aggressive_shared_prefix_read {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree24_inline(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
         let tree = Arc::new(setup_masstree24_inline::<32>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
@@ -3532,7 +3540,11 @@ mod aggressive_shared_prefix_read {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn skipmap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
         let map = Arc::new(setup_skipmap::<32>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
@@ -3569,7 +3581,11 @@ mod aggressive_shared_prefix_read {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn indexset(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
         let map = Arc::new(setup_indexset::<32>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
@@ -3606,7 +3622,11 @@ mod aggressive_shared_prefix_read {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn tree_index(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
         let tree = Arc::new(setup_tree_index::<32>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
@@ -3654,7 +3674,11 @@ mod aggressive_shared_prefix_write {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree24(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -3696,7 +3720,11 @@ mod aggressive_shared_prefix_write {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree24_inline(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -3738,7 +3766,11 @@ mod aggressive_shared_prefix_write {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn skipmap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -3776,7 +3808,11 @@ mod aggressive_shared_prefix_write {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn indexset(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -3814,7 +3850,11 @@ mod aggressive_shared_prefix_write {
 
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn tree_index(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix_chunks::<32>(N, PREFIX_CHUNKS, PREFIX_BUCKETS));
+        let keys = Arc::new(keys_shared_prefix_chunks::<32>(
+            N,
+            PREFIX_CHUNKS,
+            PREFIX_BUCKETS,
+        ));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
