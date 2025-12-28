@@ -89,6 +89,7 @@ impl<'op> PropagationContext<'op> {
     /// # Safety
     /// Same requirements as `lock_node`.
     #[inline(always)]
+    #[allow(dead_code, reason = "API provided for high-contention scenarios")]
     #[expect(clippy::unused_self, reason = "API Consistency")]
     pub unsafe fn lock_node_yielding(&self, version_ptr: *const NodeVersion) -> LockGuard<'op> {
         // SAFETY: Caller guarantees version_ptr is valid for 'op.

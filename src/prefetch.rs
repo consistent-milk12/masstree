@@ -7,7 +7,7 @@
 //!
 //! # Architecture Support
 //!
-//! - **`x86_64`**: Uses `_mm_prefetch` with `_MM_HINT_T0` (all cache levels)
+//! - **`x86_64`**: Uses `_mm_prefetch` with `_MM_HINT_T0` (read) or `_MM_HINT_ET0` (write)
 //! - **`aarch64`**: Uses `_prefetch` with locality hint 3 (keep in cache)
 //! - **Other**: No-op (safe fallback)
 //!
@@ -99,10 +99,11 @@ pub fn prefetch_write<T>(ptr: *mut T) {
     #[cfg(target_arch = "x86_64")]
     {
         // SAFETY: _mm_prefetch is always safe to call.
-        // _MM_HINT_T0 works for both read and write prefetch on x86.
-        // For exclusive access, _MM_HINT_ET0 could be used but T0 is portable.
+        // _MM_HINT_ET0 prefetches into exclusive state, avoiding a later
+        // shared→exclusive upgrade when we write. Supported on all modern
+        // x86_64 CPUs (Intel Broadwell+, AMD Bulldozer+).
         unsafe {
-            std::arch::x86_64::_mm_prefetch(ptr.cast::<i8>(), std::arch::x86_64::_MM_HINT_T0);
+            std::arch::x86_64::_mm_prefetch(ptr.cast::<i8>(), std::arch::x86_64::_MM_HINT_ET0);
         }
     }
 

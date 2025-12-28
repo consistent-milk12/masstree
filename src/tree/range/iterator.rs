@@ -267,6 +267,7 @@ where
     A: NodeAllocatorGeneric<S, L>,
 {
     /// Reference to the tree.
+    #[allow(dead_code, reason = "kept for future sublayer navigation")]
     tree: &'a MassTreeGeneric<S, L, A>,
 
     /// Memory reclamation guard.

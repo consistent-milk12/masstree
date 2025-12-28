@@ -84,6 +84,7 @@ pub fn clear_before_cas_publish_hook() {
 }
 
 /// Call the before-CAS-publish hook if set.
+#[allow(dead_code, reason = "CAS path disabled")]
 pub(super) fn call_before_cas_publish_hook() {
     if let Some(cell) = BEFORE_CAS_PUBLISH_HOOK.get() {
         let guard = cell.lock().unwrap();

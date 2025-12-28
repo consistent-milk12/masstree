@@ -17,10 +17,6 @@
 /// Maximum allowed WIDTH for u64 permuter encoding.
 pub const MAX_WIDTH: usize = 15;
 
-/// Number of bits used to store the size.
-#[allow(dead_code, reason = "TODO: Remove later if not needed")]
-const SIZE_BITS: usize = 4;
-
 /// Mask for extracting size (lower 4 bits).
 const SIZE_MASK: u64 = 0xF;
 

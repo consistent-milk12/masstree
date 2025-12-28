@@ -7,19 +7,18 @@
 //! - B+tree at each trie node for the current 8-byte slice
 //! - Cache-friendly: 8-byte key slices fit in registers
 //!
-//! ## Status: Alpha
+//! ## Status: Beta (v0.2.0)
 //!
-//! **Not production ready.** Core concurrent operations work but memory
-//! reclamation is incomplete and range scans/deletion are not implemented.
+//! Core operations work. Range scans implemented. Deletion planned for v0.3.0.
 //!
 //! | Feature | Status |
 //! |---------|--------|
-//! | Concurrent get | Works (lock-free, version-validated) |
-//! | Concurrent insert | Works (CAS fast path + locked fallback) |
-//! | Split propagation | Works (leaf and internode) |
-//! | Memory reclamation | Partial (nodes not freed until tree drop) |
-//! | Range scans | Not implemented |
-//! | Deletion | Not implemented |
+//! | Concurrent get | Lock-free, version-validated |
+//! | Concurrent insert | Fine-grained leaf locking |
+//! | Split propagation | Leaf and internode |
+//! | Range scans | `scan`, `scan_ref`, `scan_prefix` |
+//! | Memory reclamation | Partial (values freed, nodes at tree drop) |
+//! | Deletion | Planned (v0.3.0) |
 //!
 //! ## Thread Safety
 //!
@@ -228,7 +227,3 @@ pub use tree::{
     SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters, get_debug_counters,
     get_parent_wait_stats, reset_debug_counters,
 };
-
-// Re-export RAII helpers for internal use
-#[expect(unused_imports, reason = "Used by split propagation code paths")]
-pub(crate) use tree::ExitGuard;

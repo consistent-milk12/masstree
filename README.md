@@ -1,6 +1,6 @@
 # masstree
 
-`masstree` is a high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` and supports variable length keys by building a trie of small B+trees, based on the [Masstree paper](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf) (Mao, Kohler, Morris — EuroSys 2012).
+`masstree` is a beta high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` and supports variable length keys by building a trie of small B+trees, based on the [Masstree paper](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf) (Mao, Kohler, Morris — EuroSys 2012).
 
 This release is published as `0.2.0`. The crate is feature-complete for core operations (get, insert, range scans) but still being validated for correctness and performance under high contention.
 
@@ -25,7 +25,7 @@ This crate is in active development and still changing.
 Implemented:
 
 - `get`, `get_with_guard`, and `get_ref` — lock-free reads with version validation
-- `insert` and `insert_with_guard` — CAS fast path with locked fallback
+- `insert` and `insert_with_guard` — fine-grained leaf locking
 - `scan`, `scan_ref`, and `scan_prefix` — zero-copy range iteration
 - Leaf and internode splits with proper B-link tree semantics
 

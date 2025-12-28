@@ -31,8 +31,8 @@ use masstree::MassTree24;
 use masstree::get_debug_counters;
 
 /// Reset debug counters (no-op when tracing is disabled)
-
 #[cfg(not(feature = "tracing"))]
+#[allow(dead_code, reason = "conditional compilation stub")]
 fn reset_counters() {}
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -1164,9 +1164,8 @@ fn repeated_20_runs_8_threads_mixed() {
 // EXTREME STRESS TESTS (for CI or extended testing)
 // =============================================================================
 
-/// Long-running stress test - run with --ignored for extended testing
+/// Long-running stress test (100 runs × 8k keys)
 #[test]
-#[ignore]
 fn extreme_100_runs_stress() {
     common::init_tracing();
 
@@ -1221,9 +1220,8 @@ fn extreme_100_runs_stress() {
     eprintln!("extreme_100_runs: ALL 100 RUNS PASSED");
 }
 
-/// Massive key count test
+/// Massive key count test (100k keys across 16 threads)
 #[test]
-#[ignore]
 fn extreme_100k_keys() {
     common::init_tracing();
 

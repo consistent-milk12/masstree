@@ -7,7 +7,6 @@ use std::{
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering},
 };
 
-use parking_lot::{Condvar, Mutex};
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
@@ -139,8 +138,6 @@ where
             allocator,
             root_ptr: AtomicPtr::new(root_ptr.cast::<u8>()),
             count: AtomicUsize::new(0),
-            parent_set_condvar: Condvar::new(),
-            parent_set_mutex: Mutex::new(()),
             _marker: PhantomData,
         }
     }
@@ -182,28 +179,6 @@ where
     //  Internal Helpers
     // ========================================================================
 
-    /// Notify all threads waiting for a parent pointer to be set.
-    ///
-    /// Called after setting a node's parent pointer during split propagation.
-    /// This wakes up any threads waiting in the condvar.
-    #[inline(always)]
-    pub(crate) fn notify_parent_set(&self) {
-        self.parent_set_condvar.notify_all();
-    }
-
-    /// Wait for a parent pointer to be set, with timeout.
-    ///
-    /// Returns `true` if notified (should recheck condition), `false` on timeout.
-    ///
-    /// Marked `#[cold]` because waiting is rare (only during concurrent splits).
-    #[cold]
-    fn wait_for_parent_set(&self, timeout: std::time::Duration) -> bool {
-        !self
-            .parent_set_condvar
-            .wait_for(&mut self.parent_set_mutex.lock(), timeout)
-            .timed_out()
-    }
-
     /// Load the root pointer atomically.
     #[inline(always)]
     pub(crate) fn load_root_ptr_generic(&self, _guard: &LocalGuard<'_>) -> *const u8 {
@@ -212,6 +187,7 @@ where
 
     /// Compare-and-swap the root pointer atomically.
     #[inline(always)]
+    #[expect(dead_code, reason = "CAS path disabled")]
     pub(crate) fn cas_root_ptr_generic(
         &self,
         expected: *mut u8,
@@ -250,24 +226,28 @@ where
 
     /// Get a mutable reference to the allocator.
     #[inline(always)]
+    #[allow(dead_code, reason = "infrastructure for future deletion")]
     pub(crate) const fn allocator_mut(&mut self) -> &mut A {
         &mut self.allocator
     }
 
     /// Get an immutable reference to the allocator.
     #[inline(always)]
+    #[allow(dead_code, reason = "infrastructure for future deletion")]
     pub(crate) const fn allocator(&self) -> &A {
         &self.allocator
     }
 
     /// Get a reference to the collector.
     #[inline(always)]
+    #[allow(dead_code, reason = "infrastructure for future deletion")]
     pub(crate) const fn collector(&self) -> &Collector {
         &self.collector
     }
 
     /// Increment the entry count.
     #[inline(always)]
+    #[allow(dead_code, reason = "infrastructure for entry count tracking")]
     pub(crate) fn inc_count(&self) {
         self.count.fetch_add(1, AtomicOrdering::Relaxed);
     }
@@ -288,6 +268,7 @@ where
     ///
     /// Reference to the leaf node that contains or should contain the key.
     #[inline(always)]
+    #[allow(dead_code, reason = "traversal helper for future features")]
     pub(crate) fn reach_leaf_generic(&self, key: &Key<'_>) -> &L {
         let root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 
@@ -313,6 +294,7 @@ where
     /// Traverse from an internode down to the target leaf.
     ///
     /// Uses generic internode search to find the correct child at each level.
+    #[allow(dead_code, reason = "traversal helper for future features")]
     #[expect(
         clippy::unused_self,
         reason = "Method signature matches reach_leaf pattern"
@@ -353,6 +335,7 @@ where
 
     /// Reach the leaf node that should contain the given key (mutable).
     #[inline(always)]
+    #[allow(dead_code, reason = "traversal helper for future features")]
     #[expect(
         clippy::needless_pass_by_ref_mut,
         reason = "Returns &mut L which requires &mut self for lifetime"
@@ -404,6 +387,7 @@ where
     /// # Safety
     ///
     /// The returned pointer is valid for as long as the tree's allocations remain valid.
+    #[allow(dead_code, reason = "traversal helper for future features")]
     fn reach_leaf_mut_iterative_generic(mut current: *mut u8, ikey: u64) -> *mut L {
         use crate::ksearch::upper_bound_internode_generic;
         use crate::prefetch::prefetch_read;
@@ -1518,10 +1502,7 @@ where
                 if slot_keylenx >= LAYER_KEYLENX {
                     if key.has_suffix() {
                         // Key has more bytes - descend into the layer
-                        return InsertSearchResultGeneric::Layer {
-                            slot,
-                            shift_amount: 8,
-                        };
+                        return InsertSearchResultGeneric::Layer { slot };
                     }
                     // Key terminates here - it must sort before the layer pointer.
                     return InsertSearchResultGeneric::NotFound { logical_pos: i };
@@ -2548,6 +2529,7 @@ where
     ///
     /// Returns `Some(index)` if found, `None` if not found. Use this in retry loops
     /// where not finding the child is a valid transient state during concurrent splits.
+    #[allow(dead_code, reason = "traversal helper for future features")]
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn try_find_child_index_generic(&self, parent: &L::Internode, child: *mut u8) -> Option<usize> {
         use crate::leaf_trait::TreeInternode;
@@ -2558,6 +2540,7 @@ where
 
     /// Find the child index for a given child pointer in an internode.
     /// Panics if not found.
+    #[allow(dead_code, reason = "traversal helper for future features")]
     #[expect(clippy::expect_used, reason = "FATAL: Fail Fast")]
     fn find_child_index_generic(&self, parent: &L::Internode, child: *mut u8) -> usize {
         self.try_find_child_index_generic(parent, child)

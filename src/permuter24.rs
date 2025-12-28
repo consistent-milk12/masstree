@@ -48,10 +48,6 @@ pub const FREEZE_SENTINEL: u128 = 0x1F;
 /// Bit position of slot 23 (freeze position).
 pub const FREEZE_SHIFT: usize = 23 * SLOT_BITS + SIZE_BITS; // = 120
 
-/// Mask for slot 23 (freeze slot).
-#[allow(dead_code)]
-const FREEZE_SLOT_MASK: u128 = SLOT_MASK << FREEZE_SHIFT;
-
 // =============================================================================
 // Permuter24
 // =============================================================================

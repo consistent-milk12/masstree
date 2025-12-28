@@ -39,10 +39,14 @@
 //!
 
 mod api;
+#[allow(dead_code, reason = "scaffolding for future features (reverse iteration, layer optimization)")]
 mod cursor_key;
+#[allow(dead_code, reason = "scaffolding for future features")]
 mod find;
+#[allow(dead_code, reason = "scaffolding for future features (reverse iteration)")]
 mod helper;
 mod iterator;
+#[allow(dead_code, reason = "scaffolding for future features")]
 mod scan_state;
 
 // Re-export public types

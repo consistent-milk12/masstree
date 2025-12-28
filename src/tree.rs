@@ -3,15 +3,12 @@
 //!
 //! This module provides the main `MassTree<V>` and `MassTreeIndex<V>` types.
 
-#![allow(dead_code, reason = "Major Refactor in process")]
-
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering};
 
 use crate::slot::ValueSlot;
 use crate::value::{LeafValue, LeafValueIndex};
-use parking_lot::{Condvar, Mutex};
 use seize::Collector;
 
 mod generic;
@@ -25,9 +22,6 @@ pub mod test_hooks;
 
 pub use index::MassTreeIndex;
 pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
-
-// Re-export RAII helpers for crate-wide use
-pub(crate) use split::ExitGuard;
 
 // Re-export debug counters (only when tracing is enabled)
 #[cfg(feature = "tracing")]
@@ -54,16 +48,6 @@ pub enum InsertError {
     /// Memory allocation failed.
     AllocationFailed,
 
-    /// Root-level split required.
-    /// Concurrent root updates require changing `MassTree.root` to `AtomicPtr`.
-    /// Fall back to single-threaded insert path.
-    RootSplitRequired,
-
-    /// Parent internode is full and needs splitting.
-    /// Recursive internode split not yet fully implemented concurrently.
-    /// Fall back to single-threaded insert path.
-    ParentSplitRequired,
-
     /// Split required (generic path).
     /// Leaf is full and needs to be split.
     SplitRequired,
@@ -87,14 +71,6 @@ impl StdFmt::Display for InsertError {
             Self::LeafFull => write!(f, "leaf node is full"),
 
             Self::AllocationFailed => write!(f, "memory allocation failed"),
-
-            Self::RootSplitRequired => {
-                write!(f, "root-level split required (use single-threaded insert)")
-            }
-
-            Self::ParentSplitRequired => {
-                write!(f, "parent split required (use single-threaded insert)")
-            }
 
             Self::SplitRequired => {
                 write!(f, "split required (leaf full)")
@@ -122,8 +98,7 @@ impl std::error::Error for InsertError {}
 // ============================================================================
 
 use crate::alloc_trait::NodeAllocatorGeneric;
-#[allow(unused_imports)] // Will be used in submodule refactoring
-use crate::leaf_trait::{TreeInternode, TreeLeafNode};
+use crate::leaf_trait::TreeLeafNode;
 
 /// A high-performance generic trie of B+trees.
 ///
@@ -166,15 +141,6 @@ where
     /// Number of key-value pairs in the tree (atomic for concurrent access).
     count: AtomicUsize,
 
-    /// Condition variable for parent-set notification.
-    ///
-    /// When a node's parent pointer is set during split propagation,
-    /// waiters are notified to wake up instead of spinning.
-    parent_set_condvar: Condvar,
-
-    /// Mutex paired with the condvar (required by [`parking_lot`] API).
-    parent_set_mutex: Mutex<()>,
-
     /// Marker to indicate slot and leaf types.
     _marker: PhantomData<(S, L)>,
 }
@@ -196,7 +162,7 @@ where
 
 /// Result of a CAS insert attempt (generic version).
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "CAS path disabled")]
 pub(crate) enum CasInsertResultGeneric<O> {
     /// CAS insert succeeded.
     Success(Option<O>),
@@ -214,7 +180,6 @@ pub(crate) enum CasInsertResultGeneric<O> {
 
 /// Result of searching a leaf for insert position (generic version).
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) enum InsertSearchResultGeneric {
     /// Key exists at this slot.
     Found { slot: usize },
@@ -223,7 +188,7 @@ pub(crate) enum InsertSearchResultGeneric {
     /// Same ikey but different suffix - need to create layer.
     Conflict { slot: usize },
     /// Found layer pointer - descend into sublayer.
-    Layer { slot: usize, shift_amount: usize },
+    Layer { slot: usize },
 }
 
 impl<S, L, A> Drop for MassTreeGeneric<S, L, A>
