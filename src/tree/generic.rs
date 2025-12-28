@@ -457,7 +457,7 @@ where
                         }
 
                         // Validate version AFTER all reads
-                        if leaf.version().has_changed_or_locked(version) {
+                        if leaf.version().has_changed(version) {
                             let (advanced, new_version) =
                                 self.advance_to_key_generic(leaf, key, version, guard);
 
@@ -546,7 +546,7 @@ where
                     }
 
                     // Validate version AFTER all reads
-                    if leaf.version().has_changed_or_locked(version) {
+                    if leaf.version().has_changed(version) {
                         let (advanced, new_version) =
                             self.advance_to_key_generic(leaf, key, version, guard);
 
@@ -699,7 +699,7 @@ where
                         }
 
                         // Validate version AFTER all reads
-                        if leaf.version().has_changed_or_locked(version) {
+                        if leaf.version().has_changed(version) {
                             let (advanced, new_version) =
                                 self.advance_to_key_generic(leaf, key, version, guard);
 
@@ -818,7 +818,7 @@ where
                     }
 
                     // Validate version AFTER all reads
-                    if leaf.version().has_changed_or_locked(version) {
+                    if leaf.version().has_changed(version) {
                         // Version changed - follow B-link chain if split occurred
                         let (advanced, new_version) =
                             self.advance_to_key_generic(leaf, key, version, guard);

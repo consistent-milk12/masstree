@@ -126,7 +126,7 @@ where
     );
 
     // Validate version before committing
-    if leaf.version().has_changed_or_locked(version) {
+    if leaf.version().has_changed(version) {
         // Version changed, need to revalidate
         // Check if we need to follow B-links
         if leaf.version().has_split(version) {
@@ -728,7 +728,7 @@ where
     let version: u32 = stack.version();
 
     // Check if version changed (concurrent modification)
-    if leaf.version().has_changed_or_locked(version) {
+    if leaf.version().has_changed(version) {
         return (ScanState::Retry, None);
     }
 
@@ -784,7 +784,7 @@ where
     let version: u32 = stack.version();
 
     // Check if version changed (concurrent modification)
-    if leaf.version().has_changed_or_locked(version) {
+    if leaf.version().has_changed(version) {
         return (ScanState::Retry, None);
     }
 
@@ -840,7 +840,7 @@ where
     let version: u32 = stack.version();
 
     // Check if version changed (concurrent modification)
-    if leaf.version().has_changed_or_locked(version) {
+    if leaf.version().has_changed(version) {
         // Need to reposition
         return (ScanState::Retry, None);
     }
