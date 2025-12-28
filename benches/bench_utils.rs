@@ -16,15 +16,15 @@
 //! | `keys_clustered` | Hot ranges with gaps | Real-world access patterns |
 //! | `keys_sparse` | Wide gaps between keys | Cache miss stress |
 //!
-//! ### MassTree-Optimized Patterns (where MassTree should excel)
+//! ### MassTree-Optimized Patterns (where [`MassTree`] should excel)
 //!
-//! | Function | Pattern | Why MassTree Wins |
+//! | Function | Pattern | Why `MassTree` Wins |
 //! |----------|---------|-------------------|
 //! | `keys_shared_prefix` | First 8B identical | Trie shares prefix traversal |
 //! | `keys_shared_prefix_chunks` | Multiple 8B chunks identical | Multi-layer prefix sharing |
 //! | `keys_suffix_only_differ` | Only last chunk differs | Suffix mechanism optimized |
 //! | `keys_hierarchical` | Nested namespace keys | Trie naturally handles hierarchy |
-//! | `keys_variable_length` | Mix of 8B, 16B, 24B, 32B | MassTree handles any length |
+//! | `keys_variable_length` | Mix of 8B, 16B, 24B, 32B | `MassTree` handles any length |
 //! | `string_keys_urls` | URL-like strings | Long keys with shared domains |
 //! | `string_keys_paths` | File path strings | Hierarchical shared prefixes |
 //!
@@ -379,7 +379,7 @@ pub fn keys_sparse<const K: usize>(n: usize, spacing: u64) -> Vec<[u8; K]> {
 
 /// Generate keys where only the last 8-byte chunk differs.
 ///
-/// **MassTree advantage**: All keys share the same prefix through all layers
+/// **`MassTree` advantage**: All keys share the same prefix through all layers
 /// except the final one. The suffix mechanism handles this efficiently.
 ///
 /// - `K` must be >= 16 (need at least 2 chunks)
@@ -415,7 +415,7 @@ pub fn keys_suffix_only_differ<const K: usize>(n: usize) -> Vec<[u8; K]> {
 
 /// Generate hierarchical namespace-style keys.
 ///
-/// **MassTree advantage**: Trie structure naturally shares common prefixes.
+/// **`MassTree` advantage**: Trie structure naturally shares common prefixes.
 /// Keys look like: `namespace:category:subcategory:id`
 ///
 /// - `namespaces`: Number of top-level namespaces
@@ -468,6 +468,7 @@ pub fn keys_hierarchical<const K: usize>(
 }
 
 /// Container for variable-length keys (as `Vec<u8>`).
+#[expect(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct VariableLengthKeys {
     pub keys: Vec<Vec<u8>>,
@@ -476,7 +477,7 @@ pub struct VariableLengthKeys {
 
 /// Generate keys with varying lengths (8, 16, 24, 32 bytes).
 ///
-/// **MassTree advantage**: Handles variable-length keys naturally through
+/// **`MassTree` advantage**: Handles variable-length keys naturally through
 /// the trie structure without padding overhead.
 ///
 /// Distribution can be uniform or weighted toward certain sizes.
@@ -517,7 +518,7 @@ pub fn keys_variable_length(n: usize, seed: u64) -> VariableLengthKeys {
 
 /// Generate URL-like string keys.
 ///
-/// **MassTree advantage**: URLs often share common prefixes (domain, path segments).
+/// **`MassTree` advantage**: URLs often share common prefixes (domain, path segments).
 /// The trie structure efficiently shares these prefixes.
 ///
 /// Format: `https://domain{i%domains}.com/path/{category}/{id}`
@@ -542,7 +543,7 @@ pub fn string_keys_urls(n: usize, domains: usize) -> Vec<String> {
 
 /// Generate file path-like string keys.
 ///
-/// **MassTree advantage**: File paths have natural hierarchy with shared prefixes.
+/// **`MassTree` advantage**: File paths have natural hierarchy with shared prefixes.
 ///
 /// Format: `/home/user{u}/projects/proj{p}/src/module{m}/file{f}.rs`
 #[must_use]
@@ -713,7 +714,7 @@ pub fn keys_blink_stress<const K: usize>(n: usize) -> Vec<[u8; K]> {
     }
 
     // Deduplicate (bit reversal can produce duplicates for non-power-of-2 n)
-    reordered.sort();
+    reordered.sort_unstable();
     reordered.dedup();
 
     // If we lost keys due to dedup, fill with remaining sequential keys
@@ -733,9 +734,10 @@ pub fn keys_blink_stress<const K: usize>(n: usize) -> Vec<[u8; K]> {
 /// Creates multiple distinct ranges that can be scanned in parallel
 /// without overlap, plus some overlapping ranges for contention testing.
 ///
-/// Returns: (non_overlapping_ranges, overlapping_ranges)
-/// Each range is a (start_key, end_key) pair.
+/// Returns: (`non_overlapping_ranges`, `overlapping_ranges`)
+/// Each range is a (`start_key`, `end_key`) pair.
 #[must_use]
+#[expect(clippy::type_complexity)]
 pub fn scan_ranges<const K: usize>(
     total_keys: usize,
     num_ranges: usize,

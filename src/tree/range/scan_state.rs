@@ -274,7 +274,7 @@ where
     ///
     /// - `leaf`: Raw pointer to the leaf node (may be null)
     #[must_use]
-    pub fn with_leaf(
+    pub const fn with_leaf(
         root: *const u8,
         leaf: *mut L,
         version: u32,
@@ -305,7 +305,7 @@ where
     ///
     /// Returns null if the leaf is not set.
     #[inline(always)]
-    pub fn leaf_ptr(&self) -> *mut L {
+    pub const fn leaf_ptr(&self) -> *mut L {
         match self.leaf {
             Some(nn) => nn.as_ptr(),
             None => std::ptr::null_mut(),
@@ -382,7 +382,7 @@ where
     ///
     /// Accepts null pointers (converts to `None` internally).
     #[inline(always)]
-    pub fn set_leaf(&mut self, leaf: *mut L) {
+    pub const fn set_leaf(&mut self, leaf: *mut L) {
         self.leaf = NonNull::new(leaf);
     }
 
@@ -517,7 +517,7 @@ impl<L> LayerContext<L> {
 
     /// Get the leaf as a raw mutable pointer.
     #[inline(always)]
-    pub fn leaf_ptr(&self) -> *mut L {
+    pub const fn leaf_ptr(&self) -> *mut L {
         self.leaf.as_ptr()
     }
 }
@@ -640,7 +640,7 @@ impl<V> ScanSnapshotPtr<V> {
     /// 1. The guard is still held
     /// 2. The version hasn't changed since the snapshot was created
     #[inline(always)]
-    pub unsafe fn value_ref(&self) -> &V {
+    pub const unsafe fn value_ref(&self) -> &V {
         // SAFETY: Caller ensures pointer is valid
         unsafe { &*self.value_ptr }
     }
@@ -757,6 +757,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_ptr_alignment)]
     fn test_scan_snapshot_ptr_generic() {
         // Test with u64
         let ptr: *const u64 = 0x1000 as *const u64;
@@ -767,7 +768,7 @@ mod tests {
         // Test from_raw
         let raw: *const u8 = 0x2000 as *const u8;
         let snap2: ScanSnapshotPtr<u64> = ScanSnapshotPtr::from_raw(raw, 4);
-        assert_eq!(snap2.value_ptr, raw as *const u64);
+        assert_eq!(snap2.value_ptr, raw.cast::<u64>());
         assert_eq!(snap2.key_len, 4);
     }
 

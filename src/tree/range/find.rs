@@ -502,7 +502,7 @@ where
     find_next_inner_ptr(stack, cursor_key, layer_stack, guard, true)
 }
 
-/// Inner implementation for zero-copy find_next.
+/// Inner implementation for zero-copy [`find_next`].
 ///
 /// Nearly identical to [`find_next_inner`] but:
 /// - Does NOT call `S::output_from_raw` (no Arc clone)
@@ -618,8 +618,7 @@ where
     )
 }
 
-
-/// Single-layer fast path for zero-copy find_next.
+/// Single-layer fast path for zero-copy [`find_next`].
 ///
 /// Optimized for scans where all keys are ≤ 8 bytes (no layer pointers).
 /// This eliminates:
@@ -675,9 +674,9 @@ where
         let cmp: Ordering = cursor_key.compare(slot_ikey, slot_keylenx as usize);
 
         let is_dup: bool = match cmp {
-            Ordering::Greater => true,
             Ordering::Less => false,
-            Ordering::Equal => {
+
+            Ordering::Greater | Ordering::Equal => {
                 // For single-layer, no suffix comparison needed (keylenx <= 8)
                 true
             }

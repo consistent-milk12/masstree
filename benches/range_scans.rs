@@ -22,6 +22,7 @@
 //! cargo bench --bench range_scans --features mimalloc
 //! ```
 
+#![allow(clippy::needless_collect)]
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::pedantic)]
 #![expect(clippy::indexing_slicing)]

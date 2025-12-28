@@ -1611,11 +1611,13 @@ mod scan_while_insert {
 // 14: PREFIX SCAN - MassTree-specific optimization
 // =============================================================================
 
-#[divan::bench_group(name = "14_prefix_scan")]
+#[divan::bench_group(name = "14_prefix_scan", sample_count = 20)]
 mod prefix_scan {
     use super::*;
 
     const PREFIX_BUCKETS: u64 = 100;
+    // Reduced ops for prefix scan - each scan touches 10K entries (1M/100 buckets)
+    const PREFIX_OPS: usize = 100;
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
@@ -1623,7 +1625,7 @@ mod prefix_scan {
         let tree = Arc::new(setup_masstree24(&keys));
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(divan::counter::ItemsCount::new(threads * PREFIX_OPS))
             .bench_local(|| {
                 let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -1635,7 +1637,7 @@ mod prefix_scan {
                         thread::spawn(move || {
                             barrier.wait();
                             let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
+                            for _ in 0..PREFIX_OPS {
                                 let guard = tree.guard();
                                 total += tree.scan_prefix(&thread_prefix, |_, _| true, &guard);
                             }
@@ -1649,9 +1651,6 @@ mod prefix_scan {
                 }
             });
     }
-
-    // Note: TreeIndex and IndexSet don't have native prefix scan,
-    // so we skip them for this benchmark (not a fair comparison)
 }
 
 // =============================================================================

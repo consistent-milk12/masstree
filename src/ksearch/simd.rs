@@ -37,13 +37,15 @@ pub fn find_exact_u64(keys: &[u64], target: u64) -> Option<usize> {
             // SAFETY: We just checked that AVX2 is available
             return unsafe { find_exact_u64_avx2(keys, target) };
         }
+
         // SSE4.1 provides _mm_cmpeq_epi64
         if is_x86_feature_detected!("sse4.1") {
             // SAFETY: We just checked that SSE4.1 is available
             return unsafe { find_exact_u64_sse2(keys, target) };
         }
+
         // Fallback to scalar
-        return find_exact_u64_scalar(keys, target);
+        find_exact_u64_scalar(keys, target)
     }
 
     // Fallback for non-x86 architectures
@@ -66,8 +68,9 @@ pub fn count_le_u64(keys: &[u64], size: usize, target: u64) -> usize {
             // SAFETY: We just checked that AVX2 is available
             return unsafe { count_le_u64_avx2(keys, size, target) };
         }
+
         // SSE2 fallback (uses scalar for LE comparison)
-        return count_le_u64_sse2(keys, size, target);
+        count_le_u64_sse2(keys, size, target)
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -90,6 +93,7 @@ pub fn find_exact_u64_scalar(keys: &[u64], target: u64) -> Option<usize> {
             return Some(i);
         }
     }
+
     None
 }
 
@@ -99,11 +103,13 @@ pub fn find_exact_u64_scalar(keys: &[u64], target: u64) -> Option<usize> {
 #[must_use]
 pub fn count_le_u64_scalar(keys: &[u64], size: usize, target: u64) -> usize {
     let mut count = 0;
+
     for key in keys.iter().take(size) {
         if *key <= target {
             count += 1;
         }
     }
+
     count
 }
 
@@ -118,7 +124,7 @@ mod sse2_impl {
     /// SSE2 exact match: compare 2 keys at a time.
     ///
     /// # Safety
-    /// Caller must ensure running on x86_64 (SSE2 is always available).
+    /// Caller must ensure running on `x86_64` (SSE2 is always available).
     #[inline]
     #[target_feature(enable = "sse4.1")]
     #[allow(clippy::indexing_slicing)]
@@ -157,6 +163,7 @@ mod sse2_impl {
                 if keys[i] == target {
                     return Some(i);
                 }
+
                 i += 1;
             }
 
@@ -186,7 +193,10 @@ fn count_le_u64_sse2(keys: &[u64], size: usize, target: u64) -> usize {
 
 #[cfg(target_arch = "x86_64")]
 mod avx2_impl {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{
+        _mm256_cmpeq_epi64, _mm256_cmpgt_epi64, _mm256_loadu_si256, _mm256_movemask_epi8,
+        _mm256_set1_epi64x,
+    };
 
     /// AVX2 exact match: compare 4 keys at a time.
     ///
@@ -214,16 +224,20 @@ mod avx2_impl {
 
                 if mask != 0 {
                     // Found a match - determine which lane (each lane is 8 bytes)
-                    let lane_mask = mask as u32;
+                    let lane_mask = mask.cast_unsigned();
+
                     if lane_mask & 0x0000_00FF != 0 {
                         return Some(i);
                     }
+
                     if lane_mask & 0x0000_FF00 != 0 {
                         return Some(i + 1);
                     }
+
                     if lane_mask & 0x00FF_0000 != 0 {
                         return Some(i + 2);
                     }
+
                     return Some(i + 3);
                 }
 
@@ -271,8 +285,8 @@ mod avx2_impl {
 
                 // Count lanes where key <= target (i.e., gt mask is 0)
                 // Each lane is 8 bytes, so check each 8-bit group
-                let lane_mask = mask as u32;
-                if lane_mask & 0x0000_00FF == 0 {
+                let lane_mask = mask.cast_unsigned();
+                if lane_mask.trailing_zeros() >= 8 {
                     count += 1;
                 }
                 if lane_mask & 0x0000_FF00 == 0 {
@@ -328,13 +342,15 @@ pub fn find_all_matches_u64(keys: &[u64], len: usize, target: u64) -> u32 {
             // SAFETY: We just checked that AVX2 is available
             return unsafe { find_all_matches_u64_avx2(keys, len, target) };
         }
+
         // SSE4.1 provides _mm_cmpeq_epi64
         if is_x86_feature_detected!("sse4.1") {
             // SAFETY: We just checked that SSE4.1 is available
             return unsafe { find_all_matches_u64_sse2(keys, len, target) };
         }
+
         // Fallback to scalar
-        return find_all_matches_u64_scalar(keys, len, target);
+        find_all_matches_u64_scalar(keys, len, target)
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -360,12 +376,15 @@ pub fn find_all_matches_u64_scalar(keys: &[u64], len: usize, target: u64) -> u32
 
 #[cfg(target_arch = "x86_64")]
 mod find_all_impl {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{
+        _mm_cmpeq_epi64, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi64x, _mm256_cmpeq_epi64,
+        _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi64x,
+    };
 
     /// SSE2 implementation: compare 2 keys at a time, build bitmask.
     ///
     /// # Safety
-    /// Caller must ensure running on x86_64.
+    /// Caller must ensure running on `x86_64`.
     #[inline]
     #[target_feature(enable = "sse4.1")]
     #[allow(clippy::cast_possible_wrap)]
@@ -431,7 +450,7 @@ mod find_all_impl {
             while i + 4 <= len && i + 4 <= keys.len() {
                 let keys_vec = _mm256_loadu_si256(keys.as_ptr().add(i).cast());
                 let cmp = _mm256_cmpeq_epi64(keys_vec, target_vec);
-                let byte_mask = _mm256_movemask_epi8(cmp) as u32;
+                let byte_mask = _mm256_movemask_epi8(cmp).cast_unsigned();
 
                 // Each lane is 8 bytes
                 if byte_mask & 0x0000_00FF != 0 {
@@ -645,9 +664,10 @@ mod tests {
     fn test_find_all_matches_width24() {
         // Test with 24 keys (WIDTH=24 for leaf nodes)
         let mut keys = [0u64; 24];
-        for i in 0..24 {
+        (0..24).for_each(|i| {
             keys[i] = (i as u64) * 10;
-        }
+        });
+
         // Set duplicates at positions 5, 15, 23 using a value that doesn't collide
         // (keys[i] = i*10, so avoid multiples of 10 in range [0, 230])
         keys[5] = 999;
@@ -698,10 +718,13 @@ mod tests {
     fn test_find_all_matches_scalar_width24() {
         // Scalar test for 24 keys
         let mut keys = [0u64; 24];
-        for i in 0..24 {
+
+        (0..24).for_each(|i| {
             keys[i] = 42;
-        }
+        });
+
         let mask = find_all_matches_u64_scalar(&keys, 24, 42);
+
         // All 24 bits should be set
         assert_eq!(mask, 0x00FF_FFFF); // bits 0-23
     }

@@ -31,7 +31,7 @@ use super::cursor_key::CursorKey;
 /// slot if an exact ikey match was found.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyIndexedPosition {
-    /// Logical position for insertion (0..=perm.size()).
+    /// Logical position for insertion (`0..=perm.size()`).
     ///
     /// All slots at positions `< i` have ikeys less than the search key.
     /// Slots at positions `>= i` have ikeys greater than or equal.
@@ -70,7 +70,8 @@ impl KeyIndexedPosition {
 
     /// Get the physical slot (panics if no match).
     #[inline(always)]
-    pub fn slot(&self) -> usize {
+    #[expect(clippy::expect_used, reason = "Fail fast")]
+    pub const fn slot(&self) -> usize {
         self.p
             .expect("slot() called on KeyIndexedPosition without match")
     }
@@ -135,7 +136,7 @@ impl ForwardScanHelper {
     ///
     /// For forward scans with `find_initial`:
     /// - If stored suffix > search suffix: emit (key is after start bound)
-    /// - If stored suffix == search suffix AND emit_equal: emit (exact match allowed)
+    /// - If stored suffix == search suffix AND `emit_equal`: emit (exact match allowed)
     /// - Otherwise: skip to next
     ///
     /// # Arguments
@@ -346,26 +347,26 @@ where
     }
 
     // If slot has suffix, compare suffix bytes
-    if keylenx == KSUF_KEYLENX {
-        if let Some(stored_suffix) = leaf.ksuf(slot) {
-            let cursor_suffix: &[u8] = cursor_key.suffix();
+    if keylenx == KSUF_KEYLENX
+        && let Some(stored_suffix) = leaf.ksuf(slot)
+    {
+        let cursor_suffix: &[u8] = cursor_key.suffix();
 
-            match cursor_suffix.cmp(stored_suffix) {
-                Ordering::Less => {
-                    // Cursor suffix < stored: position is correct (insert before)
-                    return base_pos;
-                }
+        match cursor_suffix.cmp(stored_suffix) {
+            Ordering::Less => {
+                // Cursor suffix < stored: position is correct (insert before)
+                return base_pos;
+            }
 
-                Ordering::Equal => {
-                    // Exact match - we already emitted this key, skip to next position
-                    return KeyIndexedPosition::not_found(base_pos.i + 1);
-                }
+            Ordering::Equal => {
+                // Exact match - we already emitted this key, skip to next position
+                return KeyIndexedPosition::not_found(base_pos.i + 1);
+            }
 
-                Ordering::Greater => {
-                    // Cursor suffix > stored: insert after this slot
-                    // But we need to check if there are more slots with same ikey
-                    return find_position_after_suffix(cursor_key, leaf, perm, base_pos.i);
-                }
+            Ordering::Greater => {
+                // Cursor suffix > stored: insert after this slot
+                // But we need to check if there are more slots with same ikey
+                return find_position_after_suffix(cursor_key, leaf, perm, base_pos.i);
             }
         }
     }
@@ -378,7 +379,7 @@ where
 /// Find position after inline keys with the same ikey but shorter length.
 ///
 /// When cursor has an inline key that is longer than the slot's inline key
-/// (same ikey, cursor_len > slot_keylenx), we need to find the first slot
+/// `(same ikey, cursor_len > slot_keylenx)`, we need to find the first slot
 /// where cursor <= slot.
 fn find_position_after_inline<L, S>(
     cursor_key: &CursorKey,
@@ -488,6 +489,7 @@ pub const fn has_suffix_keylenx(keylenx: u8) -> bool {
 /// For inline keys (keylenx 0-8), returns the key length.
 /// For suffix/layer keys, returns 8 (the ikey portion).
 #[inline(always)]
+#[expect(clippy::cast_possible_truncation, reason = "Known Value")]
 pub const fn inline_key_len(keylenx: u8) -> usize {
     if keylenx <= (IKEY_SIZE as u8) {
         keylenx as usize
@@ -504,8 +506,8 @@ pub const fn inline_key_len(keylenx: u8) -> usize {
 ///
 /// This is a full key comparison that handles all cases:
 /// - Inline keys (keylenx 0-8)
-/// - Suffix keys (keylenx == KSUF_KEYLENX)
-/// - Layer pointers (keylenx >= LAYER_KEYLENX)
+/// - Suffix keys (`keylenx == KSUF_KEYLENX`)
+/// - Layer pointers (`keylenx >= LAYER_KEYLENX`)
 ///
 /// # Returns
 ///
@@ -541,12 +543,9 @@ where
         // Slot has suffix
         if cursor_key.has_suffix() {
             // Both have suffix: compare suffix bytes
-            if let Some(stored_suffix) = leaf.ksuf(slot) {
+            leaf.ksuf(slot).map_or(Ordering::Greater, |stored_suffix| {
                 cursor_key.suffix().cmp(stored_suffix)
-            } else {
-                // No stored suffix (shouldn't happen for KSUF_KEYLENX)
-                Ordering::Greater
-            }
+            })
         } else {
             // Cursor has no suffix, slot does: cursor < slot
             Ordering::Less

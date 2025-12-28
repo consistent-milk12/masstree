@@ -781,15 +781,15 @@ where
 
         let mut count: usize = 0;
 
-        loop {
+        'l: loop {
             // Use the zero-copy advance method
             if let Some((key, value_ref)) = self.advance_no_alloc_ref() {
                 count += 1;
                 if !visitor(key, value_ref) {
-                    break;
+                    break 'l;
                 }
             } else {
-                break;
+                break 'l;
             }
         }
 
@@ -814,6 +814,7 @@ where
     /// 1. The guard prevents deallocation during iteration
     /// 2. Version validation ensures the slot hasn't been modified
     #[inline(always)]
+    #[expect(clippy::too_many_lines, reason = "Complex allocation logic")]
     fn advance_no_alloc_ref(&mut self) -> Option<(&[u8], &S::Value)> {
         // Handle pending emit from initialize() - first entry case
         if self.state == ScanState::Emit && self.snapshot.is_some() {
@@ -999,8 +1000,6 @@ where
             return None;
         }
     }
-
-
 }
 
 impl<S, L, A> std::iter::FusedIterator for RangeIter<'_, '_, S, L, A>

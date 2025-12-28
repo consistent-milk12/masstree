@@ -1,17 +1,17 @@
 //! Filepath: src/tree/range/mod.rs
 //!
-//! Range scan module for MassTree.
+//! Range scan module for [`MassTree`].
 //!
 //! This module implements ordered range iteration over the tree.
 //!
 //! # Module Organization
 //!
 //! - `cursor_key`: Mutable key buffer for scan position tracking
-//! - `scan_state`: State machine types (ScanState, ScanStackElement, etc.)
+//! - `scan_state`: State machine types ([`ScanState`], [`ScanStackElement`], etc.)
 //! - `helper`: Forward scan helper and lower bound search
-//! - `find`: Core algorithm (find_initial, find_next, find_retry)
-//! - `iterator`: RangeIter and ScanEntry types
-//! - `api`: Public API methods on MassTreeGeneric
+//! - `find`: Core algorithm (`find_initial`, `find_next`, `find_retry`)
+//! - `iterator`: [`RangeIter`] and [`ScanEntry`] types
+//! - `api`: Public API methods on [`MassTreeGeneric`]
 //!
 //! # Public API
 //!

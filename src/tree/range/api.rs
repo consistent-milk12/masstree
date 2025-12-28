@@ -407,8 +407,8 @@ mod tests {
 
         // Insert some test data
         for i in 0u64..100 {
-            let key = format!("key{:03}", i);
-            tree.insert_with_guard(key.as_bytes(), i, &guard);
+            let key = format!("key{i:03}");
+            let _ = tree.insert_with_guard(key.as_bytes(), i, &guard);
         }
 
         // Collect values using scan (cloning)
@@ -493,8 +493,8 @@ mod tests {
 
         // Insert 100 entries
         for i in 0u64..100 {
-            let key = format!("key{:03}", i);
-            tree.insert_with_guard(key.as_bytes(), i, &guard);
+            let key = format!("key{i:03}");
+            let _ = tree.insert_with_guard(key.as_bytes(), i, &guard);
         }
 
         // Scan with early stop after 10 entries
