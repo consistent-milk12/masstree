@@ -21,7 +21,7 @@ use seize::LocalGuard;
 
 use crate::key::IKEY_SIZE;
 use crate::ksearch::upper_bound_internode_generic;
-use crate::leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
+use crate::leaf_trait::{TreeInternode, TreeLeafNode};
 use crate::leaf24::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::nodeversion::NodeVersion;
 use crate::prefetch::prefetch_read;
@@ -110,13 +110,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            // Split in progress, retry
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = leaf.permutation();
 
     // Find lower bound position
     let kx: KeyIndexedPosition = lower_with_position(cursor_key, leaf, &perm);
@@ -132,7 +126,7 @@ where
     );
 
     // Validate version before committing
-    if leaf.version().has_changed(version) {
+    if leaf.version().has_changed_or_locked(version) {
         // Version changed, need to revalidate
         // Check if we need to follow B-links
         if leaf.version().has_split(version) {
@@ -734,7 +728,7 @@ where
     let version: u32 = stack.version();
 
     // Check if version changed (concurrent modification)
-    if leaf.version().has_changed(version) {
+    if leaf.version().has_changed_or_locked(version) {
         return (ScanState::Retry, None);
     }
 
@@ -765,12 +759,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match next_leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison
     let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
@@ -795,7 +784,7 @@ where
     let version: u32 = stack.version();
 
     // Check if version changed (concurrent modification)
-    if leaf.version().has_changed(version) {
+    if leaf.version().has_changed_or_locked(version) {
         return (ScanState::Retry, None);
     }
 
@@ -825,12 +814,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match next_leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison
     let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
@@ -856,7 +840,7 @@ where
     let version: u32 = stack.version();
 
     // Check if version changed (concurrent modification)
-    if leaf.version().has_changed(version) {
+    if leaf.version().has_changed_or_locked(version) {
         // Need to reposition
         return (ScanState::Retry, None);
     }
@@ -888,12 +872,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match next_leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison (like C++ `helper.lower(ka, this)`).
     // This ensures we skip past any keys <= cursor_key.
@@ -928,12 +907,7 @@ where
         return (ScanState::Retry, None);
     }
 
-    let perm: L::Perm = match leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = leaf.permutation();
 
     // Recompute position using suffix-aware search
     // This is critical: if cursor_key has a suffix, we need to find the position
@@ -1057,12 +1031,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return ScanState::Retry;
-        }
-    };
+    let perm: L::Perm = leaf.permutation();
 
     // Find position using suffix-aware search
     // This ensures we find the correct position when keys share the same ikey
@@ -1210,14 +1179,7 @@ where
 
     let version: u32 = leaf.version().stable();
 
-    let perm: L::Perm = match leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            // Will retry via find_retry
-            stack.update_state(0, L::Perm::empty(), 0);
-            return true;
-        }
-    };
+    let perm: L::Perm = leaf.permutation();
 
     // Find position (cursor has len=9, will skip past the layer pointer)
     // Use suffix-aware search to handle keys with same ikey correctly

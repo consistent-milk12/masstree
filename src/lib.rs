@@ -169,7 +169,6 @@ pub const fn init_tracing() {}
 
 pub mod alloc24;
 pub mod alloc_trait;
-pub mod freeze24;
 pub mod internode;
 pub mod key;
 pub mod ksearch;
@@ -188,7 +187,6 @@ pub mod tree;
 pub mod value;
 
 // Re-export freeze types for convenience
-pub use freeze24::Freeze24Utils;
 
 // Re-export leaf node traits for generic tree operations
 pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
@@ -221,7 +219,7 @@ pub use tree::{MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTree
 #[cfg(feature = "tracing")]
 pub use tree::{
     ADVANCE_BLINK_COUNT, BLINK_ADVANCE_ANOMALY_COUNT, BLINK_SHOULD_FOLLOW_COUNT,
-    CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters,
+    DebugCounters,
     LOCKED_INSERT_COUNT, PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
     PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, SEARCH_NOT_FOUND_COUNT,
     SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters, get_debug_counters,

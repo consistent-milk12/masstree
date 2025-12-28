@@ -18,18 +18,6 @@ pub static BLINK_SHOULD_FOLLOW_COUNT: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "tracing")]
 pub static SEARCH_NOT_FOUND_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Atomic counter for successful CAS inserts.
-#[cfg(feature = "tracing")]
-pub static CAS_INSERT_SUCCESS_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Atomic counter for CAS insert retries (contention).
-#[cfg(feature = "tracing")]
-pub static CAS_INSERT_RETRY_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Atomic counter for CAS insert fallbacks to locked path.
-#[cfg(feature = "tracing")]
-pub static CAS_INSERT_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
-
 /// Atomic counter for locked insert completions.
 #[cfg(feature = "tracing")]
 pub static LOCKED_INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -79,9 +67,6 @@ pub static PARENT_WAIT_MAX_NS: AtomicU64 = AtomicU64::new(0);
 pub fn reset_debug_counters() {
     BLINK_SHOULD_FOLLOW_COUNT.store(0, Relaxed);
     SEARCH_NOT_FOUND_COUNT.store(0, Relaxed);
-    CAS_INSERT_SUCCESS_COUNT.store(0, Relaxed);
-    CAS_INSERT_RETRY_COUNT.store(0, Relaxed);
-    CAS_INSERT_FALLBACK_COUNT.store(0, Relaxed);
     LOCKED_INSERT_COUNT.store(0, Relaxed);
     SPLIT_COUNT.store(0, Relaxed);
     ADVANCE_BLINK_COUNT.store(0, Relaxed);
@@ -102,12 +87,6 @@ pub struct DebugCounters {
     pub blink_should_follow: u64,
     /// Total `NotFound` results
     pub search_not_found: u64,
-    /// Successful CAS inserts
-    pub cas_insert_success: u64,
-    /// CAS insert retries
-    pub cas_insert_retry: u64,
-    /// CAS insert fallbacks to locked
-    pub cas_insert_fallback: u64,
     /// Locked insert completions
     pub locked_insert: u64,
     /// Leaf splits
@@ -145,9 +124,6 @@ pub fn get_all_debug_counters() -> DebugCounters {
     DebugCounters {
         blink_should_follow: BLINK_SHOULD_FOLLOW_COUNT.load(Relaxed),
         search_not_found: SEARCH_NOT_FOUND_COUNT.load(Relaxed),
-        cas_insert_success: CAS_INSERT_SUCCESS_COUNT.load(Relaxed),
-        cas_insert_retry: CAS_INSERT_RETRY_COUNT.load(Relaxed),
-        cas_insert_fallback: CAS_INSERT_FALLBACK_COUNT.load(Relaxed),
         locked_insert: LOCKED_INSERT_COUNT.load(Relaxed),
         split: SPLIT_COUNT.load(Relaxed),
         advance_blink: ADVANCE_BLINK_COUNT.load(Relaxed),

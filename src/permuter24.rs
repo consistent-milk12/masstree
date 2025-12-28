@@ -19,9 +19,6 @@ use portable_atomic::{AtomicU128, Ordering};
 
 use crate::{leaf_trait::TreePermutation, suffix::PermutationProvider};
 
-// Re-export Freeze24Utils from freeze24 module
-pub use crate::freeze24::Freeze24Utils;
-
 // =============================================================================
 // Constants
 // =============================================================================
@@ -482,12 +479,6 @@ impl Permuter24 {
     /// - Not all slot indices 0-23 are present
     #[cfg(debug_assertions)]
     pub fn debug_assert_valid(&self) {
-        // Skip validation for frozen permuters (slot 23 = 0x1F)
-        // Frozen state is valid during splits but would fail slot < 24 check
-        if Freeze24Utils::is_frozen(self.value) {
-            return;
-        }
-
         let size: usize = self.size();
         assert!(size <= 24, "invalid size: {size} > 24");
 
@@ -718,15 +709,6 @@ impl TreePermutation for Permuter24 {
         Self::set_size(self, n);
     }
 
-    #[inline(always)]
-    fn is_frozen_raw(raw: u128) -> bool {
-        crate::freeze24::Freeze24Utils::is_frozen(raw)
-    }
-
-    #[inline(always)]
-    fn freeze_raw(raw: u128) -> u128 {
-        crate::freeze24::Freeze24Utils::freeze_raw(raw)
-    }
 }
 
 // =============================================================================
@@ -866,15 +848,6 @@ mod tests {
         assert_eq!(p.get(2), 2);
         assert_eq!(p.get(3), 1);
         assert_eq!(p.get(4), 4);
-    }
-
-    #[test]
-    fn test_freeze() {
-        let p = Permuter24::make_sorted(10);
-        let frozen = Freeze24Utils::freeze_raw(p.value());
-
-        assert!(Freeze24Utils::is_frozen(frozen));
-        assert!(!Freeze24Utils::is_frozen(p.value()));
     }
 
     #[test]

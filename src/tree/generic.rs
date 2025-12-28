@@ -3,7 +3,6 @@ use std::time::Instant;
 use std::{
     cmp::Ordering,
     marker::PhantomData,
-    ptr as StdPtr,
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering},
 };
 
@@ -17,36 +16,8 @@ use crate::{
     nodeversion::NodeVersion,
     slot::ValueSlot,
     tree::split::Propagation,
-    tree::{CasInsertResultGeneric, InsertError, InsertSearchResultGeneric},
+    tree::{InsertError, InsertSearchResultGeneric},
 };
-
-/// Sentinel for the CLAIMING state in the Option A (Safe) CAS insert protocol.
-///
-/// When a slot's value pointer equals this sentinel, the slot is reserved by an in-progress
-/// CAS insert attempt. The inserter has exclusive right to write key metadata, but hasn't
-/// yet installed the real value pointer.
-///
-/// State machine: `NULL -> CLAIMING -> arc_ptr -> (permutation publish) -> visible`
-///
-/// This sentinel:
-/// - Must be non-null (to distinguish from "free")
-/// - Must never be dereferenced
-/// - Must be stable for the program lifetime
-/// - Must be easy to recognize (`== claiming_ptr()`)
-static CLAIMING_SENTINEL: u8 = 0;
-
-/// Returns the CLAIMING sentinel pointer (provenance-sound).
-#[inline(always)]
-fn claiming_ptr() -> *mut u8 {
-    StdPtr::from_ref(&CLAIMING_SENTINEL).cast_mut()
-}
-
-/// Returns true if `ptr` is the CLAIMING sentinel.
-#[inline(always)]
-#[expect(dead_code, reason = "CAS path disabled")]
-fn is_claiming_ptr(ptr: *mut u8) -> bool {
-    StdPtr::eq(ptr, claiming_ptr())
-}
 
 impl<S, L, A> MassTreeGeneric<S, L, A>
 where
@@ -56,74 +27,6 @@ where
     L: LayerCapableLeaf<S>,
     A: NodeAllocatorGeneric<S, L>,
 {
-    #[inline]
-    #[expect(dead_code, reason = "CAS path disabled")]
-    fn cas_insert_enabled() -> bool {
-        use std::sync::OnceLock;
-
-        // CAS insert is currently correctness-sensitive under high contention.
-        // Default to disabled unless explicitly enabled for benchmarking/experiments.
-        //
-        // - Set `MASSTREE_ENABLE_CAS=1` to enable the CAS fast path.
-        // - Set `MASSTREE_ENABLE_CAS=0` or unset to disable.
-        static ENABLE_CAS: OnceLock<bool> = OnceLock::new();
-        *ENABLE_CAS.get_or_init(|| {
-            std::env::var("MASSTREE_ENABLE_CAS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        })
-    }
-
-    /// Pick a free physical slot from the permutation's free region, skipping reserved slots.
-    ///
-    /// The Option A (Safe) CAS insert protocol uses a 3-phase state machine:
-    /// `NULL -> CLAIMING -> arc_ptr -> (permutation publish) -> visible`
-    ///
-    /// A CAS inserter can temporarily set `leaf_values[slot]` to `CLAIMING` or `arc_ptr` while
-    /// the slot is still in the permutation's free region (not yet published by permutation CAS).
-    ///
-    /// The locked insert path must treat such slots as **reserved** and avoid reusing them,
-    /// otherwise it can overwrite a CAS-reserved slot and later publish it, creating an
-    /// inconsistent (ikey/keylenx/ptr) tuple visible to readers.
-    ///
-    /// Returns `(slot, back_offset)` where `slot == perm.back_at_offset(back_offset)`.
-    #[inline(always)]
-    #[expect(dead_code, reason = "CAS path disabled")]
-    fn pick_free_slot_avoiding_reserved(
-        leaf: &L,
-        perm: &L::Perm,
-        ikey: u64,
-    ) -> Option<(usize, usize)> {
-        use crate::leaf_trait::TreePermutation;
-
-        let size: usize = perm.size();
-        debug_assert!(
-            size < L::WIDTH,
-            "pick_free_slot_avoiding_reserved: no free slots"
-        );
-
-        let free_count: usize = L::WIDTH - size;
-        for offset in 0..free_count {
-            let slot: usize = perm.back_at_offset(offset);
-
-            // Slot-0 / ikey_bound invariant: skip slot 0 if it can't be reused.
-            if slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                continue;
-            }
-
-            // Option A (Safe): treat non-null in free region as reserved.
-            // This includes both CLAIMING (reservation sentinel) and arc_ptr (value installed
-            // but not yet published via permutation CAS).
-            if !leaf.leaf_value_ptr(slot).is_null() {
-                continue;
-            }
-
-            return Some((slot, offset));
-        }
-
-        None
-    }
-
     /// Create a new empty `MassTreeGeneric` with the given allocator.
     ///
     /// The tree starts with a single empty leaf as root.
@@ -183,24 +86,6 @@ where
     #[inline(always)]
     pub(crate) fn load_root_ptr_generic(&self, _guard: &LocalGuard<'_>) -> *const u8 {
         self.root_ptr.load(AtomicOrdering::Acquire)
-    }
-
-    /// Compare-and-swap the root pointer atomically.
-    #[inline(always)]
-    #[expect(dead_code, reason = "CAS path disabled")]
-    pub(crate) fn cas_root_ptr_generic(
-        &self,
-        expected: *mut u8,
-        new: *mut u8,
-    ) -> Result<(), *mut u8> {
-        self.root_ptr
-            .compare_exchange(
-                expected,
-                new,
-                AtomicOrdering::AcqRel,
-                AtomicOrdering::Acquire,
-            )
-            .map(|_| ())
     }
 
     /// Check if the current root is a leaf node.
@@ -530,11 +415,8 @@ where
                         continue 'layer_loop;
                     }
 
-                    // Load permutation - if frozen, a split is in progress
-                    let Ok(perm) = leaf.permutation_try() else {
-                        version = leaf.version().stable();
-                        continue 'search_loop;
-                    };
+                    // Load permutation
+                    let perm = leaf.permutation();
 
                     let target_ikey: u64 = key.ikey();
 
@@ -575,7 +457,7 @@ where
                         }
 
                         // Validate version AFTER all reads
-                        if leaf.version().has_changed(version) {
+                        if leaf.version().has_changed_or_locked(version) {
                             let (advanced, new_version) =
                                 self.advance_to_key_generic(leaf, key, version, guard);
 
@@ -664,7 +546,7 @@ where
                     }
 
                     // Validate version AFTER all reads
-                    if leaf.version().has_changed(version) {
+                    if leaf.version().has_changed_or_locked(version) {
                         let (advanced, new_version) =
                             self.advance_to_key_generic(leaf, key, version, guard);
 
@@ -775,11 +657,8 @@ where
                         continue 'layer_loop; // Retry from layer root
                     }
 
-                    // Load permutation - if frozen, a split is in progress
-                    let Ok(perm) = leaf.permutation_try() else {
-                        version = leaf.version().stable();
-                        continue 'search_loop;
-                    };
+                    // Load permutation
+                    let perm = leaf.permutation();
 
                     let target_ikey: u64 = key.ikey();
 
@@ -820,7 +699,7 @@ where
                         }
 
                         // Validate version AFTER all reads
-                        if leaf.version().has_changed(version) {
+                        if leaf.version().has_changed_or_locked(version) {
                             let (advanced, new_version) =
                                 self.advance_to_key_generic(leaf, key, version, guard);
 
@@ -939,7 +818,7 @@ where
                     }
 
                     // Validate version AFTER all reads
-                    if leaf.version().has_changed(version) {
+                    if leaf.version().has_changed_or_locked(version) {
                         // Version changed - follow B-link chain if split occurred
                         let (advanced, new_version) =
                             self.advance_to_key_generic(leaf, key, version, guard);
@@ -1120,347 +999,6 @@ where
 
             // Descend to child
             node = child;
-        }
-    }
-
-    // ========================================================================
-    //  Generic CAS Insert Path (disabled - kept for future reference)
-    // ========================================================================
-
-    /// Maximum CAS retry attempts before falling back to locked path.
-    const MAX_CAS_RETRIES_GENERIC: usize = 3;
-
-    /// Try CAS-based lock-free insert.
-    ///
-    /// Attempts to insert a new key-value pair using optimistic concurrency.
-    /// Returns result indicating success or reason for fallback.
-    #[expect(dead_code, reason = "CAS path disabled")]
-    #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
-    pub(crate) fn try_cas_insert_generic(
-        &self,
-        key: &Key<'_>,
-        value: &S::Output,
-        guard: &LocalGuard<'_>,
-    ) -> CasInsertResultGeneric<S::Output> {
-        use crate::leaf_trait::TreePermutation;
-        use std::ptr as StdPtr;
-
-        let ikey: u64 = key.ikey();
-
-        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-        let keylenx: u8 = key.current_len() as u8;
-
-        // Suffix keys require locked path
-        if key.has_suffix() {
-            return CasInsertResultGeneric::ContentionFallback;
-        }
-
-        let mut retries: usize = 0;
-        let mut leaf_ptr: *mut L = StdPtr::null_mut();
-        let mut use_reach: bool = true;
-
-        loop {
-            // 1. Optimistic traversal to find target leaf
-            // CAS path only operates on layer 0 (no suffix keys), so is_sublayer=false
-            if use_reach {
-                let layer_root: *const u8 = self.load_root_ptr_generic(guard);
-                // Note: get_fresh_root inside reach_leaf_concurrent_generic handles parent traversal
-                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
-            } else {
-                use_reach = true;
-            }
-
-            let leaf: &L = unsafe { &*leaf_ptr };
-
-            // B-link advance if needed
-            let (advanced, exceeded_hop_limit) =
-                self.advance_to_key_by_bound_generic(leaf, key, guard);
-
-            // If we exceeded the hop limit, fall back to locked path which will re-traverse
-            if exceeded_hop_limit {
-                return CasInsertResultGeneric::ContentionFallback;
-            }
-
-            if !StdPtr::eq(advanced, leaf) {
-                leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
-                use_reach = false;
-                continue;
-            }
-
-            // 2. Get version (fail-fast if dirty)
-            let version: u32 = leaf.version().value();
-            if leaf.version().is_dirty() {
-                return CasInsertResultGeneric::ContentionFallback;
-            }
-
-            // Check for frozen permutation
-            // If frozen, wait briefly for version to stabilize before falling back.
-            // This prevents spinning on a transient frozen state (Fix B: freeze-wait protocol).
-            let Ok(perm) = leaf.permutation_try() else {
-                let _ = leaf.version().stable();
-                return CasInsertResultGeneric::ContentionFallback;
-            };
-
-            // 3. Search for key position
-            let search_result = self.search_for_insert_generic(leaf, key, &perm);
-
-            match search_result {
-                InsertSearchResultGeneric::Found { slot } => {
-                    return CasInsertResultGeneric::ExistsNeedLock { slot };
-                }
-
-                InsertSearchResultGeneric::Layer { slot, .. }
-                | InsertSearchResultGeneric::Conflict { slot } => {
-                    return CasInsertResultGeneric::LayerNeedLock { slot };
-                }
-
-                InsertSearchResultGeneric::NotFound { logical_pos } => {
-                    // 4. Check if leaf has space
-                    if perm.size() >= L::WIDTH {
-                        return CasInsertResultGeneric::FullNeedLock;
-                    }
-
-                    // 5. Pick a free slot from the free region, scanning for usable slots.
-                    //
-                    // This mirrors the locked path's `pick_free_slot_avoiding_reserved`:
-                    // - Skip slot 0 if it can't be reused (ikey_bound invariant)
-                    // - Skip slots that are already reserved (non-null in free region)
-                    //
-                    // This is a key optimization: instead of only trying perm.back(),
-                    // we scan all free slots to find one that's actually available.
-                    let size: usize = perm.size();
-                    let free_count: usize = L::WIDTH - size;
-
-                    let mut found_slot: Option<(usize, usize)> = None; // (slot, offset)
-                    for offset in 0..free_count {
-                        let slot: usize = perm.back_at_offset(offset);
-
-                        // Slot-0 / ikey_bound invariant: skip slot 0 if it can't be reused
-                        if slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                            continue;
-                        }
-
-                        // Skip reserved slots (CLAIMING or arc_ptr from another CAS in progress)
-                        if !leaf.load_slot_value(slot).is_null() {
-                            continue;
-                        }
-
-                        found_slot = Some((slot, offset));
-                        break;
-                    }
-
-                    let Some((slot, back_offset)) = found_slot else {
-                        // No usable slot found - all free slots are either:
-                        // - slot 0 that can't be reused, or
-                        // - reserved by another CAS in progress
-                        // Fall back to locked path which can wait for reservations to clear
-                        return CasInsertResultGeneric::ContentionFallback;
-                    };
-
-                    // 6. Compute new permutation with the chosen slot.
-                    //
-                    // If the slot is not at offset 0 (the natural back position),
-                    // we need to swap it to the back before inserting.
-                    let (new_perm, allocated_slot) = if back_offset == 0 {
-                        // Slot is already at back, use directly
-                        perm.insert_from_back_immutable(logical_pos)
-                    } else {
-                        // Swap the chosen slot to back position, then insert
-                        let mut perm_copy = perm;
-                        let back_pos: usize = L::WIDTH - 1;
-                        let chosen_pos: usize = back_pos - back_offset;
-                        perm_copy.swap_free_slots(back_pos, chosen_pos);
-                        let allocated = perm_copy.insert_from_back(logical_pos);
-                        (perm_copy, allocated)
-                    };
-                    debug_assert_eq!(allocated_slot, slot, "slot mismatch after insert");
-
-                    // ============================================================
-                    // Option A (Safe) Protocol: 3-phase CAS insert
-                    //
-                    // State machine: NULL -> CLAIMING -> arc_ptr -> (perm publish)
-                    //
-                    // Phase 1: Reserve slot (NULL -> CLAIMING)
-                    // Phase 2: Write key metadata (exclusive access via CLAIMING)
-                    // Phase 3: Install value (CLAIMING -> arc_ptr)
-                    // Phase 4: Publish (permutation CAS)
-                    // ============================================================
-
-                    // 8. Phase 1: Reserve the slot (NULL -> CLAIMING).
-                    //
-                    // This gives us exclusive right to write key metadata into this slot.
-                    // The CLAIMING sentinel is non-null, so other CAS attempts and the
-                    // locked path will see it as "reserved".
-                    let claiming: *mut u8 = claiming_ptr();
-                    if leaf
-                        .cas_slot_value(slot, StdPtr::null_mut(), claiming)
-                        .is_err()
-                    {
-                        // Contention: another thread claimed this slot first.
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 9. Version check before writing metadata.
-                    //
-                    // If version changed (split, etc.), release the reservation and retry.
-                    if leaf.version().has_changed_or_locked(version) {
-                        // Release reservation: CLAIMING -> NULL
-                        let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 10. Phase 2: Write key metadata.
-                    //
-                    // We have exclusive access to this slot via CLAIMING. No other CAS
-                    // attempt can write metadata here until we release the reservation.
-                    // The slot is not visible to readers until permutation publishes.
-                    unsafe {
-                        leaf.store_key_data_for_cas(slot, ikey, keylenx);
-                    }
-
-                    // 11. Version check after metadata.
-                    if leaf.version().has_changed_or_locked(version) {
-                        // Release reservation: CLAIMING -> NULL
-                        let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 12. Phase 3: Install the value pointer (CLAIMING -> arc_ptr).
-                    //
-                    // Prepare the value pointer and transition from CLAIMING to the real value.
-                    let value_ptr: *mut u8 = S::output_to_raw(value);
-                    match leaf.cas_slot_value(slot, claiming, value_ptr) {
-                        Ok(()) => {
-                            // Successfully installed value pointer.
-                        }
-                        Err(actual) => {
-                            // Invariant violation: nobody else should touch a CLAIMING slot
-                            // in the free region. If this fires, prefer leaking over double-free.
-                            debug_assert!(
-                                false,
-                                "CLAIMING->value_ptr CAS failed; expected CLAIMING, actual={actual:p}"
-                            );
-                            // Drop the value we just created (it was never installed).
-                            // SAFETY: value_ptr was just created by output_to_raw
-                            unsafe { S::cleanup_value_ptr(value_ptr) };
-                            // Best-effort release: try to reset to NULL.
-                            let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                    }
-
-                    // 13. Verify slot ownership (should still be value_ptr).
-                    if leaf.load_slot_value(slot) != value_ptr {
-                        // Slot was stolen after we installed value_ptr. This is unexpected
-                        // but we handle it by cleaning up our value and falling back.
-                        // SAFETY: value_ptr was just created by output_to_raw
-                        unsafe { S::cleanup_value_ptr(value_ptr) };
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 14. Final version check before permutation publish.
-                    if leaf.version().has_changed_or_locked(version) {
-                        match leaf.cas_slot_value(slot, value_ptr, StdPtr::null_mut()) {
-                            Ok(()) | Err(_) => {
-                                // SAFETY: value_ptr was just created by output_to_raw
-                                unsafe { S::cleanup_value_ptr(value_ptr) };
-                            }
-                        }
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 15. Phase 4: CAS permutation to publish.
-                    //
-                    // The permutation CAS is the linearization point. Once it succeeds,
-                    // the insert is logically complete and visible to other threads.
-                    // No post-publish waits or checks are needed because:
-                    //
-                    // 1. Permutation freezing prevents CAS racing with splits
-                    // 2. If a split happens immediately after, entry migrates correctly
-                    // 3. Post-publish waits (stable(), wait_for_split(), permutation_wait())
-                    //    defeat the purpose of a fast path and can take milliseconds
-                    match leaf.cas_permutation_raw(perm, new_perm) {
-                        Ok(()) => {
-                            // Success! Increment count and return.
-                            self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                            return CasInsertResultGeneric::Success(None);
-                        }
-
-                        Err(failure) => {
-                            match leaf.cas_slot_value(slot, value_ptr, StdPtr::null_mut()) {
-                                Ok(()) | Err(_) => {
-                                    // SAFETY: value_ptr was just created by output_to_raw
-                                    unsafe { S::cleanup_value_ptr(value_ptr) };
-                                }
-                            }
-
-                            if failure.is_frozen() {
-                                return CasInsertResultGeneric::ContentionFallback;
-                            }
-
-                            #[cfg(feature = "tracing")]
-                            crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                            retries += 1;
-                            if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                                return CasInsertResultGeneric::ContentionFallback;
-                            }
-                            Self::backoff_generic(retries);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Exponential backoff for CAS retries.
-    ///
-    /// Marked `#[cold]` because backoff only happens during contention.
-    #[cold]
-    fn backoff_generic(retries: usize) {
-        let spins = 1usize << retries.min(6);
-        for _ in 0..spins {
-            std::hint::spin_loop();
         }
     }
 
@@ -1998,54 +1536,46 @@ where
                             continue;
                         }
 
-                        let slot: usize = perm.back();
+                        // Get next free slot from back
+                        let mut slot: usize = perm.back();
+                        let mut back_offset: usize = 0;
 
-                        // Check slot-0 rule
+                        // Handle slot-0 rule: can't reuse slot-0 for different ikey
                         if slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                            let free_count: usize = L::WIDTH - perm.size();
-                            let mut found_slot: Option<(usize, usize)> = None;
-
+                            let free_count = L::WIDTH - perm.size();
+                            let mut found = false;
                             for offset in 1..free_count {
                                 let candidate: usize = perm.back_at_offset(offset);
                                 if candidate != 0 {
-                                    found_slot = Some((candidate, offset));
+                                    slot = candidate;
+                                    back_offset = offset;
+                                    found = true;
                                     break;
                                 }
                             }
-
-                            if let Some((alt_slot, back_offset)) = found_slot {
-                                self.assign_slot_generic(leaf, &mut lock, alt_slot, key, &value, guard);
-
-                                let mut new_perm = perm;
-                                let back_pos: usize = L::WIDTH - 1;
-                                let chosen_pos: usize = back_pos - back_offset;
-                                new_perm.swap_free_slots(back_pos, chosen_pos);
-                                let allocated: usize = new_perm.insert_from_back(logical_pos);
-                                debug_assert_eq!(allocated, alt_slot, "allocated unexpected slot");
-                                leaf.set_permutation(new_perm);
-                                drop(lock);
-
-                                self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                                #[cfg(feature = "tracing")]
-                                crate::tree::optimistic::LOCKED_INSERT_COUNT
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                                return Ok(None);
+                            if !found {
+                                // Only slot-0 available - trigger split
+                                let leaf_ptr_current: *mut L =
+                                    std::ptr::from_ref(leaf).cast_mut();
+                                self.handle_leaf_split_generic(
+                                    leaf_ptr_current,
+                                    lock,
+                                    logical_pos,
+                                    ikey,
+                                    guard,
+                                )?;
+                                continue;
                             }
-
-                            let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
-                            self.handle_leaf_split_generic(
-                                leaf_ptr_current,
-                                lock,
-                                logical_pos,
-                                ikey,
-                                guard,
-                            )?;
-                            continue;
                         }
 
                         self.assign_slot_generic(leaf, &mut lock, slot, key, &value, guard);
 
                         let mut new_perm = perm;
+                        if back_offset > 0 {
+                            let back_pos: usize = L::WIDTH - 1;
+                            let chosen_pos: usize = back_pos - back_offset;
+                            new_perm.swap_free_slots(back_pos, chosen_pos);
+                        }
                         let allocated: usize = new_perm.insert_from_back(logical_pos);
                         debug_assert_eq!(allocated, slot, "allocated unexpected slot");
                         leaf.set_permutation(new_perm);
@@ -2129,62 +1659,46 @@ where
                         continue;
                     }
 
-                    // Pick a free slot, handling slot-0 / ikey_bound invariant.
-                    // Since we hold the lock, we can use perm.back() directly.
-                    let slot: usize = perm.back();
+                    // Get next free slot from back
+                    let mut slot: usize = perm.back();
+                    let mut back_offset: usize = 0;
 
-                    // Check slot-0 rule: slot 0 stores ikey_bound and can only be
-                    // reused if the new key has the same ikey as the current bound.
+                    // Handle slot-0 rule: can't reuse slot-0 for different ikey
                     if slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                        // Need to find another slot or split.
-                        // Scan free region for a non-zero slot.
-                        let free_count: usize = L::WIDTH - perm.size();
-                        let mut found_slot: Option<(usize, usize)> = None;
-
+                        let free_count = L::WIDTH - perm.size();
+                        let mut found = false;
                         for offset in 1..free_count {
                             let candidate: usize = perm.back_at_offset(offset);
                             if candidate != 0 {
-                                found_slot = Some((candidate, offset));
+                                slot = candidate;
+                                back_offset = offset;
+                                found = true;
                                 break;
                             }
                         }
-
-                        if let Some((alt_slot, back_offset)) = found_slot {
-                            // Use the alternative slot
-                            self.assign_slot_generic(leaf, &mut lock, alt_slot, key, &value, guard);
-
-                            let mut new_perm = perm;
-                            let back_pos: usize = L::WIDTH - 1;
-                            let chosen_pos: usize = back_pos - back_offset;
-                            new_perm.swap_free_slots(back_pos, chosen_pos);
-                            let allocated: usize = new_perm.insert_from_back(logical_pos);
-                            debug_assert_eq!(allocated, alt_slot, "allocated unexpected slot");
-                            leaf.set_permutation(new_perm);
-                            drop(lock);
-
-                            self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                            #[cfg(feature = "tracing")]
-                            crate::tree::optimistic::LOCKED_INSERT_COUNT
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                            return Ok(None);
+                        if !found {
+                            // Only slot-0 available - trigger split
+                            let leaf_ptr_current: *mut L =
+                                std::ptr::from_ref(leaf).cast_mut();
+                            self.handle_leaf_split_generic(
+                                leaf_ptr_current,
+                                lock,
+                                logical_pos,
+                                ikey,
+                                guard,
+                            )?;
+                            continue;
                         }
-
-                        // Only slot 0 is free and can't be reused - must split
-                        let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
-                        self.handle_leaf_split_generic(
-                            leaf_ptr_current,
-                            lock,
-                            logical_pos,
-                            ikey,
-                            guard,
-                        )?;
-                        continue;
                     }
 
-                    // Use perm.back() directly - simple case
                     self.assign_slot_generic(leaf, &mut lock, slot, key, &value, guard);
 
                     let mut new_perm = perm;
+                    if back_offset > 0 {
+                        let back_pos: usize = L::WIDTH - 1;
+                        let chosen_pos: usize = back_pos - back_offset;
+                        new_perm.swap_free_slots(back_pos, chosen_pos);
+                    }
                     let allocated: usize = new_perm.insert_from_back(logical_pos);
                     debug_assert_eq!(allocated, slot, "allocated unexpected slot");
                     leaf.set_permutation(new_perm);
