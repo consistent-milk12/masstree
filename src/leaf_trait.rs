@@ -973,6 +973,21 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Panics in debug mode if `slot >= WIDTH`.
     #[must_use]
     fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32;
+
+    // ========================================================================
+    //  Cache Optimization
+    // ========================================================================
+
+    /// Prefetch the leaf node's data into cache.
+    ///
+    /// Brings the node's key arrays (`ikey0`, `keylenx`) and value pointers
+    /// (`leaf_values`) into CPU cache before they're accessed, reducing memory
+    /// latency during sequential scanning.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches C++ `leaf::prefetch()` pattern from `masstree_scan.hh:195, 299`.
+    fn prefetch(&self);
 }
 
 // =============================================================================

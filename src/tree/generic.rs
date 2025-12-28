@@ -194,7 +194,9 @@ where
     /// Wait for a parent pointer to be set, with timeout.
     ///
     /// Returns `true` if notified (should recheck condition), `false` on timeout.
-    #[inline(always)]
+    ///
+    /// Marked `#[cold]` because waiting is rare (only during concurrent splits).
+    #[cold]
     fn wait_for_parent_set(&self, timeout: std::time::Duration) -> bool {
         !self
             .parent_set_condvar
@@ -495,6 +497,15 @@ where
     ///
     /// Same protocol as [`get_concurrent_generic`] but returns `&V` instead of `Arc<V>`.
     /// Eliminates Arc clone overhead for maximum read performance.
+    ///
+    /// # Single-Layer Fast Path
+    ///
+    /// When the key is ≤ 8 bytes (no suffix), uses an optimized code path that:
+    /// - Skips layer pointer checks (`keylenx >= LAYER_KEYLENX`)
+    /// - Doesn't track layer descent state
+    /// - Eliminates suffix matching logic
+    ///
+    /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
     #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
     fn get_ref_generic<'g>(
         &self,
@@ -505,6 +516,9 @@ where
         use crate::leaf24::KSUF_KEYLENX;
         use crate::leaf24::LAYER_KEYLENX;
         use crate::link::{is_marked, unmark_ptr};
+
+        // Detect single-layer mode: key ≤ 8 bytes means no suffix, no layer descent possible
+        let single_layer_mode: bool = !key.has_suffix();
 
         // Start at tree root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
@@ -539,6 +553,88 @@ where
                     };
 
                     let target_ikey: u64 = key.ikey();
+
+                    // ================================================================
+                    // Single-layer fast path (keys ≤ 8 bytes)
+                    // ================================================================
+                    if single_layer_mode {
+                        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+                        let search_keylenx: u8 = key.current_len() as u8;
+
+                        // Optimized search: no suffix handling, no layer checks
+                        let mut match_ptr: Option<*mut u8> = None;
+
+                        for i in 0..perm.size() {
+                            let slot: usize = perm.get(i);
+                            let slot_ikey: u64 = leaf.ikey(slot);
+
+                            if slot_ikey != target_ikey {
+                                continue;
+                            }
+
+                            let slot_keylenx: u8 = leaf.keylenx(slot);
+                            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                            if slot_ptr.is_null() {
+                                continue;
+                            }
+
+                            // Exact keylenx match = found
+                            if slot_keylenx == search_keylenx {
+                                match_ptr = Some(slot_ptr);
+                                break;
+                            }
+
+                            // Layer pointer with matching ikey means a longer key exists,
+                            // but our short key (≤8 bytes) is NOT a match - continue searching
+                            // (Layer pointers have keylenx >= 128, our key has keylenx <= 8)
+                        }
+
+                        // Validate version AFTER all reads
+                        if leaf.version().has_changed(version) {
+                            let (advanced, new_version) =
+                                self.advance_to_key_generic(leaf, key, version, guard);
+
+                            if !std::ptr::eq(advanced, leaf) {
+                                leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
+                                continue 'leaf_loop;
+                            }
+
+                            version = new_version;
+                            continue 'search_loop;
+                        }
+
+                        // VERSION VALIDATED
+
+                        if let Some(ptr) = match_ptr {
+                            // Value - return reference WITHOUT cloning Arc
+                            // SAFETY: version validated, guard protects from deallocation
+                            let value_ref: &'g S::Value = unsafe { &*(ptr.cast::<S::Value>()) };
+                            return Some(value_ref);
+                        }
+
+                        // Not found - check for dirty or B-link
+                        if leaf.version().is_dirty() {
+                            version = leaf.version().stable();
+                            continue 'search_loop;
+                        }
+
+                        let next_raw: *mut L = leaf.next_raw();
+                        let next_ptr: *mut L = unmark_ptr(next_raw);
+                        if !next_ptr.is_null() && !is_marked(next_raw) {
+                            let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+                            if target_ikey >= next_bound {
+                                leaf_ptr = next_ptr;
+                                continue 'leaf_loop;
+                            }
+                        }
+
+                        return None;
+                    }
+
+                    // ================================================================
+                    // Multi-layer path (handles layer descent)
+                    // ================================================================
 
                     #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
                     let search_keylenx: u8 = if key.has_suffix() {
@@ -637,6 +733,15 @@ where
     }
 
     /// Internal concurrent get implementation with layer descent support.
+    ///
+    /// # Single-Layer Fast Path
+    ///
+    /// When the key is ≤ 8 bytes (no suffix), uses an optimized code path that:
+    /// - Skips layer pointer checks (`keylenx >= LAYER_KEYLENX`)
+    /// - Doesn't track layer descent state
+    /// - Eliminates suffix matching logic
+    ///
+    /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
     #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
     fn get_concurrent_generic(
         &self,
@@ -656,6 +761,9 @@ where
             ikey = format_args!("{:016x}", target_ikey_for_trace),
             "get: START"
         );
+
+        // Detect single-layer mode: key ≤ 8 bytes means no suffix, no layer descent possible
+        let single_layer_mode: bool = !key.has_suffix();
 
         // Start at tree root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
@@ -690,6 +798,111 @@ where
                     };
 
                     let target_ikey: u64 = key.ikey();
+
+                    // ================================================================
+                    // Single-layer fast path (keys ≤ 8 bytes)
+                    // ================================================================
+                    if single_layer_mode {
+                        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+                        let search_keylenx: u8 = key.current_len() as u8;
+
+                        // Optimized search: no suffix handling, no layer checks
+                        let mut match_ptr: Option<*mut u8> = None;
+
+                        for i in 0..perm.size() {
+                            let slot: usize = perm.get(i);
+                            let slot_ikey: u64 = leaf.ikey(slot);
+
+                            if slot_ikey != target_ikey {
+                                continue;
+                            }
+
+                            let slot_keylenx: u8 = leaf.keylenx(slot);
+                            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                            if slot_ptr.is_null() {
+                                continue;
+                            }
+
+                            // Exact keylenx match = found
+                            if slot_keylenx == search_keylenx {
+                                match_ptr = Some(slot_ptr);
+                                break;
+                            }
+
+                            // Layer pointer with matching ikey means a longer key exists,
+                            // but our short key (≤8 bytes) is NOT a match - continue searching
+                            // (Layer pointers have keylenx >= 128, our key has keylenx <= 8)
+                        }
+
+                        // Validate version AFTER all reads
+                        if leaf.version().has_changed(version) {
+                            let (advanced, new_version) =
+                                self.advance_to_key_generic(leaf, key, version, guard);
+
+                            if !std::ptr::eq(advanced, leaf) {
+                                leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
+                                continue 'leaf_loop;
+                            }
+
+                            version = new_version;
+                            continue 'search_loop;
+                        }
+
+                        // VERSION VALIDATED
+
+                        if let Some(ptr) = match_ptr {
+                            // Value - NOW safe to clone
+                            // SAFETY: version validated, so ptr is valid value pointer
+                            let output: S::Output = unsafe { S::output_from_raw(ptr) };
+                            return Some(output);
+                        }
+
+                        // Not found - check for dirty or B-link
+                        if leaf.version().is_dirty() {
+                            version = leaf.version().stable();
+                            continue 'search_loop;
+                        }
+
+                        let next_raw: *mut L = leaf.next_raw();
+                        let next_ptr: *mut L = unmark_ptr(next_raw);
+                        if !next_ptr.is_null() && !is_marked(next_raw) {
+                            let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+                            if target_ikey >= next_bound {
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!(
+                                    ikey = target_ikey,
+                                    leaf_ptr = ?std::ptr::from_ref(leaf),
+                                    next_ptr = ?next_ptr,
+                                    next_bound = next_bound,
+                                    "get: NotFound but ikey >= next_bound; following B-link"
+                                );
+                                #[cfg(feature = "tracing")]
+                                crate::tree::optimistic::BLINK_SHOULD_FOLLOW_COUNT
+                                    .fetch_add(1, AtomicOrdering::Relaxed);
+                                leaf_ptr = next_ptr;
+                                continue 'leaf_loop;
+                            }
+                        }
+
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            ikey = format_args!("{:016x}", target_ikey),
+                            leaf_ptr = ?std::ptr::from_ref(leaf),
+                            perm_size = perm.size(),
+                            next_ptr = ?next_ptr,
+                            is_marked = is_marked(next_raw),
+                            "get: NOT_FOUND"
+                        );
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::SEARCH_NOT_FOUND_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        return None;
+                    }
+
+                    // ================================================================
+                    // Multi-layer path (handles layer descent)
+                    // ================================================================
 
                     #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
                     let search_keylenx: u8 = if key.has_suffix() {
@@ -828,6 +1041,7 @@ where
     }
 
     /// Follow parent pointers to find the actual layer root.
+    #[inline(always)]
     #[expect(clippy::unused_self, reason = "Method signature pattern")]
     fn maybe_parent_generic(&self, mut node: *const u8) -> *const u8 {
         loop {
@@ -1256,7 +1470,9 @@ where
     }
 
     /// Exponential backoff for CAS retries.
-    #[inline(always)]
+    ///
+    /// Marked `#[cold]` because backoff only happens during contention.
+    #[cold]
     fn backoff_generic(retries: usize) {
         let spins = 1usize << retries.min(6);
         for _ in 0..spins {
@@ -1275,6 +1491,7 @@ where
         use crate::leaf_trait::TreePermutation;
         use crate::leaf24::KSUF_KEYLENX;
         use crate::leaf24::LAYER_KEYLENX;
+        use std::cmp::Ordering;
 
         let target_ikey: u64 = key.ikey();
 
@@ -1306,9 +1523,8 @@ where
                             shift_amount: 8,
                         };
                     }
-                    // Key terminates here - it's distinct from layer contents
-                    // Continue searching for an exact match or insert position
-                    continue;
+                    // Key terminates here - it must sort before the layer pointer.
+                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
                 }
 
                 // Exact match check
@@ -1340,7 +1556,79 @@ where
                     // Both have suffixes with same 8-byte prefix - need layer
                     return InsertSearchResultGeneric::Conflict { slot };
                 }
-                // One inline, one suffix - distinct keys, continue searching
+
+                // Distinct keys with the same ikey: insertion order is determined by
+                // Masstree `key.compare(ikey, keylenx)` semantics (length vs keylenx).
+                if key.compare(slot_ikey, slot_keylenx as usize) == Ordering::Less {
+                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
+                }
+            }
+
+            // Sorted order - found insert position
+            if slot_ikey > target_ikey {
+                return InsertSearchResultGeneric::NotFound { logical_pos: i };
+            }
+        }
+
+        // Insert at end
+        InsertSearchResultGeneric::NotFound {
+            logical_pos: perm.size(),
+        }
+    }
+
+
+    /// Single-layer fast path for insert search (keys ≤ 8 bytes).
+    ///
+    /// Optimized version that:
+    /// - Skips suffix comparison logic  
+    /// - Only returns `Found` or `NotFound` (never `Layer` or `Conflict`)
+    ///
+    /// For layer pointers: an 8-byte key sorts BEFORE a layer pointer with
+    /// the same ikey (layer pointers handle keys > 8 bytes).
+    #[inline(always)]
+    #[expect(clippy::unused_self, reason = "API Consistency")]
+    fn search_for_insert_single_layer(
+        &self,
+        leaf: &L,
+        key: &Key<'_>,
+        perm: &L::Perm,
+    ) -> InsertSearchResultGeneric {
+        use crate::leaf_trait::TreePermutation;
+        use crate::leaf24::LAYER_KEYLENX;
+
+        let target_ikey: u64 = key.ikey();
+
+        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+        let search_keylenx: u8 = key.current_len() as u8;
+
+        for i in 0..perm.size() {
+            let slot: usize = perm.get(i);
+            let slot_ikey: u64 = leaf.ikey(slot);
+
+            if slot_ikey == target_ikey {
+                let slot_keylenx: u8 = leaf.keylenx(slot);
+                let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                if slot_ptr.is_null() {
+                    continue;
+                }
+
+                // Layer pointer: short key (≤8 bytes) sorts before layer pointer
+                // (layer pointers handle keys > 8 bytes with same prefix)
+                if slot_keylenx >= LAYER_KEYLENX {
+                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
+                }
+
+                // Exact match - same ikey and keylenx
+                if slot_keylenx == search_keylenx {
+                    return InsertSearchResultGeneric::Found { slot };
+                }
+
+                // Same ikey, different keylenx - check insertion order
+                // For single-layer, shorter keys sort before longer keys
+                if search_keylenx < slot_keylenx {
+                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
+                }
             }
 
             // Sorted order - found insert position
@@ -1541,6 +1829,15 @@ where
     }
 
     /// Internal concurrent insert with CAS fast path and locked fallback.
+    ///
+    /// # Single-Layer Fast Path
+    ///
+    /// When the key is ≤ 8 bytes (no suffix), uses an optimized code path that:
+    /// - Uses simplified search (no suffix/layer handling)
+    /// - Only handles `Found` and `NotFound` results
+    /// - Skips layer descent tracking
+    ///
+    /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(level = "debug", skip_all, fields(ikey = %format_args!("{:016x}", key.ikey())))
@@ -1566,6 +1863,9 @@ where
             ikey = format_args!("{:016x}", ikey_for_trace),
             "INSERT_START"
         );
+
+        // Detect single-layer mode: key ≤ 8 bytes means no suffix, no layer operations
+        let single_layer_mode: bool = !key.has_suffix();
 
         // Track current layer root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
@@ -1667,6 +1967,127 @@ where
 
             // Get permutation (must not be frozen since we hold lock)
             let perm = leaf.permutation();
+
+            // ================================================================
+            // Single-layer fast path (keys ≤ 8 bytes)
+            // ================================================================
+            if single_layer_mode {
+                let search_result = self.search_for_insert_single_layer(leaf, key, &perm);
+
+                match search_result {
+                    InsertSearchResultGeneric::Found { slot } => {
+                        // Key exists - update value
+                        let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+                        if !old_ptr.is_null() {
+                            let old_output: S::Output = unsafe { S::output_from_raw(old_ptr) };
+                            let new_ptr: *mut u8 = S::output_consume_to_raw(value);
+
+                            lock.mark_insert();
+                            leaf.set_leaf_value_ptr(slot, new_ptr);
+                            drop(lock);
+
+                            unsafe {
+                                guard.defer_retire(old_ptr, |ptr, _| {
+                                    S::cleanup_value_ptr(ptr);
+                                });
+                            }
+
+                            #[cfg(feature = "tracing")]
+                            crate::tree::optimistic::LOCKED_INSERT_COUNT
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                            return Ok(Some(old_output));
+                        }
+                        drop(lock);
+                        continue;
+                    }
+
+                    InsertSearchResultGeneric::NotFound { logical_pos } => {
+                        let ikey: u64 = key.ikey();
+
+                        // Check if leaf has space
+                        if perm.size() >= L::WIDTH {
+                            let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
+                            self.handle_leaf_split_generic(
+                                leaf_ptr_current,
+                                lock,
+                                logical_pos,
+                                ikey,
+                                guard,
+                            )?;
+                            continue;
+                        }
+
+                        let slot: usize = perm.back();
+
+                        // Check slot-0 rule
+                        if slot == 0 && !leaf.can_reuse_slot0(ikey) {
+                            let free_count: usize = L::WIDTH - perm.size();
+                            let mut found_slot: Option<(usize, usize)> = None;
+
+                            for offset in 1..free_count {
+                                let candidate: usize = perm.back_at_offset(offset);
+                                if candidate != 0 {
+                                    found_slot = Some((candidate, offset));
+                                    break;
+                                }
+                            }
+
+                            if let Some((alt_slot, back_offset)) = found_slot {
+                                self.assign_slot_generic(leaf, &mut lock, alt_slot, key, &value, guard);
+
+                                let mut new_perm = perm;
+                                let back_pos: usize = L::WIDTH - 1;
+                                let chosen_pos: usize = back_pos - back_offset;
+                                new_perm.swap_free_slots(back_pos, chosen_pos);
+                                let allocated: usize = new_perm.insert_from_back(logical_pos);
+                                debug_assert_eq!(allocated, alt_slot, "allocated unexpected slot");
+                                leaf.set_permutation(new_perm);
+                                drop(lock);
+
+                                self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                                #[cfg(feature = "tracing")]
+                                crate::tree::optimistic::LOCKED_INSERT_COUNT
+                                    .fetch_add(1, AtomicOrdering::Relaxed);
+                                return Ok(None);
+                            }
+
+                            let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
+                            self.handle_leaf_split_generic(
+                                leaf_ptr_current,
+                                lock,
+                                logical_pos,
+                                ikey,
+                                guard,
+                            )?;
+                            continue;
+                        }
+
+                        self.assign_slot_generic(leaf, &mut lock, slot, key, &value, guard);
+
+                        let mut new_perm = perm;
+                        let allocated: usize = new_perm.insert_from_back(logical_pos);
+                        debug_assert_eq!(allocated, slot, "allocated unexpected slot");
+                        leaf.set_permutation(new_perm);
+                        drop(lock);
+
+                        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::LOCKED_INSERT_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        return Ok(None);
+                    }
+
+                    // These can't happen - search_for_insert_single_layer only returns Found/NotFound
+                    InsertSearchResultGeneric::Layer { .. }
+                    | InsertSearchResultGeneric::Conflict { .. } => {
+                        unreachable!("single-layer search never returns Layer or Conflict")
+                    }
+                }
+            }
+
+            // ================================================================
+            // Multi-layer path (handles layer descent and conflicts)
+            // ================================================================
 
             // Search for insert position
             let search_result = self.search_for_insert_generic(leaf, key, &perm);
@@ -1920,6 +2341,11 @@ where
     /// Handle a leaf split when the leaf is full.
     ///
     /// This function implements the SPLIT-THEN-RETRY pattern:
+    ///
+    /// # Performance
+    ///
+    /// Marked `#[cold]` because splits are rare (~1 per WIDTH inserts).
+    /// Marked `#[inline(never)]` to keep split code out of the hot insert path.
     /// 1. Calculate split point
     /// 2. Allocate new leaf (pre-allocation before marking split)
     /// 3. Mark split in progress
@@ -1963,7 +2389,8 @@ where
         )
     )
 )]
-    #[inline]
+    #[cold]
+    #[inline(never)]
     fn handle_leaf_split_generic(
         &self,
         left_leaf_ptr: *mut L,
@@ -2184,6 +2611,12 @@ where
     /// - Caller must hold the lock on `parent_leaf`
     /// - Caller must have called `lock.mark_insert()` before calling this
     /// - `guard` must come from this tree's collector
+    ///
+    /// # Performance
+    ///
+    /// Marked `#[cold]` because layer creation is rare (only for suffix conflicts).
+    #[cold]
+    #[inline(never)]
     unsafe fn create_layer_concurrent_generic(
         &self,
         parent_leaf: &L,

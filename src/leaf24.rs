@@ -271,6 +271,47 @@ impl<S: ValueSlot> LeafNode24<S> {
         ikeys
     }
 
+    /// Prefetch leaf node data for range scans.
+    ///
+    /// Brings the node's key arrays (`ikey0`, `keylenx`) and value pointers
+    /// (`leaf_values`) into CPU cache before they're accessed, reducing memory
+    /// latency during sequential scanning.
+    ///
+    /// # Memory Layout (WIDTH=24)
+    ///
+    /// ```text
+    /// Offset   Size    Field
+    /// ------   ----    -----
+    /// 0        64B     Cache line 0: version + modstate + padding
+    /// 64       64B     Cache line 1: permutation (u128) + padding
+    /// 128      192B    ikey0 (24 × 8B = 192B, ~3 cache lines)
+    /// 320      24B     keylenx (24 × 1B)
+    /// 344      192B    leaf_values (24 × 8B = 192B, ~3 cache lines)
+    /// ```
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches C++ `leaf::prefetch()` pattern from `masstree_scan.hh:195, 299`.
+    #[inline(always)]
+    pub fn prefetch(&self) {
+        use crate::prefetch::prefetch_read;
+
+        let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
+
+        // Prefetch ikey0 array (starts at offset 128, spans ~3 cache lines)
+        // Skip cache lines 0-1 (version/permutation) - already accessed
+        unsafe {
+            prefetch_read(self_ptr.add(128)); // ikey0[0..8]
+            prefetch_read(self_ptr.add(192)); // ikey0[8..16]
+            prefetch_read(self_ptr.add(256)); // ikey0[16..24] + keylenx
+
+            // Prefetch leaf_values array (starts at ~344, spans ~3 cache lines)
+            prefetch_read(self_ptr.add(320)); // keylenx + leaf_values[0..8]
+            prefetch_read(self_ptr.add(384)); // leaf_values[8..16]
+            prefetch_read(self_ptr.add(448)); // leaf_values[16..24]
+        }
+    }
+
     /// Get the keylenx at the given physical slot.
     #[must_use]
     #[inline(always)]
@@ -1538,6 +1579,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
         Self::ksuf_match_result(self, slot, keylenx, suffix)
+    }
+
+    #[inline(always)]
+    fn prefetch(&self) {
+        Self::prefetch(self);
     }
 }
 

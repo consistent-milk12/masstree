@@ -519,7 +519,10 @@ impl NodeVersion {
     #[inline(always)]
     pub fn has_split(&self, old: u32) -> bool {
         // Compiler fence: ensures all prior reads complete before version check.
-        compiler_fence(Ordering::SeqCst);
+        // This matches C++ fence() in nodeversion.hh:80.
+        // Acquire is sufficient - we only need to prevent reordering of reads
+        // before this fence, not full sequential consistency.
+        compiler_fence(Ordering::Acquire);
 
         (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
     }
