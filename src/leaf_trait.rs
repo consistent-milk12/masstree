@@ -30,40 +30,6 @@ pub use crate::value::InsertTarget;
 pub use crate::value::SplitPoint;
 
 // ============================================================================
-//  CAS Permutation Error
-// ============================================================================
-
-/// Error returned when a CAS permutation operation fails.
-///
-/// Contains the current permutation value that caused the CAS to fail.
-/// Use `is_frozen()` to check if a split is in progress.
-#[derive(Debug, Clone, Copy)]
-pub struct CasPermutationError<P: TreePermutation> {
-    /// The current permutation value in the node.
-    pub current: P,
-}
-
-impl<P: TreePermutation> CasPermutationError<P> {
-    /// Create a new CAS permutation error.
-    #[inline(always)]
-    pub const fn new(current: P) -> Self {
-        Self { current }
-    }
-
-    /// Check if the failure was due to frozen state (split in progress).
-    #[inline(always)]
-    pub fn is_frozen(&self) -> bool {
-        P::is_frozen_raw(self.current.value())
-    }
-
-    /// Get the current permutation value.
-    #[inline(always)]
-    pub const fn current(&self) -> P {
-        self.current
-    }
-}
-
-// ============================================================================
 //  TreePermutation Trait
 // ============================================================================
 
@@ -201,58 +167,6 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
 
     /// Set the size without changing slot positions.
     fn set_size(&mut self, n: usize);
-
-    // ========================================================================
-    //  Freeze Operations
-    // ========================================================================
-
-    /// Check if a raw permutation value is frozen.
-    ///
-    /// A frozen permutation indicates a split is in progress.
-    /// CAS insert threads should fall back to the locked path.
-    fn is_frozen_raw(raw: Self::Raw) -> bool;
-
-    /// Freeze a raw permutation value.
-    ///
-    /// Returns a frozen value that will fail any CAS with a valid expected.
-    fn freeze_raw(raw: Self::Raw) -> Self::Raw;
-}
-
-// ============================================================================
-//  FreezeGuardOps Trait
-// ============================================================================
-
-/// Operations that freeze guards must support.
-///
-/// This trait abstracts over `FreezeGuard<'a, S, WIDTH>` (WIDTH=15) and
-/// `FreezeGuard24<'a, S>` (WIDTH=24), enabling generic split operations.
-///
-/// A freeze guard captures a snapshot of the permutation at freeze time and
-/// provides panic safety by restoring the original permutation if dropped
-/// while still active.
-///
-/// # Implementors
-///
-/// - `FreezeGuard<'a, S, WIDTH>` for WIDTH in 1..=15
-/// - `FreezeGuard24<'a, S>` for WIDTH=24
-pub trait FreezeGuardOps<P: TreePermutation> {
-    /// Get the permutation snapshot captured at freeze time.
-    ///
-    /// This is the authoritative membership for split computation.
-    /// It includes all CAS inserts that published before freeze succeeded.
-    fn snapshot(&self) -> P;
-
-    /// Get the raw snapshot value.
-    ///
-    /// Used for debugging/logging and low-level operations.
-    fn snapshot_raw(&self) -> P::Raw;
-
-    /// Set whether the guard is active.
-    ///
-    /// When active, dropping the guard will restore the original permutation
-    /// (panic safety). Set to `false` before successful unfreeze to prevent
-    /// rollback on normal drop.
-    fn set_active(&mut self, active: bool);
 }
 
 // ============================================================================
@@ -511,29 +425,6 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Used for freeze detection without constructing a Permuter.
     fn permutation_raw(&self) -> <Self::Perm as TreePermutation>::Raw;
 
-    /// Check if permutation is frozen (split in progress).
-    ///
-    /// Convenience method that checks the raw value.
-    #[inline(always)]
-    fn is_perm_frozen(&self) -> bool {
-        Self::Perm::is_frozen_raw(self.permutation_raw())
-    }
-
-    /// Try to load permutation, returning error if frozen.
-    ///
-    /// Used in CAS insert path to detect ongoing splits.
-    ///
-    /// # Errors
-    /// Fails when trying to load a frozen permutation.
-    #[expect(clippy::result_unit_err)]
-    fn permutation_try(&self) -> Result<Self::Perm, ()>;
-
-    /// Wait for permutation to unfreeze.
-    ///
-    /// Spins with progressive backoff until permutation is valid.
-    /// May timeout and return empty permutation if stuck too long.
-    fn permutation_wait(&self) -> Self::Perm;
-
     // ========================================================================
     //  Key Operations
     // ========================================================================
@@ -726,36 +617,9 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Spins until the next pointer is unmarked and version is stable.
     fn wait_for_split(&self);
 
-    /// CAS the permutation from expected to new value.
-    ///
-    /// The raw permutation value is used for atomic comparison.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(CasPermutationError)` if:
-    /// - The permutation is frozen (split in progress)
-    /// - The current permutation value does not match `expected` (concurrent modification)
-    ///
-    /// # Freeze Safety
-    ///
-    /// If the permutation is frozen (split in progress), the CAS will fail.
-    fn cas_permutation_raw(
-        &self,
-        expected: Self::Perm,
-        new: Self::Perm,
-    ) -> Result<(), CasPermutationError<Self::Perm>>;
-
     // ========================================================================
     //  Split Operations
     // ========================================================================
-
-    /// The freeze guard type for this leaf.
-    ///
-    /// Used by split operations to atomically freeze the permutation and
-    /// capture a snapshot for computing the split.
-    type FreezeGuard<'a>: FreezeGuardOps<Self::Perm>
-    where
-        Self: 'a;
 
     /// Calculate the optimal split point.
     ///
@@ -806,38 +670,6 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
         new_leaf: Box<Self>,
         guard: &seize::LocalGuard<'_>,
     ) -> (Box<Self>, u64, InsertTarget);
-
-    // ========================================================================
-    //  Freeze Operations
-    // ========================================================================
-
-    /// Freeze the permutation for split operations.
-    ///
-    /// Returns a guard that captures the pre-freeze permutation snapshot.
-    /// The guard provides panic safety by restoring a valid permutation if
-    /// the split is aborted.
-    ///
-    /// # Preconditions
-    ///
-    /// - Caller must hold the leaf lock
-    /// - Caller must have called `version().mark_split()`
-    fn freeze_permutation(&self) -> Self::FreezeGuard<'_>;
-
-    /// Unfreeze the permutation and publish the final split result.
-    ///
-    /// This consumes the freeze guard and atomically publishes the new
-    /// permutation, making the split visible to readers.
-    ///
-    /// # Arguments
-    ///
-    /// * `guard` - The freeze guard from `freeze_permutation()`
-    /// * `perm` - The new permutation to publish
-    fn unfreeze_set_permutation(&self, guard: Self::FreezeGuard<'_>, perm: Self::Perm);
-
-    /// Check if the permutation is currently frozen.
-    ///
-    /// A frozen permutation indicates a split is in progress.
-    fn is_permutation_frozen(&self) -> bool;
 
     // ========================================================================
     //  Sibling Link Helper (for split)
@@ -1118,14 +950,6 @@ mod tests {
         assert_eq!(new_p.get(0), 0);
     }
 
-    fn test_permutation_freeze<P: TreePermutation>() {
-        let p = P::empty();
-        assert!(!P::is_frozen_raw(p.value()));
-
-        let frozen = P::freeze_raw(p.value());
-        assert!(P::is_frozen_raw(frozen));
-    }
-
     fn test_permutation_roundtrip<P: TreePermutation>() {
         let p = P::empty();
         let raw = p.value();
@@ -1146,11 +970,6 @@ mod tests {
     #[test]
     fn test_permuter24_trait_insert_immutable() {
         test_permutation_insert_immutable::<Permuter24>();
-    }
-
-    #[test]
-    fn test_permuter24_trait_freeze() {
-        test_permutation_freeze::<Permuter24>();
     }
 
     #[test]

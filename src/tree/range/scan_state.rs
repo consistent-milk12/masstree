@@ -195,7 +195,7 @@ where
 
     /// Cached permutation snapshot.
     ///
-    /// Loaded via `leaf.permutation_try()`. Must be refreshed when version
+    /// Loaded via `leaf.permutation()`. Must be refreshed when version
     /// changes or when moving to a new leaf.
     perm: L::Perm,
 
@@ -440,17 +440,9 @@ where
 
         self.version = leaf.version().stable();
 
-        match leaf.permutation_try() {
-            Ok(perm) => {
-                self.perm = perm;
-                self.ki = ki;
-                Ok(())
-            }
-            Err(_frozen) => {
-                // Split in progress, caller should wait and retry
-                Err(())
-            }
-        }
+        self.perm = leaf.permutation();
+        self.ki = ki;
+        Ok(())
     }
 }
 

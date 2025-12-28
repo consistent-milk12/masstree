@@ -27,7 +27,7 @@ pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 #[cfg(feature = "tracing")]
 pub use optimistic::{
     ADVANCE_BLINK_COUNT, BLINK_ADVANCE_ANOMALY_COUNT, BLINK_SHOULD_FOLLOW_COUNT,
-    CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters,
+    DebugCounters,
     LOCKED_INSERT_COUNT, PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
     PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, SEARCH_NOT_FOUND_COUNT,
     SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters, get_debug_counters,
@@ -158,24 +158,6 @@ where
             .field("width", &L::WIDTH)
             .finish_non_exhaustive()
     }
-}
-
-/// Result of a CAS insert attempt (generic version).
-#[derive(Debug)]
-#[expect(dead_code, reason = "CAS path disabled")]
-pub(crate) enum CasInsertResultGeneric<O> {
-    /// CAS insert succeeded.
-    Success(Option<O>),
-    /// Key already exists - need locked update.
-    ExistsNeedLock { slot: usize },
-    /// Leaf is full - need locked split.
-    FullNeedLock,
-    /// Layer creation needed.
-    LayerNeedLock { slot: usize },
-    /// Slot-0 violation - need locked path.
-    Slot0NeedLock,
-    /// High contention - fall back to locked path.
-    ContentionFallback,
 }
 
 /// Result of searching a leaf for insert position (generic version).
@@ -438,7 +420,7 @@ mod tests {
                 let leaf: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_ptr };
                 let _ = leaf.version().stable();
 
-                let perm = leaf.permutation_wait();
+                let perm = leaf.permutation();
                 for i in 0..perm.size() {
                     let slot = perm.get(i);
                     if leaf.ikey(slot) == ikey && leaf.keylenx(slot) == 8 {

@@ -31,132 +31,13 @@ test:
     rm -f .test-output.tmp
     exit $exit_code
 
-# Run all tests with nextest, tracing, and mimalloc (prioritized mode)
-# This is the recommended way to run tests for development
+# Run all tests with nextest and mimalloc
 next:
-    cargo nextest run --no-fail-fast --features "tracing,mimalloc"
+    cargo nextest run --no-fail-fast --features mimalloc
 
-# Run all tests with trace-level logging, then pretty-print logs to JSON
-next-trace:
-    #!/usr/bin/env bash
-    rm -f logs/masstree.jsonl logs/masstree.json
-    RUST_LOG=trace MASSTREE_LOG_CONSOLE=0 cargo nextest run --no-fail-fast --features "mimalloc,tracing"
-    if [ -f logs/masstree.jsonl ]; then
-        jaq -s '.' logs/masstree.jsonl > logs/masstree.json
-        rm -f logs/masstree.jsonl
-        echo "Logs written to logs/masstree.json"
-    fi
-
-# Run lock contention profiler with tracing (writes to logs/lock_contention.json)
-# Usage: just profile-locks [RUST_LOG=masstree=warn]
-profile-locks LOG_LEVEL="masstree=warn":
-    #!/usr/bin/env bash
-    rm -f logs/lock_contention.json
-    echo "Running lock contention profiler..."
-    echo "Log level: {{LOG_LEVEL}}"
-    RUST_LOG="{{LOG_LEVEL}}" cargo run --release --features "mimalloc,tracing" --bin lock_contention
-    if [ -f logs/lock_contention.json ]; then
-        echo ""
-        echo "=== SLOW Operations Summary ==="
-        rg -c "SLOW_(OP|LOCK)" logs/lock_contention.json || echo "0 slow operations"
-        echo ""
-        echo "=== Sample of slow operations ==="
-        rg "SLOW_(OP|LOCK)" logs/lock_contention.json | head -20 || true
-        echo ""
-        echo "Full logs: logs/lock_contention.json"
-        echo "Filter: rg \"SLOW_(OP|LOCK)\" logs/lock_contention.json"
-    fi
-
-# Run lock contention profiler without tracing (fast, stats only)
-profile-locks-fast:
-    cargo run --release --features mimalloc --bin lock_contention
-
-# Run lock contention with CAS enabled (optimistic fast path)
-cas:
-    #!/usr/bin/env bash
-    rm -f logs/lock_contention.json
-    RUST_LOG=masstree=warn,lock_contention=warn MASSTREE_ENABLE_CAS=1 cargo run --release --features "mimalloc,tracing" --bin lock_contention
-
-# Run lock contention with CAS disabled (locked path only)
-lock:
-    #!/usr/bin/env bash
-    rm -f logs/lock_contention.json
-    RUST_LOG=masstree=warn,lock_contention=warn MASSTREE_ENABLE_CAS=0 cargo run --release --features "mimalloc,tracing" --bin lock_contention
-
-# Run CAS path with debug-level tracing (verbose, for diagnosing issues)
-cas_debug:
-    #!/usr/bin/env bash
-    rm -f logs/lock_contention.json
-    RUST_LOG=masstree=debug,lock_contention=warn MASSTREE_ENABLE_CAS=1 cargo run --release --features "mimalloc,tracing" --bin lock_contention
-
-# Run locked path with debug-level tracing (verbose, for diagnosing issues)
-lock_debug:
-    #!/usr/bin/env bash
-    rm -f logs/lock_contention.json
-    RUST_LOG=masstree=debug,lock_contention=warn MASSTREE_ENABLE_CAS=0 cargo run --release --features "mimalloc,tracing" --bin lock_contention
-
-# Stress test: run N iterations of CAS benchmark, saving logs sequentially
-# Usage: just stress [N=10]
-stress N="10":
-    #!/usr/bin/env bash
-    rm -rf logs/runs
-    mkdir -p logs/runs
-    echo "Running {{N}} stress test iterations..."
-    for i in $(seq 1 {{N}}); do
-        echo "=== Run $i/{{N}} ==="
-        RUST_LOG=masstree=warn,lock_contention=warn MASSTREE_ENABLE_CAS=1 \
-            cargo run --release --features "mimalloc,tracing" --bin lock_contention 2>&1 \
-            | grep -E '(Run [0-9]+/10|Slowest|B-link advance|Fastest|Throughput)'
-        mv logs/lock_contention.json "logs/runs/run_$(printf '%02d' $i).json" 2>/dev/null || true
-    done
-    echo ""
-    echo "Logs saved to logs/runs/run_*.json"
-
-# Stress test with debug-level tracing (verbose, for diagnosing issues)
-# Usage: just stress_debug [N=10]
-stress_debug N="10":
-    #!/usr/bin/env bash
-    rm -rf logs/runs
-    mkdir -p logs/runs
-    echo "Running {{N}} stress test iterations (debug level)..."
-    for i in $(seq 1 {{N}}); do
-        echo "=== Run $i/{{N}} ==="
-        RUST_LOG=masstree=debug,lock_contention=warn MASSTREE_ENABLE_CAS=1 \
-            cargo run --release --features "mimalloc,tracing" --bin lock_contention 2>&1 \
-            | grep -E '(Run [0-9]+/10|Slowest|B-link advance|Fastest|Throughput)'
-        mv logs/lock_contention.json "logs/runs/run_$(printf '%02d' $i).json" 2>/dev/null || true
-    done
-    echo ""
-    echo "Logs saved to logs/runs/run_*.json"
-
-# Analyze stress test logs
-analyze:
-    cargo run --release --bin analyze_runs
-
-# Run a specific test with nextest, tracing, and mimalloc
+# Run a specific test with nextest and mimalloc
 next-one TEST:
-    cargo nextest run --no-fail-fast --features "tracing,mimalloc" {{TEST}}
-
-# Run stress test until failure (for debugging race conditions)
-# Uses nextest with mimalloc - runs tests in separate processes for more parallel stress
-stress-until-fail:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    i=0
-    while true; do
-        i=$((i + 1))
-        echo -n "Run $i: "
-        output=$(cargo nextest run --features mimalloc --test concurrent_regression stress_concurrent_insert_many_keys 2>&1)
-        if echo "$output" | grep -qE "FAIL|CRITICAL: Key not found"; then
-            echo "FOUND BUG!"
-            echo "$output" | grep -E "FAIL|CRITICAL|ERROR|immediate_verify_failures|Missing" | head -10
-            echo ""
-            echo "To debug: RUST_LOG=masstree=debug cargo test --features tracing --test concurrent_regression stress_concurrent_insert_many_keys -- --nocapture"
-            break
-        else
-            echo "ok"
-        fi
-    done
+    cargo nextest run --no-fail-fast --features mimalloc {{TEST}}
 
 # Run nextest N times to catch intermittent failures
 # Usage: just next-repeat 20
@@ -167,21 +48,11 @@ next-repeat N="10":
     failed=0
     for i in $(seq 1 {{N}}); do
         echo "=== Run $i/{{N}} ==="
-        output=$(cargo nextest run --no-fail-fast --features "tracing,mimalloc" 2>&1)
-        status=$?
-        if [ $status -eq 0 ]; then
+        if cargo nextest run --no-fail-fast --features mimalloc 2>&1 | tail -5; then
             echo "PASS"
             passed=$((passed + 1))
         else
             echo "FAIL"
-            echo "$output" | rg -n "(FAIL|Summary|error:|panicked at)" | head -n 20 || true
-            mkdir -p logs/next-repeat
-            if [ -f logs/masstree.jsonl ]; then
-                cp -f logs/masstree.jsonl "logs/next-repeat/run-${i}.jsonl"
-                echo "Saved logs to logs/next-repeat/run-${i}.jsonl"
-            fi
-            printf '%s\n' "$output" > "logs/next-repeat/run-${i}.out"
-            echo "Saved output to logs/next-repeat/run-${i}.out"
             failed=$((failed + 1))
         fi
     done
@@ -216,18 +87,15 @@ test-one TEST:
     cargo test {{TEST}} -- --nocapture
 
 # Run ALL possible tests (unit, doc, integration, loom, shuttle, miri)
-# This is the most comprehensive test command
 test-all: test test-loom test-shuttle miri-strict
     @echo "All tests passed!"
 
 # Run loom tests for deterministic concurrency verification
-# Loom explores all possible thread interleavings
 test-loom:
     RUSTFLAGS="--cfg loom" cargo test --lib nodeversion::loom_tests
     RUSTFLAGS="--cfg loom" cargo test --lib tree::loom_tests
 
 # Run shuttle linearizability tests
-# Shuttle tests concurrent operations for correctness
 test-shuttle:
     cargo test --lib tree::shuttle_tests
 
@@ -264,14 +132,7 @@ clean:
 
 # === Miri commands (require nightly) ===
 
-# Install nightly toolchain with miri (run once)
-# Commented out - nightly and miri already installed
-# miri-setup:
-#     rustup toolchain install nightly --component miri
-#     rustup run nightly cargo miri setup
-
 # Run unit tests under Miri to detect undefined behavior
-# Note: Only runs --lib tests; proptest is too slow under Miri (~100x overhead)
 miri:
     cargo +nightly miri test --lib
 
@@ -291,14 +152,9 @@ miri-leaks:
 miri-tree-borrows:
     MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test --lib
 
-# Run ALL tests under Miri (slow! includes proptest)
-# Note: -Zmiri-disable-isolation required for proptest (uses getcwd)
-miri-all:
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test
-
 # === Benchmarks ===
 
-# Run benchmarks (requires uncommenting [[bench]] in Cargo.toml)
+# Run benchmarks
 bench:
     cargo bench
 
@@ -311,110 +167,36 @@ bench-native:
 bench-native-one FILTER:
     RUSTFLAGS="-C target-cpu=native" cargo bench --bench concurrent_maps --features mimalloc -- {{FILTER}}
 
-# Run C++ Masstree-compatible read scaling benchmark (apples-to-apples comparison)
-# Pre-populates 10M keys, then measures pure read throughput with shuffled access
-# Compare with: cd reference && ./mttest -j32 -l 10000000 rw1
-apples:
-    cargo bench --bench concurrent_maps --features mimalloc -- rw1_reads_only
-
 # === Profiling ===
 
 # Build with debug symbols for profiling
 build-profile:
     cargo build --profile release-with-debug
 
-# === Flamegraph (requires cargo-flamegraph) ===
-
 # Run flamegraph on the profile example
 # Usage: just flamegraph [workload]
-# Workloads: key, permuter, tree, all (default: tree)
 flamegraph workload="tree":
     CARGO_PROFILE_PROFILING_DEBUG=2 \
     RUSTFLAGS="-C force-frame-pointers=yes" \
     cargo flamegraph --profile profiling --example profile -- {{workload}}
     @echo "Output: flamegraph.svg"
 
-# Run flamegraph with mimalloc (allocator symbols may be incomplete)
-flamegraph-mimalloc workload="tree":
-    CARGO_PROFILE_PROFILING_DEBUG=2 \
-    RUSTFLAGS="-C force-frame-pointers=yes" \
-    CFLAGS="-fno-omit-frame-pointer" \
-    cargo flamegraph --profile profiling --example profile --features mimalloc -- {{workload}}
-    @echo "Output: flamegraph.svg"
-
 # Run flamegraph on a specific benchmark
-# Usage: just flamegraph-bench concurrent_maps "08a_read_scaling"
 flamegraph-bench bench filter="":
     CARGO_PROFILE_PROFILING_DEBUG=2 \
     RUSTFLAGS="-C force-frame-pointers=yes" \
     cargo flamegraph --profile profiling --bench {{bench}} -- {{filter}}
     @echo "Output: flamegraph.svg"
 
-# Run perf record manually (for more control)
-# Usage: just perf-record [workload]
-perf-record workload="tree":
-    RUSTFLAGS="-C force-frame-pointers=yes -C debuginfo=2" \
-    cargo build --profile profiling --example profile
-    perf record -g --call-graph dwarf ./target/profiling/examples/profile {{workload}}
-    @echo "Output: perf.data"
-    @echo "View:   perf report -g"
-
-# Generate flamegraph from existing perf.data
-perf-flamegraph:
-    perf script | stackcollapse-perf.pl | flamegraph.pl > perf-flamegraph.svg
-    @echo "Output: perf-flamegraph.svg"
-
-# Build the callgrind profiling example (with debug symbols)
-build-callgrind:
-    cargo build --profile release-with-debug --example profile
-
-# Run callgrind profiler (default: key workload)
-# Usage: just callgrind [key|permuter|all]
-callgrind workload="key":
-    @cargo build --profile release-with-debug --example profile
-    valgrind --tool=callgrind ./target/release-with-debug/examples/profile {{workload}}
-    @echo "Output: callgrind.out.*"
-    @echo "Analyze: just callgrind-annotate"
-    @echo "GUI:     just callgrind-view"
-
-# Run callgrind with cache simulation
-callgrind-cache workload="key":
-    @cargo build --profile release-with-debug --example profile
-    valgrind --tool=callgrind --cache-sim=yes --branch-sim=yes ./target/release-with-debug/examples/profile {{workload}}
-
-# Annotate the most recent callgrind output
-callgrind-annotate:
-    @callgrind_annotate $(ls -t callgrind.out.* | head -1) --auto=yes
-
-# Open most recent callgrind output in kcachegrind
-callgrind-view:
-    @kcachegrind $(ls -t callgrind.out.* | head -1)
-
-# Clean callgrind output files
-callgrind-clean:
-    rm -f callgrind.out.*
-
 # === Safety ===
 
 # Run address sanitizer (requires nightly)
-# Note: --lib --tests excludes doc tests which don't support sanitizers
 asan:
     RUSTFLAGS="-Z sanitizer=address" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
 
-# Run address sanitizer then clean (avoids polluting normal builds)
-asan-clean:
-    RUSTFLAGS="-Z sanitizer=address" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
-    cargo clean
-
 # Run thread sanitizer (requires nightly)
-# Note: --lib --tests excludes doc tests which don't support sanitizers
 tsan:
     RUSTFLAGS="-Z sanitizer=thread" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
-
-# Run thread sanitizer then clean (avoids polluting normal builds)
-tsan-clean:
-    RUSTFLAGS="-Z sanitizer=thread" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
-    cargo clean
 
 # === Assembly Inspection (requires cargo-show-asm) ===
 
@@ -423,27 +205,5 @@ asm:
     @cargo asm --lib || true
 
 # View assembly for a function (use index from `just asm`)
-# Usage: just asm-view 0
 asm-view index:
     cargo asm --lib --rust {{index}}
-
-# Side-by-side diff of two functions by index
-# Usage: just asm-diff 0 1
-asm-diff idx1 idx2:
-    @mkdir -p /tmp/asm-diff
-    @cargo asm --lib {{idx1}} > /tmp/asm-diff/a.asm 2>&1
-    @cargo asm --lib {{idx2}} > /tmp/asm-diff/b.asm 2>&1
-    @if command -v delta >/dev/null 2>&1; then \
-        delta /tmp/asm-diff/a.asm /tmp/asm-diff/b.asm; \
-    else \
-        diff -y --width=140 /tmp/asm-diff/a.asm /tmp/asm-diff/b.asm || true; \
-    fi
-
-# Analyze function throughput with llvm-mca
-# Usage: just asm-mca 0
-asm-mca index:
-    @if ! command -v llvm-mca >/dev/null 2>&1; then \
-        echo "Error: llvm-mca not found. Install: sudo apt install llvm"; \
-        exit 1; \
-    fi
-    cargo asm --lib {{index}} | llvm-mca -mcpu=native

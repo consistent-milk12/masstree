@@ -23,10 +23,7 @@ use crate::slot::ValueSlot;
 use crate::suffix::SuffixBag;
 use seize::{Guard, LocalGuard};
 
-mod cas;
-mod freeze;
 
-pub use cas::CasPermutationFailure24;
 
 /// Special keylenx value indicating key has a suffix.
 pub const KSUF_KEYLENX: u8 = 64;
@@ -724,12 +721,6 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.permutation.load_raw(READ_ORD)
     }
 
-    /// Store raw permutation value with Release ordering.
-    #[inline(always)]
-    pub(crate) fn permutation_store_raw_release(&self, raw: u128) {
-        self.permutation.store_raw(raw, WRITE_ORD);
-    }
-
     /// Atomically claim a slot for CAS insert.
     ///
     /// # Errors
@@ -1057,16 +1048,6 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     }
 
     #[inline(always)]
-    fn permutation_try(&self) -> Result<Permuter24, ()> {
-        Self::permutation_try(self).map_err(|_| ())
-    }
-
-    #[inline(always)]
-    fn permutation_wait(&self) -> Permuter24 {
-        Self::permutation_wait(self)
-    }
-
-    #[inline(always)]
     fn ikey(&self, slot: usize) -> u64 {
         Self::ikey(self, slot)
     }
@@ -1201,27 +1182,9 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         Self::wait_for_split(self);
     }
 
-    #[inline(always)]
-    fn cas_permutation_raw(
-        &self,
-        expected: Self::Perm,
-        new: Self::Perm,
-    ) -> Result<(), crate::leaf_trait::CasPermutationError<Self::Perm>> {
-        Self::cas_permutation_raw(self, expected, new).map_err(|failure| {
-            crate::leaf_trait::CasPermutationError::new(crate::permuter24::Permuter24::from_value(
-                failure.current_raw(),
-            ))
-        })
-    }
-
     // ========================================================================
     // Split Operations
     // ========================================================================
-
-    type FreezeGuard<'a>
-        = freeze::FreezeGuard24<'a, S>
-    where
-        Self: 'a;
 
     fn calculate_split_point(
         &self,
@@ -1324,10 +1287,8 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
                 "split_into_preallocated: START (new leaf is split-locked)"
             );
 
-            // Always freeze during split - caller must hold lock
-            let freeze_guard = Self::freeze_permutation(self);
-
-            let old_perm: Permuter24 = freeze_guard.snapshot();
+            // Load current permutation (caller holds lock)
+            let old_perm: Permuter24 = self.permutation();
             let old_size = old_perm.size();
 
             debug_assert!(
@@ -1372,8 +1333,8 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
             let mut old_perm_updated = old_perm;
             old_perm_updated.set_size(split_pos);
 
-            // Publish truncated permutation and unfreeze
-            Self::unfreeze_set_permutation(self, freeze_guard, old_perm_updated);
+            // Publish truncated permutation
+            self.set_permutation(old_perm_updated);
 
             // Get split key from new leaf's first entry
             let split_ikey = new_leaf.ikey(new_perm.get(0));
@@ -1409,10 +1370,8 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
             );
         }
 
-        // Always freeze during split - caller must hold lock
-        let freeze_guard = Self::freeze_permutation(self);
-
-        let old_perm: Permuter24 = freeze_guard.snapshot();
+        // Load current permutation (caller holds lock)
+        let old_perm: Permuter24 = self.permutation();
         let old_size = old_perm.size();
 
         debug_assert!(old_size > 0, "Cannot split empty leaf");
@@ -1445,28 +1404,13 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         let new_perm = Permuter24::make_sorted(old_size);
         new_leaf.set_permutation(new_perm);
 
-        // Old leaf becomes empty - unfreeze with empty permutation
-        Self::unfreeze_set_permutation(self, freeze_guard, Permuter24::empty());
+        // Old leaf becomes empty
+        self.set_permutation(Permuter24::empty());
 
         // Split key is first key of new leaf
         let split_ikey = new_leaf.ikey(new_perm.get(0));
 
         (new_leaf, split_ikey, crate::value::InsertTarget::Right)
-    }
-
-    #[inline(always)]
-    fn freeze_permutation(&self) -> Self::FreezeGuard<'_> {
-        Self::freeze_permutation(self)
-    }
-
-    #[inline(always)]
-    fn unfreeze_set_permutation(&self, guard: Self::FreezeGuard<'_>, perm: Self::Perm) {
-        Self::unfreeze_set_permutation(self, guard, perm);
-    }
-
-    #[inline(always)]
-    fn is_permutation_frozen(&self) -> bool {
-        crate::freeze24::Freeze24Utils::is_frozen(self.permutation_raw())
     }
 
     #[inline(always)]

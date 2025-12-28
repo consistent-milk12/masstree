@@ -14,6 +14,7 @@ keywords = [
 	"btree",
 	"ordered-map",
 	"lock-free",
+	"range-scans",
 ]
 categories = ["data-structures", "concurrency", "database-implementations"]
 readme = "README.md"
@@ -143,7 +144,7 @@ opt-level = 3
 debug = false
 debug-assertions = false
 overflow-checks = false
-lto = "thin"
+lto = "fat"
 panic = "abort"
 codegen-units = 1
 strip = "symbols"
@@ -168,8 +169,8 @@ debug = true
 
 [profile.bench]
 inherits = "release"
-debug = true
-strip = "none"
+debug = false
+strip = "symbols"
 
 [[bench]]
 name = "concurrent_maps24"
@@ -195,11 +196,3 @@ harness = false
 [[bench]]
 name = "range_concurrent"
 harness = false
-
-# =============================================================================
-# Profiling Binaries
-# =============================================================================
-
-[[bin]]
-name = "lock_contention"
-path = "bin/lock_contention.rs"
