@@ -495,6 +495,15 @@ where
     ///
     /// Same protocol as [`get_concurrent_generic`] but returns `&V` instead of `Arc<V>`.
     /// Eliminates Arc clone overhead for maximum read performance.
+    ///
+    /// # Single-Layer Fast Path
+    ///
+    /// When the key is ≤ 8 bytes (no suffix), uses an optimized code path that:
+    /// - Skips layer pointer checks (`keylenx >= LAYER_KEYLENX`)
+    /// - Doesn't track layer descent state
+    /// - Eliminates suffix matching logic
+    ///
+    /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
     #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
     fn get_ref_generic<'g>(
         &self,
@@ -505,6 +514,9 @@ where
         use crate::leaf24::KSUF_KEYLENX;
         use crate::leaf24::LAYER_KEYLENX;
         use crate::link::{is_marked, unmark_ptr};
+
+        // Detect single-layer mode: key ≤ 8 bytes means no suffix, no layer descent possible
+        let single_layer_mode: bool = !key.has_suffix();
 
         // Start at tree root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
@@ -539,6 +551,98 @@ where
                     };
 
                     let target_ikey: u64 = key.ikey();
+
+                    // ================================================================
+                    // Single-layer fast path (keys ≤ 8 bytes)
+                    // ================================================================
+                    if single_layer_mode {
+                        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+                        let search_keylenx: u8 = key.current_len() as u8;
+
+                        // Optimized search: no suffix handling, no layer checks
+                        let mut match_ptr: Option<*mut u8> = None;
+                        let mut found_layer: bool = false;
+
+                        for i in 0..perm.size() {
+                            let slot: usize = perm.get(i);
+                            let slot_ikey: u64 = leaf.ikey(slot);
+
+                            if slot_ikey != target_ikey {
+                                continue;
+                            }
+
+                            let slot_keylenx: u8 = leaf.keylenx(slot);
+                            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                            if slot_ptr.is_null() {
+                                continue;
+                            }
+
+                            // Exact keylenx match = found
+                            if slot_keylenx == search_keylenx {
+                                match_ptr = Some(slot_ptr);
+                                break;
+                            }
+
+                            // DEFENSIVE: If we encounter a layer pointer, signal fallback
+                            if slot_keylenx >= LAYER_KEYLENX {
+                                found_layer = true;
+                                break;
+                            }
+                        }
+
+                        // Validate version AFTER all reads
+                        if leaf.version().has_changed(version) {
+                            let (advanced, new_version) =
+                                self.advance_to_key_generic(leaf, key, version, guard);
+
+                            if !std::ptr::eq(advanced, leaf) {
+                                leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
+                                continue 'leaf_loop;
+                            }
+
+                            version = new_version;
+                            continue 'search_loop;
+                        }
+
+                        // VERSION VALIDATED
+
+                        // Fallback to multi-layer if we hit a layer pointer
+                        if found_layer {
+                            // This shouldn't happen for truly single-layer data,
+                            // but handle gracefully by falling through to multi-layer
+                            break 'search_loop;
+                        }
+
+                        if let Some(ptr) = match_ptr {
+                            // Value - return reference WITHOUT cloning Arc
+                            // SAFETY: version validated, guard protects from deallocation
+                            let value_ref: &'g S::Value = unsafe { &*(ptr.cast::<S::Value>()) };
+                            return Some(value_ref);
+                        }
+
+                        // Not found - check for dirty or B-link
+                        if leaf.version().is_dirty() {
+                            version = leaf.version().stable();
+                            continue 'search_loop;
+                        }
+
+                        let next_raw: *mut L = leaf.next_raw();
+                        let next_ptr: *mut L = unmark_ptr(next_raw);
+                        if !next_ptr.is_null() && !is_marked(next_raw) {
+                            let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+                            if target_ikey >= next_bound {
+                                leaf_ptr = next_ptr;
+                                continue 'leaf_loop;
+                            }
+                        }
+
+                        return None;
+                    }
+
+                    // ================================================================
+                    // Multi-layer path (handles layer descent)
+                    // ================================================================
 
                     #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
                     let search_keylenx: u8 = if key.has_suffix() {
@@ -637,6 +741,15 @@ where
     }
 
     /// Internal concurrent get implementation with layer descent support.
+    ///
+    /// # Single-Layer Fast Path
+    ///
+    /// When the key is ≤ 8 bytes (no suffix), uses an optimized code path that:
+    /// - Skips layer pointer checks (`keylenx >= LAYER_KEYLENX`)
+    /// - Doesn't track layer descent state
+    /// - Eliminates suffix matching logic
+    ///
+    /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
     #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
     fn get_concurrent_generic(
         &self,
@@ -656,6 +769,9 @@ where
             ikey = format_args!("{:016x}", target_ikey_for_trace),
             "get: START"
         );
+
+        // Detect single-layer mode: key ≤ 8 bytes means no suffix, no layer descent possible
+        let single_layer_mode: bool = !key.has_suffix();
 
         // Start at tree root
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
@@ -690,6 +806,121 @@ where
                     };
 
                     let target_ikey: u64 = key.ikey();
+
+                    // ================================================================
+                    // Single-layer fast path (keys ≤ 8 bytes)
+                    // ================================================================
+                    if single_layer_mode {
+                        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+                        let search_keylenx: u8 = key.current_len() as u8;
+
+                        // Optimized search: no suffix handling, no layer checks
+                        let mut match_ptr: Option<*mut u8> = None;
+                        let mut found_layer: bool = false;
+
+                        for i in 0..perm.size() {
+                            let slot: usize = perm.get(i);
+                            let slot_ikey: u64 = leaf.ikey(slot);
+
+                            if slot_ikey != target_ikey {
+                                continue;
+                            }
+
+                            let slot_keylenx: u8 = leaf.keylenx(slot);
+                            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                            if slot_ptr.is_null() {
+                                continue;
+                            }
+
+                            // Exact keylenx match = found
+                            if slot_keylenx == search_keylenx {
+                                match_ptr = Some(slot_ptr);
+                                break;
+                            }
+
+                            // DEFENSIVE: If we encounter a layer pointer, signal fallback
+                            if slot_keylenx >= LAYER_KEYLENX {
+                                found_layer = true;
+                                break;
+                            }
+                        }
+
+                        // Validate version AFTER all reads
+                        if leaf.version().has_changed(version) {
+                            let (advanced, new_version) =
+                                self.advance_to_key_generic(leaf, key, version, guard);
+
+                            if !std::ptr::eq(advanced, leaf) {
+                                leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
+                                continue 'leaf_loop;
+                            }
+
+                            version = new_version;
+                            continue 'search_loop;
+                        }
+
+                        // VERSION VALIDATED
+
+                        // Fallback to multi-layer if we hit a layer pointer
+                        if found_layer {
+                            // This shouldn't happen for truly single-layer data,
+                            // but handle gracefully by falling through to multi-layer
+                            break 'search_loop;
+                        }
+
+                        if let Some(ptr) = match_ptr {
+                            // Value - NOW safe to clone
+                            // SAFETY: version validated, so ptr is valid value pointer
+                            let output: S::Output = unsafe { S::output_from_raw(ptr) };
+                            return Some(output);
+                        }
+
+                        // Not found - check for dirty or B-link
+                        if leaf.version().is_dirty() {
+                            version = leaf.version().stable();
+                            continue 'search_loop;
+                        }
+
+                        let next_raw: *mut L = leaf.next_raw();
+                        let next_ptr: *mut L = unmark_ptr(next_raw);
+                        if !next_ptr.is_null() && !is_marked(next_raw) {
+                            let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+                            if target_ikey >= next_bound {
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!(
+                                    ikey = target_ikey,
+                                    leaf_ptr = ?std::ptr::from_ref(leaf),
+                                    next_ptr = ?next_ptr,
+                                    next_bound = next_bound,
+                                    "get: NotFound but ikey >= next_bound; following B-link"
+                                );
+                                #[cfg(feature = "tracing")]
+                                crate::tree::optimistic::BLINK_SHOULD_FOLLOW_COUNT
+                                    .fetch_add(1, AtomicOrdering::Relaxed);
+                                leaf_ptr = next_ptr;
+                                continue 'leaf_loop;
+                            }
+                        }
+
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            ikey = format_args!("{:016x}", target_ikey),
+                            leaf_ptr = ?std::ptr::from_ref(leaf),
+                            perm_size = perm.size(),
+                            next_ptr = ?next_ptr,
+                            is_marked = is_marked(next_raw),
+                            "get: NOT_FOUND"
+                        );
+                        #[cfg(feature = "tracing")]
+                        crate::tree::optimistic::SEARCH_NOT_FOUND_COUNT
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        return None;
+                    }
+
+                    // ================================================================
+                    // Multi-layer path (handles layer descent)
+                    // ================================================================
 
                     #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
                     let search_keylenx: u8 = if key.has_suffix() {
