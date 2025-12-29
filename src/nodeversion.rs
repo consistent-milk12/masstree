@@ -1134,7 +1134,7 @@ impl Default for SingleThreadedNodeVersion {
 }
 
 #[cfg(test)]
-mod unit_tests {}
+mod unit_tests;
 
 // Concurrent tests live in a submodule to keep this file lean.
 // Guarded with `#[cfg(not(miri))]` because Miri doesn't support multi-threading well.

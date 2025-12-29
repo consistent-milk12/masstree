@@ -486,6 +486,402 @@ impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
 }
 
 // ============================================================================
+//  InlineSlotMeta
+// ============================================================================
+
+/// Metadata for a single slot's suffix in inline storage.
+///
+/// Uses `u16` for offset to keep metadata compact (4 bytes per slot).
+/// Maximum inline capacity is 65535 bytes.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+struct InlineSlotMeta {
+    /// Offset into the data buffer (`u16::MAX` if no suffix).
+    offset: u16,
+
+    /// Length of the suffix.
+    len: u16,
+}
+
+impl InlineSlotMeta {
+    /// Sentinel value indicating no suffix stored.
+    const EMPTY: Self = Self {
+        offset: u16::MAX,
+        len: 0,
+    };
+
+    /// Check if this slot has a suffix.
+    #[inline(always)]
+    const fn has_suffix(self) -> bool {
+        self.offset != u16::MAX
+    }
+}
+
+impl Default for InlineSlotMeta {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+// ============================================================================
+//  InlineSuffixBag
+// ============================================================================
+
+/// Fixed-capacity suffix storage embedded directly in a leaf node.
+///
+/// This is an optimization to avoid heap allocation for the common case
+/// where total suffix data is small. Based on C++ Masstree's `iksuf_`
+/// (internal key suffix) design.
+///
+/// # Design
+///
+/// - Embedded in the leaf node (no heap allocation)
+/// - Fixed capacity determined at compile time
+/// - Append-only with slot reuse when new suffix fits in old space
+/// - When full, caller must drain to external `SuffixBag`
+///
+/// # Memory Layout
+///
+/// ```text
+/// InlineSuffixBag<WIDTH=24, CAPACITY=256> (354 bytes total)
+/// ├── slots: [InlineSlotMeta; 24]  // 96 bytes (4 bytes each)
+/// ├── size: u16                     // 2 bytes
+/// └── data: [u8; 256]               // 256 bytes
+/// ```
+///
+/// # Type Parameters
+///
+/// * `WIDTH` - Number of slots (must match the leaf node's WIDTH)
+/// * `CAPACITY` - Fixed capacity in bytes for suffix data
+#[derive(Debug)]
+#[repr(C)]
+pub struct InlineSuffixBag<const WIDTH: usize, const CAPACITY: usize> {
+    /// Per-slot metadata: (offset, length) pairs.
+    slots: [InlineSlotMeta; WIDTH],
+
+    /// Current write position in data buffer.
+    size: u16,
+
+    /// Fixed-size data buffer.
+    data: [u8; CAPACITY],
+}
+
+impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY> {
+    // ========================================================================
+    //  Constructor
+    // ========================================================================
+
+    /// Create an empty inline suffix bag.
+    ///
+    /// This is a const fn so it can be used in static/const contexts.
+    #[must_use]
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self {
+            slots: [InlineSlotMeta::EMPTY; WIDTH],
+            size: 0,
+            data: [0u8; CAPACITY],
+        }
+    }
+
+    // ========================================================================
+    //  Capacity & Size
+    // ========================================================================
+
+    /// Return the fixed capacity of this inline bag.
+    #[must_use]
+    #[inline(always)]
+    pub const fn capacity(&self) -> usize {
+        CAPACITY
+    }
+
+    /// Return the number of bytes currently used.
+    #[must_use]
+    #[inline(always)]
+    pub const fn used(&self) -> usize {
+        self.size as usize
+    }
+
+    /// Return the remaining capacity.
+    #[must_use]
+    #[inline(always)]
+    pub const fn remaining(&self) -> usize {
+        CAPACITY - self.size as usize
+    }
+
+    /// Return the number of slots that have suffixes.
+    #[must_use]
+    #[inline(always)]
+    pub fn count(&self) -> usize {
+        self.slots.iter().filter(|s| s.has_suffix()).count()
+    }
+
+    // ========================================================================
+    //  Slot Access
+    // ========================================================================
+
+    /// Check if a slot has a suffix.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot bounds checked via debug_assert"
+    )]
+    pub fn has_suffix(&self, slot: usize) -> bool {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        self.slots[slot].has_suffix()
+    }
+
+    /// Get the suffix for a slot, or `None` if no suffix.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Bounds checked via debug_assert and invariant"
+    )]
+    pub fn get(&self, slot: usize) -> Option<&[u8]> {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+
+        let meta: InlineSlotMeta = self.slots[slot];
+
+        if !meta.has_suffix() {
+            return None;
+        }
+
+        let start: usize = meta.offset as usize;
+        let end: usize = start + meta.len as usize;
+
+        // INVARIANT: Valid metadata points to valid data range.
+        debug_assert!(
+            end <= CAPACITY,
+            "inline suffix metadata points past capacity: {end} > {CAPACITY}"
+        );
+
+        Some(&self.data[start..end])
+    }
+
+    /// Get the suffix for a slot, or empty slice if no suffix.
+    #[must_use]
+    #[inline(always)]
+    pub fn get_or_empty(&self, slot: usize) -> &[u8] {
+        self.get(slot).unwrap_or(&[])
+    }
+
+    // ========================================================================
+    //  Suffix Assignment
+    // ========================================================================
+
+    /// Try to assign a suffix to a slot in-place.
+    ///
+    /// This is the fast path matching C++ `stringbag::assign()`:
+    /// 1. If new suffix fits in old slot's space, reuse it
+    /// 2. Otherwise, append to end if there's room
+    /// 3. If no room, return `false` (caller should use external bag)
+    ///
+    /// # Returns
+    ///
+    /// - `true` if the suffix was assigned successfully
+    /// - `false` if there's not enough capacity (caller should drain to external)
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot >= WIDTH` or if suffix length exceeds `u16::MAX`.
+    #[inline]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot bounds checked via debug_assert"
+    )]
+    pub fn try_assign(&mut self, slot: usize, suffix: &[u8]) -> bool {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+
+        let suffix_len: usize = suffix.len();
+
+        // Suffix must fit in u16
+        if suffix_len > u16::MAX as usize {
+            return false;
+        }
+
+        let meta: InlineSlotMeta = self.slots[slot];
+
+        // Fast path 1: Reuse existing slot if new suffix fits in old space
+        if meta.has_suffix() && suffix_len <= meta.len as usize {
+            let start: usize = meta.offset as usize;
+            self.data[start..start + suffix_len].copy_from_slice(suffix);
+
+            #[expect(clippy::cast_possible_truncation, reason = "len checked above")]
+            {
+                self.slots[slot] = InlineSlotMeta {
+                    offset: meta.offset,
+                    len: suffix_len as u16,
+                };
+            }
+            return true;
+        }
+
+        // Fast path 2: Append to end if there's room
+        let new_offset: usize = self.size as usize;
+        if new_offset + suffix_len <= CAPACITY {
+            self.data[new_offset..new_offset + suffix_len].copy_from_slice(suffix);
+
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "offset and len checked to fit"
+            )]
+            {
+                self.slots[slot] = InlineSlotMeta {
+                    offset: new_offset as u16,
+                    len: suffix_len as u16,
+                };
+                self.size = (new_offset + suffix_len) as u16;
+            }
+            return true;
+        }
+
+        // Out of capacity - caller should drain to external
+        false
+    }
+
+    /// Clear the suffix for a slot.
+    ///
+    /// This marks the slot as having no suffix but does NOT reclaim
+    /// the data buffer space. Space is only reclaimed when draining
+    /// to an external bag.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `slot >= WIDTH`.
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot bounds checked via debug_assert"
+    )]
+    pub fn clear(&mut self, slot: usize) {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        self.slots[slot] = InlineSlotMeta::EMPTY;
+    }
+
+    /// Clear all slots and reset size to zero.
+    ///
+    /// Used after draining to an external bag.
+    #[inline(always)]
+    pub fn clear_all(&mut self) {
+        self.slots = [InlineSlotMeta::EMPTY; WIDTH];
+        self.size = 0;
+    }
+
+    // ========================================================================
+    //  Drain to External
+    // ========================================================================
+
+    /// Drain active suffixes to a new external `SuffixBag`.
+    ///
+    /// This is called when the inline bag is full and we need to
+    /// allocate an external bag. It:
+    /// 1. Creates a new `SuffixBag` with appropriate capacity
+    /// 2. Copies all active suffixes (per permutation) to it
+    /// 3. Assigns the new suffix that triggered the drain
+    /// 4. Clears this inline bag
+    ///
+    /// # Arguments
+    ///
+    /// * `perm` - Permutation indicating which slots are active
+    /// * `new_slot` - The slot that needs the new suffix
+    /// * `new_suffix` - The suffix that didn't fit
+    ///
+    /// # Returns
+    ///
+    /// A new `SuffixBag` containing all active suffixes plus the new one.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot bounds explicitly checked"
+    )]
+    pub fn drain_to_external<P: PermutationProvider>(
+        &mut self,
+        perm: &P,
+        new_slot: usize,
+        new_suffix: &[u8],
+    ) -> SuffixBag<WIDTH> {
+        // Calculate total size needed
+        let mut total_size: usize = new_suffix.len();
+        for i in 0..perm.size() {
+            let s: usize = perm.get(i);
+            if s < WIDTH && s != new_slot {
+                if let Some(suffix) = self.get(s) {
+                    total_size += suffix.len();
+                }
+            }
+        }
+
+        // Allocate with power-of-2 capacity, minimum 256
+        let capacity: usize = total_size.next_power_of_two().max(256);
+        let mut bag: SuffixBag<WIDTH> = SuffixBag::with_capacity(capacity);
+
+        // Copy existing suffixes
+        for i in 0..perm.size() {
+            let s: usize = perm.get(i);
+            if s < WIDTH && s != new_slot {
+                if let Some(suffix) = self.get(s) {
+                    bag.assign(s, suffix);
+                }
+            }
+        }
+
+        // Assign the new suffix
+        bag.assign(new_slot, new_suffix);
+
+        // Clear inline storage
+        self.clear_all();
+
+        bag
+    }
+
+    // ========================================================================
+    //  Comparison Helpers
+    // ========================================================================
+
+    /// Check if a slot's suffix equals the given suffix.
+    #[must_use]
+    #[inline(always)]
+    pub fn suffix_equals(&self, slot: usize, suffix: &[u8]) -> bool {
+        self.get(slot).is_some_and(|stored| stored == suffix)
+    }
+
+    /// Compare a slot's suffix with the given suffix.
+    #[must_use]
+    #[inline(always)]
+    pub fn suffix_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering> {
+        self.get(slot).map(|stored| stored.cmp(suffix))
+    }
+}
+
+impl<const WIDTH: usize, const CAPACITY: usize> Default for InlineSuffixBag<WIDTH, CAPACITY> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const WIDTH: usize, const CAPACITY: usize> Clone for InlineSuffixBag<WIDTH, CAPACITY> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self {
+            slots: self.slots,
+            size: self.size,
+            data: self.data,
+        }
+    }
+}
+
+// ============================================================================
 //  Tests
 // ============================================================================
 
@@ -942,5 +1338,283 @@ mod tests {
         assert_eq!(bag.get(1), Some(b"test".as_slice()));
         assert_eq!(bag.get(3), Some(b"test".as_slice()));
         assert_eq!(bag.get(4), Some(b"test".as_slice()));
+    }
+
+    // ========================================================================
+    //  InlineSuffixBag Tests
+    // ========================================================================
+
+    #[test]
+    fn test_inline_new() {
+        let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        assert_eq!(bag.capacity(), 256);
+        assert_eq!(bag.used(), 0);
+        assert_eq!(bag.remaining(), 256);
+        assert_eq!(bag.count(), 0);
+    }
+
+    #[test]
+    fn test_inline_default() {
+        let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::default();
+
+        assert_eq!(bag.count(), 0);
+        assert_eq!(bag.used(), 0);
+    }
+
+    #[test]
+    fn test_inline_try_assign_basic() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        assert!(bag.try_assign(0, b"hello"));
+        assert!(bag.try_assign(5, b"world"));
+
+        assert_eq!(bag.get(0), Some(b"hello".as_slice()));
+        assert_eq!(bag.get(5), Some(b"world".as_slice()));
+        assert_eq!(bag.get(1), None);
+        assert_eq!(bag.count(), 2);
+        assert_eq!(bag.used(), 10);
+    }
+
+    #[test]
+    fn test_inline_try_assign_reuse_slot() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        // Assign longer suffix first
+        assert!(bag.try_assign(0, b"hello world"));
+        let used_before = bag.used();
+
+        // Shorter suffix should reuse slot's space
+        assert!(bag.try_assign(0, b"hi"));
+        assert_eq!(bag.get(0), Some(b"hi".as_slice()));
+
+        // Used bytes should not increase
+        assert_eq!(bag.used(), used_before);
+    }
+
+    #[test]
+    fn test_inline_try_assign_append() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        assert!(bag.try_assign(0, b"first"));
+        assert!(bag.try_assign(1, b"second"));
+
+        assert_eq!(bag.used(), 11); // 5 + 6
+        assert_eq!(bag.get(0), Some(b"first".as_slice()));
+        assert_eq!(bag.get(1), Some(b"second".as_slice()));
+    }
+
+    #[test]
+    fn test_inline_try_assign_fails_when_full() {
+        let mut bag: InlineSuffixBag<24, 32> = InlineSuffixBag::new();
+
+        // Fill most of the capacity
+        assert!(bag.try_assign(0, b"12345678901234567890")); // 20 bytes
+        assert!(bag.try_assign(1, b"1234567890")); // 10 bytes, total 30
+
+        // This should fail - only 2 bytes remaining
+        assert!(!bag.try_assign(2, b"abc"));
+
+        // First two slots should still be valid
+        assert_eq!(bag.get(0), Some(b"12345678901234567890".as_slice()));
+        assert_eq!(bag.get(1), Some(b"1234567890".as_slice()));
+        assert_eq!(bag.get(2), None);
+    }
+
+    #[test]
+    fn test_inline_clear() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        bag.try_assign(0, b"hello");
+        assert!(bag.has_suffix(0));
+
+        bag.clear(0);
+
+        assert!(!bag.has_suffix(0));
+        assert_eq!(bag.get(0), None);
+        // Used bytes NOT reclaimed by clear
+        assert_eq!(bag.used(), 5);
+    }
+
+    #[test]
+    fn test_inline_clear_all() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        bag.try_assign(0, b"hello");
+        bag.try_assign(1, b"world");
+
+        bag.clear_all();
+
+        assert_eq!(bag.count(), 0);
+        assert_eq!(bag.used(), 0);
+        assert!(!bag.has_suffix(0));
+        assert!(!bag.has_suffix(1));
+    }
+
+    #[test]
+    fn test_inline_get_or_empty() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        bag.try_assign(0, b"hello");
+
+        assert_eq!(bag.get_or_empty(0), b"hello".as_slice());
+        assert_eq!(bag.get_or_empty(1), b"".as_slice());
+    }
+
+    #[test]
+    fn test_inline_suffix_equals() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        bag.try_assign(0, b"hello");
+
+        assert!(bag.suffix_equals(0, b"hello"));
+        assert!(!bag.suffix_equals(0, b"world"));
+        assert!(!bag.suffix_equals(1, b"hello"));
+    }
+
+    #[test]
+    fn test_inline_suffix_compare() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        bag.try_assign(0, b"hello");
+
+        assert_eq!(
+            bag.suffix_compare(0, b"hello"),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert_eq!(
+            bag.suffix_compare(0, b"hella"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(bag.suffix_compare(1, b"hello"), None);
+    }
+
+    #[test]
+    fn test_inline_drain_to_external() {
+        struct MockPerm {
+            slots: Vec<usize>,
+        }
+
+        impl PermutationProvider for MockPerm {
+            fn size(&self) -> usize {
+                self.slots.len()
+            }
+
+            fn get(&self, i: usize) -> usize {
+                self.slots[i]
+            }
+        }
+
+        let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+
+        // Fill inline bag
+        bag.try_assign(0, b"suffix0");
+        bag.try_assign(1, b"suffix1");
+        bag.try_assign(2, b"suffix2");
+
+        let perm = MockPerm {
+            slots: vec![0, 1, 2],
+        };
+
+        // Drain to external with a new suffix for slot 3
+        let external = bag.drain_to_external(&perm, 3, b"new_suffix");
+
+        // Inline bag should be cleared
+        assert_eq!(bag.count(), 0);
+        assert_eq!(bag.used(), 0);
+
+        // External bag should have all suffixes
+        assert_eq!(external.get(0), Some(b"suffix0".as_slice()));
+        assert_eq!(external.get(1), Some(b"suffix1".as_slice()));
+        assert_eq!(external.get(2), Some(b"suffix2".as_slice()));
+        assert_eq!(external.get(3), Some(b"new_suffix".as_slice()));
+    }
+
+    #[test]
+    fn test_inline_drain_replaces_slot() {
+        struct MockPerm {
+            slots: Vec<usize>,
+        }
+
+        impl PermutationProvider for MockPerm {
+            fn size(&self) -> usize {
+                self.slots.len()
+            }
+
+            fn get(&self, i: usize) -> usize {
+                self.slots[i]
+            }
+        }
+
+        let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+
+        bag.try_assign(0, b"old_suffix");
+        bag.try_assign(1, b"keep_this");
+
+        let perm = MockPerm {
+            slots: vec![0, 1],
+        };
+
+        // Replace slot 0's suffix during drain
+        let external = bag.drain_to_external(&perm, 0, b"new_suffix");
+
+        // External should have new suffix for slot 0
+        assert_eq!(external.get(0), Some(b"new_suffix".as_slice()));
+        assert_eq!(external.get(1), Some(b"keep_this".as_slice()));
+    }
+
+    #[test]
+    fn test_inline_clone() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+        bag.try_assign(0, b"hello");
+        bag.try_assign(5, b"world");
+
+        let cloned = bag.clone();
+
+        assert_eq!(cloned.get(0), Some(b"hello".as_slice()));
+        assert_eq!(cloned.get(5), Some(b"world".as_slice()));
+        assert_eq!(cloned.count(), 2);
+        assert_eq!(cloned.used(), bag.used());
+    }
+
+    #[test]
+    fn test_inline_empty_suffix() {
+        let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+
+        // Empty suffix should work
+        assert!(bag.try_assign(0, b""));
+        assert_eq!(bag.get(0), Some(b"".as_slice()));
+        assert!(bag.has_suffix(0));
+        assert_eq!(bag.used(), 0);
+    }
+
+    #[test]
+    fn test_inline_various_widths() {
+        // Test with different WIDTH parameters
+        let mut bag7: InlineSuffixBag<7, 128> = InlineSuffixBag::new();
+        bag7.try_assign(0, b"test");
+        bag7.try_assign(6, b"last");
+        assert_eq!(bag7.get(0), Some(b"test".as_slice()));
+        assert_eq!(bag7.get(6), Some(b"last".as_slice()));
+
+        let mut bag15: InlineSuffixBag<15, 128> = InlineSuffixBag::new();
+        bag15.try_assign(14, b"slot14");
+        assert_eq!(bag15.get(14), Some(b"slot14".as_slice()));
+    }
+
+    #[test]
+    fn test_inline_size_calculation() {
+        // Verify the size calculation from the doc comment
+        // InlineSuffixBag<24, 256>: 24*4 + 2 + 256 = 354 bytes
+        assert_eq!(
+            std::mem::size_of::<InlineSuffixBag<24, 256>>(),
+            24 * 4 + 2 + 256
+        );
+
+        // InlineSuffixBag<15, 128>: 15*4 + 2 + 128 = 190 bytes
+        assert_eq!(
+            std::mem::size_of::<InlineSuffixBag<15, 128>>(),
+            15 * 4 + 2 + 128
+        );
     }
 }

@@ -212,7 +212,7 @@ pub use link::{is_marked, mark_ptr, unmark_ptr};
 
 // Re-export main types for convenience
 pub use slot::ValueSlot;
-pub use suffix::{PermutationProvider, SuffixBag};
+pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
 pub use tree::RemoveError;
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use tree::{
