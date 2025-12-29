@@ -65,17 +65,15 @@ where
     }
 
     /// Check if the tree is empty.
+    ///
+    /// Returns `true` if the tree contains no keys.
+    ///
+    /// Note: After deletions, the tree structure (internodes, empty leaves) may
+    /// persist even when empty. This method checks the key count, not the structure.
     #[must_use]
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        if self.root_is_leaf_generic() {
-            // SAFETY: root_is_leaf_generic confirmed this is a leaf
-            let leaf_ptr: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
-            unsafe { (*leaf_ptr).is_empty() }
-        } else {
-            // Internode implies at least one key
-            false
-        }
+        self.len() == 0
     }
 
     // ========================================================================
@@ -99,6 +97,7 @@ where
         reason = "root_ptr points to L or L::Internode, both have NodeVersion \
                   as first field with proper alignment"
     )]
+    #[expect(dead_code, reason = "Kept for future use when is_empty() needs structural check")]
     fn root_is_leaf_generic(&self) -> bool {
         let root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 
@@ -940,7 +939,7 @@ where
         feature = "tracing",
         tracing::instrument(level = "trace", skip(self, _guard), fields(ikey = %format_args!("{:016x}", key.ikey())))
     )]
-    fn reach_leaf_concurrent_generic(
+    pub(crate) fn reach_leaf_concurrent_generic(
         &self,
         start: *const u8,
         key: &Key<'_>,
@@ -1347,6 +1346,57 @@ where
         self.insert_concurrent_generic(&mut key, output, guard)
     }
 
+    // ========================================================================
+    //  Remove Operations
+    // ========================================================================
+
+    /// Remove a key from the tree.
+    ///
+    /// Returns `Ok(Some(value))` if the key existed and was removed,
+    /// `Ok(None)` if the key was not found, or an error on failure.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let tree = MassTree24::new();
+    /// tree.insert(b"key", 42)?;
+    ///
+    /// let removed = tree.remove(b"key")?;
+    /// assert_eq!(removed, Some(Arc::new(42)));
+    ///
+    /// let not_found = tree.remove(b"key")?;
+    /// assert_eq!(not_found, None);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `RemoveError::RetryLimitExceeded` if the operation cannot
+    /// complete after the retry limit (extremely rare, indicates contention).
+    pub fn remove(&self, key: &[u8]) -> Result<Option<S::Output>, super::remove::RemoveError> {
+        let guard = self.guard();
+        self.remove_with_guard(key, &guard)
+    }
+
+    /// Remove a key using an existing guard.
+    ///
+    /// Use this when performing multiple operations under the same guard
+    /// to amortize guard creation overhead.
+    pub fn remove_with_guard(
+        &self,
+        key: &[u8],
+        guard: &LocalGuard<'_>,
+    ) -> Result<Option<S::Output>, super::remove::RemoveError> {
+        super::remove::remove_concurrent_generic(self, key, guard)
+    }
+
+    /// Decrement the entry count after successful removal.
+    ///
+    /// Called by `finish_remove_generic` after updating the permutation.
+    #[inline(always)]
+    pub(crate) fn dec_count(&self) {
+        self.count.fetch_sub(1, AtomicOrdering::Relaxed);
+    }
+
     /// Internal concurrent insert with CAS fast path and locked fallback.
     ///
     /// # Single-Layer Fast Path
@@ -1411,6 +1461,26 @@ where
                 continue;
             }
 
+            // ================================================================
+            // OPTIMISTIC LOCKING: Capture STABLE version + permutation
+            // ================================================================
+            // C++ pattern from masstree_get.hh + masstree_struct.hh:
+            //
+            // 1. reach_leaf() calls stable() which waits for dirty bits to clear
+            // 2. Capture permutation after stable
+            // 3. lock() only waits for lock_bit (not dirty bits)
+            // 4. has_changed() compares against the STABLE version
+            //
+            // Key insight: stable() gives us a CLEAN snapshot. If any modification
+            // happens after that, has_changed() will detect it. But since we
+            // waited for dirty bits in stable(), modifications are unlikely.
+            //
+            // This is more efficient than waiting for dirty bits in lock() because:
+            // - We can proceed immediately once lock_bit is clear
+            // - We only retry if there was actually a concurrent modification
+            let pre_lock_version: u32 = leaf.version().stable();
+            let pre_lock_perm_raw = leaf.permutation_raw();
+
             // Lock the leaf
             #[cfg(feature = "tracing")]
             let lock_start = Instant::now();
@@ -1430,6 +1500,29 @@ where
                         "SLOW_LEAF_LOCK: acquiring leaf lock took >1ms"
                     );
                 }
+            }
+
+            // ================================================================
+            // POST-LOCK VALIDATION (C++ masstree_get.hh:100-105 pattern)
+            // ================================================================
+            // With optimistic locking, we acquired the lock without waiting for
+            // dirty bits. Now check if version/permutation changed while waiting.
+            // If so, another thread modified this leaf - unlock and retry.
+            if leaf.version().has_changed(pre_lock_version)
+                || leaf.permutation_raw() != pre_lock_perm_raw
+            {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    ikey = format_args!("{:016x}", ikey_for_trace),
+                    leaf_ptr = ?std::ptr::from_ref(leaf),
+                    "INSERT_RETRY: version/permutation changed during lock acquisition"
+                );
+                drop(lock);
+                #[cfg(feature = "tracing")]
+                {
+                    retry_count += 1;
+                }
+                continue;
             }
 
             // Post-lock membership check (C++ masstree_insert/split pattern):

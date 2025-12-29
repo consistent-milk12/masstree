@@ -748,6 +748,10 @@ impl<const WIDTH: usize> TreePermutation for Permuter<WIDTH> {
         Self::set_size(self, n);
     }
 
+    #[inline(always)]
+    fn remove(&mut self, i: usize) {
+        Self::remove(self, i);
+    }
 }
 
 #[cfg(test)]

@@ -167,6 +167,15 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
 
     /// Set the size without changing slot positions.
     fn set_size(&mut self, n: usize);
+
+    /// Remove the slot at logical position `i`.
+    ///
+    /// The slot is moved to the free region (back) and size is decremented.
+    ///
+    /// # Panics
+    ///
+    /// Debug-panics if `i >= size()`.
+    fn remove(&mut self, i: usize);
 }
 
 // ============================================================================

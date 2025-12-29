@@ -620,9 +620,11 @@ impl NodeVersion {
         loop {
             let value: u32 = self.value.load(Ordering::Relaxed);
 
-            // Must wait for both lock bit and dirty bits to clear.
-            // This ensures we don't acquire while another writer is active.
-            if (value & (LOCK_BIT | DIRTY_MASK)) == 0 {
+            // OPTIMISTIC LOCKING: Only wait for LOCK_BIT to clear.
+            // We DON'T wait for dirty bits (INSERTING_BIT, SPLITTING_BIT).
+            // After acquiring, caller must validate version hasn't changed.
+            // This matches C++ nodeversion.hh:96 which only checks lock_bit.
+            if (value & LOCK_BIT) == 0 {
                 // STRATEGY: Set LOCK_BIT and INSERTING_BIT atomically.
                 // This ensures CAS insert threads (which call stable()) will wait for us.
                 //
@@ -690,8 +692,9 @@ impl NodeVersion {
     pub fn try_lock(&self) -> Option<LockGuard<'_>> {
         let value: u32 = self.value.load(Ordering::Relaxed);
 
-        // Fail fast if locked or dirty.
-        if (value & (LOCK_BIT | DIRTY_MASK)) != 0 {
+        // OPTIMISTIC: Fail fast only if locked (not if dirty).
+        // Matches lock() behavior - caller must validate after acquiring.
+        if (value & LOCK_BIT) != 0 {
             return None;
         }
 

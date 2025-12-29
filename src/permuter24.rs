@@ -709,6 +709,10 @@ impl TreePermutation for Permuter24 {
         Self::set_size(self, n);
     }
 
+    #[inline(always)]
+    fn remove(&mut self, i: usize) {
+        Self::remove(self, i);
+    }
 }
 
 // =============================================================================

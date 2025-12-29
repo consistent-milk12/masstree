@@ -15,6 +15,7 @@ mod generic;
 mod index;
 mod optimistic;
 mod range;
+pub mod remove;
 mod split;
 
 #[cfg(test)]
@@ -22,6 +23,7 @@ pub mod test_hooks;
 
 pub use index::MassTreeIndex;
 pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
+pub use remove::RemoveError;
 
 // Re-export debug counters (only when tracing is enabled)
 #[cfg(feature = "tracing")]
@@ -271,6 +273,50 @@ pub type MassTree24Inline<V> = MassTreeGeneric<
     crate::alloc24::SeizeAllocator24<LeafValueIndex<V>>,
 >;
 
+/// MassTree with WIDTH=15 (matches C++ default).
+///
+/// Uses 15 slots per leaf node (vs 24 for MassTree24), which provides:
+/// - Smaller nodes (~240 bytes vs ~384 bytes)
+/// - Better cache locality (4 cache lines vs 6)
+/// - u64 permutation (no u128 atomics)
+///
+/// Trade-off: More frequent splits due to smaller capacity.
+pub type MassTree15<V> = MassTreeGeneric<
+    LeafValue<V>,
+    crate::leaf15::LeafNode15<LeafValue<V>>,
+    crate::alloc15::SeizeAllocator15<LeafValue<V>>,
+>;
+
+/// Inline storage variant of WIDTH=15 tree.
+pub type MassTree15Inline<V> = MassTreeGeneric<
+    LeafValueIndex<V>,
+    crate::leaf15::LeafNode15<LeafValueIndex<V>>,
+    crate::alloc15::SeizeAllocator15<LeafValueIndex<V>>,
+>;
+
+/// MassTree with lock-free allocation tracking.
+///
+/// Uses atomic CAS operations instead of mutex for tracking allocations.
+/// This eliminates contention on the allocation hot path for better scaling.
+pub type MassTreeLockFree<V> = MassTreeGeneric<
+    LeafValue<V>,
+    crate::leaf24::LeafNode24<LeafValue<V>>,
+    crate::alloc_lockfree::LockFreeAllocator<
+        crate::leaf24::LeafNode24<LeafValue<V>>,
+        LeafValue<V>,
+    >,
+>;
+
+/// Lock-free allocator with WIDTH=15 nodes.
+pub type MassTree15LockFree<V> = MassTreeGeneric<
+    LeafValue<V>,
+    crate::leaf15::LeafNode15<LeafValue<V>>,
+    crate::alloc_lockfree::LockFreeAllocator<
+        crate::leaf15::LeafNode15<LeafValue<V>>,
+        LeafValue<V>,
+    >,
+>;
+
 // ============================================================================
 //  Constructor implementations for type aliases
 // ============================================================================
@@ -302,6 +348,70 @@ impl<V: Copy + Send + Sync + 'static> MassTree24Inline<V> {
 }
 
 impl<V: Copy + Send + Sync + 'static> Default for MassTree24Inline<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: Send + Sync + 'static> MassTree15<V> {
+    /// Create a new empty `MassTree15`.
+    #[must_use]
+    #[inline(always)]
+    pub fn new() -> Self {
+        let allocator = crate::alloc15::SeizeAllocator15::new();
+        Self::with_allocator(allocator)
+    }
+}
+
+impl<V: Send + Sync + 'static> Default for MassTree15<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: Copy + Send + Sync + 'static> MassTree15Inline<V> {
+    /// Create a new empty `MassTree15Inline`.
+    #[must_use]
+    #[inline(always)]
+    pub fn new() -> Self {
+        let allocator = crate::alloc15::SeizeAllocator15::new();
+        Self::with_allocator(allocator)
+    }
+}
+
+impl<V: Copy + Send + Sync + 'static> Default for MassTree15Inline<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: Send + Sync + 'static> MassTreeLockFree<V> {
+    /// Create a new empty `MassTreeLockFree`.
+    #[must_use]
+    #[inline(always)]
+    pub fn new() -> Self {
+        let allocator = crate::alloc_lockfree::LockFreeAllocator::new();
+        Self::with_allocator(allocator)
+    }
+}
+
+impl<V: Send + Sync + 'static> Default for MassTreeLockFree<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: Send + Sync + 'static> MassTree15LockFree<V> {
+    /// Create a new empty `MassTree15LockFree`.
+    #[must_use]
+    #[inline(always)]
+    pub fn new() -> Self {
+        let allocator = crate::alloc_lockfree::LockFreeAllocator::new();
+        Self::with_allocator(allocator)
+    }
+}
+
+impl<V: Send + Sync + 'static> Default for MassTree15LockFree<V> {
     fn default() -> Self {
         Self::new()
     }

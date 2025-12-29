@@ -167,11 +167,14 @@ pub fn init_tracing() {
 #[cfg(not(feature = "tracing"))]
 pub const fn init_tracing() {}
 
+pub mod alloc15;
 pub mod alloc24;
+pub mod alloc_lockfree;
 pub mod alloc_trait;
 pub mod internode;
 pub mod key;
 pub mod ksearch;
+pub mod leaf15;
 pub mod leaf24;
 pub mod leaf_trait;
 pub mod link;
@@ -203,6 +206,12 @@ pub use leaf24::{LeafNode24, WIDTH_24 as LEAF24_WIDTH};
 // Re-export allocator24 types
 pub use alloc24::{NodeAllocator24, SeizeAllocator24};
 
+// Re-export LeafNode15 types (matches C++ default WIDTH=15)
+pub use leaf15::{LeafNode15, WIDTH_15};
+
+// Re-export allocator15 types
+pub use alloc15::{NodeAllocator15, SeizeAllocator15};
+
 // Re-export value types
 pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
 
@@ -213,7 +222,11 @@ pub use link::{is_marked, mark_ptr, unmark_ptr};
 pub use slot::ValueSlot;
 pub use suffix::{PermutationProvider, SuffixBag};
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
-pub use tree::{MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTreeIndex};
+pub use tree::{
+    MassTree, MassTree15, MassTree15Inline, MassTree15LockFree, MassTree24, MassTree24Inline,
+    MassTreeGeneric, MassTreeIndex, MassTreeLockFree,
+};
+pub use tree::RemoveError;
 
 // Re-export debug counters for diagnosis (only when tracing is enabled)
 #[cfg(feature = "tracing")]
