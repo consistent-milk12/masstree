@@ -21,11 +21,12 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::indexing_slicing)]
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::pedantic)]
 
-use masstree::{MassTree15, MassTree15LockFree, MassTree24, MassTree24Inline, MassTreeLockFree};
+use masstree::{MassTree24, MassTree24Inline, MassTreeLockFree};
 use std::env;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -85,7 +86,11 @@ impl Config {
             ];
         }
 
-        Self { threads, duration_secs, tests }
+        Self {
+            threads,
+            duration_secs,
+            tests,
+        }
     }
 }
 
@@ -98,25 +103,25 @@ struct KvRandom {
 }
 
 impl KvRandom {
-    const A: u32 = 1664525;
-    const C: u32 = 1013904223;
+    const A: u32 = 1_664_525;
+    const C: u32 = 1_013_904_223;
     const FIRST_SEED: u64 = 31949;
 
-    fn new(seed: u64) -> Self {
+    const fn new(seed: u64) -> Self {
         Self { seed: seed as u32 }
     }
 
-    fn seed(&mut self, seed: u64) {
+    const fn seed(&mut self, seed: u64) {
         self.seed = seed as u32;
     }
 
     #[inline]
-    fn lcg_step(&mut self) -> u32 {
+    const fn lcg_step(&mut self) -> u32 {
         self.seed = self.seed.wrapping_mul(Self::A).wrapping_add(Self::C);
         self.seed
     }
 
-    fn rand(&mut self) -> u32 {
+    const fn rand(&mut self) -> u32 {
         self.lcg_step();
         let x0 = self.lcg_step();
         self.lcg_step();
@@ -125,10 +130,10 @@ impl KvRandom {
     }
 
     fn bernoulli(&mut self, p: f64) -> bool {
-        (self.rand() as f64 / 0x7FFF_FFFF as f64) < p
+        (f64::from(self.rand()) / f64::from(0x7FFF_FFFF)) < p
     }
 
-    fn uniform(&mut self, max: u32) -> u32 {
+    const fn uniform(&mut self, max: u32) -> u32 {
         self.rand() % max
     }
 }
@@ -180,10 +185,7 @@ fn report(test_name: &str, threads: usize, duration: Duration, ops: u64) {
     let secs = duration.as_secs_f64();
     let ops_per_sec = ops as f64 / secs;
     let m_ops = ops_per_sec / 1_000_000.0;
-    println!(
-        "{:12} {:2} threads: {:8.2}M ops/sec ({} ops in {:.2}s)",
-        test_name, threads, m_ops, ops, secs
-    );
+    println!("{test_name:12} {threads:2} threads: {m_ops:8.2}M ops/sec ({ops} ops in {secs:.2}s)");
 }
 
 // =============================================================================
@@ -210,8 +212,8 @@ fn run_rw1(threads: usize, duration_secs: u64) {
                 let mut puts = 0u64;
                 while !timeout.load(Ordering::Relaxed) {
                     let x = rng.rand();
-                    let key = key_var(x as u64);
-                    let _ = tree.insert(&key, (x + 1) as u64);
+                    let key = key_var(u64::from(x));
+                    let _ = tree.insert(&key, u64::from(x + 1));
                     puts += 1;
                 }
 
@@ -229,7 +231,7 @@ fn run_rw1(threads: usize, duration_secs: u64) {
                 // Get phase
                 let mut gets = 0u64;
                 for x in keys {
-                    let key = key_var(x as u64);
+                    let key = key_var(u64::from(x));
                     std::hint::black_box(tree.get(&key));
                     gets += 1;
                 }
@@ -246,7 +248,12 @@ fn run_rw1(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rw1", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rw1",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -275,7 +282,7 @@ fn run_rw2_internal(test_name: &str, threads: usize, duration_secs: u64, get_fra
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
                 let offset = rng.rand();
-                const C: u32 = 2654435761;
+                const C: u32 = 2_654_435_761;
 
                 let mut puts = 0u64;
                 let mut gets = 0u64;
@@ -283,13 +290,13 @@ fn run_rw2_internal(test_name: &str, threads: usize, duration_secs: u64, get_fra
                 while !timeout.load(Ordering::Relaxed) {
                     if puts == 0 || !rng.bernoulli(get_frac) {
                         let x = (offset.wrapping_add(puts as u32)).wrapping_mul(C);
-                        let key = key_var(x as u64);
-                        let _ = tree.insert(&key, (x + 1) as u64);
+                        let key = key_var(u64::from(x));
+                        let _ = tree.insert(&key, u64::from(x + 1));
                         puts += 1;
                     } else {
                         let idx = rng.uniform(puts as u32);
                         let x = (offset.wrapping_add(idx)).wrapping_mul(C);
-                        let key = key_var(x as u64);
+                        let key = key_var(u64::from(x));
                         std::hint::black_box(tree.get(&key));
                         gets += 1;
                     }
@@ -304,7 +311,12 @@ fn run_rw2_internal(test_name: &str, threads: usize, duration_secs: u64, get_fra
         h.join().unwrap();
     }
 
-    report(test_name, threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        test_name,
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 fn run_rw2(threads: usize, duration_secs: u64) {
@@ -366,7 +378,12 @@ fn run_rw3(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rw3", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rw3",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -418,7 +435,12 @@ fn run_rw3_disjoint(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rw3_disjoint", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rw3_disjoint",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -490,14 +512,23 @@ fn run_rw3_mttest(threads: usize, duration_secs: u64) {
 
     // Sum per-thread rates (C++ methodology)
     let results = results.lock().unwrap();
-    let sum_rates: f64 = results.iter().map(|(ops, elapsed)| *ops as f64 / elapsed).sum();
+    let sum_rates: f64 = results
+        .iter()
+        .map(|(ops, elapsed)| *ops as f64 / elapsed)
+        .sum();
     let total_ops: u64 = results.iter().map(|(ops, _)| ops).sum();
     let max_elapsed: f64 = results.iter().map(|(_, e)| *e).fold(0.0, f64::max);
 
     println!();
     println!("=== METHODOLOGY COMPARISON ===");
-    println!("C++ style (sum per-thread rates): {:.2}M ops/sec", sum_rates / 1_000_000.0);
-    println!("Rust style (total/wall-clock):    {:.2}M ops/sec", total_ops as f64 / max_elapsed / 1_000_000.0);
+    println!(
+        "C++ style (sum per-thread rates): {:.2}M ops/sec",
+        sum_rates / 1_000_000.0
+    );
+    println!(
+        "Rust style (total/wall-clock):    {:.2}M ops/sec",
+        total_ops as f64 / max_elapsed / 1_000_000.0
+    );
     println!();
 }
 
@@ -506,7 +537,7 @@ fn run_rw3_mttest(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_rw3_w15(threads: usize, duration_secs: u64) {
-    let tree = Arc::new(MassTree15::<u64>::new());
+    let tree = Arc::new(MassTree24::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -547,7 +578,12 @@ fn run_rw3_w15(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rw3_w15", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rw3_w15",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -596,7 +632,12 @@ fn run_rw3_lf(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rw3_lf", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rw3_lf",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -604,7 +645,7 @@ fn run_rw3_lf(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_rw3_w15_lf(threads: usize, duration_secs: u64) {
-    let tree = Arc::new(MassTree15LockFree::<u64>::new());
+    let tree = Arc::new(MassTreeLockFree::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -645,7 +686,12 @@ fn run_rw3_w15_lf(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rw3_w15_lf", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rw3_w15_lf",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -694,7 +740,12 @@ fn run_rw3_bin(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rw3_bin", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rw3_bin",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -702,7 +753,7 @@ fn run_rw3_bin(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_rw4(threads: usize, duration_secs: u64) {
-    const TOP: u64 = 2147483647;
+    const TOP: u64 = 2_147_483_647;
     let tree = Arc::new(MassTree24::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
@@ -742,7 +793,12 @@ fn run_rw4(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rw4", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rw4",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -774,8 +830,8 @@ fn run_same(threads: usize, duration_secs: u64) {
                 let mut n = 0u64;
                 while !timeout.load(Ordering::Relaxed) {
                     let x = rng.uniform(10);
-                    let key = key_var(x as u64);
-                    let _ = tree.insert(&key, (x + 1) as u64);
+                    let key = key_var(u64::from(x));
+                    let _ = tree.insert(&key, u64::from(x + 1));
                     n += 1;
                 }
 
@@ -788,7 +844,12 @@ fn run_same(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("same", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "same",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -819,7 +880,7 @@ fn run_wscale(threads: usize, duration_secs: u64) {
 
                 let mut n = 0u64;
                 while !timeout.load(Ordering::Relaxed) {
-                    let x = rng.rand() as u64;
+                    let x = u64::from(rng.rand());
                     let key = key_var(x);
                     let _ = tree.insert(&key, x + 1);
                     n += 1;
@@ -834,7 +895,12 @@ fn run_wscale(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("wscale", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "wscale",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -847,7 +913,7 @@ fn run_rscale(threads: usize, duration_secs: u64) {
     let nseqkeys = (PARTSZ * threads) as u64;
 
     // Pre-populate (like ruscale_init)
-    println!("rscale: pre-populating {} keys...", nseqkeys);
+    println!("rscale: pre-populating {nseqkeys} keys...");
     for part in 0..threads {
         let seed = KvRandom::FIRST_SEED + (part % 48) as u64;
         let mut rng = KvRandom::new(seed);
@@ -887,7 +953,7 @@ fn run_rscale(threads: usize, duration_secs: u64) {
 
                 let mut n = 0u64;
                 while !timeout.load(Ordering::Relaxed) {
-                    let x = (rng.rand() as u64) % nseqkeys;
+                    let x = u64::from(rng.rand()) % nseqkeys;
                     let key = key_var(x);
                     std::hint::black_box(tree.get(&key));
                     n += 1;
@@ -902,7 +968,12 @@ fn run_rscale(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rscale", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rscale",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -915,7 +986,7 @@ fn run_uscale(threads: usize, duration_secs: u64) {
     let nseqkeys = (PARTSZ * threads) as u64;
 
     // Pre-populate
-    println!("uscale: pre-populating {} keys...", nseqkeys);
+    println!("uscale: pre-populating {nseqkeys} keys...");
     for i in 0..nseqkeys {
         let key = key_var(i);
         let _ = tree.insert(&key, i + 1);
@@ -943,7 +1014,7 @@ fn run_uscale(threads: usize, duration_secs: u64) {
 
                 let mut n = 0u64;
                 while !timeout.load(Ordering::Relaxed) {
-                    let x = (rng.rand() as u64) % nseqkeys;
+                    let x = u64::from(rng.rand()) % nseqkeys;
                     let key = key_var(x);
                     let _ = tree.insert(&key, x + 1);
                     n += 1;
@@ -958,7 +1029,12 @@ fn run_uscale(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("uscale", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "uscale",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -989,7 +1065,7 @@ fn run_rw1long(threads: usize, duration_secs: u64) {
                     let x = rng.rand();
                     let fmt = rng.uniform(4) as usize;
                     let key = format!("{}{}", FORMATS[fmt], x).into_bytes();
-                    let _ = tree.insert(&key, (x + 1) as u64);
+                    let _ = tree.insert(&key, u64::from(x + 1));
                     puts += 1;
                 }
 
@@ -1026,7 +1102,12 @@ fn run_rw1long(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rw1long", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rw1long",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -1061,7 +1142,7 @@ fn run_rwsmall24(threads: usize, duration_secs: u64) {
                 while !timeout.load(Ordering::Relaxed) {
                     let x = rng.uniform(NKEYS << 3);
                     let key_idx = x >> 3;
-                    let key = key_var(key_idx as u64);
+                    let key = key_var(u64::from(key_idx));
 
                     if (x & 7) != 0 {
                         std::hint::black_box(tree.get(&key));
@@ -1080,7 +1161,12 @@ fn run_rwsmall24(threads: usize, duration_secs: u64) {
         h.join().unwrap();
     }
 
-    report("rwsmall24", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+    report(
+        "rwsmall24",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
 }
 
 // =============================================================================
@@ -1090,7 +1176,10 @@ fn run_rwsmall24(threads: usize, duration_secs: u64) {
 fn main() {
     let config = Config::parse();
 
-    println!("cpp_comp: {} threads, {}s duration", config.threads, config.duration_secs);
+    println!(
+        "cpp_comp: {} threads, {}s duration",
+        config.threads, config.duration_secs
+    );
     println!("-------------------------------------------");
 
     for test in &config.tests {
@@ -1113,7 +1202,7 @@ fn main() {
             "uscale" => run_uscale(config.threads, config.duration_secs),
             "rw1long" => run_rw1long(config.threads, config.duration_secs),
             "rwsmall24" => run_rwsmall24(config.threads, config.duration_secs),
-            _ => eprintln!("Unknown test: {}", test),
+            _ => eprintln!("Unknown test: {test}"),
         }
     }
 }

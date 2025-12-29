@@ -212,6 +212,11 @@ harness = false
 name = "cpp_comp"
 harness = false
 
+[[bench]]
+name = "extreme_stress"
+harness = false
+
+
 [[bin]]
 name = "cpp_comp"
 path = "benches/cpp_comp.rs"

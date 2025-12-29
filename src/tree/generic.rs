@@ -929,12 +929,24 @@ where
         }
     }
 
-    /// Traverse from layer root to target leaf with version validation.
+    /// Double-buffer traversal from root to leaf.
     ///
-    /// Simple loop that descends through internodes to find the target leaf.
-    /// B-link walking in `advance_to_key` handles any splits that occur.
+    /// This implements the C++ Masstree `reach_leaf()` pattern with:
+    /// - Two-pointer technique to avoid stale child pointer validation
+    /// - Split detection with key comparison to avoid unnecessary root restarts
+    ///
+    /// # Algorithm
+    ///
+    /// The double-buffer technique uses two slots for node/version pairs:
+    /// 1. Read child pointer into the OTHER buffer (sense ^ 1)
+    /// 2. Get child's stable version
+    /// 3. Validate parent version
+    /// 4. If valid: swap sense (we're now "at" child)
+    /// 5. If invalid due to split: check if key > last_key
+    /// 6. Only restart from root if key actually escaped to sibling
     #[expect(clippy::unused_self, reason = "API Consistency")]
     #[expect(clippy::used_underscore_binding, reason = "Lock guard")]
+    #[expect(clippy::indexing_slicing, reason = "sense is always 0 or 1")]
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(level = "trace", skip(self, _guard), fields(ikey = %format_args!("{:016x}", key.ikey())))
@@ -951,53 +963,102 @@ where
         use crate::prefetch::prefetch_read;
 
         let target_ikey: u64 = key.ikey();
-        let mut node: *const u8 = start;
 
-        loop {
-            // SAFETY: node is valid, both node types have NodeVersion as first field
-            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+        // Double-buffer: two node/version pairs, alternating via sense
+        // n[sense] is current node, n[sense ^ 1] is candidate child
+        let mut n: [*const u8; 2] = [start, std::ptr::null()];
+        let mut v: [u32; 2] = [0; 2];
+        let mut sense: usize = 0;
 
-            // Get stable version (spins if dirty)
-            let v: u32 = version.stable();
+        'retry: loop {
+            // ==================================================================
+            // Traverse internodes using double-buffer pattern
+            // ==================================================================
+            loop {
+                // SAFETY: n[sense] is valid, NodeVersion is first field
+                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+                let version: &NodeVersion = unsafe { &*(n[sense].cast::<NodeVersion>()) };
 
-            if version.is_leaf() {
-                // Reached a leaf
-                return node.cast_mut().cast::<L>();
-            }
+                // Get stable version of current node
+                v[sense] = version.stable();
 
-            // It's an internode - traverse down
-            // SAFETY: !is_leaf() confirmed above
-            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+                // Check if we've reached a leaf
+                if version.is_leaf() {
+                    return n[sense].cast_mut().cast::<L>();
+                }
 
-            // Binary search for child
-            let child_idx: usize =
-                upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
-            let child: *mut u8 = inode.child(child_idx);
+                // It's an internode - traverse down
+                // SAFETY: !is_leaf() confirmed above
+                let inode: &L::Internode = unsafe { &*(n[sense].cast::<L::Internode>()) };
 
-            // Prefetch child node while we validate version (hides memory latency)
-            prefetch_read(child);
+                // Binary/linear search for child pointer
+                let child_idx: usize =
+                    upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
 
-            if child.is_null() {
-                // Concurrent split in progress - retry from start
-                node = start;
-                continue;
-            }
+                // Read child into the OTHER buffer (sense ^ 1)
+                let other: usize = sense ^ 1;
+                let child: *mut u8 = inode.child(child_idx);
+                n[other] = child.cast_const();
 
-            // Check if internode changed during our read
-            if inode.version().has_changed(v) {
-                // Version changed - check for split
-                if inode.version().has_split(v) {
-                    // Key might have escaped to sibling - retry from start
-                    node = start;
+                // Null child means concurrent split in progress
+                if child.is_null() {
+                    // Reset to start and retry
+                    sense = 0;
+                    n[0] = start;
+                    continue 'retry;
+                }
+
+                // Prefetch child while we validate (hide memory latency)
+                prefetch_read(child);
+
+                // Get stable version of child BEFORE validating parent
+                // This is the key insight: we have child's version captured,
+                // so even if parent changes, we know child state at read time
+                // SAFETY: child is non-null and valid
+                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+                let child_version: &NodeVersion = unsafe { &*(child.cast::<NodeVersion>()) };
+                v[other] = child_version.stable();
+
+                // Now validate parent - did it change during our read?
+                if !inode.version().has_changed(v[sense]) {
+                    // Success! Parent unchanged, child read is valid
+                    // Swap sense to "move" to child
+                    sense = other;
                     continue;
                 }
-                // Just retry this internode
-                continue;
-            }
 
-            // Descend to child
-            node = child;
+                // Parent changed - check if it was a split that moved our key
+                let old_v: u32 = v[sense];
+                v[sense] = inode.version().stable(); // Re-read parent version
+
+                if inode.version().has_split(old_v) {
+                    // Split occurred - check if our key moved to the right sibling
+                    // If target_ikey > last_key, key is beyond this internode's range
+                    let nkeys: usize = inode.nkeys();
+                    if nkeys > 0 {
+                        let last_key: u64 = inode.ikey(nkeys - 1);
+                        if target_ikey > last_key {
+                            // Key escaped to sibling - must restart from root
+                            #[cfg(feature = "tracing")]
+                            tracing::debug!(
+                                target_ikey = format_args!("{:016x}", target_ikey),
+                                last_key = format_args!("{:016x}", last_key),
+                                "reach_leaf: key escaped to sibling, restarting"
+                            );
+                            sense = 0;
+                            n[0] = start;
+                            continue 'retry;
+                        }
+                    }
+                }
+
+                // Minor change (insert) or split that didn't move our key
+                // Just retry this level (sense stays the same, loop continues)
+                #[cfg(feature = "tracing")]
+                tracing::trace!(
+                    "reach_leaf: internode changed but key still in range, retrying level"
+                );
+            }
         }
     }
 
