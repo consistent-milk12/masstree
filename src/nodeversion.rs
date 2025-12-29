@@ -420,14 +420,16 @@ impl NodeVersion {
         let mut spins: u32 = 0;
 
         loop {
-            // Single Acquire load - establishes synchronizes-with relationship with
-            // the writer's Release store in `LockGuard::drop()`.
-            //
-            // OPTIMIZATION: Previous version did double-load (Relaxed then Acquire).
-            // Single Acquire load is sufficient and saves ~5-10% on read throughput.
-            let value: u32 = self.value.load(Ordering::Acquire);
+            // Relaxed load like C++ - only need compiler barrier at the end.
+            // C++ nodeversion.hh:40-47 uses plain reads with acquire_fence() after loop.
+            // On x86, Relaxed compiles to same `mov` as Acquire.
+            let value: u32 = self.value.load(Ordering::Relaxed);
 
             if (value & DIRTY_MASK) == 0 {
+                // Acquire fence after successful read - matches C++ acquire_fence()
+                // This establishes synchronizes-with relationship with writer's Release.
+                std::sync::atomic::fence(Ordering::Acquire);
+
                 #[expect(clippy::cast_possible_truncation)]
                 #[cfg(feature = "tracing")]
                 {
@@ -493,20 +495,14 @@ impl NodeVersion {
     pub fn has_changed(&self, old: u32) -> bool {
         // Compiler fence: ensures all prior reads complete before version check.
         // This matches C++ fence() in nodeversion.hh:72.
-        // OPTIMIZATION: Acquire is sufficient - we only need to prevent reordering
-        // of reads before this fence, not full sequential consistency.
         compiler_fence(Ordering::Acquire);
 
+        // Relaxed load like C++ - the compiler fence above prevents reordering.
+        // C++ uses plain read after fence(): `return (x.v_ ^ v_) > lock_bit;`
+        //
         // XOR the versions, change = differing bits above LOCK_BIT | INSERTING_BIT.
-        //
-        // With the "always dirty on lock" strategy, we set INSERTING_BIT when acquiring
-        // the lock. This means `old` (from stable()) won't have INSERTING_BIT, but
-        // `current` (after we lock) will. We must ignore this difference, otherwise
-        // has_changed() always returns true after we acquire the lock.
-        //
         // LOCK_BIT = 1, INSERTING_BIT = 2, so LOCK_BIT | INSERTING_BIT = 3.
-        // We check if any bits above bit 1 (i.e., bits 2+) differ.
-        (old ^ self.value.load(Ordering::Acquire)) > (LOCK_BIT | INSERTING_BIT)
+        (old ^ self.value.load(Ordering::Relaxed)) > (LOCK_BIT | INSERTING_BIT)
     }
 
     /// Check if a split has occurred since `old`.
@@ -520,11 +516,10 @@ impl NodeVersion {
     pub fn has_split(&self, old: u32) -> bool {
         // Compiler fence: ensures all prior reads complete before version check.
         // This matches C++ fence() in nodeversion.hh:80.
-        // Acquire is sufficient - we only need to prevent reordering of reads
-        // before this fence, not full sequential consistency.
         compiler_fence(Ordering::Acquire);
 
-        (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
+        // Relaxed load like C++ - the compiler fence above prevents reordering.
+        (old ^ self.value.load(Ordering::Relaxed)) >= VSPLIT_LOWBIT
     }
 
     /// Check if a split has occurred since `old`, without a fence.

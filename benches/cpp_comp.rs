@@ -6,10 +6,12 @@
 //!
 //! ```bash
 //! # Run all tests with 6 threads, 3 second duration
-//! cargo run --release --bench cpp_comp --features mimalloc -- -j6 -d3
+//! cargo bench --bench cpp_comp --features mimalloc -- -j6 -d3
+//! # (or: cargo run --release --bin cpp_comp --features mimalloc -- -j6 -d3)
 //!
 //! # Run specific test
-//! cargo run --release --bench cpp_comp --features mimalloc -- -j6 -d3 rw3
+//! cargo bench --bench cpp_comp --features mimalloc -- -j6 -d3 rw3
+//! # (or: cargo run --release --bin cpp_comp --features mimalloc -- -j6 -d3 rw3)
 //!
 //! # Compare with C++ (in reference/ directory)
 //! ./mttest -j6 -d3 rw3
@@ -20,7 +22,7 @@
 #![allow(clippy::indexing_slicing)]
 #![allow(clippy::unwrap_used)]
 
-use masstree::{MassTree15, MassTree15LockFree, MassTree24, MassTreeLockFree};
+use masstree::{MassTree15, MassTree15LockFree, MassTree24, MassTree24Inline, MassTreeLockFree};
 use std::env;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -205,19 +207,19 @@ fn run_rw1(threads: usize, duration_secs: u64) {
                 let mut rng = KvRandom::new(seed);
 
                 // Put phase
-                let mut keys = Vec::new();
+                let mut puts = 0u64;
                 while !timeout.load(Ordering::Relaxed) {
                     let x = rng.rand();
                     let key = key_var(x as u64);
                     let _ = tree.insert(&key, (x + 1) as u64);
-                    keys.push(x);
+                    puts += 1;
                 }
-                let puts = keys.len() as u64;
 
-                // Shuffle
+                // Reconstruct + shuffle (matches C++ `kvtest_rw1_seed`: regenerate keys, then shuffle)
                 rng.seed(seed);
-                for _ in 0..keys.len() {
-                    rng.rand();
+                let mut keys = Vec::with_capacity(puts as usize);
+                for _ in 0..puts {
+                    keys.push(rng.rand());
                 }
                 for i in 0..keys.len() {
                     let j = rng.uniform(keys.len() as u32) as usize;
@@ -226,7 +228,7 @@ fn run_rw1(threads: usize, duration_secs: u64) {
 
                 // Get phase
                 let mut gets = 0u64;
-                for &x in &keys {
+                for x in keys {
                     let key = key_var(x as u64);
                     std::hint::black_box(tree.get(&key));
                     gets += 1;
@@ -322,7 +324,8 @@ fn run_rw2g98(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_rw3(threads: usize, duration_secs: u64) {
-    let tree = Arc::new(MassTree24::<u64>::new());
+    // Use inline storage - no Arc allocation per insert (matches C++)
+    let tree = Arc::new(MassTree24Inline::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -364,6 +367,138 @@ fn run_rw3(threads: usize, duration_secs: u64) {
     }
 
     report("rw3", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+}
+
+// =============================================================================
+// RW3_DISJOINT: Sequential 8-byte keys with disjoint ranges per thread
+// =============================================================================
+
+fn run_rw3_disjoint(threads: usize, duration_secs: u64) {
+    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let timeout = Arc::new(AtomicBool::new(false));
+    let total_ops = Arc::new(AtomicU64::new(0));
+
+    let timeout_clone = Arc::clone(&timeout);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(duration_secs));
+        timeout_clone.store(true, Ordering::Relaxed);
+    });
+
+    let start = Instant::now();
+
+    let handles: Vec<_> = (0..threads)
+        .map(|tid| {
+            let tree = Arc::clone(&tree);
+            let timeout = Arc::clone(&timeout);
+            let total_ops = Arc::clone(&total_ops);
+            thread::spawn(move || {
+                // Each thread uses disjoint key range
+                let base = (tid as u64) * 10_000_000;
+
+                // Put phase
+                let mut n = 0u64;
+                while !timeout.load(Ordering::Relaxed) {
+                    let key = key8(base + n);
+                    let _ = tree.insert(&key, n + 1);
+                    n += 1;
+                }
+
+                // Get phase
+                for i in 0..n {
+                    let key = key8(base + i);
+                    std::hint::black_box(tree.get(&key));
+                }
+
+                total_ops.fetch_add(n * 2, Ordering::Relaxed);
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    report("rw3_disjoint", threads, start.elapsed(), total_ops.load(Ordering::Relaxed));
+}
+
+// =============================================================================
+// RW3_MTTEST: Exact C++ mttest methodology (per-thread timing, sum rates)
+// =============================================================================
+
+fn run_rw3_mttest(threads: usize, duration_secs: u64) {
+    use std::sync::Mutex;
+
+    // Use inline storage - no Arc allocation per insert (matches C++)
+    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let timeout = Arc::new(AtomicBool::new(false));
+    // Collect per-thread results: (ops, elapsed_secs)
+    let results: Arc<Mutex<Vec<(u64, f64)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let timeout_clone = Arc::clone(&timeout);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(duration_secs));
+        timeout_clone.store(true, Ordering::Relaxed);
+    });
+
+    let handles: Vec<_> = (0..threads)
+        .map(|tid| {
+            let tree = Arc::clone(&tree);
+            let timeout = Arc::clone(&timeout);
+            let results = Arc::clone(&results);
+            thread::spawn(move || {
+                // C++ pattern: each thread times itself
+                let t0 = Instant::now();
+
+                // Put phase
+                let mut n = 0u64;
+                while !timeout.load(Ordering::Relaxed) {
+                    let key = key8(n);
+                    let _ = tree.insert(&key, n + 1);
+                    n += 1;
+                }
+
+                let t1 = Instant::now();
+
+                // Get phase
+                for i in 0..n {
+                    let key = key8(i);
+                    std::hint::black_box(tree.get(&key));
+                }
+
+                let t2 = Instant::now();
+
+                let total_ops = n * 2;
+                let elapsed = (t2 - t0).as_secs_f64();
+                let ops_per_sec = total_ops as f64 / elapsed;
+
+                // Report per-thread stats (like C++ does)
+                println!(
+                    "{}: {{\"thread\":{},\"puts\":{},\"puts_per_sec\":{:.5},\"gets\":{},\"gets_per_sec\":{:.5},\"ops\":{},\"ops_per_sec\":{:.5}}}",
+                    tid, tid, n, n as f64 / (t1 - t0).as_secs_f64(),
+                    n, n as f64 / (t2 - t1).as_secs_f64(),
+                    total_ops, ops_per_sec
+                );
+
+                results.lock().unwrap().push((total_ops, elapsed));
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Sum per-thread rates (C++ methodology)
+    let results = results.lock().unwrap();
+    let sum_rates: f64 = results.iter().map(|(ops, elapsed)| *ops as f64 / elapsed).sum();
+    let total_ops: u64 = results.iter().map(|(ops, _)| ops).sum();
+    let max_elapsed: f64 = results.iter().map(|(_, e)| *e).fold(0.0, f64::max);
+
+    println!();
+    println!("=== METHODOLOGY COMPARISON ===");
+    println!("C++ style (sum per-thread rates): {:.2}M ops/sec", sum_rates / 1_000_000.0);
+    println!("Rust style (total/wall-clock):    {:.2}M ops/sec", total_ops as f64 / max_elapsed / 1_000_000.0);
+    println!();
 }
 
 // =============================================================================
@@ -849,21 +984,22 @@ fn run_rw1long(threads: usize, duration_secs: u64) {
                 let mut rng = KvRandom::new(seed);
 
                 // Put phase
-                let mut keys = Vec::new();
+                let mut puts = 0u64;
                 while !timeout.load(Ordering::Relaxed) {
                     let x = rng.rand();
                     let fmt = rng.uniform(4) as usize;
                     let key = format!("{}{}", FORMATS[fmt], x).into_bytes();
                     let _ = tree.insert(&key, (x + 1) as u64);
-                    keys.push((fmt, x));
+                    puts += 1;
                 }
-                let puts = keys.len() as u64;
 
-                // Shuffle
+                // Reconstruct + shuffle (C++ regenerates keys after put phase, then shuffles)
                 rng.seed(seed);
-                for _ in 0..keys.len() {
-                    rng.rand();
-                    rng.uniform(4);
+                let mut keys = Vec::with_capacity(puts as usize);
+                for _ in 0..puts {
+                    let x = rng.rand();
+                    let fmt = rng.uniform(4) as usize;
+                    keys.push((fmt, x));
                 }
                 for i in 0..keys.len() {
                     let j = rng.uniform(keys.len() as u32) as usize;
@@ -872,7 +1008,7 @@ fn run_rw1long(threads: usize, duration_secs: u64) {
 
                 // Get phase
                 let mut gets = 0u64;
-                for &(fmt, x) in &keys {
+                for (fmt, x) in keys {
                     let key = format!("{}{}", FORMATS[fmt], x).into_bytes();
                     std::hint::black_box(tree.get(&key));
                     gets += 1;
@@ -964,6 +1100,8 @@ fn main() {
             "rw2g90" => run_rw2g90(config.threads, config.duration_secs),
             "rw2g98" => run_rw2g98(config.threads, config.duration_secs),
             "rw3" => run_rw3(config.threads, config.duration_secs),
+            "rw3_disjoint" => run_rw3_disjoint(config.threads, config.duration_secs),
+            "rw3_mttest" => run_rw3_mttest(config.threads, config.duration_secs),
             "rw3_w15" => run_rw3_w15(config.threads, config.duration_secs),
             "rw3_lf" => run_rw3_lf(config.threads, config.duration_secs),
             "rw3_w15_lf" => run_rw3_w15_lf(config.threads, config.duration_secs),

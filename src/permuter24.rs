@@ -117,6 +117,21 @@ impl Permuter24 {
         }
     }
 
+    /// Create a permuter from a raw u128 value.
+    ///
+    /// This is used for optimistic read patterns where we capture the
+    /// permutation value before acquiring a lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `value` represents a valid permutation state.
+    /// Invalid values may cause undefined behavior in subsequent operations.
+    #[inline(always)]
+    #[must_use]
+    pub const fn from_raw(value: u128) -> Self {
+        Self { value }
+    }
+
     /// Create a sorted permuter with `n` elements.
     ///
     /// Position i maps to slot i for i in `0..n` (sorted order).
