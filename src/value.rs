@@ -141,7 +141,9 @@ impl<V> Clone for LeafValue<V> {
     fn clone(&self) -> Self {
         match self {
             Self::Empty => Self::Empty,
+
             Self::Value(arc) => Self::Value(Arc::clone(arc)),
+
             Self::Layer(ptr) => Self::Layer(*ptr),
         }
     }
@@ -158,7 +160,9 @@ impl<V> std::fmt::Debug for LeafValue<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Empty => write!(f, "Empty"),
+
             Self::Value(_) => write!(f, "Value(...)"),
+
             Self::Layer(ptr) => write!(f, "Layer({ptr:?})"),
         }
     }
@@ -268,7 +272,9 @@ impl<V: Copy> std::fmt::Debug for LeafValueIndex<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Empty => write!(f, "Empty"),
+
             Self::Value(_) => write!(f, "Value(...)"),
+
             Self::Layer(ptr) => write!(f, "Layer({ptr:?})"),
         }
     }
@@ -283,6 +289,7 @@ impl<V: Copy> std::fmt::Debug for LeafValueIndex<V> {
 pub struct SplitPoint {
     /// Logical position where to split (in post-insert coordinates).
     pub pos: usize,
+
     /// The ikey that will be the first key of the new (right) leaf.
     pub split_ikey: u64,
 }
@@ -292,6 +299,7 @@ pub struct SplitPoint {
 pub enum InsertTarget {
     /// Insert into the original (left) leaf.
     Left,
+
     /// Insert into the new (right) leaf.
     Right,
 }
