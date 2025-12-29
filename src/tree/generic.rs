@@ -929,6 +929,34 @@ where
         }
     }
 
+    /// Single-step parent traversal (C++ `maybe_parent()` equivalent).
+    ///
+    /// Returns the parent node if it exists, otherwise returns `node` itself.
+    /// Used in root fix-up loop during traversal retries.
+    #[inline(always)]
+    #[expect(clippy::unused_self, reason = "Method signature pattern")]
+    fn maybe_parent_one_step(&self, node: *const u8) -> *const u8 {
+        // SAFETY: node is valid, both types have NodeVersion as first field
+        #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+        let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+
+        let parent: *mut u8 = if version.is_leaf() {
+            // SAFETY: version.is_leaf() confirmed
+            let leaf: &L = unsafe { &*(node.cast::<L>()) };
+            leaf.parent()
+        } else {
+            // SAFETY: !version.is_leaf() confirmed
+            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+            inode.parent()
+        };
+
+        if parent.is_null() {
+            node
+        } else {
+            parent.cast_const()
+        }
+    }
+
     /// Double-buffer traversal from root to leaf.
     ///
     /// This implements the C++ Masstree `reach_leaf()` pattern with:
@@ -966,11 +994,45 @@ where
 
         // Double-buffer: two node/version pairs, alternating via sense
         // n[sense] is current node, n[sense ^ 1] is candidate child
-        let mut n: [*const u8; 2] = [start, std::ptr::null()];
+        // Note: n[0] is set in root fix-up loop, n[1] is set before being read
+        let mut n: [*const u8; 2] = [std::ptr::null(); 2];
         let mut v: [u32; 2] = [0; 2];
+        #[expect(unused_assignments, reason = "sense is set at top of retry loop")]
         let mut sense: usize = 0;
 
         'retry: loop {
+            // ==================================================================
+            // Root fix-up: walk up until we find the actual layer root
+            // ==================================================================
+            // C++ comment: "Get a non-stale root. Detect staleness by checking
+            // whether n has ever split. The true root has never split."
+            //
+            // When a node splits, SPLIT_UNLOCK_MASK clears the ROOT_BIT.
+            // So we walk up via parent pointers until we find a node with
+            // is_root() set, which is the current layer root.
+            sense = 0;
+            n[sense] = start;
+            loop {
+                // SAFETY: n[sense] is valid, NodeVersion is first field
+                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+                let version: &NodeVersion = unsafe { &*(n[sense].cast::<NodeVersion>()) };
+                v[sense] = version.stable();
+
+                if version.is_root() {
+                    // Found the current layer root
+                    break;
+                }
+
+                #[cfg(feature = "tracing")]
+                tracing::trace!(
+                    node = ?n[sense],
+                    "reach_leaf: root fix-up, walking up to parent"
+                );
+
+                // Walk up to parent
+                n[sense] = self.maybe_parent_one_step(n[sense]);
+            }
+
             // ==================================================================
             // Traverse internodes using double-buffer pattern
             // ==================================================================
@@ -1002,9 +1064,7 @@ where
 
                 // Null child means concurrent split in progress
                 if child.is_null() {
-                    // Reset to start and retry
-                    sense = 0;
-                    n[0] = start;
+                    // Retry - root fix-up loop will find current root
                     continue 'retry;
                 }
 
@@ -1045,8 +1105,7 @@ where
                                 last_key = format_args!("{:016x}", last_key),
                                 "reach_leaf: key escaped to sibling, restarting"
                             );
-                            sense = 0;
-                            n[0] = start;
+                            // Retry - root fix-up loop will find current root
                             continue 'retry;
                         }
                     }
