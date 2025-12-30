@@ -18,14 +18,7 @@ keywords = [
 ]
 categories = ["data-structures", "concurrency", "database-implementations"]
 readme = "README.md"
-include = [
-	"src/**/*",
-	"benches/**/*",
-	"tests/**/*",
-	"Cargo.toml",
-	"LICENSE",
-	"README.md",
-]
+include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md"]
 
 [features]
 default = []
@@ -215,8 +208,3 @@ harness = false
 [[bench]]
 name = "extreme_stress"
 harness = false
-
-
-[[bin]]
-name = "cpp_comp"
-path = "benches/cpp_comp.rs"
