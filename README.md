@@ -2,7 +2,7 @@
 
 `masstree` is a beta high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` and supports variable length keys by building a trie of small B+trees, based on the [Masstree paper](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf) (Mao, Kohler, Morris — EuroSys 2012).
 
-This release is published as `0.2.0`. The crate is feature-complete for core operations (get, insert, range scans) but still being validated for correctness and performance under high contention.
+This release is published as `0.2.2`. The crate is feature-complete for core operations (get, insert, range scans) but still being validated for correctness and performance under high contention.
 
 This crate does a lot of allocation. In my testing, the default global allocator can be much slower than `mimalloc` for these patterns. The C++ Masstree codebase uses a custom allocator, and this Rust port does not have an equivalent yet.
 
@@ -39,7 +39,8 @@ Not implemented yet:
 | Version | Features |
 |---------|----------|
 | 0.1.x | Initial implementation (get, insert, splits) |
-| **0.2.0** | Range scans (`scan`, `scan_ref`, `scan_prefix`) |
+| 0.2.0 | Range scans (`scan`, `scan_ref`, `scan_prefix`) |
+| **0.2.2** | Box elimination, optimized range scans |
 | 0.3.0 | Deletion (planned) |
 
 ## Install
@@ -48,7 +49,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-masstree = { version = "0.2.0", features = ["mimalloc"] }
+masstree = { version = "0.2.2", features = ["mimalloc"] }
 ```
 
 MSRV is Rust `1.92`.
@@ -86,7 +87,7 @@ Notes:
 
 ## Benchmarks
 
-These numbers are from `runs/run23_point_ops.md` (point operations, 6 physical cores) and `runs/run20_range.md` (range scans). The tables show median results.
+These numbers are from `runs/run29_point_ops_optimized.md` (point operations, 6 physical cores) and `runs/run30_range_scans_optimized.md` (range scans). The tables show median results.
 
 ### Point Operations
 
@@ -94,33 +95,33 @@ Read throughput at 6 threads:
 
 | Benchmark | `MassTree` | `SkipMap` | `IndexSet` | `TreeIndex` |
 | --- | --- | --- | --- | --- |
-| `10a_read_scaling_8B` | **86.7 Mitem/s** | 42.6 Mitem/s | 31.9 Mitem/s | 30.7 Mitem/s |
-| `10b_read_scaling_32B` | **45.0 Mitem/s** | 17.6 Mitem/s | 17.1 Mitem/s | 16.7 Mitem/s |
+| Read scaling (8B keys) | **64.2 Mitem/s** | 44.0 Mitem/s | 34.9 Mitem/s | 33.2 Mitem/s |
+| Read scaling (32B keys) | **53.9 Mitem/s** | 18.0 Mitem/s | 17.1 Mitem/s | 16.7 Mitem/s |
 
 Write benchmarks at 6 threads, median time per run:
 
 | Benchmark | `MassTree` | `SkipMap` | `IndexSet` | `TreeIndex` |
 | --- | --- | --- | --- | --- |
-| `01_concurrent_writes_disjoint` | **17.5 ms** | 28.0 ms | 80.3 ms | 18.1 ms |
-| `02_concurrent_writes_contention` | **7.6 ms** | 14.6 ms | 21.1 ms | 22.7 ms |
+| Concurrent writes (disjoint) | **18.3 ms** | 28.4 ms | 86.6 ms | 18.3 ms |
+| Concurrent writes (contention) | **8.08 ms** | 14.9 ms | 23.1 ms | 23.5 ms |
 
 Single threaded insert, median time per run:
 
 | Benchmark | `MassTree` | `SkipMap` | `IndexSet` | `TreeIndex` |
 | --- | --- | --- | --- | --- |
-| `03_single_threaded_insert` | **8.5 ms** | 12.5 ms | 42.0 ms | 17.9 ms |
+| Single-threaded insert | **11.5 ms** | 13.3 ms | 41.7 ms | 17.7 ms |
 
 ### Range Scans
 
-Scan throughput at 6 threads (10K entries scanned per operation):
+Scan throughput at 6 threads:
 
 | Benchmark | `MassTree` | `IndexSet` | `TreeIndex` |
 | --- | --- | --- | --- |
-| `01_sequential_full_scan` | **4.46 Mitem/s** | 0.61 Mitem/s | 3.56 Mitem/s |
-| `02_reverse_scan` | **4.46 Mitem/s** | 0.60 Mitem/s | 3.41 Mitem/s |
-| `12_long_keys_64b_scan` | **4.29 Mitem/s** | 0.66 Mitem/s | 3.41 Mitem/s |
+| Sequential full scan | **4.69 Mitem/s** | 0.63 Mitem/s | 3.22 Mitem/s |
+| Reverse scan | **4.57 Mitem/s** | 0.60 Mitem/s | 3.13 Mitem/s |
+| Long keys (64B) scan | **4.60 Mitem/s** | 0.57 Mitem/s | 3.11 Mitem/s |
 
-MassTree outperforms TreeIndex by 25-30% on range scans for short keys (≤8 bytes) and matches it for long keys.
+MassTree outperforms TreeIndex by **31-55%** on range scans and is **6-8x faster** than IndexSet.
 
 ### Similar structures used in benchmarks
 
