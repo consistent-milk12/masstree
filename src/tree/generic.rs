@@ -96,7 +96,10 @@ where
         reason = "root_ptr points to L or L::Internode, both have NodeVersion \
                   as first field with proper alignment"
     )]
-    #[expect(dead_code, reason = "Kept for future use when is_empty() needs structural check")]
+    #[expect(
+        dead_code,
+        reason = "Kept for future use when is_empty() needs structural check"
+    )]
     fn root_is_leaf_generic(&self) -> bool {
         let root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 
@@ -1213,7 +1216,6 @@ where
         }
     }
 
-
     /// Single-layer fast path for insert search (keys ≤ 8 bytes).
     ///
     /// Optimized version that:
@@ -1767,8 +1769,7 @@ where
                             }
                             if !found {
                                 // Only slot-0 available - trigger split
-                                let leaf_ptr_current: *mut L =
-                                    std::ptr::from_ref(leaf).cast_mut();
+                                let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
                                 self.handle_leaf_split_generic(
                                     leaf_ptr_current,
                                     lock,
@@ -1890,8 +1891,7 @@ where
                         }
                         if !found {
                             // Only slot-0 available - trigger split
-                            let leaf_ptr_current: *mut L =
-                                std::ptr::from_ref(leaf).cast_mut();
+                            let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
                             self.handle_leaf_split_generic(
                                 leaf_ptr_current,
                                 lock,
@@ -2160,9 +2160,10 @@ where
             "SPLIT_START: captured root status BEFORE mark_split"
         );
 
-        // Allocate new leaf BEFORE marking split
+        // Allocate new leaf directly from pool BEFORE marking split
         // This ensures allocation doesn't happen while we hold the split lock
-        let new_leaf: Box<L> = L::new_boxed();
+        // The leaf is initialized but split_into_preallocated will set up the split-locked version
+        let right_leaf_ptr: *mut L = self.allocator.alloc_leaf_direct(false, false);
 
         // Mark split in progress (sets SPLITTING_BIT)
         let mut lock = lock;
@@ -2172,11 +2173,8 @@ where
         // NOTE: The right sibling receives a split-locked version from
         // split_into_preallocated() - this is NOT done by the allocator!
         // insert_target is ignored - we use SPLIT-THEN-RETRY pattern
-        let (new_leaf_box, split_ikey, _insert_target) =
-            unsafe { left_leaf.split_into_preallocated(split_point.pos, new_leaf, guard) };
-
-        // Allocate new leaf in allocator (just tracks it, doesn't set version)
-        let right_leaf_ptr: *mut L = self.allocator.alloc_leaf(new_leaf_box);
+        let (split_ikey, _insert_target) =
+            unsafe { left_leaf.split_into_preallocated(split_point.pos, right_leaf_ptr, guard) };
 
         #[cfg(feature = "tracing")]
         {

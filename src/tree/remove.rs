@@ -19,8 +19,8 @@ use seize::{Guard, LocalGuard};
 use crate::{
     alloc_trait::NodeAllocatorGeneric,
     key::Key,
-    leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
     leaf_trait::{LayerCapableLeaf, TreePermutation},
+    leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::LockGuard,
     slot::ValueSlot,
     tree::MassTreeGeneric,
@@ -126,7 +126,8 @@ where
             retry_count += 1;
 
             // Step 1: Navigate to target leaf
-            let leaf_ptr: *mut L = tree.reach_leaf_concurrent_generic(layer_root, &key, false, guard);
+            let leaf_ptr: *mut L =
+                tree.reach_leaf_concurrent_generic(layer_root, &key, false, guard);
             // SAFETY: reach_leaf_concurrent_generic returns a valid leaf pointer
             let leaf: &L = unsafe { &*leaf_ptr };
 
@@ -182,9 +183,8 @@ where
                     }
 
                     // Step 6: Finish the removal
-                    let removed_value: Option<S::Output> = finish_remove_generic::<S, L, A>(
-                        tree, leaf, &mut lock, ki, kp, guard,
-                    );
+                    let removed_value: Option<S::Output> =
+                        finish_remove_generic::<S, L, A>(tree, leaf, &mut lock, ki, kp, guard);
 
                     // Step 7: Check if leaf is now empty
                     // NOTE: We intentionally do NOT mark_deleted() here.
@@ -232,11 +232,7 @@ where
 /// 2. Compare ikey values
 /// 3. If ikey matches, check keylenx and suffix
 /// 4. Return position if exact match found
-fn search_for_remove_generic<S, L>(
-    leaf: &L,
-    key: &Key<'_>,
-    perm: &L::Perm,
-) -> RemoveSearchResult
+fn search_for_remove_generic<S, L>(leaf: &L, key: &Key<'_>, perm: &L::Perm) -> RemoveSearchResult
 where
     S: ValueSlot,
     S::Value: Send + Sync + 'static,

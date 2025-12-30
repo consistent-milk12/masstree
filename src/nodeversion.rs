@@ -20,9 +20,12 @@
 //! // Lock released when guard drops
 //! ```
 
+use std::hint as StdHint;
 use std::marker::PhantomData;
-use std::sync::atomic::compiler_fence;
+use std::ptr as StdPtr;
+use std::sync::atomic as StdAtomic;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
+use std::thread as StdThread;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -94,7 +97,7 @@ impl Backoff {
     /// a spin-wait loop.
     fn spin(&mut self) {
         for _ in 0..=self.count {
-            std::hint::spin_loop();
+            StdHint::spin_loop();
         }
         // Double count, cap at 15: 0 -> 1 -> 3 -> 7 -> 15 -> 15
         self.count = ((self.count << 1) | 1) & 15;
@@ -388,7 +391,7 @@ impl NodeVersion {
     #[must_use]
     #[inline(always)]
     pub const fn as_ptr(&self) -> *const Self {
-        std::ptr::from_ref(self)
+        StdPtr::from_ref(self)
     }
 
     // ========================================================================
@@ -414,10 +417,6 @@ impl NodeVersion {
     #[must_use]
     pub fn stable(&self) -> u32 {
         let mut backoff = Backoff::new();
-        #[cfg(feature = "tracing")]
-        let start = Instant::now();
-        #[cfg(feature = "tracing")]
-        let mut spins: u32 = 0;
 
         loop {
             // Relaxed load like C++ - only need compiler barrier at the end.
@@ -428,31 +427,12 @@ impl NodeVersion {
             if (value & DIRTY_MASK) == 0 {
                 // Acquire fence after successful read - matches C++ acquire_fence()
                 // This establishes synchronizes-with relationship with writer's Release.
-                std::sync::atomic::fence(Ordering::Acquire);
-
-                #[expect(clippy::cast_possible_truncation)]
-                #[cfg(feature = "tracing")]
-                {
-                    let elapsed = start.elapsed();
-                    if elapsed > Duration::from_millis(1) || spins > 100 {
-                        tracing::warn!(
-                            version_ptr = ?std::ptr::from_ref(self),
-                            elapsed_us = elapsed.as_micros() as u64,
-                            spins = spins,
-                            final_value = format_args!("{:#010x}", value),
-                            "SLOW_STABLE: stable() took >1ms waiting for dirty bits to clear"
-                        );
-                    }
-                }
+                StdAtomic::fence(Ordering::Acquire);
 
                 return value;
             }
 
             backoff.spin();
-            #[cfg(feature = "tracing")]
-            {
-                spins += 1;
-            }
         }
     }
 
@@ -495,7 +475,7 @@ impl NodeVersion {
     pub fn has_changed(&self, old: u32) -> bool {
         // Compiler fence: ensures all prior reads complete before version check.
         // This matches C++ fence() in nodeversion.hh:72.
-        compiler_fence(Ordering::Acquire);
+        StdAtomic::compiler_fence(Ordering::Acquire);
 
         // Relaxed load like C++ - the compiler fence above prevents reordering.
         // C++ uses plain read after fence(): `return (x.v_ ^ v_) > lock_bit;`
@@ -516,7 +496,7 @@ impl NodeVersion {
     pub fn has_split(&self, old: u32) -> bool {
         // Compiler fence: ensures all prior reads complete before version check.
         // This matches C++ fence() in nodeversion.hh:80.
-        compiler_fence(Ordering::Acquire);
+        StdAtomic::compiler_fence(Ordering::Acquire);
 
         // Relaxed load like C++ - the compiler fence above prevents reordering.
         (old ^ self.value.load(Ordering::Relaxed)) >= VSPLIT_LOWBIT
@@ -559,7 +539,7 @@ impl NodeVersion {
     #[inline(always)]
     pub fn has_changed_or_locked(&self, old: u32) -> bool {
         // OPTIMIZATION: Acquire fence is sufficient for preventing read reordering.
-        compiler_fence(Ordering::Acquire);
+        StdAtomic::compiler_fence(Ordering::Acquire);
 
         let current: u32 = self.value.load(Ordering::Acquire);
 
@@ -603,15 +583,6 @@ impl NodeVersion {
     pub fn lock(&self) -> LockGuard<'_> {
         let mut backoff: Backoff = Backoff::new();
 
-        #[cfg(feature = "tracing")]
-        let start = Instant::now();
-
-        #[cfg(feature = "tracing")]
-        let mut spins: u32 = 0;
-
-        #[cfg(feature = "tracing")]
-        let mut contended = false;
-
         loop {
             let value: u32 = self.value.load(Ordering::Relaxed);
 
@@ -635,41 +606,17 @@ impl NodeVersion {
                     .compare_exchange_weak(value, locked, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
-                    #[expect(clippy::cast_possible_truncation)]
-                    #[cfg(feature = "tracing")]
-                    {
-                        let elapsed = start.elapsed();
-                        if elapsed > Duration::from_millis(1) || spins > 100 {
-                            tracing::warn!(
-                                version_ptr = ?std::ptr::from_ref(self),
-                                elapsed_us = elapsed.as_micros() as u64,
-                                spins = spins,
-                                contended = contended,
-                                "SLOW_LOCK: lock() took >1ms"
-                            );
-                        }
-                    }
-
                     return LockGuard {
-                        version: std::ptr::from_ref(self),
+                        version: StdPtr::from_ref(self),
                         // locked_value now includes INSERTING_BIT
                         locked_value: locked,
                         _lifetime: PhantomData,
                         _marker: PhantomData,
                     };
                 }
-            } else {
-                #[cfg(feature = "tracing")]
-                {
-                    contended = true;
-                }
             }
 
             backoff.spin();
-            #[cfg(feature = "tracing")]
-            {
-                spins += 1;
-            }
         }
     }
 
@@ -702,7 +649,7 @@ impl NodeVersion {
             .compare_exchange(value, locked, Ordering::Acquire, Ordering::Relaxed)
         {
             Ok(_) => Some(LockGuard {
-                version: std::ptr::from_ref(self),
+                version: StdPtr::from_ref(self),
                 locked_value: locked,
                 _lifetime: PhantomData,
                 _marker: PhantomData,
@@ -773,56 +720,25 @@ impl NodeVersion {
     pub fn lock_with_yield(&self) -> LockGuard<'_> {
         const SPINS_BEFORE_YIELD: u32 = 4;
 
-        #[cfg(feature = "tracing")]
-        let start = Instant::now();
-
-        #[cfg(feature = "tracing")]
-        let mut total_spins: u32 = 0;
-
-        #[cfg(feature = "tracing")]
-        let mut yields: u32 = 0;
-
         let mut spin_count: u32 = 0;
 
         loop {
             // Try to acquire the lock
             if let Some(guard) = self.try_lock() {
-                #[cfg(feature = "tracing")]
-                #[expect(clippy::cast_possible_truncation)]
-                {
-                    let elapsed = start.elapsed();
-                    if elapsed > Duration::from_millis(1) || total_spins > 100 || yields > 10 {
-                        tracing::warn!(
-                            version_ptr = ?std::ptr::from_ref(self),
-                            elapsed_us = elapsed.as_micros() as u64,
-                            total_spins = total_spins,
-                            yields = yields,
-                            "SLOW_LOCK_YIELD: lock_with_yield() took >1ms"
-                        );
-                    }
-                }
                 return guard;
             }
 
             spin_count += 1;
-            #[cfg(feature = "tracing")]
-            {
-                total_spins += 1;
-            }
 
             if spin_count < SPINS_BEFORE_YIELD {
                 // Brief spin before yielding
                 for _ in 0..spin_count {
-                    std::hint::spin_loop();
+                    StdHint::spin_loop();
                 }
             } else {
                 // Yield CPU to other threads - reduces lock convoy
-                std::thread::yield_now();
+                StdThread::yield_now();
                 spin_count = 0; // Reset for next cycle
-                #[cfg(feature = "tracing")]
-                {
-                    yields += 1;
-                }
             }
         }
     }
@@ -955,7 +871,7 @@ impl NodeVersion {
         // This is critical - parent pointer and all data must be visible to readers
         // before we unlock. Without this, a reader could see the unlocked version
         // but read stale/missing parent pointer.
-        compiler_fence(Ordering::SeqCst);
+        StdAtomic::compiler_fence(Ordering::SeqCst);
 
         // Release store: synchronizes with Acquire loads in stable()/has_changed()
         self.value.store(new_value, Ordering::Release);

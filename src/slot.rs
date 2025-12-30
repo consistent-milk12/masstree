@@ -268,7 +268,7 @@ impl<V> ValueSlot for LeafValue<V> {
             "swap_output called on Layer slot; layer pointer would be lost"
         );
 
-        let old: Self = std::mem::replace(self, Self::Value(new_output));
+        let old: Self = StdMem::replace(self, Self::Value(new_output));
 
         match old {
             Self::Value(arc) => Some(arc),
@@ -381,7 +381,7 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
             "swap_output called on Layer slot; layer pointer would be lost"
         );
 
-        let old: Self = std::mem::replace(self, Self::Value(new_output));
+        let old: Self = StdMem::replace(self, Self::Value(new_output));
         match old {
             Self::Value(v) => Some(v),
             _ => None,

@@ -2557,7 +2557,8 @@ mod insert_heavy {
                             let mut rng_state = t as u64;
                             for (i, key) in keys.iter().enumerate() {
                                 // Simple LCG for deterministic "random"
-                                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 if (rng_state % 100) < WRITE_RATIO as u64 {
                                     let _ = tree.insert_with_guard(key, i as u64, &guard);
                                 } else {
@@ -2607,7 +2608,8 @@ mod insert_heavy {
                             barrier.wait();
                             let mut rng_state = t as u64;
                             for (i, key) in keys.iter().enumerate() {
-                                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 if (rng_state % 100) < WRITE_RATIO as u64 {
                                     let _ = tree.insert_sync(*key, i as u64);
                                 } else {
@@ -2657,7 +2659,8 @@ mod insert_heavy {
                             barrier.wait();
                             let mut rng_state = t as u64;
                             for (i, key) in keys.iter().enumerate() {
-                                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 if (rng_state % 100) < WRITE_RATIO as u64 {
                                     map.insert(*key, i as u64);
                                 } else {
@@ -2707,7 +2710,8 @@ mod insert_heavy {
                             barrier.wait();
                             let mut rng_state = t as u64;
                             for (i, key) in keys.iter().enumerate() {
-                                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 if (rng_state % 100) < WRITE_RATIO as u64 {
                                     let mut guard = map.write().unwrap();
                                     guard.insert(*key, i as u64);
@@ -2760,7 +2764,8 @@ mod hot_spot {
                             let guard = tree.guard();
                             let mut rng_state = t as u64;
                             for i in 0..OPS {
-                                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 let idx = (rng_state as usize) % hot.len();
                                 // 50% read, 50% update (insert over existing)
                                 if rng_state % 2 == 0 {
@@ -2798,7 +2803,8 @@ mod hot_spot {
                             barrier.wait();
                             let mut rng_state = t as u64;
                             for i in 0..OPS {
-                                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 let idx = (rng_state as usize) % hot.len();
                                 if rng_state % 2 == 0 {
                                     black_box(tree.peek_with(&hot[idx], |_, v| *v));
@@ -2836,7 +2842,8 @@ mod hot_spot {
                             barrier.wait();
                             let mut rng_state = t as u64;
                             for i in 0..OPS {
-                                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 let idx = (rng_state as usize) % hot.len();
                                 if rng_state % 2 == 0 {
                                     black_box(map.get(&hot[idx]));
@@ -2873,7 +2880,8 @@ mod hot_spot {
                             barrier.wait();
                             let mut rng_state = t as u64;
                             for i in 0..OPS {
-                                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 let idx = (rng_state as usize) % hot.len();
                                 if rng_state % 2 == 0 {
                                     let guard = map.read().unwrap();

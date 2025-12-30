@@ -17,8 +17,8 @@
 use masstree::MassTree24;
 use scc::TreeIndex;
 use std::env;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -57,7 +57,10 @@ impl Config {
             i += 1;
         }
 
-        Self { threads, duration_secs }
+        Self {
+            threads,
+            duration_secs,
+        }
     }
 }
 
@@ -182,7 +185,11 @@ fn bench_seq_insert_read_treeindex(threads: usize, duration: Duration) -> (u64, 
 // Test: Read-heavy (90% reads, 10% writes on pre-populated tree)
 // =============================================================================
 
-fn bench_read_heavy_masstree(threads: usize, duration: Duration, initial_size: u64) -> (u64, Duration) {
+fn bench_read_heavy_masstree(
+    threads: usize,
+    duration: Duration,
+    initial_size: u64,
+) -> (u64, Duration) {
     let tree = Arc::new(MassTree24::<u64>::new());
 
     // Pre-populate
@@ -236,7 +243,11 @@ fn bench_read_heavy_masstree(threads: usize, duration: Duration, initial_size: u
     (total_ops.load(Ordering::Relaxed), elapsed)
 }
 
-fn bench_read_heavy_treeindex(threads: usize, duration: Duration, initial_size: u64) -> (u64, Duration) {
+fn bench_read_heavy_treeindex(
+    threads: usize,
+    duration: Duration,
+    initial_size: u64,
+) -> (u64, Duration) {
     let tree: Arc<TreeIndex<[u8; 8], u64>> = Arc::new(TreeIndex::new());
 
     // Pre-populate

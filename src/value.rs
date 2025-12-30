@@ -6,6 +6,7 @@
 //!
 //! These types are leaf-implementation agnostic and can be used with any WIDTH.
 
+use std::fmt as StdFmt;
 use std::sync::Arc;
 
 // ============================================================================
@@ -156,8 +157,8 @@ impl<V> Clone for LeafValue<V> {
 unsafe impl<V: Send + Sync> Send for LeafValue<V> {}
 unsafe impl<V: Send + Sync> Sync for LeafValue<V> {}
 
-impl<V> std::fmt::Debug for LeafValue<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<V> StdFmt::Debug for LeafValue<V> {
+    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         match self {
             Self::Empty => write!(f, "Empty"),
 
@@ -268,8 +269,8 @@ impl<V: Copy> LeafValueIndex<V> {
 
 impl<V: Copy> Copy for LeafValueIndex<V> {}
 
-impl<V: Copy> std::fmt::Debug for LeafValueIndex<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<V: Copy> StdFmt::Debug for LeafValueIndex<V> {
+    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         match self {
             Self::Empty => write!(f, "Empty"),
 

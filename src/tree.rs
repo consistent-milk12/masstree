@@ -288,13 +288,10 @@ pub type MassTreeLockFree<V> = MassTreeGeneric<
 
 /// [`MassTree`] with thread-local pool allocator.
 ///
-/// Uses O(1) allocation from thread-local free lists for higher throughput.
+/// Uses O(1) allocation from lock-free free lists for higher throughput.
 /// Best for write-heavy workloads where allocation cost dominates.
-pub type MassTreePooled<V> = MassTreeGeneric<
-    LeafValue<V>,
-    LeafNode24<LeafValue<V>>,
-    PoolAllocator24<LeafValue<V>>,
->;
+pub type MassTreePooled<V> =
+    MassTreeGeneric<LeafValue<V>, LeafNode24<LeafValue<V>>, PoolAllocator24<LeafValue<V>>>;
 
 /// [`MassTree24Inline`] with thread-local pool allocator.
 ///
@@ -388,7 +385,6 @@ impl<V: Copy + Send + Sync + 'static> Default for MassTreePooledInline<V> {
         Self::new()
     }
 }
-
 
 // ============================================================================
 //  Tests

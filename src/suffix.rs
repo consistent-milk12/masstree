@@ -800,10 +800,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// # Returns
     ///
     /// A new `SuffixBag` containing all active suffixes plus the new one.
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds explicitly checked"
-    )]
+    #[expect(clippy::indexing_slicing, reason = "Slot bounds explicitly checked")]
     pub fn drain_to_external<P: PermutationProvider>(
         &mut self,
         perm: &P,
@@ -1551,9 +1548,7 @@ mod tests {
         bag.try_assign(0, b"old_suffix");
         bag.try_assign(1, b"keep_this");
 
-        let perm = MockPerm {
-            slots: vec![0, 1],
-        };
+        let perm = MockPerm { slots: vec![0, 1] };
 
         // Replace slot 0's suffix during drain
         let external = bag.drain_to_external(&perm, 0, b"new_suffix");

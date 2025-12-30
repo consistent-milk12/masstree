@@ -549,6 +549,67 @@ where
         ptr.cast::<u8>()
     }
 
+    /// Allocate an internode directly from the pool without Box overhead.
+    ///
+    /// Writes directly to pool memory, avoiding the Box allocation.
+    #[inline]
+    fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
+        let ptr = global_internode_pool().allocate();
+        if ptr.is_null() {
+            // Fallback to Box path on OOM
+            let node: Box<InternodeNode<S, INTERNODE_WIDTH>> = InternodeNode::new(height);
+            return self.alloc_internode_erased(Box::into_raw(node).cast());
+        }
+
+        let ptr: *mut InternodeNode<S, INTERNODE_WIDTH> = ptr.cast();
+        // SAFETY: ptr is valid, aligned (from pool), we have exclusive access
+        unsafe {
+            InternodeNode::init_at(ptr, height);
+        }
+        ptr.cast::<u8>()
+    }
+
+    /// Allocate an internode as root directly from the pool.
+    #[inline]
+    fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
+        let ptr = global_internode_pool().allocate();
+        if ptr.is_null() {
+            // Fallback to Box path on OOM
+            let node: Box<InternodeNode<S, INTERNODE_WIDTH>> = InternodeNode::new_root(height);
+            return self.alloc_internode_erased(Box::into_raw(node).cast());
+        }
+
+        let ptr: *mut InternodeNode<S, INTERNODE_WIDTH> = ptr.cast();
+        // SAFETY: ptr is valid, aligned (from pool), we have exclusive access
+        unsafe {
+            InternodeNode::init_at_root(ptr, height);
+        }
+        ptr.cast::<u8>()
+    }
+
+    /// Allocate an internode for split directly from the pool.
+    #[inline]
+    fn alloc_internode_direct_for_split(
+        &self,
+        parent_version: &crate::nodeversion::NodeVersion,
+        height: u32,
+    ) -> *mut u8 {
+        let ptr = global_internode_pool().allocate();
+        if ptr.is_null() {
+            // Fallback to Box path on OOM
+            let node: Box<InternodeNode<S, INTERNODE_WIDTH>> =
+                InternodeNode::new_for_split(parent_version, height);
+            return self.alloc_internode_erased(Box::into_raw(node).cast());
+        }
+
+        let ptr: *mut InternodeNode<S, INTERNODE_WIDTH> = ptr.cast();
+        // SAFETY: ptr is valid, aligned (from pool), we have exclusive access
+        unsafe {
+            InternodeNode::init_at_for_split(ptr, parent_version, height);
+        }
+        ptr.cast::<u8>()
+    }
+
     /// Track an internode pointer for cleanup.
     ///
     /// No-op for pool allocator - we don't track individual allocations.

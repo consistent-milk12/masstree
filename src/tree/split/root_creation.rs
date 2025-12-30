@@ -83,18 +83,15 @@ impl RootCreation {
         #[cfg(feature = "tracing")]
         tracing::debug!("RootCreation: creating root from leaves");
 
-        // Create new root internode (height=0, children are leaves)
-        let new_root: Box<L::Internode> = L::Internode::new_root_boxed(0);
+        // Create new root internode directly in pool (height=0, children are leaves)
+        let new_root_ptr: *mut u8 = allocator.alloc_internode_direct_root(0);
+        let new_root: &L::Internode = unsafe { &*new_root_ptr.cast::<L::Internode>() };
 
         // Set up children: [left] -split_ikey- [right]
         new_root.set_child(0, left_leaf_ptr.cast());
         new_root.set_ikey(0, split_ikey);
         new_root.set_child(1, right_leaf_ptr.cast());
         new_root.set_nkeys(1);
-
-        // Allocate and track
-        let new_root_ptr: *mut u8 =
-            allocator.alloc_internode_erased(Box::into_raw(new_root).cast());
 
         #[cfg(feature = "tracing")]
         tracing::debug!(new_root_ptr = ?new_root_ptr, "RootCreation: allocated");
@@ -177,16 +174,14 @@ impl RootCreation {
             "RootCreation: creating root from internodes"
         );
 
-        // Create new root (height = left.height + 1)
-        let new_root: Box<L::Internode> = L::Internode::new_root_boxed(left.height() + 1);
+        // Create new root directly in pool (height = left.height + 1)
+        let new_root_ptr: *mut u8 = allocator.alloc_internode_direct_root(left.height() + 1);
+        let new_root: &L::Internode = unsafe { &*new_root_ptr.cast::<L::Internode>() };
 
         new_root.set_child(0, left_inode_ptr.cast());
         new_root.set_ikey(0, split_ikey);
         new_root.set_child(1, right_inode_ptr.cast());
         new_root.set_nkeys(1);
-
-        let new_root_ptr: *mut u8 =
-            allocator.alloc_internode_erased(Box::into_raw(new_root).cast());
 
         let expected: *mut u8 = left_inode_ptr.cast();
         match root_ptr.compare_exchange(
@@ -261,19 +256,15 @@ impl RootCreation {
         #[cfg(feature = "tracing")]
         tracing::debug!("RootCreation: promoting layer root leaves");
 
-        // Create new internode (height=0, children are leaves)
-        let new_inode: Box<L::Internode> = L::Internode::new_boxed(0);
+        // Create new internode directly in pool (height=0, children are leaves)
+        // Mark as layer root (has root flag, but not main tree root)
+        let new_inode_ptr: *mut u8 = allocator.alloc_internode_direct_root(0);
+        let new_inode: &L::Internode = unsafe { &*new_inode_ptr.cast::<L::Internode>() };
 
         new_inode.set_child(0, left_leaf_ptr.cast());
         new_inode.set_ikey(0, split_ikey);
         new_inode.set_child(1, right_leaf_ptr.cast());
         new_inode.set_nkeys(1);
-
-        // Mark as layer root (has root flag, but not main tree root)
-        new_inode.version().mark_root();
-
-        let new_inode_ptr: *mut u8 =
-            allocator.alloc_internode_erased(Box::into_raw(new_inode).cast());
 
         // Update parent pointers - NO CAS needed
         unsafe {
@@ -330,17 +321,14 @@ impl RootCreation {
             "RootCreation: promoting layer root internodes"
         );
 
-        let new_inode: Box<L::Internode> = L::Internode::new_boxed(left.height() + 1);
+        // Create new internode directly in pool with root flag
+        let new_inode_ptr: *mut u8 = allocator.alloc_internode_direct_root(left.height() + 1);
+        let new_inode: &L::Internode = unsafe { &*new_inode_ptr.cast::<L::Internode>() };
 
         new_inode.set_child(0, left_inode_ptr.cast());
         new_inode.set_ikey(0, split_ikey);
         new_inode.set_child(1, right_inode_ptr.cast());
         new_inode.set_nkeys(1);
-
-        new_inode.version().mark_root();
-
-        let new_inode_ptr: *mut u8 =
-            allocator.alloc_internode_erased(Box::into_raw(new_inode).cast());
 
         unsafe {
             atomic_fence(AtomicOrdering::Release);

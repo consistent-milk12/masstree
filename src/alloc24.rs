@@ -315,6 +315,107 @@ where
         // For now, subtree retirement is not supported for WIDTH=24
         // The allocator's Drop will clean up all nodes
     }
+
+    /// Allocate a leaf directly without Box intermediate.
+    ///
+    /// Uses raw allocation + `init_at` to avoid stack-to-heap copy.
+    #[inline]
+    fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode24<S> {
+        use std::alloc::{Layout, alloc};
+
+        let layout = Layout::new::<LeafNode24<S>>();
+        // SAFETY: Layout is valid (non-zero size)
+        let ptr: *mut LeafNode24<S> = unsafe { alloc(layout).cast::<LeafNode24<S>>() };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        // Initialize in-place
+        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        unsafe {
+            LeafNode24::init_at(ptr, is_root || is_layer_root);
+        }
+
+        // Track for cleanup
+        self.leaf_ptrs.lock().push(ptr);
+        ptr
+    }
+
+    /// Allocate an internode directly without Box intermediate.
+    #[inline]
+    fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
+        use std::alloc::{Layout, alloc};
+
+        let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
+        // SAFETY: Layout is valid
+        let ptr: *mut InternodeNode<S> =
+            unsafe { alloc(layout) as *mut InternodeNode<S, INTERNODE_WIDTH> };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        // Initialize in-place
+        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        unsafe {
+            InternodeNode::init_at(ptr, height);
+        }
+
+        // Track for cleanup
+        self.internode_ptrs.lock().push(ptr);
+        ptr.cast()
+    }
+
+    /// Allocate an internode as root directly without Box intermediate.
+    #[inline]
+    fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
+        use std::alloc::{Layout, alloc};
+
+        let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
+        // SAFETY: Layout is valid
+        let ptr: *mut InternodeNode<S> =
+            unsafe { alloc(layout) as *mut InternodeNode<S, INTERNODE_WIDTH> };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        // Initialize in-place as root
+        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        unsafe {
+            InternodeNode::init_at_root(ptr, height);
+        }
+
+        // Track for cleanup
+        self.internode_ptrs.lock().push(ptr);
+        ptr.cast()
+    }
+
+    /// Allocate an internode for split directly without Box intermediate.
+    #[inline]
+    fn alloc_internode_direct_for_split(
+        &self,
+        parent_version: &crate::nodeversion::NodeVersion,
+        height: u32,
+    ) -> *mut u8 {
+        use std::alloc::{Layout, alloc};
+
+        let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
+        // SAFETY: Layout is valid
+        let ptr: *mut InternodeNode<S> =
+            unsafe { alloc(layout) as *mut InternodeNode<S, INTERNODE_WIDTH> };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        // Initialize in-place with split-locked version
+        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        unsafe {
+            InternodeNode::init_at_for_split(ptr, parent_version, height);
+        }
+
+        // Track for cleanup
+        self.internode_ptrs.lock().push(ptr);
+        ptr.cast()
+    }
 }
 
 #[cfg(test)]

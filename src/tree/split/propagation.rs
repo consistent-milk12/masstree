@@ -196,6 +196,7 @@ impl Propagation {
 
         loop {
             iterations += 1;
+
             if iterations > MAX_PROPAGATION_ITERATIONS {
                 // RAII: left_lock will auto-unlock on panic
                 // But we need to unlock split-locked right explicitly
@@ -208,15 +209,6 @@ impl Propagation {
                 );
             }
 
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                iteration = iterations,
-                at_leaf_level,
-                left_ptr = ?left_ptr,
-                right_ptr = ?right_ptr,
-                "PROPAGATE_LOOP: iteration start"
-            );
-
             // Get left's parent pointer
             let left_parent: *mut u8 = Self::get_parent::<S, L>(left_ptr, at_leaf_level);
 
@@ -226,9 +218,6 @@ impl Propagation {
 
             // 1a. LAYER ROOT (check BEFORE main root)
             if left_parent.is_null() && is_layer_root {
-                #[cfg(feature = "tracing")]
-                tracing::info!("PROPAGATE_LOOP: promoting layer root");
-
                 Self::promote_layer_root::<S, L, A>(
                     allocator,
                     left_ptr,
@@ -279,12 +268,6 @@ impl Propagation {
             // This is TRUE hand-over-hand: we hold left_lock while
             // acquiring parent_lock. Both are LockGuard<'op> with RAII.
 
-            #[cfg(feature = "tracing")]
-            tracing::trace!(
-                parent_ptr = ?left_parent,
-                "PROPAGATE_LOOP: locking parent (hand-over-hand)"
-            );
-
             let parent: &L::Internode = unsafe { &*left_parent.cast::<L::Internode>() };
 
             // SAFETY: parent is valid (reclamation guard protects for 'op)
@@ -303,12 +286,6 @@ impl Propagation {
 
             if current_left_parent != left_parent {
                 // Parent pointer changed - release parent lock and retry
-                #[cfg(feature = "tracing")]
-                tracing::warn!(
-                    old = ?left_parent,
-                    new = ?current_left_parent,
-                    "PROPAGATE_LOOP: parent pointer changed after lock, retrying"
-                );
                 drop(parent_lock); // RAII: auto-unlock
                 stale_parent_retries = 0; // Reset: parent changed, not stale
                 std::hint::spin_loop();
@@ -328,13 +305,6 @@ impl Propagation {
 
                     // SpecAnalysis §4.6: Bounded fallback for stale parent
                     if stale_parent_retries > MAX_STALE_PARENT_RETRIES {
-                        #[cfg(feature = "tracing")]
-                        tracing::error!(
-                            retries = stale_parent_retries,
-                            "PROPAGATE_LOOP: membership validation failed repeatedly - \
-                         parent pointer appears permanently stale, returning SplitFailed"
-                        );
-
                         // Return error instead of panicking - caller will retry insert from scratch.
                         // This maintains availability at the cost of one failed insert attempt.
                         Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
@@ -346,24 +316,10 @@ impl Propagation {
 
                     // Child not found - parent may have been split concurrently
                     // Release parent lock and retry (left_lock still held)
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        retries = stale_parent_retries,
-                        "PROPAGATE_LOOP: membership validation failed, retrying"
-                    );
-
                     drop(parent_lock); // RAII: auto-unlock
                     std::hint::spin_loop();
                     continue;
                 };
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                child_idx,
-                parent_nkeys = parent.nkeys(),
-                parent_is_full = parent.is_full(),
-                "PROPAGATE_LOOP: membership validated"
-            );
 
             // =========================================================
             // STEP 5: Parent has space - insert and finish
@@ -372,13 +328,6 @@ impl Propagation {
             if !parent.is_full() {
                 parent_lock.mark_insert();
 
-                #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    child_idx,
-                    split_ikey = format_args!("{:016x}", split_ikey),
-                    "PROPAGATE_LOOP: inserting into parent (has space)"
-                );
-
                 // Insert at child_idx (pointer-based, NOT key-based)
                 parent.insert_key_and_child(child_idx, split_ikey, right_ptr);
 
@@ -386,9 +335,6 @@ impl Propagation {
                 Self::set_parent::<S, L>(right_ptr, left_parent, at_leaf_level);
 
                 // Unlock order: right → parent → left (RAII via drop)
-                #[cfg(feature = "tracing")]
-                tracing::info!("PROPAGATE_LOOP: insert complete, unlocking (RAII)");
-
                 Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
                 drop(parent_lock); // RAII: auto-unlock
                 drop(left_lock); // RAII: auto-unlock
@@ -399,14 +345,6 @@ impl Propagation {
             // =========================================================
             // STEP 6: Parent is full - split and continue
             // =========================================================
-
-            #[cfg(feature = "tracing")]
-            tracing::info!(
-                parent_ptr = ?left_parent,
-                parent_height = parent.height(),
-                "PROPAGATE_LOOP: parent full, splitting"
-            );
-
             parent_lock.mark_split();
 
             // Capture parent's root status BEFORE modifications
@@ -419,20 +357,10 @@ impl Propagation {
             let parent_is_layer_root: bool =
                 !parent_is_main_root && parent.parent().is_null() && parent.is_root();
 
-            // Create split-locked sibling for parent
-            let parent_sibling: Box<L::Internode> =
-                L::Internode::new_boxed_for_split(parent.version(), parent.height());
-            let parent_sibling_ptr: *mut L::Internode = Box::into_raw(parent_sibling);
-
-            allocator.track_internode_erased(parent_sibling_ptr.cast());
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                parent_sibling_ptr = ?parent_sibling_ptr,
-                parent_is_main_root,
-                parent_is_layer_root,
-                "PROPAGATE_LOOP: parent sibling created (split-locked)"
-            );
+            // Create split-locked sibling directly in pool
+            let parent_sibling_ptr: *mut L::Internode = allocator
+                .alloc_internode_direct_for_split(parent.version(), parent.height())
+                .cast();
 
             // Split parent and insert child
             let (popup_key, child_went_left): (u64, bool) = unsafe {
@@ -444,13 +372,6 @@ impl Propagation {
                     right_ptr,
                 )
             };
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                popup_key = format_args!("{:016x}", popup_key),
-                child_went_left,
-                "PROPAGATE_LOOP: parent split complete"
-            );
 
             // Update children's parent pointers in sibling
             Self::update_sibling_children_parents::<S, L>(parent, parent_sibling_ptr);
@@ -477,9 +398,6 @@ impl Propagation {
             // - drop(left_lock) releases old left
             // - left_lock = parent_lock transfers ownership WITHOUT unlock
             //   (because both have unified lifetime 'op)
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!("PROPAGATE_LOOP: TRUE hand-over-hand transition (v3 RAII)");
 
             // Unlock current right sibling (it's fully installed now)
             Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
@@ -512,14 +430,6 @@ impl Propagation {
             is_main_root = parent_is_main_root;
             is_layer_root = parent_is_layer_root;
             at_leaf_level = false; // Now at internode level
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                new_left = ?left_ptr,
-                new_right = ?right_ptr,
-                new_height = unsafe { (*left_ptr.cast::<L::Internode>()).height() },
-                "PROPAGATE_LOOP: continuing to next level (parent still locked)"
-            );
         }
     }
 

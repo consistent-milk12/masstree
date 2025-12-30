@@ -645,26 +645,27 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Split this leaf at `split_pos` using a pre-allocated target.
     ///
-    /// Moves entries from `split_pos..size` to `new_leaf`.
+    /// Moves entries from `split_pos..size` to `new_leaf_ptr`.
+    /// The caller is responsible for allocating and tracking the new leaf.
     ///
     /// # Returns
     ///
-    /// `(new_leaf_box, split_ikey, insert_target)` tuple where:
-    /// - `new_leaf_box` is the new right leaf with moved entries
+    /// `(split_ikey, insert_target)` tuple where:
     /// - `split_ikey` is the first key of the new leaf (separator for parent)
     /// - `insert_target` indicates which leaf should receive the new key
     ///
     /// # Safety
     ///
     /// - Caller must hold the leaf lock (if concurrent)
-    /// - `new_leaf` must be freshly allocated (empty)
+    /// - `new_leaf_ptr` must point to valid, initialized leaf memory
+    /// - The new leaf should be freshly allocated (empty) with split-locked version
     /// - `guard` must be valid
     unsafe fn split_into_preallocated(
         &self,
         split_pos: usize,
-        new_leaf: Box<Self>,
+        new_leaf_ptr: *mut Self,
         guard: &seize::LocalGuard<'_>,
-    ) -> (Box<Self>, u64, InsertTarget);
+    ) -> (u64, InsertTarget);
 
     /// Move ALL entries to a new right leaf.
     ///
@@ -676,9 +677,9 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Same requirements as `split_into_preallocated`.
     unsafe fn split_all_to_right_preallocated(
         &self,
-        new_leaf: Box<Self>,
+        new_leaf_ptr: *mut Self,
         guard: &seize::LocalGuard<'_>,
-    ) -> (Box<Self>, u64, InsertTarget);
+    ) -> (u64, InsertTarget);
 
     // ========================================================================
     //  Sibling Link Helper (for split)
