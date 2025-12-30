@@ -7,7 +7,6 @@ use std::fmt as StdFmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering};
 
-use crate::alloc_lockfree::LockFreeAllocator;
 use crate::alloc_pool::PoolAllocator24;
 use crate::alloc24::SeizeAllocator24;
 use crate::leaf24::LeafNode24;
@@ -265,16 +264,6 @@ pub type MassTree24Inline<V> = MassTreeGeneric<
     SeizeAllocator24<LeafValueIndex<V>>,
 >;
 
-/// [`MassTree`] with lock-free allocation tracking.
-///
-/// Uses atomic CAS operations instead of mutex for tracking allocations.
-/// This eliminates contention on the allocation hot path for better scaling.
-pub type MassTreeLockFree<V> = MassTreeGeneric<
-    LeafValue<V>,
-    LeafNode24<LeafValue<V>>,
-    LockFreeAllocator<LeafNode24<LeafValue<V>>, LeafValue<V>>,
->;
-
 /// [`MassTree`] with thread-local pool allocator.
 ///
 /// Uses O(1) allocation from lock-free free lists for higher throughput.
@@ -322,22 +311,6 @@ impl<V: Copy + Send + Sync + 'static> MassTree24Inline<V> {
 }
 
 impl<V: Copy + Send + Sync + 'static> Default for MassTree24Inline<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<V: Send + Sync + 'static> MassTreeLockFree<V> {
-    /// Create a new empty `MassTreeLockFree`.
-    #[must_use]
-    #[inline(always)]
-    pub fn new() -> Self {
-        let allocator = LockFreeAllocator::new();
-        Self::with_allocator(allocator)
-    }
-}
-
-impl<V: Send + Sync + 'static> Default for MassTreeLockFree<V> {
     fn default() -> Self {
         Self::new()
     }

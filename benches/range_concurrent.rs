@@ -63,10 +63,8 @@ use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::{MassTree24, RangeBound};
 use scc::TreeIndex;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Barrier;
-use std::sync::RwLock;
 use std::thread;
 
 fn main() {
@@ -110,14 +108,6 @@ fn setup_indexset<const K: usize>(keys: &[[u8; K]]) -> IndexSetBTreeMap<[u8; K],
         map.insert(*key, i as u64);
     }
     map
-}
-
-fn setup_std_btreemap<const K: usize>(keys: &[[u8; K]]) -> RwLock<BTreeMap<[u8; K], u64>> {
-    let mut map = BTreeMap::new();
-    for (i, key) in keys.iter().enumerate() {
-        map.insert(*key, i as u64);
-    }
-    RwLock::new(map)
 }
 
 // =============================================================================
@@ -243,44 +233,6 @@ mod sequential_full_scan {
                 }
             });
     }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_sequential::<8>(N));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
 }
 
 // =============================================================================
@@ -388,44 +340,6 @@ mod reverse_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 total += map
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_reverse::<8>(N));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
                                     .iter()
                                     .take(SCAN_LIMIT)
                                     .map(|(_, v)| {
@@ -573,44 +487,6 @@ mod clustered_scan {
                 }
             });
     }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_clustered::<8>(CLUSTERS, KEYS_PER_CLUSTER, GAP_SIZE));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
 }
 
 // =============================================================================
@@ -720,44 +596,6 @@ mod sparse_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 total += map
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_sparse::<8>(N, SPACING));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
                                     .iter()
                                     .take(SCAN_LIMIT)
                                     .map(|(_, v)| {
@@ -903,44 +741,6 @@ mod shared_prefix_scan {
                 }
             });
     }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_shared_prefix::<16>(N, PREFIX_BUCKETS));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
 }
 
 // =============================================================================
@@ -1048,44 +848,6 @@ mod suffix_differ_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 total += map
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_suffix_only_differ::<32>(N));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
                                     .iter()
                                     .take(SCAN_LIMIT)
                                     .map(|(_, v)| {
@@ -1234,44 +996,6 @@ mod hierarchical_scan {
                 }
             });
     }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_hierarchical::<32>(NAMESPACES, CATEGORIES, ITEMS));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
 }
 
 // =============================================================================
@@ -1379,44 +1103,6 @@ mod adversarial_splits_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 total += map
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_adversarial_splits::<8>(N));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
                                     .iter()
                                     .take(SCAN_LIMIT)
                                     .map(|(_, v)| {
@@ -1576,48 +1262,6 @@ mod interleaved_scan {
                 }
             });
     }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_interleaved_ranges::<8>(
-            HOT_RANGES,
-            KEYS_PER_RANGE,
-            COLD_GAP,
-        ));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
 }
 
 // =============================================================================
@@ -1725,44 +1369,6 @@ mod blink_stress_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 total += map
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_blink_stress::<8>(N));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
                                     .iter()
                                     .take(SCAN_LIMIT)
                                     .map(|(_, v)| {
@@ -1906,44 +1512,6 @@ mod random_keys_scan {
                 }
             });
     }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
 }
 
 // =============================================================================
@@ -2051,44 +1619,6 @@ mod long_keys_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 total += map
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
                                     .iter()
                                     .take(SCAN_LIMIT)
                                     .map(|(_, v)| {
@@ -2231,69 +1761,6 @@ mod scan_while_insert {
                                 let guard = sdd::Guard::new();
                                 total += tree
                                     .iter(&guard)
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in writer_handles {
-                    h.join().unwrap();
-                }
-                for h in reader_handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let initial_keys = keys::<8>(INITIAL_N);
-        let insert_keys: Vec<_> = keys::<8>(INITIAL_N + INSERT_N)[INITIAL_N..].to_vec();
-        let readers = threads - WRITERS;
-
-        bencher
-            .with_inputs(|| {
-                let map = Arc::new(setup_std_btreemap(&initial_keys));
-                let new_keys = Arc::new(insert_keys.clone());
-                (map, new_keys)
-            })
-            .bench_refs(|(map, new_keys)| {
-                let barrier = Arc::new(Barrier::new(threads));
-
-                let writer_handles: Vec<_> = (0..WRITERS)
-                    .map(|w| {
-                        let map = Arc::clone(map);
-                        let barrier = Arc::clone(&barrier);
-                        let chunk_size = INSERT_N / WRITERS;
-                        let chunk: Vec<_> = new_keys[w * chunk_size..(w + 1) * chunk_size].to_vec();
-                        thread::spawn(move || {
-                            barrier.wait();
-                            for (i, key) in chunk.iter().enumerate() {
-                                let mut guard = map.write().unwrap();
-                                guard.insert(*key, (INITIAL_N + i) as u64);
-                            }
-                        })
-                    })
-                    .collect();
-
-                let reader_handles: Vec<_> = (0..readers)
-                    .map(|_| {
-                        let map = Arc::clone(map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
-                                    .iter()
                                     .take(SCAN_LIMIT)
                                     .map(|(_, v)| {
                                         black_box(v);
@@ -2476,38 +1943,6 @@ mod full_scan_aggregate {
                 }
             });
     }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys_sequential::<8>(SCAN_N));
-        let map = Arc::new(setup_std_btreemap(&keys));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * FULL_SCAN_OPS))
-            .bench_local(|| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|_| {
-                        let map = Arc::clone(&map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut grand_total = 0u64;
-                            for _ in 0..FULL_SCAN_OPS {
-                                let guard = map.read().unwrap();
-                                let sum: u64 = guard.iter().map(|(_, v)| *v).sum();
-                                grand_total += sum;
-                            }
-                            black_box(grand_total);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
 }
 
 // =============================================================================
@@ -2677,59 +2112,6 @@ mod insert_heavy {
                 }
             });
     }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let initial_keys: Vec<[u8; 8]> = keys_sequential::<8>(INITIAL_N);
-        let insert_keys: Vec<Vec<[u8; 8]>> = (0..threads)
-            .map(|t| {
-                (0..OPS)
-                    .map(|i| {
-                        let val = (INITIAL_N + t * OPS + i) as u64;
-                        val.to_be_bytes()
-                    })
-                    .collect()
-            })
-            .collect();
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS))
-            .with_inputs(|| {
-                let map = Arc::new(setup_std_btreemap(&initial_keys));
-                (map, insert_keys.clone())
-            })
-            .bench_refs(|(map, thread_keys)| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(map);
-                        let barrier = Arc::clone(&barrier);
-                        let keys = thread_keys[t].clone();
-                        let read_keys = initial_keys.clone();
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut rng_state = t as u64;
-                            for (i, key) in keys.iter().enumerate() {
-                                rng_state =
-                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                                if (rng_state % 100) < WRITE_RATIO as u64 {
-                                    let mut guard = map.write().unwrap();
-                                    guard.insert(*key, i as u64);
-                                } else {
-                                    let idx = (rng_state as usize) % read_keys.len();
-                                    let guard = map.read().unwrap();
-                                    black_box(guard.get(&read_keys[idx]));
-                                }
-                            }
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
 }
 
 // =============================================================================
@@ -2849,46 +2231,6 @@ mod hot_spot {
                                     black_box(map.get(&hot[idx]));
                                 } else {
                                     map.insert(hot[idx], i as u64);
-                                }
-                            }
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let all_keys: Vec<[u8; 8]> = keys_sequential::<8>(TOTAL_N);
-        let hot_keys: Vec<[u8; 8]> = all_keys[..HOT_RANGE].to_vec();
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS))
-            .with_inputs(|| Arc::new(setup_std_btreemap(&all_keys)))
-            .bench_refs(|map| {
-                let barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(map);
-                        let barrier = Arc::clone(&barrier);
-                        let hot = hot_keys.clone();
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut rng_state = t as u64;
-                            for i in 0..OPS {
-                                rng_state =
-                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                                let idx = (rng_state as usize) % hot.len();
-                                if rng_state % 2 == 0 {
-                                    let guard = map.read().unwrap();
-                                    black_box(guard.get(&hot[idx]));
-                                } else {
-                                    let mut guard = map.write().unwrap();
-                                    guard.insert(hot[idx], i as u64);
                                 }
                             }
                         })
@@ -3089,70 +2431,6 @@ mod split_inducing_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 total += map
-                                    .iter()
-                                    .take(SCAN_LIMIT)
-                                    .map(|(_, v)| {
-                                        black_box(v);
-                                        1usize
-                                    })
-                                    .sum::<usize>();
-                            }
-                            black_box(total);
-                        })
-                    })
-                    .collect();
-
-                for h in writer_handles {
-                    h.join().unwrap();
-                }
-                for h in reader_handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [3, 4, 5, 6])]
-    fn std_btreemap(bencher: Bencher, threads: usize) {
-        let initial_keys = keys_sequential::<8>(INITIAL_N);
-        let insert_keys: Vec<[u8; 8]> = (INITIAL_N..INITIAL_N + INSERT_N)
-            .map(|i| (i as u64).to_be_bytes())
-            .collect();
-        let readers = threads - WRITERS;
-
-        bencher
-            .with_inputs(|| {
-                let map = Arc::new(setup_std_btreemap(&initial_keys));
-                (map, insert_keys.clone())
-            })
-            .bench_refs(|(map, new_keys)| {
-                let barrier = Arc::new(Barrier::new(threads));
-
-                let writer_handles: Vec<_> = (0..WRITERS)
-                    .map(|w| {
-                        let map = Arc::clone(map);
-                        let barrier = Arc::clone(&barrier);
-                        let chunk_size = INSERT_N / WRITERS;
-                        let chunk: Vec<_> = new_keys[w * chunk_size..(w + 1) * chunk_size].to_vec();
-                        thread::spawn(move || {
-                            barrier.wait();
-                            for (i, key) in chunk.iter().enumerate() {
-                                let mut guard = map.write().unwrap();
-                                guard.insert(*key, i as u64);
-                            }
-                        })
-                    })
-                    .collect();
-
-                let reader_handles: Vec<_> = (0..readers)
-                    .map(|_| {
-                        let map = Arc::clone(map);
-                        let barrier = Arc::clone(&barrier);
-                        thread::spawn(move || {
-                            barrier.wait();
-                            let mut total = 0usize;
-                            for _ in 0..OPS_PER_THREAD {
-                                let guard = map.read().unwrap();
-                                total += guard
                                     .iter()
                                     .take(SCAN_LIMIT)
                                     .map(|(_, v)| {

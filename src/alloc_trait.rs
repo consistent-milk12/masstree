@@ -1,7 +1,7 @@
 //! Generic allocator trait for tree nodes.
 //!
 //! This module defines [`NodeAllocatorGeneric`] that abstracts over allocators
-//! for different leaf node types (`LeafNode<S, WIDTH>` and `LeafNode24<S>`).
+//! for different leaf node types.
 //!
 //! # Design
 //!
@@ -11,8 +11,8 @@
 //!
 //! # Implementors
 //!
-//! - `SeizeAllocator<S, WIDTH>` for `LeafNode<S, WIDTH>`
-//! - `SeizeAllocator24<S>` for `LeafNode24<S>`
+//! - [`SeizeAllocator24<S>`](crate::alloc24::SeizeAllocator24) for `LeafNode24<S>`
+//! - [`PoolAllocator24<S>`](crate::alloc_pool::PoolAllocator24) for `LeafNode24<S>`
 
 use seize::LocalGuard;
 
@@ -22,8 +22,7 @@ use crate::slot::ValueSlot;
 
 /// Trait for allocating and deallocating tree nodes generically.
 ///
-/// Abstracts over `SeizeAllocator<S, WIDTH>` and `SeizeAllocator24<S>`, enabling
-/// tree operations to work with any leaf type implementing [`TreeLeafNode`].
+/// Enables tree operations to work with any leaf type implementing [`TreeLeafNode`].
 ///
 /// # Type Parameters
 ///
@@ -41,8 +40,8 @@ use crate::slot::ValueSlot;
 ///
 /// # Implementors
 ///
-/// - `SeizeAllocator<S, WIDTH>` for `L = LeafNode<S, WIDTH>`
-/// - `SeizeAllocator24<S>` for `L = LeafNode24<S>`
+/// - [`SeizeAllocator24<S>`](crate::alloc24::SeizeAllocator24) for `L = LeafNode24<S>`
+/// - [`PoolAllocator24<S>`](crate::alloc_pool::PoolAllocator24) for `L = LeafNode24<S>`
 pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     // ========================================================================
     // Leaf Allocation

@@ -168,7 +168,6 @@ pub fn init_tracing() {
 pub const fn init_tracing() {}
 
 pub mod alloc24;
-pub mod alloc_lockfree;
 pub mod alloc_pool;
 pub mod alloc_trait;
 pub mod internode;
@@ -202,7 +201,7 @@ pub use permuter24::{AtomicPermuter24, Permuter24, WIDTH_24};
 pub use leaf24::{LeafNode24, WIDTH_24 as LEAF24_WIDTH};
 
 // Re-export allocator24 types
-pub use alloc24::{NodeAllocator24, SeizeAllocator24};
+pub use alloc24::SeizeAllocator24;
 
 // Re-export pool allocator types
 pub use alloc_pool::PoolAllocator24;
@@ -219,6 +218,6 @@ pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
 pub use tree::RemoveError;
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use tree::{
-    MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTreeIndex, MassTreeLockFree,
-    MassTreePooled, MassTreePooledInline,
+    MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTreeIndex, MassTreePooled,
+    MassTreePooledInline,
 };

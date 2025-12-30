@@ -17,6 +17,8 @@ use std::cmp::Ordering;
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
 use std::ptr as StdPtr;
+use std::sync::Arc;
+use std::sync::atomic::{self as StdAtomic, Ordering as AtomicOrdering};
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
 use crate::key::IKEY_SIZE;
@@ -1036,12 +1038,6 @@ impl<S: ValueSlot> LeafNode24<S> {
                 .compare_exchange(next, marked, CAS_SUCCESS, CAS_FAILURE)
             {
                 Ok(_) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::trace!(
-                        self_ptr = ?StdPtr::from_ref(self),
-                        next = ?next,
-                        "lock_next: SUCCESS - marked next pointer"
-                    );
                     // Return UNMARKED old next (may be null). We intentionally mark even
                     // `NULL` next pointers to avoid two concurrent splits both "seeing"
                     // `NULL` and racing to publish different siblings, orphaning one.
@@ -1418,15 +1414,6 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
                 split_version,
             );
 
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                self_ptr = ?StdPtr::from_ref(self),
-                new_leaf_ptr = ?new_leaf_ptr,
-                split_pos = split_pos,
-                new_leaf_is_split_locked = new_leaf.version.is_split_locked(),
-                "split_into_preallocated: START (new leaf is split-locked)"
-            );
-
             // Load current permutation (caller holds lock)
             let old_perm: Permuter24 = self.permutation();
             let old_size = old_perm.size();
@@ -1478,17 +1465,6 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 
             // Get split key from new leaf's first entry
             let split_ikey = new_leaf.ikey(new_perm.get(0));
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                self_ptr = ?StdPtr::from_ref(self),
-                new_leaf_ptr = ?new_leaf_ptr,
-                split_ikey = format_args!("{:016x}", split_ikey),
-                entries_moved = entries_to_move,
-                old_size_after = split_pos,
-                new_size = new_perm.size(),
-                "split_into_preallocated: DONE (new leaf still split-locked)"
-            );
 
             (split_ikey, crate::value::InsertTarget::Left)
         }
@@ -1570,23 +1546,9 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         // 4. Release fence for visibility
         // 5. Store new_sibling into self.next (unmarked), completing the link
 
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            self_ptr = ?StdPtr::from_ref(self),
-            new_sibling = ?new_sibling,
-            "link_sibling: START (CAS-based)"
-        );
-
         // Step 1: Lock the next pointer via CAS mark
         // This returns the unmarked old_next pointer
         let old_next: *mut Self = self.lock_next();
-
-        #[cfg(feature = "tracing")]
-        tracing::trace!(
-            self_ptr = ?StdPtr::from_ref(self),
-            old_next = ?old_next,
-            "link_sibling: locked next pointer"
-        );
 
         // SAFETY: Caller guarantees new_sibling is valid
         unsafe {
@@ -1601,19 +1563,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         }
 
         // Step 4: Release fence ensures new_sibling is fully visible before publishing
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+        StdAtomic::fence(AtomicOrdering::Release);
 
         // Step 5: Store new_sibling (unmarked) - atomically publishes the link
         // This also "unlocks" the next pointer by clearing the mark bit
         <Self as crate::leaf_trait::TreeLeafNode<S>>::set_next(self, new_sibling);
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            self_ptr = ?StdPtr::from_ref(self),
-            new_sibling = ?new_sibling,
-            old_next = ?old_next,
-            "link_sibling: DONE (CAS-based)"
-        );
     }
 
     #[inline(always)]
@@ -1725,7 +1679,7 @@ impl<S: ValueSlot> Drop for LeafNode24<S> {
 impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value::LeafValue<V>>
     for LeafNode24<crate::value::LeafValue<V>>
 {
-    fn try_clone_output(&self, slot: usize) -> Option<std::sync::Arc<V>> {
+    fn try_clone_output(&self, slot: usize) -> Option<Arc<V>> {
         debug_assert!(
             slot < WIDTH_24,
             "try_clone_arc: slot {slot} >= WIDTH_24 {WIDTH_24}"
@@ -1748,8 +1702,8 @@ impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value:
         // - Caller ensures slot is stable (lock or version validation)
         unsafe {
             let value_ptr: *const V = ptr.cast();
-            std::sync::Arc::increment_strong_count(value_ptr);
-            Some(std::sync::Arc::from_raw(value_ptr))
+            Arc::increment_strong_count(value_ptr);
+            Some(Arc::from_raw(value_ptr))
         }
     }
 
@@ -1757,7 +1711,7 @@ impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value:
         &self,
         slot: usize,
         key: &crate::key::Key<'_>,
-        value: Option<std::sync::Arc<V>>,
+        value: Option<Arc<V>>,
         guard: &seize::LocalGuard<'_>,
     ) {
         debug_assert!(
@@ -1780,7 +1734,7 @@ impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value:
             clippy::expect_used,
             reason = "invariant: source slot must contain value"
         )]
-        let arc: std::sync::Arc<V> = value.expect(
+        let arc: Arc<V> = value.expect(
             "assign_from_key_arc: value cannot be None (source slot was not a value); \
              this indicates a bug in conflict detection",
         );
@@ -1791,7 +1745,7 @@ impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value:
         // Store Arc as raw pointer
         // NOTE: Arc ownership transfers to the slot; the slot now owns one strong reference.
         // The caller must NOT drop `value` again - it's been consumed via into_raw.
-        let ptr: *mut u8 = std::sync::Arc::into_raw(arc).cast_mut().cast::<u8>();
+        let ptr: *mut u8 = Arc::into_raw(arc).cast_mut().cast::<u8>();
         self.set_leaf_value_ptr(slot, ptr);
 
         // Set keylenx and suffix based on whether key has remaining bytes
