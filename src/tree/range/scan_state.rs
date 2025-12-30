@@ -653,6 +653,7 @@ impl<S: ValueSlot> ScanSnapshot<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ptr as StdPtr;
 
     // Note: These tests use mock types since we can't easily construct
     // real LeafNode24 in unit tests. Integration tests in CODE_005 will
@@ -691,8 +692,8 @@ mod tests {
 
     #[test]
     fn test_layer_context_creation() {
-        let root: *const u8 = 0x1000 as *const u8;
-        let leaf: *mut u8 = 0x2000 as *mut u8;
+        let root: *const u8 = StdPtr::without_provenance(0x1000);
+        let leaf: *mut u8 = StdPtr::without_provenance_mut(0x2000);
 
         let ctx: LayerContext<u8> = LayerContext::new(root, leaf);
 
@@ -708,21 +709,27 @@ mod tests {
         assert!(stack.is_empty());
 
         // Push some contexts
-        stack.push(LayerContext::new(0x1000 as *const u8, 0x2000 as *mut u8));
-        stack.push(LayerContext::new(0x3000 as *const u8, 0x4000 as *mut u8));
+        stack.push(LayerContext::new(
+            StdPtr::without_provenance(0x1000),
+            StdPtr::without_provenance_mut(0x2000),
+        ));
+        stack.push(LayerContext::new(
+            StdPtr::without_provenance(0x3000),
+            StdPtr::without_provenance_mut(0x4000),
+        ));
 
         assert_eq!(stack.len(), 2);
 
         // Pop
         let ctx = stack.pop().unwrap();
-        assert_eq!(ctx.root, 0x3000 as *const u8);
-        assert_eq!(ctx.leaf_ptr(), 0x4000 as *mut u8);
+        assert_eq!(ctx.root, StdPtr::without_provenance(0x3000));
+        assert_eq!(ctx.leaf_ptr(), StdPtr::without_provenance_mut(0x4000));
 
         assert_eq!(stack.len(), 1);
 
         // Pop again
         let ctx = stack.pop().unwrap();
-        assert_eq!(ctx.root, 0x1000 as *const u8);
+        assert_eq!(ctx.root, StdPtr::without_provenance(0x1000));
 
         assert!(stack.is_empty());
         assert!(stack.pop().is_none());
@@ -735,8 +742,8 @@ mod tests {
         // Push 4 elements (should stay inline)
         for i in 1..=4 {
             stack.push(LayerContext::new(
-                (i * 0x1000) as *const u8,
-                (i * 0x2000) as *mut u8,
+                StdPtr::without_provenance(i * 0x1000),
+                StdPtr::without_provenance_mut(i * 0x2000),
             ));
         }
 
@@ -744,7 +751,10 @@ mod tests {
         assert!(!stack.spilled());
 
         // Push one more (should spill to heap)
-        stack.push(LayerContext::new(0x5000 as *const u8, 0x6000 as *mut u8));
+        stack.push(LayerContext::new(
+            StdPtr::without_provenance(0x5000),
+            StdPtr::without_provenance_mut(0x6000),
+        ));
         assert!(stack.spilled());
     }
 
@@ -752,13 +762,13 @@ mod tests {
     #[expect(clippy::cast_ptr_alignment)]
     fn test_scan_snapshot_ptr_generic() {
         // Test with u64
-        let ptr: *const u64 = 0x1000 as *const u64;
+        let ptr: *const u64 = StdPtr::without_provenance(0x1000);
         let snap: ScanSnapshotPtr<u64> = ScanSnapshotPtr::new(ptr, 8);
         assert_eq!(snap.value_ptr, ptr);
         assert_eq!(snap.key_len, 8);
 
         // Test from_raw
-        let raw: *const u8 = 0x2000 as *const u8;
+        let raw: *const u8 = StdPtr::without_provenance(0x2000);
         let snap2: ScanSnapshotPtr<u64> = ScanSnapshotPtr::from_raw(raw, 4);
         assert_eq!(snap2.value_ptr, raw.cast::<u64>());
         assert_eq!(snap2.key_len, 4);

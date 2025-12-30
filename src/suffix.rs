@@ -773,7 +773,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     ///
     /// Used after draining to an external bag.
     #[inline(always)]
-    pub fn clear_all(&mut self) {
+    pub const fn clear_all(&mut self) {
         self.slots = [InlineSlotMeta::EMPTY; WIDTH];
         self.size = 0;
     }
@@ -813,10 +813,11 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         for i in 0..perm.size() {
             let s: usize = perm.get(i);
 
-            if s < WIDTH && s != new_slot {
-                if let Some(suffix) = self.get(s) {
-                    total_size += suffix.len();
-                }
+            if s < WIDTH
+                && s != new_slot
+                && let Some(suffix) = self.get(s)
+            {
+                total_size += suffix.len();
             }
         }
 
@@ -827,10 +828,11 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         // Copy existing suffixes
         for i in 0..perm.size() {
             let s: usize = perm.get(i);
-            if s < WIDTH && s != new_slot {
-                if let Some(suffix) = self.get(s) {
-                    bag.assign(s, suffix);
-                }
+            if s < WIDTH
+                && s != new_slot
+                && let Some(suffix) = self.get(s)
+            {
+                bag.assign(s, suffix);
             }
         }
 

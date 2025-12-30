@@ -2768,7 +2768,7 @@ mod hot_spot {
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 let idx = (rng_state as usize) % hot.len();
                                 // 50% read, 50% update (insert over existing)
-                                if rng_state % 2 == 0 {
+                                if rng_state.is_multiple_of(2) {
                                     black_box(tree.get_with_guard(&hot[idx], &guard));
                                 } else {
                                     let _ = tree.insert_with_guard(&hot[idx], i as u64, &guard);

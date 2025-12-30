@@ -252,7 +252,7 @@ where
         let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
         // SAFETY: Layout is valid
         let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout) as *mut InternodeNode<S, INTERNODE_WIDTH> };
+            unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -276,7 +276,7 @@ where
         let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
         // SAFETY: Layout is valid
         let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout) as *mut InternodeNode<S, INTERNODE_WIDTH> };
+            unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -304,7 +304,7 @@ where
         let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
         // SAFETY: Layout is valid
         let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout) as *mut InternodeNode<S, INTERNODE_WIDTH> };
+            unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }

@@ -7,7 +7,6 @@ use std::fmt as StdFmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering};
 
-use crate::alloc_pool::PoolAllocator24;
 use crate::alloc24::SeizeAllocator24;
 use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
@@ -107,10 +106,10 @@ use crate::leaf_trait::TreeLeafNode;
 /// # Example
 ///
 /// ```ignore
-/// use masstree::{MassTreeGeneric, LeafNode24, PoolAllocator24};
+/// use masstree::{MassTreeGeneric, LeafNode24, SeizeAllocator24};
 ///
 /// // Create a WIDTH=24 tree explicitly
-/// let tree: MassTreeGeneric<u64, LeafNode24<_>, PoolAllocator24<_>> =
+/// let tree: MassTreeGeneric<u64, LeafNode24<_>, SeizeAllocator24<_>> =
 ///     MassTreeGeneric::new();
 /// ```
 pub struct MassTreeGeneric<S, L, A>
@@ -264,22 +263,6 @@ pub type MassTree24Inline<V> = MassTreeGeneric<
     SeizeAllocator24<LeafValueIndex<V>>,
 >;
 
-/// [`MassTree`] with thread-local pool allocator.
-///
-/// Uses O(1) allocation from lock-free free lists for higher throughput.
-/// Best for write-heavy workloads where allocation cost dominates.
-pub type MassTreePooled<V> =
-    MassTreeGeneric<LeafValue<V>, LeafNode24<LeafValue<V>>, PoolAllocator24<LeafValue<V>>>;
-
-/// [`MassTree24Inline`] with thread-local pool allocator.
-///
-/// Combines inline value storage with pool allocation for maximum throughput.
-pub type MassTreePooledInline<V> = MassTreeGeneric<
-    LeafValueIndex<V>,
-    LeafNode24<LeafValueIndex<V>>,
-    PoolAllocator24<LeafValueIndex<V>>,
->;
-
 // ============================================================================
 //  Constructor implementations for type aliases
 // ============================================================================
@@ -311,38 +294,6 @@ impl<V: Copy + Send + Sync + 'static> MassTree24Inline<V> {
 }
 
 impl<V: Copy + Send + Sync + 'static> Default for MassTree24Inline<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<V: Send + Sync + 'static> MassTreePooled<V> {
-    /// Create a new empty `MassTreePooled`.
-    #[must_use]
-    #[inline(always)]
-    pub fn new() -> Self {
-        let allocator = PoolAllocator24::new();
-        Self::with_allocator(allocator)
-    }
-}
-
-impl<V: Send + Sync + 'static> Default for MassTreePooled<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<V: Copy + Send + Sync + 'static> MassTreePooledInline<V> {
-    /// Create a new empty `MassTreePooledInline`.
-    #[must_use]
-    #[inline(always)]
-    pub fn new() -> Self {
-        let allocator = PoolAllocator24::new();
-        Self::with_allocator(allocator)
-    }
-}
-
-impl<V: Copy + Send + Sync + 'static> Default for MassTreePooledInline<V> {
     fn default() -> Self {
         Self::new()
     }

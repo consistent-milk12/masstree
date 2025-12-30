@@ -1,4 +1,4 @@
-//! Deletion operations for MassTree.
+//! Deletion operations for `MassTree`.
 //!
 //! This module implements the `remove()` operation following the C++
 //! reference in `reference/masstree_remove.hh`.
@@ -43,7 +43,7 @@ pub enum RemoveError {
 impl std::fmt::Display for RemoveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RemoveError::RetryLimitExceeded => write!(f, "retry limit exceeded"),
+            Self::RetryLimitExceeded => write!(f, "retry limit exceeded"),
         }
     }
 }
@@ -334,12 +334,12 @@ where
     let value_ptr: *mut u8 = leaf.leaf_value_ptr(kp);
 
     // Step 2: Clone the value for return (before retirement)
-    let value: Option<S::Output> = if !value_ptr.is_null() {
+    let value: Option<S::Output> = if value_ptr.is_null() {
+        None
+    } else {
         // SAFETY: value_ptr points to valid value created during insert
         // We use try_clone_output which handles Arc cloning properly
         leaf.try_clone_output(kp)
-    } else {
-        None
     };
 
     // Step 3: Schedule value retirement

@@ -679,6 +679,7 @@ where
                     self.needs_duplicate_check = true;
                     continue;
                 }
+
                 ScanState::Up => {
                     if !handle_up(
                         &mut self.stack,
@@ -689,15 +690,18 @@ where
                         self.exhausted = true;
                         return None;
                     }
+
                     self.state = ScanState::FindNext;
                     self.needs_duplicate_check = true;
                     continue;
                 }
+
                 ScanState::Retry => {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
                     self.needs_duplicate_check = true;
                     continue;
                 }
+
                 ScanState::Emit | ScanState::FindNext => {}
             }
 

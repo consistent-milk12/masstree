@@ -972,7 +972,7 @@ where
     /// 2. Get child's stable version
     /// 3. Validate parent version
     /// 4. If valid: swap sense (we're now "at" child)
-    /// 5. If invalid due to split: check if key > last_key
+    /// 5. If invalid due to split: check if key > `last_key`
     /// 6. Only restart from root if key actually escaped to sibling
     #[expect(clippy::unused_self, reason = "API Consistency")]
     #[expect(clippy::used_underscore_binding, reason = "Lock guard")]

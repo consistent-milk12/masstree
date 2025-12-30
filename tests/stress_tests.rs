@@ -123,7 +123,6 @@ fn multilayer_16byte_keys_4_threads() {
         }
     }
 
-
     if !missing.is_empty() {
         panic!(
             "multilayer_16byte: Missing {} keys: {:?}",
@@ -190,7 +189,6 @@ fn multilayer_24byte_keys_4_threads() {
             }
         }
     }
-
 
     if !missing.is_empty() {
         panic!(
@@ -259,7 +257,6 @@ fn multilayer_32byte_keys_4_threads() {
             }
         }
     }
-
 
     if !missing.is_empty() {
         panic!(
@@ -879,7 +876,6 @@ fn mixed_heavy_reads_during_writes() {
     for h in reader_handles {
         h.join().unwrap();
     }
-
 
     // Final verification - all keys must be present
     let guard = tree.guard();

@@ -2,7 +2,7 @@
 
 `masstree` is a beta high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` and supports variable length keys by building a trie of small B+trees, based on the [Masstree paper](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf) (Mao, Kohler, Morris — EuroSys 2012).
 
-This release is published as `0.2.2`. The crate is feature-complete for core operations (get, insert, range scans) but still being validated for correctness and performance under high contention.
+This release is published as `0.2.3`. The crate is feature-complete for core operations (get, insert, remove, range scans) but still being validated for correctness and performance under high contention.
 
 This crate does a lot of allocation. In my testing, the default global allocator can be much slower than `mimalloc` for these patterns. The C++ Masstree codebase uses a custom allocator, and this Rust port does not have an equivalent yet.
 
@@ -26,13 +26,14 @@ Implemented:
 
 - `get`, `get_with_guard`, and `get_ref` — lock-free reads with version validation
 - `insert` and `insert_with_guard` — fine-grained leaf locking
+- `remove` and `remove_with_guard` — concurrent deletion with value retirement
 - `scan`, `scan_ref`, and `scan_prefix` — zero-copy range iteration
 - Leaf and internode splits with proper B-link tree semantics
 
 Not implemented yet:
 
-- Deletion (planned for 0.3.0)
 - Keys longer than 256 bytes (configurable limit, currently panics)
+- Leaf coalescing after deletion (empty leaves remain in tree)
 
 ### Version roadmap
 
@@ -40,8 +41,9 @@ Not implemented yet:
 |---------|----------|
 | 0.1.x | Initial implementation (get, insert, splits) |
 | 0.2.0 | Range scans (`scan`, `scan_ref`, `scan_prefix`) |
-| **0.2.2** | Box elimination, optimized range scans |
-| 0.3.0 | Deletion (planned) |
+| 0.2.2 | Box elimination, optimized range scans |
+| **0.2.3** | Deletion (`remove`, `remove_with_guard`) |
+| 0.3.0 | Leaf coalescing, memory reclamation improvements (planned) |
 
 ## Install
 
@@ -49,7 +51,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-masstree = { version = "0.2.2", features = ["mimalloc"] }
+masstree = { version = "0.2.3", features = ["mimalloc"] }
 ```
 
 MSRV is Rust `1.92`.

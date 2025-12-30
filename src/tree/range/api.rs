@@ -400,9 +400,9 @@ mod tests {
     #[test]
     fn test_scan_ref_returns_same_values_as_scan() {
         use super::RangeBound;
-        use crate::MassTree24;
+        use crate::MassTree24Inline;
 
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree24Inline<u64> = MassTree24Inline::new();
         let guard = tree.guard();
 
         // Insert some test data
@@ -417,8 +417,7 @@ mod tests {
             RangeBound::Unbounded,
             RangeBound::Unbounded,
             |_key, value| {
-                // value is Arc<u64>, need to dereference
-                values_scan.push(*value);
+                values_scan.push(value);
                 true
             },
             &guard,
@@ -430,7 +429,6 @@ mod tests {
             RangeBound::Unbounded,
             RangeBound::Unbounded,
             |_key, value| {
-                // value is &u64, direct reference
                 values_scan_ref.push(*value);
                 true
             },
@@ -445,9 +443,9 @@ mod tests {
     #[test]
     fn test_scan_ref_with_range_bounds() {
         use super::RangeBound;
-        use crate::MassTree24;
+        use crate::MassTree24Inline;
 
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree24Inline<u64> = MassTree24Inline::new();
         let guard = tree.guard();
 
         // Insert keys "a", "b", "c", "d", "e"
@@ -461,7 +459,7 @@ mod tests {
             RangeBound::Included(b"b"),
             RangeBound::Included(b"d"),
             |_key, value| {
-                values_scan.push(*value);
+                values_scan.push(value);
                 true
             },
             &guard,
@@ -486,9 +484,9 @@ mod tests {
     #[test]
     fn test_scan_ref_early_stop() {
         use super::RangeBound;
-        use crate::MassTree24;
+        use crate::MassTree24Inline;
 
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree24Inline<u64> = MassTree24Inline::new();
         let guard = tree.guard();
 
         // Insert 100 entries

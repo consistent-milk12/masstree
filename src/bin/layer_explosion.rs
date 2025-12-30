@@ -1,8 +1,8 @@
 //! Profile binary for layer explosion workload (64-byte keys, 8 layers).
 //!
 //! Usage:
-//!   cargo build --release --bin layer_explosion --features mimalloc
-//!   perf record -g --call-graph dwarf -F 999 -- ./target/release/layer_explosion -j6
+//!   cargo build --release --bin `layer_explosion` --features mimalloc
+//!   perf record -g --call-graph dwarf -F 999 -- ./`target/release/layer_explosion` -j6
 //!   perf report --stdio --no-children -g none --percent-limit 1
 
 use std::sync::Arc;
