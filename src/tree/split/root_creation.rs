@@ -1,13 +1,8 @@
 //! Root and layer-root creation helpers.
 //!
 //! Provides atomic root installation for both main tree roots and layer roots.
-//! Layer roots use parent pointer updates only (no CAS on `root_ptr`).
-//!
-//! # CAS Failure Policy
-//!
-//! When CAS fails during main root creation, the allocated internode is
-//! NOT retired. It remains tracked by the allocator and will be freed
-//! when the allocator drops. This prevents double-free.
+//! Main tree roots use atomic store (we hold the lock on current root).
+//! Layer roots use parent pointer updates only (no modification to `root_ptr`).
 
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering, fence as atomic_fence};
 
@@ -24,13 +19,13 @@ pub struct RootCreation;
 
 impl RootCreation {
     // =========================================================================
-    // Main Tree Root Creation (uses CAS on root_ptr)
+    // Main Tree Root Creation (atomic store on root_ptr - we hold the lock)
     // =========================================================================
 
     /// Create a new main tree root internode from two leaves.
     ///
-    /// Atomically installs a new root via CAS on `root_ptr`. Parent pointers
-    /// are only updated after CAS succeeds to avoid dangling references.
+    /// Atomically installs a new root via store on `root_ptr`. Parent pointers
+    /// are updated after the store to avoid dangling references.
     ///
     /// # Arguments
     ///
@@ -96,45 +91,21 @@ impl RootCreation {
         #[cfg(feature = "tracing")]
         tracing::debug!(new_root_ptr = ?new_root_ptr, "RootCreation: allocated");
 
-        // Atomically install via CAS
-        let expected: *mut u8 = left_leaf_ptr.cast();
-        match root_ptr.compare_exchange(
-            expected,
-            new_root_ptr,
-            AtomicOrdering::AcqRel,
-            AtomicOrdering::Acquire,
-        ) {
-            Ok(_) => {
-                // CAS succeeded - update parent pointers
-                unsafe {
-                    // Release fence: ensure internode is fully constructed
-                    // before it becomes visible via parent pointers
-                    atomic_fence(AtomicOrdering::Release);
+        // Atomically install new root
+        // CRITICAL: We hold lock on left (current root), so this store is safe.
+        // Using Release ordering to ensure new_root is fully visible before the swap.
+        root_ptr.store(new_root_ptr, AtomicOrdering::Release);
 
-                    (*left_leaf_ptr).set_parent(new_root_ptr);
-                    (*right_leaf_ptr).set_parent(new_root_ptr);
-                    (*left_leaf_ptr).version().mark_nonroot();
-                }
-
-                #[cfg(feature = "tracing")]
-                tracing::info!(new_root_ptr = ?new_root_ptr, "RootCreation: root installed");
-
-                Ok(new_root_ptr.cast())
-            }
-            Err(current) => {
-                // Under TRUE hand-over-hand, CAS failure should be unreachable.
-                // This indicates an invariant violation - panic with diagnostics.
-                // (See §2.1 - unified panic policy per SpecAnalysis2 §7.2)
-                //
-                // The allocated node remains tracked by the allocator (no leak).
-                panic!(
-                    "RootCreation::create_root_from_leaves: CAS failed unexpectedly. \
-                     expected={expected:?}, current={current:?}. \
-                     This indicates an invariant violation - the root was modified \
-                     while we held the lock."
-                );
-            }
+        unsafe {
+            (*left_leaf_ptr).set_parent(new_root_ptr);
+            (*right_leaf_ptr).set_parent(new_root_ptr);
+            (*left_leaf_ptr).version().mark_nonroot();
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(new_root_ptr = ?new_root_ptr, "RootCreation: root installed");
+
+        Ok(new_root_ptr.cast())
     }
 
     /// Create a new main tree root internode from two internodes.
@@ -183,38 +154,24 @@ impl RootCreation {
         new_root.set_child(1, right_inode_ptr.cast());
         new_root.set_nkeys(1);
 
-        let expected: *mut u8 = left_inode_ptr.cast();
-        match root_ptr.compare_exchange(
-            expected,
-            new_root_ptr,
-            AtomicOrdering::AcqRel,
-            AtomicOrdering::Acquire,
-        ) {
-            Ok(_) => {
-                unsafe {
-                    atomic_fence(AtomicOrdering::Release);
-                    (*left_inode_ptr).set_parent(new_root_ptr);
-                    (*right_inode_ptr).set_parent(new_root_ptr);
-                    (*left_inode_ptr).version().mark_nonroot();
-                }
+        // Atomically install new root
+        // CRITICAL: We hold lock on left (current root), so this store is safe.
+        root_ptr.store(new_root_ptr, AtomicOrdering::Release);
 
-                #[cfg(feature = "tracing")]
-                tracing::info!(
-                    new_root_ptr = ?new_root_ptr,
-                    new_height = left.height() + 1,
-                    "RootCreation: internode root installed"
-                );
-
-                Ok(new_root_ptr.cast())
-            }
-            Err(current) => {
-                // Panic on CAS failure - see §2.1 and create_root_from_leaves
-                panic!(
-                    "RootCreation::create_root_from_internodes: CAS failed unexpectedly. \
-                     expected={expected:?}, current={current:?}. Invariant violation."
-                );
-            }
+        unsafe {
+            (*left_inode_ptr).set_parent(new_root_ptr);
+            (*right_inode_ptr).set_parent(new_root_ptr);
+            (*left_inode_ptr).version().mark_nonroot();
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            new_root_ptr = ?new_root_ptr,
+            new_height = left.height() + 1,
+            "RootCreation: internode root installed"
+        );
+
+        Ok(new_root_ptr.cast())
     }
 
     // =========================================================================

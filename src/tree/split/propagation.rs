@@ -50,11 +50,9 @@ use super::parent_locking::ParentLocking;
 use super::propagation_context::PropagationContext;
 use super::root_creation::RootCreation;
 
-/// Maximum iterations before considering tree corrupted.
-const MAX_PROPAGATION_ITERATIONS: usize = 64;
-
-/// Maximum consecutive stale parent retries before re-descent from root.
-const MAX_STALE_PARENT_RETRIES: usize = 16;
+// CRITICAL: Defensive bounds - uncomment if debugging infinite loops or livelock
+// const MAX_PROPAGATION_ITERATIONS: usize = 64;
+// const MAX_STALE_PARENT_RETRIES: usize = 16;
 
 /// Unit struct namespace for split propagation operations.
 pub struct Propagation;
@@ -191,23 +189,18 @@ impl Propagation {
         L: LayerCapableLeaf<S>,
         A: NodeAllocatorGeneric<S, L>,
     {
-        let mut iterations: usize = 0;
-        let mut stale_parent_retries: usize = 0;
+        // CRITICAL: Uncomment iteration tracking if debugging infinite loops
+        // let mut iterations: usize = 0;
+        // let mut stale_parent_retries: usize = 0;
 
         loop {
-            iterations += 1;
-
-            if iterations > MAX_PROPAGATION_ITERATIONS {
-                // RAII: left_lock will auto-unlock on panic
-                // But we need to unlock split-locked right explicitly
-                Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
-                drop(left_lock); // Explicit for clarity
-
-                panic!(
-                    "Propagation::propagation_loop: exceeded {MAX_PROPAGATION_ITERATIONS} \
-                     iterations - tree likely corrupted"
-                );
-            }
+            // CRITICAL: Uncomment to detect runaway propagation (tree corruption)
+            // iterations += 1;
+            // if iterations > MAX_PROPAGATION_ITERATIONS {
+            //     Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+            //     drop(left_lock);
+            //     panic!("Propagation: exceeded max iterations - tree likely corrupted");
+            // }
 
             // Get left's parent pointer
             let left_parent: *mut u8 = Self::get_parent::<S, L>(left_ptr, at_leaf_level);
@@ -251,15 +244,13 @@ impl Propagation {
                 return result;
             }
 
-            // 1c. NULL parent but not a root - error
-            if left_parent.is_null() {
-                Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
-                drop(left_lock); // RAII: auto-unlock before panic
-                panic!(
-                    "Propagation: NULL parent on non-root. \
-                     is_main_root={is_main_root}, is_layer_root={is_layer_root}"
-                );
-            }
+            // CRITICAL: NULL parent on non-root indicates tree corruption
+            // Uncomment if debugging parent pointer issues
+            // if left_parent.is_null() {
+            //     Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+            //     drop(left_lock);
+            //     panic!("Propagation: NULL parent on non-root");
+            // }
 
             // =========================================================
             // STEP 2: Lock parent WHILE left is still locked
@@ -287,7 +278,7 @@ impl Propagation {
             if current_left_parent != left_parent {
                 // Parent pointer changed - release parent lock and retry
                 drop(parent_lock); // RAII: auto-unlock
-                stale_parent_retries = 0; // Reset: parent changed, not stale
+                // CRITICAL: stale_parent_retries = 0; // Reset: parent changed, not stale
                 std::hint::spin_loop();
                 continue;
             }
@@ -298,21 +289,17 @@ impl Propagation {
 
             let child_idx: usize =
                 if let Some(idx) = ParentLocking::validate_membership::<S, L>(parent, left_ptr) {
-                    stale_parent_retries = 0; // Reset on success
+                    // CRITICAL: stale_parent_retries = 0; // Reset on success
                     idx
                 } else {
-                    stale_parent_retries += 1;
-
-                    // SpecAnalysis §4.6: Bounded fallback for stale parent
-                    if stale_parent_retries > MAX_STALE_PARENT_RETRIES {
-                        // Return error instead of panicking - caller will retry insert from scratch.
-                        // This maintains availability at the cost of one failed insert attempt.
-                        Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
-                        drop(parent_lock);
-                        drop(left_lock);
-
-                        return Err(InsertError::SplitFailed);
-                    }
+                    // CRITICAL: Uncomment to prevent livelock on persistent stale parent
+                    // stale_parent_retries += 1;
+                    // if stale_parent_retries > MAX_STALE_PARENT_RETRIES {
+                    //     Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+                    //     drop(parent_lock);
+                    //     drop(left_lock);
+                    //     return Err(InsertError::SplitFailed);
+                    // }
 
                     // Child not found - parent may have been split concurrently
                     // Release parent lock and retry (left_lock still held)

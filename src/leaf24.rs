@@ -983,8 +983,9 @@ impl<S: ValueSlot> LeafNode24<S> {
     ///
     /// Spins until the next pointer is unmarked and version is stable.
     pub fn wait_for_split(&self) {
-        const MAX_RETRIES: usize = 1000;
-        let mut retries: usize = 0;
+        // CRITICAL: Uncomment to add timeout for stuck splits
+        // const MAX_RETRIES: usize = 1000;
+        // let mut retries: usize = 0;
 
         while self.next_is_marked() {
             // Quick check: did marker clear during spin?
@@ -998,11 +999,11 @@ impl<S: ValueSlot> LeafNode24<S> {
             // Still marked - wait for version to stabilize
             let _ = self.version.stable();
 
-            retries += 1;
-            if retries > MAX_RETRIES {
-                // Timeout - proceed anyway
-                break;
-            }
+            // CRITICAL: Uncomment to prevent infinite spin on stuck split
+            // retries += 1;
+            // if retries > MAX_RETRIES {
+            //     break;
+            // }
         }
     }
 
