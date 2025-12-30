@@ -17,7 +17,6 @@ use seize::Collector;
 
 mod generic;
 mod index;
-mod optimistic;
 mod range;
 pub mod remove;
 mod split;
@@ -28,16 +27,6 @@ pub mod test_hooks;
 pub use index::MassTreeIndex;
 pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use remove::RemoveError;
-
-// Re-export debug counters (only when tracing is enabled)
-#[cfg(feature = "tracing")]
-pub use optimistic::{
-    ADVANCE_BLINK_COUNT, BLINK_ADVANCE_ANOMALY_COUNT, BLINK_SHOULD_FOLLOW_COUNT, DebugCounters,
-    LOCKED_INSERT_COUNT, PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
-    PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, SEARCH_NOT_FOUND_COUNT,
-    SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters, get_debug_counters,
-    get_parent_wait_stats, reset_debug_counters,
-};
 
 // ============================================================================
 //  InsertError

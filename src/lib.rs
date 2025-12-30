@@ -184,7 +184,6 @@ pub mod permuter24;
 pub mod prefetch;
 pub mod slot;
 pub mod suffix;
-mod tracing_helpers;
 pub mod tree;
 pub mod value;
 
@@ -222,14 +221,4 @@ pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use tree::{
     MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTreeIndex, MassTreeLockFree,
     MassTreePooled, MassTreePooledInline,
-};
-
-// Re-export debug counters for diagnosis (only when tracing is enabled)
-#[cfg(feature = "tracing")]
-pub use tree::{
-    ADVANCE_BLINK_COUNT, BLINK_ADVANCE_ANOMALY_COUNT, BLINK_SHOULD_FOLLOW_COUNT, DebugCounters,
-    LOCKED_INSERT_COUNT, PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
-    PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, SEARCH_NOT_FOUND_COUNT,
-    SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters, get_debug_counters,
-    get_parent_wait_stats, reset_debug_counters,
 };

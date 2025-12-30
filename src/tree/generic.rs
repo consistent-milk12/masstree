@@ -2118,8 +2118,6 @@ where
         );
 
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
-        #[cfg(feature = "tracing")]
-        crate::tree::optimistic::SPLIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
 
         // Calculate split point
         let split_point = left_leaf

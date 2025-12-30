@@ -56,12 +56,7 @@ fn main() {
         i += 1;
     }
 
-    eprintln!(
-        "Layer explosion: {} threads, {} iterations, {} ops/thread",
-        threads, iterations, OPS_PER_THREAD
-    );
-
-    for iter in 0..iterations {
+    for _ in 0..iterations {
         let tree: Arc<MassTree<u64>> = Arc::new(MassTree::new());
 
         let handles: Vec<_> = (0..threads)
@@ -72,7 +67,7 @@ fn main() {
                     let end = start + OPS_PER_THREAD;
                     for i in start..end {
                         let key = make_long_key(i as u64);
-                        tree.insert(&key, i as u64);
+                        let _ = tree.insert(&key, i as u64);
                     }
                 })
             })
@@ -81,11 +76,5 @@ fn main() {
         for h in handles {
             h.join().unwrap();
         }
-
-        if iter == 0 {
-            eprintln!("Iteration {}: tree populated", iter);
-        }
     }
-
-    eprintln!("Done");
 }

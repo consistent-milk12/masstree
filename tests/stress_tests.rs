@@ -27,38 +27,10 @@
 mod common;
 
 use masstree::MassTree24;
-#[cfg(feature = "tracing")]
-use masstree::get_debug_counters;
-
-/// Reset debug counters (no-op when tracing is disabled)
-#[cfg(not(feature = "tracing"))]
-#[allow(dead_code, reason = "conditional compilation stub")]
-fn reset_counters() {}
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-
-// =============================================================================
-// Test Configuration
-// =============================================================================
-
-/// Report debug counters if any B-link issues detected
-#[cfg(feature = "tracing")]
-fn report_debug_counters(test_name: &str) {
-    let (blink_should_follow, search_not_found) = get_debug_counters();
-    if blink_should_follow > 0 || search_not_found > 0 {
-        eprintln!(
-            "\n*** {} - DIAGNOSTIC ***\n\
-             B-link followed: {} times\n\
-             Search NotFound: {} times\n",
-            test_name, blink_should_follow, search_not_found
-        );
-    }
-}
-
-#[cfg(not(feature = "tracing"))]
-fn report_debug_counters(_test_name: &str) {}
 
 /// Verify all keys are findable, panic with details if any missing
 fn verify_all_keys<F>(tree: &MassTree24<u64>, key_gen: F, count: usize, test_name: &str)
@@ -151,7 +123,6 @@ fn multilayer_16byte_keys_4_threads() {
         }
     }
 
-    report_debug_counters("multilayer_16byte_keys_4_threads");
 
     if !missing.is_empty() {
         panic!(
@@ -220,7 +191,6 @@ fn multilayer_24byte_keys_4_threads() {
         }
     }
 
-    report_debug_counters("multilayer_24byte_keys_4_threads");
 
     if !missing.is_empty() {
         panic!(
@@ -290,7 +260,6 @@ fn multilayer_32byte_keys_4_threads() {
         }
     }
 
-    report_debug_counters("multilayer_32byte_keys_4_threads");
 
     if !missing.is_empty() {
         panic!(
@@ -344,7 +313,6 @@ fn multilayer_mixed_lengths() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("multilayer_mixed_lengths");
 
     if fail_count > 0 {
         panic!(
@@ -396,7 +364,6 @@ fn high_thread_8_threads_8byte_keys() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("high_thread_8_threads_8byte_keys");
 
     if fail_count > 0 {
         panic!(
@@ -455,7 +422,6 @@ fn high_thread_16_threads_8byte_keys() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("high_thread_16_threads_8byte_keys");
 
     if fail_count > 0 {
         panic!(
@@ -503,7 +469,6 @@ fn high_thread_8_threads_24byte_keys() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("high_thread_8_threads_24byte_keys");
 
     if fail_count > 0 {
         panic!(
@@ -555,7 +520,6 @@ fn large_volume_10k_keys_4_threads() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("large_volume_10k_keys_4_threads");
 
     if fail_count > 0 {
         panic!(
@@ -603,7 +567,6 @@ fn large_volume_20k_keys_8_threads() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("large_volume_20k_keys_8_threads");
 
     if fail_count > 0 {
         panic!(
@@ -656,7 +619,6 @@ fn pattern_sequential_keys_high_splits() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("pattern_sequential_keys_high_splits");
 
     if fail_count > 0 {
         panic!(
@@ -706,7 +668,6 @@ fn pattern_reverse_sequential() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("pattern_reverse_sequential");
 
     if fail_count > 0 {
         panic!(
@@ -767,7 +728,6 @@ fn pattern_pseudorandom_keys() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("pattern_pseudorandom_keys");
 
     if fail_count > 0 {
         panic!(
@@ -839,7 +799,6 @@ fn pattern_shared_prefix() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("pattern_shared_prefix");
 
     if fail_count > 0 {
         panic!(
@@ -921,7 +880,6 @@ fn mixed_heavy_reads_during_writes() {
         h.join().unwrap();
     }
 
-    report_debug_counters("mixed_heavy_reads_during_writes");
 
     // Final verification - all keys must be present
     let guard = tree.guard();
@@ -991,7 +949,6 @@ fn mixed_continuous_readwrite() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("mixed_continuous_readwrite");
 
     if fail_count > 0 {
         panic!(
@@ -1041,14 +998,9 @@ fn repeated_10_runs_4_threads_8byte() {
 
         let fail_count = verify_failures.load(Ordering::Relaxed);
         if fail_count > 0 {
-            #[cfg(feature = "tracing")]
-            let (blink, notfound) = get_debug_counters();
-            #[cfg(not(feature = "tracing"))]
-            let (blink, notfound) = (0u64, 0u64);
             panic!(
-                "repeated_10_runs: run {} failed with {} verification failures\n\
-                 blink_follow={}, search_notfound={}",
-                run, fail_count, blink, notfound
+                "repeated_10_runs: run {} failed with {} verification failures",
+                run, fail_count
             );
         }
 
@@ -1090,14 +1042,9 @@ fn repeated_10_runs_4_threads_24byte() {
 
         let fail_count = verify_failures.load(Ordering::Relaxed);
         if fail_count > 0 {
-            #[cfg(feature = "tracing")]
-            let (blink, notfound) = get_debug_counters();
-            #[cfg(not(feature = "tracing"))]
-            let (blink, notfound) = (0u64, 0u64);
             panic!(
-                "repeated_10_runs_24byte: run {} failed with {} verification failures\n\
-                 blink_follow={}, search_notfound={}",
-                run, fail_count, blink, notfound
+                "repeated_10_runs_24byte: run {} failed with {} verification failures",
+                run, fail_count
             );
         }
 
@@ -1145,14 +1092,9 @@ fn repeated_20_runs_8_threads_mixed() {
 
         let fail_count = verify_failures.load(Ordering::Relaxed);
         if fail_count > 0 {
-            #[cfg(feature = "tracing")]
-            let (blink, notfound) = get_debug_counters();
-            #[cfg(not(feature = "tracing"))]
-            let (blink, notfound) = (0u64, 0u64);
             panic!(
-                "repeated_20_runs_mixed: run {} failed with {} verification failures\n\
-                 blink_follow={}, search_notfound={}",
-                run, fail_count, blink, notfound
+                "repeated_20_runs_mixed: run {} failed with {} verification failures",
+                run, fail_count
             );
         }
 
@@ -1199,14 +1141,9 @@ fn extreme_100_runs_stress() {
 
         let fail_count = verify_failures.load(Ordering::Relaxed);
         if fail_count > 0 {
-            #[cfg(feature = "tracing")]
-            let (blink, notfound) = get_debug_counters();
-            #[cfg(not(feature = "tracing"))]
-            let (blink, notfound) = (0u64, 0u64);
             panic!(
-                "extreme_100_runs: run {} failed with {} verification failures\n\
-                 blink_follow={}, search_notfound={}",
-                run, fail_count, blink, notfound
+                "extreme_100_runs: run {} failed with {} verification failures",
+                run, fail_count
             );
         }
 
@@ -1258,7 +1195,6 @@ fn extreme_100k_keys() {
     }
 
     let fail_count = verify_failures.load(Ordering::Relaxed);
-    report_debug_counters("extreme_100k_keys");
 
     if fail_count > 0 {
         panic!("extreme_100k: {} sampled verification failures", fail_count);
