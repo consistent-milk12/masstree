@@ -7,6 +7,8 @@
 //! - Concurrent removes during splits
 //! - Tests split/remove interaction
 
+#![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
@@ -40,9 +42,9 @@ fn splitremove_sequential() {
         let key = n.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
         if n % 2 == 0 {
-            assert!(val.is_none(), "key {} should be removed", n);
+            assert!(val.is_none(), "key {n} should be removed");
         } else {
-            assert_eq!(val, Some(n), "key {} should exist", n);
+            assert_eq!(val, Some(n), "key {n} should exist");
         }
     }
 }
@@ -194,7 +196,7 @@ fn splitremove_reinsert() {
         for n in 0u64..1000 {
             let key = n.to_be_bytes();
             let val = tree.get_with_guard(&key, &guard);
-            assert!(val.is_none(), "cycle {}: key {} should be gone", cycle, n);
+            assert!(val.is_none(), "cycle {cycle}: key {n} should be gone");
         }
     }
 }

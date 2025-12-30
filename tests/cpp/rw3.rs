@@ -6,6 +6,12 @@
 //! 1. Insert keys 0, 1, 2, ... N sequentially
 //! 2. Get all keys and verify values
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
+
 use masstree::MassTree24Inline;
 use std::sync::Arc;
 use std::thread;

@@ -518,6 +518,7 @@ fn run_rw3_mttest(threads: usize, duration_secs: u64) {
         .sum();
     let total_ops: u64 = results.iter().map(|(ops, _)| ops).sum();
     let max_elapsed: f64 = results.iter().map(|(_, e)| *e).fold(0.0, f64::max);
+    drop(results);
 
     println!();
     println!("=== METHODOLOGY COMPARISON ===");

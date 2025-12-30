@@ -4,6 +4,8 @@
 //! - Pre-populate tree, then pure random reads
 //! - Tests read throughput scaling with threads
 
+#![allow(clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;

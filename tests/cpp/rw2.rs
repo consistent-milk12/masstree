@@ -6,13 +6,15 @@
 //! - Interleave puts and gets based on a get fraction
 //! - Gets only access keys that have been put
 
+#![allow(clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::thread;
 
 const SEED: u64 = 31949;
-const C: u64 = 2654435761; // Golden ratio hash multiplier
+const C: u64 = 2_654_435_761; // Golden ratio hash multiplier
 const N: usize = 100_000;
 
 fn rw2_seed(get_frac: f64) {

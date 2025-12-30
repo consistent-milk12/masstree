@@ -4,9 +4,11 @@
 //!
 //! Pattern:
 //! - For each x in 0..limit:
-//!   - For y in 0..=x: put(initial_pos + y*incr, x - y)
-//! - Final state: key k = initial_pos + i*incr has value (limit - 1 - i)
+//!   - For y in 0..=x: `put(initial_pos + y*incr, x - y)`
+//! - Final state: key `k = initial_pos + i*incr` has value (limit - 1 - i)
 //! - Tests many overwrites to same keys
+
+#![allow(clippy::unwrap_used)]
 
 use masstree::MassTree24Inline;
 use std::sync::Arc;
@@ -36,7 +38,7 @@ fn tri1_single_thread() {
         let key = (INITIAL_POS + i as u64 * incr).to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
         let expected = (LIMIT - 1 - i) as u64;
-        assert_eq!(val, Some(expected), "key {} mismatch", i);
+        assert_eq!(val, Some(expected), "key {i} mismatch");
     }
 }
 
@@ -61,7 +63,7 @@ fn tri1_check() {
         let key = (INITIAL_POS + x as u64 * incr).to_be_bytes();
         let expected = (LIMIT - 1 - x) as u64;
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(expected), "check: key {} mismatch", x);
+        assert_eq!(val, Some(expected), "check: key {x} mismatch");
     }
 }
 
@@ -94,7 +96,7 @@ fn tri1_concurrent() {
                     let key = (initial + i as u64 * incr).to_be_bytes();
                     let expected = (limit - 1 - i) as u64;
                     let val = tree.get_with_guard(&key, &guard);
-                    assert_eq!(val, Some(expected), "tid {}: key {} mismatch", tid, i);
+                    assert_eq!(val, Some(expected), "tid {tid}: key {i} mismatch");
                 }
             })
         })

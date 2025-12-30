@@ -6,6 +6,8 @@
 //! - Keys like "user123", "machine456", "opening789", "fartparade000"
 //! - Tests multi-layer trie behavior
 
+#![allow(clippy::indexing_slicing, clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
@@ -27,11 +29,13 @@ fn rw1long_single_thread() {
 
     // Put phase
     let mut keys: Vec<(usize, u32)> = Vec::with_capacity(N);
+
     for _ in 0..N {
         let x: u32 = rng.random();
         let fmt: usize = rng.random_range(0..4);
         let key = make_key(fmt, x);
-        tree.insert_with_guard(key.as_bytes(), x as u64 + 1, &guard)
+
+        tree.insert_with_guard(key.as_bytes(), u64::from(x) + 1, &guard)
             .unwrap();
         keys.push((fmt, x));
     }
@@ -43,7 +47,7 @@ fn rw1long_single_thread() {
     for (fmt, x) in &keys {
         let key = make_key(*fmt, *x);
         let val = tree.get_with_guard(key.as_bytes(), &guard);
-        assert_eq!(val, Some(*x as u64 + 1), "key {} mismatch", key);
+        assert_eq!(val, Some(u64::from(*x) + 1), "key {key} mismatch");
     }
 }
 
@@ -65,7 +69,7 @@ fn rw1long_concurrent() {
                     let x: u32 = rng.random();
                     let fmt: usize = rng.random_range(0..4);
                     let key = make_key(fmt, x);
-                    let _ = tree.insert_with_guard(key.as_bytes(), x as u64 + 1, &guard);
+                    let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x) + 1, &guard);
                     keys.push((fmt, x));
                 }
 
@@ -74,7 +78,7 @@ fn rw1long_concurrent() {
                 for (fmt, x) in &keys {
                     let key = make_key(*fmt, *x);
                     let val = tree.get_with_guard(key.as_bytes(), &guard);
-                    assert_eq!(val, Some(*x as u64 + 1));
+                    assert_eq!(val, Some(u64::from(*x) + 1));
                 }
             })
         })

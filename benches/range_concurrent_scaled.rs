@@ -2490,14 +2490,16 @@ mod full_scan_aggregate {
                     .map(|_| {
                         let map = Arc::clone(&map);
                         let barrier = Arc::clone(&barrier);
+
                         thread::spawn(move || {
                             barrier.wait();
                             let mut grand_total = 0u64;
+
                             for _ in 0..FULL_SCAN_OPS {
-                                let guard = map.read().unwrap();
-                                let sum: u64 = guard.iter().map(|(_, v)| *v).sum();
+                                let sum: u64 = map.read().unwrap().values().copied().sum();
                                 grand_total += sum;
                             }
+
                             black_box(grand_total);
                         })
                     })
@@ -2799,14 +2801,17 @@ mod hot_spot {
                         let tree = Arc::clone(tree);
                         let barrier = Arc::clone(&barrier);
                         let hot = hot_keys.clone();
+
                         thread::spawn(move || {
                             barrier.wait();
                             let mut rng_state = t as u64;
+
                             for i in 0..OPS {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 let idx = (rng_state as usize) % hot.len();
-                                if rng_state % 2 == 0 {
+
+                                if rng_state.is_multiple_of(2) {
                                     black_box(tree.peek_with(&hot[idx], |_, v| *v));
                                 } else {
                                     // TreeIndex doesn't support update, insert returns error if exists
@@ -2838,14 +2843,17 @@ mod hot_spot {
                         let map = Arc::clone(map);
                         let barrier = Arc::clone(&barrier);
                         let hot = hot_keys.clone();
+
                         thread::spawn(move || {
                             barrier.wait();
                             let mut rng_state = t as u64;
+
                             for i in 0..OPS {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 let idx = (rng_state as usize) % hot.len();
-                                if rng_state % 2 == 0 {
+
+                                if rng_state.is_multiple_of(2) {
                                     black_box(map.get(&hot[idx]));
                                 } else {
                                     map.insert(hot[idx], i as u64);
@@ -2883,7 +2891,7 @@ mod hot_spot {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                                 let idx = (rng_state as usize) % hot.len();
-                                if rng_state % 2 == 0 {
+                                if rng_state.is_multiple_of(2) {
                                     let guard = map.read().unwrap();
                                     black_box(guard.get(&hot[idx]));
                                 } else {

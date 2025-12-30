@@ -7,6 +7,8 @@
 //! - Gets only retrieve keys that were previously inserted
 //! - Tests read/write mix with predictable key pattern
 
+#![allow(clippy::cast_possible_truncation, clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
@@ -14,7 +16,7 @@ use std::thread;
 
 const SEED: u64 = 31949;
 const N: usize = 50_000;
-const MULTIPLIER: u32 = 2654435761;
+const MULTIPLIER: u32 = 2_654_435_761;
 
 fn rw2fixed_impl(get_frac: f64) {
     let tree: MassTree24Inline<u64> = MassTree24Inline::new();
@@ -34,14 +36,14 @@ fn rw2fixed_impl(get_frac: f64) {
             let x = offset.wrapping_add(idx).wrapping_mul(MULTIPLIER) % 100_000_000;
             let key = x.to_be_bytes();
             let val = tree.get_with_guard(&key, &guard);
-            assert!(val.is_some(), "key {} should exist", x);
-            assert_eq!(val, Some((x + 1) as u64));
+            assert!(val.is_some(), "key {x} should exist");
+            assert_eq!(val, Some(u64::from(x + 1)));
             gets += 1;
         } else {
             // Insert
             let x = offset.wrapping_add(puts as u32).wrapping_mul(MULTIPLIER) % 100_000_000;
             let key = x.to_be_bytes();
-            tree.insert_with_guard(&key, (x + 1) as u64, &guard)
+            tree.insert_with_guard(&key, u64::from(x + 1), &guard)
                 .unwrap();
             puts += 1;
         }
@@ -92,7 +94,7 @@ fn rw2fixed_concurrent() {
                         let x =
                             offset.wrapping_add(puts as u32).wrapping_mul(MULTIPLIER) % 100_000_000;
                         let key = x.to_be_bytes();
-                        let _ = tree.insert_with_guard(&key, (x + 1) as u64, &guard);
+                        let _ = tree.insert_with_guard(&key, u64::from(x + 1), &guard);
                         puts += 1;
                     }
                 }

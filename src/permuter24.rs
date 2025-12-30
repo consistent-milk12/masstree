@@ -418,6 +418,33 @@ impl Permuter24 {
         #[cfg(debug_assertions)]
         self.debug_assert_valid();
     }
+
+    /// Remove a physical slot from the permutation.
+    ///
+    /// Finds the logical position of the given physical slot and removes it,
+    /// shifting subsequent slots down.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slot is not found in the permutation.
+    #[inline]
+    pub fn remove_slot(&mut self, slot: usize) {
+        let size = self.size();
+
+        // Find the logical position of this slot
+        let mut found_pos: Option<usize> = None;
+        for i in 0..size {
+            if self.get(i) == slot {
+                found_pos = Some(i);
+                break;
+            }
+        }
+
+        let pos = found_pos.expect("remove_slot: slot not in permutation");
+
+        // Use the existing remove method which removes by logical position
+        self.remove(pos);
+    }
 }
 
 // =============================================================================

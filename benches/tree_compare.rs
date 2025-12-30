@@ -1,6 +1,6 @@
-//! MassTree vs scc::TreeIndex Comparison
+//! [`MassTree`] vs [`scc::TreeIndex`] Comparison
 //!
-//! Compares performance of MassTree24 against scc::TreeIndex for key workloads.
+//! Compares performance of [`MassTree24`] against [`scc::TreeIndex`] for key workloads.
 //!
 //! ## Running
 //!
@@ -13,6 +13,7 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::unwrap_used)]
 #![allow(missing_docs)]
+#![allow(clippy::indexing_slicing)]
 
 use masstree::MassTree24;
 use scc::TreeIndex;
@@ -69,18 +70,21 @@ impl Config {
 // =============================================================================
 
 #[inline]
-fn key8(n: u64) -> [u8; 8] {
+const fn key8(n: u64) -> [u8; 8] {
     let mut buf = [b'0'; 8];
     let mut val = n;
     let mut i = 8;
+
     if val == 0 {
         return buf;
     }
+
     while val > 0 && i > 0 {
         i -= 1;
         buf[i] = b'0' + (val % 10) as u8;
         val /= 10;
     }
+
     buf
 }
 
@@ -214,21 +218,26 @@ fn bench_read_heavy_masstree(
             let tree = Arc::clone(&tree);
             let timeout = Arc::clone(&timeout);
             let total_ops = Arc::clone(&total_ops);
+
             thread::spawn(move || {
                 let mut ops = 0u64;
                 let mut i = tid as u64;
+
                 while !timeout.load(Ordering::Relaxed) {
                     let key = key8(i % initial_size);
-                    if i % 10 == 0 {
+
+                    if i.is_multiple_of(10) {
                         // 10% writes
                         let _ = tree.insert(&key, i);
                     } else {
                         // 90% reads
                         std::hint::black_box(tree.get(&key));
                     }
+
                     ops += 1;
                     i += 1;
                 }
+
                 total_ops.fetch_add(ops, Ordering::Relaxed);
             })
         })
@@ -237,6 +246,7 @@ fn bench_read_heavy_masstree(
     for h in handles {
         h.join().unwrap();
     }
+
     timeout_handle.join().unwrap();
 
     let elapsed = start.elapsed();
@@ -272,22 +282,27 @@ fn bench_read_heavy_treeindex(
             let tree = Arc::clone(&tree);
             let timeout = Arc::clone(&timeout);
             let total_ops = Arc::clone(&total_ops);
+
             thread::spawn(move || {
                 let guard = scc::Guard::new();
                 let mut ops = 0u64;
                 let mut i = tid as u64;
+
                 while !timeout.load(Ordering::Relaxed) {
                     let key = key8(i % initial_size);
-                    if i % 10 == 0 {
+
+                    if i.is_multiple_of(10) {
                         // 10% writes
                         let _ = tree.insert_sync(key, i);
                     } else {
                         // 90% reads
                         std::hint::black_box(tree.peek(&key, &guard));
                     }
+
                     ops += 1;
                     i += 1;
                 }
+
                 total_ops.fetch_add(ops, Ordering::Relaxed);
             })
         })
@@ -391,6 +406,7 @@ fn bench_write_only_treeindex(threads: usize, duration: Duration) -> (u64, Durat
 // Reporting
 // =============================================================================
 
+#[expect(clippy::cast_precision_loss)]
 fn report(test: &str, impl_name: &str, threads: usize, elapsed: Duration, total_ops: u64) {
     let ops_per_sec = total_ops as f64 / elapsed.as_secs_f64();
     println!(
@@ -404,6 +420,7 @@ fn report(test: &str, impl_name: &str, threads: usize, elapsed: Duration, total_
     );
 }
 
+#[expect(clippy::cast_precision_loss)]
 fn compare(test: &str, threads: usize, masstree: (u64, Duration), treeindex: (u64, Duration)) {
     let mt_rate = masstree.0 as f64 / masstree.1.as_secs_f64();
     let ti_rate = treeindex.0 as f64 / treeindex.1.as_secs_f64();
@@ -414,7 +431,7 @@ fn compare(test: &str, threads: usize, masstree: (u64, Duration), treeindex: (u6
 
     let winner = if ratio > 1.0 { "MassTree" } else { "TreeIndex" };
     let factor = if ratio > 1.0 { ratio } else { 1.0 / ratio };
-    println!("  => {} is {:.2}x faster\n", winner, factor);
+    println!("  => {winner} is {factor:.2}x faster\n");
 }
 
 // =============================================================================

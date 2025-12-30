@@ -6,6 +6,12 @@
 //! - Populate tree with sequential keys
 //! - Perform reverse scans and verify descending order
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation
+)]
+
 use masstree::{MassTree24Inline, RangeBound};
 use std::sync::Arc;
 use std::thread;

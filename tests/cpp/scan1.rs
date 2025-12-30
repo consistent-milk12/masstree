@@ -6,6 +6,8 @@
 //! - Populate tree with sequential keys
 //! - Perform range scans and verify order
 
+#![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
+
 use masstree::{MassTree24Inline, RangeBound};
 use std::sync::Arc;
 use std::thread;
@@ -67,7 +69,7 @@ fn scan1_range() {
         RangeBound::Excluded(&end),
         |key, value| {
             let key_val = u64::from_be_bytes(key.try_into().unwrap());
-            assert!(key_val >= 100 && key_val < 200);
+            assert!((100..200).contains(&key_val));
             assert_eq!(key_val, *value);
             count += 1;
             true

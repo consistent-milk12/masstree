@@ -15,9 +15,10 @@ use crate::{
     leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::NodeVersion,
     slot::ValueSlot,
-    tree::split::Propagation,
-    tree::{InsertError, InsertSearchResultGeneric},
+    tree::{InsertError, InsertSearchResultGeneric, remove::NodeCleaner, split::Propagation},
 };
+
+use super::remove::RemoveError;
 
 impl<S, L, A> MassTreeGeneric<S, L, A>
 where
@@ -563,6 +564,21 @@ where
                     // VERSION VALIDATED - NOW SAFE TO INTERPRET SNAPSHOT
                     if let Some((keylenx, ptr)) = match_snapshot {
                         if keylenx >= LAYER_KEYLENX {
+                            // Layer pointer - check if sublayer is deleted before descending
+                            //
+                            // SAFETY: ptr is non-null (came from valid slot) and protected by guard.
+                            // Even if sublayer is being retired, memory is safe until guard drops.
+                            let sublayer_version: &NodeVersion = unsafe { &*ptr.cast::<NodeVersion>() };
+                            if sublayer_version.is_deleted() {
+                                // Sublayer was garbage collected - key doesn't exist
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!(
+                                    layer_ptr = ?ptr,
+                                    "get_ref: sublayer deleted, key not found"
+                                );
+                                return None;
+                            }
+
                             // Layer pointer - descend into sublayer
                             key.shift();
                             layer_root = ptr;
@@ -818,6 +834,20 @@ where
 
                     if let Some((keylenx, ptr)) = match_snapshot {
                         if keylenx >= LAYER_KEYLENX {
+                            // Layer pointer - check if sublayer is deleted before descending
+                            //
+                            // SAFETY: ptr is non-null (came from valid slot) and protected by guard.
+                            let sublayer_version: &NodeVersion = unsafe { &*ptr.cast::<NodeVersion>() };
+                            if sublayer_version.is_deleted() {
+                                // Sublayer was garbage collected - key doesn't exist
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!(
+                                    layer_ptr = ?ptr,
+                                    "get: sublayer deleted, key not found"
+                                );
+                                return None;
+                            }
+
                             // Layer pointer - descend into sublayer
                             key.shift();
                             layer_root = ptr;
@@ -929,7 +959,6 @@ where
     /// 4. If valid: swap sense (we're now "at" child)
     /// 5. If invalid due to split: check if key > `last_key`
     /// 6. Only restart from root if key actually escaped to sibling
-    #[expect(clippy::unused_self, reason = "API Consistency")]
     #[expect(clippy::used_underscore_binding, reason = "Lock guard")]
     #[expect(clippy::indexing_slicing, reason = "sense is always 0 or 1")]
     #[cfg_attr(
@@ -1448,7 +1477,7 @@ where
     ///
     /// Returns `RemoveError::RetryLimitExceeded` if the operation cannot
     /// complete after the retry limit (extremely rare, indicates contention).
-    pub fn remove(&self, key: &[u8]) -> Result<Option<S::Output>, super::remove::RemoveError> {
+    pub fn remove(&self, key: &[u8]) -> Result<Option<S::Output>, RemoveError> {
         let guard = self.guard();
         self.remove_with_guard(key, &guard)
     }
@@ -1457,12 +1486,15 @@ where
     ///
     /// Use this when performing multiple operations under the same guard
     /// to amortize guard creation overhead.
+    ///
+    /// # Errors
+    /// If fails to remove
     pub fn remove_with_guard(
         &self,
         key: &[u8],
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<S::Output>, super::remove::RemoveError> {
-        super::remove::remove_concurrent_generic(self, key, guard)
+    ) -> Result<Option<S::Output>, RemoveError> {
+        NodeCleaner::remove_concurrent_generic(self, key, guard)
     }
 
     /// Decrement the entry count after successful removal.

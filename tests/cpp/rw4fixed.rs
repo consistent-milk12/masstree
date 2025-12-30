@@ -7,6 +7,8 @@
 //! - Get all keys and verify values
 //! - Tests reverse sequential insertion
 
+#![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
+
 use masstree::MassTree24Inline;
 use std::sync::Arc;
 use std::thread;
@@ -31,7 +33,7 @@ fn rw4fixed_single_thread() {
         let key_val = TOP - n;
         let key = key_val.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(n + 1), "key {} mismatch", key_val);
+        assert_eq!(val, Some(n + 1), "key {key_val} mismatch");
     }
 }
 
@@ -69,6 +71,6 @@ fn rw4fixed_concurrent() {
         let key_val = TOP - n;
         let key = key_val.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(n + 1), "key {} mismatch", key_val);
+        assert_eq!(val, Some(n + 1), "key {key_val} mismatch");
     }
 }

@@ -7,6 +7,13 @@
 //! - Forces multi-layer trie traversal (keys > 8 bytes)
 //! - Tests layer creation and traversal
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
@@ -22,7 +29,7 @@ fn make_key16(x: i32) -> [u8; 16] {
     key
 }
 
-fn make_val16(x: i32) -> u64 {
+const fn make_val16(x: i32) -> u64 {
     (x.wrapping_add(1)) as u64
 }
 
@@ -50,7 +57,7 @@ fn rw16_single_thread() {
         let key = make_key16(*x);
         let expected = make_val16(*x);
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(expected), "key {:016} mismatch", x);
+        assert_eq!(val, Some(expected), "key {x:016} mismatch");
     }
 }
 
@@ -69,6 +76,7 @@ fn rw16_concurrent() {
 
                 // Put phase
                 let mut keys: Vec<i32> = Vec::with_capacity(per_thread);
+
                 for _ in 0..per_thread {
                     let x: i32 = rng.random();
                     let key = make_key16(x);
@@ -79,10 +87,11 @@ fn rw16_concurrent() {
 
                 // Shuffle and get
                 keys.shuffle(&mut rng);
+
                 for x in &keys {
                     let key = make_key16(*x);
                     let val = tree.get_with_guard(&key, &guard);
-                    assert!(val.is_some(), "key {:016} not found", x);
+                    assert!(val.is_some(), "key {x:016} not found");
                 }
             })
         })
@@ -99,10 +108,10 @@ fn rw16_sequential_keys() {
     let tree: MassTree24Inline<u64> = MassTree24Inline::new();
     let guard = tree.guard();
 
-    for i in 0..N as i32 {
+    (0..N as i32).for_each(|i| {
         let key = make_key16(i);
         tree.insert_with_guard(&key, i as u64, &guard).unwrap();
-    }
+    });
 
     // Verify all
     for i in 0..N as i32 {

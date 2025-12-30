@@ -7,6 +7,8 @@
 //! - No reads, pure write throughput test
 //! - May have overwrites with same value
 
+#![allow(clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;

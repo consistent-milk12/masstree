@@ -1454,6 +1454,7 @@ fn test_masstree24_many_splits() {
 }
 
 #[test]
+#[cfg(not(miri))]
 fn test_masstree24_sequential_u64_limited() {
     // Test inserting keys with u64 sequential pattern
     // Uses 10,000 keys to trigger multiple internode splits

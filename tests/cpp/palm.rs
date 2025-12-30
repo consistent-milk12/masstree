@@ -7,6 +7,8 @@
 //! - palmb: Batched random reads with sorted access pattern
 //! - Tests large dataset performance
 
+#![allow(clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
@@ -63,18 +65,19 @@ fn palmb_batched_reads() {
         }
 
         // Sort for cache-friendly access
-        batch.sort();
+        batch.sort_unstable();
 
         // Read in sorted order
         for &x in &batch {
             let key = x.to_be_bytes();
             let val = tree.get_with_guard(&key, &guard);
-            assert_eq!(val, Some(x + 1), "key {} mismatch", x);
+            assert_eq!(val, Some(x + 1), "key {x} mismatch");
         }
     }
 }
 
 #[test]
+#[expect(clippy::cast_sign_loss)]
 fn palm_concurrent_insert() {
     let tree = Arc::new(MassTree24Inline::<u64>::new());
     let num_threads = 4;
@@ -105,7 +108,7 @@ fn palm_concurrent_insert() {
     for i in 0..PALM_N {
         let key = i.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(i + 1), "key {} missing", i);
+        assert_eq!(val, Some(i + 1), "key {i} missing");
     }
 }
 
@@ -126,9 +129,11 @@ fn palm_concurrent_read() {
     let num_threads = 4;
     let read_range = PALM_N / 10;
 
+    #[expect(clippy::cast_sign_loss)]
     let handles: Vec<_> = (0..num_threads)
         .map(|tid| {
             let tree = Arc::clone(&tree);
+
             thread::spawn(move || {
                 let guard = tree.guard();
                 let mut rng = StdRng::seed_from_u64(SEED + tid as u64);
@@ -136,10 +141,12 @@ fn palm_concurrent_read() {
 
                 for _ in 0..5 {
                     batch.clear();
+
                     for _ in 0..PALM_BATCH {
                         batch.push(rng.random_range(0..read_range));
                     }
-                    batch.sort();
+
+                    batch.sort_unstable();
 
                     for &x in &batch {
                         let key = x.to_be_bytes();

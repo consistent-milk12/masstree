@@ -277,6 +277,7 @@ where
 
         let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
         // SAFETY: Layout is valid
+        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
         let ptr: *mut InternodeNode<S> =
             unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
         if ptr.is_null() {
@@ -305,6 +306,7 @@ where
 
         let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
         // SAFETY: Layout is valid
+        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
         let ptr: *mut InternodeNode<S> =
             unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
         if ptr.is_null() {

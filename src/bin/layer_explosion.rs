@@ -5,6 +5,10 @@
 //!   perf record -g --call-graph dwarf -F 999 -- ./`target/release/layer_explosion` -j6
 //!   perf report --stdio --no-children -g none --percent-limit 1
 
+#![allow(clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::indexing_slicing)]
+
 use std::sync::Arc;
 use std::thread;
 
@@ -19,8 +23,8 @@ fn make_long_key(val: u64) -> [u8; 64] {
     let bytes = val.to_be_bytes();
     key[0..8].copy_from_slice(&bytes);
     key[8..16].copy_from_slice(&bytes);
-    key[16..24].copy_from_slice(&val.wrapping_mul(0x9e3779b97f4a7c15).to_be_bytes());
-    key[24..32].copy_from_slice(&val.wrapping_mul(0x517cc1b727220a95).to_be_bytes());
+    key[16..24].copy_from_slice(&val.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes());
+    key[24..32].copy_from_slice(&val.wrapping_mul(0x517c_c1b7_2722_0a95).to_be_bytes());
     // Rest stays zero - creates shared prefix patterns
     key
 }

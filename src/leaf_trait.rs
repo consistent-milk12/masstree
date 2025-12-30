@@ -526,6 +526,34 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ) -> Result<(), *mut u8>;
 
     // ========================================================================
+    //  Slot Clearing (for gc_layer)
+    // ========================================================================
+
+    /// Clear a slot completely, removing any value or layer pointer.
+    ///
+    /// Used by gc_layer when cleaning up an empty sublayer.
+    /// The parent leaf's slot that pointed to the sublayer is cleared.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - The leaf is locked
+    /// - The slot is valid (0..WIDTH)
+    /// - Any value/layer at this slot has been or will be properly retired
+    fn clear_slot(&self, slot: usize);
+
+    /// Clear a slot and update permutation.
+    ///
+    /// This is a convenience method that:
+    /// 1. Clears the slot contents
+    /// 2. Removes the slot from the permutation
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the leaf is locked.
+    fn clear_slot_and_permutation(&self, slot: usize);
+
+    // ========================================================================
     //  Size Operations
     // ========================================================================
 

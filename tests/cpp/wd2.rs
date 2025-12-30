@@ -7,6 +7,12 @@
 //! - Random removes on other threads' keys
 //! - Tests complex concurrent insert/delete interaction
 
+#![allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation
+)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
@@ -21,7 +27,7 @@ const P_PUT2: u32 = 10000;
 const P_REMOVE2: u32 = 20000;
 
 fn make_status_key(client_id: usize, suffix: Option<char>) -> Vec<u8> {
-    let mut key = format!("s{:03}", client_id).into_bytes();
+    let mut key = format!("s{client_id:03}").into_bytes();
     if let Some(c) = suffix {
         key.push(c as u8);
     }
@@ -29,7 +35,7 @@ fn make_status_key(client_id: usize, suffix: Option<char>) -> Vec<u8> {
 }
 
 fn make_main_key(client_id: usize, suffix: Option<char>) -> Vec<u8> {
-    let mut key = format!("k{:03}", client_id).into_bytes();
+    let mut key = format!("k{client_id:03}").into_bytes();
     if let Some(c) = suffix {
         key.push(c as u8);
     }
@@ -79,10 +85,7 @@ fn wd2_concurrent() {
                 let next_tid = (tid + 1) % num_threads;
 
                 // Main loop
-                let mut nrounds = 0u64;
                 while !done.load(Ordering::Relaxed) {
-                    nrounds += 1;
-
                     // Put to main key
                     let _ = tree.insert_with_guard(&main_key, x, &guard);
 

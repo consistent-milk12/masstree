@@ -6,6 +6,8 @@
 //! - Keys like "user000000000000000000" (4 + 18 = 22 bytes)
 //! - Tests multi-layer trie with fixed-length keys
 
+#![allow(clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
@@ -31,10 +33,11 @@ fn ycsbk_single_thread() {
 
     // Put phase
     let mut keys: Vec<String> = Vec::with_capacity(N);
-    for i in 0..N {
+    for _ in 0..N {
         let key = make_ycsb_key(&mut rng);
         let val: u32 = rng.random();
-        tree.insert_with_guard(key.as_bytes(), val as u64, &guard)
+
+        tree.insert_with_guard(key.as_bytes(), u64::from(val), &guard)
             .unwrap();
         keys.push(key);
     }
@@ -45,7 +48,7 @@ fn ycsbk_single_thread() {
         let _regenerated_key = make_ycsb_key(&mut rng); // consume to keep rng in sync
         let expected_val: u32 = rng.random();
         let val = tree.get_with_guard(key.as_bytes(), &guard);
-        assert_eq!(val, Some(expected_val as u64), "key {} mismatch", key);
+        assert_eq!(val, Some(u64::from(expected_val)), "key {key} mismatch");
     }
 }
 
@@ -66,7 +69,7 @@ fn ycsbk_concurrent() {
                 for _ in 0..per_thread {
                     let key = make_ycsb_key(&mut rng);
                     let val: u32 = rng.random();
-                    let _ = tree.insert_with_guard(key.as_bytes(), val as u64, &guard);
+                    let _ = tree.insert_with_guard(key.as_bytes(), u64::from(val), &guard);
                     keys.push(key);
                 }
 
@@ -74,7 +77,7 @@ fn ycsbk_concurrent() {
                 keys.shuffle(&mut rng);
                 for key in &keys {
                     let val = tree.get_with_guard(key.as_bytes(), &guard);
-                    assert!(val.is_some(), "key {} not found", key);
+                    assert!(val.is_some(), "key {key} not found");
                 }
             })
         })

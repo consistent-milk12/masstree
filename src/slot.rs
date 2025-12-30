@@ -198,6 +198,21 @@ pub trait ValueSlot: Default + Sized {
     /// - For `LeafValue<V>`: `Arc::into_raw(output)` directly
     /// - For `LeafValueIndex<V>`: `Box::into_raw(Box::new(output))`
     fn output_consume_to_raw(output: Self::Output) -> *mut u8;
+
+    /// Clean up a raw pointer created by `output_to_raw`.
+    ///
+    /// This is the counterpart to `output_to_raw` - it frees the memory
+    /// allocated when converting an output to a raw pointer.
+    ///
+    /// - For `LeafValue<V>`: Decrements Arc refcount (drops the cloned Arc)
+    /// - For `LeafValueIndex<V>`: Drops the Box
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been created by `output_to_raw`
+    /// - `ptr` must not have been already cleaned up
+    /// - Caller must ensure no references to the pointed-to value exist
+    unsafe fn cleanup_output_raw(ptr: *mut u8);
 }
 
 // ============================================================================
@@ -302,6 +317,14 @@ impl<V> ValueSlot for LeafValue<V> {
     #[inline(always)]
     fn output_consume_to_raw(output: Arc<V>) -> *mut u8 {
         Arc::into_raw(output) as *mut u8
+    }
+
+    #[inline(always)]
+    unsafe fn cleanup_output_raw(ptr: *mut u8) {
+        // SAFETY: Caller guarantees ptr came from output_to_raw (Arc::into_raw)
+        unsafe {
+            drop(Arc::from_raw(ptr.cast::<V>()));
+        }
     }
 }
 
@@ -414,6 +437,14 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
     fn output_consume_to_raw(output: V) -> *mut u8 {
         // Box the value to get a stable pointer.
         Box::into_raw(Box::new(output)).cast::<u8>()
+    }
+
+    #[inline(always)]
+    unsafe fn cleanup_output_raw(ptr: *mut u8) {
+        // SAFETY: Caller guarantees ptr came from output_to_raw (Box::into_raw)
+        unsafe {
+            drop(Box::from_raw(ptr.cast::<V>()));
+        }
     }
 }
 

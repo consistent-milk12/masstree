@@ -800,7 +800,6 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// # Returns
     ///
     /// A new `SuffixBag` containing all active suffixes plus the new one.
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds explicitly checked")]
     pub fn drain_to_external<P: PermutationProvider>(
         &mut self,
         perm: &P,

@@ -1,5 +1,7 @@
 //! Simple [`MassTree`] usage example.
 
+#![allow(clippy::multiple_crate_versions)]
+
 use masstree::MassTree;
 
 fn main() {

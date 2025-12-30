@@ -6,6 +6,8 @@
 //! - Keys that look like URLs with shared prefixes
 //! - Tests trie behavior with hierarchical keys
 
+#![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
@@ -27,7 +29,7 @@ fn make_url(rng: &mut StdRng) -> String {
     let domain = DOMAINS[rng.random_range(0..DOMAINS.len())];
     let path = PATHS[rng.random_range(0..PATHS.len())];
     let id: u32 = rng.random();
-    format!("{}{}{}", domain, path, id)
+    format!("{domain}{path}{id}")
 }
 
 #[test]
@@ -49,7 +51,7 @@ fn url_single_thread() {
     urls.shuffle(&mut rng);
     for (i, url) in urls.iter().enumerate() {
         let val = tree.get_with_guard(url.as_bytes(), &guard);
-        assert!(val.is_some(), "URL {} not found: {}", i, url);
+        assert!(val.is_some(), "URL {i} not found: {url}");
     }
 }
 
@@ -67,6 +69,7 @@ fn url_concurrent() {
                 let mut rng = StdRng::seed_from_u64(SEED + tid as u64);
 
                 let mut urls: Vec<String> = Vec::with_capacity(per_thread);
+
                 for i in 0..per_thread {
                     let url = make_url(&mut rng);
                     let _ = tree.insert_with_guard(
@@ -74,13 +77,15 @@ fn url_concurrent() {
                         (tid * per_thread + i) as u64,
                         &guard,
                     );
+
                     urls.push(url);
                 }
 
                 urls.shuffle(&mut rng);
+
                 for url in &urls {
                     let val = tree.get_with_guard(url.as_bytes(), &guard);
-                    assert!(val.is_some(), "URL not found: {}", url);
+                    assert!(val.is_some(), "URL not found: {url}");
                 }
             })
         })
@@ -98,15 +103,16 @@ fn url_shared_prefix_stress() {
 
     // All URLs share same domain - stress trie layer sharing
     let domain = "http://example.com/api/v1/users/";
+
     for i in 0..N {
-        let url = format!("{}{}", domain, i);
+        let url = format!("{domain}{i}");
         tree.insert_with_guard(url.as_bytes(), i as u64, &guard)
             .unwrap();
     }
 
     // Verify all present
     for i in 0..N {
-        let url = format!("{}{}", domain, i);
+        let url = format!("{domain}{i}");
         let val = tree.get_with_guard(url.as_bytes(), &guard);
         assert_eq!(val, Some(i as u64));
     }

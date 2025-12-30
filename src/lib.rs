@@ -58,12 +58,24 @@
 //! - **`MassTreeIndex<V: Copy>`**: Convenience wrapper that copies values.
 //!   Note: Currently wraps `MassTree<V>` internally; true inline storage is
 //!   planned for a future release.
+//!
+//! ## Feature Flags
+//!
+//! ### `tracing`
+//!
+//! Enables structured logging for debugging concurrent operations.
+//! See the crate-level documentation for details.
+//!
+//! ### `mimalloc`
+//!
+//! Uses mimalloc as the global allocator for improved performance.
 
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 // We use extensive benchmarking to verify #[inline(always)] placement is correct.
 #![allow(clippy::inline_always)]
+#![allow(clippy::multiple_crate_versions)]
 
 // Global allocator selection (enabled via features)
 #[cfg(feature = "mimalloc")]

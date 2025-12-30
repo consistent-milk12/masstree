@@ -1213,6 +1213,60 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         self.ikey_bound() == new_ikey
     }
+
+    // ============================================================================
+    //  Slot Clearing (for gc_layer)
+    // ============================================================================
+
+    /// Clear a slot completely, removing any value or layer pointer.
+    ///
+    /// This is used by gc_layer when cleaning up an empty sublayer.
+    /// The parent leaf's slot that pointed to the sublayer is cleared.
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses Release ordering to ensure the clear is visible to subsequent readers.
+    /// The permutation should be updated separately to remove this slot from
+    /// the logical ordering.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - The leaf is locked
+    /// - The slot is valid (0..WIDTH)
+    /// - Any value/layer at this slot has been or will be properly retired
+    #[inline]
+    pub fn clear_slot(&self, slot: usize) {
+        debug_assert!(slot < WIDTH_24, "clear_slot: slot out of bounds");
+
+        // Clear keylenx to 0 (marks slot as empty for searches)
+        self.keylenx[slot].store(0, AtomicOrdering::Release);
+
+        // Clear the value pointer
+        self.leaf_values[slot].store(std::ptr::null_mut(), AtomicOrdering::Release);
+
+        // Note: ikey is NOT cleared - it's only meaningful when keylenx > 0
+        // Note: suffix is NOT cleared - it's only meaningful when keylenx indicates suffix
+    }
+
+    /// Clear a slot and update permutation atomically.
+    ///
+    /// This is a convenience method that:
+    /// 1. Clears the slot contents
+    /// 2. Removes the slot from the permutation
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the leaf is locked.
+    pub fn clear_slot_and_permutation(&self, slot: usize) {
+        // Clear the slot
+        self.clear_slot(slot);
+
+        // Remove from permutation
+        let mut perm = self.permutation();
+        perm.remove_slot(slot);
+        self.set_permutation(perm);
+    }
 }
 
 // ============================================================================
@@ -1332,6 +1386,15 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_value: *mut u8,
     ) -> Result<(), *mut u8> {
         Self::cas_slot_value(self, slot, expected, new_value)
+    }
+
+    #[inline]
+    fn clear_slot(&self, slot: usize) {
+        Self::clear_slot(self, slot);
+    }
+
+    fn clear_slot_and_permutation(&self, slot: usize) {
+        Self::clear_slot_and_permutation(self, slot);
     }
 
     #[inline(always)]

@@ -8,6 +8,9 @@
 //! - Read all keys in shuffled order
 //! - Pure read throughput test
 
+#![allow(clippy::indexing_slicing)]
+#![allow(clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
@@ -53,7 +56,7 @@ fn r1_single_thread() {
     for x in &keys {
         let key = make_key10(*x);
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(*x + 1), "key {} mismatch", x);
+        assert_eq!(val, Some(*x + 1), "key {x} mismatch");
     }
 }
 
@@ -99,13 +102,13 @@ fn r1_concurrent(num_threads: usize) {
                     start + per_thread
                 };
 
-                for i in start..end {
+                (start..end).for_each(|i| {
                     let idx = indices[i];
                     let x = keys[idx];
                     let key = make_key10(x);
                     let val = tree.get_with_guard(&key, &guard);
                     assert_eq!(val, Some(x + 1));
-                }
+                });
             })
         })
         .collect();

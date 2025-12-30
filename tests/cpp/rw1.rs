@@ -7,6 +7,8 @@
 //! 2. Shuffle the keys
 //! 3. Get all keys in shuffled order, verify values
 
+#![allow(clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;

@@ -9,6 +9,8 @@
 //! - Verify all keys are gone
 //! - Repeat for multiple rounds
 
+#![allow(clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use std::sync::Arc;
 use std::thread;
@@ -39,21 +41,21 @@ fn wd3_single_thread() {
         for i in 0..NK {
             let key = make_key(prefix, i);
             let val = tree.get_with_guard(&key, &guard);
-            assert_eq!(val, Some(i), "round {}: key {} should exist", round, i);
+            assert_eq!(val, Some(i), "round {round}: key {i} should exist");
         }
 
         // Remove phase
         for i in 0..NK {
             let key = make_key(prefix, i);
             let result = tree.remove_with_guard(&key, &guard);
-            assert!(result.is_ok(), "round {}: remove {} failed", round, i);
+            assert!(result.is_ok(), "round {round}: remove {i} failed");
         }
 
         // Verify all gone
         for i in 0..NK {
             let key = make_key(prefix, i);
             let val = tree.get_with_guard(&key, &guard);
-            assert!(val.is_none(), "round {}: key {} should be gone", round, i);
+            assert!(val.is_none(), "round {round}: key {i} should be gone");
         }
     }
 }
@@ -69,7 +71,7 @@ fn wd3_concurrent() {
             thread::spawn(move || {
                 let guard = tree.guard();
                 // Each thread has its own prefix to avoid conflicts
-                let prefix = format!("t{:02}", tid);
+                let prefix = format!("t{tid:02}");
 
                 for round in 0..ROUNDS {
                     // Insert phase
@@ -85,10 +87,7 @@ fn wd3_concurrent() {
                         assert_eq!(
                             val,
                             Some(i),
-                            "tid {}, round {}: key {} should exist",
-                            tid,
-                            round,
-                            i
+                            "tid {tid}, round {round}: key {i} should exist"
                         );
                     }
 
@@ -104,10 +103,7 @@ fn wd3_concurrent() {
                         let val = tree.get_with_guard(&key, &guard);
                         assert!(
                             val.is_none(),
-                            "tid {}, round {}: key {} should be gone",
-                            tid,
-                            round,
-                            i
+                            "tid {tid}, round {round}: key {i} should be gone"
                         );
                     }
                 }
@@ -138,7 +134,7 @@ fn wd3_with_prefix() {
         for i in 0..1000u64 {
             let key = make_key(prefix, i);
             let val = tree.get_with_guard(&key, &guard);
-            assert_eq!(val, Some(i), "round {}: key {} mismatch", round, i);
+            assert_eq!(val, Some(i), "round {round}: key {i} mismatch");
         }
 
         // Remove
@@ -151,7 +147,7 @@ fn wd3_with_prefix() {
         for i in 0..1000u64 {
             let key = make_key(prefix, i);
             let val = tree.get_with_guard(&key, &guard);
-            assert!(val.is_none(), "round {}: key {} should be gone", round, i);
+            assert!(val.is_none(), "round {round}: key {i} should be gone");
         }
     }
 }

@@ -320,6 +320,18 @@ where
     /// back to the standard multi-layer path.
     single_layer_mode: bool,
 
+    /// Tracks the last output pointer allocated by `advance_no_alloc_ref`.
+    ///
+    /// For `LeafValueIndex<V>` (Copy types), `output_to_raw` allocates a Box
+    /// to provide a stable pointer. This field tracks that allocation so we
+    /// can clean it up when:
+    /// - Advancing to the next entry (previous pointer no longer needed)
+    /// - Dropping the iterator
+    ///
+    /// For `LeafValue<V>` (Arc types), this tracks the cloned Arc that needs
+    /// to be decremented when no longer needed.
+    last_output_ptr: Option<*mut u8>,
+
     /// Marker for lifetime covariance.
     _marker: PhantomData<&'a ()>,
 }
@@ -401,6 +413,7 @@ where
             emit_equal,
             needs_duplicate_check: false,
             single_layer_mode,
+            last_output_ptr: None,
             _marker: PhantomData,
         }
     }
@@ -836,20 +849,26 @@ where
             // Transition to FindNext for next call
             self.state = ScanState::FindNext;
 
+            // Clean up the previous output pointer before creating a new one.
+            // For LeafValueIndex (Copy types), output_to_raw allocates a Box
+            // that must be freed. For LeafValue (Arc types), this decrements
+            // the cloned Arc's refcount.
+            if let Some(old_ptr) = self.last_output_ptr.take() {
+                // SAFETY: old_ptr was created by output_to_raw in a previous call
+                unsafe { S::cleanup_output_raw(old_ptr) };
+            }
+
             // Convert the output to a raw pointer and dereference.
             // For Arc<V>: output_to_raw gives us the Arc's data pointer
             // For Copy types: output_to_raw gives us the Box's data pointer
             let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
 
+            // Track this pointer so we can clean it up later
+            self.last_output_ptr = Some(ptr);
+
             // SAFETY: We just created this pointer from a valid Output.
             // The guard protects the underlying data.
             let value_ref: &S::Value = unsafe { &*ptr.cast::<S::Value>() };
-
-            // Note: We leak the extra Arc refcount here for the first entry.
-            // This is acceptable because:
-            // 1. It's only one entry (the first)
-            // 2. The tree still holds the original Arc
-            // 3. When the snapshot drops, it decrements the refcount
 
             return Some((key, value_ref));
         }
@@ -1017,6 +1036,23 @@ where
 {
 }
 
+impl<S, L, A> Drop for RangeIter<'_, '_, S, L, A>
+where
+    S: ValueSlot,
+    L: TreeLeafNode<S>,
+    A: NodeAllocatorGeneric<S, L>,
+{
+    fn drop(&mut self) {
+        // Clean up any outstanding output pointer from advance_no_alloc_ref.
+        // This pointer was created by output_to_raw and must be freed.
+        if let Some(ptr) = self.last_output_ptr.take() {
+            // SAFETY: ptr was created by S::output_to_raw and has not been cleaned up yet.
+            // We only create one pointer at a time and track it in last_output_ptr.
+            unsafe { S::cleanup_output_raw(ptr) };
+        }
+    }
+}
+
 // ============================================================================
 //  Key/Value Only Iterators
 // ============================================================================
@@ -1153,80 +1189,4 @@ where
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_range_bound_contains() {
-        // Unbounded contains everything
-        assert!(RangeBound::Unbounded.contains(b"anything"));
-        assert!(RangeBound::Unbounded.contains(b""));
-
-        // Included: key <= bound
-        let included = RangeBound::Included(b"middle");
-        assert!(included.contains(b"aaa"));
-        assert!(included.contains(b"middle"));
-        assert!(!included.contains(b"zzz"));
-
-        // Excluded: key < bound
-        let excluded = RangeBound::Excluded(b"middle");
-        assert!(excluded.contains(b"aaa"));
-        assert!(!excluded.contains(b"middle"));
-        assert!(!excluded.contains(b"zzz"));
-    }
-
-    #[test]
-    fn test_range_bound_to_start_params() {
-        let (key, emit) = RangeBound::Unbounded.to_start_params();
-        assert_eq!(key, b"");
-        assert!(emit);
-
-        let (key, emit) = RangeBound::Included(b"start").to_start_params();
-        assert_eq!(key, b"start");
-        assert!(emit);
-
-        let (key, emit) = RangeBound::Excluded(b"start").to_start_params();
-        assert_eq!(key, b"start");
-        assert!(!emit);
-    }
-
-    #[test]
-    fn test_range_bound_from_std_bound() {
-        use std::ops::Bound;
-
-        let rb: RangeBound = Bound::Unbounded.into();
-        assert!(matches!(rb, RangeBound::Unbounded));
-
-        let rb: RangeBound = Bound::Included(b"key".as_slice()).into();
-        assert!(matches!(rb, RangeBound::Included(k) if k == b"key"));
-
-        let rb: RangeBound = Bound::Excluded(b"key".as_slice()).into();
-        assert!(matches!(rb, RangeBound::Excluded(k) if k == b"key"));
-    }
-
-    #[test]
-    fn test_scan_entry() {
-        let entry = ScanEntry::new(b"key".to_vec(), 42u64);
-
-        assert_eq!(entry.key(), b"key");
-        assert_eq!(*entry.value(), 42);
-
-        let (key, value) = entry.into_parts();
-        assert_eq!(key, b"key");
-        assert_eq!(value, 42);
-    }
-
-    #[test]
-    fn test_range_bound_is_unbounded() {
-        assert!(RangeBound::Unbounded.is_unbounded());
-        assert!(!RangeBound::Included(b"key").is_unbounded());
-        assert!(!RangeBound::Excluded(b"key").is_unbounded());
-    }
-
-    #[test]
-    fn test_range_bound_key() {
-        assert!(RangeBound::Unbounded.key().is_none());
-        assert_eq!(RangeBound::Included(b"key").key(), Some(b"key".as_slice()));
-        assert_eq!(RangeBound::Excluded(b"key").key(), Some(b"key".as_slice()));
-    }
-}
+mod unit_tests;

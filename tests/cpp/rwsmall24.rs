@@ -6,6 +6,8 @@
 //! - 24 keys, 7/8 reads, 1/8 writes
 //! - Tests hot key performance
 
+#![allow(clippy::unwrap_used)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;

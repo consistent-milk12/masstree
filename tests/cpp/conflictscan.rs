@@ -6,6 +6,8 @@
 //! - Concurrent readers scanning while writers modify
 //! - Tests scan stability under concurrent updates
 
+#![allow(clippy::unwrap_used)]
+
 use masstree::{MassTree24Inline, RangeBound};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
@@ -49,7 +51,7 @@ fn conflictscan_single_writer() {
             let key = existing.to_be_bytes();
             let _ = writer_tree.insert_with_guard(&key, existing + 1000, &guard);
 
-            if n % 1000 == 0 {
+            if n.is_multiple_of(1000) {
                 thread::yield_now();
             }
         }
@@ -80,10 +82,7 @@ fn conflictscan_single_writer() {
                     // Should see at least initial keys
                     assert!(
                         count >= INITIAL_KEYS,
-                        "scan {}: only saw {} keys, expected >= {}",
-                        scan_count,
-                        count,
-                        INITIAL_KEYS
+                        "scan {scan_count}: only saw {count} keys, expected >= {INITIAL_KEYS}"
                     );
                     scan_count += 1;
                 }
@@ -125,6 +124,8 @@ fn conflictscan_multi_writer() {
             let done = Arc::clone(&done);
             thread::spawn(move || {
                 let guard = tree.guard();
+
+                #[expect(clippy::cast_sign_loss)]
                 let mut n = INITIAL_KEYS + (tid as u64 * 100_000);
 
                 while !done.load(Ordering::Relaxed) {
@@ -132,7 +133,7 @@ fn conflictscan_multi_writer() {
                     let _ = tree.insert_with_guard(&key, n, &guard);
                     n += 1;
 
-                    if n % 100 == 0 {
+                    if n.is_multiple_of(100) {
                         thread::yield_now();
                     }
                 }

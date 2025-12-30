@@ -7,11 +7,12 @@
 //! - Deleter chases behind and removes them
 //! - Tests concurrent insert/delete
 
+#![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
+
 use masstree::MassTree24Inline;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
 
 const N: u64 = 50_000;
 
@@ -92,15 +93,17 @@ fn wd1_single_pair() {
     // Verify tree is mostly empty (deleter may not have caught up completely)
     let guard = tree.guard();
     let mut remaining = 0;
+
     for n in 0..N {
         let key = n.to_be_bytes();
+
         if tree.get_with_guard(&key, &guard).is_some() {
             remaining += 1;
         }
     }
 
     // Allow some keys to remain (race between writer finish and deleter)
-    assert!(remaining < 100, "too many keys remaining: {}", remaining);
+    assert!(remaining < 100, "too many keys remaining: {remaining}");
 }
 
 #[test]
@@ -115,8 +118,8 @@ fn wd1_multi_pair() {
     for pair_id in 0..num_pairs {
         let tree_w = Arc::clone(&tree);
         let tree_d = Arc::clone(&tree);
-        let done_w = Arc::clone(&done);
-        let done_d = Arc::clone(&done);
+        let _done_w = Arc::clone(&done);
+        let _done_d = Arc::clone(&done);
         let writer_pos = Arc::new(AtomicU64::new(0));
         let writer_pos_clone = Arc::clone(&writer_pos);
 

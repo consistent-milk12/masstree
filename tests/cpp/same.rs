@@ -6,6 +6,8 @@
 //! - All threads repeatedly update the same 10 keys
 //! - Tests concurrent update bugs and lock contention
 
+#![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
+
 use masstree::MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
