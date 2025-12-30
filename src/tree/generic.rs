@@ -32,9 +32,8 @@ where
     /// The tree starts with a single empty leaf as root.
     #[must_use]
     pub fn with_allocator(allocator: A) -> Self {
-        // Create root leaf and register with allocator.
-        let root_leaf: Box<L> = L::new_root_boxed();
-        let root_ptr: *mut L = allocator.alloc_leaf(root_leaf);
+        // Create root leaf directly in allocator memory (bypasses Box for pool allocators).
+        let root_ptr: *mut L = allocator.alloc_leaf_direct(true, false);
 
         Self {
             collector: Collector::new(),
@@ -2386,9 +2385,8 @@ where
             // Both keys have the same ikey at this level AND both have more bytes.
             // Create an intermediate twig node that just holds this matching ikey.
 
-            // Allocate new twig node configured as layer root
-            let twig: Box<L> = L::new_layer_root_boxed();
-            let twig_ptr: *mut L = self.allocator.alloc_leaf(twig);
+            // Allocate new twig node configured as layer root (direct allocation)
+            let twig_ptr: *mut L = self.allocator.alloc_leaf_direct(false, true);
 
             // Initialize twig with the matching ikey in slot 0
             // SAFETY: twig_ptr is valid, we just allocated it
@@ -2422,8 +2420,8 @@ where
         // Step 5: Create final leaf with both keys (now diverged or one is prefix)
         // =====================================================================
 
-        let final_leaf: Box<L> = L::new_layer_root_boxed();
-        let final_ptr: *mut L = self.allocator.alloc_leaf(final_leaf);
+        // Allocate final leaf as layer root (direct allocation)
+        let final_ptr: *mut L = self.allocator.alloc_leaf_direct(false, true);
 
         // Assign both entries to the final leaf in sorted order
         // SAFETY: final_ptr is valid (just allocated), guard is from caller

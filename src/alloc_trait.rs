@@ -65,6 +65,35 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// from concurrent code paths with only `&self`.
     fn alloc_leaf(&self, node: Box<L>) -> *mut L;
 
+    /// Allocate a leaf node directly without going through Box.
+    ///
+    /// This is an optimization for pool allocators that can write directly
+    /// to pool memory, avoiding the intermediate Box allocation.
+    ///
+    /// # Arguments
+    ///
+    /// * `is_root` - Whether this is a tree root node
+    /// * `is_layer_root` - Whether this is a layer root node
+    ///
+    /// # Returns
+    ///
+    /// A raw mutable pointer to the initialized node.
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to creating a Box and calling `alloc_leaf`.
+    #[inline]
+    fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut L {
+        let node = if is_layer_root {
+            L::new_layer_root_boxed()
+        } else if is_root {
+            L::new_root_boxed()
+        } else {
+            L::new_boxed()
+        };
+        self.alloc_leaf(node)
+    }
+
     /// Track a leaf pointer for cleanup (concurrent-safe via `&self`).
     ///
     /// Used by concurrent code paths that allocate via `Box::into_raw()`.

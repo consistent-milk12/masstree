@@ -1,4 +1,4 @@
-//! Lock-free node allocation for MassTree.
+//! Lock-free node allocation for [`MassTree`].
 //!
 //! Uses atomic operations instead of mutex for tracking, eliminating
 //! contention on the allocation hot path.
@@ -23,7 +23,7 @@ const INTERNODE_WIDTH: usize = 15;
 /// is wrapped in a Node that points to the next.
 struct TrackNode<T> {
     ptr: *mut T,
-    next: AtomicPtr<TrackNode<T>>,
+    next: AtomicPtr<Self>,
 }
 
 impl<T> TrackNode<T> {

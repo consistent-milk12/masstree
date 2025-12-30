@@ -175,6 +175,45 @@ impl<S: ValueSlot> LeafNode24<S> {
         }
     }
 
+    /// Initialize a leaf node directly at the given pointer.
+    ///
+    /// This avoids stack allocation and copy by writing directly to the destination.
+    /// Used by pool allocators for maximum performance.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must be valid, properly aligned, and point to uninitialized memory
+    /// - `ptr` must have space for `size_of::<Self>()` bytes
+    #[inline]
+    pub unsafe fn init_at(ptr: *mut Self, is_root: bool) {
+        // SAFETY: All operations here are safe because:
+        // - ptr is valid and properly sized (caller guarantees)
+        // - We have exclusive access to the memory
+        // - All writes are to properly aligned fields
+        unsafe {
+            // Zero the entire struct first (most fields are zero-initialized)
+            std::ptr::write_bytes(ptr, 0, 1);
+
+            // Now write the non-zero fields
+            let node = &mut *ptr;
+
+            // Version: leaf node, optionally root
+            std::ptr::write(&mut node.version, NodeVersion::new(true));
+            if is_root {
+                node.version.mark_root();
+            }
+
+            // ModState: Insert mode
+            std::ptr::write(&mut node.modstate, ModState24::Insert);
+
+            // Permutation: empty
+            std::ptr::write(&mut node.permutation, AtomicPermuter24::new());
+
+            // InlineSuffixBag: new (contains non-zero atomics)
+            std::ptr::write(&raw mut (*ptr).inline_ksuf, UnsafeCell::new(InlineSuffixBag::new()));
+        }
+    }
+
     /// Create a new leaf node (boxed).
     #[inline]
     #[must_use]

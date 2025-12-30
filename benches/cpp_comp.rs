@@ -23,7 +23,7 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::pedantic)]
 
-use masstree::{MassTree24, MassTree24Inline, MassTreeLockFree};
+use masstree::{MassTree24, MassTree24Inline, MassTreeLockFree, MassTreePooledInline};
 use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -641,6 +641,60 @@ fn run_rw3_lf(threads: usize, duration_secs: u64) {
 }
 
 // =============================================================================
+// RW3_POOL: Pool allocator variant (inline values)
+// =============================================================================
+
+fn run_rw3_pool(threads: usize, duration_secs: u64) {
+    let tree = Arc::new(MassTreePooledInline::<u64>::new());
+    let timeout = Arc::new(AtomicBool::new(false));
+    let total_ops = Arc::new(AtomicU64::new(0));
+
+    let timeout_clone = Arc::clone(&timeout);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(duration_secs));
+        timeout_clone.store(true, Ordering::Relaxed);
+    });
+
+    let start = Instant::now();
+
+    let handles: Vec<_> = (0..threads)
+        .map(|_| {
+            let tree = Arc::clone(&tree);
+            let timeout = Arc::clone(&timeout);
+            let total_ops = Arc::clone(&total_ops);
+            thread::spawn(move || {
+                // Put phase
+                let mut n = 0u64;
+                while !timeout.load(Ordering::Relaxed) {
+                    let key = key8(n);
+                    let _ = tree.insert(&key, n + 1);
+                    n += 1;
+                }
+
+                // Get phase
+                for i in 0..n {
+                    let key = key8(i);
+                    std::hint::black_box(tree.get(&key));
+                }
+
+                total_ops.fetch_add(n * 2, Ordering::Relaxed);
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    report(
+        "rw3_pool",
+        threads,
+        start.elapsed(),
+        total_ops.load(Ordering::Relaxed),
+    );
+}
+
+// =============================================================================
 // RW3_W15_LF: WIDTH=15 + Lock-free allocator
 // =============================================================================
 
@@ -1193,6 +1247,7 @@ fn main() {
             "rw3_mttest" => run_rw3_mttest(config.threads, config.duration_secs),
             "rw3_w15" => run_rw3_w15(config.threads, config.duration_secs),
             "rw3_lf" => run_rw3_lf(config.threads, config.duration_secs),
+            "rw3_pool" => run_rw3_pool(config.threads, config.duration_secs),
             "rw3_w15_lf" => run_rw3_w15_lf(config.threads, config.duration_secs),
             "rw3_bin" => run_rw3_bin(config.threads, config.duration_secs),
             "rw4" => run_rw4(config.threads, config.duration_secs),
