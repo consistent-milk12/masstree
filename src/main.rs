@@ -1,4 +1,4 @@
-//! Simple MassTree usage example.
+//! Simple [`MassTree`] usage example.
 
 use masstree::MassTree;
 

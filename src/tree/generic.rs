@@ -733,34 +733,11 @@ where
                         if !next_ptr.is_null() && !is_marked(next_raw) {
                             let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
                             if target_ikey >= next_bound {
-                                #[cfg(feature = "tracing")]
-                                tracing::debug!(
-                                    ikey = target_ikey,
-                                    leaf_ptr = ?std::ptr::from_ref(leaf),
-                                    next_ptr = ?next_ptr,
-                                    next_bound = next_bound,
-                                    "get: NotFound but ikey >= next_bound; following B-link"
-                                );
-                                #[cfg(feature = "tracing")]
-                                crate::tree::optimistic::BLINK_SHOULD_FOLLOW_COUNT
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
                                 leaf_ptr = next_ptr;
                                 continue 'leaf_loop;
                             }
                         }
 
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            ikey = format_args!("{:016x}", target_ikey),
-                            leaf_ptr = ?std::ptr::from_ref(leaf),
-                            perm_size = perm.size(),
-                            next_ptr = ?next_ptr,
-                            is_marked = is_marked(next_raw),
-                            "get: NOT_FOUND"
-                        );
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::SEARCH_NOT_FOUND_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
                         return None;
                     }
 
@@ -869,35 +846,13 @@ where
                         let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
                         if target_ikey >= next_bound {
                             // Key should be in the next leaf - follow B-link
-                            #[cfg(feature = "tracing")]
-                            tracing::debug!(
-                                ikey = target_ikey,
-                                leaf_ptr = ?std::ptr::from_ref(leaf),
-                                next_ptr = ?next_ptr,
-                                next_bound = next_bound,
-                                "get: NotFound but ikey >= next_bound; following B-link"
-                            );
-                            #[cfg(feature = "tracing")]
-                            crate::tree::optimistic::BLINK_SHOULD_FOLLOW_COUNT
-                                .fetch_add(1, AtomicOrdering::Relaxed);
+
                             leaf_ptr = next_ptr;
                             continue 'leaf_loop;
                         }
                     }
 
                     // Truly not found
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        ikey = format_args!("{:016x}", target_ikey),
-                        leaf_ptr = ?std::ptr::from_ref(leaf),
-                        perm_size = perm.size(),
-                        next_ptr = ?next_ptr,
-                        is_marked = is_marked(next_raw),
-                        "get: NOT_FOUND"
-                    );
-                    #[cfg(feature = "tracing")]
-                    crate::tree::optimistic::SEARCH_NOT_FOUND_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
                     return None;
                 }
             }
@@ -1219,7 +1174,7 @@ where
     /// Single-layer fast path for insert search (keys ≤ 8 bytes).
     ///
     /// Optimized version that:
-    /// - Skips suffix comparison logic  
+    /// - Skips suffix comparison logic
     /// - Only returns `Found` or `NotFound` (never `Layer` or `Conflict`)
     ///
     /// For layer pointers: an 8-byte key sorts BEFORE a layer pointer with
@@ -1678,21 +1633,7 @@ where
                     // SAFETY: next_ptr is a valid leaf pointer (protected by the guard).
                     let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
                     if key.ikey() >= next_bound {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            ikey = format_args!("{:016x}", ikey_for_trace),
-                            leaf_ptr = ?std::ptr::from_ref(leaf),
-                            next_bound = format_args!("{:016x}", next_bound),
-                            "INSERT_RETRY: key moved to next sibling (post-lock check)"
-                        );
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::WRONG_LEAF_INSERT_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
                         drop(lock);
-                        #[cfg(feature = "tracing")]
-                        {
-                            retry_count += 1;
-                        }
                         continue;
                     }
                 }
@@ -1725,9 +1666,6 @@ where
                                 });
                             }
 
-                            #[cfg(feature = "tracing")]
-                            crate::tree::optimistic::LOCKED_INSERT_COUNT
-                                .fetch_add(1, AtomicOrdering::Relaxed);
                             return Ok(Some(old_output));
                         }
                         drop(lock);
@@ -1795,9 +1733,6 @@ where
                         drop(lock);
 
                         self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::LOCKED_INSERT_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
                         return Ok(None);
                     }
 
@@ -1842,11 +1777,9 @@ where
                             });
                         }
 
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::LOCKED_INSERT_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
                         return Ok(Some(old_output));
                     }
+
                     drop(lock);
                 }
 
@@ -1917,9 +1850,6 @@ where
                     drop(lock);
 
                     self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                    #[cfg(feature = "tracing")]
-                    crate::tree::optimistic::LOCKED_INSERT_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
                     return Ok(None);
                 }
 
@@ -1992,9 +1922,6 @@ where
                     drop(lock);
                     self.count.fetch_add(1, AtomicOrdering::Relaxed);
 
-                    #[cfg(feature = "tracing")]
-                    crate::tree::optimistic::LOCKED_INSERT_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
                     return Ok(None);
                 }
             }

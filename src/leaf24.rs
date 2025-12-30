@@ -983,13 +983,23 @@ impl<S: ValueSlot> LeafNode24<S> {
 
     /// Wait for an in-progress split to complete.
     ///
-    /// Spins until the next pointer is unmarked and version is stable.
+    /// Spins until the next pointer is unmarked, the version is stable,
+    /// OR the node is marked as deleted.
+    ///
+    /// # Note
+    ///
+    /// A marked next pointer can mean either:
+    /// 1. A split is in progress (will be unmarked when split completes)
+    /// 2. An unlink is in progress (leaf being deleted, may stay marked)
+    ///
+    /// We check `is_deleted()` to avoid spinning forever on case 2.
     pub fn wait_for_split(&self) {
-        // CRITICAL: Uncomment to add timeout for stuck splits
-        // const MAX_RETRIES: usize = 1000;
-        // let mut retries: usize = 0;
-
         while self.next_is_marked() {
+            // Check if node was deleted (unlink marks next but never unmarks)
+            if self.version.is_deleted() {
+                return;
+            }
+
             // Quick check: did marker clear during spin?
             for _ in 0..16 {
                 std::hint::spin_loop();
@@ -1001,11 +1011,10 @@ impl<S: ValueSlot> LeafNode24<S> {
             // Still marked - wait for version to stabilize
             let _ = self.version.stable();
 
-            // CRITICAL: Uncomment to prevent infinite spin on stuck split
-            // retries += 1;
-            // if retries > MAX_RETRIES {
-            //     break;
-            // }
+            // Re-check deletion after waiting for version
+            if self.version.is_deleted() {
+                return;
+            }
         }
     }
 
@@ -1060,6 +1069,87 @@ impl<S: ValueSlot> LeafNode24<S> {
     fn cas_next(&self, current: *mut Self, new: *mut Self) -> Result<*mut Self, *mut Self> {
         self.next
             .compare_exchange(current, new, CAS_SUCCESS, CAS_FAILURE)
+    }
+
+    /// Unlink this leaf from the B-link doubly-linked chain.
+    ///
+    /// This is the inverse of [`link_split_concurrent`]. Used when removing
+    /// an empty leaf from the tree.
+    ///
+    /// # Algorithm (from C++ `btree_leaflink.hh:76-96`)
+    ///
+    /// 1. Lock our next pointer via CAS marking
+    /// 2. CAS prev->next from self to marked(self) to signal unlinking
+    /// 3. Update next->prev = prev
+    /// 4. Release fence for visibility
+    /// 5. Store prev->next = next (unmarked), completing the unlink
+    ///
+    /// # Preconditions
+    ///
+    /// - Self is locked (caller holds version lock)
+    /// - Self has a predecessor (`prev` is non-null)
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the version lock on this leaf
+    /// - `self.prev()` must be non-null (not the leftmost leaf)
+    /// - The prev and next pointers must be valid leaves
+    pub unsafe fn unlink_from_chain(&self) {
+        // Step 1: Lock our next pointer (mark it)
+        // This prevents concurrent splits from interfering
+        let next: *mut Self = self.lock_next();
+
+        // Step 2: CAS prev->next from self to marked(self)
+        // This signals to prev that we're unlinking
+        //
+        // IMPORTANT: We must re-read prev on each iteration because if prev splits,
+        // a new node becomes our predecessor and we need to CAS on that node instead.
+        // (This matches the C++ implementation in btree_leaflink.hh:86-91)
+        let self_ptr: *mut Self = StdPtr::from_ref(self).cast_mut();
+        let marked_self: *mut Self = mark_ptr(self_ptr);
+
+        let final_prev: *mut Self;
+        loop {
+            // Re-read prev on each iteration (may change if prev splits)
+            let prev: *mut Self = self.prev();
+            debug_assert!(!prev.is_null(), "unlink_from_chain: prev must be non-null");
+
+            // SAFETY: prev is non-null (checked above) and points to a valid leaf
+            // Try to mark prev's next pointer (from self to marked(self))
+            match unsafe { &*prev }
+                .next
+                .compare_exchange(self_ptr, marked_self, CAS_SUCCESS, CAS_FAILURE)
+            {
+                Ok(_) => {
+                    final_prev = prev;
+                    break;
+                }
+                Err(current) => {
+                    // If prev->next is already marked, wait for it to clear
+                    // This can happen if prev is splitting
+                    if is_marked(current) {
+                        // SAFETY: prev is valid
+                        unsafe { (*prev).wait_for_split() };
+                    }
+                    // Otherwise, prev->next doesn't point to us - prev may have split
+                    // and our new prev is the split sibling. Loop and re-read prev.
+                    std::hint::spin_loop();
+                }
+            }
+        }
+
+        // Step 3: Update next->prev to skip over us
+        if !next.is_null() {
+            // SAFETY: next is non-null (just checked) and points to a valid leaf
+            unsafe { (*next).set_prev(final_prev) };
+        }
+
+        // Step 4: Release fence for visibility
+        StdAtomic::fence(AtomicOrdering::Release);
+
+        // Step 5: Complete unlinking by storing unmarked next into prev->next
+        // SAFETY: final_prev is non-null and points to a valid leaf
+        unsafe { (*final_prev).set_next(next) };
     }
 
     /// Get the previous leaf pointer.
@@ -1277,6 +1367,12 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn set_prev(&self, prev: *mut Self) {
         Self::set_prev(self, prev);
+    }
+
+    #[inline(always)]
+    unsafe fn unlink_from_chain(&self) {
+        // SAFETY: Caller guarantees preconditions
+        unsafe { Self::unlink_from_chain(self) };
     }
 
     #[inline(always)]

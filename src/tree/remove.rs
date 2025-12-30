@@ -373,11 +373,175 @@ where
     // Step 7: Decrement entry count
     tree.dec_count();
 
+    // Step 8: Check if leaf is now empty and should be removed
+    //
+    // DISABLED: Leaf removal (coalescing) requires remove_from_parent_generic()
+    // to be implemented (Phase 5). Without updating the parent's child pointer,
+    // traversals through the parent will hit the deleted leaf and loop forever.
+    //
+    // TODO: Enable once Phase 5 is complete.
+    // if new_perm.size() == 0 {
+    //     let removed: bool = remove_leaf_generic::<S, L, A>(tree, leaf, lock, guard);
+    //     if removed {
+    //         return value;
+    //     }
+    // }
+
     // Mark insert in lock guard for version increment
     // This ensures readers see the removal
     lock.mark_insert();
 
     value
+}
+
+// ============================================================================
+//  Leaf Removal (Coalescing)
+// ============================================================================
+
+/// Remove an empty leaf from the tree structure.
+///
+/// Called when a leaf becomes empty after key removal. This function:
+/// 1. Marks the leaf as deleted
+/// 2. Unlinks it from the B-link chain
+/// 3. Removes it from the parent internode
+/// 4. Schedules the leaf for retirement via seize
+///
+/// # Algorithm (from C++ `masstree_remove.hh:178-255`)
+///
+/// Leftmost leaves (`prev == null`) are never removed because:
+/// - They may be the only leaf in a sublayer
+/// - Removing them requires special gc_layer handling
+///
+/// Non-leftmost leaves can be safely unlinked and retired.
+///
+/// # Returns
+///
+/// - `true` if the leaf was removed and scheduled for retirement
+/// - `false` if the leaf is leftmost and cannot be removed
+///
+/// # Preconditions
+///
+/// - `leaf` is locked (caller holds `LockGuard`)
+/// - `leaf.permutation().size() == 0` (leaf is empty)
+fn remove_leaf_generic<S, L, A>(
+    tree: &MassTreeGeneric<S, L, A>,
+    leaf: &L,
+    lock: &mut LockGuard<'_>,
+    guard: &LocalGuard<'_>,
+) -> bool
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
+{
+    // Case 1: Leftmost leaf (prev == null) - cannot remove
+    // This leaf might be the only leaf in a sublayer, or the main root's first leaf.
+    // Removing it would require gc_layer handling (deferred to Phase 8).
+    if leaf.prev().is_null() {
+        // TODO: If this is a single leaf in a sublayer and it's empty,
+        // schedule gc_layer to remove the layer pointer from parent.
+        // For now, the empty leftmost leaf stays in the tree.
+        return false;
+    }
+
+    // Case 2: Non-leftmost leaf - we can remove it
+
+    // Step 1: Mark as deleted
+    // This tells concurrent readers to retry from a higher level
+    lock.mark_deleted();
+
+    // Step 2: Unlink from B-link chain
+    // SAFETY: leaf is locked, prev is non-null (checked above)
+    unsafe { leaf.unlink_from_chain() };
+
+    // Step 3: Remove from parent internode
+    // This updates the parent's child pointer and potentially collapses empty internodes
+    //
+    // NOTE: This is currently a stub (TODO: Phase 5).
+    // The parent's child pointer is NOT updated, which means:
+    // - Traversal through parent can reach this deleted leaf
+    // - Readers will see is_deleted() and retry from layer root
+    // - This is safe but wastes parent child slot
+    let ikey_bound: u64 = leaf.ikey_bound();
+    let leaf_ptr: *mut u8 = (leaf as *const L).cast_mut().cast::<u8>();
+
+    remove_from_parent_generic::<S, L, A>(tree, leaf_ptr, ikey_bound, None, guard);
+
+    // Step 4: Schedule leaf retirement via seize
+    //
+    // CRITICAL: We can only retire the leaf AFTER the parent's child pointer
+    // is updated (nulled out). Otherwise, readers traversing through the parent
+    // can reach freed memory.
+    //
+    // Since remove_from_parent_generic() is currently a stub that doesn't update
+    // the parent, we MUST NOT retire the leaf yet. The leaf will stay in memory
+    // (marked as deleted) until the tree itself is dropped.
+    //
+    // TODO: Enable retirement once Phase 5 (remove_from_parent_generic) is complete.
+    // let leaf_ptr_for_retire: *mut L = (leaf as *const L).cast_mut();
+    // // SAFETY: leaf_ptr_for_retire points to a valid leaf that we just unlinked
+    // unsafe {
+    //     guard.defer_retire(leaf_ptr_for_retire.cast(), |ptr: *mut u8, _| {
+    //         // SAFETY: ptr was allocated via Box in the allocator
+    //         let leaf: *mut L = ptr.cast();
+    //         drop(Box::from_raw(leaf));
+    //     });
+    // }
+
+    true
+}
+
+/// Remove a child from its parent internode, potentially collapsing empty chains.
+///
+/// This function walks up the tree from the removed child, updating parent
+/// pointers and collapsing single-child internodes.
+///
+/// # Algorithm (from C++ `masstree_remove.hh:211-255`)
+///
+/// 1. Lock the parent internode
+/// 2. Find the child's position using `ikey_bound`
+/// 3. Update the child pointer (to replacement or null)
+/// 4. If removing a non-leftmost child, shift keys/children down
+/// 5. If removing the leftmost child and parent has keys, redirect ikey bounds
+/// 6. If parent is now empty and not root, recurse up
+fn remove_from_parent_generic<S, L, A>(
+    _tree: &MassTreeGeneric<S, L, A>,
+    child: *mut u8,
+    _ikey_bound: u64,
+    _replacement: Option<*mut u8>,
+    _guard: &LocalGuard<'_>,
+)
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
+{
+    // Get parent pointer
+    // SAFETY: child points to a valid leaf that we just removed from the tree
+    let parent_ptr: *mut u8 = unsafe {
+        let leaf: &L = &*(child.cast::<L>());
+        leaf.parent()
+    };
+
+    if parent_ptr.is_null() {
+        // Child was the root (single leaf in layer) - nothing to update
+        // The layer pointer in the grandparent will be handled by gc_layer (Phase 8)
+        return;
+    }
+
+    // TODO: Full implementation in Phase 5
+    // For now, we leave the parent's child pointer pointing to the deleted leaf.
+    // This is safe because:
+    // 1. The leaf is marked as deleted, so readers will retry
+    // 2. The leaf won't be freed until all readers are done (seize)
+    // 3. The parent still has the correct number of keys/children for routing
+    //
+    // The downside is wasted space in the parent's child array, but the tree
+    // remains correct. This will be fixed in Phase 5.
 }
 
 // ============================================================================

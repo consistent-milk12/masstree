@@ -577,6 +577,17 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Set previous leaf pointer.
     fn set_prev(&self, prev: *mut Self);
 
+    /// Unlink this leaf from the B-link doubly-linked chain.
+    ///
+    /// Used when removing an empty leaf from the tree.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the version lock on this leaf
+    /// - `self.prev()` must be non-null (not the leftmost leaf)
+    /// - The prev and next pointers must be valid leaves
+    unsafe fn unlink_from_chain(&self);
+
     /// Get parent internode pointer.
     fn parent(&self) -> *mut u8;
 
