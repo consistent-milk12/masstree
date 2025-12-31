@@ -26,7 +26,7 @@ use crate::link::{is_marked, unmark_ptr};
 /// This enum captures the three possible outcomes without interpreting
 /// the pointer until after version validation.
 enum LookupResult {
-    /// Found a value pointer. The `keylenx` confirms it's a value (< LAYER_KEYLENX).
+    /// Found a value pointer. The `keylenx` confirms it's a value (< `LAYER_KEYLENX`).
     Value(*mut u8),
 
     /// Found a layer pointer. Need to descend into sublayer.
@@ -171,21 +171,21 @@ where
     /// - If same leaf, new version: `(same_ptr, false)` with updated version
     #[cold]
     #[inline(never)]
-    fn handle_version_change<'a>(
+    fn handle_version_change(
         &self,
-        leaf: &'a L,
+        leaf: &L,
         key: &Key<'_>,
         version: u32,
         guard: &LocalGuard<'_>,
     ) -> (*mut L, u32, bool) {
         let (advanced, new_version) = self.advance_to_key_generic(leaf, key, version, guard);
 
-        if !std::ptr::eq(advanced, leaf) {
-            // Different leaf - search there
-            (std::ptr::from_ref(advanced).cast_mut(), new_version, true)
-        } else {
+        if std::ptr::eq(advanced, leaf) {
             // Same leaf, new version - retry search
             (std::ptr::from_ref(leaf).cast_mut(), new_version, false)
+        } else {
+            // Different leaf - search there
+            (std::ptr::from_ref(advanced).cast_mut(), new_version, true)
         }
     }
 
@@ -195,6 +195,7 @@ where
     /// `None` if key is definitively not found.
     #[cold]
     #[inline(never)]
+    #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_blink_chain(&self, leaf: &L, target_ikey: u64) -> Option<*mut L> {
         let next_raw: *mut L = leaf.next_raw();
         let next_ptr: *mut L = unmark_ptr(next_raw);
@@ -215,6 +216,7 @@ where
     /// Returns `true` if sublayer is valid, `false` if deleted (key not found).
     #[cold]
     #[inline(never)]
+    #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_sublayer_valid(&self, layer_ptr: *mut u8) -> bool {
         // SAFETY: ptr is non-null (came from valid slot) and protected by guard.
         #[expect(clippy::cast_ptr_alignment, reason = "Checked")]

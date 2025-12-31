@@ -185,7 +185,7 @@ fn test_try_lock_under_contention() {
     // At least some try_lock calls should have succeeded.
     // Note: On fast machines, all calls may succeed (no contention),
     // which is fine - it means the lock is working correctly.
-    let successes = success_count.load(Ordering::Relaxed);
+    let successes: usize = success_count.load(Ordering::Relaxed);
     assert!(successes > 0, "no try_lock succeeded");
 
     // Version should have changed after all the inserts

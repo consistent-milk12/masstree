@@ -80,6 +80,7 @@ fn test_leaf24_linking() {
     assert!(!leaf1.next_is_marked());
 
     // Cleanup
+    // SAFETY: leaf2_ptr was created by Box::into_raw above and not yet freed
     let _ = unsafe { Box::from_raw(leaf2_ptr) };
 }
 
@@ -140,6 +141,7 @@ fn test_lock_next_marks_and_unmarks() {
     assert!(!leaf1.next_is_marked());
 
     // Cleanup
+    // SAFETY: leaf2_ptr was created by Box::into_raw above and not yet freed
     let _ = unsafe { Box::from_raw(leaf2_ptr) };
 }
 
@@ -158,16 +160,17 @@ fn test_link_sibling_preserves_existing_next() {
     let leaf_b_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf_b);
     let leaf_c_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf_c);
 
-    // Reconstruct references
-    let leaf_a: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_a_ptr };
-    let leaf_b: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_b_ptr };
-    let leaf_c: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_c_ptr };
+    // Reconstruct references (SAFETY: Pointers are valid from Box::into_raw above)
+    let leaf_a: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_a_ptr }; // SAFETY: valid ptr
+    let leaf_b: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_b_ptr }; // SAFETY: valid ptr
+    let leaf_c: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_c_ptr }; // SAFETY: valid ptr
 
     // Initial chain: A -> B
     leaf_a.set_next(leaf_b_ptr);
     leaf_b.set_prev(leaf_a_ptr);
 
     // Link C after A: A -> C -> B
+    // SAFETY: All pointers are valid and properly initialized
     unsafe { TreeLeafNode::<LeafValue<u64>>::link_sibling(leaf_a, leaf_c_ptr) };
 
     // Verify chain structure
@@ -180,10 +183,10 @@ fn test_link_sibling_preserves_existing_next() {
     assert!(!leaf_a.next_is_marked());
     assert!(!leaf_c.next_is_marked());
 
-    // Cleanup
-    let _ = unsafe { Box::from_raw(leaf_a_ptr) };
-    let _ = unsafe { Box::from_raw(leaf_b_ptr) };
-    let _ = unsafe { Box::from_raw(leaf_c_ptr) };
+    // Cleanup (SAFETY: Pointers from Box::into_raw above, not yet freed)
+    let _ = unsafe { Box::from_raw(leaf_a_ptr) }; // SAFETY: valid ptr
+    let _ = unsafe { Box::from_raw(leaf_b_ptr) }; // SAFETY: valid ptr
+    let _ = unsafe { Box::from_raw(leaf_c_ptr) }; // SAFETY: valid ptr
 }
 
 #[test]
@@ -198,6 +201,7 @@ fn test_link_sibling_null_next() {
     let leaf_a_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf_a);
     let leaf_c_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf_c);
 
+    // SAFETY: Pointers are valid, created by Box::into_raw above
     let leaf_a: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_a_ptr };
     let leaf_c: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_c_ptr };
 
@@ -205,6 +209,7 @@ fn test_link_sibling_null_next() {
     assert!(leaf_a.safe_next().is_null());
 
     // Link C after A
+    // SAFETY: All pointers are valid and properly initialized
     unsafe { TreeLeafNode::<LeafValue<u64>>::link_sibling(leaf_a, leaf_c_ptr) };
 
     // Verify chain
@@ -214,6 +219,7 @@ fn test_link_sibling_null_next() {
     assert!(!leaf_a.next_is_marked());
 
     // Cleanup
+    // SAFETY: Pointers were created by Box::into_raw above and not yet freed
     let _ = unsafe { Box::from_raw(leaf_a_ptr) };
     let _ = unsafe { Box::from_raw(leaf_c_ptr) };
 }
@@ -237,5 +243,6 @@ fn test_cas_next() {
     assert_eq!(result.unwrap_err(), leaf2_ptr);
 
     // Cleanup
+    // SAFETY: leaf2_ptr was created by Box::into_raw above and not yet freed
     let _ = unsafe { Box::from_raw(leaf2_ptr) };
 }

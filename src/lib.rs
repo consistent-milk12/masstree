@@ -110,16 +110,15 @@ static GLOBAL: MiMalloc = MiMalloc;
 #[cfg(feature = "tracing")]
 pub fn init_tracing() {
     use std::env;
-    use std::sync::Once;
-    static INIT: Once = Once::new();
+    use std::sync::OnceLock;
+    use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
     // Store the guard in a static to keep the non-blocking writer alive.
-    // Leaking is intentional - we want logs to flush on process exit.
-    static mut GUARD: Option<tracing_appender::non_blocking::WorkerGuard> = None;
+    // The guard ensures logs are flushed on process exit.
+    static GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
-    INIT.call_once(|| {
-        use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
-
+    // OnceLock::get_or_init ensures this runs exactly once
+    GUARD.get_or_init(|| {
         // Configuration from environment
         let log_dir = env::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
         let console_enabled = false;
@@ -131,14 +130,6 @@ pub fn init_tracing() {
         // File appender - non-rotating, writes to masstree.jsonl (NDJSON)
         let file_appender = tracing_appender::rolling::never(&log_dir, "masstree.jsonl");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-
-        // Store guard to prevent dropping (logs would be lost)
-        // SAFETY: This is only called once due to Once::call_once, and we never read GUARD
-        // after this point except implicitly when the process exits.
-        #[allow(static_mut_refs)]
-        unsafe {
-            GUARD = Some(guard);
-        }
 
         // File layer - JSON format for structured analysis
         let file_layer = tracing_subscriber::fmt::layer()
@@ -172,6 +163,9 @@ pub fn init_tracing() {
             .with(file_layer)
             .with(console_layer)
             .try_init();
+
+        // Return the guard to be stored in OnceLock
+        guard
     });
 }
 
@@ -192,6 +186,7 @@ pub mod ordering;
 pub mod permuter;
 pub mod permuter24;
 pub mod prefetch;
+pub mod ptr;
 pub mod slot;
 pub mod suffix;
 pub mod tree;
@@ -210,8 +205,7 @@ pub use permuter24::{AtomicPermuter24, Permuter24, WIDTH_24};
 
 // Re-export LeafNode24 types
 pub use leaf24::{
-    LeafNode24, MODSTATE_DELETED_LAYER, MODSTATE_INSERT, MODSTATE_REMOVE,
-    WIDTH_24 as LEAF24_WIDTH,
+    LeafNode24, MODSTATE_DELETED_LAYER, MODSTATE_INSERT, MODSTATE_REMOVE, WIDTH_24 as LEAF24_WIDTH,
 };
 
 // Re-export allocator24 types
@@ -222,6 +216,9 @@ pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
 
 // Re-export link utilities
 pub use link::{is_marked, mark_ptr, unmark_ptr};
+
+// Re-export pointer types
+pub use ptr::NodePtr;
 
 // Re-export main types for convenience
 pub use slot::ValueSlot;

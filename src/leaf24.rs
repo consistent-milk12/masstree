@@ -53,6 +53,10 @@ pub const MODSTATE_REMOVE: u8 = 1;
 /// Modification state: node's layer has been deleted.
 pub const MODSTATE_DELETED_LAYER: u8 = 2;
 
+/// Modification state: node is empty (all keys removed).
+/// Empty nodes can be reused by insert or cleaned up by background task.
+pub const MODSTATE_EMPTY: u8 = 3;
+
 /// Leaf node with 24 slots using u128 permutation.
 ///
 /// # Concurrency Model
@@ -76,9 +80,10 @@ pub struct LeafNode24<S: ValueSlot> {
     version: NodeVersion,
 
     /// Modification state for coordinating insert/remove operations.
-    /// - 0 = `MODSTATE_INSERT` (default)
-    /// - 1 = `MODSTATE_REMOVE`
-    /// - 2 = `MODSTATE_DELETED_LAYER`
+    /// - 0 = `MODSTATE_INSERT` (default, normal operation)
+    /// - 1 = `MODSTATE_REMOVE` (being removed)
+    /// - 2 = `MODSTATE_DELETED_LAYER` (sublayer was gc'd)
+    /// - 3 = `MODSTATE_EMPTY` (all keys removed, can be reused)
     modstate: AtomicU8,
 
     /// Padding to fill cache line 0 and separate version from permutation.
@@ -1245,6 +1250,42 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     // ============================================================================
+    //  Empty State (for lazy coalescing)
+    // ============================================================================
+
+    /// Check if this leaf is in empty state (modstate == `MODSTATE_EMPTY`).
+    ///
+    /// Empty state means the leaf had all its keys removed and is available
+    /// for reuse by insert or cleanup by the coalescing background task.
+    #[must_use]
+    #[inline(always)]
+    pub fn is_empty_state(&self) -> bool {
+        self.modstate() == MODSTATE_EMPTY
+    }
+
+    /// Mark this leaf as empty (all keys removed).
+    ///
+    /// Called when the last key is removed from a leaf. The leaf remains
+    /// in the tree structure but is marked for potential reuse or cleanup.
+    ///
+    /// Empty leaves can be:
+    /// - Reused by insert operations (saves allocation)
+    /// - Cleaned up by background coalescing task
+    #[inline(always)]
+    pub fn mark_empty(&self) {
+        self.set_modstate(MODSTATE_EMPTY);
+    }
+
+    /// Clear empty state, returning to normal insert mode.
+    ///
+    /// Called when an empty leaf is being reused for a new insert.
+    /// This resets the modstate to allow normal operation.
+    #[inline(always)]
+    pub fn clear_empty_state(&self) {
+        self.set_modstate(MODSTATE_INSERT);
+    }
+
+    // ============================================================================
     //  Slot Assignment
     // ============================================================================
 
@@ -1863,6 +1904,21 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn is_removing(&self) -> bool {
         Self::is_removing(self)
+    }
+
+    #[inline(always)]
+    fn is_empty_state(&self) -> bool {
+        Self::is_empty_state(self)
+    }
+
+    #[inline(always)]
+    fn mark_empty(&self) {
+        Self::mark_empty(self);
+    }
+
+    #[inline(always)]
+    fn clear_empty_state(&self) {
+        Self::clear_empty_state(self);
     }
 }
 

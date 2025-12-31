@@ -11,8 +11,10 @@ use crate::alloc24::SeizeAllocator24;
 use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
 use crate::value::{LeafValue, LeafValueIndex};
+use coalesce::CoalesceQueue;
 use seize::Collector;
 
+mod coalesce;
 mod generic;
 mod index;
 mod range;
@@ -133,6 +135,12 @@ where
     /// Number of key-value pairs in the tree (atomic for concurrent access).
     count: AtomicUsize,
 
+    /// Queue of empty leaves pending cleanup (lazy coalescing).
+    ///
+    /// When leaves become empty after key removal, they are queued here
+    /// for background cleanup rather than being removed inline.
+    coalesce_queue: CoalesceQueue<L>,
+
     /// Marker to indicate slot and leaf types.
     _marker: PhantomData<(S, L)>,
 }
@@ -148,6 +156,7 @@ where
             .field("root_ptr", &self.root_ptr.load(AtomicOrdering::Relaxed))
             .field("count", &self.count.load(AtomicOrdering::Relaxed))
             .field("width", &L::WIDTH)
+            .field("pending_coalesce", &self.coalesce_queue.len())
             .finish_non_exhaustive()
     }
 }
@@ -177,14 +186,17 @@ where
     fn drop(&mut self) {
         // No concurrent access is possible here (Drop requires unique access).
         //
-        // Step 1: Process all deferred retirements (suffix bags, etc.)
+        // Step 1: Clear the coalesce queue (leaves will be freed in teardown)
+        self.coalesce_queue.clear();
+
+        // Step 2: Process all deferred retirements (suffix bags, etc.)
         // This MUST be called before teardown_tree to ensure any objects
         // retired via defer_retire() are reclaimed before we free nodes.
         //
         // SAFETY: &mut self guarantees no threads are active with guards.
         unsafe { self.collector.reclaim_all() };
 
-        // Step 2: Free all nodes via allocator traversal.
+        // Step 3: Free all nodes via allocator traversal.
         let root: *mut u8 = self.root_ptr.load(AtomicOrdering::Acquire);
         self.allocator.teardown_tree(root);
     }

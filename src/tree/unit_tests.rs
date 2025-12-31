@@ -160,10 +160,10 @@ fn concurrent_insert_then_get_does_not_lose_key() {
             h.join().unwrap();
         }
 
-        let key_val = missing_key.load(Ordering::SeqCst);
+        let key_val: u64 = missing_key.load(Ordering::SeqCst);
         if key_val != u64::MAX {
-            let t = missing_thread.load(Ordering::SeqCst);
-            let i = missing_i.load(Ordering::SeqCst);
+            let t: usize = missing_thread.load(Ordering::SeqCst);
+            let i: usize = missing_i.load(Ordering::SeqCst);
 
             let in_leaf_chain = scan_leaf_chain_contains(&tree, key_val);
             panic!(

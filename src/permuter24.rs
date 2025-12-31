@@ -428,6 +428,7 @@ impl Permuter24 {
     ///
     /// Panics if the slot is not found in the permutation.
     #[inline]
+    #[expect(clippy::expect_used, reason = "Documented invariant: slot must exist")]
     pub fn remove_slot(&mut self, slot: usize) {
         let size = self.size();
 

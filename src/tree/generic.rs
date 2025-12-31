@@ -13,7 +13,12 @@ use crate::{
     leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::NodeVersion,
     slot::ValueSlot,
-    tree::{InsertError, InsertSearchResultGeneric, remove::NodeCleaner, split::Propagation},
+    tree::{
+        InsertError, InsertSearchResultGeneric,
+        coalesce::{self, CoalesceQueue},
+        remove::NodeCleaner,
+        split::Propagation,
+    },
     unmark_ptr,
 };
 
@@ -46,6 +51,7 @@ where
             allocator,
             root_ptr: AtomicPtr::new(root_ptr.cast::<u8>()),
             count: AtomicUsize::new(0),
+            coalesce_queue: CoalesceQueue::new(),
             _marker: PhantomData,
         }
     }
@@ -82,6 +88,58 @@ where
     }
 
     // ========================================================================
+    //  Lazy Coalescing (Empty Leaf Cleanup)
+    // ========================================================================
+
+    /// Get the number of empty leaves pending cleanup.
+    ///
+    /// This is the number of leaves that became empty after key removal
+    /// and are waiting to be processed by `process_coalesce()`.
+    #[must_use]
+    #[inline]
+    pub fn pending_coalesce(&self) -> usize {
+        self.coalesce_queue.len()
+    }
+
+    /// Process all pending empty leaf removals.
+    ///
+    /// Call this during low-contention periods to clean up empty leaves.
+    /// This is safe to call concurrently with other operations.
+    ///
+    /// # Returns
+    ///
+    /// The number of entries processed (including skipped/re-queued).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tree = MassTree::new();
+    /// let guard = tree.guard();
+    ///
+    /// // ... perform many removes ...
+    ///
+    /// // Clean up empty leaves
+    /// let processed = tree.process_coalesce(&guard);
+    /// println!("Processed {} empty leaves", processed);
+    /// ```
+    #[inline]
+    pub fn process_coalesce(&self, guard: &LocalGuard<'_>) -> usize {
+        coalesce::process_all::<S, L, A>(&self.coalesce_queue, &self.allocator, guard)
+    }
+
+    /// Process up to `limit` pending empty leaf removals.
+    ///
+    /// Useful for bounded cleanup during normal operations.
+    ///
+    /// # Returns
+    ///
+    /// The number of entries processed.
+    #[inline]
+    pub fn process_coalesce_batch(&self, guard: &LocalGuard<'_>, limit: usize) -> usize {
+        coalesce::process_batch::<S, L, A>(&self.coalesce_queue, &self.allocator, guard, limit)
+    }
+
+    // ========================================================================
     //  Internal Helpers
     // ========================================================================
 
@@ -113,6 +171,7 @@ where
         // `NodeVersion` is the first field of both leaf and internode types.
         let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
 
+        // SAFETY: version_ptr is valid per above invariant
         unsafe { (*version_ptr).is_leaf() }
     }
 
@@ -171,6 +230,7 @@ where
             reason = "root points to L or L::Internode, both properly aligned"
         )]
         let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+        // SAFETY: version_ptr is valid per comment above
         let is_leaf: bool = unsafe { (*version_ptr).is_leaf() };
 
         if is_leaf {
@@ -212,6 +272,7 @@ where
                 clippy::cast_ptr_alignment,
                 reason = "child_ptr points to L or L::Internode, both properly aligned"
             )]
+            // SAFETY: child_ptr points to valid node with NodeVersion as first field
             let child_version: &NodeVersion = unsafe { &*(child_ptr.cast::<NodeVersion>()) };
 
             if child_version.is_leaf() {
@@ -244,6 +305,7 @@ where
             reason = "root points to L or L::Internode, both properly aligned"
         )]
         let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+        // SAFETY: version_ptr is valid per comment above
         let is_leaf: bool = unsafe { (*version_ptr).is_leaf() };
 
         if is_leaf {
@@ -568,7 +630,7 @@ where
     ///
     /// # Algorithm (from C++ `leaf::advance_to_key`)
     /// 1. Get stable version
-    /// 2. If has_split AND key > last key in leaf: walk B-link chain
+    /// 2. If `has_split` AND key > last key in leaf: walk B-link chain
     /// 3. Otherwise: key belongs in current leaf
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_generic<'a>(

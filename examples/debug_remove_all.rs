@@ -1,5 +1,5 @@
 //! Debug test with flush
-use anyhow::{Context, Result as AnyResult, anyhow as ANYHOW};
+use anyhow::{Result as AnyResult, anyhow as ANYHOW};
 use masstree::MassTree24;
 use std::io::{self, Write};
 

@@ -21,7 +21,7 @@ use crate::nodeversion::LockGuard;
 
 /// Result of finding a usable slot for insertion.
 enum FindSlotResult {
-    /// Found a usable slot at the given index with back_offset for permutation.
+    /// Found a usable slot at the given index with `back_offset` for permutation.
     Found { slot: usize, back_offset: usize },
 
     /// No usable slot available - need to split the leaf.
@@ -45,9 +45,10 @@ where
     /// Handles the slot-0 rule: slot-0 stores `ikey_bound()` and cannot be
     /// reused for a different ikey.
     ///
-    /// Returns `FindSlotResult::Found` with the slot and back_offset,
+    /// Returns `FindSlotResult::Found` with the slot and `back_offset`,
     /// or `FindSlotResult::NeedsSplit` if no usable slot is available.
     #[inline(always)]
+    #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn find_usable_slot(&self, leaf: &L, perm: &L::Perm, ikey: u64) -> FindSlotResult {
         // Check if leaf has space
         if perm.size() >= L::WIDTH {
@@ -56,7 +57,6 @@ where
 
         // Get next free slot from back
         let slot: usize = perm.back();
-        let back_offset: usize;
 
         // Handle slot-0 rule: can't reuse slot-0 for different ikey
         if slot == 0 && !leaf.can_reuse_slot0(ikey) {
@@ -77,7 +77,7 @@ where
             return FindSlotResult::NeedsSplit;
         }
 
-        back_offset = 0;
+        let back_offset: usize = 0;
         FindSlotResult::Found { slot, back_offset }
     }
 
@@ -89,6 +89,7 @@ where
     ///
     /// Caller must hold the lock on `leaf`.
     #[inline(always)]
+    #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn update_existing_value(
         &self,
         leaf: &L,
@@ -125,6 +126,10 @@ where
     ///
     /// Caller must hold the lock on `leaf` and have verified slot availability.
     #[inline(always)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Slot assignment requires full context"
+    )]
     fn insert_new_value(
         &self,
         leaf: &L,
@@ -154,6 +159,69 @@ where
 
         leaf.set_permutation(new_perm);
     }
+
+    // ========================================================================
+    //  Empty Leaf Reuse (Lazy Coalescing Optimization)
+    // ========================================================================
+
+    /// Check if an empty leaf can be reused for the given key.
+    ///
+    /// Empty leaves (from which all keys were removed) can be reused instead
+    /// of allocating new leaves, which saves memory and improves performance.
+    ///
+    /// # Rules
+    ///
+    /// - Leftmost leaves (prev == null): Always reusable, they set `ikey_bound` on insert
+    /// - Non-leftmost leaves: `ikey_bound` must match `key.ikey()` for B-link correctness
+    /// - Caller must have already verified !`deleted_layer()`
+    #[inline(always)]
+    #[expect(clippy::unused_self, reason = "API consistency with other methods")]
+    fn can_reuse_empty_leaf(&self, leaf: &L, key: &Key<'_>) -> bool {
+        // Leftmost leaves can always be reused - they'll set ikey_bound from the key
+        if leaf.prev().is_null() {
+            return true;
+        }
+
+        // Non-leftmost: ikey_bound must match for B-link chain correctness
+        leaf.ikey_bound() == key.ikey()
+    }
+
+    /// Insert a value into an empty leaf, reusing it instead of allocating.
+    ///
+    /// This is the fast path for lazy coalescing: when a leaf becomes empty
+    /// after removes, subsequent inserts can reuse it.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(None)` - insert succeeded, no old value (leaf was empty)
+    #[inline(always)]
+    #[expect(clippy::unnecessary_wraps, reason = "Matches insert API return type")]
+    fn insert_into_empty_leaf(
+        &self,
+        leaf: &L,
+        lock: &mut LockGuard<'_>,
+        key: &Key<'_>,
+        value: &S::Output,
+        guard: &LocalGuard<'_>,
+    ) -> Result<Option<S::Output>, InsertError> {
+        // Clear empty state - leaf is being reactivated
+        leaf.clear_empty_state();
+
+        // Use slot 0 - it's always available in an empty leaf
+        let slot: usize = 0;
+
+        // Assign the slot with key and value
+        self.assign_slot_generic(leaf, lock, slot, key, value, guard);
+
+        // Create permutation with single entry at position 0, using slot 0
+        let new_perm = L::Perm::make_sorted(1);
+        leaf.set_permutation(new_perm);
+
+        // Increment count
+        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+
+        Ok(None)
+    }
 }
 
 // ============================================================================
@@ -172,14 +240,14 @@ where
     ///
     /// Returns `true` if validation passed, `false` if retry is needed.
     #[inline(always)]
+    #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn validate_post_lock(
         &self,
         leaf: &L,
         pre_lock_version: u32,
         pre_lock_perm_raw: <L::Perm as TreePermutation>::Raw,
     ) -> bool {
-        !leaf.version().has_changed(pre_lock_version)
-            && leaf.permutation_raw() == pre_lock_perm_raw
+        !leaf.version().has_changed(pre_lock_version) && leaf.permutation_raw() == pre_lock_perm_raw
     }
 
     /// Validate membership: check if key should be in this leaf or a sibling.
@@ -187,6 +255,7 @@ where
     /// Returns `Ok(())` if key belongs here, `Err(retry_reason)` if we need
     /// to retry (split in progress or key moved to sibling).
     #[inline(always)]
+    #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn validate_membership(&self, leaf: &L, key: &Key<'_>) -> Result<(), MembershipError> {
         let next_raw: *mut L = leaf.next_raw();
 
@@ -213,8 +282,14 @@ where
     /// Handle suffix conflict: same ikey, different suffix.
     ///
     /// Creates a new layer to distinguish the conflicting keys.
+    ///
+    /// Takes ownership of `value` to avoid an unnecessary `Arc::clone`.
     #[cold]
     #[inline(never)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Layer creation requires full context"
+    )]
     fn handle_suffix_conflict(
         &self,
         leaf: &L,
@@ -229,9 +304,9 @@ where
 
         // Create new layer for the conflicting keys
         // SAFETY: We hold the lock on `leaf`, guard is from this tree's collector
-        let layer_ptr: *mut u8 = unsafe {
-            self.create_layer_concurrent_generic(leaf, slot, key, value.clone(), guard)
-        };
+        // NOTE: We pass `value` by ownership (no clone) since this function consumes it
+        let layer_ptr: *mut u8 =
+            unsafe { self.create_layer_concurrent_generic(leaf, slot, key, value, guard) };
 
         // Retire the existing value in the conflict slot
         let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
@@ -313,8 +388,7 @@ where
             let leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let (leaf, exceeded_hop_limit) =
-                self.advance_to_key_by_bound_generic(leaf, key, guard);
+            let (leaf, exceeded_hop_limit) = self.advance_to_key_by_bound_generic(leaf, key, guard);
 
             // If we exceeded the hop limit, re-traverse from root
             if exceeded_hop_limit {
@@ -353,6 +427,17 @@ where
             if self.validate_membership(leaf, key).is_err() {
                 drop(lock);
                 continue;
+            }
+
+            // ================================================================
+            // EMPTY LEAF REUSE (Lazy Coalescing Optimization)
+            // ================================================================
+            // Check if this is an empty leaf that can be reused.
+            // This is a fast path for insert-remove-reinsert workloads.
+            if leaf.is_empty() && self.can_reuse_empty_leaf(leaf, key) {
+                let result = self.insert_into_empty_leaf(leaf, &mut lock, key, &value, guard);
+                drop(lock);
+                return result;
             }
 
             // Get permutation (must not be frozen since we hold lock)
@@ -401,8 +486,7 @@ where
                             }
 
                             FindSlotResult::NeedsSplit => {
-                                let leaf_ptr_current: *mut L =
-                                    std::ptr::from_ref(leaf).cast_mut();
+                                let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
                                 self.handle_leaf_split_generic(
                                     leaf_ptr_current,
                                     lock,
@@ -437,8 +521,7 @@ where
                         continue;
                     }
 
-                    let old_value =
-                        self.update_existing_value(leaf, &mut lock, slot, value, guard);
+                    let old_value = self.update_existing_value(leaf, &mut lock, slot, value, guard);
                     drop(lock);
                     return Ok(Some(old_value));
                 }
@@ -473,7 +556,6 @@ where
                                 ikey,
                                 guard,
                             )?;
-                            continue;
                         }
                     }
                 }

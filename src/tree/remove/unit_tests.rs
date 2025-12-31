@@ -7,7 +7,6 @@ use crate::nodeversion::{LockGuard, NodeVersion};
 use crate::tree::MassTree24;
 use crate::value::LeafValue;
 use std::sync::Arc;
-use tracing_test::traced_test;
 
 // Type aliases for coalescing tests
 type TestLeaf = LeafNode24<LeafValue<u64>>;

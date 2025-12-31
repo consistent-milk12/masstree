@@ -818,10 +818,11 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         for i in 0..perm.size() {
             let s: usize = perm.get(i);
 
-            if s < WIDTH && s != new_slot {
-                if let Some(suffix) = self.get(s) {
-                    bag.assign(s, suffix);
-                }
+            if s < WIDTH
+                && s != new_slot
+                && let Some(suffix) = self.get(s)
+            {
+                bag.assign(s, suffix);
             }
         }
 

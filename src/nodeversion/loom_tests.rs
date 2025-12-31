@@ -54,7 +54,7 @@ impl Drop for LoomLockGuard<'_> {
 
 impl LoomLockGuard<'_> {
     fn mark_insert(&mut self) {
-        let value = self.version.value.load(Ordering::Relaxed);
+        let value: u32 = self.version.value.load(Ordering::Relaxed);
         self.version
             .value
             .store(value | INSERTING_BIT, Ordering::Release);
@@ -77,7 +77,7 @@ impl LoomNodeVersion {
 
     fn stable(&self) -> u32 {
         loop {
-            let value = self.value.load(Ordering::Relaxed);
+            let value: u32 = self.value.load(Ordering::Relaxed);
             if (value & DIRTY_MASK) == 0 {
                 loom::sync::atomic::fence(Ordering::Acquire);
                 return value;
@@ -88,7 +88,7 @@ impl LoomNodeVersion {
 
     fn lock(&self) -> LoomLockGuard<'_> {
         loop {
-            let value = self.value.load(Ordering::Relaxed);
+            let value: u32 = self.value.load(Ordering::Relaxed);
 
             if (value & (LOCK_BIT | DIRTY_MASK)) != 0 {
                 loom::thread::yield_now();
@@ -119,7 +119,7 @@ impl LoomNodeVersion {
     }
 
     fn try_lock(&self) -> Option<LoomLockGuard<'_>> {
-        let value = self.value.load(Ordering::Relaxed);
+        let value: u32 = self.value.load(Ordering::Relaxed);
 
         if (value & (LOCK_BIT | DIRTY_MASK)) != 0 {
             return None;
@@ -157,7 +157,7 @@ fn test_loom_mutual_exclusion() {
         let t1 = thread::spawn(move || {
             let _guard = v1.lock();
             // Increment counter while holding lock
-            let val = c1.load(Ordering::Relaxed);
+            let val: u32 = c1.load(Ordering::Relaxed);
             c1.store(val + 1, Ordering::Relaxed);
         });
 
@@ -166,7 +166,7 @@ fn test_loom_mutual_exclusion() {
         let t2 = thread::spawn(move || {
             let _guard = v2.lock();
             // Increment counter while holding lock
-            let val = c2.load(Ordering::Relaxed);
+            let val: u32 = c2.load(Ordering::Relaxed);
             c2.store(val + 1, Ordering::Relaxed);
         });
 
