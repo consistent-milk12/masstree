@@ -118,6 +118,7 @@ impl CursorKey {
     /// assert_eq!(cursor.current_ikey(), u64::from_be_bytes(*b"hello wo"));
     ///
     #[must_use]
+    #[inline(always)]
     pub fn from_slice(data: &[u8]) -> Self {
         assert!(
             data.len() <= MAX_KEY_LENGTH,
@@ -146,6 +147,7 @@ impl CursorKey {
     /// The cursor starts at position 0 with ikey = 0, which compares less than
     /// all other keys (minimum key).
     #[must_use]
+    #[inline(always)]
     pub const fn empty() -> Self {
         Self {
             buf: [0u8; MAX_KEY_LENGTH],
@@ -172,7 +174,7 @@ impl CursorKey {
     ///
     /// This is the complete key that would be emitted to the visitor.
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub fn full_key(&self) -> &[u8] {
         let end: usize = self.offset + self.len;
         // SAFETY: offset + len <= MAX_KEY_LENGTH by construction
@@ -256,7 +258,7 @@ impl CursorKey {
     /// cursor.shift();
     /// assert_eq!(cursor.current_ikey(), u64::from_be_bytes(*b"rld!!!!!"));
     ///
-    #[inline]
+    #[inline(always)]
     pub fn shift(&mut self) {
         debug_assert!(self.has_suffix(), "shift() called without suffix");
 
@@ -290,7 +292,7 @@ impl CursorKey {
     /// assert_eq!(cursor.current_ikey(), 0);
     /// assert_eq!(cursor.current_len(), 0);
     ///
-    #[inline]
+    #[inline(always)]
     pub fn shift_clear(&mut self) {
         self.offset += IKEY_SIZE;
         self.len = 0;
@@ -321,7 +323,7 @@ impl CursorKey {
     /// # Panics
     ///
     /// Debug-panics if `offset == 0` (cannot unshift from root layer).
-    #[inline]
+    #[inline(always)]
     pub fn unshift(&mut self) {
         debug_assert!(self.offset >= IKEY_SIZE, "unshift() called at root layer");
 
@@ -338,7 +340,7 @@ impl CursorKey {
     ///
     /// This is a full reset - the cursor will point to the original key
     /// from the buffer.
-    #[inline]
+    #[inline(always)]
     pub fn unshift_all(&mut self) {
         if self.offset > 0 {
             // Find total key length by scanning for last non-zero byte
@@ -363,7 +365,7 @@ impl CursorKey {
     /// # Arguments
     ///
     /// - `ikey`: The ikey value to store (big-endian u64)
-    #[inline]
+    #[inline(always)]
     pub fn assign_store_ikey(&mut self, ikey: u64) {
         self.ikey = ikey;
 
@@ -391,7 +393,7 @@ impl CursorKey {
     /// # Panics
     ///
     /// Panics if the suffix would overflow the buffer.
-    #[inline]
+    #[inline(always)]
     pub fn assign_store_suffix(&mut self, suffix: &[u8]) -> usize {
         let suffix_start: usize = self.offset + IKEY_SIZE;
         let suffix_end: usize = suffix_start + suffix.len();
@@ -413,7 +415,7 @@ impl CursorKey {
     /// # Arguments
     ///
     /// - `len`: The key length (0-8 for inline, or computed from `assign_store_suffix`)
-    #[inline]
+    #[inline(always)]
     pub fn assign_store_length(&mut self, len: usize) {
         debug_assert!(
             len <= MAX_KEY_LENGTH - self.offset,
@@ -466,7 +468,7 @@ impl CursorKey {
     /// After `unshift()` (which sets len=9), the cursor has suffix and will
     /// compare Equal/Greater to skip the already-processed layer pointer.
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub fn compare(&self, other_ikey: u64, keylenx: usize) -> Ordering {
         // First compare ikeys
         match self.ikey.cmp(&other_ikey) {
@@ -503,7 +505,7 @@ impl CursorKey {
     ///
     /// Lexicographic comparison of suffix bytes.
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub fn compare_suffix(&self, stored_suffix: &[u8]) -> Ordering {
         self.suffix().cmp(stored_suffix)
     }
@@ -515,7 +517,7 @@ impl CursorKey {
     /// Read an ikey from the buffer at the given offset.
     ///
     /// Pads with zeros if fewer than 8 bytes remain.
-    #[inline]
+    #[inline(always)]
     fn read_ikey_from_buf(buf: &[u8; MAX_KEY_LENGTH], offset: usize, len: usize) -> u64 {
         if len == 0 {
             return 0;

@@ -1,0 +1,491 @@
+//! ========================================================================
+//!  Generic Insert Path
+//! ========================================================================
+//!
+//! Refactored for performance with:
+//! - `#[inline(always)]` on hot path helpers
+//! - `#[cold]` on retry/error paths
+//! - Unified slot allocation and value update logic
+
+use super::{
+    AtomicOrdering, Guard, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX,
+    LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, TreePermutation,
+    ValueSlot, is_marked, unmark_ptr,
+};
+
+use crate::nodeversion::LockGuard;
+
+// ============================================================================
+//  FindSlotResult - Slot allocation outcome
+// ============================================================================
+
+/// Result of finding a usable slot for insertion.
+enum FindSlotResult {
+    /// Found a usable slot at the given index with back_offset for permutation.
+    Found { slot: usize, back_offset: usize },
+
+    /// No usable slot available - need to split the leaf.
+    NeedsSplit,
+}
+
+// ============================================================================
+//  Hot Path Helpers
+// ============================================================================
+
+impl<S, L, A> MassTreeGeneric<S, L, A>
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
+{
+    /// Find a usable slot for inserting a new key.
+    ///
+    /// Handles the slot-0 rule: slot-0 stores `ikey_bound()` and cannot be
+    /// reused for a different ikey.
+    ///
+    /// Returns `FindSlotResult::Found` with the slot and back_offset,
+    /// or `FindSlotResult::NeedsSplit` if no usable slot is available.
+    #[inline(always)]
+    fn find_usable_slot(&self, leaf: &L, perm: &L::Perm, ikey: u64) -> FindSlotResult {
+        // Check if leaf has space
+        if perm.size() >= L::WIDTH {
+            return FindSlotResult::NeedsSplit;
+        }
+
+        // Get next free slot from back
+        let slot: usize = perm.back();
+        let back_offset: usize;
+
+        // Handle slot-0 rule: can't reuse slot-0 for different ikey
+        if slot == 0 && !leaf.can_reuse_slot0(ikey) {
+            let free_count = L::WIDTH - perm.size();
+
+            for offset in 1..free_count {
+                let candidate: usize = perm.back_at_offset(offset);
+
+                if candidate != 0 {
+                    return FindSlotResult::Found {
+                        slot: candidate,
+                        back_offset: offset,
+                    };
+                }
+            }
+
+            // Only slot-0 available - trigger split
+            return FindSlotResult::NeedsSplit;
+        }
+
+        back_offset = 0;
+        FindSlotResult::Found { slot, back_offset }
+    }
+
+    /// Update an existing value in a slot.
+    ///
+    /// Returns the old value that was replaced.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the lock on `leaf`.
+    #[inline(always)]
+    fn update_existing_value(
+        &self,
+        leaf: &L,
+        lock: &mut LockGuard<'_>,
+        slot: usize,
+        new_value: S::Output,
+        guard: &LocalGuard<'_>,
+    ) -> S::Output {
+        let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+        // Clone old value for return BEFORE we store new pointer.
+        // SAFETY: old_ptr is non-null and came from output_to_raw
+        let old_output: S::Output = unsafe { S::output_from_raw(old_ptr) };
+        let new_ptr: *mut u8 = S::output_consume_to_raw(new_value);
+
+        // Mark insert, store value
+        lock.mark_insert();
+        leaf.set_leaf_value_ptr(slot, new_ptr);
+
+        // Defer retirement of the old value.
+        // SAFETY: old_ptr came from output_to_raw
+        unsafe {
+            guard.defer_retire(old_ptr, |ptr, _| {
+                S::cleanup_value_ptr(ptr);
+            });
+        }
+
+        old_output
+    }
+
+    /// Insert a new value into a slot and update the permutation.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the lock on `leaf` and have verified slot availability.
+    #[inline(always)]
+    fn insert_new_value(
+        &self,
+        leaf: &L,
+        lock: &mut LockGuard<'_>,
+        slot: usize,
+        back_offset: usize,
+        logical_pos: usize,
+        perm: L::Perm,
+        key: &Key<'_>,
+        value: &S::Output,
+        guard: &LocalGuard<'_>,
+    ) {
+        // Assign the slot
+        self.assign_slot_generic(leaf, lock, slot, key, value, guard);
+
+        // Update permutation
+        let mut new_perm = perm;
+
+        if back_offset > 0 {
+            let back_pos: usize = L::WIDTH - 1;
+            let chosen_pos: usize = back_pos - back_offset;
+            new_perm.swap_free_slots(back_pos, chosen_pos);
+        }
+
+        let allocated: usize = new_perm.insert_from_back(logical_pos);
+        debug_assert_eq!(allocated, slot, "allocated unexpected slot");
+
+        leaf.set_permutation(new_perm);
+    }
+}
+
+// ============================================================================
+//  Cold Path Helpers (Validation / Retry)
+// ============================================================================
+
+impl<S, L, A> MassTreeGeneric<S, L, A>
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
+{
+    /// Validate post-lock state: check if version or permutation changed.
+    ///
+    /// Returns `true` if validation passed, `false` if retry is needed.
+    #[cold]
+    #[inline(never)]
+    fn validate_post_lock(
+        &self,
+        leaf: &L,
+        pre_lock_version: u32,
+        pre_lock_perm_raw: <L::Perm as TreePermutation>::Raw,
+    ) -> bool {
+        !leaf.version().has_changed(pre_lock_version)
+            && leaf.permutation_raw() == pre_lock_perm_raw
+    }
+
+    /// Validate membership: check if key should be in this leaf or a sibling.
+    ///
+    /// Returns `Ok(())` if key belongs here, `Err(retry_reason)` if we need
+    /// to retry (split in progress or key moved to sibling).
+    #[cold]
+    #[inline(never)]
+    fn validate_membership(&self, leaf: &L, key: &Key<'_>) -> Result<(), MembershipError> {
+        let next_raw: *mut L = leaf.next_raw();
+
+        // Check for split in progress
+        if is_marked(next_raw) {
+            leaf.wait_for_split();
+            return Err(MembershipError::SplitInProgress);
+        }
+
+        let next_ptr: *mut L = unmark_ptr(next_raw);
+
+        if !next_ptr.is_null() {
+            // SAFETY: next_ptr is a valid leaf pointer (protected by the guard).
+            let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+
+            if key.ikey() >= next_bound {
+                return Err(MembershipError::KeyMovedToSibling);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle suffix conflict: same ikey, different suffix.
+    ///
+    /// Creates a new layer to distinguish the conflicting keys.
+    #[cold]
+    #[inline(never)]
+    fn handle_suffix_conflict(
+        &self,
+        leaf: &L,
+        lock: &mut LockGuard<'_>,
+        slot: usize,
+        key: &mut Key<'_>,
+        value: S::Output,
+        guard: &LocalGuard<'_>,
+    ) {
+        // Mark insert before modifying the node
+        lock.mark_insert();
+
+        // Create new layer for the conflicting keys
+        // SAFETY: We hold the lock on `leaf`, guard is from this tree's collector
+        let layer_ptr: *mut u8 = unsafe {
+            self.create_layer_concurrent_generic(leaf, slot, key, value.clone(), guard)
+        };
+
+        // Retire the existing value in the conflict slot
+        let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
+        if !old_ptr.is_null() {
+            unsafe {
+                guard.defer_retire(old_ptr, |ptr, _| {
+                    S::cleanup_value_ptr(ptr);
+                });
+            }
+        }
+
+        // Clear any existing suffix for this slot
+        // SAFETY: We hold the lock
+        unsafe { leaf.clear_ksuf(slot, guard) };
+
+        // Install the layer pointer in the conflict slot
+        leaf.set_keylenx(slot, LAYER_KEYLENX);
+        leaf.set_leaf_value_ptr(slot, layer_ptr);
+
+        // Increment count (new key was added to the layer)
+        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+}
+
+/// Errors from membership validation.
+enum MembershipError {
+    /// A split is in progress - wait and retry.
+    SplitInProgress,
+    /// Key has moved to a sibling leaf - retry traversal.
+    KeyMovedToSibling,
+}
+
+// ============================================================================
+//  Main Insert Implementation
+// ============================================================================
+
+impl<S, L, A> MassTreeGeneric<S, L, A>
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
+{
+    /// Internal concurrent insert with optimistic locking.
+    ///
+    /// # Single-Layer Fast Path
+    ///
+    /// When the key is ≤ 8 bytes (no suffix), uses an optimized code path that:
+    /// - Uses simplified search (no suffix/layer handling)
+    /// - Only handles `Found` and `NotFound` results
+    /// - Skips layer descent tracking
+    ///
+    /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
+    #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
+    pub(super) fn insert_concurrent_generic(
+        &self,
+        key: &mut Key<'_>,
+        value: S::Output,
+        guard: &LocalGuard<'_>,
+    ) -> Result<Option<S::Output>, InsertError> {
+        // Detect single-layer mode: key ≤ 8 bytes means no suffix, no layer operations
+        let single_layer_mode: bool = !key.has_suffix();
+
+        // Track current layer root
+        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
+
+        // Track whether we're in a sublayer (for layer traversal)
+        let mut in_sublayer: bool = false;
+
+        loop {
+            // Find the actual layer root (handles layer root promotion for sublayers)
+            layer_root = self.maybe_parent_generic(layer_root);
+
+            // Traverse to leaf
+            let leaf_ptr: *mut L =
+                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
+
+            let leaf: &L = unsafe { &*leaf_ptr };
+
+            // B-link advance if needed
+            let (leaf, exceeded_hop_limit) =
+                self.advance_to_key_by_bound_generic(leaf, key, guard);
+
+            // If we exceeded the hop limit, re-traverse from root
+            if exceeded_hop_limit {
+                layer_root = self.load_root_ptr_generic(guard);
+                continue;
+            }
+
+            // ================================================================
+            // OPTIMISTIC LOCKING: Capture STABLE version + permutation
+            // ================================================================
+            let pre_lock_version: u32 = leaf.version().stable();
+            let pre_lock_perm_raw = leaf.permutation_raw();
+
+            // Lock the leaf
+            let mut lock = leaf.version().lock();
+
+            // ================================================================
+            // POST-LOCK VALIDATION
+            // ================================================================
+            if !self.validate_post_lock(leaf, pre_lock_version, pre_lock_perm_raw) {
+                drop(lock);
+                continue;
+            }
+
+            // Post-lock membership check
+            if self.validate_membership(leaf, key).is_err() {
+                drop(lock);
+                continue;
+            }
+
+            // Get permutation (must not be frozen since we hold lock)
+            let perm = leaf.permutation();
+
+            // ================================================================
+            // Single-layer fast path (keys ≤ 8 bytes)
+            // ================================================================
+            if single_layer_mode {
+                let search_result = self.search_for_insert_single_layer(leaf, key, &perm);
+
+                match search_result {
+                    InsertSearchResultGeneric::Found { slot } => {
+                        let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                        if old_ptr.is_null() {
+                            drop(lock);
+                            continue;
+                        }
+
+                        let old_value =
+                            self.update_existing_value(leaf, &mut lock, slot, value, guard);
+                        drop(lock);
+                        return Ok(Some(old_value));
+                    }
+
+                    InsertSearchResultGeneric::NotFound { logical_pos } => {
+                        let ikey: u64 = key.ikey();
+
+                        match self.find_usable_slot(leaf, &perm, ikey) {
+                            FindSlotResult::Found { slot, back_offset } => {
+                                self.insert_new_value(
+                                    leaf,
+                                    &mut lock,
+                                    slot,
+                                    back_offset,
+                                    logical_pos,
+                                    perm,
+                                    key,
+                                    &value,
+                                    guard,
+                                );
+                                drop(lock);
+                                self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                                return Ok(None);
+                            }
+
+                            FindSlotResult::NeedsSplit => {
+                                let leaf_ptr_current: *mut L =
+                                    std::ptr::from_ref(leaf).cast_mut();
+                                self.handle_leaf_split_generic(
+                                    leaf_ptr_current,
+                                    lock,
+                                    logical_pos,
+                                    ikey,
+                                    guard,
+                                )?;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // These can't happen in single-layer mode
+                    InsertSearchResultGeneric::Layer { .. }
+                    | InsertSearchResultGeneric::Conflict { .. } => {
+                        unreachable!("single-layer search never returns Layer or Conflict")
+                    }
+                }
+            }
+
+            // ================================================================
+            // Multi-layer path (handles layer descent and conflicts)
+            // ================================================================
+            let search_result = self.search_for_insert_generic(leaf, key, &perm);
+
+            match search_result {
+                InsertSearchResultGeneric::Found { slot } => {
+                    let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                    if old_ptr.is_null() {
+                        drop(lock);
+                        continue;
+                    }
+
+                    let old_value =
+                        self.update_existing_value(leaf, &mut lock, slot, value, guard);
+                    drop(lock);
+                    return Ok(Some(old_value));
+                }
+
+                InsertSearchResultGeneric::NotFound { logical_pos } => {
+                    let ikey: u64 = key.ikey();
+
+                    match self.find_usable_slot(leaf, &perm, ikey) {
+                        FindSlotResult::Found { slot, back_offset } => {
+                            self.insert_new_value(
+                                leaf,
+                                &mut lock,
+                                slot,
+                                back_offset,
+                                logical_pos,
+                                perm,
+                                key,
+                                &value,
+                                guard,
+                            );
+                            drop(lock);
+                            self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                            return Ok(None);
+                        }
+
+                        FindSlotResult::NeedsSplit => {
+                            let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
+                            self.handle_leaf_split_generic(
+                                leaf_ptr_current,
+                                lock,
+                                logical_pos,
+                                ikey,
+                                guard,
+                            )?;
+                            continue;
+                        }
+                    }
+                }
+
+                InsertSearchResultGeneric::Layer { slot, .. } => {
+                    // Descend into sublayer
+                    let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+                    drop(lock);
+
+                    key.shift();
+                    layer_root = layer_ptr;
+                    in_sublayer = true;
+                }
+
+                InsertSearchResultGeneric::Conflict { slot } => {
+                    self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard);
+                    drop(lock);
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
