@@ -835,31 +835,6 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
         lo
     }
 
-    /// Prefetch the internode's data into cache.
-    ///
-    /// Brings the node's key and child arrays into CPU cache before they're
-    /// accessed, reducing memory latency during traversal.
-    ///
-    /// Matches C++ `internode::prefetch()` from `reference/masstree_struct.hh:149-152`.
-    #[inline(always)]
-    pub fn prefetch(&self) {
-        use crate::prefetch::prefetch_read;
-
-        let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
-        let max_offset: usize = core::cmp::min(16 * WIDTH + 1, 256);
-
-        // Prefetch cache lines beyond the first (which was fetched when we accessed version)
-        let mut offset: usize = 64;
-        while offset < max_offset {
-            // SAFETY: prefetch_read is a hint, safe even with invalid addresses.
-            // The CPU will simply ignore prefetch requests for unmapped memory.
-            unsafe {
-                prefetch_read(self_ptr.add(offset));
-            }
-            offset += 64;
-        }
-    }
-
     // ========================================================================
     //  Invariant Checker
     // ========================================================================
@@ -1116,11 +1091,6 @@ where
             insert_ikey,
             insert_child,
         )
-    }
-
-    #[inline(always)]
-    fn prefetch(&self) {
-        Self::prefetch(self);
     }
 }
 

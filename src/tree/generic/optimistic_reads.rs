@@ -18,7 +18,6 @@ use crate::leaf_trait::TreePermutation;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
 use crate::link::{is_marked, unmark_ptr};
-use crate::prefetch::prefetch_read;
 
 // ============================================================================
 //  LookupResult - Search outcome enum
@@ -83,33 +82,8 @@ where
 }
 
 // ============================================================================
-//  Search Helpers (Hot Path)
+//  Search Helpers (Multi-Layer Path)
 // ============================================================================
-
-/// Check a single slot for a value match (single-layer mode).
-#[inline(always)]
-fn check_slot_single_layer<L, S>(leaf: &L, slot: usize, search_keylenx: u8) -> Option<LookupResult>
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-{
-    let slot_keylenx: u8 = leaf.keylenx(slot);
-    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-    if slot_ptr.is_null() {
-        return None; // Slot being modified, continue
-    }
-
-    if slot_keylenx == search_keylenx {
-        return Some(LookupResult::Value(slot_ptr));
-    }
-
-    // Layer pointer with matching ikey means a longer key exists,
-    // but our short key (<=8 bytes) is NOT a match
-    None
-}
 
 /// Check a single slot for a value/layer match (multi-layer mode).
 #[inline(always)]
@@ -149,60 +123,13 @@ where
     None
 }
 
-/// Search a leaf for a key in single-layer mode (keys <= 8 bytes).
-///
-/// Uses binary search for WIDTH > 16, linear search otherwise.
-#[inline(always)]
-fn search_leaf_single_layer<S, L>(leaf: &L, target_ikey: u64, search_keylenx: u8) -> LookupResult
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-{
-    let perm = leaf.permutation();
-    let size = perm.size();
-
-    // Use binary search for larger leaves
-    if L::WIDTH > BINARY_SEARCH_THRESHOLD {
-        let (start_pos, found) = binary_search_ikey::<L, S>(leaf, &perm, target_ikey);
-
-        if !found {
-            return LookupResult::NotFound;
-        }
-
-        // Linear scan from first match (handles multiple entries with same ikey)
-        for i in start_pos..size {
-            let slot = perm.get(i);
-            if leaf.ikey(slot) != target_ikey {
-                break; // Past matching ikeys
-            }
-            if let Some(result) = check_slot_single_layer::<L, S>(leaf, slot, search_keylenx) {
-                return result;
-            }
-        }
-
-        return LookupResult::NotFound;
-    }
-
-    // Linear search for small leaves (WIDTH <= 16)
-    for i in 0..size {
-        let slot: usize = perm.get(i);
-        let slot_ikey: u64 = leaf.ikey(slot);
-
-        if slot_ikey == target_ikey {
-            if let Some(result) = check_slot_single_layer::<L, S>(leaf, slot, search_keylenx) {
-                return result;
-            }
-        }
-    }
-
-    LookupResult::NotFound
-}
+/// Minimum entries before binary search is worthwhile.
+/// Below this threshold, linear scan is faster due to lower overhead.
+const BINARY_SEARCH_MIN_SIZE: usize = 12;
 
 /// Search a leaf for a key in multi-layer mode (keys > 8 bytes).
 ///
-/// Uses binary search for WIDTH > 16, linear search otherwise.
+/// Uses binary search for WIDTH > 16 AND size >= 12, linear search otherwise.
 #[inline(always)]
 fn search_leaf_multi_layer<S, L>(leaf: &L, key: &Key<'_>) -> LookupResult
 where
@@ -222,8 +149,8 @@ where
         key.current_len() as u8
     };
 
-    // Use binary search for larger leaves
-    if L::WIDTH > BINARY_SEARCH_THRESHOLD {
+    // Use binary search only for leaves with enough entries to benefit
+    if L::WIDTH > BINARY_SEARCH_THRESHOLD && size >= BINARY_SEARCH_MIN_SIZE {
         let (start_pos, found) = binary_search_ikey::<L, S>(leaf, &perm, target_ikey);
 
         if !found {
@@ -312,9 +239,6 @@ where
         let next_ptr: *mut L = unmark_ptr(next_raw);
 
         if !next_ptr.is_null() && !is_marked(next_raw) {
-            // Prefetch next leaf for likely traversal
-            prefetch_read(next_ptr);
-
             // SAFETY: next_ptr is valid (protected by guard in caller)
             let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
             if target_ikey >= next_bound {
@@ -383,7 +307,7 @@ where
     /// * `Some(Arc<V>)` - If the key was found
     /// * `None` - If the key was not found
     #[must_use]
-    #[inline] // Not #[inline(always)] - public API, let compiler decide at call sites
+    #[inline(always)]
     pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<S::Output> {
         let mut search_key: Key<'_> = Key::new(key);
         self.get_impl(&mut search_key, guard, |ptr| {
@@ -412,7 +336,7 @@ where
     /// * `Some(&V)` - A reference to the value, valid for the guard's lifetime
     /// * `None` - If the key was not found
     #[must_use]
-    #[inline] // Not #[inline(always)] - public API, let compiler decide at call sites
+    #[inline(always)]
     pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g S::Value> {
         let mut search_key: Key<'_> = Key::new(key);
         self.get_impl(&mut search_key, guard, |ptr| {
@@ -436,35 +360,130 @@ where
         F: Fn(*mut u8) -> R,
     {
         // Detect single-layer mode: key <= 8 bytes means no suffix, no layer descent
-        let single_layer_mode: bool = !key.has_suffix();
+        // This enables a completely inline fast path without enum overhead
+        if !key.has_suffix() {
+            return self.get_impl_single_layer(key, guard, extract);
+        }
 
-        // Start at tree root
+        // Multi-layer path for keys > 8 bytes
+        self.get_impl_multi_layer(key, guard, extract)
+    }
+
+    /// Single-layer fast path (keys ≤ 8 bytes).
+    ///
+    /// Completely inline search without `LookupResult` enum overhead.
+    /// This is the hot path for most workloads.
+    #[inline(always)]
+    fn get_impl_single_layer<R, F>(
+        &self,
+        key: &Key<'_>,
+        guard: &LocalGuard<'_>,
+        extract: F,
+    ) -> Option<R>
+    where
+        F: Fn(*mut u8) -> R,
+    {
+        let layer_root: *const u8 = self.load_root_ptr_generic(guard);
+        let target_ikey: u64 = key.ikey();
+        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+        let search_keylenx: u8 = key.current_len() as u8;
+
+        // Traverse to leaf
+        let mut leaf_ptr: *mut L =
+            self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
+
+        'leaf_loop: loop {
+            // SAFETY: leaf_ptr protected by guard
+            let leaf: &L = unsafe { &*leaf_ptr };
+            let mut version: u32 = leaf.version().stable();
+
+            'search_loop: loop {
+                // Inline linear search - no function calls, no enum
+                let perm = leaf.permutation();
+                let size = perm.size();
+                let mut found_ptr: *mut u8 = std::ptr::null_mut();
+
+                for i in 0..size {
+                    let slot: usize = perm.get(i);
+                    let slot_ikey: u64 = leaf.ikey(slot);
+
+                    if slot_ikey == target_ikey {
+                        let slot_keylenx: u8 = leaf.keylenx(slot);
+                        if slot_keylenx == search_keylenx {
+                            let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+                            if !ptr.is_null() {
+                                found_ptr = ptr;
+                                break;
+                            }
+                        }
+                        // Layer pointer (keylenx >= 128) with matching ikey means
+                        // a longer key exists, but our short key is NOT a match
+                    }
+                }
+
+                // Version validation AFTER all reads
+                if leaf.version().has_changed(version) {
+                    let (advanced, new_version) =
+                        self.advance_to_key_generic(leaf, key, version, guard);
+
+                    if !std::ptr::eq(advanced, leaf) {
+                        leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
+                        continue 'leaf_loop;
+                    }
+
+                    version = new_version;
+                    continue 'search_loop;
+                }
+
+                // Version validated - interpret result
+                if !found_ptr.is_null() {
+                    return Some(extract(found_ptr));
+                }
+
+                // Not found - check dirty or B-link
+                if leaf.version().is_dirty() {
+                    version = leaf.version().stable();
+                    continue 'search_loop;
+                }
+
+                if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
+                    leaf_ptr = next_ptr;
+                    continue 'leaf_loop;
+                }
+
+                return None;
+            }
+        }
+    }
+
+    /// Multi-layer path for keys > 8 bytes.
+    ///
+    /// Handles layer descent, suffix matching, and complex key structures.
+    #[inline(always)]
+    fn get_impl_multi_layer<R, F>(
+        &self,
+        key: &mut Key<'_>,
+        guard: &LocalGuard<'_>,
+        extract: F,
+    ) -> Option<R>
+    where
+        F: Fn(*mut u8) -> R,
+    {
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
         let mut in_sublayer: bool = false;
 
         'layer_loop: loop {
-            // Find the actual layer root (handles layer root promotion)
             layer_root = self.maybe_parent_generic(layer_root);
 
-            // Traverse to leaf for current layer
             let mut leaf_ptr: *mut L =
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
-            // Inner loop for searching within a leaf (may follow B-links)
             'leaf_loop: loop {
-                // SAFETY: leaf_ptr protected by guard
                 let leaf: &L = unsafe { &*leaf_ptr };
-
-                // Take version snapshot (spins if dirty)
                 let mut version: u32 = leaf.version().stable();
 
                 'search_loop: loop {
-                    // Note: No explicit is_deleted() check here - has_changed() below
-                    // returns true if deleted bit is set, so we catch it after search.
-                    // This avoids redundant atomic load on the hot path.
-
-                    // Check for gc'd sublayer - must restart from main tree root
-                    // C++ masstree_get.hh:111-115
+                    // Check for gc'd sublayer
                     if leaf.deleted_layer() {
                         key.unshift_all();
                         layer_root = self.load_root_ptr_generic(guard);
@@ -473,21 +492,8 @@ where
                     }
 
                     let target_ikey: u64 = key.ikey();
+                    let result: LookupResult = search_leaf_multi_layer::<S, L>(leaf, key);
 
-                    // ============================================================
-                    //  Search Phase (hot path)
-                    // ============================================================
-                    let result: LookupResult = if single_layer_mode {
-                        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-                        let search_keylenx: u8 = key.current_len() as u8;
-                        search_leaf_single_layer::<S, L>(leaf, target_ikey, search_keylenx)
-                    } else {
-                        search_leaf_multi_layer::<S, L>(leaf, key)
-                    };
-
-                    // ============================================================
-                    //  Version Validation (must happen AFTER all reads)
-                    // ============================================================
                     if leaf.version().has_changed(version) {
                         let (new_ptr, new_version, changed_leaf) =
                             self.handle_version_change(leaf, key, version, guard);
@@ -501,26 +507,16 @@ where
                         continue 'search_loop;
                     }
 
-                    // ============================================================
-                    //  Interpret Result (version validated)
-                    // ============================================================
                     match result {
                         LookupResult::Value(ptr) => {
                             return Some(extract(ptr));
                         }
 
                         LookupResult::Layer(ptr) => {
-                            // Verify sublayer not deleted before descending
                             if !self.check_sublayer_valid(ptr) {
-                                #[cfg(feature = "tracing")]
-                                tracing::debug!(
-                                    layer_ptr = ?ptr,
-                                    "get: sublayer deleted, key not found"
-                                );
                                 return None;
                             }
 
-                            // Descend into sublayer
                             key.shift();
                             layer_root = ptr;
                             in_sublayer = true;
@@ -528,19 +524,16 @@ where
                         }
 
                         LookupResult::NotFound => {
-                            // Check for dirty (concurrent modification)
                             if leaf.version().is_dirty() {
                                 version = leaf.version().stable();
                                 continue 'search_loop;
                             }
 
-                            // Check B-link chain
                             if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
                                 leaf_ptr = next_ptr;
                                 continue 'leaf_loop;
                             }
 
-                            // Truly not found
                             return None;
                         }
                     }

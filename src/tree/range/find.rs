@@ -182,6 +182,8 @@ where
         let slot_ikey: u64 = leaf.ikey(slot);
         let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
         cursor_key.assign_store_ikey(slot_ikey);
+        // Prefetch layer root before descending (hide memory latency)
+        prefetch_read(layer_ptr);
         stack.set_root(layer_ptr);
         return (ScanState::Down, None);
     }
@@ -405,6 +407,8 @@ where
         let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
         layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
         cursor_key.assign_store_ikey(slot_ikey);
+        // Prefetch layer root before descending (hide memory latency)
+        prefetch_read(slot_ptr);
         stack.set_root(slot_ptr);
         return (ScanState::Down, None);
     }
@@ -568,6 +572,8 @@ where
         let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
         layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
         cursor_key.assign_store_ikey(slot_ikey);
+        // Prefetch layer root before descending (hide memory latency)
+        prefetch_read(slot_ptr);
         stack.set_root(slot_ptr);
         return (ScanState::Down, None);
     }

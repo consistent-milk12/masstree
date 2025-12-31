@@ -336,10 +336,3 @@ fn test_split_insert_at_midpoint() {
     let _ = insert_went_left;
 }
 
-#[test]
-fn test_prefetch_does_not_crash() {
-    // Just verify prefetch doesn't crash - it's a no-op hint on most systems
-    let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-    node.prefetch();
-    // If we get here, prefetch worked (it's just a hint, no crash expected)
-}
