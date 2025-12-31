@@ -96,7 +96,7 @@ impl<L> CoalesceQueue<L> {
 
     /// Check if the queue is empty.
     #[must_use]
-    #[inline(always)]
+    #[inline] // Not #[inline(always)] - takes mutex lock, not hot path
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.pending.lock().is_empty()

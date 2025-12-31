@@ -4,8 +4,10 @@
 //!
 //! Refactored for performance with:
 //! - `#[inline(always)]` on hot path helpers
-//! - `#[cold]` on retry/error paths
+//! - Binary search for WIDTH > 16 (matching insert path)
 //! - Unified implementation via closure for value extraction
+
+use std::cmp::Ordering;
 
 use super::{
     Key, LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, NodeVersion,
@@ -16,6 +18,7 @@ use crate::leaf_trait::TreePermutation;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
 use crate::link::{is_marked, unmark_ptr};
+use crate::prefetch::prefetch_read;
 
 // ============================================================================
 //  LookupResult - Search outcome enum
@@ -37,18 +40,118 @@ enum LookupResult {
 }
 
 // ============================================================================
+//  Binary Search Core (for WIDTH > 16)
+// ============================================================================
+
+/// Threshold for switching from linear to binary search.
+/// C++ uses 16; we use the same for parity with insert path.
+const BINARY_SEARCH_THRESHOLD: usize = 16;
+
+/// Binary search to find the first position with matching ikey.
+///
+/// Returns the logical position where `target_ikey` starts (or would be),
+/// and whether any exact ikey match exists.
+#[inline(always)]
+fn binary_search_ikey<L, S>(leaf: &L, perm: &L::Perm, target_ikey: u64) -> (usize, bool)
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+{
+    let size = perm.size();
+    let mut l: usize = 0;
+    let mut r: usize = size;
+    let mut found = false;
+
+    while l < r {
+        let m = (l + r) >> 1;
+        let slot = perm.get(m);
+        let slot_ikey = leaf.ikey(slot);
+
+        match target_ikey.cmp(&slot_ikey) {
+            Ordering::Less => r = m,
+            Ordering::Equal => {
+                found = true;
+                r = m; // Continue left to find first match
+            }
+            Ordering::Greater => l = m + 1,
+        }
+    }
+
+    (l, found)
+}
+
+// ============================================================================
 //  Search Helpers (Hot Path)
 // ============================================================================
 
+/// Check a single slot for a value match (single-layer mode).
+#[inline(always)]
+fn check_slot_single_layer<L, S>(leaf: &L, slot: usize, search_keylenx: u8) -> Option<LookupResult>
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+{
+    let slot_keylenx: u8 = leaf.keylenx(slot);
+    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+    if slot_ptr.is_null() {
+        return None; // Slot being modified, continue
+    }
+
+    if slot_keylenx == search_keylenx {
+        return Some(LookupResult::Value(slot_ptr));
+    }
+
+    // Layer pointer with matching ikey means a longer key exists,
+    // but our short key (<=8 bytes) is NOT a match
+    None
+}
+
+/// Check a single slot for a value/layer match (multi-layer mode).
+#[inline(always)]
+fn check_slot_multi_layer<L, S>(
+    leaf: &L,
+    slot: usize,
+    key: &Key<'_>,
+    search_keylenx: u8,
+) -> Option<LookupResult>
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+{
+    let slot_keylenx: u8 = leaf.keylenx(slot);
+    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+    if slot_ptr.is_null() {
+        return None; // Slot being modified, continue
+    }
+
+    if slot_keylenx == search_keylenx {
+        // Potential exact match - verify suffix if present
+        if slot_keylenx == KSUF_KEYLENX {
+            if leaf.ksuf_equals(slot, key.suffix()) {
+                return Some(LookupResult::Value(slot_ptr));
+            }
+        } else {
+            return Some(LookupResult::Value(slot_ptr));
+        }
+    } else if slot_keylenx >= LAYER_KEYLENX && key.has_suffix() {
+        // Layer pointer - record for descent after validation
+        return Some(LookupResult::Layer(slot_ptr));
+    }
+
+    None
+}
+
 /// Search a leaf for a key in single-layer mode (keys <= 8 bytes).
 ///
-/// Optimized path that skips:
-/// - Suffix comparison logic
-/// - Layer descent handling (short keys can't descend)
-///
-/// # Safety
-///
-/// Caller must ensure `leaf` is valid and protected by a guard.
+/// Uses binary search for WIDTH > 16, linear search otherwise.
 #[inline(always)]
 fn search_leaf_single_layer<S, L>(leaf: &L, target_ikey: u64, search_keylenx: u8) -> LookupResult
 where
@@ -58,30 +161,40 @@ where
     L: LayerCapableLeaf<S>,
 {
     let perm = leaf.permutation();
+    let size = perm.size();
 
-    for i in 0..perm.size() {
+    // Use binary search for larger leaves
+    if L::WIDTH > BINARY_SEARCH_THRESHOLD {
+        let (start_pos, found) = binary_search_ikey::<L, S>(leaf, &perm, target_ikey);
+
+        if !found {
+            return LookupResult::NotFound;
+        }
+
+        // Linear scan from first match (handles multiple entries with same ikey)
+        for i in start_pos..size {
+            let slot = perm.get(i);
+            if leaf.ikey(slot) != target_ikey {
+                break; // Past matching ikeys
+            }
+            if let Some(result) = check_slot_single_layer::<L, S>(leaf, slot, search_keylenx) {
+                return result;
+            }
+        }
+
+        return LookupResult::NotFound;
+    }
+
+    // Linear search for small leaves (WIDTH <= 16)
+    for i in 0..size {
         let slot: usize = perm.get(i);
         let slot_ikey: u64 = leaf.ikey(slot);
 
-        if slot_ikey != target_ikey {
-            continue;
+        if slot_ikey == target_ikey {
+            if let Some(result) = check_slot_single_layer::<L, S>(leaf, slot, search_keylenx) {
+                return result;
+            }
         }
-
-        let slot_keylenx: u8 = leaf.keylenx(slot);
-        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-        if slot_ptr.is_null() {
-            continue;
-        }
-
-        // Exact keylenx match = found
-        if slot_keylenx == search_keylenx {
-            return LookupResult::Value(slot_ptr);
-        }
-
-        // Layer pointer with matching ikey means a longer key exists,
-        // but our short key (<=8 bytes) is NOT a match - continue searching
-        // (Layer pointers have keylenx >= 128, our key has keylenx <= 8)
     }
 
     LookupResult::NotFound
@@ -89,13 +202,7 @@ where
 
 /// Search a leaf for a key in multi-layer mode (keys > 8 bytes).
 ///
-/// Handles:
-/// - Suffix comparison for keys with same 8-byte prefix
-/// - Layer pointer detection for descent
-///
-/// # Safety
-///
-/// Caller must ensure `leaf` is valid and protected by a guard.
+/// Uses binary search for WIDTH > 16, linear search otherwise.
 #[inline(always)]
 fn search_leaf_multi_layer<S, L>(leaf: &L, key: &Key<'_>) -> LookupResult
 where
@@ -106,6 +213,7 @@ where
 {
     let perm = leaf.permutation();
     let target_ikey: u64 = key.ikey();
+    let size = perm.size();
 
     #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
     let search_keylenx: u8 = if key.has_suffix() {
@@ -114,35 +222,37 @@ where
         key.current_len() as u8
     };
 
-    for i in 0..perm.size() {
+    // Use binary search for larger leaves
+    if L::WIDTH > BINARY_SEARCH_THRESHOLD {
+        let (start_pos, found) = binary_search_ikey::<L, S>(leaf, &perm, target_ikey);
+
+        if !found {
+            return LookupResult::NotFound;
+        }
+
+        // Linear scan from first match
+        for i in start_pos..size {
+            let slot = perm.get(i);
+            if leaf.ikey(slot) != target_ikey {
+                break;
+            }
+            if let Some(result) = check_slot_multi_layer::<L, S>(leaf, slot, key, search_keylenx) {
+                return result;
+            }
+        }
+
+        return LookupResult::NotFound;
+    }
+
+    // Linear search for small leaves
+    for i in 0..size {
         let slot: usize = perm.get(i);
         let slot_ikey: u64 = leaf.ikey(slot);
 
-        if slot_ikey != target_ikey {
-            continue;
-        }
-
-        let slot_keylenx: u8 = leaf.keylenx(slot);
-        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-        if slot_ptr.is_null() {
-            continue;
-        }
-
-        if slot_keylenx == search_keylenx {
-            // Potential exact match - verify suffix if present
-            let suffix_match: bool = if slot_keylenx == KSUF_KEYLENX {
-                leaf.ksuf_equals(slot, key.suffix())
-            } else {
-                true
-            };
-
-            if suffix_match {
-                return LookupResult::Value(slot_ptr);
+        if slot_ikey == target_ikey {
+            if let Some(result) = check_slot_multi_layer::<L, S>(leaf, slot, key, search_keylenx) {
+                return result;
             }
-        } else if slot_keylenx >= LAYER_KEYLENX && key.has_suffix() {
-            // Layer pointer - record for descent after validation
-            return LookupResult::Layer(slot_ptr);
         }
     }
 
@@ -150,7 +260,7 @@ where
 }
 
 // ============================================================================
-//  Cold Path Helpers (Retry / Error Paths)
+//  Helper Functions
 // ============================================================================
 
 impl<S, L, A> MassTreeGeneric<S, L, A>
@@ -193,14 +303,18 @@ where
     ///
     /// Returns `Some(next_leaf_ptr)` if we should follow the B-link,
     /// `None` if key is definitively not found.
-    #[cold]
-    #[inline(never)]
+    ///
+    /// Note: NOT marked #[cold] - B-link traversal is common during concurrent splits.
+    #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_blink_chain(&self, leaf: &L, target_ikey: u64) -> Option<*mut L> {
         let next_raw: *mut L = leaf.next_raw();
         let next_ptr: *mut L = unmark_ptr(next_raw);
 
         if !next_ptr.is_null() && !is_marked(next_raw) {
+            // Prefetch next leaf for likely traversal
+            prefetch_read(next_ptr);
+
             // SAFETY: next_ptr is valid (protected by guard in caller)
             let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
             if target_ikey >= next_bound {
@@ -214,8 +328,9 @@ where
     /// Check if sublayer is deleted before descending.
     ///
     /// Returns `true` if sublayer is valid, `false` if deleted (key not found).
-    #[cold]
-    #[inline(never)]
+    ///
+    /// Note: NOT marked #[cold] - layer descent is hot path for keys > 8 bytes.
+    #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_sublayer_valid(&self, layer_ptr: *mut u8) -> bool {
         // SAFETY: ptr is non-null (came from valid slot) and protected by guard.
@@ -268,7 +383,7 @@ where
     /// * `Some(Arc<V>)` - If the key was found
     /// * `None` - If the key was not found
     #[must_use]
-    #[inline(always)]
+    #[inline] // Not #[inline(always)] - public API, let compiler decide at call sites
     pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<S::Output> {
         let mut search_key: Key<'_> = Key::new(key);
         self.get_impl(&mut search_key, guard, |ptr| {
@@ -297,7 +412,7 @@ where
     /// * `Some(&V)` - A reference to the value, valid for the guard's lifetime
     /// * `None` - If the key was not found
     #[must_use]
-    #[inline(always)]
+    #[inline] // Not #[inline(always)] - public API, let compiler decide at call sites
     pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g S::Value> {
         let mut search_key: Key<'_> = Key::new(key);
         self.get_impl(&mut search_key, guard, |ptr| {
@@ -344,10 +459,9 @@ where
                 let mut version: u32 = leaf.version().stable();
 
                 'search_loop: loop {
-                    // Check for deleted node
-                    if leaf.version().is_deleted() {
-                        continue 'layer_loop;
-                    }
+                    // Note: No explicit is_deleted() check here - has_changed() below
+                    // returns true if deleted bit is set, so we catch it after search.
+                    // This avoids redundant atomic load on the hot path.
 
                     // Check for gc'd sublayer - must restart from main tree root
                     // C++ masstree_get.hh:111-115

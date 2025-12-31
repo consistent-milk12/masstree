@@ -111,7 +111,7 @@ where
     ///
     /// Uses binary search for WIDTH > 16, linear search otherwise.
     /// This matches C++ `key_bound<max_size, bound_method_fast>` selection.
-    #[inline(always)]
+    #[inline] // Not #[inline(always)] - calls other inline fns, avoid cascading bloat
     #[expect(clippy::unused_self, reason = "API Consistency")]
     pub(super) fn search_for_insert_generic(
         &self,
@@ -235,7 +235,7 @@ where
     /// - Only returns `Found` or `NotFound` (never `Layer` or `Conflict`)
     ///
     /// Uses binary search for WIDTH > 16, linear search otherwise.
-    #[inline(always)]
+    #[inline] // Not #[inline(always)] - calls other inline fns, avoid cascading bloat
     #[expect(clippy::unused_self, reason = "API Consistency")]
     pub(super) fn search_for_insert_single_layer(
         &self,

@@ -194,7 +194,7 @@ where
     /// # Returns
     ///
     /// `Ok(None)` - insert succeeded, no old value (leaf was empty)
-    #[inline(always)]
+    #[inline] // Not #[inline(always)] - empty leaf reuse is rare, avoid hot path bloat
     #[expect(clippy::unnecessary_wraps, reason = "Matches insert API return type")]
     fn insert_into_empty_leaf(
         &self,
