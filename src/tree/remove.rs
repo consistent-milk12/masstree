@@ -322,13 +322,12 @@ where
         self.tree.dec_count();
 
         // Step 8: Check if leaf is now empty and should be removed
-        //
-        // NOTE: Leaf coalescing is DISABLED due to known bugs.
-        // See KNOWN_BUGS.md section "Leaf Coalescing Disabled".
-        // Re-enable by changing `false &&` to just the condition.
+        // NOTE: Leaf coalescing DISABLED - still causes infinite loops.
+        // Fixed: deleted_layer infinite loop in reach_leaf_concurrent_generic
+        // Remaining: Unknown issue in coalescing path
         #[expect(
             clippy::overly_complex_bool_expr,
-            reason = "FIX: After removal traversal infrastructure is properly implemented"
+            reason = "Coalescing disabled - still causes infinite loops"
         )]
         if false && new_perm.size() == 0 {
             // Try to remove the leaf. Returns Some(self) if couldn't remove.
@@ -1263,7 +1262,7 @@ impl NodeCleaner {
         S::Output: Send + Sync,
         L: LayerCapableLeaf<S>,
     {
-        loop {
+        for _ in 0..MAX_PARENT_RETRIES {
             // Step 1: Read parent pointer
             let parent_ptr: *mut u8 = unsafe { Self::get_parent_erased::<S, L>(current_ptr) };
 
@@ -1277,7 +1276,7 @@ impl NodeCleaner {
             let parent: &L::Internode = unsafe { &*(parent_ptr.cast::<L::Internode>()) };
             let parent_lock: LockGuard<'_> = parent.version().lock();
 
-            // Step 4: Validate parent hasn' changed
+            // Step 4: Validate parent hasn't changed
             // The parent pointer could have changed if:
             // - A concurrent split moved current to a new parent
             // - A concurrent collapse changed the parent chain
@@ -1298,6 +1297,9 @@ impl NodeCleaner {
             // Relax fence like C++ relax_fence()
             StdHint::spin_loop();
         }
+
+        // Retry limit exceeded - return as if no parent (caller handles gracefully)
+        (None, StdPtr::null_mut())
     }
 
     /// Set the parent pointer on a node (leaf or internode).

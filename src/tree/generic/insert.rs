@@ -339,6 +339,16 @@ where
                 continue;
             }
 
+            // Check for gc'd sublayer - must restart from main tree root
+            // C++ masstree_get.hh:111-115
+            if leaf.deleted_layer() {
+                drop(lock);
+                key.unshift_all();
+                layer_root = self.load_root_ptr_generic(guard);
+                in_sublayer = false;
+                continue;
+            }
+
             // Post-lock membership check
             if self.validate_membership(leaf, key).is_err() {
                 drop(lock);

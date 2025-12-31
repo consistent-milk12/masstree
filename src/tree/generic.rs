@@ -436,22 +436,10 @@ where
 
                 // Check if we've reached a leaf
                 if version.is_leaf() {
-                    // SAFETY: is_leaf() confirmed, cast is valid
-                    let leaf: &L = unsafe { &*(n[sense].cast::<L>()) };
-
-                    // Check if this leaf is part of a gc'd layer.
-                    // This can happen when:
-                    // 1. We traversed into a sublayer
-                    // 2. Another thread gc'd the sublayer (marked deleted_layer)
-                    // 3. We reached the leaf after it was marked but before retirement
-                    //
-                    // In this case, restart traversal. The root fix-up loop will
-                    // walk up to find a valid starting point (or the layer root
-                    // will have been cleared from its parent, causing caller to retry).
-                    if leaf.deleted_layer() {
-                        continue 'retry;
-                    }
-
+                    // Return the leaf pointer - caller must check deleted_layer()
+                    // and handle by unshifting key and restarting from main root.
+                    // We cannot handle deleted_layer here because `start` is fixed
+                    // to the sublayer root, causing an infinite loop if we retry.
                     return n[sense].cast_mut().cast::<L>();
                 }
 
@@ -517,10 +505,71 @@ where
         }
     }
 
+    /// Compare a key with the last key in a leaf, retrying until stable.
+    ///
+    /// Returns:
+    /// - `Ordering::Less` if key < last key in leaf
+    /// - `Ordering::Equal` if key == last key in leaf
+    /// - `Ordering::Greater` if key > last key in leaf, or leaf is empty
+    ///
+    /// This matches C++ `leaf::stable_last_key_compare()` from `masstree_struct.hh:603-626`.
+    ///
+    /// # Reference
+    /// ```cpp
+    /// template <typename P>
+    /// inline int leaf<P>::stable_last_key_compare(const key_type& k, nodeversion_type v,
+    ///                                              threadinfo& ti) const {
+    ///     while (true) {
+    ///         typename leaf<P>::permuter_type perm(permutation_);
+    ///         int n = perm.size();
+    ///         int p = perm[n ? n - 1 : 0];
+    ///         int cmp = compare_key(k, p);
+    ///         if (likely(!this->has_changed(v))) {
+    ///             return cmp;
+    ///         }
+    ///         v = this->stable_annotated(ti.stable_fence());
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    fn stable_last_key_compare(leaf: &L, key: &Key<'_>, mut version: u32) -> Ordering {
+        loop {
+            let perm: L::Perm = leaf.permutation();
+            let n: usize = perm.size();
+
+            // If empty, return Greater (key should look elsewhere)
+            // If non-empty, compare with last slot in permutation
+            let cmp: Ordering = if n == 0 {
+                // Empty leaf - return Greater so caller will check siblings
+                // C++ comment: "it is always safe to return 1, because then the
+                // caller will check more precisely whether k belongs in this"
+                Ordering::Greater
+            } else {
+                let last_slot: usize = perm.get(n - 1);
+                let slot_ikey: u64 = leaf.ikey(last_slot);
+                let slot_keylenx: u8 = leaf.keylenx(last_slot);
+                key.compare(slot_ikey, slot_keylenx as usize)
+            };
+
+            // Check if version is still valid
+            if !leaf.version().has_changed(version) {
+                return cmp;
+            }
+
+            // Version changed, get new stable version and retry
+            version = leaf.version().stable();
+        }
+    }
+
     /// Advance to correct leaf via B-link after version change detected.
     ///
     /// This is called when `has_changed(old_version)` returns true, indicating
     /// a split may have occurred. It follows B-links to find the correct leaf.
+    ///
+    /// # Algorithm (from C++ `leaf::advance_to_key`)
+    /// 1. Get stable version
+    /// 2. If has_split AND key > last key in leaf: walk B-link chain
+    /// 3. Otherwise: key belongs in current leaf
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_generic<'a>(
         &'a self,
@@ -534,17 +583,24 @@ where
         let key_ikey: u64 = key.ikey();
         let mut version: u32 = leaf.version().stable();
 
-        // Only follow chain if split occurred or is in progress
-        if !leaf.version().has_split(old_version) {
-            // Double-check: split could have started after has_split check
-            if !leaf.version().is_splitting() {
-                return (leaf, version);
-            }
+        // Check if we need to walk the B-link chain
+        // C++: if (unlikely(v.has_split(oldv)) && n->stable_last_key_compare(ka, v, ti) > 0)
+        let needs_walk: bool = if leaf.version().has_split(old_version) {
+            // Split occurred - check if key is greater than last key in leaf
+            Self::stable_last_key_compare(leaf, key, version) == Ordering::Greater
+        } else if leaf.version().is_splitting() {
+            // Split in progress - wait and check
+            version = leaf.version().stable();
+            Self::stable_last_key_compare(leaf, key, version) == Ordering::Greater
+        } else {
+            false
+        };
+
+        if !needs_walk {
+            return (leaf, version);
         }
 
-        // Wait for any in-progress split to complete
-        version = leaf.version().stable();
-
+        // Walk B-link chain to find correct leaf
         while !leaf.version().is_deleted() {
             let next_raw: *mut L = leaf.next_raw();
 

@@ -347,6 +347,15 @@ where
                         continue 'layer_loop;
                     }
 
+                    // Check for gc'd sublayer - must restart from main tree root
+                    // C++ masstree_get.hh:111-115
+                    if leaf.deleted_layer() {
+                        key.unshift_all();
+                        layer_root = self.load_root_ptr_generic(guard);
+                        in_sublayer = false;
+                        continue 'layer_loop;
+                    }
+
                     let target_ikey: u64 = key.ikey();
 
                     // ============================================================

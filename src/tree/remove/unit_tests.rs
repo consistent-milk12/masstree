@@ -834,6 +834,9 @@ fn test_concurrent_remove_and_get() {
         (found, not_found)
     });
 
+    // Let reader thread start before we begin removing
+    thread::sleep(std::time::Duration::from_millis(1));
+
     // Writer thread: remove keys
     for i in (0_u64..1000).step_by(2) {
         tree.remove(&i.to_be_bytes()).unwrap();
