@@ -235,7 +235,7 @@ where
     /// * `kp` - Physical slot index
     /// * `layer_context` - Parent info for sublayer cleanup
     /// * `guard` - Guard for memory reclamation
-    #[inline]
+    #[inline(always)]
     #[expect(clippy::too_many_arguments, reason = "Complex state management")]
     const fn new(
         tree: &'t MassTreeGeneric<S, L, A>,
@@ -258,7 +258,7 @@ where
     }
 
     /// Get a reference to the locked leaf.
-    #[inline]
+    #[inline(always)]
     fn leaf(&self) -> &L {
         // SAFETY: leaf is valid and locked by us
         unsafe { &*self.leaf }
@@ -280,8 +280,8 @@ where
     /// # C++ Reference
     ///
     /// `masstree_remove.hh:162-176` - `finish_remove()`
-    #[inline]
     #[must_use]
+    #[inline(always)]
     pub fn finish_remove(mut self) -> Option<S::Output> {
         let leaf = self.leaf();
 
@@ -967,15 +967,7 @@ impl NodeCleaner {
         }
 
         // Step 5: Key found, create cursor for removal
-        let cursor = RemoveCursor::new(
-            tree,
-            leaf_ptr,
-            lock,
-            ki,
-            new_kp,
-            layer_context,
-            guard,
-        );
+        let cursor = RemoveCursor::new(tree, leaf_ptr, lock, ki, new_kp, layer_context, guard);
 
         RemoveLockResult::Ready(cursor)
     }

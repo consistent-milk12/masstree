@@ -485,6 +485,8 @@ impl Propagation {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn promote_layer_root<S, L, A>(
         allocator: &A,
         left_ptr: *mut u8,
@@ -515,6 +517,8 @@ impl Propagation {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn create_main_root<S, L, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,

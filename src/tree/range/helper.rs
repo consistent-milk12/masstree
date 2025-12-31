@@ -151,7 +151,9 @@ impl ForwardScanHelper {
     pub const fn initial_ksuf_match(ksuf_compare: Ordering, emit_equal: bool) -> bool {
         match ksuf_compare {
             Ordering::Greater => true,
+
             Ordering::Equal => emit_equal,
+
             Ordering::Less => false,
         }
     }
@@ -242,6 +244,7 @@ impl ForwardScanHelper {
 ///
 /// Corresponds to the lower bound logic in `find_initial` and `find_next`
 /// from `masstree_scan.hh`.
+#[inline]
 pub fn lower_with_position<L, S>(
     cursor_key: &CursorKey,
     leaf: &L,
@@ -264,10 +267,12 @@ where
                 // Search key < slot key: insert before this position
                 return KeyIndexedPosition::not_found(i);
             }
+
             Ordering::Equal => {
                 // Exact ikey match found
                 return KeyIndexedPosition::found(i, slot);
             }
+
             Ordering::Greater => {
                 // Search key > slot key: continue searching
             }
@@ -298,6 +303,7 @@ where
 /// # Returns
 ///
 /// `KeyIndexedPosition` with accurate position considering suffixes.
+#[inline]
 pub fn lower_with_suffix<L, S>(
     cursor_key: &CursorKey,
     leaf: &L,
@@ -381,6 +387,8 @@ where
 /// When cursor has an inline key that is longer than the slot's inline key
 /// `(same ikey, cursor_len > slot_keylenx)`, we need to find the first slot
 /// where cursor <= slot.
+#[cold]
+#[inline(never)]
 fn find_position_after_inline<L, S>(
     cursor_key: &CursorKey,
     leaf: &L,
@@ -427,6 +435,8 @@ where
 
 /// When cursor suffix > stored suffix (or cursor has suffix but slot doesn't),
 /// we need to skip past any remaining slots with the same ikey.
+#[cold]
+#[inline(never)]
 fn find_position_after_suffix<L, S>(
     cursor_key: &CursorKey,
     leaf: &L,
@@ -499,203 +509,8 @@ pub const fn inline_key_len(keylenx: u8) -> usize {
 }
 
 // ============================================================================
-//  Suffix Comparison Helpers
-// ============================================================================
-
-/// Compare cursor key against slot considering suffix bytes.
-///
-/// This is a full key comparison that handles all cases:
-/// - Inline keys (keylenx 0-8)
-/// - Suffix keys (`keylenx == KSUF_KEYLENX`)
-/// - Layer pointers (`keylenx >= LAYER_KEYLENX`)
-///
-/// # Returns
-///
-/// - `Ordering::Less`: cursor < slot
-/// - `Ordering::Equal`: cursor == slot (at this layer)
-/// - `Ordering::Greater`: cursor > slot
-pub fn compare_full<L, S>(cursor_key: &CursorKey, leaf: &L, slot: usize) -> Ordering
-where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-{
-    let slot_ikey: u64 = leaf.ikey(slot);
-
-    // First compare ikeys
-    match cursor_key.current_ikey().cmp(&slot_ikey) {
-        Ordering::Equal => {}
-        ord => return ord,
-    }
-
-    // ikeys equal, compare by length/suffix
-    let keylenx: u8 = leaf.keylenx(slot);
-
-    if keylenx >= LAYER_KEYLENX {
-        // Slot is layer pointer
-        if cursor_key.has_suffix() {
-            // Cursor has more bytes: equal at this layer (descend into layer)
-            Ordering::Equal
-        } else {
-            // Cursor ends here, layer has more: cursor < layer
-            Ordering::Less
-        }
-    } else if keylenx == KSUF_KEYLENX {
-        // Slot has suffix
-        if cursor_key.has_suffix() {
-            // Both have suffix: compare suffix bytes
-            leaf.ksuf(slot).map_or(Ordering::Greater, |stored_suffix| {
-                cursor_key.suffix().cmp(stored_suffix)
-            })
-        } else {
-            // Cursor has no suffix, slot does: cursor < slot
-            Ordering::Less
-        }
-    } else {
-        // Slot is inline (keylenx 0-8)
-        let slot_len: usize = keylenx as usize;
-        let cursor_len: usize = cursor_key.current_len();
-
-        if cursor_key.has_suffix() {
-            // Cursor has suffix, slot doesn't: cursor > slot
-            Ordering::Greater
-        } else {
-            // Both inline: compare lengths
-            cursor_len.cmp(&slot_len)
-        }
-    }
-}
-
-// ============================================================================
 //  Tests
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_key_indexed_position_not_found() {
-        let pos = KeyIndexedPosition::not_found(5);
-        assert_eq!(pos.i, 5);
-        assert!(!pos.has_match());
-        assert!(pos.p.is_none());
-    }
-
-    #[test]
-    fn test_key_indexed_position_found() {
-        let pos = KeyIndexedPosition::found(3, 7);
-        assert_eq!(pos.i, 3);
-        assert!(pos.has_match());
-        assert_eq!(pos.slot(), 7);
-    }
-
-    #[test]
-    fn test_forward_scan_helper_next() {
-        assert_eq!(ForwardScanHelper::next(0), 1);
-        assert_eq!(ForwardScanHelper::next(5), 6);
-        assert_eq!(ForwardScanHelper::next(23), 24);
-    }
-
-    #[test]
-    fn test_initial_ksuf_match() {
-        // Greater suffix always matches
-        assert!(ForwardScanHelper::initial_ksuf_match(
-            Ordering::Greater,
-            true
-        ));
-        assert!(ForwardScanHelper::initial_ksuf_match(
-            Ordering::Greater,
-            false
-        ));
-
-        // Equal suffix matches only with emit_equal=true
-        assert!(ForwardScanHelper::initial_ksuf_match(Ordering::Equal, true));
-        assert!(!ForwardScanHelper::initial_ksuf_match(
-            Ordering::Equal,
-            false
-        ));
-
-        // Less suffix never matches
-        assert!(!ForwardScanHelper::initial_ksuf_match(Ordering::Less, true));
-        assert!(!ForwardScanHelper::initial_ksuf_match(
-            Ordering::Less,
-            false
-        ));
-    }
-
-    #[test]
-    fn test_is_duplicate_less() {
-        // Cursor key "apple" < slot "banana"
-        let cursor = CursorKey::from_slice(b"apple");
-        let slot_ikey = u64::from_be_bytes([b'b', b'a', b'n', b'a', b'n', b'a', 0, 0]);
-
-        // cursor < slot -> not a duplicate
-        assert!(!ForwardScanHelper::is_duplicate(&cursor, slot_ikey, 6));
-    }
-
-    #[test]
-    fn test_is_duplicate_equal() {
-        // Cursor key "hello" == slot "hello"
-        let cursor = CursorKey::from_slice(b"hello");
-        let slot_ikey = u64::from_be_bytes([b'h', b'e', b'l', b'l', b'o', 0, 0, 0]);
-
-        // cursor == slot -> is a duplicate
-        assert!(ForwardScanHelper::is_duplicate(&cursor, slot_ikey, 5));
-    }
-
-    #[test]
-    fn test_is_duplicate_greater() {
-        // Cursor key "zebra" > slot "apple"
-        let cursor = CursorKey::from_slice(b"zebra");
-        let slot_ikey = u64::from_be_bytes([b'a', b'p', b'p', b'l', b'e', 0, 0, 0]);
-
-        // cursor > slot -> is a duplicate
-        assert!(ForwardScanHelper::is_duplicate(&cursor, slot_ikey, 5));
-    }
-
-    #[test]
-    fn test_keylenx_helpers() {
-        assert!(!is_layer_keylenx(0));
-        assert!(!is_layer_keylenx(8));
-        assert!(!is_layer_keylenx(64));
-        assert!(is_layer_keylenx(128));
-        assert!(is_layer_keylenx(255));
-
-        assert!(!has_suffix_keylenx(0));
-        assert!(!has_suffix_keylenx(8));
-        assert!(has_suffix_keylenx(64));
-        assert!(!has_suffix_keylenx(128));
-
-        assert_eq!(inline_key_len(0), 0);
-        assert_eq!(inline_key_len(5), 5);
-        assert_eq!(inline_key_len(8), 8);
-        assert_eq!(inline_key_len(64), 8);
-        assert_eq!(inline_key_len(128), 8);
-    }
-
-    #[test]
-    fn test_is_duplicate_with_suffix() {
-        // Cursor suffix "xyz" > stored suffix "abc"
-        let mut cursor = CursorKey::from_slice(b"hello world xyz");
-        cursor.assign_store_ikey(u64::from_be_bytes(*b"hello wo"));
-        let _ = cursor.assign_store_suffix(b"rld xyz");
-        cursor.assign_store_length(15);
-
-        // cursor.suffix() = "rld xyz"
-        // stored_suffix = "rld abc"
-        // "rld xyz" > "rld abc" -> is duplicate
-        assert!(ForwardScanHelper::is_duplicate_with_suffix(
-            &cursor, b"rld abc"
-        ));
-
-        // "rld xyz" < "rld zzz" -> not duplicate
-        assert!(!ForwardScanHelper::is_duplicate_with_suffix(
-            &cursor, b"rld zzz"
-        ));
-
-        // "rld xyz" == "rld xyz" -> is duplicate
-        assert!(ForwardScanHelper::is_duplicate_with_suffix(
-            &cursor, b"rld xyz"
-        ));
-    }
-}
+mod unit_tests;

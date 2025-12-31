@@ -457,6 +457,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     ///
     /// Caller must ensure suffix storage is stable via version validation or lock.
     #[must_use]
+    #[inline]
     pub fn ksuf(&self, slot: usize) -> Option<&[u8]> {
         debug_assert!(slot < WIDTH_24, "ksuf: slot {slot} >= WIDTH_24 {WIDTH_24}");
 
@@ -488,22 +489,6 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline(always)]
     pub fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
         self.ksuf(slot).unwrap_or(&[])
-    }
-
-    /// Backward compatibility: check if any suffix storage exists.
-    #[must_use]
-    #[inline(always)]
-    #[deprecated(note = "Use has_external_ksuf() for clarity")]
-    pub fn has_ksuf_storage(&self) -> bool {
-        self.has_external_ksuf()
-    }
-
-    /// Backward compatibility: get external suffix pointer.
-    #[must_use]
-    #[inline(always)]
-    #[deprecated(note = "Use external_ksuf_ptr() for clarity")]
-    pub fn ksuf_ptr(&self) -> *mut SuffixBag<WIDTH_24> {
-        self.external_ksuf_ptr()
     }
 
     /// Assign a suffix to a slot (two-tier: inline first, then external).
@@ -639,6 +624,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 
     /// Check if a slot's suffix equals the given suffix.
     #[must_use]
+    #[inline]
     pub fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
         debug_assert!(
             slot < WIDTH_24,
@@ -669,6 +655,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 
     /// Compare a slot's suffix with the given suffix.
     #[must_use]
+    #[inline]
     pub fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering> {
         debug_assert!(
             slot < WIDTH_24,
@@ -699,6 +686,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 
     /// Check if a slot's key matches the given key.
     #[must_use]
+    #[inline]
     pub fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
         debug_assert!(
             slot < WIDTH_24,
@@ -1114,10 +1102,12 @@ impl<S: ValueSlot> LeafNode24<S> {
 
             // SAFETY: prev is non-null (checked above) and points to a valid leaf
             // Try to mark prev's next pointer (from self to marked(self))
-            match unsafe { &*prev }
-                .next
-                .compare_exchange(self_ptr, marked_self, CAS_SUCCESS, CAS_FAILURE)
-            {
+            match unsafe { &*prev }.next.compare_exchange(
+                self_ptr,
+                marked_self,
+                CAS_SUCCESS,
+                CAS_FAILURE,
+            ) {
                 Ok(_) => {
                     final_prev = prev;
                     break;
@@ -1220,7 +1210,7 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.modstate() == MODSTATE_DELETED_LAYER
     }
 
-    /// Mark this layer as deleted (for gc_layer).
+    /// Mark this layer as deleted (for `gc_layer`).
     ///
     /// Called when garbage collecting an empty sublayer. The parent's slot
     /// that pointed to this sublayer will be cleared, and this leaf is marked
@@ -1275,7 +1265,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 
     /// Clear a slot completely, removing any value or layer pointer.
     ///
-    /// This is used by gc_layer when cleaning up an empty sublayer.
+    /// This is used by `gc_layer` when cleaning up an empty sublayer.
     /// The parent leaf's slot that pointed to the sublayer is cleared.
     ///
     /// # Memory Ordering
@@ -1291,6 +1281,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// - The slot is valid (0..WIDTH)
     /// - Any value/layer at this slot has been or will be properly retired
     #[inline]
+    #[expect(clippy::indexing_slicing)]
     pub fn clear_slot(&self, slot: usize) {
         debug_assert!(slot < WIDTH_24, "clear_slot: slot out of bounds");
 

@@ -171,8 +171,7 @@ where
     /// Validate post-lock state: check if version or permutation changed.
     ///
     /// Returns `true` if validation passed, `false` if retry is needed.
-    #[cold]
-    #[inline(never)]
+    #[inline(always)]
     fn validate_post_lock(
         &self,
         leaf: &L,
@@ -187,8 +186,7 @@ where
     ///
     /// Returns `Ok(())` if key belongs here, `Err(retry_reason)` if we need
     /// to retry (split in progress or key moved to sibling).
-    #[cold]
-    #[inline(never)]
+    #[inline(always)]
     fn validate_membership(&self, leaf: &L, key: &Key<'_>) -> Result<(), MembershipError> {
         let next_raw: *mut L = leaf.next_raw();
 

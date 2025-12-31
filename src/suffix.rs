@@ -166,6 +166,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// Panics if `slot >= WIDTH`.
     #[must_use]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Bounds checked via debug_assert and invariant maintenance"
@@ -285,6 +286,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// # Panics
     ///
     /// Panics if `slot >= WIDTH` or if suffix length exceeds `u16::MAX`.
+    #[inline]
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot bounds checked via debug_assert"
@@ -643,7 +645,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     ///
     /// Panics in debug mode if `slot >= WIDTH`.
     #[must_use]
-    #[inline]
+    #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "Bounds checked via debug_assert and invariant"
@@ -806,32 +808,20 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         new_slot: usize,
         new_suffix: &[u8],
     ) -> SuffixBag<WIDTH> {
-        // Calculate total size needed
-        let mut total_size: usize = new_suffix.len();
-
-        for i in 0..perm.size() {
-            let s: usize = perm.get(i);
-
-            if s < WIDTH
-                && s != new_slot
-                && let Some(suffix) = self.get(s)
-            {
-                total_size += suffix.len();
-            }
-        }
-
-        // Allocate with power-of-2 capacity, minimum 256
-        let capacity: usize = total_size.next_power_of_two().max(256);
+        // Estimate capacity: current used bytes + new suffix, rounded to power of 2.
+        // This avoids iterating twice to calculate exact size.
+        let estimated_size: usize = self.size as usize + new_suffix.len();
+        let capacity: usize = estimated_size.next_power_of_two().max(256);
         let mut bag: SuffixBag<WIDTH> = SuffixBag::with_capacity(capacity);
 
-        // Copy existing suffixes
+        // Single pass: copy existing suffixes and assign new one
         for i in 0..perm.size() {
             let s: usize = perm.get(i);
-            if s < WIDTH
-                && s != new_slot
-                && let Some(suffix) = self.get(s)
-            {
-                bag.assign(s, suffix);
+
+            if s < WIDTH && s != new_slot {
+                if let Some(suffix) = self.get(s) {
+                    bag.assign(s, suffix);
+                }
             }
         }
 

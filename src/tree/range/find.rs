@@ -277,6 +277,7 @@ where
 /// # C++ Reference
 ///
 /// Corresponds to `scanstackelt::find_next` in `masstree_scan.hh:246-317`.
+#[inline]
 pub fn find_next<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &mut CursorKey,
@@ -297,6 +298,7 @@ where
 /// Find the next entry with duplicate checking enabled.
 ///
 /// Called after a Retry state to skip already-emitted entries.
+#[inline]
 pub fn find_next_with_duplicate_check<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &mut CursorKey,
@@ -771,6 +773,7 @@ where
 /// Advance to next leaf, zero-copy variant.
 ///
 /// Same as [`advance_leaf`] but returns `ScanSnapshotPtr`.
+#[inline]
 fn advance_leaf_ptr<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &CursorKey,
@@ -827,6 +830,7 @@ where
 ///
 /// Uses `lower_with_suffix` to find the correct starting position in the new
 /// leaf, matching the C++ behavior of `helper.lower(ka, this)`.
+#[inline]
 fn advance_leaf<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &CursorKey,
@@ -883,6 +887,8 @@ where
 }
 
 /// Refresh stack state after version change and retry.
+#[cold]
+#[inline(never)]
 fn refresh_and_retry<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &CursorKey,
@@ -922,6 +928,8 @@ where
 }
 
 /// Follow B-links to find the correct leaf after a split.
+#[cold]
+#[inline(never)]
 #[expect(clippy::similar_names)]
 fn follow_blinks_or_retry<L, S>(
     stack: &mut ScanStackElement<L, S>,
@@ -1050,6 +1058,7 @@ where
 /// Traverse from layer root to target leaf.
 ///
 /// Similar to `reach_leaf_concurrent_generic` but uses cursor key's ikey.
+#[inline]
 fn reach_leaf_for_scan<L, S>(
     start: *const u8,
     cursor_key: &CursorKey,

@@ -26,6 +26,7 @@
 //!```
 
 use std::marker::PhantomData;
+use std::ops::Bound;
 
 use seize::LocalGuard;
 use smallvec::SmallVec;
@@ -144,12 +145,12 @@ impl<'a> RangeBound<'a> {
 }
 
 // Conversion from std::ops::Bound
-impl<'a> From<std::ops::Bound<&'a [u8]>> for RangeBound<'a> {
-    fn from(bound: std::ops::Bound<&'a [u8]>) -> Self {
+impl<'a> From<Bound<&'a [u8]>> for RangeBound<'a> {
+    fn from(bound: Bound<&'a [u8]>) -> Self {
         match bound {
-            std::ops::Bound::Unbounded => RangeBound::Unbounded,
-            std::ops::Bound::Included(k) => RangeBound::Included(k),
-            std::ops::Bound::Excluded(k) => RangeBound::Excluded(k),
+            Bound::Unbounded => RangeBound::Unbounded,
+            Bound::Included(k) => RangeBound::Included(k),
+            Bound::Excluded(k) => RangeBound::Excluded(k),
         }
     }
 }
@@ -266,10 +267,6 @@ where
     L: TreeLeafNode<S>,
     A: NodeAllocatorGeneric<S, L>,
 {
-    /// Reference to the tree.
-    #[allow(dead_code, reason = "kept for future sublayer navigation")]
-    tree: &'a MassTreeGeneric<S, L, A>,
-
     /// Memory reclamation guard.
     guard: &'g LocalGuard<'a>,
 
@@ -332,8 +329,8 @@ where
     /// to be decremented when no longer needed.
     last_output_ptr: Option<*mut u8>,
 
-    /// Marker for lifetime covariance.
-    _marker: PhantomData<&'a ()>,
+    /// Marker for lifetime and type parameter covariance.
+    _marker: PhantomData<&'a A>,
 }
 
 impl<S, L, A> std::fmt::Debug for RangeIter<'_, '_, S, L, A>
@@ -400,7 +397,6 @@ where
         };
 
         Self {
-            tree,
             guard,
             stack,
             layer_stack: SmallVec::new(),
@@ -478,6 +474,7 @@ where
     }
 
     /// Advance the iterator state machine.
+    #[inline]
     fn advance(&mut self) -> Option<ScanEntry<S::Output>> {
         loop {
             match self.state {
@@ -568,6 +565,7 @@ where
 {
     type Item = ScanEntry<S::Output>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.exhausted {
             return None;
@@ -584,6 +582,7 @@ where
         self.advance()
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.exhausted {
             (0, Some(0))
@@ -902,28 +901,36 @@ where
                     ScanState::Emit => {
                         if let Some(snap) = snapshot_ptr {
                             let key = self.cursor_key.full_key();
+
                             if !self.end_bound.contains(key) {
                                 self.exhausted = true;
                                 return None;
                             }
+
                             self.state = ScanState::FindNext;
                             let value_ref: &S::Value = unsafe { &*snap.value_ptr };
+
                             return Some((key, value_ref));
                         }
                     }
+
                     ScanState::FindNext => {
                         if self.stack.is_null() {
                             self.exhausted = true;
                             return None;
                         }
+
                         continue;
                     }
+
                     ScanState::Retry => continue,
+
                     ScanState::Down => {
                         // Encountered layer pointer - fall back to multi-layer
                         self.single_layer_mode = false;
                         // Don't continue; fall through to handle Down below
                     }
+
                     ScanState::Up => {
                         self.exhausted = true;
                         return None;
@@ -943,6 +950,7 @@ where
                     self.needs_duplicate_check = true;
                     continue;
                 }
+
                 ScanState::Up => {
                     if !handle_up(
                         &mut self.stack,
@@ -953,15 +961,18 @@ where
                         self.exhausted = true;
                         return None;
                     }
+
                     self.state = ScanState::FindNext;
                     self.needs_duplicate_check = true;
                     continue;
                 }
+
                 ScanState::Retry => {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
                     self.needs_duplicate_check = true;
                     continue;
                 }
+
                 ScanState::Emit | ScanState::FindNext => {}
             }
 
@@ -1006,22 +1017,8 @@ where
                 return Some((key, value_ref));
             }
 
-            // For non-Emit states, continue the loop
-            if new_state == ScanState::Up
-                || new_state == ScanState::Down
-                || new_state == ScanState::Retry
-            {
-                continue;
-            }
-
-            // FindNext with no snapshot means keep looking
-            if snapshot_ptr.is_none() && new_state == ScanState::FindNext {
-                continue;
-            }
-
-            // Exhausted
-            self.exhausted = true;
-            return None;
+            // All non-Emit states (Up, Down, Retry, FindNext) continue the loop.
+            // Exhaustion is detected by stack.is_null() or handle_up() returning false.
         }
     }
 }
@@ -1090,10 +1087,12 @@ where
 {
     type Item = Vec<u8>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|entry| entry.key)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
     }
@@ -1142,10 +1141,12 @@ where
 {
     type Item = S::Output;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|entry| entry.value)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
     }
