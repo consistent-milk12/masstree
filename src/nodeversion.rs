@@ -805,6 +805,7 @@ impl NodeVersion {
     /// Uses Relaxed ordering because the new node is not yet visible to other threads.
     /// The fence in `link_sibling()` establishes visibility.
     #[must_use]
+    #[inline(always)]
     pub fn new_for_split(source: &Self) -> Self {
         let source_value = source.value.load(Ordering::Relaxed);
         debug_assert!(
@@ -850,6 +851,7 @@ impl NodeVersion {
     /// # Panics
     ///
     /// Debug-asserts that the node is locked with [`SPLITTING_BIT`] set.
+    #[inline(always)]
     pub fn unlock_for_split(&self) {
         let locked_value = self.value.load(Ordering::Relaxed);
 

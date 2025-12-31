@@ -65,12 +65,16 @@ enum RemoveSearchResult {
     NotFound,
 
     /// Key found at logical position `ki`, physical slot `kp`.
-    #[expect(dead_code, reason = "TODO: Reserved for future use")]
+    ///
+    /// Note: `kp` is captured here but discarded after locking because
+    /// the slot position must be re-verified under lock.
     Found {
         /// Logical position in permutation (0..size).
         ki: usize,
 
         /// Physical slot index (0..WIDTH).
+        /// Discarded after locking - position is re-verified.
+        #[expect(dead_code, reason = "Slot position is re-verified after locking")]
         kp: usize,
     },
 
@@ -82,6 +86,46 @@ enum RemoveSearchResult {
         /// Physical slot index containing the layer pointer.
         slot: usize,
     },
+}
+
+/// Result of attempting to find, lock, and verify a key for removal.
+///
+/// This enum separates the search/lock phase from the actual removal,
+/// enabling cleaner control flow in the main remove loop.
+enum RemoveLockResult<'t, 'g, S, L, A>
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
+{
+    /// Key not found in this layer.
+    NotFound,
+
+    /// Key found and cursor is ready for removal.
+    Ready(RemoveCursor<'t, 'g, S, L, A>),
+
+    /// Need to descend into sublayer.
+    DescendLayer {
+        /// Pointer to the sublayer root.
+        layer_ptr: *mut u8,
+
+        /// Parent leaf containing the layer slot.
+        parent_leaf: *mut u8,
+
+        /// Physical slot in parent containing the layer pointer.
+        parent_slot: usize,
+    },
+
+    /// Version changed or slot moved, retry from `reach_leaf`.
+    Retry,
+
+    /// Leaf is part of a gc'd sublayer, restart from tree root.
+    ///
+    /// This happens when another thread called `gc_layer` between our
+    /// search and lock. The key must be unshifted before retry.
+    RestartFromRoot,
 }
 
 // ============================================================================
@@ -236,6 +280,7 @@ where
     /// # C++ Reference
     ///
     /// `masstree_remove.hh:162-176` - `finish_remove()`
+    #[inline]
     #[must_use]
     pub fn finish_remove(mut self) -> Option<S::Output> {
         let leaf = self.leaf();
@@ -684,94 +729,57 @@ impl NodeCleaner {
                     continue 'retry_loop;
                 }
 
+                // Step 4: Handle search result
                 match search_result {
                     RemoveSearchResult::NotFound => {
-                        // Key doesn't exist
                         return Ok(None);
                     }
 
                     RemoveSearchResult::Found { ki, kp: _ } => {
-                        // Step 4: Lock the leaf
-                        let lock: LockGuard<'_> = leaf.version().lock();
-
-                        // Step 4a: Check if this leaf is part of a gc'd sublayer.
-                        // This can happen when:
-                        // 1. We descended into a sublayer
-                        // 2. Another thread called gc_layer on this sublayer
-                        // 3. gc_layer marked the leaf as deleted_layer before we locked it
-                        //
-                        // In this case, we need to restart from the tree root with
-                        // the key reset to its original position.
-                        if leaf.deleted_layer() {
-                            drop(lock);
-
-                            // Reset key to original position (undo all layer descents)
-                            key.unshift_all();
-
-                            // Restart from tree root
-                            layer_root = tree.root_ptr.load(AtomicOrdering::Acquire);
-                            layer_context = None;
-                            continue 'layer_loop;
-                        }
-
-                        // Step 5: Re-verify after lock (key might have moved)
-                        let new_perm: L::Perm = leaf.permutation();
-                        if new_perm.size() <= ki {
-                            // Slot was removed by concurrent delete
-                            drop(lock);
-                            continue 'retry_loop;
-                        }
-
-                        let new_kp: usize = new_perm.get(ki);
-                        let slot_ikey: u64 = leaf.ikey(new_kp);
-                        let slot_keylenx: u8 = leaf.keylenx(new_kp);
-
-                        // Verify this is still our key
-                        if slot_ikey != key.ikey() {
-                            drop(lock);
-                            continue 'retry_loop;
-                        }
-
-                        // Handle based on key type
-                        if slot_keylenx >= LAYER_KEYLENX {
-                            // This is a layer pointer, not a value - descend into layer
-                            drop(lock);
-                            let lp: *mut u8 = leaf.leaf_value_ptr(new_kp);
-
-                            // Check if sublayer is deleted before descending
-                            if !Self::is_sublayer_valid(lp) {
-                                return Ok(None);
-                            }
-
-                            // Track this layer descent for gc_layer cleanup
-                            layer_context = Some(LayerContext {
-                                parent_leaf: leaf_ptr.cast::<u8>(),
-                                parent_slot: new_kp,
-                            });
-
-                            layer_root = lp;
-                            key.shift();
-                            continue 'layer_loop;
-                        }
-
-                        // Step 6: Create cursor and finish the removal
-                        //
-                        // The cursor owns the lock and handles all removal logic,
-                        // including potential leaf coalescing. This matches the C++
-                        // tcursor pattern where the lock is persistent state.
-                        let cursor = RemoveCursor::new(
+                        // Lock, verify, and get cursor or control flow instruction
+                        let lock_result = Self::lock_and_verify_for_remove(
                             tree,
                             leaf_ptr,
-                            lock,
                             ki,
-                            new_kp, // Use re-verified slot position
+                            &key,
                             layer_context,
                             guard,
                         );
 
-                        let removed_value: Option<S::Output> = cursor.finish_remove();
+                        match lock_result {
+                            RemoveLockResult::NotFound => {
+                                return Ok(None);
+                            }
 
-                        return Ok(removed_value);
+                            RemoveLockResult::Ready(cursor) => {
+                                return Ok(cursor.finish_remove());
+                            }
+
+                            RemoveLockResult::DescendLayer {
+                                layer_ptr: lp,
+                                parent_leaf,
+                                parent_slot,
+                            } => {
+                                layer_context = Some(LayerContext {
+                                    parent_leaf,
+                                    parent_slot,
+                                });
+                                layer_root = lp;
+                                key.shift();
+                                continue 'layer_loop;
+                            }
+
+                            RemoveLockResult::Retry => {
+                                continue 'retry_loop;
+                            }
+
+                            RemoveLockResult::RestartFromRoot => {
+                                key.unshift_all();
+                                layer_root = tree.root_ptr.load(AtomicOrdering::Acquire);
+                                layer_context = None;
+                                continue 'layer_loop;
+                            }
+                        }
                     }
 
                     RemoveSearchResult::DescendLayer { layer_ptr, slot } => {
@@ -780,12 +788,10 @@ impl NodeCleaner {
                             return Ok(None);
                         }
 
-                        // Track this layer descent for gc_layer cleanup
                         layer_context = Some(LayerContext {
                             parent_leaf: leaf_ptr.cast::<u8>(),
                             parent_slot: slot,
                         });
-
                         layer_root = layer_ptr;
                         key.shift();
                         continue 'layer_loop;
@@ -879,6 +885,99 @@ impl NodeCleaner {
         }
 
         RemoveSearchResult::NotFound
+    }
+
+    /// Lock the leaf and verify the key is still present for removal.
+    ///
+    /// This is the hot path after finding a key. It:
+    /// 1. Locks the leaf
+    /// 2. Checks for `deleted_layer` (gc'd sublayer)
+    /// 3. Re-verifies the key position after locking
+    /// 4. Returns appropriate result for caller to act on
+    ///
+    /// # Returns
+    ///
+    /// - `NotFound`: Key was not found (sublayer deleted)
+    /// - `Ready(cursor)`: Cursor is ready for removal
+    /// - `DescendLayer{...}`: Need to descend into sublayer
+    /// - `Retry`: Version changed, retry from `reach_leaf`
+    /// - `RestartFromRoot`: Leaf is `deleted_layer`, restart with unshifted key
+    #[inline]
+    fn lock_and_verify_for_remove<'t, 'g, S, L, A>(
+        tree: &'t MassTreeGeneric<S, L, A>,
+        leaf_ptr: *mut L,
+        ki: usize,
+        key: &Key<'_>,
+        layer_context: Option<LayerContext>,
+        guard: &'g LocalGuard<'g>,
+    ) -> RemoveLockResult<'t, 'g, S, L, A>
+    where
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
+    {
+        // SAFETY: leaf_ptr is valid from reach_leaf_concurrent_generic
+        let leaf: &L = unsafe { &*leaf_ptr };
+
+        // Step 1: Lock the leaf
+        let lock: LockGuard<'_> = leaf.version().lock();
+
+        // Step 2: Check if this leaf is part of a gc'd sublayer
+        if leaf.deleted_layer() {
+            drop(lock);
+            return RemoveLockResult::RestartFromRoot;
+        }
+
+        // Step 3: Re-verify after lock (key might have moved)
+        let new_perm: L::Perm = leaf.permutation();
+        if new_perm.size() <= ki {
+            // Slot was removed by concurrent delete
+            drop(lock);
+            return RemoveLockResult::Retry;
+        }
+
+        let new_kp: usize = new_perm.get(ki);
+        let slot_ikey: u64 = leaf.ikey(new_kp);
+        let slot_keylenx: u8 = leaf.keylenx(new_kp);
+
+        // Verify this is still our key
+        if slot_ikey != key.ikey() {
+            drop(lock);
+            return RemoveLockResult::Retry;
+        }
+
+        // Step 4: Handle based on key type
+        if slot_keylenx >= LAYER_KEYLENX {
+            // This is a layer pointer, not a value - need to descend
+            drop(lock);
+            let lp: *mut u8 = leaf.leaf_value_ptr(new_kp);
+
+            // Check if sublayer is deleted before descending
+            if !Self::is_sublayer_valid(lp) {
+                return RemoveLockResult::NotFound;
+            }
+
+            return RemoveLockResult::DescendLayer {
+                layer_ptr: lp,
+                parent_leaf: leaf_ptr.cast::<u8>(),
+                parent_slot: new_kp,
+            };
+        }
+
+        // Step 5: Key found, create cursor for removal
+        let cursor = RemoveCursor::new(
+            tree,
+            leaf_ptr,
+            lock,
+            ki,
+            new_kp,
+            layer_context,
+            guard,
+        );
+
+        RemoveLockResult::Ready(cursor)
     }
 
     // ============================================================================

@@ -367,7 +367,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// 3. Insert the slot at position i
     /// 4. Increment size
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub fn insert_from_back(&mut self, i: usize) -> usize {
         debug_assert!(i <= self.size(), "insert_from_back: i > size");
         debug_assert!(self.size() < WIDTH, "insert_from_back: permuter full");
@@ -420,7 +420,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// assert_eq!(perm.size(), 0);
     /// ```
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub fn insert_from_back_immutable(&self, i: usize) -> (Self, usize) {
         debug_assert!(i <= self.size(), "insert_from_back_immutable: i > size");
         debug_assert!(
@@ -459,7 +459,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// 1. Decrement size, keep positions `0..i` unchanged
     /// 2. Shift positions `i+1..WIDTH` down by one
     /// 3. Move the removed slot to position `WIDTH-1` (back)
-    #[inline]
+    #[inline(always)]
     pub fn remove_to_back(&mut self, i: usize) {
         debug_assert!(i < self.size(), "remove_to_back: i >= size");
 
@@ -593,6 +593,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// Panics in debug mode if `i > j` or `j > WIDTH`.
     ///
     /// # Algorithm (matches C++ `kpermuter::rotate`)
+    #[inline(always)]
     pub fn rotate(&mut self, i: usize, j: usize) {
         debug_assert!(i <= j, "rotate: i > j");
         debug_assert!(j <= WIDTH, "rotate: j > WIDTH");

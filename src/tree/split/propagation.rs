@@ -33,9 +33,6 @@
 //! re-descent from root to find the correct parent. This is bounded fallback
 //! rather than infinite retry.
 
-#[cfg(feature = "tracing")]
-use std::time::Instant;
-
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use seize::LocalGuard;
@@ -118,23 +115,12 @@ impl Propagation {
         L: LayerCapableLeaf<S>,
         A: NodeAllocatorGeneric<S, L>,
     {
-        #[cfg(feature = "tracing")]
-        let start: Instant = Instant::now();
-
         // Create PropagationContext with unified lifetime tied to reclamation guard
         let ctx: PropagationContext<'op> = PropagationContext::new(guard);
 
         // Convert LockGuard to unified lifetime for use in propagation loop
         // SAFETY: The reclamation guard ensures the leaf remains valid for 'op
         let left_lock: LockGuard<'op> = unsafe { ctx.unify_guard(left_lock) };
-
-        #[cfg(feature = "tracing")]
-        tracing::info!(
-            is_main_root,
-            is_layer_root,
-            "MAKE_SPLIT: starting hand-over-hand propagation (v3 RAII)"
-        );
-
         let result: Result<(), InsertError> = Self::propagation_loop::<S, L, A>(
             root_ptr,
             allocator,
@@ -147,18 +133,6 @@ impl Propagation {
             is_layer_root,
             true, // at_leaf_level
         );
-
-        #[cfg(feature = "tracing")]
-        #[expect(clippy::cast_possible_truncation, reason = "logs")]
-        {
-            let elapsed = start.elapsed();
-            if elapsed > std::time::Duration::from_millis(1) {
-                tracing::warn!(
-                    elapsed_us = elapsed.as_micros() as u64,
-                    "MAKE_SPLIT: slow propagation (>1ms)"
-                );
-            }
-        }
 
         result
     }

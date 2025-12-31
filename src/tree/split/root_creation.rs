@@ -40,27 +40,10 @@ impl RootCreation {
     /// `Ok(new_root_ptr)` on success. `Err(InsertError::SplitFailed)` if CAS
     /// fails (another thread installed a root first).
     ///
-    /// # CAS Failure Policy
-    ///
-    /// On CAS failure, the allocated internode is NOT retired. It remains
-    /// tracked by the allocator and will be freed when the allocator drops.
-    /// This prevents double-free (see SpecAnalysis.md §2.3).
-    ///
     /// # Note
     ///
     /// Caller is responsible for unlocking `right_leaf_ptr` after this returns.
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(
-            level = "debug",
-            skip(root_ptr, allocator),
-            fields(
-                left = ?left_leaf_ptr,
-                right = ?right_leaf_ptr,
-                split_ikey = %format_args!("{:016x}", split_ikey)
-            )
-        )
-    )]
+    #[expect(clippy::unnecessary_wraps, reason = "API Consistency")]
     pub fn create_root_from_leaves<S, L, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
@@ -75,9 +58,6 @@ impl RootCreation {
         L: LayerCapableLeaf<S>,
         A: NodeAllocatorGeneric<S, L>,
     {
-        #[cfg(feature = "tracing")]
-        tracing::debug!("RootCreation: creating root from leaves");
-
         // Create new root internode directly in pool (height=0, children are leaves)
         let new_root_ptr: *mut u8 = allocator.alloc_internode_direct_root(0);
         let new_root: &L::Internode = unsafe { &*new_root_ptr.cast::<L::Internode>() };
@@ -87,9 +67,6 @@ impl RootCreation {
         new_root.set_ikey(0, split_ikey);
         new_root.set_child(1, right_leaf_ptr.cast());
         new_root.set_nkeys(1);
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(new_root_ptr = ?new_root_ptr, "RootCreation: allocated");
 
         // Atomically install new root
         // CRITICAL: We hold lock on left (current root), so this store is safe.
@@ -102,27 +79,13 @@ impl RootCreation {
             (*left_leaf_ptr).version().mark_nonroot();
         }
 
-        #[cfg(feature = "tracing")]
-        tracing::info!(new_root_ptr = ?new_root_ptr, "RootCreation: root installed");
-
         Ok(new_root_ptr.cast())
     }
 
     /// Create a new main tree root internode from two internodes.
     ///
     /// Used when the existing root internode splits.
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(
-            level = "debug",
-            skip(root_ptr, allocator),
-            fields(
-                left = ?left_inode_ptr,
-                right = ?right_inode_ptr,
-                split_ikey = %format_args!("{:016x}", split_ikey)
-            )
-        )
-    )]
+    #[expect(clippy::unnecessary_wraps, reason = "API Consistency")]
     pub fn create_root_from_internodes<S, L, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
@@ -138,12 +101,6 @@ impl RootCreation {
         A: NodeAllocatorGeneric<S, L>,
     {
         let left: &L::Internode = unsafe { &*left_inode_ptr };
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            left_height = left.height(),
-            "RootCreation: creating root from internodes"
-        );
 
         // Create new root directly in pool (height = left.height + 1)
         let new_root_ptr: *mut u8 = allocator.alloc_internode_direct_root(left.height() + 1);
@@ -164,13 +121,6 @@ impl RootCreation {
             (*left_inode_ptr).version().mark_nonroot();
         }
 
-        #[cfg(feature = "tracing")]
-        tracing::info!(
-            new_root_ptr = ?new_root_ptr,
-            new_height = left.height() + 1,
-            "RootCreation: internode root installed"
-        );
-
         Ok(new_root_ptr.cast())
     }
 
@@ -185,18 +135,6 @@ impl RootCreation {
     ///
     /// Layer root promotion does NOT use CAS on `root_ptr` - it only updates
     /// parent pointers. This is the key difference from main root creation.
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(
-            level = "debug",
-            skip(allocator),
-            fields(
-                left = ?left_leaf_ptr,
-                right = ?right_leaf_ptr,
-                split_ikey = %format_args!("{:016x}", split_ikey)
-            )
-        )
-    )]
     pub fn promote_layer_root_leaves<S, L, A>(
         allocator: &A,
         left_leaf_ptr: *mut L,
@@ -210,9 +148,6 @@ impl RootCreation {
         L: LayerCapableLeaf<S>,
         A: NodeAllocatorGeneric<S, L>,
     {
-        #[cfg(feature = "tracing")]
-        tracing::debug!("RootCreation: promoting layer root leaves");
-
         // Create new internode directly in pool (height=0, children are leaves)
         // Mark as layer root (has root flag, but not main tree root)
         let new_inode_ptr: *mut u8 = allocator.alloc_internode_direct_root(0);
@@ -235,28 +170,10 @@ impl RootCreation {
             (*right_leaf_ptr).version().mark_nonroot();
         }
 
-        #[cfg(feature = "tracing")]
-        tracing::info!(
-            new_inode_ptr = ?new_inode_ptr,
-            "RootCreation: layer root internode created"
-        );
-
         new_inode_ptr.cast()
     }
 
     /// Promote a layer root internode to a new layer internode.
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(
-            level = "debug",
-            skip(allocator),
-            fields(
-                left = ?left_inode_ptr,
-                right = ?right_inode_ptr,
-                split_ikey = %format_args!("{:016x}", split_ikey)
-            )
-        )
-    )]
     pub fn promote_layer_root_internodes<S, L, A>(
         allocator: &A,
         left_inode_ptr: *mut L::Internode,
@@ -271,12 +188,6 @@ impl RootCreation {
         A: NodeAllocatorGeneric<S, L>,
     {
         let left: &L::Internode = unsafe { &*left_inode_ptr };
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            left_height = left.height(),
-            "RootCreation: promoting layer root internodes"
-        );
 
         // Create new internode directly in pool with root flag
         let new_inode_ptr: *mut u8 = allocator.alloc_internode_direct_root(left.height() + 1);
@@ -294,13 +205,6 @@ impl RootCreation {
             (*right_inode_ptr).set_parent(new_inode_ptr);
             (*left_inode_ptr).version().mark_nonroot();
         }
-
-        #[cfg(feature = "tracing")]
-        tracing::info!(
-            new_inode_ptr = ?new_inode_ptr,
-            new_height = left.height() + 1,
-            "RootCreation: layer root internode created"
-        );
 
         new_inode_ptr.cast()
     }
