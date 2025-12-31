@@ -869,6 +869,52 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// Matches C++ `leaf::prefetch()` pattern from `masstree_scan.hh:195, 299`.
     fn prefetch(&self);
+
+    // ========================================================================
+    //  Modification State (modstate) Operations
+    // ========================================================================
+
+    /// Get the modification state.
+    ///
+    /// Returns one of:
+    /// - `0` (`MODSTATE_INSERT`): Normal insert mode
+    /// - `1` (`MODSTATE_REMOVE`): Node is being removed
+    /// - `2` (`MODSTATE_DELETED_LAYER`): Layer has been garbage collected
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `leaf::modstate_` in `masstree_struct.hh:264-270`.
+    fn modstate(&self) -> u8;
+
+    /// Set the modification state.
+    fn set_modstate(&self, state: u8);
+
+    /// Check if this layer has been deleted (garbage collected).
+    ///
+    /// This is distinct from `version.is_deleted()`:
+    /// - `is_deleted()` means the node itself is removed from the tree
+    /// - `deleted_layer()` means the sublayer this node was root of has been gc'd
+    ///
+    /// When `deleted_layer()` is true, readers should reset their key position
+    /// and retry from the main tree root.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `leaf::deleted_layer()` in `masstree_struct.hh:456-458`.
+    fn deleted_layer(&self) -> bool;
+
+    /// Mark this layer as deleted (for gc_layer).
+    ///
+    /// Called when garbage collecting an empty sublayer.
+    fn mark_deleted_layer(&self);
+
+    /// Mark this node as being in remove mode.
+    ///
+    /// Called at the start of a remove operation.
+    fn mark_remove(&self);
+
+    /// Check if this node is in remove mode.
+    fn is_removing(&self) -> bool;
 }
 
 // =============================================================================

@@ -209,7 +209,10 @@ pub use alloc_trait::NodeAllocatorGeneric;
 pub use permuter24::{AtomicPermuter24, Permuter24, WIDTH_24};
 
 // Re-export LeafNode24 types
-pub use leaf24::{LeafNode24, WIDTH_24 as LEAF24_WIDTH};
+pub use leaf24::{
+    LeafNode24, MODSTATE_DELETED_LAYER, MODSTATE_INSERT, MODSTATE_REMOVE,
+    WIDTH_24 as LEAF24_WIDTH,
+};
 
 // Re-export allocator24 types
 pub use alloc24::SeizeAllocator24;

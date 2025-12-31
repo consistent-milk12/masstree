@@ -44,19 +44,14 @@ pub const LAYER_KEYLENX: u8 = 128;
 /// Width constant for [`LeafNode24`].
 pub const WIDTH_24: usize = 24;
 
-/// Modification state values (shared with leaf.rs).
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModState24 {
-    /// Node is in insert mode (normal operation).
-    Insert = 0,
+/// Modification state: node is in insert mode (normal operation).
+pub const MODSTATE_INSERT: u8 = 0;
 
-    /// Node is being removed.
-    Remove = 1,
+/// Modification state: node is being removed.
+pub const MODSTATE_REMOVE: u8 = 1;
 
-    /// Node's layer has been deleted.
-    DeletedLayer = 2,
-}
+/// Modification state: node's layer has been deleted.
+pub const MODSTATE_DELETED_LAYER: u8 = 2;
 
 /// Leaf node with 24 slots using u128 permutation.
 ///
@@ -80,8 +75,11 @@ pub struct LeafNode24<S: ValueSlot> {
     /// Version for optimistic concurrency control.
     version: NodeVersion,
 
-    /// Modification state for suffix operations.
-    modstate: ModState24,
+    /// Modification state for coordinating insert/remove operations.
+    /// - 0 = `MODSTATE_INSERT` (default)
+    /// - 1 = `MODSTATE_REMOVE`
+    /// - 2 = `MODSTATE_DELETED_LAYER`
+    modstate: AtomicU8,
 
     /// Padding to fill cache line 0 and separate version from permutation.
     ///
@@ -164,7 +162,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         Self {
             version,
-            modstate: ModState24::Insert,
+            modstate: AtomicU8::new(MODSTATE_INSERT),
             _pad0: [0; 55],
             permutation: AtomicPermuter24::new(),
             _pad1: [0; 48],
@@ -208,8 +206,8 @@ impl<S: ValueSlot> LeafNode24<S> {
                 node.version.mark_root();
             }
 
-            // ModState: Insert mode
-            StdPtr::write(&raw mut node.modstate, ModState24::Insert);
+            // ModState: Insert mode (atomic)
+            StdPtr::write(&raw mut node.modstate, AtomicU8::new(MODSTATE_INSERT));
 
             // Permutation: empty
             StdPtr::write(&raw mut node.permutation, AtomicPermuter24::new());
@@ -1187,16 +1185,73 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Get the modification state.
+    ///
+    /// Returns one of:
+    /// - `MODSTATE_INSERT` (0): Normal insert mode
+    /// - `MODSTATE_REMOVE` (1): Node is being removed
+    /// - `MODSTATE_DELETED_LAYER` (2): Layer has been garbage collected
     #[must_use]
     #[inline(always)]
-    pub const fn modstate(&self) -> ModState24 {
-        self.modstate
+    pub fn modstate(&self) -> u8 {
+        self.modstate.load(AtomicOrdering::Acquire)
     }
 
     /// Set the modification state.
     #[inline(always)]
-    pub const fn set_modstate(&mut self, state: ModState24) {
-        self.modstate = state;
+    pub fn set_modstate(&self, state: u8) {
+        self.modstate.store(state, AtomicOrdering::Release);
+    }
+
+    /// Check if this layer has been deleted (garbage collected).
+    ///
+    /// This is distinct from `version.is_deleted()`:
+    /// - `is_deleted()` means the node itself is removed from the tree
+    /// - `deleted_layer()` means the sublayer this node was root of has been gc'd
+    ///
+    /// When `deleted_layer()` is true, readers should reset their key position
+    /// (`unshift_all`) and retry from the main tree root.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `leaf::deleted_layer()` in `masstree_struct.hh:456-458`.
+    #[must_use]
+    #[inline(always)]
+    pub fn deleted_layer(&self) -> bool {
+        self.modstate() == MODSTATE_DELETED_LAYER
+    }
+
+    /// Mark this layer as deleted (for gc_layer).
+    ///
+    /// Called when garbage collecting an empty sublayer. The parent's slot
+    /// that pointed to this sublayer will be cleared, and this leaf is marked
+    /// so concurrent readers know to retry from the tree root.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches setting `modstate_ = modstate_deleted_layer` in C++.
+    #[inline(always)]
+    pub fn mark_deleted_layer(&self) {
+        self.set_modstate(MODSTATE_DELETED_LAYER);
+    }
+
+    /// Mark this node as being in remove mode.
+    ///
+    /// Called at the start of a remove operation to prevent suffix allocation
+    /// during the remove process.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches the modstate transition in `finish_remove` (`masstree_remove.hh:162-166`).
+    #[inline(always)]
+    pub fn mark_remove(&self) {
+        self.set_modstate(MODSTATE_REMOVE);
+    }
+
+    /// Check if this node is in remove mode.
+    #[must_use]
+    #[inline(always)]
+    pub fn is_removing(&self) -> bool {
+        self.modstate() == MODSTATE_REMOVE
     }
 
     // ============================================================================
@@ -1783,6 +1838,40 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn prefetch(&self) {
         Self::prefetch(self);
+    }
+
+    // ========================================================================
+    // Modification State (modstate) Operations
+    // ========================================================================
+
+    #[inline(always)]
+    fn modstate(&self) -> u8 {
+        Self::modstate(self)
+    }
+
+    #[inline(always)]
+    fn set_modstate(&self, state: u8) {
+        Self::set_modstate(self, state);
+    }
+
+    #[inline(always)]
+    fn deleted_layer(&self) -> bool {
+        Self::deleted_layer(self)
+    }
+
+    #[inline(always)]
+    fn mark_deleted_layer(&self) {
+        Self::mark_deleted_layer(self);
+    }
+
+    #[inline(always)]
+    fn mark_remove(&self) {
+        Self::mark_remove(self);
+    }
+
+    #[inline(always)]
+    fn is_removing(&self) -> bool {
+        Self::is_removing(self)
     }
 }
 
