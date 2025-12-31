@@ -694,7 +694,14 @@ impl NodeCleaner {
         // - Empty leaves are unlinked from the B-link chain
         // - Removed from parent internodes
         // - Scheduled for deferred reclamation
-        if new_perm.size() == 0 {
+        //
+        // NOTE: Leaf coalescing is DISABLED due to known bugs that cause hangs.
+        // See KNOWN_BUGS.md section "Leaf Coalescing Disabled" for details.
+        // Re-enable after fixing:
+        // - locked_parent_generic unbounded retry loop (remove.rs:1208-1242)
+        // - Traversal retry on null children (generic.rs:1051-1055)
+        // - Lock coupling protocol timing differences vs C++
+        if false && new_perm.size() == 0 {
             // Try to remove the empty leaf from the tree
             let removed: bool =
                 Self::remove_leaf_generic::<S, L, A>(tree, leaf, lock, layer_context, guard);
