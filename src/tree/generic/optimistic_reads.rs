@@ -375,6 +375,11 @@ where
         'leaf_loop: loop {
             // SAFETY: leaf_ptr protected by guard
             let leaf: &L = unsafe { &*leaf_ptr };
+
+            // Prefetch ikey cache lines while waiting for stable version.
+            // This hides memory latency if the node is locked (version spinning).
+            leaf.prefetch_for_search();
+
             let mut version: u32 = leaf.version().stable();
 
             'search_loop: loop {
@@ -512,6 +517,10 @@ where
 
             'leaf_loop: loop {
                 let leaf: &L = unsafe { &*leaf_ptr };
+
+                // Prefetch ikey cache lines while waiting for stable version.
+                leaf.prefetch_for_search();
+
                 let mut version: u32 = leaf.version().stable();
 
                 'search_loop: loop {

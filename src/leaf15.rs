@@ -388,6 +388,32 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
     }
 
+    /// Prefetch ikey0 and permutation for point lookups.
+    ///
+    /// Lighter-weight than [`Self::prefetch`] - only fetches the cache lines
+    /// needed for the search loop (permutation + ikeys). Call this before
+    /// `version.stable()` to hide memory latency during version spin-wait.
+    ///
+    /// # Memory Layout (WIDTH=15)
+    ///
+    /// ```text
+    /// Cache Line 1 (64-127):   permutation - needed for slot ordering
+    /// Cache Line 2 (128-191):  ikey0[0..7] - first 8 ikeys
+    /// Cache Line 3 (192-247):  ikey0[8..14] - remaining ikeys
+    /// ```
+    #[inline(always)]
+    pub fn prefetch_for_search(&self) {
+        let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
+
+        // SAFETY: Offsets are within LeafNode15 bounds (768 bytes total).
+        // Prefetch is a hint - invalid addresses cause no fault.
+        unsafe {
+            prefetch_read(self_ptr.add(64));  // Cache line 1: permutation
+            prefetch_read(self_ptr.add(128)); // Cache line 2: ikey0[0..7]
+            prefetch_read(self_ptr.add(192)); // Cache line 3: ikey0[8..14]
+        }
+    }
+
     /// Get the keylenx at the given physical slot.
     #[must_use]
     #[inline(always)]
@@ -1891,6 +1917,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         Self::prefetch_ikey(self, slot);
     }
 
+    #[inline(always)]
+    fn prefetch_for_search(&self) {
+        Self::prefetch_for_search(self);
+    }
+
     // ========================================================================
     // Modification State (modstate) Operations
     // ========================================================================
@@ -2164,6 +2195,58 @@ impl<V: Copy + Send + Sync + 'static>
         }
     }
 }
+
+// ============================================================================
+//  Compile-Time Size Assertions
+// ============================================================================
+//
+// LeafNode15 memory layout (768 bytes, 12 cache lines):
+//
+// Cache Line 0 (bytes 0-63):   version (4B) + modstate (1B) + padding (59B)
+// Cache Line 1 (bytes 64-127): permutation (8B) + padding (56B)
+// Cache Lines 2-3 (128-247):   ikey0[15] (120B)
+// Cache Line 4 (248-311):      keylenx[15] (15B) + padding (1B) + values start
+// Cache Lines 4-6 (264-383):   leaf_values[15] (120B)
+// Cache Lines 7-11 (384-701):  inline_ksuf (318B)
+// Cache Lines 11-12 (704-735): external_ksuf + next + prev + parent (32B)
+// Tail padding (736-767):      32B to align to 64B boundary
+//
+// Hot path (get) touches 4-6 cache lines:
+//   CL 0: version (OCC validation)
+//   CL 1: permutation (slot ordering)
+//   CL 2-3: ikey0 (key comparison)
+//   CL 4-6: leaf_values (on match)
+
+/// Verify LeafNode15 size is exactly 768 bytes (12 cache lines).
+/// This ensures the hot path layout is cache-optimal.
+///
+/// Note: Uses `LeafValue<u64>` as the concrete slot type for size checks.
+/// PhantomData<S> is zero-sized, so LeafNode15 size is S-independent.
+const _: () = {
+    use crate::value::LeafValue;
+
+    // LeafNode15 should be exactly 768 bytes
+    assert!(std::mem::size_of::<LeafNode15<LeafValue<u64>>>() == 768);
+
+    // Alignment should be 64 bytes (cache line)
+    assert!(std::mem::align_of::<LeafNode15<LeafValue<u64>>>() == 64);
+};
+
+/// Verify component sizes match expected values.
+const _: () = {
+    use crate::nodeversion::NodeVersion;
+    use crate::permuter::AtomicPermuter15;
+    use crate::suffix::InlineSuffixBag;
+    use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8};
+
+    assert!(std::mem::size_of::<NodeVersion>() == 4);
+    assert!(std::mem::size_of::<AtomicPermuter15>() == 8);
+    assert!(std::mem::size_of::<[AtomicU64; WIDTH_15]>() == 120);
+    assert!(std::mem::size_of::<[AtomicU8; WIDTH_15]>() == 15);
+    assert!(std::mem::size_of::<[AtomicPtr<u8>; WIDTH_15]>() == 120);
+    assert!(std::mem::size_of::<InlineSuffixBag<WIDTH_15, 256>>() == 318);
+};
+
 //
 // #[cfg(test)]
 // mod unit_tests;

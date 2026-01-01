@@ -878,6 +878,20 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
         // Default no-op; implementations may override
     }
 
+    /// Prefetch permutation and ikeys for point lookups.
+    ///
+    /// Lighter-weight than [`Self::prefetch`] - only fetches cache lines
+    /// needed for the search loop. Call before `version.stable()` to
+    /// hide memory latency during version spin-wait.
+    ///
+    /// # Default Implementation
+    ///
+    /// No-op. Implementations may override with actual prefetch.
+    #[inline(always)]
+    fn prefetch_for_search(&self) {
+        // Default no-op; implementations may override
+    }
+
     // ========================================================================
     //  Modification State (modstate) Operations
     // ========================================================================
