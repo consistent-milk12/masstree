@@ -356,15 +356,11 @@ pub fn upper_bound_internode_direct<S: slot::ValueSlot, const WIDTH: usize>(
 /// Used by `MassTreeGeneric` for WIDTH-agnostic traversal.
 ///
 /// # Algorithm
-/// Uses **optimized linear search** for small nodes (WIDTH ≤ 16), matching C++ Masstree.
+/// Uses **linear search** for small nodes (WIDTH ≤ 16), matching C++ Masstree.
 /// Linear search is faster than binary for small nodes due to:
 /// - No branch mispredictions from binary search pattern
 /// - Sequential memory access (better hardware prefetching)
 /// - Simpler loop with no midpoint calculation
-///
-/// Optimizations:
-/// - Loop unrolling (4 at a time)
-/// - Early exit on match
 ///
 /// # Arguments
 /// * `search_ikey` - The 8-byte key to route
@@ -377,62 +373,22 @@ pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
     search_ikey: u64,
     node: &I,
 ) -> usize {
-    // Optimized linear search with loop unrolling
     // Linear search like C++ key_find_upper_bound_by (ksearch.hh:83-95)
+    // Used when WIDTH <= 16 (bound_method_fast selects linear for small nodes)
     let size: usize = node.nkeys();
     let mut l: usize = 0;
 
-    // Unrolled loop: process 4 keys per iteration
-    while l + 4 <= size {
-        // Check key 0
-        let k0: u64 = node.ikey(l);
-        if search_ikey < k0 {
-            return l;
-        }
-        if search_ikey == k0 {
-            return l + 1;
-        }
-
-        // Check key 1
-        let k1: u64 = node.ikey(l + 1);
-        if search_ikey < k1 {
-            return l + 1;
-        }
-        if search_ikey == k1 {
-            return l + 2;
-        }
-
-        // Check key 2
-        let k2: u64 = node.ikey(l + 2);
-        if search_ikey < k2 {
-            return l + 2;
-        }
-        if search_ikey == k2 {
-            return l + 3;
-        }
-
-        // Check key 3
-        let k3: u64 = node.ikey(l + 3);
-        if search_ikey < k3 {
-            return l + 3;
-        }
-        if search_ikey == k3 {
-            return l + 4;
-        }
-
-        l += 4;
-    }
-
-    // Handle remainder (0-3 keys)
     while l < size {
         let node_ikey: u64 = node.ikey(l);
 
         if search_ikey < node_ikey {
-            return l;
-        }
-        if search_ikey == node_ikey {
+            // Found first key greater than search_ikey
+            break;
+        } else if search_ikey == node_ikey {
+            // Exact match - route to right child
             return l + 1;
         }
+        // search_ikey > node_ikey, continue to next
         l += 1;
     }
 

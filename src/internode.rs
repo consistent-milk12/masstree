@@ -812,39 +812,18 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// Returns the index where `insert_ikey` should go, such that
     /// `ikey(i-1) < insert_ikey <= ikey(i)` (or at the end if greater than all).
     ///
-    /// Uses optimized linear search with loop unrolling. Linear search is faster
-    /// than binary for small nodes (WIDTH ≤ 16) due to predictable branches and
-    /// sequential memory access.
+    /// Uses linear search. Linear search is faster than binary for small nodes
+    /// (WIDTH ≤ 16) due to predictable branches and sequential memory access.
     ///
     /// FIXED: Used in the data race fix for recomputing child index after reacquiring lock.
     #[inline]
     pub fn find_insert_position(&self, insert_ikey: u64) -> usize {
         let n: usize = self.nkeys();
-        let mut i: usize = 0;
 
-        // Unrolled loop: process 4 keys per iteration
-        while i + 4 <= n {
+        for i in 0..n {
             if self.ikey(i) >= insert_ikey {
                 return i;
             }
-            if self.ikey(i + 1) >= insert_ikey {
-                return i + 1;
-            }
-            if self.ikey(i + 2) >= insert_ikey {
-                return i + 2;
-            }
-            if self.ikey(i + 3) >= insert_ikey {
-                return i + 3;
-            }
-            i += 4;
-        }
-
-        // Handle remainder (0-3 keys)
-        while i < n {
-            if self.ikey(i) >= insert_ikey {
-                return i;
-            }
-            i += 1;
         }
 
         n

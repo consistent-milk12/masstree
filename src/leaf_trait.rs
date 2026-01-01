@@ -861,23 +861,6 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Matches C++ `leaf::prefetch()` pattern from `masstree_scan.hh:195, 299`.
     fn prefetch(&self);
 
-    /// Prefetch the ikey at the given slot into CPU cache.
-    ///
-    /// This is used during linear search to hide memory latency by
-    /// prefetching future ikeys while processing current ones.
-    ///
-    /// # Arguments
-    ///
-    /// * `slot` - Physical slot index (0..WIDTH)
-    ///
-    /// # Default Implementation
-    ///
-    /// No-op. Implementations may override with actual prefetch.
-    #[inline(always)]
-    fn prefetch_ikey(&self, _slot: usize) {
-        // Default no-op; implementations may override
-    }
-
     // ========================================================================
     //  Modification State (modstate) Operations
     // ========================================================================
