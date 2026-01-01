@@ -758,6 +758,12 @@ where
     // Prefetch the next leaf's data arrays
     next_leaf.prefetch();
 
+    // Prefetch next-next leaf for deeper pipelining
+    let next_next: *mut L = next_leaf.safe_next();
+    if !next_next.is_null() {
+        prefetch_read(next_next);
+    }
+
     // Get stable version
     let next_version: u32 = next_leaf.version().stable();
 
@@ -813,6 +819,12 @@ where
 
     // Prefetch the next leaf's data arrays
     next_leaf.prefetch();
+
+    // Prefetch next-next leaf for deeper pipelining
+    let next_next: *mut L = next_leaf.safe_next();
+    if !next_next.is_null() {
+        prefetch_read(next_next);
+    }
 
     // Get stable version
     let next_version: u32 = next_leaf.version().stable();
@@ -872,6 +884,12 @@ where
     // Prefetch the next leaf's data arrays (ikey0, keylenx, leaf_values)
     // This brings multiple cache lines into L1/L2 before we iterate
     next_leaf.prefetch();
+
+    // Prefetch next-next leaf for deeper pipelining
+    let next_next: *mut L = next_leaf.safe_next();
+    if !next_next.is_null() {
+        prefetch_read(next_next);
+    }
 
     // Get stable version
     let next_version: u32 = next_leaf.version().stable();
