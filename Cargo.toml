@@ -196,11 +196,19 @@ name = "concurrent_maps24"
 harness = false
 
 [[bench]]
+name = "concurrent_maps15"
+harness = false
+
+[[bench]]
 name = "concurrent_masstree24"
 harness = false
 
 [[bench]]
 name = "concurrent_masstree15"
+harness = false
+
+[[bench]]
+name = "concurrent_masstree15_inline"
 harness = false
 
 [[bench]]
@@ -230,6 +238,10 @@ harness = false
 
 [[bench]]
 name = "range_masstree24"
+harness = false
+
+[[bench]]
+name = "range_masstree15"
 harness = false
 
 [[bench]]
@@ -270,6 +282,10 @@ harness = false
 
 [[bench]]
 name = "iai_masstree"
+harness = false
+
+[[bench]]
+name = "rwlock_btreemap_vs_masstree15"
 harness = false
 
 # CLI tools - require `bins` feature to compile

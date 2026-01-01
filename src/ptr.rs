@@ -284,8 +284,10 @@ mod tests {
         let ptr2 = NodePtr::null();
         assert_eq!(ptr1, ptr2);
 
-        let raw = 0x1000 as *mut u8;
-        // SAFETY: Not dereferencing, just testing equality
+        // Use real allocated memory for strict provenance compatibility
+        let mut value: u8 = 42;
+        let raw: *mut u8 = &mut value;
+        // SAFETY: raw points to valid stack memory
         let ptr3 = unsafe { NodePtr::from_raw(raw) };
         let ptr4 = unsafe { NodePtr::from_raw(raw) };
         assert_eq!(ptr3, ptr4);

@@ -16,7 +16,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 ## Status
 
-**v0.3.0** — Core feature complete. Not production-ready.
+**v0.3.0** — Core feature complete. It has been heavily tested but I am not sure about whether it should be usd in actual projects. Such low-level cncurrent data structures usually need a lot of stress testing and have a lot of edge cases that are not easily noticeable. The unsafe code passes miri with strict-provenance flag, but that doesn't really ensure correctness.
 
 | Feature | Status |
 |---------|--------|
@@ -27,7 +27,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 | Leaf coalescing | Lazy queue-based cleanup |
 | Memory reclamation | Seize-based epoch reclamation |
 
-**Tests:** 731+ tests (466 unit + 88 ported from C++ reference + integration). Miri strict provenance clean.
+**Tests:** 755 tests (466 unit + 88 ported from C++ reference + integration). Miri strict provenance clean.
 
 **Not yet implemented:** `Entry` API, `DoubleEndedIterator`, `Extend`/`FromIterator`.
 
@@ -74,15 +74,61 @@ tree.scan_prefix(b"wor", |key, value| {
 }, &guard);
 ```
 
-## When to Use
+## Ergonomic APIs
 
-**Best for:**
+For simpler use cases, auto-guard versions create guards internally:
+
+```rust
+use masstree::MassTree;
+
+let tree: MassTree<u64> = MassTree::new();
+
+// Auto-guard versions (simpler but slightly more overhead per call)
+tree.insert(b"key1", 100).unwrap();
+tree.insert(b"key2", 200).unwrap();
+
+assert_eq!(tree.get(b"key1"), Some(std::sync::Arc::new(100)));
+assert_eq!(tree.len(), 2);
+assert!(!tree.is_empty());
+
+tree.remove(b"key1").unwrap();
+```
+
+### Range Iteration
+
+```rust
+use masstree::{MassTree, RangeBound};
+
+let tree: MassTree<u64> = MassTree::new();
+let guard = tree.guard();
+
+// Populate
+for i in 0..100u64 {
+    tree.insert_with_guard(&i.to_be_bytes(), i, &guard).unwrap();
+}
+
+// Iterator-based range scan
+for entry in tree.range(RangeBound::Included(b""), RangeBound::Unbounded, &guard) {
+    println!("{:?} -> {:?}", entry.key(), entry.value());
+}
+
+// Full iteration
+for entry in tree.iter(&guard) {
+    println!("{:?}", entry.key());
+}
+```
+
+## Analysis of Benchmarks
+
+**Should be better for:**
+
 - Long keys with shared prefixes (URLs, file paths, UUIDs)
 - Range scans over ordered data
 - Mixed read/write workloads
 - High-contention scenarios
 
 **Consider alternatives for:**
+
 - Unordered point lookups → `dashmap` (1.6-1.9x faster)
 - Write-heavy at 6+ threads → `indexset` (better write scaling)
 - Integer keys only → `congee` (ART-based)
@@ -147,7 +193,7 @@ MassTree is **31-55% faster** than TreeIndex and **6-8x faster** than IndexSet o
 | 98% reads | 17.8 Mop/s | 18.9 Mop/s | 94% |
 | Contention | 3.5 Mop/s | 2.6 Mop/s | **132%** |
 
-Read path at parity with C++. Rust wins on contention handling.
+Read path is almost at parity with C++. And currently better at contention handling, but it's currently ~70% in write ops. It should be noted that there are so many fundamental divergences in this implementation (especially the current hyaline based memory reclamation using `seize`), that I am not sure that it SHOULD be called a 'masstree', but MOST of the the core ideas and algorithms are still based on the original paper and repo.
 
 ## How It Works
 
