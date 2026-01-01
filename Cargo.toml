@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -32,6 +32,16 @@ simd = []
 # When enabled, auto-initializes a subscriber that writes NDJSON logs to logs/masstree.jsonl.
 # Respects RUST_LOG env var (default: info). Set MASSTREE_LOG_CONSOLE=0 to disable console.
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
+# Enable CLI tools (divan_parser, criterion_summary). Not needed for library usage.
+bins = [
+	"dep:serde_json",
+	"dep:serde",
+	"dep:chrono",
+	"dep:clap",
+	"dep:comfy-table",
+	"dep:regex",
+	"dep:nom",
+]
 
 [dependencies]
 anyhow = "1.0.100"
@@ -53,14 +63,14 @@ tracing-subscriber = { version = "0.3.22", features = [
 ], optional = true }
 tracing-appender = { version = "0.2.4", optional = true }
 
-# For formatting JSON logs
-serde_json = "1.0.148"
-serde = { version = "1.0.228", features = ["derive"] }
-chrono = "0.4.42"
-clap = { version = "4.5.53", features = ["derive"] }
-comfy-table = "7.2.1"
-regex = "1.12.2"
-nom = "8.0.0"
+# Optional CLI tool dependencies (enabled via `bins` feature)
+serde_json = { version = "1.0.148", optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+chrono = { version = "0.4.42", optional = true }
+clap = { version = "4.5.53", features = ["derive"], optional = true }
+comfy-table = { version = "7.2.1", optional = true }
+regex = { version = "1.12.2", optional = true }
+nom = { version = "8.0.0", optional = true }
 
 
 [dev-dependencies]
@@ -257,3 +267,16 @@ harness = false
 [[bench]]
 name = "iai_masstree"
 harness = false
+
+# CLI tools - require `bins` feature to compile
+[[bin]]
+name = "divan_parser"
+required-features = ["bins"]
+
+[[bin]]
+name = "criterion_summary"
+required-features = ["bins"]
+
+[[bin]]
+name = "layer_explosion"
+required-features = ["bins"]
