@@ -48,6 +48,11 @@ enum LookupResult {
 /// - Layer pointer detection for descent
 ///
 /// Optimized with loop unrolling (3 at a time).
+///
+/// Uses Relaxed ordering for ikey loads after the initial Acquire on permutation.
+/// This is safe because:
+/// 1. `permutation()` uses Acquire ordering, synchronizing with writer's Release
+/// 2. OCC version validation at the end catches any races
 #[inline(always)]
 fn search_leaf_multi_layer<S, L>(leaf: &L, key: &Key<'_>) -> LookupResult
 where
@@ -56,6 +61,7 @@ where
     S::Output: Send + Sync,
     L: LayerCapableLeaf<S>,
 {
+    // Acquire ordering on permutation synchronizes with writer's Release fence
     let perm = leaf.permutation();
     let size = perm.size();
     let target_ikey: u64 = key.ikey();
@@ -71,16 +77,17 @@ where
 
     // Unrolled loop: process 3 slots per iteration
     // Speculative batch load: load all slots and ikeys upfront for better ILP
+    // Use Relaxed ordering - synchronization already established by permutation load
     while i + 3 <= size {
         // Batch load slots (bit extraction only, no memory access)
         let s0: usize = perm.get(i);
         let s1: usize = perm.get(i + 1);
         let s2: usize = perm.get(i + 2);
 
-        // Batch load ikeys (memory loads can be issued in parallel)
-        let ikey0: u64 = leaf.ikey(s0);
-        let ikey1: u64 = leaf.ikey(s1);
-        let ikey2: u64 = leaf.ikey(s2);
+        // Batch load ikeys with Relaxed ordering (safe after permutation Acquire)
+        let ikey0: u64 = leaf.ikey_relaxed(s0);
+        let ikey1: u64 = leaf.ikey_relaxed(s1);
+        let ikey2: u64 = leaf.ikey_relaxed(s2);
 
         // Now check sequentially with early exit
         if ikey0 == target_ikey {
@@ -105,7 +112,7 @@ where
     // Handle remainder (0-2 elements)
     while i < size {
         let slot: usize = perm.get(i);
-        let slot_ikey: u64 = leaf.ikey(slot);
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
         if slot_ikey == target_ikey {
             if let Some(result) = check_slot_match(leaf, slot, search_keylenx, key) {
                 return result;

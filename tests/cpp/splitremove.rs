@@ -9,7 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
 
-use masstree::MassTree24Inline;
+use masstree::MassTree15Inline as MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

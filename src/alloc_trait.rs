@@ -120,12 +120,12 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
 
     /// Allocate an internode and return a type-erased pointer.
     ///
-    /// The concrete type is `InternodeNode<S, L::WIDTH>` but represented as
-    /// `*mut u8` to avoid const generic limitations.
+    /// The concrete type is `InternodeNode<S>` but represented as
+    /// `*mut u8` for uniformity with leaf node pointers.
     ///
     /// # Arguments
     ///
-    /// * `node_ptr` - A `Box<InternodeNode<S, WIDTH>>` cast to `*mut u8` via `Box::into_raw().cast()`
+    /// * `node_ptr` - A `Box<InternodeNode<S>>` cast to `*mut u8` via `Box::into_raw().cast()`
     ///
     /// # Returns
     ///
@@ -213,7 +213,7 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     ///
     /// # Safety
     ///
-    /// - `ptr` must point to a valid `InternodeNode<S, L::WIDTH>`
+    /// - `ptr` must point to a valid `InternodeNode<S>`
     /// - `ptr` must be unreachable from the tree by any new traversal
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>);
 

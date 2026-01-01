@@ -347,8 +347,8 @@ fn test_split_counter_wraparound() {
 }
 
 #[test]
-fn test_simple_has_split_no_fence() {
-    // Test that simple_has_split works correctly (same logic, no fence)
+fn test_has_split_no_compiler_fence() {
+    // Test that has_split_no_compiler_fence works correctly (same logic, no fence)
     let v = NodeVersion::new(true);
     let before = v.stable();
 
@@ -357,11 +357,11 @@ fn test_simple_has_split_no_fence() {
         guard.mark_split();
     }
 
-    // simple_has_split should detect the change
-    assert!(v.simple_has_split(before));
+    // has_split_no_compiler_fence should detect the change
+    assert!(v.has_split_no_compiler_fence(before));
 
     // And should match has_split
-    assert_eq!(v.has_split(before), v.simple_has_split(before));
+    assert_eq!(v.has_split(before), v.has_split_no_compiler_fence(before));
 }
 
 // =======================================================================

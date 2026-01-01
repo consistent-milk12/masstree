@@ -185,8 +185,8 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
 
 /// Trait for internode types used in a `MassTree`.
 ///
-/// Abstracts over `InternodeNode<S, WIDTH>` for different WIDTH values,
-/// enabling generic tree operations.
+/// Abstracts over `InternodeNode<S>` for generic tree operations.
+/// Internode WIDTH is fixed at 15 (matching leaf WIDTH for optimal B+tree fanout).
 ///
 /// # Type Parameters
 ///
@@ -194,8 +194,7 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
 ///
 /// # Implementors
 ///
-/// - `InternodeNode<S, WIDTH>` for WIDTH in 1..=15
-/// - `InternodeNode<S, 24>` for WIDTH=24
+/// - `InternodeNode<S>` (fixed WIDTH=15)
 pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Node width (max number of children).
     const WIDTH: usize;
@@ -283,6 +282,15 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Get child pointer at index.
     fn child(&self, idx: usize) -> *mut u8;
+
+    /// Get child pointer with prefetch hint for the next likely child.
+    ///
+    /// Default implementation just calls `child()` without prefetching.
+    /// Optimized implementations can prefetch the next child to hide latency.
+    #[inline(always)]
+    fn child_with_prefetch(&self, idx: usize, _nkeys: usize) -> *mut u8 {
+        self.child(idx)
+    }
 
     /// Set child pointer at index.
     fn set_child(&self, idx: usize, child: *mut u8);
@@ -429,12 +437,25 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     //  Key Operations
     // ========================================================================
 
-    /// Get ikey at physical slot.
+    /// Get ikey at physical slot using Acquire ordering.
     ///
     /// # Panics
     ///
     /// Debug-panics if `slot >= WIDTH`.
     fn ikey(&self, slot: usize) -> u64;
+
+    /// Get ikey at physical slot using Relaxed ordering.
+    ///
+    /// # Safety Justification
+    ///
+    /// Safe to use when caller has already loaded permutation with Acquire
+    /// ordering and will validate with OCC at the end of the read operation.
+    /// Avoids redundant Acquire fences on each ikey load.
+    ///
+    /// # Panics
+    ///
+    /// Debug-panics if `slot >= WIDTH`.
+    fn ikey_relaxed(&self, slot: usize) -> u64;
 
     /// Set ikey at physical slot.
     ///

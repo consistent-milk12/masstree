@@ -14,7 +14,7 @@
     clippy::cast_possible_wrap
 )]
 
-use masstree::MassTree24Inline;
+use masstree::MassTree15Inline as MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
 use std::thread;

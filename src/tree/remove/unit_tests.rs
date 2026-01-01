@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 // Type aliases for coalescing tests
 type TestLeaf = LeafNode24<LeafValue<u64>>;
-type TestInternode = InternodeNode<LeafValue<u64>, 15>;
+type TestInternode = InternodeNode<LeafValue<u64>>;
 type TestTree = MassTree24<u64>;
 
 #[test]

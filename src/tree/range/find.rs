@@ -179,7 +179,8 @@ where
         //   }
         // This is needed even when start key has no suffix (exact 8-byte prefix)
         // because we want to scan all keys under this layer pointer.
-        let slot_ikey: u64 = leaf.ikey(slot);
+        // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates at end
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
         let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
         cursor_key.assign_store_ikey(slot_ikey);
         // Prefetch layer root before descending (hide memory latency)
@@ -203,7 +204,8 @@ where
                     let key_len = IKEY_SIZE + stored_suffix.len();
 
                     // Store key data in cursor for duplicate filtering
-                    cursor_key.assign_store_ikey(leaf.ikey(slot));
+                    // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates
+                    cursor_key.assign_store_ikey(leaf.ikey_relaxed(slot));
                     let _ = cursor_key.assign_store_suffix(stored_suffix);
                     cursor_key.assign_store_length(key_len);
 
@@ -225,7 +227,8 @@ where
             let key_len = keylenx as usize;
 
             // Store key data in cursor
-            cursor_key.assign_store_ikey(leaf.ikey(slot));
+            // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates
+            cursor_key.assign_store_ikey(leaf.ikey_relaxed(slot));
             cursor_key.assign_store_length(key_len);
 
             // Advance past this position for next iteration
@@ -368,7 +371,8 @@ where
 
     // Read slot data - Guard ensures memory safety
     // No per-entry version check: validated at leaf boundaries only
-    let slot_ikey: u64 = leaf.ikey(slot);
+    // Use Relaxed ordering - permutation loaded with Acquire, OCC validates at end
+    let slot_ikey: u64 = leaf.ikey_relaxed(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
     // Check for duplicate only when needed (after Retry)
@@ -540,7 +544,8 @@ where
     };
 
     // Read slot data - Guard ensures memory safety
-    let slot_ikey: u64 = leaf.ikey(slot);
+    // Use Relaxed ordering - permutation loaded with Acquire, OCC validates at end
+    let slot_ikey: u64 = leaf.ikey_relaxed(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
     // Check for duplicate only when needed (after Retry)
@@ -668,7 +673,8 @@ where
     };
 
     // Read slot data
-    let slot_ikey: u64 = leaf.ikey(slot);
+    // Use Relaxed ordering - permutation loaded with Acquire, OCC validates at end
+    let slot_ikey: u64 = leaf.ikey_relaxed(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
     // Check for duplicate only when needed (after Retry)

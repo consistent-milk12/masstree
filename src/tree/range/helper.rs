@@ -258,9 +258,10 @@ where
     let search_ikey: u64 = cursor_key.current_ikey();
 
     // Linear search through permutation
+    // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates at end
     for i in 0..size {
         let slot: usize = perm.get(i);
-        let slot_ikey: u64 = leaf.ikey(slot);
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
         match search_ikey.cmp(&slot_ikey) {
             Ordering::Less => {
@@ -404,9 +405,10 @@ where
     let cursor_len: usize = cursor_key.current_len();
 
     // Scan forward from start_i to find first slot where cursor <= slot
+    // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates at end
     for i in (start_i + 1)..size {
         let slot: usize = perm.get(i);
-        let slot_ikey: u64 = leaf.ikey(slot);
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
         if slot_ikey != search_ikey {
             // Different ikey: insert before it
@@ -451,9 +453,10 @@ where
     let search_ikey: u64 = cursor_key.current_ikey();
 
     // Scan forward from start_i to find first slot with different ikey
+    // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates at end
     for i in (start_i + 1)..size {
         let slot: usize = perm.get(i);
-        let slot_ikey: u64 = leaf.ikey(slot);
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
         if slot_ikey != search_ikey {
             // Found a slot with different ikey: insert before it

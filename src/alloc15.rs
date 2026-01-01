@@ -1,14 +1,18 @@
-//! Node allocation for [`LeafNode15`] (WIDTH=24).
+//! Node allocation for [`LeafNode15`] with WIDTH=24 leaves and WIDTH=15 internodes.
 //!
 //! This module provides [`SeizeAllocator15`], a Miri-compliant allocator for
-//! 24-slot leaf nodes using `seize` for memory reclamation.
+//! masstree nodes using `seize` for memory reclamation.
 //!
-//! # Note on Internode WIDTH
+//! # Naming Convention
 //!
-//! While leaves use WIDTH=24 (via Permuter24 with u128), internodes are still
-//! limited to WIDTH=15 because they use the original Permuter (u64 with 4-bit slots).
-//! This is fine since internodes just hold child pointers; the benefit of WIDTH=24
-//! comes from leaves holding more keys and splitting less often.
+//! The "15" in [`SeizeAllocator15`] refers to the **internode width** (WIDTH=15),
+//! which uses the original Permuter (u64 with 4-bit slots). Despite the name,
+//! this allocator manages [`LeafNode15`] nodes which have **leaf width of 24**
+//! (via Permuter24 with u128).
+//!
+//! This asymmetry is intentional: internodes just hold child pointers, so WIDTH=15
+//! is sufficient. The benefit of WIDTH=24 comes from leaves holding more keys
+//! and splitting less often.
 
 use std::mem as StdMem;
 
@@ -20,13 +24,14 @@ use crate::internode::InternodeNode;
 use crate::leaf15::LeafNode15;
 use crate::slot::ValueSlot;
 
-/// Width constant for internodes (limited by 4-bit permutation slots).
-const INTERNODE_WIDTH: usize = 15;
-
-/// Miri-compliant allocator for 24-slot leaf nodes.
+/// Miri-compliant allocator for masstree nodes (WIDTH=24 leaves, WIDTH=15 internodes).
 ///
 /// Uses `Box::into_raw()` for clean provenance and `Mutex` for concurrent tracking.
 /// Implements [`NodeAllocatorGeneric`] for use with [`crate::MassTreeGeneric`].
+///
+/// # Naming
+///
+/// The "15" suffix refers to internode width. See module docs for details.
 ///
 /// # Design
 ///
@@ -43,7 +48,7 @@ pub struct SeizeAllocator15<S: ValueSlot> {
     leaf_ptrs: Mutex<Vec<*mut LeafNode15<S>>>,
 
     /// Raw pointers to allocated internode nodes (WIDTH=15).
-    internode_ptrs: Mutex<Vec<*mut InternodeNode<S, INTERNODE_WIDTH>>>,
+    internode_ptrs: Mutex<Vec<*mut InternodeNode<S>>>,
 }
 
 // SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
@@ -134,12 +139,20 @@ where
         // Step 1: Remove from tracking to prevent double-free.
         // The allocator's Drop iterates leaf_ptrs and frees everything,
         // so we must remove the pointer before deferring retirement.
-        {
+        let found = {
             let mut ptrs = self.leaf_ptrs.lock();
             if let Some(pos) = ptrs.iter().position(|&p| p == ptr) {
                 ptrs.swap_remove(pos);
+                true
+            } else {
+                false
             }
-        }
+        };
+
+        debug_assert!(
+            found,
+            "retire_leaf: pointer {ptr:p} not found in tracking list - possible double-retire"
+        );
 
         // Step 2: Defer retirement via seize.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
@@ -156,12 +169,9 @@ where
         reason = "Caller guarantees node_ptr is properly aligned for InternodeNode"
     )]
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
-        // SAFETY: Caller passes a valid Box<InternodeNode<S, INTERNODE_WIDTH>> as *mut u8.
-        // The pointer was originally created from Box::into_raw on an InternodeNode,
-        // so alignment is guaranteed.
-        let node: Box<InternodeNode<S, INTERNODE_WIDTH>> =
-            unsafe { Box::from_raw(node_ptr.cast::<InternodeNode<S, INTERNODE_WIDTH>>()) };
-        let ptr: *mut InternodeNode<S, INTERNODE_WIDTH> = Box::into_raw(node);
+        // Caller passes a valid pointer to an allocated InternodeNode<S>.
+        // Just cast and track - no Box round-trip needed.
+        let ptr: *mut InternodeNode<S> = node_ptr.cast();
         self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
@@ -173,15 +183,23 @@ where
 
     #[inline(always)]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        let typed_ptr: *mut InternodeNode<S, INTERNODE_WIDTH> = ptr.cast();
+        let typed_ptr: *mut InternodeNode<S> = ptr.cast();
 
         // Step 1: Remove from tracking to prevent double-free.
-        {
+        let found = {
             let mut ptrs = self.internode_ptrs.lock();
             if let Some(pos) = ptrs.iter().position(|&p| p == typed_ptr) {
                 ptrs.swap_remove(pos);
+                true
+            } else {
+                false
             }
-        }
+        };
+
+        debug_assert!(
+            found,
+            "retire_internode_erased: pointer {ptr:p} not found in tracking list - possible double-retire"
+        );
 
         // Step 2: Defer retirement via seize.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
@@ -196,7 +214,7 @@ where
     fn teardown_tree(&self, _root_ptr: *mut u8) {
         // Free all tracked nodes using interior mutability
         let leaves: Vec<*mut LeafNode15<S>> = StdMem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode<S, INTERNODE_WIDTH>> =
+        let internodes: Vec<*mut InternodeNode<S>> =
             StdMem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
@@ -215,10 +233,15 @@ where
     }
 
     #[inline(always)]
-    unsafe fn retire_subtree_root(&self, _root_ptr: *mut u8, _guard: &LocalGuard<'_>) {
-        // TODO: Implement subtree traversal for WIDTH=24
-        // For now, subtree retirement is not supported for WIDTH=24
-        // The allocator's Drop will clean up all nodes
+    unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, _guard: &LocalGuard<'_>) {
+        // Subtree traversal not implemented - nodes remain tracked until allocator drop.
+        // This is safe but may delay memory reclamation for replaced layers.
+        debug_assert!(
+            !root_ptr.is_null(),
+            "retire_subtree_root: received null pointer"
+        );
+        // Nodes will be freed when the allocator is dropped.
+        // For eager reclamation, implement subtree traversal here.
     }
 
     /// Allocate a leaf directly without Box intermediate.
@@ -229,15 +252,19 @@ where
         use std::alloc::{Layout, alloc};
 
         let layout = Layout::new::<LeafNode15<S>>();
-        // SAFETY: Layout is valid (non-zero size)
-        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid (non-zero size)")]
+        // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
+        // The global allocator returns memory aligned to layout.align().
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "Layout::new::<LeafNode15> guarantees alignment"
+        )]
         let ptr: *mut LeafNode15<S> = unsafe { alloc(layout).cast::<LeafNode15<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
 
         // Initialize in-place
-        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
             LeafNode15::init_at(ptr, is_root || is_layer_root);
         }
@@ -252,17 +279,20 @@ where
     fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
-        // SAFETY: Layout is valid
-        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid (non-zero size)")]
-        let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
+        let layout = Layout::new::<InternodeNode<S>>();
+        // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
+        // The global allocator returns memory aligned to layout.align().
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "Layout::new::<InternodeNode> guarantees alignment"
+        )]
+        let ptr: *mut InternodeNode<S> = unsafe { alloc(layout).cast::<InternodeNode<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
 
         // Initialize in-place
-        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
             InternodeNode::init_at(ptr, height);
         }
@@ -277,17 +307,20 @@ where
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
-        // SAFETY: Layout is valid
-        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
-        let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
+        let layout = Layout::new::<InternodeNode<S>>();
+        // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
+        // The global allocator returns memory aligned to layout.align().
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "Layout::new::<InternodeNode> guarantees alignment"
+        )]
+        let ptr: *mut InternodeNode<S> = unsafe { alloc(layout).cast::<InternodeNode<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
 
         // Initialize in-place as root
-        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
             InternodeNode::init_at_root(ptr, height);
         }
@@ -306,17 +339,20 @@ where
     ) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
-        // SAFETY: Layout is valid
-        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
-        let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
+        let layout = Layout::new::<InternodeNode<S>>();
+        // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
+        // The global allocator returns memory aligned to layout.align().
+        #[expect(
+            clippy::cast_ptr_alignment,
+            reason = "Layout::new::<InternodeNode> guarantees alignment"
+        )]
+        let ptr: *mut InternodeNode<S> = unsafe { alloc(layout).cast::<InternodeNode<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
 
         // Initialize in-place with split-locked version
-        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
             InternodeNode::init_at_for_split(ptr, parent_version, height);
         }

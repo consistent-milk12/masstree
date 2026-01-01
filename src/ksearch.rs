@@ -300,15 +300,15 @@ where
 /// // Follow child_ptr to continue traversal
 /// ```
 #[inline]
-pub fn upper_bound_internode<S: slot::ValueSlot, const WIDTH: usize>(
+pub fn upper_bound_internode<S: slot::ValueSlot>(
     search_ikey: u64,
-    node: &InternodeNode<S, WIDTH>,
+    node: &InternodeNode<S>,
 ) -> usize {
     let size: usize = node.size();
 
     // Internodes don't use permutation, keys are in physical order
-    // Create identity permutation for the generic function
-    let perm = Permuter::<WIDTH>::make_sorted(size);
+    // Create identity permutation for the generic function (WIDTH=15)
+    let perm = Permuter::<15>::make_sorted(size);
 
     upper_bound_by(size, perm, |slot| {
         let node_ikey: u64 = node.ikey(slot);
@@ -320,9 +320,9 @@ pub fn upper_bound_internode<S: slot::ValueSlot, const WIDTH: usize>(
 ///
 /// Optimized version that doesn't create a permutation.
 #[inline]
-pub fn upper_bound_internode_direct<S: slot::ValueSlot, const WIDTH: usize>(
+pub fn upper_bound_internode_direct<S: slot::ValueSlot>(
     search_ikey: u64,
-    node: &InternodeNode<S, WIDTH>,
+    node: &InternodeNode<S>,
 ) -> usize {
     let size: usize = node.size();
     let mut l: usize = 0;
@@ -372,7 +372,7 @@ pub fn upper_bound_internode_direct<S: slot::ValueSlot, const WIDTH: usize>(
 ///
 /// # Returns
 /// Child index (0 to nkeys). Use `node.child(result)` to get the child pointer.
-#[inline]
+#[inline(always)]
 pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
     search_ikey: u64,
     node: &I,

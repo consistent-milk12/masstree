@@ -18,9 +18,6 @@ use crate::internode::InternodeNode;
 use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
 
-/// Width constant for internodes (limited by 4-bit permutation slots).
-const INTERNODE_WIDTH: usize = 15;
-
 /// Miri-compliant allocator for 24-slot leaf nodes.
 ///
 /// Uses `Box::into_raw()` for clean provenance and `Mutex` for concurrent tracking.
@@ -41,7 +38,7 @@ pub struct SeizeAllocator24<S: ValueSlot> {
     leaf_ptrs: Mutex<Vec<*mut LeafNode24<S>>>,
 
     /// Raw pointers to allocated internode nodes (WIDTH=15).
-    internode_ptrs: Mutex<Vec<*mut InternodeNode<S, INTERNODE_WIDTH>>>,
+    internode_ptrs: Mutex<Vec<*mut InternodeNode<S>>>,
 }
 
 // SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
@@ -154,12 +151,12 @@ where
         reason = "Caller guarantees node_ptr is properly aligned for InternodeNode"
     )]
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
-        // SAFETY: Caller passes a valid Box<InternodeNode<S, INTERNODE_WIDTH>> as *mut u8.
+        // SAFETY: Caller passes a valid Box<InternodeNode<S>> as *mut u8.
         // The pointer was originally created from Box::into_raw on an InternodeNode,
         // so alignment is guaranteed.
-        let node: Box<InternodeNode<S, INTERNODE_WIDTH>> =
-            unsafe { Box::from_raw(node_ptr.cast::<InternodeNode<S, INTERNODE_WIDTH>>()) };
-        let ptr: *mut InternodeNode<S, INTERNODE_WIDTH> = Box::into_raw(node);
+        let node: Box<InternodeNode<S>> =
+            unsafe { Box::from_raw(node_ptr.cast::<InternodeNode<S>>()) };
+        let ptr: *mut InternodeNode<S> = Box::into_raw(node);
         self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
@@ -171,7 +168,7 @@ where
 
     #[inline(always)]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        let typed_ptr: *mut InternodeNode<S, INTERNODE_WIDTH> = ptr.cast();
+        let typed_ptr: *mut InternodeNode<S> = ptr.cast();
 
         // Step 1: Remove from tracking to prevent double-free.
         {
@@ -194,7 +191,7 @@ where
     fn teardown_tree(&self, _root_ptr: *mut u8) {
         // Free all tracked nodes using interior mutability
         let leaves: Vec<*mut LeafNode24<S>> = std::mem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode<S, INTERNODE_WIDTH>> =
+        let internodes: Vec<*mut InternodeNode<S>> =
             std::mem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
@@ -250,11 +247,11 @@ where
     fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
+        let layout = Layout::new::<InternodeNode<S>>();
         // SAFETY: Layout is valid
         #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid (non-zero size)")]
         let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
+            unsafe { alloc(layout).cast::<InternodeNode<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -275,11 +272,11 @@ where
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
+        let layout = Layout::new::<InternodeNode<S>>();
         // SAFETY: Layout is valid
         #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
         let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
+            unsafe { alloc(layout).cast::<InternodeNode<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -304,11 +301,11 @@ where
     ) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<S, INTERNODE_WIDTH>>();
+        let layout = Layout::new::<InternodeNode<S>>();
         // SAFETY: Layout is valid
         #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
         let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout).cast::<InternodeNode<S, INTERNODE_WIDTH>>() };
+            unsafe { alloc(layout).cast::<InternodeNode<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }

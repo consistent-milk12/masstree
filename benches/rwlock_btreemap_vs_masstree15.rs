@@ -50,7 +50,9 @@ fn setup_masstree15<const K: usize>(keys: &[[u8; K]]) -> MassTree15<u64> {
     tree
 }
 
-fn setup_std_rwlock_btreemap<const K: usize>(keys: &[[u8; K]]) -> StdRwLock<BTreeMap<[u8; K], u64>> {
+fn setup_std_rwlock_btreemap<const K: usize>(
+    keys: &[[u8; K]],
+) -> StdRwLock<BTreeMap<[u8; K], u64>> {
     let mut map = BTreeMap::new();
     for (i, key) in keys.iter().enumerate() {
         map.insert(*key, i as u64);
@@ -69,20 +71,20 @@ fn setup_parking_rwlock_btreemap<const K: usize>(
 }
 
 // =============================================================================
-// 01: Uniform random point reads (8B keys)
+// 01: Uniform random point reads (64B keys)
 // =============================================================================
 
-#[divan::bench_group(name = "01_point_get_uniform_8B")]
-mod point_get_uniform_8b {
+#[divan::bench_group(name = "01_point_get_uniform_64B")]
+mod point_get_uniform_64b {
     use super::*;
 
-    const N: usize = 1_000_000;
-    const OPS_PER_THREAD: usize = 100_000;
+    const N: usize = 500_000;
+    const OPS_PER_THREAD: usize = 50_000;
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let tree = Arc::new(setup_masstree15::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let tree = Arc::new(setup_masstree15::<64>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -119,8 +121,8 @@ mod point_get_uniform_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn std_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -161,8 +163,8 @@ mod point_get_uniform_8b {
     /// (e.g. batch processing or request-local caching) rather than lock-per-op.
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn std_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -199,8 +201,8 @@ mod point_get_uniform_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn parking_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -238,8 +240,8 @@ mod point_get_uniform_8b {
     /// Batched read lock for `parking_lot::RwLock`.
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn parking_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -276,20 +278,20 @@ mod point_get_uniform_8b {
 }
 
 // =============================================================================
-// 02: Zipfian point reads (8B keys) - hot key distribution
+// 02: Zipfian point reads (64B keys) - hot key distribution
 // =============================================================================
 
-#[divan::bench_group(name = "02_point_get_zipf_8B")]
-mod point_get_zipf_8b {
+#[divan::bench_group(name = "02_point_get_zipf_64B")]
+mod point_get_zipf_64b {
     use super::*;
 
-    const N: usize = 1_000_000;
-    const OPS_PER_THREAD: usize = 100_000;
+    const N: usize = 500_000;
+    const OPS_PER_THREAD: usize = 50_000;
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let tree = Arc::new(setup_masstree15::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let tree = Arc::new(setup_masstree15::<64>(keys.as_ref()));
         let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -326,8 +328,8 @@ mod point_get_zipf_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn std_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
         let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -364,8 +366,8 @@ mod point_get_zipf_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn std_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
         let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -402,8 +404,8 @@ mod point_get_zipf_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn parking_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
         let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -440,8 +442,8 @@ mod point_get_zipf_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn parking_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
         let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
 
         bencher
@@ -478,11 +480,11 @@ mod point_get_zipf_8b {
 }
 
 // =============================================================================
-// 03: Mixed workload (90% reads / 10% writes) - uniform keys (8B)
+// 03: Mixed workload (90% reads / 10% writes) - uniform keys (64B)
 // =============================================================================
 
-#[divan::bench_group(name = "03_mixed_uniform_90_10_8B")]
-mod mixed_uniform_90_10_8b {
+#[divan::bench_group(name = "03_mixed_uniform_90_10_64B")]
+mod mixed_uniform_90_10_64b {
     use super::*;
 
     const N: usize = 100_000;
@@ -491,12 +493,12 @@ mod mixed_uniform_90_10_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
+        let keys = Arc::new(keys::<64>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .with_inputs(|| Arc::new(setup_masstree15::<8>(keys.as_ref())))
+            .with_inputs(|| Arc::new(setup_masstree15::<64>(keys.as_ref())))
             .bench_local_values(|tree| {
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -533,12 +535,12 @@ mod mixed_uniform_90_10_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn std_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
+        let keys = Arc::new(keys::<64>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .with_inputs(|| Arc::new(setup_std_rwlock_btreemap::<8>(keys.as_ref())))
+            .with_inputs(|| Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref())))
             .bench_local_values(|map| {
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -578,12 +580,12 @@ mod mixed_uniform_90_10_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn parking_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
+        let keys = Arc::new(keys::<64>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD, 42));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .with_inputs(|| Arc::new(setup_parking_rwlock_btreemap::<8>(keys.as_ref())))
+            .with_inputs(|| Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref())))
             .bench_local_values(|map| {
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -623,11 +625,282 @@ mod mixed_uniform_90_10_8b {
 }
 
 // =============================================================================
-// 04: Range scan (contiguous window) - 8B keys
+// 03b: Mixed workload with realistic contention (64B keys, Zipf hotset)
+//
+// Models a common production pattern:
+// - Large map, but most traffic hits a hot subset of keys (Zipfian access).
+// - Writes update hot keys (e.g. counters, session state, caches).
+// - Reads are performed in short bursts; for `RwLock<BTreeMap>`, we model this by
+//   batching the read lock across consecutive reads between writes.
+//
+// This aims to be more realistic than uniform distribution over the entire key
+// space, while still being deterministic.
 // =============================================================================
 
-#[divan::bench_group(name = "04_range_scan_window_8B")]
-mod range_scan_window_8b {
+#[divan::bench_group(name = "03b_mixed_zipf_hotset_95_5_64B")]
+mod mixed_zipf_hotset_95_5_64b {
+    use super::*;
+
+    const N_KEYS: usize = 200_000;
+    const HOTSET: usize = 4_096;
+    const OPS_PER_THREAD: usize = 50_000;
+    const WRITE_EVERY: usize = 20; // 5% writes
+
+    fn access_indices(threads: usize) -> Vec<usize> {
+        // Indices into hotset [0..HOTSET), Zipfian-distributed.
+        zipfian_indices(HOTSET, OPS_PER_THREAD * threads, 42)
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<64>(N_KEYS));
+        let tree = Arc::new(setup_masstree15::<64>(keys.as_ref()));
+        let indices = Arc::new(access_indices(threads));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(&tree);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let guard = tree.guard();
+                            let mut sum = 0u64;
+                            let base = t * OPS_PER_THREAD;
+                            start.wait();
+
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[base + i];
+                                if i % WRITE_EVERY == 0 {
+                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
+                                    sum = sum.wrapping_add(*v);
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    /// Lock-per-op baseline for `std::sync::RwLock<BTreeMap>`.
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn std_rwlock_btreemap(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<64>(N_KEYS));
+        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
+        let indices = Arc::new(access_indices(threads));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let base = t * OPS_PER_THREAD;
+                            start.wait();
+
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[base + i];
+                                if i % WRITE_EVERY == 0 {
+                                    let mut guard = map.write().unwrap();
+                                    guard.insert(keys[idx], i as u64);
+                                } else {
+                                    let guard = map.read().unwrap();
+                                    if let Some(v) = guard.get(&keys[idx]) {
+                                        sum = sum.wrapping_add(*v);
+                                    }
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    /// Batched read locks: acquire one read lock for the entire read-run between writes.
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn std_rwlock_btreemap_batched_reads(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<64>(N_KEYS));
+        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
+        let indices = Arc::new(access_indices(threads));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let base = t * OPS_PER_THREAD;
+                            start.wait();
+
+                            let mut i = 0usize;
+                            while i < OPS_PER_THREAD {
+                                let idx = indices[base + i];
+                                if i % WRITE_EVERY == 0 {
+                                    let mut guard = map.write().unwrap();
+                                    guard.insert(keys[idx], i as u64);
+                                    i += 1;
+                                    continue;
+                                }
+
+                                let next_write = i + (WRITE_EVERY - (i % WRITE_EVERY));
+                                let end = next_write.min(OPS_PER_THREAD);
+
+                                let guard = map.read().unwrap();
+                                for j in i..end {
+                                    let idx = indices[base + j];
+                                    if let Some(v) = guard.get(&keys[idx]) {
+                                        sum = sum.wrapping_add(*v);
+                                    }
+                                }
+                                i = end;
+                            }
+
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    /// Lock-per-op baseline for `parking_lot::RwLock<BTreeMap>`.
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn parking_rwlock_btreemap(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<64>(N_KEYS));
+        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
+        let indices = Arc::new(access_indices(threads));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let base = t * OPS_PER_THREAD;
+                            start.wait();
+
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[base + i];
+                                if i % WRITE_EVERY == 0 {
+                                    let mut guard = map.write();
+                                    guard.insert(keys[idx], i as u64);
+                                } else {
+                                    let guard = map.read();
+                                    if let Some(v) = guard.get(&keys[idx]) {
+                                        sum = sum.wrapping_add(*v);
+                                    }
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    /// Batched read locks for `parking_lot::RwLock`.
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn parking_rwlock_btreemap_batched_reads(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<64>(N_KEYS));
+        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
+        let indices = Arc::new(access_indices(threads));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let base = t * OPS_PER_THREAD;
+                            start.wait();
+
+                            let mut i = 0usize;
+                            while i < OPS_PER_THREAD {
+                                let idx = indices[base + i];
+                                if i % WRITE_EVERY == 0 {
+                                    let mut guard = map.write();
+                                    guard.insert(keys[idx], i as u64);
+                                    i += 1;
+                                    continue;
+                                }
+
+                                let next_write = i + (WRITE_EVERY - (i % WRITE_EVERY));
+                                let end = next_write.min(OPS_PER_THREAD);
+
+                                let guard = map.read();
+                                for j in i..end {
+                                    let idx = indices[base + j];
+                                    if let Some(v) = guard.get(&keys[idx]) {
+                                        sum = sum.wrapping_add(*v);
+                                    }
+                                }
+                                i = end;
+                            }
+
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 04: Range scan (contiguous window) - 64B keys
+// =============================================================================
+
+#[divan::bench_group(name = "04_range_scan_window_64B")]
+mod range_scan_window_64b {
     use super::*;
 
     const N: usize = 200_000;
@@ -636,8 +909,8 @@ mod range_scan_window_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let tree = Arc::new(setup_masstree15::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let tree = Arc::new(setup_masstree15::<64>(keys.as_ref()));
         let starts = Arc::new(uniform_indices(N - SCAN_LEN, SCANS_PER_THREAD * threads, 7));
 
         bencher
@@ -685,8 +958,8 @@ mod range_scan_window_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn std_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
         let starts = Arc::new(uniform_indices(N - SCAN_LEN, SCANS_PER_THREAD * threads, 7));
 
         bencher
@@ -726,8 +999,8 @@ mod range_scan_window_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn parking_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<8>(keys.as_ref()));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
         let starts = Arc::new(uniform_indices(N - SCAN_LEN, SCANS_PER_THREAD * threads, 7));
 
         bencher
@@ -767,15 +1040,15 @@ mod range_scan_window_8b {
 }
 
 // =============================================================================
-// 05: Range scan while writers update keys (8B keys)
+// 05: Range scan while writers update keys (64B keys)
 //
-// This models “read-mostly scans” in the presence of background writes.
+// This models "read-mostly scans" in the presence of background writes.
 // - `RwLock<BTreeMap>` scans will block writers while holding the read lock.
 // - `MassTree15` scans should progress without global blocking.
 // =============================================================================
 
-#[divan::bench_group(name = "05_range_scan_window_with_writes_8B")]
-mod range_scan_window_with_writes_8b {
+#[divan::bench_group(name = "05_range_scan_window_with_writes_64B")]
+mod range_scan_window_with_writes_64b {
     use super::*;
 
     const N: usize = 200_000;
@@ -790,9 +1063,13 @@ mod range_scan_window_with_writes_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, scan_threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let tree = Arc::new(setup_masstree15::<8>(keys.as_ref()));
-        let starts = Arc::new(uniform_indices(N - SCAN_LEN, SCANS_PER_THREAD * scan_threads, 7));
+        let keys = Arc::new(keys::<64>(N));
+        let tree = Arc::new(setup_masstree15::<64>(keys.as_ref()));
+        let starts = Arc::new(uniform_indices(
+            N - SCAN_LEN,
+            SCANS_PER_THREAD * scan_threads,
+            7,
+        ));
         let writer_idxs = Arc::new(writer_indices());
 
         bencher
@@ -863,9 +1140,13 @@ mod range_scan_window_with_writes_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn std_rwlock_btreemap(bencher: Bencher, scan_threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<8>(keys.as_ref()));
-        let starts = Arc::new(uniform_indices(N - SCAN_LEN, SCANS_PER_THREAD * scan_threads, 7));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
+        let starts = Arc::new(uniform_indices(
+            N - SCAN_LEN,
+            SCANS_PER_THREAD * scan_threads,
+            7,
+        ));
         let writer_idxs = Arc::new(writer_indices());
 
         bencher
@@ -928,9 +1209,13 @@ mod range_scan_window_with_writes_8b {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn parking_rwlock_btreemap(bencher: Bencher, scan_threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<8>(keys.as_ref()));
-        let starts = Arc::new(uniform_indices(N - SCAN_LEN, SCANS_PER_THREAD * scan_threads, 7));
+        let keys = Arc::new(keys::<64>(N));
+        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
+        let starts = Arc::new(uniform_indices(
+            N - SCAN_LEN,
+            SCANS_PER_THREAD * scan_threads,
+            7,
+        ));
         let writer_idxs = Arc::new(writer_indices());
 
         bencher
@@ -993,419 +1278,12 @@ mod range_scan_window_with_writes_8b {
 }
 
 // =============================================================================
-// 06: Uniform random point reads (64B keys)
+// 06: Uniform random point reads (64B keys), with aggressive shared prefixes
 //
-// Note: 64B keys model “heavier” real keys (IDs + namespace + payload-ish),
-// and increase memory bandwidth / cache pressure for all structures.
+// This is the regime where MassTree's layered/trie design is expected to help.
 // =============================================================================
 
-#[divan::bench_group(name = "06_point_get_uniform_64B")]
-mod point_get_uniform_64b {
-    use super::*;
-
-    const N: usize = 200_000;
-    const OPS_PER_THREAD: usize = 50_000;
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn masstree15(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let tree = Arc::new(setup_masstree15::<64>(keys.as_ref()));
-        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let tree = Arc::clone(&tree);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let guard = tree.guard();
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                let guard = map.read().unwrap();
-                                if let Some(v) = guard.get(&keys[idx]) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            let guard = map.read().unwrap();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                if let Some(v) = guard.get(&keys[idx]) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn parking_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                let guard = map.read();
-                                if let Some(v) = guard.get(&keys[idx]) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn parking_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            let guard = map.read();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                if let Some(v) = guard.get(&keys[idx]) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-}
-
-// =============================================================================
-// 07: Zipfian point reads (64B keys)
-// =============================================================================
-
-#[divan::bench_group(name = "07_point_get_zipf_64B")]
-mod point_get_zipf_64b {
-    use super::*;
-
-    const N: usize = 200_000;
-    const OPS_PER_THREAD: usize = 50_000;
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn masstree15(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let tree = Arc::new(setup_masstree15::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let tree = Arc::clone(&tree);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let guard = tree.guard();
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                let guard = map.read().unwrap();
-                                if let Some(v) = guard.get(&keys[idx]) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn std_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            let guard = map.read().unwrap();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                if let Some(v) = guard.get(&keys[idx]) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn parking_rwlock_btreemap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                let guard = map.read();
-                                if let Some(v) = guard.get(&keys[idx]) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn parking_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<64>(N));
-        let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start = Arc::clone(&start);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let base = t * OPS_PER_THREAD;
-                            start.wait();
-                            let guard = map.read();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[base + i];
-                                if let Some(v) = guard.get(&keys[idx]) {
-                                    sum = sum.wrapping_add(*v);
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-}
-
-// =============================================================================
-// 08: Uniform random point reads (64B keys), with aggressive shared prefixes
-//
-// This is the regime where MassTree’s layered/trie design is expected to help.
-// =============================================================================
-
-#[divan::bench_group(name = "08_point_get_uniform_shared_prefix_64B")]
+#[divan::bench_group(name = "06_point_get_uniform_shared_prefix_64B")]
 mod point_get_uniform_shared_prefix_64b {
     use super::*;
 

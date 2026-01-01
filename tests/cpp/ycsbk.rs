@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree24Inline;
+use masstree::MassTree15Inline as MassTree24Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
 use std::thread;

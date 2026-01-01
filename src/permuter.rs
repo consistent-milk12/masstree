@@ -171,7 +171,22 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// Position i maps to slot i for i in `0..n` (sorted/natural order).
     /// Remaining slots are free and will be allocated from `back()`.
     ///
+    /// # Free Slot Ordering
+    ///
+    /// Free slots (positions `n..WIDTH`) are stored in **reverse order** so that
+    /// `back()` returns slot `n` (the next slot to allocate). This maintains the
+    /// invariant that slots are allocated in order: 0, 1, 2, ...
+    ///
+    /// ## Example (WIDTH=15, n=5)
+    ///
+    /// ```text
+    /// Positions 0-4 (in use):  slot 0, slot 1, slot 2, slot 3, slot 4
+    /// Positions 5-14 (free):   slot 14, slot 13, ..., slot 6, slot 5
+    /// back() = get(14) = slot 5  ← next to allocate
+    /// ```
+    ///
     /// # Panics
+    ///
     /// Panics if `n > WIDTH`.
     #[must_use]
     pub fn make_sorted(n: usize) -> Self {
@@ -195,9 +210,9 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
 
         // We need positions 0..n to be sorted (slot i at position i)
         // and positions n..WIDTH to hold remaining slots in reverse order
-        // so back() = get(WIDTH - 1) return slot n (next to allocate)
+        // so back() = get(WIDTH - 1) returns slot n (next to allocate)
 
-        // Build the free slot porting: positions n..WIDTH hold slots n..WIDTH - 1
+        // Build the free slot portion: positions n..WIDTH hold slots n..WIDTH-1
         // in reverse order so back() = slot n
         let mut value: u64 = n as u64;
 
@@ -205,9 +220,14 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let sorted_mask: u64 = ((1u64 << (n * 4)) - 1) << 4;
         value |= sorted & sorted_mask;
 
-        // Fill positions n..WIDTH with remaining slots in reverse order
-        // Position n gets slot WIDTH - 1, position n + 1 gets slot WIDTH - 2, etc.
-        // Position WIDTH - 1 (back) gets slot n
+        // Fill positions n..WIDTH with remaining slots in REVERSE order.
+        // This ensures back() returns the lowest free slot (slot n).
+        //
+        // Example for n=5, WIDTH=15:
+        //   Position 5:  slot = 15 - 1 - (5-5) = 14
+        //   Position 6:  slot = 15 - 1 - (6-5) = 13
+        //   ...
+        //   Position 14: slot = 15 - 1 - (14-5) = 5  ← back() returns this
         let mut pos: usize = n;
 
         while pos < WIDTH {
@@ -328,6 +348,11 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// # Panics
     ///
     /// Panics in debug mode if positions are not in the free region.
+    ///
+    /// # Implementation Note
+    ///
+    /// Uses the same XOR swap trick as [`Self::exchange`]. The XOR swap works on
+    /// 4-bit slot values without requiring a temporary variable.
     #[inline(always)]
     pub fn swap_free_slots(&mut self, pos_i: usize, pos_j: usize) {
         let size: usize = self.size();
@@ -347,7 +372,10 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
             return; // Nothing to swap
         }
 
-        // XOR swap trick (same as exchange()) - single operation instead of 4
+        // XOR swap trick: swap two 4-bit values without a temporary.
+        // 1. diff = XOR of the two 4-bit values
+        // 2. XOR diff into both positions → values are swapped
+        // Same algorithm as exchange(), kept inline for performance.
         let i_shift: usize = (pos_i + 1) * 4;
         let j_shift: usize = (pos_j + 1) * 4;
         let diff: u64 = ((self.value >> i_shift) ^ (self.value >> j_shift)) & 0xF;
@@ -468,8 +496,11 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let i_shift: usize = (i + 1) * 4;
         let mask: u64 = !((1u64 << i_shift) - 1);
 
-        // Clear unused bits above WIDTH positions (for 64-bit safety)
-        // For WIDTH=15, width_shift=64 which would overflow, so use saturating logic
+        // Clear unused bits above WIDTH positions (for 64-bit safety).
+        //
+        // For WIDTH=15: width_shift = 16 * 4 = 64, which would cause `1u64 << 64`
+        // to overflow (in Rust, this wraps to 1, not 0). We use u64::MAX instead.
+        // For WIDTH < 15: we compute the proper mask to clear upper bits.
         let width_shift: usize = (WIDTH + 1) * 4;
 
         let width_mask: u64 = if width_shift >= 64 {
@@ -588,6 +619,19 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     ///
     /// This effectively rotates the elements from position `i` to the end
     /// by `(j - i)` positions.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// rotate(2, 4) with WIDTH=7:
+    ///   Before: [A, B, C, D, E, F, G]
+    ///                ^     ^
+    ///                i     j
+    ///   After:  [A, B, E, F, G, C, D]
+    ///
+    /// Positions 2..7 rotated left by 2 places (j - i = 2).
+    /// Elements at positions 2,3 wrap around to positions 5,6.
+    /// ```
     ///
     /// # Panics
     /// Panics in debug mode if `i > j` or `j > WIDTH`.

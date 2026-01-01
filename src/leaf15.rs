@@ -2,14 +2,18 @@
 //!
 //! Leaf node for [`crate::MassTree`] with WIDTH=15 (15 slots).
 //!
-//! This module provides `LeafNode15`, a leaf node variant optimized for reduced
-//! split frequency by using 15 slots instead of the standard 15. The key difference
-//! is the use of [`AtomicPermuter15`] (u64) instead of `AtomicU64` for permutation.
+//! This module provides [`LeafNode15`], a leaf node using 15 slots with a u64
+//! permutation field ([`AtomicPermuter15`]).
 //!
 //! # Design
 //!
-//! The 15-slot design requires 4 bits per slot (values 0-14) for WIDTH=15.
+//! The 15-slot design requires 4 bits per slot (values 0-14).
 //! Total: 4 (size) + 15×4 (slots) = 64 bits, fitting in u64.
+//!
+//! # Naming Convention
+//!
+//! The "15" in `LeafNode15` refers to the slot count (WIDTH=15), matching the
+//! internode width. See `leaf24.rs` for the WIDTH=24 variant.
 
 use std::array as StdArray;
 use std::cell::UnsafeCell;
@@ -44,6 +48,18 @@ pub const LAYER_KEYLENX: u8 = 128;
 /// Width constant for [`LeafNode15`].
 pub const WIDTH_15: usize = 15;
 
+/// Return value from [`LeafNode15::ksuf_match_result`] indicating an exact match.
+pub const MATCH_RESULT_EXACT: i32 = 1;
+
+/// Return value from [`LeafNode15::ksuf_match_result`] indicating same ikey but different key.
+pub const MATCH_RESULT_MISMATCH: i32 = 0;
+
+/// Return value from [`LeafNode15::ksuf_match_result`] indicating a layer pointer.
+///
+/// This is `-IKEY_SIZE` (i.e., `-8`), signaling the caller should descend into
+/// the sublayer rather than treating this as a key match or mismatch.
+pub const MATCH_RESULT_LAYER: i32 = -(IKEY_SIZE as i32);
+
 /// Modification state: node is in insert mode (normal operation).
 pub const MODSTATE_INSERT: u8 = 0;
 
@@ -61,15 +77,31 @@ pub const MODSTATE_EMPTY: u8 = 3;
 ///
 /// # Concurrency Model
 ///
-/// Same as `LeafNode<S, WIDTH>` but uses [`AtomicPermuter15`] for the permutation
-/// field, enabling 15 slots instead of 15.
+/// Uses optimistic concurrency control (OCC) via [`NodeVersion`] for readers,
+/// and lock-based writes. The [`AtomicPermuter15`] permutation field enables
+/// lock-free slot ordering updates.
 ///
-/// # Memory Layout
+/// # Memory Layout (768 bytes, 12 cache lines)
 ///
 /// ```text
-/// Cache Line 0 (64 bytes): version + modstate + padding
-/// Cache Line 1 (64 bytes): permutation (u64 = 16 bytes) + padding (48 bytes)
-/// Cache Lines 2+: keys, keylenx, values (15 slots each)
+/// Offset   Size   Field
+/// ------   ----   -----
+/// 0        4B     version (NodeVersion)
+/// 4        1B     modstate
+/// 5        55B    _pad0 (cache line isolation)
+/// 64       8B     permutation (AtomicPermuter15)
+/// 72       56B    _pad1 (cache line isolation)
+/// 128      120B   ikey0[15] (15 × 8B)
+/// 248      15B    keylenx[15]
+/// 263      1B     implicit padding
+/// 264      120B   leaf_values[15] (15 × 8B)
+/// 384      318B   inline_ksuf (InlineSuffixBag)
+/// 702      2B     implicit padding
+/// 704      8B     external_ksuf
+/// 712      8B     next
+/// 720      8B     prev
+/// 728      8B     parent
+/// 736      32B    tail padding (align to 64B)
 /// ```
 #[repr(C, align(64))]
 pub struct LeafNode15<S: ValueSlot> {
@@ -289,6 +321,8 @@ impl<S: ValueSlot> LeafNode15<S> {
 
     /// Get the ikey at the given physical slot.
     ///
+    /// Uses Acquire ordering to synchronize with writer's Release stores.
+    ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH_15`.
     #[must_use]
@@ -301,6 +335,32 @@ impl<S: ValueSlot> LeafNode15<S> {
         debug_assert!(slot < WIDTH_15, "ikey: slot out of bounds");
 
         self.ikey0[slot].load(READ_ORD)
+    }
+
+    /// Get the ikey at the given physical slot using Relaxed ordering.
+    ///
+    /// # Safety Justification
+    ///
+    /// Safe to use Relaxed when:
+    /// 1. Caller has already loaded permutation with Acquire ordering, which
+    ///    synchronizes with the writer's Release fence after modifications
+    /// 2. OCC version validation at the end of the read catches any races
+    ///
+    /// This avoids redundant Acquire fences on each ikey load (up to 15 per search),
+    /// improving read throughput by 10-15%.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `slot >= WIDTH_15`.
+    #[must_use]
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter15, valid by construction"
+    )]
+    pub fn ikey_relaxed(&self, slot: usize) -> u64 {
+        debug_assert!(slot < WIDTH_15, "ikey_relaxed: slot out of bounds");
+
+        self.ikey0[slot].load(RELAXED)
     }
 
     /// Set the ikey at the given physical slot.
@@ -360,10 +420,10 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Offset   Size    Field
     /// ------   ----    -----
     /// 0        64B     Cache line 0: version + modstate + padding
-    /// 64       64B     Cache line 1: permutation (u64) + padding
-    /// 128      192B    ikey0 (24 × 8B = 192B, ~3 cache lines)
-    /// 320      24B     keylenx (24 × 1B)
-    /// 344      192B    leaf_values (24 × 8B = 192B, ~3 cache lines)
+    /// 64       64B     Cache line 1: permutation + padding
+    /// 128      120B    ikey0 (15 × 8B, ~2 cache lines)
+    /// 248      15B     keylenx (15 × 1B)
+    /// 264      120B    leaf_values (15 × 8B, ~2 cache lines)
     /// ```
     ///
     /// # C++ Reference
@@ -373,18 +433,16 @@ impl<S: ValueSlot> LeafNode15<S> {
     pub fn prefetch(&self) {
         let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
 
-        // Prefetch ikey0 array (starts at offset 128, spans ~3 cache lines)
+        // Prefetch ikey0 array (starts at offset 128, spans 2 cache lines)
         // Skip cache lines 0-1 (version/permutation) - already accessed
         // SAFETY: self_ptr is derived from a valid reference, and offsets are within struct bounds.
         unsafe {
-            prefetch_read(self_ptr.add(128)); // ikey0[0..8]
-            prefetch_read(self_ptr.add(192)); // ikey0[8..16]
-            prefetch_read(self_ptr.add(256)); // ikey0[16..24] + keylenx
+            prefetch_read(self_ptr.add(128)); // CL2: ikey0[0..7]
+            prefetch_read(self_ptr.add(192)); // CL3: ikey0[8..14] + keylenx[0..6]
 
-            // Prefetch leaf_values array (starts at ~344, spans ~3 cache lines)
-            prefetch_read(self_ptr.add(320)); // keylenx + leaf_values[0..8]
-            prefetch_read(self_ptr.add(384)); // leaf_values[8..16]
-            prefetch_read(self_ptr.add(448)); // leaf_values[16..24]
+            // Prefetch leaf_values array (starts at offset 264, spans 2 cache lines)
+            prefetch_read(self_ptr.add(256)); // CL4: keylenx[7..14] + leaf_values[0..5]
+            prefetch_read(self_ptr.add(320)); // CL5: leaf_values[6..14]
         }
     }
 
@@ -397,9 +455,9 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// # Memory Layout (WIDTH=15)
     ///
     /// ```text
-    /// Cache Line 1 (64-127):   permutation - needed for slot ordering
-    /// Cache Line 2 (128-191):  ikey0[0..7] - first 8 ikeys
-    /// Cache Line 3 (192-247):  ikey0[8..14] - remaining ikeys
+    /// Cache Line 1 (64-127):   permutation (8B) + padding - needed for slot ordering
+    /// Cache Line 2 (128-191):  ikey0[0..7] - first 8 ikeys (64B)
+    /// Cache Line 3 (192-247):  ikey0[8..14] - remaining 7 ikeys (56B)
     /// ```
     #[inline(always)]
     pub fn prefetch_for_search(&self) {
@@ -408,9 +466,9 @@ impl<S: ValueSlot> LeafNode15<S> {
         // SAFETY: Offsets are within LeafNode15 bounds (768 bytes total).
         // Prefetch is a hint - invalid addresses cause no fault.
         unsafe {
-            prefetch_read(self_ptr.add(64));  // Cache line 1: permutation
-            prefetch_read(self_ptr.add(128)); // Cache line 2: ikey0[0..7]
-            prefetch_read(self_ptr.add(192)); // Cache line 3: ikey0[8..14]
+            prefetch_read(self_ptr.add(64));  // CL1: permutation
+            prefetch_read(self_ptr.add(128)); // CL2: ikey0[0..7]
+            prefetch_read(self_ptr.add(192)); // CL3: ikey0[8..14]
         }
     }
 
@@ -559,9 +617,13 @@ impl<S: ValueSlot> LeafNode15<S> {
             slot < WIDTH_15,
             "assign_ksuf: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
+        debug_assert!(
+            self.version.is_locked() || self.version.is_unpublished(),
+            "assign_ksuf: caller must hold lock or node must be unpublished"
+        );
 
         // FAST PATH 1: Try inline storage first (no allocation!)
-        // SAFETY: We hold the lock, so no concurrent writers.
+        // SAFETY: We hold the lock (verified above), so no concurrent writers.
         let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
 
@@ -596,8 +658,13 @@ impl<S: ValueSlot> LeafNode15<S> {
     #[inline(never)]
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
     unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+        debug_assert!(
+            self.version.is_locked(),
+            "assign_ksuf_slow: caller must hold lock"
+        );
+
         let perm = self.permutation();
-        // SAFETY: Caller holds lock, ensuring exclusive access to inline_ksuf.
+        // SAFETY: Caller holds lock (verified above), ensuring exclusive access to inline_ksuf.
         let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
 
@@ -655,9 +722,13 @@ impl<S: ValueSlot> LeafNode15<S> {
             slot < WIDTH_15,
             "clear_ksuf: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
+        debug_assert!(
+            self.version.is_locked(),
+            "clear_ksuf: caller must hold lock"
+        );
 
         // Clear from inline storage
-        // SAFETY: We hold the lock, so no concurrent writers.
+        // SAFETY: We hold the lock (verified above), so no concurrent writers.
         let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
         inline.clear(slot);
@@ -759,16 +830,11 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Match result for layer-aware key comparison.
     ///
     /// Returns:
-    /// * `1` - Exact match
-    /// * `0` - Same ikey but different key
-    /// * `-8` - Slot is a layer pointer
+    /// * [`MATCH_RESULT_EXACT`] (1) - Exact match
+    /// * [`MATCH_RESULT_MISMATCH`] (0) - Same ikey but different key
+    /// * [`MATCH_RESULT_LAYER`] (-8) - Slot is a layer pointer
     #[must_use]
     #[inline(always)]
-    #[expect(
-        clippy::cast_possible_wrap,
-        clippy::cast_possible_truncation,
-        reason = "IKEY_SIZE (8) fits in i32"
-    )]
     pub fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
         debug_assert!(
             slot < WIDTH_15,
@@ -778,18 +844,18 @@ impl<S: ValueSlot> LeafNode15<S> {
         let stored_keylenx: u8 = self.keylenx(slot);
 
         if Self::keylenx_is_layer(stored_keylenx) {
-            return -(IKEY_SIZE as i32);
+            return MATCH_RESULT_LAYER;
         }
 
         if !self.has_ksuf(slot) {
             if stored_keylenx == keylenx && suffix.is_empty() {
-                return 1;
+                return MATCH_RESULT_EXACT;
             }
-            return 0;
+            return MATCH_RESULT_MISMATCH;
         }
 
         if suffix.is_empty() {
-            return 0;
+            return MATCH_RESULT_MISMATCH;
         }
 
         i32::from(self.ksuf_equals(slot, suffix))
@@ -808,6 +874,11 @@ impl<S: ValueSlot> LeafNode15<S> {
         exclude_slot: Option<usize>,
         guard: &LocalGuard<'_>,
     ) -> usize {
+        debug_assert!(
+            self.version.is_locked(),
+            "compact_ksuf: caller must hold lock"
+        );
+
         let old_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if old_ptr.is_null() {
             return 0;
@@ -1098,16 +1169,6 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
     }
 
-    /// CAS-based compare-and-swap on the next pointer.
-    ///
-    /// # Errors
-    /// Returns `Err(current_value)` if the CAS failed.
-    #[inline]
-    #[expect(dead_code)]
-    fn cas_next(&self, current: *mut Self, new: *mut Self) -> Result<*mut Self, *mut Self> {
-        self.next
-            .compare_exchange(current, new, CAS_SUCCESS, CAS_FAILURE)
-    }
 
     /// Unlink this leaf from the B-link doubly-linked chain.
     ///
@@ -1419,8 +1480,8 @@ unsafe impl<S: ValueSlot + Send + Sync> Sync for LeafNode15<S> {}
 
 impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> for LeafNode15<S> {
     type Perm = Permuter15;
-    // Internodes are limited to WIDTH=15 due to 4-bit permutation slots
-    type Internode = crate::internode::InternodeNode<S, 15>;
+    // Internodes use fixed WIDTH=15 (4-bit permutation slots)
+    type Internode = crate::internode::InternodeNode<S>;
     const WIDTH: usize = WIDTH_15;
 
     #[inline(always)]
@@ -1461,6 +1522,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn ikey(&self, slot: usize) -> u64 {
         Self::ikey(self, slot)
+    }
+
+    #[inline(always)]
+    fn ikey_relaxed(&self, slot: usize) -> u64 {
+        Self::ikey_relaxed(self, slot)
     }
 
     #[inline(always)]
@@ -2202,20 +2268,24 @@ impl<V: Copy + Send + Sync + 'static>
 //
 // LeafNode15 memory layout (768 bytes, 12 cache lines):
 //
-// Cache Line 0 (bytes 0-63):   version (4B) + modstate (1B) + padding (59B)
-// Cache Line 1 (bytes 64-127): permutation (8B) + padding (56B)
-// Cache Lines 2-3 (128-247):   ikey0[15] (120B)
-// Cache Line 4 (248-311):      keylenx[15] (15B) + padding (1B) + values start
-// Cache Lines 4-6 (264-383):   leaf_values[15] (120B)
-// Cache Lines 7-11 (384-701):  inline_ksuf (318B)
-// Cache Lines 11-12 (704-735): external_ksuf + next + prev + parent (32B)
-// Tail padding (736-767):      32B to align to 64B boundary
+// CL 0  (0-63):     version (4B) + modstate (1B) + _pad0 (55B)
+// CL 1  (64-127):   permutation (8B) + _pad1 (56B)
+// CL 2  (128-191):  ikey0[0..7] (64B)
+// CL 3  (192-255):  ikey0[8..14] (56B) + keylenx[0..7] (8B)
+// CL 4  (256-319):  keylenx[8..14] (7B) + pad (1B) + leaf_values[0..6] (56B)
+// CL 5  (320-383):  leaf_values[7..14] (64B)
+// CL 6  (384-447):  inline_ksuf[0..63] (64B)
+// CL 7  (448-511):  inline_ksuf[64..127] (64B)
+// CL 8  (512-575):  inline_ksuf[128..191] (64B)
+// CL 9  (576-639):  inline_ksuf[192..255] (64B)
+// CL 10 (640-703):  inline_ksuf[256..317] (62B) + pad (2B)
+// CL 11 (704-767):  external_ksuf (8B) + next (8B) + prev (8B) + parent (8B) + tail pad (32B)
 //
-// Hot path (get) touches 4-6 cache lines:
+// Hot path (get) touches 3-5 cache lines:
 //   CL 0: version (OCC validation)
 //   CL 1: permutation (slot ordering)
 //   CL 2-3: ikey0 (key comparison)
-//   CL 4-6: leaf_values (on match)
+//   CL 4-5: leaf_values (on match)
 
 /// Verify LeafNode15 size is exactly 768 bytes (12 cache lines).
 /// This ensures the hot path layout is cache-optimal.

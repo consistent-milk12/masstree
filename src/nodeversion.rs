@@ -195,7 +195,10 @@ impl Drop for LockGuard<'_> {
 impl LockGuard<'_> {
     #[inline(always)]
     const fn version(&self) -> &NodeVersion {
-        // SAFETY: `version` is non-null and valid for the guard’s lifetime.
+        // SAFETY: `self.version` is valid for the guard's lifetime because:
+        // - LockGuard<'a> holds PhantomData<&'a NodeVersion>, enforcing lifetime
+        // - The pointer was created from a valid reference in lock()/try_lock()
+        // - Nodes are freed via deferred reclamation, never while locked
         unsafe { &*self.version }
     }
 
@@ -208,30 +211,21 @@ impl LockGuard<'_> {
 
     /// Mark the node as being inserted into.
     ///
-    /// NOTE: With auto dirty on lock strategy, the `INSERTING_BIT` is already set
-    /// by `lock()`. This method is kept for:
+    /// NOTE: With the always-dirty-on-lock strategy, `INSERTING_BIT` is already set
+    /// by `lock()`. This method is now a no-op kept for:
     /// 1. Explicit documentation of intent in calling code
-    /// 2. Updating `locked_value` tracking if needed
-    /// 3. Backward compatibility with code that calls this explicitly
+    /// 2. Backward compatibility with code that calls this explicitly
     ///
-    /// This method is idempotent, calling it multiple times has no additional effect.
+    /// This method is idempotent.
     #[inline]
     pub fn mark_insert(&mut self) {
-        if (self.locked_value & INSERTING_BIT) == 0 {
-            // This shouldn't happen with the always dirty on lock strategy
-            // we are currently going for. But still handle it gracefully.
-            let value: u32 = self.version().value.load(Ordering::Relaxed);
-
-            self.version()
-                .value
-                .store(value | INSERTING_BIT, Ordering::Release);
-
-            fence(Ordering::Acquire);
-
-            self.locked_value |= INSERTING_BIT;
-        }
-
-        // If already set, this is a no-op (idempotent)
+        // With always-dirty-on-lock strategy, INSERTING_BIT should always be set.
+        // Debug-assert to catch any regression if lock() behavior changes.
+        debug_assert!(
+            (self.locked_value & INSERTING_BIT) != 0,
+            "mark_insert: INSERTING_BIT should already be set by lock()"
+        );
+        // No-op: INSERTING_BIT is already set
     }
 
     /// Mark the node as being split.
@@ -354,6 +348,24 @@ impl NodeVersion {
     #[inline(always)]
     pub fn is_locked(&self) -> bool {
         (self.value.load(Ordering::Relaxed) & LOCK_BIT) != 0
+    }
+
+    /// Check if this node is in initial/unpublished state.
+    ///
+    /// A node is "unpublished" if it has never been modified (version counters
+    /// are zero). This means it was just allocated and hasn't been linked into
+    /// the tree yet, so no other thread can see it.
+    ///
+    /// Used to allow lock-free initialization of newly allocated nodes.
+    #[must_use]
+    #[inline(always)]
+    pub fn is_unpublished(&self) -> bool {
+        let v = self.value.load(Ordering::Relaxed);
+        // A newly created leaf has value = ISLEAF_BIT (possibly | ROOT_BIT)
+        // A newly created internode has value = 0 (possibly | ROOT_BIT)
+        // Mask out the allowed initial flags and check if result is zero
+        let mask = ISLEAF_BIT | ROOT_BIT;
+        (v & !mask) == 0
     }
 
     /// Check if this node is being inserted into.
@@ -502,21 +514,31 @@ impl NodeVersion {
         (old ^ self.value.load(Ordering::Relaxed)) >= VSPLIT_LOWBIT
     }
 
-    /// Check if a split has occurred since `old`, without a fence.
+    /// Check if a split has occurred since `old`, without a compiler fence.
     ///
     /// This is a faster variant of [`Self::has_split`] that omits the compiler fence.
-    /// Use this only when you've already issued a fence (e.g., after an Acquire load).
+    /// Use this only when you've already issued a fence (e.g., after an Acquire load)
+    /// that ensures all prior reads are complete.
+    ///
+    /// # Ordering Note
+    ///
+    /// This method still uses `Ordering::Acquire` on the load, which provides
+    /// hardware memory ordering on ARM. The difference from [`Self::has_split`] is
+    /// the absence of the **compiler fence** that prevents the compiler from
+    /// reordering prior reads to after this check.
     ///
     /// # Safety (Logical)
+    ///
     /// The caller must ensure that all reads that need to be validated have
     /// already been completed and are visible before calling this method.
     /// Typically this means you've already done an Acquire load or fence.
     ///
     /// # Reference
+    ///
     /// C++ `nodeversion.hh` has `simple_has_split()` for this purpose.
     #[must_use]
     #[inline(always)]
-    pub fn simple_has_split(&self, old: u32) -> bool {
+    pub fn has_split_no_compiler_fence(&self, old: u32) -> bool {
         (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
     }
 
