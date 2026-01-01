@@ -36,7 +36,7 @@
 
 mod bench_utils;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode};
 use masstree::MassTree15;
 use scc::TreeIndex;
 use sdd::Guard as SddGuard;
@@ -59,6 +59,7 @@ use std::thread;
 
 fn bench_01_sequential_flooding(c: &mut Criterion) {
     let mut group = c.benchmark_group("01_sequential_flooding");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
 
     const OPS_PER_THREAD: usize = 100_000;
@@ -156,6 +157,7 @@ fn bench_01_sequential_flooding(c: &mut Criterion) {
 
 fn bench_02_hot_range_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("02_hot_range_contention");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
 
     const OPS_PER_THREAD: usize = 100_000;
@@ -301,6 +303,7 @@ fn make_long_key(val: u64) -> [u8; 64] {
 
 fn bench_03_layer_explosion(c: &mut Criterion) {
     let mut group = c.benchmark_group("03_layer_explosion");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
 
     const OPS_PER_THREAD: usize = 25_000;
@@ -394,6 +397,7 @@ fn bench_03_layer_explosion(c: &mut Criterion) {
 
 fn bench_04_split_storm(c: &mut Criterion) {
     let mut group = c.benchmark_group("04_split_storm");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
 
     const WRITE_OPS: usize = 50_000;
@@ -560,6 +564,7 @@ fn bench_04_split_storm(c: &mut Criterion) {
 
 fn bench_05_cascading_splits(c: &mut Criterion) {
     let mut group = c.benchmark_group("05_cascading_splits");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
 
     const BATCHES: usize = 100;
@@ -661,6 +666,7 @@ fn bench_05_cascading_splits(c: &mut Criterion) {
 
 fn bench_06_interleaved_splits(c: &mut Criterion) {
     let mut group = c.benchmark_group("06_interleaved_splits");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
 
     const OPS_PER_THREAD: usize = 50_000;
@@ -750,6 +756,7 @@ fn make_prefix_key(prefix: u64, suffix: u64) -> [u8; 24] {
 
 fn bench_07_prefix_collision_splits(c: &mut Criterion) {
     let mut group = c.benchmark_group("07_prefix_collision_splits");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
 
     const OPS_PER_THREAD: usize = 25_000;

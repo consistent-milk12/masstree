@@ -49,7 +49,7 @@ use bench_utils::{
     keys_interleaved_ranges, keys_reverse, keys_sequential, keys_shared_prefix, keys_sparse,
     keys_suffix_only_differ,
 };
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 use masstree::{MassTree24, RangeBound};
 use std::hint::black_box;
 use std::sync::Arc;
@@ -85,6 +85,7 @@ fn setup_masstree24<const K: usize>(keys: &[[u8; K]]) -> MassTree24<u64> {
 
 fn bench_01_sequential_full_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("01_sequential_full_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     let keys = Arc::new(keys_sequential::<8>(N));
     let tree = Arc::new(setup_masstree24(&keys));
@@ -139,6 +140,7 @@ fn bench_01_sequential_full_scan(c: &mut Criterion) {
 
 fn bench_02_reverse_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("02_reverse_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     let keys = Arc::new(keys_reverse::<8>(N));
     let tree = Arc::new(setup_masstree24(&keys));
@@ -193,6 +195,7 @@ fn bench_02_reverse_scan(c: &mut Criterion) {
 
 fn bench_03_clustered_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("03_clustered_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     const CLUSTERS: usize = 1000;
     const KEYS_PER_CLUSTER: usize = N / CLUSTERS;
@@ -251,6 +254,7 @@ fn bench_03_clustered_scan(c: &mut Criterion) {
 
 fn bench_04_sparse_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("04_sparse_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     const SPACING: u64 = 1000;
 
@@ -307,6 +311,7 @@ fn bench_04_sparse_scan(c: &mut Criterion) {
 
 fn bench_05_shared_prefix_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("05_shared_prefix_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     const PREFIX_BUCKETS: u64 = 100; // 10k keys per prefix
 
@@ -363,6 +368,7 @@ fn bench_05_shared_prefix_scan(c: &mut Criterion) {
 
 fn bench_06_suffix_differ_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("06_suffix_differ_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     let keys = Arc::new(keys_suffix_only_differ::<32>(N));
     let tree = Arc::new(setup_masstree24(&keys));
@@ -417,6 +423,7 @@ fn bench_06_suffix_differ_scan(c: &mut Criterion) {
 
 fn bench_07_hierarchical_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("07_hierarchical_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     // 100 namespaces * 100 categories * 100 items = 1M keys
     const NAMESPACES: usize = 100;
@@ -476,6 +483,7 @@ fn bench_07_hierarchical_scan(c: &mut Criterion) {
 
 fn bench_08_adversarial_splits_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("08_adversarial_splits_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     let keys = Arc::new(keys_adversarial_splits::<8>(N));
     let tree = Arc::new(setup_masstree24(&keys));
@@ -530,6 +538,7 @@ fn bench_08_adversarial_splits_scan(c: &mut Criterion) {
 
 fn bench_09_interleaved_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("09_interleaved_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     const HOT_RANGES: usize = 100;
     const KEYS_PER_RANGE: usize = N / HOT_RANGES;
@@ -592,6 +601,7 @@ fn bench_09_interleaved_scan(c: &mut Criterion) {
 
 fn bench_10_blink_stress_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("10_blink_stress_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     let keys = Arc::new(keys_blink_stress::<8>(N));
     let tree = Arc::new(setup_masstree24(&keys));
@@ -646,6 +656,7 @@ fn bench_10_blink_stress_scan(c: &mut Criterion) {
 
 fn bench_11_random_keys_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("11_random_keys_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     let keys = Arc::new(keys::<8>(N));
     let tree = Arc::new(setup_masstree24(&keys));
@@ -700,6 +711,7 @@ fn bench_11_random_keys_scan(c: &mut Criterion) {
 
 fn bench_12_long_keys_64b_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("12_long_keys_64b_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     let keys = Arc::new(keys::<64>(N));
     let tree = Arc::new(setup_masstree24(&keys));
@@ -754,6 +766,7 @@ fn bench_12_long_keys_64b_scan(c: &mut Criterion) {
 
 fn bench_13_scan_while_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("13_scan_while_insert");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
 
     const INITIAL_N: usize = 900_000;
@@ -847,6 +860,7 @@ fn bench_13_scan_while_insert(c: &mut Criterion) {
 
 fn bench_14_prefix_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("14_prefix_scan");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(10);
 
     const PREFIX_BUCKETS: u64 = 100;
@@ -898,6 +912,7 @@ fn bench_14_prefix_scan(c: &mut Criterion) {
 
 fn bench_15_full_scan_aggregate(c: &mut Criterion) {
     let mut group = c.benchmark_group("15_full_scan_aggregate");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(50);
 
     const SCAN_N: usize = 50_000; // Smaller dataset for full scans
@@ -956,6 +971,7 @@ fn bench_15_full_scan_aggregate(c: &mut Criterion) {
 
 fn bench_16_insert_heavy(c: &mut Criterion) {
     let mut group = c.benchmark_group("16_insert_heavy");
+    group.sampling_mode(SamplingMode::Flat);
 
     const INITIAL_N: usize = 100_000;
     const OPS: usize = 10_000;
@@ -1030,6 +1046,7 @@ fn bench_16_insert_heavy(c: &mut Criterion) {
 
 fn bench_17_hot_spot(c: &mut Criterion) {
     let mut group = c.benchmark_group("17_hot_spot");
+    group.sampling_mode(SamplingMode::Flat);
     group.sample_size(20);
 
     const TOTAL_N: usize = 1_000_000;
@@ -1096,6 +1113,7 @@ fn bench_17_hot_spot(c: &mut Criterion) {
 
 fn bench_18_split_inducing_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("18_split_inducing_scan");
+    group.sampling_mode(SamplingMode::Flat);
 
     const INITIAL_N: usize = 100_000;
     const INSERT_N: usize = 50_000;

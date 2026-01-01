@@ -329,6 +329,25 @@ impl<S: ValueSlot> LeafNode15<S> {
         ikeys
     }
 
+    /// Prefetch the ikey at the given slot into CPU cache.
+    ///
+    /// This is used during linear search to hide memory latency by
+    /// prefetching future ikeys while processing current ones.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index (0..WIDTH_15)
+    ///
+    /// # Safety
+    ///
+    /// The slot must be in range [0, WIDTH_15). No bounds check in release mode.
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "Caller ensures slot is valid")]
+    pub fn prefetch_ikey(&self, slot: usize) {
+        debug_assert!(slot < WIDTH_15, "prefetch_ikey: slot out of bounds");
+        prefetch_read(&raw const self.ikey0[slot]);
+    }
+
     /// Prefetch leaf node data for range scans.
     ///
     /// Brings the node's key arrays (`ikey0`, `keylenx`) and value pointers
@@ -1865,6 +1884,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn prefetch(&self) {
         Self::prefetch(self);
+    }
+
+    #[inline(always)]
+    fn prefetch_ikey(&self, slot: usize) {
+        Self::prefetch_ikey(self, slot);
     }
 
     // ========================================================================

@@ -21,7 +21,7 @@ mod bench_utils;
 use std::hint::black_box;
 
 use bench_utils::{keys, keys_shared_prefix, keys_shared_prefix_chunks, uniform_indices};
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 use masstree::MassTree15;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -63,6 +63,7 @@ fn generate_string_value(i: usize) -> String {
 
 fn bench_01_concurrent_writes_disjoint(c: &mut Criterion) {
     let mut group = c.benchmark_group("01_concurrent_writes_disjoint");
+    group.sampling_mode(SamplingMode::Flat);
     const OPS_PER_THREAD: usize = 50_000;
 
     for threads in [1, 2, 3, 4, 5, 6] {
@@ -104,6 +105,7 @@ fn bench_01_concurrent_writes_disjoint(c: &mut Criterion) {
 
 fn bench_02_concurrent_writes_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("02_concurrent_writes_contention");
+    group.sampling_mode(SamplingMode::Flat);
     const OPS_PER_THREAD: usize = 10_000;
     const KEY_SPACE: usize = 1_000;
 
@@ -179,6 +181,7 @@ fn bench_03_single_threaded_insert(c: &mut Criterion) {
 
 fn bench_04_read_after_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("04_read_after_write");
+    group.sampling_mode(SamplingMode::Flat);
     const KEY_COUNT: usize = 50_000;
 
     fn local_setup() -> MassTree15<u64> {
@@ -233,6 +236,7 @@ fn bench_04_read_after_write(c: &mut Criterion) {
 
 fn bench_05_get_by_key_size(c: &mut Criterion) {
     let mut group = c.benchmark_group("05_get_by_key_size");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 10_000;
 
     // 8B keys
@@ -324,6 +328,7 @@ fn bench_05_get_by_key_size(c: &mut Criterion) {
 
 fn bench_06_insert_by_key_size(c: &mut Criterion) {
     let mut group = c.benchmark_group("06_insert_by_key_size");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 1000;
 
     for (name, key_size) in [("8B", 8), ("16B", 16), ("24B", 24), ("32B", 32)] {
@@ -413,6 +418,7 @@ fn bench_06_insert_by_key_size(c: &mut Criterion) {
 
 fn bench_07_concurrent_reads_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("07_concurrent_reads_scaling");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 10_000_000;
     const OPS_PER_THREAD: usize = 50_000;
 
@@ -469,6 +475,7 @@ fn bench_07_concurrent_reads_scaling(c: &mut Criterion) {
 
 fn bench_08_concurrent_reads_long_keys(c: &mut Criterion) {
     let mut group = c.benchmark_group("08_concurrent_reads_long_keys");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 10_000_000;
     const OPS_PER_THREAD: usize = 50_000;
 
@@ -525,6 +532,7 @@ fn bench_08_concurrent_reads_long_keys(c: &mut Criterion) {
 
 fn bench_09_mixed_uniform(c: &mut Criterion) {
     let mut group = c.benchmark_group("09_mixed_uniform");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
     const WRITE_RATIO: usize = 10;
@@ -586,6 +594,7 @@ fn bench_09_mixed_uniform(c: &mut Criterion) {
 
 fn bench_10a_read_scaling_8b(c: &mut Criterion) {
     let mut group = c.benchmark_group("10a_read_scaling_8B");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 10_000_000;
     const OPS_PER_THREAD: usize = 50_000;
 
@@ -639,6 +648,7 @@ fn bench_10a_read_scaling_8b(c: &mut Criterion) {
 
 fn bench_10b_read_scaling_32b(c: &mut Criterion) {
     let mut group = c.benchmark_group("10b_read_scaling_32B");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 10_000_000;
     const OPS_PER_THREAD: usize = 50_000;
 
@@ -692,6 +702,7 @@ fn bench_10b_read_scaling_32b(c: &mut Criterion) {
 
 fn bench_10c_write_scaling_32b(c: &mut Criterion) {
     let mut group = c.benchmark_group("10c_write_scaling_32B");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
 
@@ -751,6 +762,7 @@ fn bench_10c_write_scaling_32b(c: &mut Criterion) {
 
 fn bench_11_single_hot_key(c: &mut Criterion) {
     let mut group = c.benchmark_group("11_single_hot_key");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
 
@@ -804,6 +816,7 @@ fn bench_11_single_hot_key(c: &mut Criterion) {
 
 fn bench_11a_random_read_8b(c: &mut Criterion) {
     let mut group = c.benchmark_group("11a_random_read_8B");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 1_000_000;
     const OPS_PER_THREAD: usize = 100_000;
 
@@ -860,6 +873,7 @@ fn bench_11a_random_read_8b(c: &mut Criterion) {
 
 fn bench_11b_random_read_32b(c: &mut Criterion) {
     let mut group = c.benchmark_group("11b_random_read_32B");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 1_000_000;
     const OPS_PER_THREAD: usize = 100_000;
 
@@ -916,6 +930,7 @@ fn bench_11b_random_read_32b(c: &mut Criterion) {
 
 fn bench_12_get_by_key_size_shared_prefix(c: &mut Criterion) {
     let mut group = c.benchmark_group("12_get_by_key_size_shared_prefix");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 10_000;
     const PREFIX_BUCKETS: u64 = 256;
 
@@ -988,6 +1003,7 @@ fn bench_12_get_by_key_size_shared_prefix(c: &mut Criterion) {
 
 fn bench_12a_string_values_read(c: &mut Criterion) {
     let mut group = c.benchmark_group("12a_string_values_read");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 500_000;
     const OPS_PER_THREAD: usize = 50_000;
 
@@ -1044,6 +1060,7 @@ fn bench_12a_string_values_read(c: &mut Criterion) {
 
 fn bench_12b_string_values_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("12b_string_values_write");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
 
@@ -1107,6 +1124,7 @@ fn bench_12b_string_values_write(c: &mut Criterion) {
 
 fn bench_13_concurrent_reads_long_keys_shared_prefix(c: &mut Criterion) {
     let mut group = c.benchmark_group("13_concurrent_reads_long_keys_shared_prefix");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 10_000_000;
     const OPS_PER_THREAD: usize = 50_000;
     const PREFIX_BUCKETS: u64 = 256;
@@ -1164,6 +1182,7 @@ fn bench_13_concurrent_reads_long_keys_shared_prefix(c: &mut Criterion) {
 
 fn bench_14a_aggressive_shared_prefix_read(c: &mut Criterion) {
     let mut group = c.benchmark_group("14a_aggressive_shared_prefix_read");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 1_000_000;
     const OPS_PER_THREAD: usize = 100_000;
     const PREFIX_CHUNKS: usize = 3;
@@ -1226,6 +1245,7 @@ fn bench_14a_aggressive_shared_prefix_read(c: &mut Criterion) {
 
 fn bench_14b_aggressive_shared_prefix_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("14b_aggressive_shared_prefix_write");
+    group.sampling_mode(SamplingMode::Flat);
     const N: usize = 100_000;
     const OPS_PER_THREAD: usize = 10_000;
     const PREFIX_CHUNKS: usize = 3;
