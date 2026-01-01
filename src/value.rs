@@ -13,7 +13,7 @@ use std::sync::Arc;
 //  LeafValue<V> - Arc-based storage
 // ============================================================================
 
-/// Value stored in a leaf slot (default mode with `Arc<V>`).
+/// Value stored in a leaf slot (default mode with Arc-wrapped values).
 ///
 /// Uses reference counting for cheap cloning on reads.
 #[derive(Default)]
@@ -112,7 +112,7 @@ impl<V> LeafValue<V> {
             .expect("LeafValue::as_value called on non-Value variant")
     }
 
-    /// Clone the Arc<V> (cheap reference counting increment).
+    /// Clone the `Arc<V>` (cheap reference counting increment).
     ///
     /// # Panics
     /// Panics if this is not a Value variant.

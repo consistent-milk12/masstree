@@ -1599,3 +1599,112 @@ fn test_many_suffix_keys_same_prefix() {
 
     assert_eq!(tree.len(), 20);
 }
+
+// ========================================================================
+//  MassTree15 Tests (WIDTH=15 variant)
+// ========================================================================
+
+#[test]
+fn test_masstree15_basic() {
+    let tree: MassTree15<u64> = MassTree15::new();
+
+    assert!(tree.is_empty());
+
+    tree.insert(b"hello", 123).unwrap();
+    tree.insert(b"world", 456).unwrap();
+
+    assert_eq!(tree.len(), 2);
+    assert_eq!(*tree.get(b"hello").unwrap(), 123);
+    assert_eq!(*tree.get(b"world").unwrap(), 456);
+}
+
+#[test]
+fn test_masstree15_splits() {
+    // Insert enough keys to trigger splits (WIDTH=15)
+    let tree: MassTree15<u64> = MassTree15::new();
+    let guard = tree.guard();
+
+    for i in 0u64..100 {
+        let key = i.to_be_bytes();
+        tree.insert_with_guard(&key, i, &guard).unwrap();
+    }
+
+    assert_eq!(tree.len(), 100);
+
+    // Verify all keys
+    for i in 0u64..100 {
+        let key = i.to_be_bytes();
+        let result = tree.get_with_guard(&key, &guard);
+        assert!(result.is_some(), "Key {i} not found");
+        assert_eq!(*result.unwrap(), i);
+    }
+}
+
+#[test]
+fn test_masstree15_remove() {
+    let tree: MassTree15<u64> = MassTree15::new();
+    let guard = tree.guard();
+
+    for i in 0u64..50 {
+        let key = i.to_be_bytes();
+        tree.insert_with_guard(&key, i, &guard).unwrap();
+    }
+
+    // Remove half
+    for i in 0u64..25 {
+        let key = i.to_be_bytes();
+        let result = tree.remove_with_guard(&key, &guard).unwrap();
+        assert!(result.is_some());
+        assert_eq!(*result.unwrap(), i);
+    }
+
+    assert_eq!(tree.len(), 25);
+
+    // Verify remaining
+    for i in 25u64..50 {
+        let key = i.to_be_bytes();
+        assert!(tree.get_with_guard(&key, &guard).is_some());
+    }
+}
+
+#[test]
+fn test_masstree15_inline() {
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
+    let guard = tree.guard();
+
+    for i in 0u64..100 {
+        let key = i.to_be_bytes();
+        tree.insert_with_guard(&key, i, &guard).unwrap();
+    }
+
+    assert_eq!(tree.len(), 100);
+
+    for i in 0u64..100 {
+        let key = i.to_be_bytes();
+        let result = tree.get_with_guard(&key, &guard);
+        assert_eq!(result, Some(i));
+    }
+}
+
+#[test]
+fn test_masstree15_concurrent() {
+    let tree = Arc::new(MassTree15::<u64>::new());
+    let threads: Vec<_> = (0..4)
+        .map(|t| {
+            let tree = Arc::clone(&tree);
+            thread::spawn(move || {
+                let guard = tree.guard();
+                for i in 0u64..100 {
+                    let key = (t * 1000 + i).to_be_bytes();
+                    tree.insert_with_guard(&key, t * 1000 + i, &guard).unwrap();
+                }
+            })
+        })
+        .collect();
+
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    assert_eq!(tree.len(), 400);
+}

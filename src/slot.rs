@@ -1,4 +1,4 @@
-//! Value slot abstraction for [`MassTree`] storage modes.
+//! Value slot abstraction for [`crate::MassTree`] storage modes.
 //!
 //! This module provides the [`ValueSlot`] trait that abstracts how values
 //! are stored in leaf nodes. The trait is implemented for existing types:
@@ -38,7 +38,7 @@ use crate::value::{LeafValue, LeafValueIndex};
 /// The core complexity is ensuring allocation happens exactly once per insert,
 /// even across retries (splits, layer creation). The trait achieves this by
 /// separating Value (user input) from Output (retryable handle). A secondary
-/// benefit is unifying the implementation via [`TreeCore<S>`] to avoid code duplication.
+/// benefit is unifying the implementation via the generic tree to avoid code duplication.
 ///
 /// # Associated Types
 /// - `Value`: The user-facing value type (what users insert)

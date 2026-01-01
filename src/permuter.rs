@@ -685,6 +685,133 @@ impl<const WIDTH: usize> PermutationProvider for Permuter<WIDTH> {
 //  TreePermutation Implementation
 // ============================================================================
 
+// ============================================================================
+//  AtomicPermuter (u64-based atomic wrapper)
+// ============================================================================
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Atomic wrapper for [`Permuter<WIDTH>`] where WIDTH <= 15.
+///
+/// Uses standard library `AtomicU64` since `Permuter<WIDTH>` fits in 64 bits.
+/// This is simpler than `AtomicPermuter24` which requires `portable-atomic` for u128.
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct AtomicPermuter<const WIDTH: usize = 15> {
+    inner: AtomicU64,
+}
+
+impl<const WIDTH: usize> AtomicPermuter<WIDTH> {
+    /// Create with empty permutation.
+    #[must_use]
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self {
+            inner: AtomicU64::new(Permuter::<WIDTH>::empty().value()),
+        }
+    }
+
+    /// Create from existing permuter.
+    #[must_use]
+    #[inline(always)]
+    pub const fn from_permuter(perm: Permuter<WIDTH>) -> Self {
+        Self {
+            inner: AtomicU64::new(perm.value),
+        }
+    }
+
+    /// Load with ordering.
+    #[inline(always)]
+    pub fn load(&self, order: Ordering) -> Permuter<WIDTH> {
+        Permuter::from_value(self.inner.load(order))
+    }
+
+    /// Store with ordering.
+    #[inline(always)]
+    pub fn store(&self, val: Permuter<WIDTH>, order: Ordering) {
+        self.inner.store(val.value, order);
+    }
+
+    /// Compare-and-exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with the current value if the comparison failed.
+    #[inline(always)]
+    pub fn compare_exchange(
+        &self,
+        expected: Permuter<WIDTH>,
+        new: Permuter<WIDTH>,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<Permuter<WIDTH>, Permuter<WIDTH>> {
+        self.inner
+            .compare_exchange(expected.value, new.value, success, failure)
+            .map(Permuter::from_value)
+            .map_err(Permuter::from_value)
+    }
+
+    /// Compare-and-exchange weak.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with the current value if the comparison failed, or spuriously.
+    #[inline(always)]
+    pub fn compare_exchange_weak(
+        &self,
+        expected: Permuter<WIDTH>,
+        new: Permuter<WIDTH>,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<Permuter<WIDTH>, Permuter<WIDTH>> {
+        self.inner
+            .compare_exchange_weak(expected.value, new.value, success, failure)
+            .map(Permuter::from_value)
+            .map_err(Permuter::from_value)
+    }
+
+    /// Load raw u64 value.
+    #[inline(always)]
+    pub fn load_raw(&self, order: Ordering) -> u64 {
+        self.inner.load(order)
+    }
+
+    /// Store raw u64 value.
+    #[inline(always)]
+    pub fn store_raw(&self, val: u64, order: Ordering) {
+        self.inner.store(val, order);
+    }
+
+    /// CAS on raw value.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with the current value if the comparison failed.
+    #[inline(always)]
+    pub fn compare_exchange_raw(
+        &self,
+        expected: u64,
+        new: u64,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<u64, u64> {
+        self.inner.compare_exchange(expected, new, success, failure)
+    }
+}
+
+impl<const WIDTH: usize> Default for AtomicPermuter<WIDTH> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Type alias for the standard 15-slot atomic permuter.
+pub type AtomicPermuter15 = AtomicPermuter<15>;
+
+// ============================================================================
+//  TreePermutation Implementation
+// ============================================================================
+
 impl<const WIDTH: usize> TreePermutation for Permuter<WIDTH> {
     type Raw = u64;
     const WIDTH: usize = WIDTH;

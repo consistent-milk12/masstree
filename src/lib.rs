@@ -7,18 +7,26 @@
 //! - B+tree at each trie node for the current 8-byte slice
 //! - Cache-friendly: 8-byte key slices fit in registers
 //!
-//! ## Status: Beta (v0.2.0)
+//! ## Status: v0.3.0 (Core Feature Complete)
 //!
-//! Core operations work. Range scans implemented. Deletion planned for v0.3.0.
+//! All core operations implemented and tested. Not yet production-ready—concurrent
+//! data structures require extensive stress testing beyond what Miri and proptests provide.
 //!
 //! | Feature | Status |
 //! |---------|--------|
 //! | Concurrent get | Lock-free, version-validated |
 //! | Concurrent insert | Fine-grained leaf locking |
+//! | Concurrent remove | Fine-grained locking + lazy coalescing |
 //! | Split propagation | Leaf and internode |
-//! | Range scans | `scan`, `scan_ref`, `scan_prefix` |
-//! | Memory reclamation | Partial (values freed, nodes at tree drop) |
-//! | Deletion | Planned (v0.3.0) |
+//! | Range scans | `scan`, `scan_ref`, `scan_prefix`, iterator |
+//! | Memory reclamation | Seize-based epoch reclamation |
+//! | Lazy leaf coalescing | Queue-based background cleanup |
+//!
+//! ### Not Yet Implemented
+//!
+//! - `Entry` API (like `std::collections::HashMap`)
+//! - `DoubleEndedIterator` (reverse iteration)
+//! - `Extend`, `FromIterator` traits
 //!
 //! ## Thread Safety
 //!
@@ -109,7 +117,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 /// ```
 #[cfg(feature = "tracing")]
 pub fn init_tracing() {
-    use std::env;
+    use std::env as StdEnv;
+    use std::fs as StdFs;
     use std::sync::OnceLock;
     use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -120,12 +129,12 @@ pub fn init_tracing() {
     // OnceLock::get_or_init ensures this runs exactly once
     GUARD.get_or_init(|| {
         // Configuration from environment
-        let log_dir = env::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
+        let log_dir = StdEnv::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
         let console_enabled = false;
-        let filter_str = env::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
+        let filter_str = StdEnv::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
 
         // Create log directory
-        let _ = std::fs::create_dir_all(&log_dir);
+        let _ = StdFs::create_dir_all(&log_dir);
 
         // File appender - non-rotating, writes to masstree.jsonl (NDJSON)
         let file_appender = tracing_appender::rolling::never(&log_dir, "masstree.jsonl");
@@ -173,11 +182,13 @@ pub fn init_tracing() {
 #[cfg(not(feature = "tracing"))]
 pub const fn init_tracing() {}
 
+pub mod alloc15;
 pub mod alloc24;
 pub mod alloc_trait;
 pub mod internode;
 pub mod key;
 pub mod ksearch;
+pub mod leaf15;
 pub mod leaf24;
 pub mod leaf_trait;
 pub mod link;
@@ -200,15 +211,18 @@ pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
 // Re-export allocator trait for generic tree operations
 pub use alloc_trait::NodeAllocatorGeneric;
 
-// Re-export Permuter24 types
+// Re-export Permuter types
+pub use permuter::{AtomicPermuter, AtomicPermuter15, Permuter, Permuter15};
 pub use permuter24::{AtomicPermuter24, Permuter24, WIDTH_24};
 
-// Re-export LeafNode24 types
+// Re-export leaf node types
+pub use leaf15::{LeafNode15, WIDTH_15};
 pub use leaf24::{
     LeafNode24, MODSTATE_DELETED_LAYER, MODSTATE_INSERT, MODSTATE_REMOVE, WIDTH_24 as LEAF24_WIDTH,
 };
 
-// Re-export allocator24 types
+// Re-export allocator types
+pub use alloc15::SeizeAllocator15;
 pub use alloc24::SeizeAllocator24;
 
 // Re-export value types
@@ -225,4 +239,7 @@ pub use slot::ValueSlot;
 pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
 pub use tree::RemoveError;
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
-pub use tree::{MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTreeIndex};
+pub use tree::{
+    MassTree, MassTree15, MassTree15Inline, MassTree24, MassTree24Inline, MassTreeGeneric,
+    MassTreeIndex,
+};

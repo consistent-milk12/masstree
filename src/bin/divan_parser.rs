@@ -8,6 +8,8 @@
 
 #![expect(clippy::indexing_slicing, reason = "fail fast")]
 
+use std::collections::HashMap;
+use std::fs as StdFs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::string::ToString;
@@ -24,6 +26,7 @@ use nom::{
 };
 use regex::Regex;
 use serde::Serialize;
+use serde_json as SJSON;
 
 /// Parse divan benchmark output and display selected columns.
 #[derive(Parser, Debug)]
@@ -59,10 +62,15 @@ struct Args {
 #[serde(rename_all = "lowercase")]
 enum Column {
     Fastest,
+
     Slowest,
+
     Median,
+
     Mean,
+
     Samples,
+
     Iters,
 }
 
@@ -70,10 +78,15 @@ impl Column {
     const fn header(self) -> &'static str {
         match self {
             Self::Fastest => "fastest",
+
             Self::Slowest => "slowest",
+
             Self::Median => "median",
+
             Self::Mean => "mean",
+
             Self::Samples => "samples",
+
             Self::Iters => "iters",
         }
     }
@@ -82,16 +95,22 @@ impl Column {
 #[derive(Debug, Serialize)]
 struct BenchResult {
     name: String,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     fastest: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     slowest: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     median: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     mean: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     samples: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     iters: Option<String>,
 }
@@ -100,7 +119,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let input = if let Some(path) = &args.file {
-        std::fs::read_to_string(path).context("Failed to read input file")?
+        StdFs::read_to_string(path).context("Failed to read input file")?
     } else {
         let mut buf = String::new();
         io::stdin()
@@ -115,8 +134,7 @@ fn main() -> Result<()> {
 
     // Check for comparison mode
     if let Some(compare_path) = &args.compare {
-        let input2 =
-            std::fs::read_to_string(compare_path).context("Failed to read compare file")?;
+        let input2 = StdFs::read_to_string(compare_path).context("Failed to read compare file")?;
         let input2 = strip_markdown_code_block(&input2);
         let results2 = parse_divan_output(&input2, args.filter.as_deref())?;
 
@@ -394,12 +412,18 @@ fn output_table(results: &[BenchResult], columns: &[Column]) {
         for col in columns {
             let value = match col {
                 Column::Fastest => result.fastest.as_deref(),
+
                 Column::Slowest => result.slowest.as_deref(),
+
                 Column::Median => result.median.as_deref(),
+
                 Column::Mean => result.mean.as_deref(),
+
                 Column::Samples => result.samples.as_deref(),
+
                 Column::Iters => result.iters.as_deref(),
             };
+
             row.push(Cell::new(value.unwrap_or("-")));
         }
 
@@ -413,23 +437,31 @@ fn output_json(results: &[BenchResult], columns: &[Column]) -> Result<()> {
     #[derive(Serialize)]
     struct FilteredResult {
         name: String,
+
         #[serde(flatten)]
-        values: std::collections::HashMap<String, String>,
+        values: HashMap<String, String>,
     }
 
     let filtered: Vec<FilteredResult> = results
         .iter()
         .map(|r| {
-            let mut values = std::collections::HashMap::new();
+            let mut values = HashMap::new();
+
             for col in columns {
                 let value = match col {
                     Column::Fastest => r.fastest.as_deref(),
+
                     Column::Slowest => r.slowest.as_deref(),
+
                     Column::Median => r.median.as_deref(),
+
                     Column::Mean => r.mean.as_deref(),
+
                     Column::Samples => r.samples.as_deref(),
+
                     Column::Iters => r.iters.as_deref(),
                 };
+
                 if let Some(v) = value {
                     values.insert(col.header().to_string(), v.to_string());
                 }
@@ -441,7 +473,7 @@ fn output_json(results: &[BenchResult], columns: &[Column]) -> Result<()> {
         })
         .collect();
 
-    println!("{}", serde_json::to_string_pretty(&filtered)?);
+    println!("{}", SJSON::to_string_pretty(&filtered)?);
     Ok(())
 }
 
@@ -451,6 +483,7 @@ fn output_json(results: &[BenchResult], columns: &[Column]) -> Result<()> {
 
 /// Normalize benchmark name for fuzzy matching.
 /// Strips intermediate segments like `/masstree24/` or `/masstree24_inline/`.
+#[expect(clippy::unwrap_used, reason = "Valid Regex Pattern: I checked")]
 fn normalize_name(name: &str) -> String {
     // Pattern: remove /masstree24/ or /masstree24_something/ from middle of path
     let re = Regex::new(r"/masstree24[^/]*/").unwrap();
@@ -460,10 +493,15 @@ fn normalize_name(name: &str) -> String {
 fn get_column_value(result: &BenchResult, col: Column) -> Option<&str> {
     match col {
         Column::Fastest => result.fastest.as_deref(),
+
         Column::Slowest => result.slowest.as_deref(),
+
         Column::Median => result.median.as_deref(),
+
         Column::Mean => result.mean.as_deref(),
+
         Column::Samples => result.samples.as_deref(),
+
         Column::Iters => result.iters.as_deref(),
     }
 }
@@ -476,9 +514,13 @@ fn parse_timing_us(s: &str) -> Option<f64> {
 
     Some(match unit {
         "s" => num * 1_000_000.0,
+
         "ms" => num * 1_000.0,
+
         "µs" | "us" => num,
+
         "ns" => num / 1_000.0,
+
         _ => return None,
     })
 }
@@ -487,9 +529,11 @@ fn parse_timing_us(s: &str) -> Option<f64> {
 fn calc_delta(old: &str, new: &str) -> Option<f64> {
     let old_us = parse_timing_us(old)?;
     let new_us = parse_timing_us(new)?;
+
     if old_us == 0.0 {
         return None;
     }
+
     Some((new_us - old_us) / old_us * 100.0)
 }
 
@@ -500,8 +544,6 @@ fn output_comparison_table(
     columns: &[Column],
     fuzzy: bool,
 ) {
-    use std::collections::HashMap;
-
     // Build lookup map for results_b
     let b_map: HashMap<String, &BenchResult> = results_b
         .iter()
@@ -562,6 +604,7 @@ fn output_comparison_table(
                         || Cell::new("-"),
                         |delta| {
                             let text = format!("{delta:+.1}%");
+
                             if delta < -2.0 {
                                 Cell::new(text).fg(Color::Green) // Faster
                             } else if delta > 2.0 {
@@ -572,8 +615,10 @@ fn output_comparison_table(
                         },
                     )
                 }
+
                 _ => Cell::new("-"),
             };
+
             row.push(delta_cell);
         }
 
@@ -594,8 +639,9 @@ fn output_comparison_json(
     #[derive(Serialize)]
     struct ComparisonResult {
         name: String,
+
         #[serde(flatten)]
-        values: HashMap<String, serde_json::Value>,
+        values: HashMap<String, SJSON::Value>,
     }
 
     let b_map: HashMap<String, &BenchResult> = results_b
@@ -636,11 +682,12 @@ fn output_comparison_json(
 
                 values.insert(
                     format!("{}_a", col.header()),
-                    serde_json::Value::String(val_a.unwrap_or("-").to_string()),
+                    SJSON::Value::String(val_a.unwrap_or("-").to_string()),
                 );
+
                 values.insert(
                     format!("{}_b", col.header()),
-                    serde_json::Value::String(val_b.unwrap_or("-").to_string()),
+                    SJSON::Value::String(val_b.unwrap_or("-").to_string()),
                 );
 
                 if let (Some(a), Some(b)) = (val_a, val_b)
@@ -648,8 +695,8 @@ fn output_comparison_json(
                 {
                     values.insert(
                         format!("{}_delta", col.header()),
-                        serde_json::Value::Number(
-                            serde_json::Number::from_f64(delta).unwrap_or_else(|| 0.into()),
+                        SJSON::Value::Number(
+                            SJSON::Number::from_f64(delta).unwrap_or_else(|| 0.into()),
                         ),
                     );
                 }
@@ -662,6 +709,6 @@ fn output_comparison_json(
         })
         .collect();
 
-    println!("{}", serde_json::to_string_pretty(&compared)?);
+    println!("{}", SJSON::to_string_pretty(&compared)?);
     Ok(())
 }

@@ -328,7 +328,7 @@ where
         leaf.set_permutation(new_perm);
 
         // Step 6: Clear the slot value pointer
-        leaf.set_leaf_value_ptr(self.kp, std::ptr::null_mut());
+        leaf.set_leaf_value_ptr(self.kp, StdPtr::null_mut());
 
         // Step 7: Decrement entry count
         self.tree.dec_count();
@@ -629,7 +629,7 @@ where
                 tree.allocator.retire_internode_erased(parent_ptr, guard);
             }
 
-            parent.set_child(0, std::ptr::null_mut());
+            parent.set_child(0, StdPtr::null_mut());
 
             current = parent_ptr;
             current_replacement = Some(child0);
@@ -681,7 +681,7 @@ where
     }
 }
 
-/// Unit struct providing stateless utility methods for node removal from the [`MassTree`].
+/// Unit struct providing stateless utility methods for node removal from the [`crate::MassTree`].
 #[derive(Debug)]
 pub struct NodeCleaner;
 

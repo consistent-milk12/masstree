@@ -7,7 +7,9 @@ use std::fmt as StdFmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering};
 
+use crate::alloc15::SeizeAllocator15;
 use crate::alloc24::SeizeAllocator24;
+use crate::leaf15::LeafNode15;
 use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
 use crate::value::{LeafValue, LeafValueIndex};
@@ -97,7 +99,7 @@ use crate::leaf_trait::TreeLeafNode;
 /// A high-performance generic trie of B+trees.
 ///
 /// This is the generic version that abstracts over the leaf node type.
-/// Use [`MassTree<V>`] for the standard WIDTH=24 implementation.
+/// Use `MassTree<V>` for the standard WIDTH=24 implementation.
 ///
 /// # Type Parameters
 ///
@@ -276,6 +278,32 @@ pub type MassTree24Inline<V> = MassTreeGeneric<
 >;
 
 // ============================================================================
+//  WIDTH=15 Type Aliases (u64 permutation, smaller nodes)
+// ============================================================================
+
+/// [`MassTree`] with WIDTH=15 leaf nodes.
+///
+/// Uses `LeafNode15` with u64 permutation (vs u128 for WIDTH=24).
+/// Smaller memory footprint but more frequent splits.
+///
+/// This is a type alias for [`MassTreeGeneric`] with:
+/// - `LeafValue<V>` for Arc-based value storage
+/// - `LeafNode15<LeafValue<V>>` for leaf nodes (15 slots per node)
+/// - `SeizeAllocator15<LeafValue<V>>` for memory management
+pub type MassTree15<V> =
+    MassTreeGeneric<LeafValue<V>, LeafNode15<LeafValue<V>>, SeizeAllocator15<LeafValue<V>>>;
+
+/// [`MassTree15`] with inline value storage for `Copy` types.
+///
+/// Uses `LeafNode15` with u64 permutation and inline value storage.
+/// Best for small, `Copy` types like `u64`, `i32`, pointers.
+pub type MassTree15Inline<V> = MassTreeGeneric<
+    LeafValueIndex<V>,
+    LeafNode15<LeafValueIndex<V>>,
+    SeizeAllocator15<LeafValueIndex<V>>,
+>;
+
+// ============================================================================
 //  Constructor implementations for type aliases
 // ============================================================================
 
@@ -306,6 +334,42 @@ impl<V: Copy + Send + Sync + 'static> MassTree24Inline<V> {
 }
 
 impl<V: Copy + Send + Sync + 'static> Default for MassTree24Inline<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+//  WIDTH=15 Constructors
+// ============================================================================
+
+impl<V: Send + Sync + 'static> MassTree15<V> {
+    /// Create a new empty `MassTree15`.
+    #[must_use]
+    #[inline(always)]
+    pub fn new() -> Self {
+        let allocator = SeizeAllocator15::new();
+        Self::with_allocator(allocator)
+    }
+}
+
+impl<V: Send + Sync + 'static> Default for MassTree15<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V: Copy + Send + Sync + 'static> MassTree15Inline<V> {
+    /// Create a new empty `MassTree15Inline`.
+    #[must_use]
+    #[inline(always)]
+    pub fn new() -> Self {
+        let allocator = SeizeAllocator15::new();
+        Self::with_allocator(allocator)
+    }
+}
+
+impl<V: Copy + Send + Sync + 'static> Default for MassTree15Inline<V> {
     fn default() -> Self {
         Self::new()
     }

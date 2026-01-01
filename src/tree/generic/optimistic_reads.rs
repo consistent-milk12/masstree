@@ -4,10 +4,9 @@
 //!
 //! Refactored for performance with:
 //! - `#[inline(always)]` on hot path helpers
-//! - Binary search for WIDTH > 16 (matching insert path)
+//! - Linear search by default (predictable branches, cache-friendly)
+//! - Optional SIMD search with `simd` feature flag
 //! - Unified implementation via closure for value extraction
-
-use std::cmp::Ordering;
 
 use super::{
     Key, LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, NodeVersion,
@@ -39,97 +38,16 @@ enum LookupResult {
 }
 
 // ============================================================================
-//  Binary Search Core (for WIDTH > 16)
+//  Search Helpers (Hot Path)
 // ============================================================================
-
-/// Threshold for switching from linear to binary search.
-/// C++ uses 16; we use the same for parity with insert path.
-const BINARY_SEARCH_THRESHOLD: usize = 16;
-
-/// Binary search to find the first position with matching ikey.
-///
-/// Returns the logical position where `target_ikey` starts (or would be),
-/// and whether any exact ikey match exists.
-#[inline(always)]
-fn binary_search_ikey<L, S>(leaf: &L, perm: &L::Perm, target_ikey: u64) -> (usize, bool)
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-{
-    let size = perm.size();
-    let mut l: usize = 0;
-    let mut r: usize = size;
-    let mut found = false;
-
-    while l < r {
-        let m = (l + r) >> 1;
-        let slot = perm.get(m);
-        let slot_ikey = leaf.ikey(slot);
-
-        match target_ikey.cmp(&slot_ikey) {
-            Ordering::Less => r = m,
-            Ordering::Equal => {
-                found = true;
-                r = m; // Continue left to find first match
-            }
-            Ordering::Greater => l = m + 1,
-        }
-    }
-
-    (l, found)
-}
-
-// ============================================================================
-//  Search Helpers (Multi-Layer Path)
-// ============================================================================
-
-/// Check a single slot for a value/layer match (multi-layer mode).
-#[inline(always)]
-fn check_slot_multi_layer<L, S>(
-    leaf: &L,
-    slot: usize,
-    key: &Key<'_>,
-    search_keylenx: u8,
-) -> Option<LookupResult>
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-{
-    let slot_keylenx: u8 = leaf.keylenx(slot);
-    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-    if slot_ptr.is_null() {
-        return None; // Slot being modified, continue
-    }
-
-    if slot_keylenx == search_keylenx {
-        // Potential exact match - verify suffix if present
-        if slot_keylenx == KSUF_KEYLENX {
-            if leaf.ksuf_equals(slot, key.suffix()) {
-                return Some(LookupResult::Value(slot_ptr));
-            }
-        } else {
-            return Some(LookupResult::Value(slot_ptr));
-        }
-    } else if slot_keylenx >= LAYER_KEYLENX && key.has_suffix() {
-        // Layer pointer - record for descent after validation
-        return Some(LookupResult::Layer(slot_ptr));
-    }
-
-    None
-}
-
-/// Minimum entries before binary search is worthwhile.
-/// Below this threshold, linear scan is faster due to lower overhead.
-const BINARY_SEARCH_MIN_SIZE: usize = 12;
 
 /// Search a leaf for a key in multi-layer mode (keys > 8 bytes).
 ///
-/// Uses binary search for WIDTH > 16 AND size >= 12, linear search otherwise.
+/// Handles:
+/// - Suffix comparison for keys with same 8-byte prefix
+/// - Layer pointer detection for descent
+///
+/// Optimized with loop unrolling (3 at a time) and prefetch.
 #[inline(always)]
 fn search_leaf_multi_layer<S, L>(leaf: &L, key: &Key<'_>) -> LookupResult
 where
@@ -139,8 +57,8 @@ where
     L: LayerCapableLeaf<S>,
 {
     let perm = leaf.permutation();
-    let target_ikey: u64 = key.ikey();
     let size = perm.size();
+    let target_ikey: u64 = key.ikey();
 
     #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
     let search_keylenx: u8 = if key.has_suffix() {
@@ -149,41 +67,95 @@ where
         key.current_len() as u8
     };
 
-    // Use binary search only for leaves with enough entries to benefit
-    if L::WIDTH > BINARY_SEARCH_THRESHOLD && size >= BINARY_SEARCH_MIN_SIZE {
-        let (start_pos, found) = binary_search_ikey::<L, S>(leaf, &perm, target_ikey);
+    let mut i: usize = 0;
 
-        if !found {
-            return LookupResult::NotFound;
+    // Unrolled loop: process 3 slots per iteration
+    while i + 3 <= size {
+        // // Prefetch ahead (disabled - no measurable benefit)
+        // if i + 5 <= size {
+        //     leaf.prefetch_ikey(perm.get(i + 3));
+        // }
+
+        // Check slot 0 of triplet
+        let s0: usize = perm.get(i);
+        if let Some(result) = check_slot_multi_layer(leaf, s0, target_ikey, search_keylenx, key) {
+            return result;
         }
 
-        // Linear scan from first match
-        for i in start_pos..size {
-            let slot = perm.get(i);
-            if leaf.ikey(slot) != target_ikey {
-                break;
-            }
-            if let Some(result) = check_slot_multi_layer::<L, S>(leaf, slot, key, search_keylenx) {
-                return result;
-            }
+        // Check slot 1 of triplet
+        let s1: usize = perm.get(i + 1);
+        if let Some(result) = check_slot_multi_layer(leaf, s1, target_ikey, search_keylenx, key) {
+            return result;
         }
 
-        return LookupResult::NotFound;
+        // Check slot 2 of triplet
+        let s2: usize = perm.get(i + 2);
+        if let Some(result) = check_slot_multi_layer(leaf, s2, target_ikey, search_keylenx, key) {
+            return result;
+        }
+
+        i += 3;
     }
 
-    // Linear search for small leaves
-    for i in 0..size {
+    // Handle remainder (0-2 elements)
+    while i < size {
         let slot: usize = perm.get(i);
-        let slot_ikey: u64 = leaf.ikey(slot);
-
-        if slot_ikey == target_ikey {
-            if let Some(result) = check_slot_multi_layer::<L, S>(leaf, slot, key, search_keylenx) {
-                return result;
-            }
+        if let Some(result) = check_slot_multi_layer(leaf, slot, target_ikey, search_keylenx, key) {
+            return result;
         }
+        i += 1;
     }
 
     LookupResult::NotFound
+}
+
+/// Check a single slot for multi-layer key match.
+///
+/// Returns `Some(LookupResult)` if the slot matches or is a layer pointer,
+/// `None` to continue searching.
+#[inline(always)]
+fn check_slot_multi_layer<S, L>(
+    leaf: &L,
+    slot: usize,
+    target_ikey: u64,
+    search_keylenx: u8,
+    key: &Key<'_>,
+) -> Option<LookupResult>
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+{
+    let slot_ikey: u64 = leaf.ikey(slot);
+    if slot_ikey != target_ikey {
+        return None;
+    }
+
+    let slot_keylenx: u8 = leaf.keylenx(slot);
+    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+    if slot_ptr.is_null() {
+        return None;
+    }
+
+    if slot_keylenx == search_keylenx {
+        // Potential exact match - verify suffix if present
+        let suffix_match: bool = if slot_keylenx == KSUF_KEYLENX {
+            leaf.ksuf_equals(slot, key.suffix())
+        } else {
+            true
+        };
+
+        if suffix_match {
+            return Some(LookupResult::Value(slot_ptr));
+        }
+    } else if slot_keylenx >= LAYER_KEYLENX && key.has_suffix() {
+        // Layer pointer - record for descent after validation
+        return Some(LookupResult::Layer(slot_ptr));
+    }
+
+    None
 }
 
 // ============================================================================
@@ -231,8 +203,11 @@ where
     /// Returns `Some(next_leaf_ptr)` if we should follow the B-link,
     /// `None` if key is definitively not found.
     ///
-    /// Note: NOT marked #[cold] - B-link traversal is common during concurrent splits.
-    #[inline(always)]
+    /// Marked `#[cold]` because B-link traversal is rare in the common case
+    /// (no concurrent splits). Keeps the hot path code smaller for better
+    /// instruction cache utilization.
+    #[cold]
+    #[inline(never)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_blink_chain(&self, leaf: &L, target_ikey: u64) -> Option<*mut L> {
         let next_raw: *mut L = leaf.next_raw();
@@ -253,8 +228,11 @@ where
     ///
     /// Returns `true` if sublayer is valid, `false` if deleted (key not found).
     ///
-    /// Note: NOT marked #[cold] - layer descent is hot path for keys > 8 bytes.
-    #[inline(always)]
+    /// Marked `#[cold]` because finding a deleted sublayer is rare (only during
+    /// concurrent GC). The layer descent itself is hot, but the deletion check
+    /// almost always returns true. This keeps branch prediction accurate.
+    #[cold]
+    #[inline(never)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_sublayer_valid(&self, layer_ptr: *mut u8) -> bool {
         // SAFETY: ptr is non-null (came from valid slot) and protected by guard.
@@ -318,7 +296,7 @@ where
 
     /// Get a borrowed reference to a value by key.
     ///
-    /// This is significantly faster than [`get_with_guard`] for read-heavy workloads
+    /// This is significantly faster than [`Self::get_with_guard`] for read-heavy workloads
     /// because it avoids atomic reference count operations (Arc clone/drop).
     ///
     /// # Performance
@@ -398,12 +376,67 @@ where
             let mut version: u32 = leaf.version().stable();
 
             'search_loop: loop {
-                // Inline linear search - no function calls, no enum
+                // Optimized linear search with loop unrolling (3 at a time)
+                // and prefetch 2 slots ahead to hide memory latency
                 let perm = leaf.permutation();
                 let size = perm.size();
                 let mut found_ptr: *mut u8 = std::ptr::null_mut();
+                let mut i: usize = 0;
 
-                for i in 0..size {
+                // Unrolled loop: process 3 slots per iteration
+                while i + 3 <= size {
+                    // // Prefetch ahead (disabled - no measurable benefit)
+                    // if i + 5 <= size {
+                    //     leaf.prefetch_ikey(perm.get(i + 3));
+                    // }
+
+                    // Check slot 0 of triplet
+                    let s0: usize = perm.get(i);
+                    let ikey0: u64 = leaf.ikey(s0);
+                    if ikey0 == target_ikey {
+                        let kx0: u8 = leaf.keylenx(s0);
+                        if kx0 == search_keylenx {
+                            let ptr: *mut u8 = leaf.leaf_value_ptr(s0);
+                            if !ptr.is_null() {
+                                found_ptr = ptr;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Check slot 1 of triplet
+                    let s1: usize = perm.get(i + 1);
+                    let ikey1: u64 = leaf.ikey(s1);
+                    if ikey1 == target_ikey {
+                        let kx1: u8 = leaf.keylenx(s1);
+                        if kx1 == search_keylenx {
+                            let ptr: *mut u8 = leaf.leaf_value_ptr(s1);
+                            if !ptr.is_null() {
+                                found_ptr = ptr;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Check slot 2 of triplet
+                    let s2: usize = perm.get(i + 2);
+                    let ikey2: u64 = leaf.ikey(s2);
+                    if ikey2 == target_ikey {
+                        let kx2: u8 = leaf.keylenx(s2);
+                        if kx2 == search_keylenx {
+                            let ptr: *mut u8 = leaf.leaf_value_ptr(s2);
+                            if !ptr.is_null() {
+                                found_ptr = ptr;
+                                break;
+                            }
+                        }
+                    }
+
+                    i += 3;
+                }
+
+                // Handle remainder (0-2 elements)
+                while i < size && found_ptr.is_null() {
                     let slot: usize = perm.get(i);
                     let slot_ikey: u64 = leaf.ikey(slot);
 
@@ -413,12 +446,10 @@ where
                             let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
                             if !ptr.is_null() {
                                 found_ptr = ptr;
-                                break;
                             }
                         }
-                        // Layer pointer (keylenx >= 128) with matching ikey means
-                        // a longer key exists, but our short key is NOT a match
                     }
+                    i += 1;
                 }
 
                 // Version validation AFTER all reads
@@ -459,7 +490,7 @@ where
     /// Multi-layer path for keys > 8 bytes.
     ///
     /// Handles layer descent, suffix matching, and complex key structures.
-    #[inline(always)]
+    #[inline]
     fn get_impl_multi_layer<R, F>(
         &self,
         key: &mut Key<'_>,

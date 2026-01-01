@@ -208,7 +208,7 @@ impl LockGuard<'_> {
 
     /// Mark the node as being inserted into.
     ///
-    /// NOTE: With auto dirty on lock strategy, the [`INSERTING_BIT`] is already set
+    /// NOTE: With auto dirty on lock strategy, the `INSERTING_BIT` is already set
     /// by `lock()`. This method is kept for:
     /// 1. Explicit documentation of intent in calling code
     /// 2. Updating `locked_value` tracking if needed
@@ -243,7 +243,7 @@ impl LockGuard<'_> {
     /// Unlike `mark_insert()` (which is now auto set due to new strategy), `mark_split()`
     /// must be called explicitly before split operations. This is because:
     /// 1. Not all inserts require splits
-    /// 2. The [`SPLITTING_BIT`] affects version increment logic differently
+    /// 2. The `SPLITTING_BIT` affects version increment logic differently
     /// 3. Split operations need the split version counter incremented
     ///
     /// # Memory Ordering
@@ -269,7 +269,7 @@ impl LockGuard<'_> {
     /// Also sets the splitting bit to bump version on unlock.
     ///
     /// # Memory Ordering
-    /// Same as [`mark_insert()`]: Release store followed by Acquire fence.
+    /// Same as [`Self::mark_insert`]: Release store followed by Acquire fence.
     #[inline(always)]
     pub fn mark_deleted(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
@@ -401,7 +401,7 @@ impl NodeVersion {
     /// Get a stable version value for optimistic reading.
     ///
     /// Spins while dirty bits (inserting or splitting) are set, then returns
-    /// a version with no dirty bits. Use with [`has_changed()`] after reading
+    /// a version with no dirty bits. Use with [`Self::has_changed`] after reading
     /// to detect concurrent modifications.
     ///
     /// # Memory Ordering
@@ -490,7 +490,7 @@ impl NodeVersion {
     /// Returns true if the split version counter changed.
     ///
     /// Uses the same compiler fence as `has_changed()` for correctness.
-    /// See [`has_changed`] for the full explanation.
+    /// See [`Self::has_changed`] for the full explanation.
     #[must_use]
     #[inline(always)]
     pub fn has_split(&self, old: u32) -> bool {
@@ -504,7 +504,7 @@ impl NodeVersion {
 
     /// Check if a split has occurred since `old`, without a fence.
     ///
-    /// This is a faster variant of [`has_split`] that omits the compiler fence.
+    /// This is a faster variant of [`Self::has_split`] that omits the compiler fence.
     /// Use this only when you've already issued a fence (e.g., after an Acquire load).
     ///
     /// # Safety (Logical)
@@ -525,16 +525,16 @@ impl NodeVersion {
     /// This is a stronger check than [`Self::has_changed`] for CAS operations.
     /// It returns true if:
     /// - The version counter has changed (same as `has_changed`), OR
-    /// - The node is currently being modified ([`INSERTING_BIT`] or [`SPLITTING_BIT`] set)
+    /// - The node is currently being modified (`INSERTING_BIT` or `SPLITTING_BIT` set)
     ///
     /// CAS inserts should use this instead of `has_changed` to avoid racing
     /// with locked splits. The race scenario:
     /// 1. CAS insert reads version V via `stable()` (no dirty bits)
-    /// 2. Locked thread acquires lock, sets [`INSERTING_BIT`]
-    /// 3. CAS insert checks `has_changed(V)` - returns false (ignores [`INSERTING_BIT`])
+    /// 2. Locked thread acquires lock, sets `INSERTING_BIT`
+    /// 3. CAS insert checks `has_changed(V)` - returns false (ignores `INSERTING_BIT`)
     /// 4. CAS insert proceeds, racing with the split
     ///
-    /// By checking [`INSERTING_BIT`] directly, we catch this race.
+    /// By checking `INSERTING_BIT` directly, we catch this race.
     #[must_use]
     #[inline(always)]
     pub fn has_changed_or_locked(&self, old: u32) -> bool {
@@ -564,7 +564,7 @@ impl NodeVersion {
     /// Acquire the lock and return a guard.
     ///
     /// Strategy: Always-Dirty-On-Lock
-    /// This implementation automatically sets the [`INSERTING_BIT`] when acquiring the lock.
+    /// This implementation automatically sets the `INSERTING_BIT` when acquiring the lock.
     /// This eliminates the race window between lock acquisition and explicit dirty marking,
     /// ensuring that CAS insert threads always wait for locked writers to complete.
     ///
@@ -702,7 +702,7 @@ impl NodeVersion {
 
     /// Acquire the lock using try-lock with yield.
     ///
-    /// Unlike [`lock()`] which spins with exponential backoff, this method
+    /// Unlike [`Self::lock`] which spins with exponential backoff, this method
     /// yields the CPU to other threads when the lock is contended. This is
     /// more efficient for lock convoy situations where multiple threads are
     /// waiting on the same lock.
@@ -778,9 +778,9 @@ impl NodeVersion {
     /// Create a new node version for a split sibling.
     ///
     /// The new version is:
-    /// - Locked ([`LOCK_BIT`] set)
-    /// - Marked as splitting ([`SPLITTING_BIT`] set)
-    /// - Has the same [`ISLEAF_BIT`] as the source
+    /// - Locked (`LOCK_BIT` set)
+    /// - Marked as splitting (`SPLITTING_BIT` set)
+    /// - Has the same `ISLEAF_BIT` as the source
     /// - Has zeroed version counters (fresh node)
     ///
     /// This is used during splits to create a right sibling that starts locked.
@@ -790,7 +790,7 @@ impl NodeVersion {
     /// # C++ Reference
     ///
     /// Matches `child->assign_version(*n_)` in `masstree_split.hh:198`.
-    /// However, we use [`SPLITTING_BIT`] instead of copying [`INSERTING_BIT`] because
+    /// However, we use `SPLITTING_BIT` instead of copying `INSERTING_BIT` because
     /// the right sibling's unlock should increment the split counter.
     ///
     /// # Safety Considerations
@@ -850,7 +850,7 @@ impl NodeVersion {
     ///
     /// # Panics
     ///
-    /// Debug-asserts that the node is locked with [`SPLITTING_BIT`] set.
+    /// Debug-asserts that the node is locked with `SPLITTING_BIT` set.
     #[inline(always)]
     pub fn unlock_for_split(&self) {
         let locked_value = self.value.load(Ordering::Relaxed);
@@ -881,7 +881,7 @@ impl NodeVersion {
 
     /// Check if this node was created for a split and hasn't been unlocked yet.
     ///
-    /// Returns true if [`LOCK_BIT`] and [`SPLITTING_BIT`] are both set.
+    /// Returns true if `LOCK_BIT` and `SPLITTING_BIT` are both set.
     /// Used for debugging and assertions.
     #[must_use]
     #[inline(always)]

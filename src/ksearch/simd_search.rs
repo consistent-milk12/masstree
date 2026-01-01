@@ -1,7 +1,7 @@
 //! SIMD-accelerated search functions for tree nodes.
 //!
 //! This module provides high-level search functions that use SIMD primitives
-//! from the [`simd`](super::simd) module when beneficial.
+//! from the [`super::simd`] module when beneficial.
 //!
 //! # Design Philosophy
 //!

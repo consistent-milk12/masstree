@@ -13,6 +13,8 @@ use super::{
     ValueSlot, is_marked, unmark_ptr,
 };
 
+use std::ptr as StdPtr;
+
 use crate::nodeversion::LockGuard;
 
 // ============================================================================
@@ -486,7 +488,7 @@ where
                             }
 
                             FindSlotResult::NeedsSplit => {
-                                let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
+                                let leaf_ptr_current: *mut L = StdPtr::from_ref(leaf).cast_mut();
                                 self.handle_leaf_split_generic(
                                     leaf_ptr_current,
                                     lock,
@@ -548,7 +550,7 @@ where
                         }
 
                         FindSlotResult::NeedsSplit => {
-                            let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
+                            let leaf_ptr_current: *mut L = StdPtr::from_ref(leaf).cast_mut();
                             self.handle_leaf_split_generic(
                                 leaf_ptr_current,
                                 lock,

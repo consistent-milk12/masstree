@@ -24,7 +24,7 @@
 //! fn set_parent(&self, parent: NodePtr);
 //! ```
 
-use std::ptr::NonNull;
+use std::ptr::{self as StdPtr, NonNull};
 
 use crate::leaf_trait::{TreeInternode, TreeLeafNode};
 use crate::nodeversion::NodeVersion;
@@ -59,7 +59,7 @@ impl NodePtr {
     #[inline(always)]
     #[must_use]
     pub const fn null() -> Self {
-        Self(std::ptr::null_mut())
+        Self(StdPtr::null_mut())
     }
 
     /// Create a `NodePtr` from a raw pointer.

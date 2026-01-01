@@ -1,6 +1,6 @@
-//! Node allocation for [`LeafNode24`] (WIDTH=24).
+//! Node allocation for [`LeafNode15`] (WIDTH=24).
 //!
-//! This module provides [`SeizeAllocator24`], a Miri-compliant allocator for
+//! This module provides [`SeizeAllocator15`], a Miri-compliant allocator for
 //! 24-slot leaf nodes using `seize` for memory reclamation.
 //!
 //! # Note on Internode WIDTH
@@ -10,12 +10,14 @@
 //! This is fine since internodes just hold child pointers; the benefit of WIDTH=24
 //! comes from leaves holding more keys and splitting less often.
 
+use std::mem as StdMem;
+
 use parking_lot::Mutex;
 use seize::{Guard, LocalGuard};
 
 use crate::alloc_trait::NodeAllocatorGeneric;
 use crate::internode::InternodeNode;
-use crate::leaf24::LeafNode24;
+use crate::leaf15::LeafNode15;
 use crate::slot::ValueSlot;
 
 /// Width constant for internodes (limited by 4-bit permutation slots).
@@ -36,30 +38,30 @@ const INTERNODE_WIDTH: usize = 15;
 ///
 /// All methods use interior mutability via `parking_lot::Mutex`, allowing
 /// concurrent allocation from multiple threads with only `&self`.
-pub struct SeizeAllocator24<S: ValueSlot> {
-    /// Raw pointers to allocated [`LeafNode24`] nodes.
-    leaf_ptrs: Mutex<Vec<*mut LeafNode24<S>>>,
+pub struct SeizeAllocator15<S: ValueSlot> {
+    /// Raw pointers to allocated [`LeafNode15`] nodes.
+    leaf_ptrs: Mutex<Vec<*mut LeafNode15<S>>>,
 
     /// Raw pointers to allocated internode nodes (WIDTH=15).
     internode_ptrs: Mutex<Vec<*mut InternodeNode<S, INTERNODE_WIDTH>>>,
 }
 
 // SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
-unsafe impl<S: ValueSlot + Send + Sync> Send for SeizeAllocator24<S> {}
-unsafe impl<S: ValueSlot + Send + Sync> Sync for SeizeAllocator24<S> {}
+unsafe impl<S: ValueSlot + Send + Sync> Send for SeizeAllocator15<S> {}
+unsafe impl<S: ValueSlot + Send + Sync> Sync for SeizeAllocator15<S> {}
 
-impl<S: ValueSlot> std::fmt::Debug for SeizeAllocator24<S> {
+impl<S: ValueSlot> std::fmt::Debug for SeizeAllocator15<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let leaf_count = self.leaf_ptrs.lock().len();
         let internode_count = self.internode_ptrs.lock().len();
-        f.debug_struct("SeizeAllocator24")
+        f.debug_struct("SeizeAllocator15")
             .field("leaf_count", &leaf_count)
             .field("internode_count", &internode_count)
             .finish()
     }
 }
 
-impl<S: ValueSlot> SeizeAllocator24<S> {
+impl<S: ValueSlot> SeizeAllocator15<S> {
     /// Create a new allocator.
     #[must_use]
     pub const fn new() -> Self {
@@ -82,13 +84,13 @@ impl<S: ValueSlot> SeizeAllocator24<S> {
     }
 }
 
-impl<S: ValueSlot> Default for SeizeAllocator24<S> {
+impl<S: ValueSlot> Default for SeizeAllocator15<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: ValueSlot> Drop for SeizeAllocator24<S> {
+impl<S: ValueSlot> Drop for SeizeAllocator15<S> {
     fn drop(&mut self) {
         // Free all tracked nodes on allocator drop
         for ptr in self.leaf_ptrs.lock().drain(..) {
@@ -111,24 +113,24 @@ impl<S: ValueSlot> Drop for SeizeAllocator24<S> {
 // NodeAllocatorGeneric Implementation
 // =============================================================================
 
-impl<S> NodeAllocatorGeneric<S, LeafNode24<S>> for SeizeAllocator24<S>
+impl<S> NodeAllocatorGeneric<S, LeafNode15<S>> for SeizeAllocator15<S>
 where
     S: ValueSlot + Send + Sync + 'static,
 {
     #[inline(always)]
-    fn alloc_leaf(&self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S> {
-        let ptr: *mut LeafNode24<S> = Box::into_raw(node);
+    fn alloc_leaf(&self, node: Box<LeafNode15<S>>) -> *mut LeafNode15<S> {
+        let ptr: *mut LeafNode15<S> = Box::into_raw(node);
         self.leaf_ptrs.lock().push(ptr);
         ptr
     }
 
     #[inline(always)]
-    fn track_leaf(&self, ptr: *mut LeafNode24<S>) {
+    fn track_leaf(&self, ptr: *mut LeafNode15<S>) {
         self.leaf_ptrs.lock().push(ptr);
     }
 
     #[inline(always)]
-    unsafe fn retire_leaf(&self, ptr: *mut LeafNode24<S>, guard: &LocalGuard<'_>) {
+    unsafe fn retire_leaf(&self, ptr: *mut LeafNode15<S>, guard: &LocalGuard<'_>) {
         // Step 1: Remove from tracking to prevent double-free.
         // The allocator's Drop iterates leaf_ptrs and frees everything,
         // so we must remove the pointer before deferring retirement.
@@ -193,9 +195,9 @@ where
     #[inline(always)]
     fn teardown_tree(&self, _root_ptr: *mut u8) {
         // Free all tracked nodes using interior mutability
-        let leaves: Vec<*mut LeafNode24<S>> = std::mem::take(&mut *self.leaf_ptrs.lock());
+        let leaves: Vec<*mut LeafNode15<S>> = StdMem::take(&mut *self.leaf_ptrs.lock());
         let internodes: Vec<*mut InternodeNode<S, INTERNODE_WIDTH>> =
-            std::mem::take(&mut *self.internode_ptrs.lock());
+            StdMem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
             // SAFETY: ptr came from Box::into_raw or alloc()
@@ -223,13 +225,13 @@ where
     ///
     /// Uses raw allocation + `init_at` to avoid stack-to-heap copy.
     #[inline]
-    fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode24<S> {
+    fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode15<S> {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<LeafNode24<S>>();
+        let layout = Layout::new::<LeafNode15<S>>();
         // SAFETY: Layout is valid (non-zero size)
         #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid (non-zero size)")]
-        let ptr: *mut LeafNode24<S> = unsafe { alloc(layout).cast::<LeafNode24<S>>() };
+        let ptr: *mut LeafNode15<S> = unsafe { alloc(layout).cast::<LeafNode15<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -237,7 +239,7 @@ where
         // Initialize in-place
         // SAFETY: ptr is valid, aligned, and we have exclusive access
         unsafe {
-            LeafNode24::init_at(ptr, is_root || is_layer_root);
+            LeafNode15::init_at(ptr, is_root || is_layer_root);
         }
 
         // Track for cleanup
@@ -332,15 +334,15 @@ mod tests {
 
     #[test]
     fn test_seize_allocator24_new() {
-        let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+        let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
         assert_eq!(alloc.leaf_count(), 0);
         assert_eq!(alloc.internode_count(), 0);
     }
 
     #[test]
     fn test_seize_allocator24_alloc_leaf() {
-        let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
-        let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+        let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
+        let leaf: Box<LeafNode15<LeafValue<u64>>> = LeafNode15::new();
 
         let ptr = alloc.alloc_leaf(leaf);
         assert!(!ptr.is_null());
@@ -354,9 +356,9 @@ mod tests {
 
     #[test]
     fn test_seize_allocator24_track_leaf() {
-        let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
-        let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
-        let ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf);
+        let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
+        let leaf: Box<LeafNode15<LeafValue<u64>>> = LeafNode15::new();
+        let ptr: *mut LeafNode15<LeafValue<u64>> = Box::into_raw(leaf);
 
         alloc.track_leaf(ptr);
         assert_eq!(alloc.leaf_count(), 1);
@@ -364,8 +366,8 @@ mod tests {
 
     #[test]
     fn test_seize_allocator24_drop_frees_nodes() {
-        let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
-        let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
+        let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
+        let leaf: Box<LeafNode15<LeafValue<u64>>> = LeafNode15::new();
 
         let _ = alloc.alloc_leaf(leaf);
         assert_eq!(alloc.leaf_count(), 1);

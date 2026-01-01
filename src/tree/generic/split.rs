@@ -148,7 +148,7 @@ where
     /// # Help-Along Protocol
     ///
     /// The right sibling (`right_leaf_ptr`) is created with a split-locked version
-    /// ([`LOCK_BIT`] | [`SPLITTING_BIT`] set). This function unlocks it after setting its
+    /// (`LOCK_BIT` | `SPLITTING_BIT` set). This function unlocks it after setting its
     /// parent pointer. This prevents other threads from trying to split the right
     /// sibling while its parent is NULL.
     ///

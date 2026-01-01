@@ -2,8 +2,7 @@ use super::*;
 use std::ptr as StdPtr;
 
 // Note: These tests use mock types since we can't easily construct
-// real LeafNode24 in unit tests. Integration tests in CODE_005 will
-// test with real types.
+// real LeafNode24 in unit tests. Integration tests  test with real types.
 
 #[test]
 fn test_scan_state_properties() {

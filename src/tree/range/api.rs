@@ -1,6 +1,6 @@
 //! Filepath: src/tree/range/api.rs
 //!
-//! Public API methods for range scans on [`MassTreeGeneric`].
+//! Public API methods for range scans on [`crate::MassTreeGeneric`].
 
 use seize::LocalGuard;
 
@@ -187,7 +187,7 @@ where
 
     /// Scan a range with zero-copy value references.
     ///
-    /// Unlike [`scan`] which clones values (Arc increment for `MassTree`),
+    /// Unlike [`Self::scan`] which clones values (Arc increment for `MassTree`),
     /// this returns borrowed `&V` references. This eliminates 2 atomic
     /// operations per entry, significantly improving scan throughput.
     ///

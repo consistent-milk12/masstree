@@ -1211,7 +1211,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    // Integration tests are in CODE_005 and tests/range_scan_tests.rs
+    // Integration tests are in tests/range_scan_tests.rs
     // These tests would require mock leaf nodes which is complex
 
     #[test]

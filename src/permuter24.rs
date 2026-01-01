@@ -81,7 +81,7 @@ impl Permuter24 {
     /// This constant is used by both `empty()` and `AtomicPermuter24::new()`.
     /// Position i holds slot (23 - i), so `back()` returns 0 initially.
     ///
-    /// Bit layout: size=0, slot[0]=23, slot[1]=22, ..., slot[23]=0
+    /// Bit layout: `size=0, slot[0]=23, slot[1]=22, ..., slot[23]=0`
     pub const INITIAL: u128 = {
         let mut value: u128 = 0;
         let mut i: usize = 0;
@@ -434,6 +434,7 @@ impl Permuter24 {
 
         // Find the logical position of this slot
         let mut found_pos: Option<usize> = None;
+
         for i in 0..size {
             if self.get(i) == slot {
                 found_pos = Some(i);
@@ -803,6 +804,7 @@ mod tests {
     fn test_make_sorted_full() {
         let p = Permuter24::make_sorted(24);
         assert_eq!(p.size(), 24);
+
         for i in 0..24 {
             assert_eq!(p.get(i), i);
         }

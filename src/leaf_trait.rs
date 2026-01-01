@@ -15,6 +15,7 @@
 //! - [`TreePermutation`]: `Permuter<WIDTH>`, `Permuter24`
 //! - [`TreeLeafNode`]: `LeafNode<S, WIDTH>`, `LeafNode24<S>`
 
+use std::cmp::Ordering;
 use std::fmt::Debug;
 
 use crate::key::Key;
@@ -271,7 +272,7 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn set_ikey(&self, idx: usize, key: u64);
 
     /// Compare key at position with search key.
-    fn compare_key(&self, search_ikey: u64, p: usize) -> std::cmp::Ordering;
+    fn compare_key(&self, search_ikey: u64, p: usize) -> Ordering;
 
     /// Find insert position for a key.
     fn find_insert_position(&self, insert_ikey: u64) -> usize;
@@ -351,7 +352,7 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
 //  TreeLeafNode Trait
 // ============================================================================
 
-/// Trait for leaf node types that can be used in a [`MassTree`].
+/// Trait for leaf node types that can be used in a [`crate::MassTree`].
 ///
 /// Abstracts over `LeafNode<S, WIDTH>` and `LeafNode24<S>`, enabling generic
 /// tree operations that work with both WIDTH=15 and WIDTH=24 nodes.
@@ -492,7 +493,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Load value pointer at slot.
     ///
-    /// Returns raw pointer to either an Arc<V> (value mode) or
+    /// Returns raw pointer to either an `Arc<V>` (value mode) or
     /// a sublayer root node (layer mode).
     fn leaf_value_ptr(&self, slot: usize) -> *mut u8;
 
@@ -782,7 +783,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// Panics in debug mode if `slot >= WIDTH`.
     #[must_use]
-    fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering>;
+    fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering>;
 
     /// Get the suffix for a slot, or an empty slice if none.
     ///
@@ -859,6 +860,23 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// Matches C++ `leaf::prefetch()` pattern from `masstree_scan.hh:195, 299`.
     fn prefetch(&self);
+
+    /// Prefetch the ikey at the given slot into CPU cache.
+    ///
+    /// This is used during linear search to hide memory latency by
+    /// prefetching future ikeys while processing current ones.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index (0..WIDTH)
+    ///
+    /// # Default Implementation
+    ///
+    /// No-op. Implementations may override with actual prefetch.
+    #[inline(always)]
+    fn prefetch_ikey(&self, _slot: usize) {
+        // Default no-op; implementations may override
+    }
 
     // ========================================================================
     //  Modification State (modstate) Operations

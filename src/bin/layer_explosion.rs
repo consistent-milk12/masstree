@@ -25,6 +25,7 @@ fn make_long_key(val: u64) -> [u8; 64] {
     key[8..16].copy_from_slice(&bytes);
     key[16..24].copy_from_slice(&val.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes());
     key[24..32].copy_from_slice(&val.wrapping_mul(0x517c_c1b7_2722_0a95).to_be_bytes());
+
     // Rest stays zero - creates shared prefix patterns
     key
 }
@@ -42,21 +43,26 @@ fn main() {
                 i += 1;
                 threads = args[i].parse().expect("invalid thread count");
             }
+
             "-n" => {
                 i += 1;
                 iterations = args[i].parse().expect("invalid iteration count");
             }
+
             arg if arg.starts_with("-j") => {
                 threads = arg[2..].parse().expect("invalid thread count");
             }
+
             arg if arg.starts_with("-n") => {
                 iterations = arg[2..].parse().expect("invalid iteration count");
             }
+
             _ => {
                 eprintln!("Usage: layer_explosion [-j<threads>] [-n<iterations>]");
                 std::process::exit(1);
             }
         }
+
         i += 1;
     }
 
@@ -66,9 +72,11 @@ fn main() {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
                 let tree = Arc::clone(&tree);
+
                 thread::spawn(move || {
                     let start = t * OPS_PER_THREAD;
                     let end = start + OPS_PER_THREAD;
+
                     for i in start..end {
                         let key = make_long_key(i as u64);
                         let _ = tree.insert(&key, i as u64);

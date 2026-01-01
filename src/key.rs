@@ -1,6 +1,6 @@
 //! Filepath: src/key.rs
 //!
-//! Key representation for [`MassTree`]
+//! Key representation for [`crate::MassTree`]
 //!
 //! Keys are divided into 8-byte "ikeys" for efficient comparison.
 //! The [`Key`] struct tracks the current position during tree traversal
@@ -19,7 +19,7 @@ pub const IKEY_SIZE: usize = 8;
 /// Keys longer than this are rejected to prevent unbounded trie layer recursion.
 pub const MAX_KEY_LENGTH: usize = 256;
 
-/// A key for [`MassTree`] operations.
+/// A key for [`crate::MassTree`] operations.
 ///
 /// Holds a borrowed byte slice and tracks the current position during
 /// tree traversal. Keys can be "shifted" to descend into trie layers.

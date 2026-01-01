@@ -130,12 +130,13 @@ pub fn prefetch_write<T>(ptr: *mut T) {
 #[expect(clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use std::ptr as StdPtr;
 
     #[test]
     fn test_prefetch_null_is_safe() {
         // Should not panic or crash
-        prefetch_read::<u64>(std::ptr::null());
-        prefetch_write::<u64>(std::ptr::null_mut());
+        prefetch_read::<u64>(StdPtr::null());
+        prefetch_write::<u64>(StdPtr::null_mut());
     }
 
     #[test]

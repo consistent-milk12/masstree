@@ -217,7 +217,7 @@ impl<O> ScanEntry<O> {
 //  RangeIter
 // ============================================================================
 
-/// Iterator over a key range in a [`MassTree`].
+/// Iterator over a key range in a [`crate::MassTree`].
 ///
 /// Yields entries in lexicographic key order. The iterator maintains internal
 /// state for the scan position and handles concurrent modifications via the
@@ -758,7 +758,7 @@ where
 
     /// Zero-copy iteration with borrowed value references.
     ///
-    /// Unlike [`for_each`] which clones values (Arc increment for `LeafValue`),
+    /// Unlike [`Self::for_each`] which clones values (Arc increment for `LeafValue`),
     /// this returns `&S::Value` references tied to the guard lifetime.
     ///
     /// # Performance

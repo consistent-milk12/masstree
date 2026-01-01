@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering,
     marker::PhantomData,
+    ptr as StdPtr,
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering},
 };
 
@@ -452,7 +453,7 @@ where
         // Double-buffer: two node/version pairs, alternating via sense
         // n[sense] is current node, n[sense ^ 1] is candidate child
         // Note: n[0] is set in root fix-up loop, n[1] is set before being read
-        let mut n: [*const u8; 2] = [std::ptr::null(); 2];
+        let mut n: [*const u8; 2] = [StdPtr::null(); 2];
         let mut v: [u32; 2] = [0; 2];
 
         #[expect(unused_assignments, reason = "sense is set at top of retry loop")]

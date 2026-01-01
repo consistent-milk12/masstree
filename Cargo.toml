@@ -24,6 +24,10 @@ include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md"]
 default = []
 # Alternative global allocators for benchmarking
 mimalloc = ["dep:mimalloc"]
+# Use SIMD (AVX2) for leaf ikey matching in get operations.
+# May improve performance for some workloads, but adds overhead for others.
+# Benchmark your specific workload before enabling.
+simd = []
 # When disabled (default), all tracing calls compile to no-ops with zero overhead.
 # When enabled, auto-initializes a subscriber that writes NDJSON logs to logs/masstree.jsonl.
 # Respects RUST_LOG env var (default: info). Set MASSTREE_LOG_CONSOLE=0 to disable console.
@@ -52,8 +56,11 @@ tracing-appender = { version = "0.2.4", optional = true }
 # For formatting JSON logs
 serde_json = "1.0.148"
 serde = { version = "1.0.228", features = ["derive"] }
-rayon = { version = "1.11.0", optional = true }
 chrono = "0.4.42"
+clap = { version = "4.5.53", features = ["derive"] }
+comfy-table = "7.2.1"
+regex = "1.12.2"
+nom = "8.0.0"
 
 
 [dev-dependencies]
@@ -81,6 +88,12 @@ tracing-subscriber = { version = "0.3.22", features = [
 # Simple #[traced_test] macro for asserting on log output in unit tests
 # Note: integration tests need "no-env-filter" feature
 tracing-test = { version = "0.2.5", features = ["no-env-filter"] }
+criterion = { version = "0.8.1", features = [
+	"html_reports",
+	"csv_output",
+	"real_blackbox",
+] }
+iai-callgrind = "0.16.1"
 
 [lints.rust]
 # Allow loom and shuttle cfg for deterministic concurrency testing
@@ -165,13 +178,16 @@ debug = true
 
 [profile.bench]
 inherits = "release"
-debug = false
-strip = "symbols"
+debug = 2
+strip = false
 
 [[bench]]
 name = "concurrent_maps24"
 harness = false
 
+[[bench]]
+name = "concurrent_masstree24"
+harness = false
 
 [[bench]]
 name = "concurrent_maps24_32scale"
@@ -199,6 +215,10 @@ name = "range_concurrent"
 harness = false
 
 [[bench]]
+name = "range_masstree24"
+harness = false
+
+[[bench]]
 name = "range_concurrent_scaled"
 harness = false
 
@@ -208,4 +228,32 @@ harness = false
 
 [[bench]]
 name = "extreme_stress"
+harness = false
+
+[[bench]]
+name = "extreme_stress_crit"
+harness = false
+
+[[bench]]
+name = "extreme_stress_15_crit"
+harness = false
+
+[[bench]]
+name = "concurrent_masstree24_crit"
+harness = false
+
+[[bench]]
+name = "concurrent_masstree15_crit"
+harness = false
+
+[[bench]]
+name = "range_masstree24_crit"
+harness = false
+
+[[bench]]
+name = "range_masstree15_crit"
+harness = false
+
+[[bench]]
+name = "iai_masstree"
 harness = false

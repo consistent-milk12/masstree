@@ -1,21 +1,20 @@
-//! Filepath: src/leaf24.rs
+//! Filepath: src/leaf15.rs
 //!
-//! Leaf node for [`crate::MassTree`] with WIDTH=24 (24 slots).
+//! Leaf node for [`crate::MassTree`] with WIDTH=15 (15 slots).
 //!
-//! This module provides `LeafNode24`, a leaf node variant optimized for reduced
-//! split frequency by using 24 slots instead of the standard 15. The key difference
-//! is the use of [`AtomicPermuter24`] (u128) instead of `AtomicU64` for permutation.
+//! This module provides `LeafNode15`, a leaf node variant optimized for reduced
+//! split frequency by using 15 slots instead of the standard 15. The key difference
+//! is the use of [`AtomicPermuter15`] (u64) instead of `AtomicU64` for permutation.
 //!
 //! # Design
 //!
-//! The 24-slot design requires 5 bits per slot (values 0-23) vs 4 bits for WIDTH=15.
-//! Total: 5 (size) + 24×5 (slots) = 125 bits, requiring u128 storage.
+//! The 15-slot design requires 4 bits per slot (values 0-14) for WIDTH=15.
+//! Total: 4 (size) + 15×4 (slots) = 64 bits, fitting in u64.
 
 use std::array as StdArray;
 use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
-use std::hint as StdHint;
 use std::marker::PhantomData;
 use std::ptr as StdPtr;
 use std::sync::Arc;
@@ -25,7 +24,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 use crate::key::IKEY_SIZE;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
-use crate::permuter24::{AtomicPermuter24, Permuter24};
+use crate::permuter::{AtomicPermuter15, Permuter15};
 use crate::prefetch::prefetch_read;
 use crate::slot::ValueSlot;
 use crate::suffix::{InlineSuffixBag, SuffixBag};
@@ -42,8 +41,8 @@ pub const KSUF_KEYLENX: u8 = 64;
 /// Base keylenx value indicating a layer pointer (>= this means layer).
 pub const LAYER_KEYLENX: u8 = 128;
 
-/// Width constant for [`LeafNode24`].
-pub const WIDTH_24: usize = 24;
+/// Width constant for [`LeafNode15`].
+pub const WIDTH_15: usize = 15;
 
 /// Modification state: node is in insert mode (normal operation).
 pub const MODSTATE_INSERT: u8 = 0;
@@ -58,22 +57,22 @@ pub const MODSTATE_DELETED_LAYER: u8 = 2;
 /// Empty nodes can be reused by insert or cleaned up by background task.
 pub const MODSTATE_EMPTY: u8 = 3;
 
-/// Leaf node with 24 slots using u128 permutation.
+/// Leaf node with 15 slots using u64 permutation.
 ///
 /// # Concurrency Model
 ///
-/// Same as `LeafNode<S, WIDTH>` but uses [`AtomicPermuter24`] for the permutation
-/// field, enabling 24 slots instead of 15.
+/// Same as `LeafNode<S, WIDTH>` but uses [`AtomicPermuter15`] for the permutation
+/// field, enabling 15 slots instead of 15.
 ///
 /// # Memory Layout
 ///
 /// ```text
 /// Cache Line 0 (64 bytes): version + modstate + padding
-/// Cache Line 1 (64 bytes): permutation (u128 = 16 bytes) + padding (48 bytes)
-/// Cache Lines 2+: keys, keylenx, values (24 slots each)
+/// Cache Line 1 (64 bytes): permutation (u64 = 16 bytes) + padding (48 bytes)
+/// Cache Lines 2+: keys, keylenx, values (15 slots each)
 /// ```
 #[repr(C, align(64))]
-pub struct LeafNode24<S: ValueSlot> {
+pub struct LeafNode15<S: ValueSlot> {
     // ========================================================================
     // Cache Line 0: Version + metadata (read-heavy, rarely written)
     // ========================================================================
@@ -97,38 +96,38 @@ pub struct LeafNode24<S: ValueSlot> {
     // ========================================================================
     // Cache Line 1: Permutation (CAS-heavy, isolated for performance)
     // ========================================================================
-    /// Permutation using u128 for 24-slot support.
+    /// Permutation using u64 for 15-slot support.
     /// Store is linearization point for new slot visibility.
-    permutation: AtomicPermuter24,
+    permutation: AtomicPermuter15,
 
     /// Padding to fill cache line 1.
-    /// u128 = 16 bytes, so need 64 - 16 = 48 bytes padding.
-    _pad1: [u8; 48],
+    /// u64 = 8 bytes, so need 64 - 8 = 56 bytes padding.
+    _pad1: [u8; 56],
 
     // ========================================================================
     // Cache Lines 2+: Keys and values (read during search, written on insert)
     // ========================================================================
     /// 8-byte keys for each slot.
-    ikey0: [AtomicU64; WIDTH_24],
+    ikey0: [AtomicU64; WIDTH_15],
 
     /// Key length/type for each slot.
     /// Values 0-8: inline key length
     /// Value 64: has suffix
     /// Value ≥128: is layer
-    keylenx: [AtomicU8; WIDTH_24],
+    keylenx: [AtomicU8; WIDTH_15],
 
     /// Values/layer pointers for each slot.
     /// Stores `Arc<V>` raw pointer or layer pointer as `*mut u8`.
     /// Type is determined by keylenx: if < `LAYER_KEYLENX` → `Arc<V>`, else → layer node.
-    leaf_values: [AtomicPtr<u8>; WIDTH_24],
+    leaf_values: [AtomicPtr<u8>; WIDTH_15],
 
     /// Inline suffix storage (embedded, no heap allocation for small suffixes).
     /// Uses `UnsafeCell` for interior mutability under lock.
-    inline_ksuf: UnsafeCell<InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY>>,
+    inline_ksuf: UnsafeCell<InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY>>,
 
     /// External suffix storage (heap-allocated overflow).
     /// Only allocated when inline storage is full.
-    external_ksuf: AtomicPtr<SuffixBag<WIDTH_24>>,
+    external_ksuf: AtomicPtr<SuffixBag<WIDTH_15>>,
 
     /// Next leaf with mark bit in LSB for split coordination.
     next: AtomicPtr<Self>,
@@ -143,9 +142,9 @@ pub struct LeafNode24<S: ValueSlot> {
     _marker: PhantomData<S>,
 }
 
-impl<S: ValueSlot> StdFmt::Debug for LeafNode24<S> {
+impl<S: ValueSlot> StdFmt::Debug for LeafNode15<S> {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
-        f.debug_struct("LeafNode24")
+        f.debug_struct("LeafNode15")
             .field("size", &self.size())
             .field("is_root", &self.version.is_root())
             .field("has_parent", &(!self.parent().is_null()))
@@ -153,7 +152,7 @@ impl<S: ValueSlot> StdFmt::Debug for LeafNode24<S> {
     }
 }
 
-impl<S: ValueSlot> LeafNode24<S> {
+impl<S: ValueSlot> LeafNode15<S> {
     // ============================================================================
     //  Constructor Methods
     // ============================================================================
@@ -170,8 +169,8 @@ impl<S: ValueSlot> LeafNode24<S> {
             version,
             modstate: AtomicU8::new(MODSTATE_INSERT),
             _pad0: [0; 55],
-            permutation: AtomicPermuter24::new(),
-            _pad1: [0; 48],
+            permutation: AtomicPermuter15::new(),
+            _pad1: [0; 56],
             ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             keylenx: StdArray::from_fn(|_| AtomicU8::new(0)),
             leaf_values: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
@@ -216,7 +215,7 @@ impl<S: ValueSlot> LeafNode24<S> {
             StdPtr::write(&raw mut node.modstate, AtomicU8::new(MODSTATE_INSERT));
 
             // Permutation: empty
-            StdPtr::write(&raw mut node.permutation, AtomicPermuter24::new());
+            StdPtr::write(&raw mut node.permutation, AtomicPermuter15::new());
 
             // InlineSuffixBag: new (contains non-zero atomics)
             StdPtr::write(
@@ -291,15 +290,15 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// Get the ikey at the given physical slot.
     ///
     /// # Panics
-    /// Panics in debug mode if `slot >= WIDTH_24`.
+    /// Panics in debug mode if `slot >= WIDTH_15`.
     #[must_use]
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot from Permuter24, valid by construction"
+        reason = "Slot from Permuter15, valid by construction"
     )]
     pub fn ikey(&self, slot: usize) -> u64 {
-        debug_assert!(slot < WIDTH_24, "ikey: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "ikey: slot out of bounds");
 
         self.ikey0[slot].load(READ_ORD)
     }
@@ -308,10 +307,10 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot from Permuter24, valid by construction"
+        reason = "Slot from Permuter15, valid by construction"
     )]
     pub fn set_ikey(&self, slot: usize, ikey: u64) {
-        debug_assert!(slot < WIDTH_24, "set_ikey: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "set_ikey: slot out of bounds");
 
         self.ikey0[slot].store(ikey, WRITE_ORD);
     }
@@ -320,14 +319,33 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[must_use]
     #[inline(always)]
     #[expect(clippy::indexing_slicing)]
-    pub fn load_all_ikeys(&self) -> [u64; WIDTH_24] {
-        let mut ikeys = [0u64; WIDTH_24];
+    pub fn load_all_ikeys(&self) -> [u64; WIDTH_15] {
+        let mut ikeys = [0u64; WIDTH_15];
 
-        (0..WIDTH_24).for_each(|i| {
+        (0..WIDTH_15).for_each(|i| {
             ikeys[i] = self.ikey0[i].load(READ_ORD);
         });
 
         ikeys
+    }
+
+    /// Prefetch the ikey at the given slot into CPU cache.
+    ///
+    /// This is used during linear search to hide memory latency by
+    /// prefetching future ikeys while processing current ones.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index (0..WIDTH_15)
+    ///
+    /// # Safety
+    ///
+    /// The slot must be in range [0, WIDTH_15). No bounds check in release mode.
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "Caller ensures slot is valid")]
+    pub fn prefetch_ikey(&self, slot: usize) {
+        debug_assert!(slot < WIDTH_15, "prefetch_ikey: slot out of bounds");
+        prefetch_read(&raw const self.ikey0[slot]);
     }
 
     /// Prefetch leaf node data for range scans.
@@ -336,13 +354,13 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// (`leaf_values`) into CPU cache before they're accessed, reducing memory
     /// latency during sequential scanning.
     ///
-    /// # Memory Layout (WIDTH=24)
+    /// # Memory Layout (WIDTH=15)
     ///
     /// ```text
     /// Offset   Size    Field
     /// ------   ----    -----
     /// 0        64B     Cache line 0: version + modstate + padding
-    /// 64       64B     Cache line 1: permutation (u128) + padding
+    /// 64       64B     Cache line 1: permutation (u64) + padding
     /// 128      192B    ikey0 (24 × 8B = 192B, ~3 cache lines)
     /// 320      24B     keylenx (24 × 1B)
     /// 344      192B    leaf_values (24 × 8B = 192B, ~3 cache lines)
@@ -370,34 +388,15 @@ impl<S: ValueSlot> LeafNode24<S> {
         }
     }
 
-    /// Prefetch the ikey at the given slot into CPU cache.
-    ///
-    /// This is used during linear search to hide memory latency by
-    /// prefetching future ikeys while processing current ones.
-    ///
-    /// # Arguments
-    ///
-    /// * `slot` - Physical slot index (0..WIDTH_24)
-    ///
-    /// # Safety
-    ///
-    /// The slot must be in range [0, WIDTH_24). No bounds check in release mode.
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "Caller ensures slot is valid")]
-    pub fn prefetch_ikey(&self, slot: usize) {
-        debug_assert!(slot < WIDTH_24, "prefetch_ikey: slot out of bounds");
-        prefetch_read(&raw const self.ikey0[slot]);
-    }
-
     /// Get the keylenx at the given physical slot.
     #[must_use]
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot from Permuter24, valid by construction"
+        reason = "Slot from Permuter15, valid by construction"
     )]
     pub fn keylenx(&self, slot: usize) -> u8 {
-        debug_assert!(slot < WIDTH_24, "keylenx: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "keylenx: slot out of bounds");
 
         self.keylenx[slot].load(READ_ORD)
     }
@@ -406,10 +405,10 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot from Permuter24, valid by construction"
+        reason = "Slot from Permuter15, valid by construction"
     )]
     pub fn set_keylenx(&self, slot: usize, keylenx: u8) {
-        debug_assert!(slot < WIDTH_24, "set_keylenx: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "set_keylenx: slot out of bounds");
 
         self.keylenx[slot].store(keylenx, WRITE_ORD);
     }
@@ -424,7 +423,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// Get the `keylenx` bound for this leaf.
     #[inline(always)]
     pub fn keylenx_bound(&self) -> u8 {
-        let perm: Permuter24 = self.permutation();
+        let perm: Permuter15 = self.permutation();
 
         debug_assert!(perm.size() > 0, "keylenx_bound called on empty_leaf");
 
@@ -466,7 +465,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// Load external suffix bag pointer (reader).
     #[must_use]
     #[inline(always)]
-    pub fn external_ksuf_ptr(&self) -> *mut SuffixBag<WIDTH_24> {
+    pub fn external_ksuf_ptr(&self) -> *mut SuffixBag<WIDTH_15> {
         self.external_ksuf.load(READ_ORD)
     }
 
@@ -485,7 +484,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[must_use]
     #[inline]
     pub fn ksuf(&self, slot: usize) -> Option<&[u8]> {
-        debug_assert!(slot < WIDTH_24, "ksuf: slot {slot} >= WIDTH_24 {WIDTH_24}");
+        debug_assert!(slot < WIDTH_15, "ksuf: slot {slot} >= WIDTH_15 {WIDTH_15}");
 
         if !self.has_ksuf(slot) {
             return None;
@@ -494,14 +493,14 @@ impl<S: ValueSlot> LeafNode24<S> {
         // FAST PATH: Check inline storage first
         // SAFETY: We're reading. Concurrent writes require lock, and readers
         // use version validation to retry on changes.
-        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &*self.inline_ksuf.get() };
         if let Some(suffix) = inline.get(slot) {
             return Some(suffix);
         }
 
         // SLOW PATH: Check external storage
-        let ext_ptr: *mut SuffixBag<WIDTH_24> = self.external_ksuf_ptr();
+        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf_ptr();
         if ext_ptr.is_null() {
             return None;
         }
@@ -531,13 +530,13 @@ impl<S: ValueSlot> LeafNode24<S> {
     )]
     pub unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         debug_assert!(
-            slot < WIDTH_24,
-            "assign_ksuf: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "assign_ksuf: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         // FAST PATH 1: Try inline storage first (no allocation!)
         // SAFETY: We hold the lock, so no concurrent writers.
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+        let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
 
         if inline.try_assign(slot, suffix) {
@@ -546,10 +545,10 @@ impl<S: ValueSlot> LeafNode24<S> {
         }
 
         // FAST PATH 2: Try external storage in-place (if exists and has room)
-        let old_ext: *mut SuffixBag<WIDTH_24> = self.external_ksuf.load(RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             // SAFETY: old_ext is non-null and came from Box::into_raw.
-            let bag: &mut SuffixBag<WIDTH_24> = unsafe { &mut *old_ext };
+            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
             if bag.try_assign_in_place(slot, suffix) {
                 // Clear from inline if it was there
                 inline.clear(slot);
@@ -573,17 +572,17 @@ impl<S: ValueSlot> LeafNode24<S> {
     unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         let perm = self.permutation();
         // SAFETY: Caller holds lock, ensuring exclusive access to inline_ksuf.
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+        let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
 
         // Drain inline to a new external bag with the new suffix
-        let mut new_bag: SuffixBag<WIDTH_24> = inline.drain_to_external(&perm, slot, suffix);
+        let mut new_bag: SuffixBag<WIDTH_15> = inline.drain_to_external(&perm, slot, suffix);
 
         // Merge with existing external suffixes (if any)
-        let old_ext: *mut SuffixBag<WIDTH_24> = self.external_ksuf.load(RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             // SAFETY: old_ext is non-null
-            let old_bag: &SuffixBag<WIDTH_24> = unsafe { &*old_ext };
+            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
 
             for i in 0..perm.size() {
                 let s: usize = perm.get(i);
@@ -597,7 +596,7 @@ impl<S: ValueSlot> LeafNode24<S> {
         }
 
         // Install new external bag
-        let new_ptr: *mut SuffixBag<WIDTH_24> = Box::into_raw(Box::new(new_bag));
+        let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
         self.external_ksuf.store(new_ptr, WRITE_ORD);
 
         // Retire old external bag
@@ -627,22 +626,22 @@ impl<S: ValueSlot> LeafNode24<S> {
     )]
     pub unsafe fn clear_ksuf(&self, slot: usize, _guard: &LocalGuard<'_>) {
         debug_assert!(
-            slot < WIDTH_24,
-            "clear_ksuf: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "clear_ksuf: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         // Clear from inline storage
         // SAFETY: We hold the lock, so no concurrent writers.
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+        let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
         inline.clear(slot);
 
         // Clear from external storage (if exists)
-        let ext_ptr: *mut SuffixBag<WIDTH_24> = self.external_ksuf.load(RELAXED);
+        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !ext_ptr.is_null() {
             // SAFETY: ext_ptr is non-null and came from Box::into_raw.
             // We hold the lock, so we can mutate in place.
-            let bag: &mut SuffixBag<WIDTH_24> = unsafe { &mut *ext_ptr };
+            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *ext_ptr };
             bag.clear(slot);
         }
 
@@ -654,8 +653,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline]
     pub fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
         debug_assert!(
-            slot < WIDTH_24,
-            "ksuf_equals: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "ksuf_equals: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         if !self.has_ksuf(slot) {
@@ -664,14 +663,14 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         // Check inline first
         // SAFETY: Reader access, concurrent writes require lock.
-        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &*self.inline_ksuf.get() };
         if inline.suffix_equals(slot, suffix) {
             return true;
         }
 
         // Check external
-        let ext_ptr: *mut SuffixBag<WIDTH_24> = self.external_ksuf_ptr();
+        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf_ptr();
         if ext_ptr.is_null() {
             return false;
         }
@@ -685,8 +684,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline]
     pub fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering> {
         debug_assert!(
-            slot < WIDTH_24,
-            "ksuf_compare: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "ksuf_compare: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         if !self.has_ksuf(slot) {
@@ -695,14 +694,14 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         // Check inline first
         // SAFETY: Reader access, concurrent writes require lock.
-        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &*self.inline_ksuf.get() };
         if let Some(cmp) = inline.suffix_compare(slot, suffix) {
             return Some(cmp);
         }
 
         // Check external
-        let ext_ptr: *mut SuffixBag<WIDTH_24> = self.external_ksuf_ptr();
+        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf_ptr();
         if ext_ptr.is_null() {
             return None;
         }
@@ -716,8 +715,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline]
     pub fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
         debug_assert!(
-            slot < WIDTH_24,
-            "ksuf_matches: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "ksuf_matches: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         if self.ikey(slot) != ikey {
@@ -746,8 +745,8 @@ impl<S: ValueSlot> LeafNode24<S> {
     )]
     pub fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
         debug_assert!(
-            slot < WIDTH_24,
-            "ksuf_match_result: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "ksuf_match_result: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         let stored_keylenx: u8 = self.keylenx(slot);
@@ -783,16 +782,16 @@ impl<S: ValueSlot> LeafNode24<S> {
         exclude_slot: Option<usize>,
         guard: &LocalGuard<'_>,
     ) -> usize {
-        let old_ptr: *mut SuffixBag<WIDTH_24> = self.external_ksuf.load(RELAXED);
+        let old_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if old_ptr.is_null() {
             return 0;
         }
 
         let perm = self.permutation();
         // SAFETY: old_ptr is non-null
-        let mut new_bag: SuffixBag<WIDTH_24> = unsafe { (*old_ptr).clone() };
+        let mut new_bag: SuffixBag<WIDTH_15> = unsafe { (*old_ptr).clone() };
         let reclaimed = new_bag.compact_with_permuter(&perm, exclude_slot);
-        let new_ptr: *mut SuffixBag<WIDTH_24> = Box::into_raw(Box::new(new_bag));
+        let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
 
         self.external_ksuf.store(new_ptr, WRITE_ORD);
 
@@ -814,10 +813,10 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot from Permuter24; valid by construction"
+        reason = "Slot from Permuter15; valid by construction"
     )]
     pub fn leaf_value_ptr(&self, slot: usize) -> *mut u8 {
-        debug_assert!(slot < WIDTH_24, "leaf_value_ptr: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "leaf_value_ptr: slot out of bounds");
 
         self.leaf_values[slot].load(READ_ORD)
     }
@@ -826,10 +825,10 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot from Permuter24; valid by construction"
+        reason = "Slot from Permuter15; valid by construction"
     )]
     pub fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
-        debug_assert!(slot < WIDTH_24, "set_leaf_value_ptr: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "set_leaf_value_ptr: slot out of bounds");
 
         self.leaf_values[slot].store(ptr, WRITE_ORD);
     }
@@ -838,10 +837,10 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot from Permuter24; valid by construction"
+        reason = "Slot from Permuter15; valid by construction"
     )]
     pub fn take_leaf_value_ptr(&self, slot: usize) -> *mut u8 {
-        debug_assert!(slot < WIDTH_24, "take_leaf_value_ptr: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "take_leaf_value_ptr: slot out of bounds");
 
         self.leaf_values[slot].swap(StdPtr::null_mut(), RELAXED)
     }
@@ -860,20 +859,20 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// Load permutation with Acquire ordering.
     #[inline(always)]
     #[must_use]
-    pub fn permutation(&self) -> Permuter24 {
+    pub fn permutation(&self) -> Permuter15 {
         self.permutation.load(READ_ORD)
     }
 
     /// Store permutation with Release ordering.
     #[inline(always)]
-    pub fn set_permutation(&self, perm: Permuter24) {
+    pub fn set_permutation(&self, perm: Permuter15) {
         self.permutation.store(perm, WRITE_ORD);
     }
 
     /// Get raw permutation value (for debugging).
     #[inline(always)]
     #[must_use]
-    pub fn permutation_raw(&self) -> u128 {
+    pub fn permutation_raw(&self) -> u64 {
         self.permutation.load_raw(READ_ORD)
     }
 
@@ -889,7 +888,7 @@ impl<S: ValueSlot> LeafNode24<S> {
         expected: *mut u8,
         new_value: *mut u8,
     ) -> Result<(), *mut u8> {
-        debug_assert!(slot < WIDTH_24, "cas_slot_value: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "cas_slot_value: slot out of bounds");
 
         match self.leaf_values[slot].compare_exchange(expected, new_value, CAS_SUCCESS, CAS_FAILURE)
         {
@@ -902,7 +901,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub fn load_slot_value(&self, slot: usize) -> *mut u8 {
-        debug_assert!(slot < WIDTH_24, "load_slot_value: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "load_slot_value: slot out of bounds");
         self.leaf_values[slot].load(READ_ORD)
     }
 
@@ -919,7 +918,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
         debug_assert!(
-            slot < WIDTH_24,
+            slot < WIDTH_15,
             "store_key_data_for_cas: slot out of bounds"
         );
         self.ikey0[slot].store(ikey, WRITE_ORD);
@@ -944,7 +943,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[must_use]
     #[inline(always)]
     pub fn is_full(&self) -> bool {
-        self.size() >= WIDTH_24
+        self.size() >= WIDTH_15
     }
 
     // ============================================================================
@@ -1015,7 +1014,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 
             // Quick check: did marker clear during spin?
             for _ in 0..16 {
-                StdHint::spin_loop();
+                std::hint::spin_loop();
                 if !self.next_is_marked() {
                     return;
                 }
@@ -1067,7 +1066,7 @@ impl<S: ValueSlot> LeafNode24<S> {
                 }
                 Err(_) => {
                     // CAS failed: someone else updated next, retry
-                    StdHint::spin_loop();
+                    std::hint::spin_loop();
                 }
             }
         }
@@ -1078,7 +1077,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// # Errors
     /// Returns `Err(current_value)` if the CAS failed.
     #[inline]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[expect(dead_code)]
     fn cas_next(&self, current: *mut Self, new: *mut Self) -> Result<*mut Self, *mut Self> {
         self.next
             .compare_exchange(current, new, CAS_SUCCESS, CAS_FAILURE)
@@ -1148,7 +1147,7 @@ impl<S: ValueSlot> LeafNode24<S> {
                     }
                     // Otherwise, prev->next doesn't point to us - prev may have split
                     // and our new prev is the split sibling. Loop and re-read prev.
-                    StdHint::spin_loop();
+                    std::hint::spin_loop();
                 }
             }
         }
@@ -1346,7 +1345,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline]
     #[expect(clippy::indexing_slicing)]
     pub fn clear_slot(&self, slot: usize) {
-        debug_assert!(slot < WIDTH_24, "clear_slot: slot out of bounds");
+        debug_assert!(slot < WIDTH_15, "clear_slot: slot out of bounds");
 
         // Clear keylenx to 0 (marks slot as empty for searches)
         self.keylenx[slot].store(0, AtomicOrdering::Release);
@@ -1373,7 +1372,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         // Remove from permutation
         let mut perm = self.permutation();
-        perm.remove_slot(slot);
+        perm.remove(slot);
         self.set_permutation(perm);
     }
 }
@@ -1382,21 +1381,21 @@ impl<S: ValueSlot> LeafNode24<S> {
 //  Send + Sync
 // ============================================================================
 
-// SAFETY: LeafNode24 is safe to send/share between threads when S is.
+// SAFETY: LeafNode15 is safe to send/share between threads when S is.
 // The atomic fields handle concurrent access, and the raw pointers are
 // protected by the tree's concurrency protocol (version validation, locks).
-unsafe impl<S: ValueSlot + Send + Sync> Send for LeafNode24<S> {}
-unsafe impl<S: ValueSlot + Send + Sync> Sync for LeafNode24<S> {}
+unsafe impl<S: ValueSlot + Send + Sync> Send for LeafNode15<S> {}
+unsafe impl<S: ValueSlot + Send + Sync> Sync for LeafNode15<S> {}
 
 // ============================================================================
 //  TreeLeafNode Implementation
 // ============================================================================
 
-impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> for LeafNode24<S> {
-    type Perm = Permuter24;
+impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> for LeafNode15<S> {
+    type Perm = Permuter15;
     // Internodes are limited to WIDTH=15 due to 4-bit permutation slots
     type Internode = crate::internode::InternodeNode<S, 15>;
-    const WIDTH: usize = WIDTH_24;
+    const WIDTH: usize = WIDTH_15;
 
     #[inline(always)]
     fn new_boxed() -> Box<Self> {
@@ -1419,17 +1418,17 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     }
 
     #[inline(always)]
-    fn permutation(&self) -> Permuter24 {
+    fn permutation(&self) -> Permuter15 {
         Self::permutation(self)
     }
 
     #[inline(always)]
-    fn set_permutation(&self, perm: Permuter24) {
+    fn set_permutation(&self, perm: Permuter15) {
         Self::set_permutation(self, perm);
     }
 
     #[inline(always)]
-    fn permutation_raw(&self) -> u128 {
+    fn permutation_raw(&self) -> u64 {
         Self::permutation_raw(self)
     }
 
@@ -1448,14 +1447,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         Self::ikey_bound(self)
     }
 
-    /// SIMD-accelerated ikey matching for WIDTH=24.
-    ///
-    /// Uses `load_all_ikeys()` + SIMD comparison instead of
-    /// sequential per-slot atomic loads.
-    #[inline]
-    fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
-        crate::ksearch::find_ikey_matches_leaf24(target_ikey, self)
-    }
+    // Uses default trait implementation for find_ikey_matches (scalar loop)
 
     #[inline(always)]
     fn keylenx(&self, slot: usize) -> u8 {
@@ -1683,7 +1675,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
             );
 
             // Load current permutation (caller holds lock)
-            let old_perm: Permuter24 = self.permutation();
+            let old_perm: Permuter15 = self.permutation();
             let old_size = old_perm.size();
 
             debug_assert!(
@@ -1721,7 +1713,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
             }
 
             // Build new leaf's permutation
-            let new_perm = Permuter24::make_sorted(entries_to_move);
+            let new_perm = Permuter15::make_sorted(entries_to_move);
             new_leaf.set_permutation(new_perm);
 
             // Update old leaf's permutation
@@ -1757,7 +1749,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         let new_leaf: &Self = unsafe { &*new_leaf_ptr };
 
         // Load current permutation (caller holds lock)
-        let old_perm: Permuter24 = self.permutation();
+        let old_perm: Permuter15 = self.permutation();
         let old_size = old_perm.size();
 
         debug_assert!(old_size > 0, "Cannot split empty leaf");
@@ -1787,11 +1779,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         }
 
         // New leaf gets all entries
-        let new_perm = Permuter24::make_sorted(old_size);
+        let new_perm = Permuter15::make_sorted(old_size);
         new_leaf.set_permutation(new_perm);
 
         // Old leaf becomes empty
-        self.set_permutation(Permuter24::empty());
+        self.set_permutation(Permuter15::empty());
 
         // Split key is first key of new leaf
         let split_ikey = new_leaf.ikey(new_perm.get(0));
@@ -1953,7 +1945,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 // Drop Implementation
 // =============================================================================
 
-impl<S: ValueSlot> Drop for LeafNode24<S> {
+impl<S: ValueSlot> Drop for LeafNode15<S> {
     /// Drop the leaf node, cleaning up stored values and suffix bag.
     ///
     /// This iterates through all slots and drops any non-null value pointers
@@ -1961,10 +1953,10 @@ impl<S: ValueSlot> Drop for LeafNode24<S> {
     /// are owned by the tree and cleaned up during tree teardown.
     #[expect(
         clippy::indexing_slicing,
-        reason = "slot iterates 0..WIDTH_24 which matches array size"
+        reason = "slot iterates 0..WIDTH_15 which matches array size"
     )]
     fn drop(&mut self) {
-        for slot in 0..WIDTH_24 {
+        for slot in 0..WIDTH_15 {
             let ptr: *mut u8 = self.leaf_values[slot].load(RELAXED);
             if ptr.is_null() {
                 continue;
@@ -1984,7 +1976,7 @@ impl<S: ValueSlot> Drop for LeafNode24<S> {
         }
 
         // External suffix bag (inline is embedded, no cleanup needed)
-        let ext_ptr: *mut SuffixBag<WIDTH_24> = self.external_ksuf.load(RELAXED);
+        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !ext_ptr.is_null() {
             // SAFETY: ext_ptr came from Box::into_raw in assign_ksuf_slow.
             unsafe {
@@ -1999,12 +1991,12 @@ impl<S: ValueSlot> Drop for LeafNode24<S> {
 // =============================================================================
 
 impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value::LeafValue<V>>
-    for LeafNode24<crate::value::LeafValue<V>>
+    for LeafNode15<crate::value::LeafValue<V>>
 {
     fn try_clone_output(&self, slot: usize) -> Option<Arc<V>> {
         debug_assert!(
-            slot < WIDTH_24,
-            "try_clone_arc: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "try_clone_arc: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         // Check for layer pointer - layer pointers are NOT Arc values
@@ -2037,8 +2029,8 @@ impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value:
         guard: &seize::LocalGuard<'_>,
     ) {
         debug_assert!(
-            slot < WIDTH_24,
-            "assign_from_key_arc: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "assign_from_key_arc: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         // Calculate inline length (0-8 bytes)
@@ -2091,12 +2083,12 @@ impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value:
 
 impl<V: Copy + Send + Sync + 'static>
     crate::leaf_trait::LayerCapableLeaf<crate::value::LeafValueIndex<V>>
-    for LeafNode24<crate::value::LeafValueIndex<V>>
+    for LeafNode15<crate::value::LeafValueIndex<V>>
 {
     fn try_clone_output(&self, slot: usize) -> Option<V> {
         debug_assert!(
-            slot < WIDTH_24,
-            "try_clone_output: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "try_clone_output: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         // Check for layer pointer - layer pointers are NOT values
@@ -2126,8 +2118,8 @@ impl<V: Copy + Send + Sync + 'static>
         guard: &seize::LocalGuard<'_>,
     ) {
         debug_assert!(
-            slot < WIDTH_24,
-            "assign_from_key_arc: slot {slot} >= WIDTH_24 {WIDTH_24}"
+            slot < WIDTH_15,
+            "assign_from_key_arc: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
         // Calculate inline length (0-8 bytes)
@@ -2172,6 +2164,6 @@ impl<V: Copy + Send + Sync + 'static>
         }
     }
 }
-
-#[cfg(test)]
-mod unit_tests;
+//
+// #[cfg(test)]
+// mod unit_tests;

@@ -1,4 +1,4 @@
-```text
+```bash
 Timer precision: 30 ns
 range_concurrent               fastest       │ slowest       │ median        │ mean          │ samples │ iters
 ├─ 01_sequential_full_scan                   │               │               │               │         │
