@@ -70,28 +70,33 @@ where
     let mut i: usize = 0;
 
     // Unrolled loop: process 3 slots per iteration
+    // Speculative batch load: load all slots and ikeys upfront for better ILP
     while i + 3 <= size {
-        // // Prefetch ahead (disabled - no measurable benefit)
-        // if i + 5 <= size {
-        //     leaf.prefetch_ikey(perm.get(i + 3));
-        // }
-
-        // Check slot 0 of triplet
+        // Batch load slots (bit extraction only, no memory access)
         let s0: usize = perm.get(i);
-        if let Some(result) = check_slot_multi_layer(leaf, s0, target_ikey, search_keylenx, key) {
-            return result;
-        }
-
-        // Check slot 1 of triplet
         let s1: usize = perm.get(i + 1);
-        if let Some(result) = check_slot_multi_layer(leaf, s1, target_ikey, search_keylenx, key) {
-            return result;
-        }
-
-        // Check slot 2 of triplet
         let s2: usize = perm.get(i + 2);
-        if let Some(result) = check_slot_multi_layer(leaf, s2, target_ikey, search_keylenx, key) {
-            return result;
+
+        // Batch load ikeys (memory loads can be issued in parallel)
+        let ikey0: u64 = leaf.ikey(s0);
+        let ikey1: u64 = leaf.ikey(s1);
+        let ikey2: u64 = leaf.ikey(s2);
+
+        // Now check sequentially with early exit
+        if ikey0 == target_ikey {
+            if let Some(result) = check_slot_match(leaf, s0, search_keylenx, key) {
+                return result;
+            }
+        }
+        if ikey1 == target_ikey {
+            if let Some(result) = check_slot_match(leaf, s1, search_keylenx, key) {
+                return result;
+            }
+        }
+        if ikey2 == target_ikey {
+            if let Some(result) = check_slot_match(leaf, s2, search_keylenx, key) {
+                return result;
+            }
         }
 
         i += 3;
@@ -100,8 +105,11 @@ where
     // Handle remainder (0-2 elements)
     while i < size {
         let slot: usize = perm.get(i);
-        if let Some(result) = check_slot_multi_layer(leaf, slot, target_ikey, search_keylenx, key) {
-            return result;
+        let slot_ikey: u64 = leaf.ikey(slot);
+        if slot_ikey == target_ikey {
+            if let Some(result) = check_slot_match(leaf, slot, search_keylenx, key) {
+                return result;
+            }
         }
         i += 1;
     }
@@ -109,15 +117,14 @@ where
     LookupResult::NotFound
 }
 
-/// Check a single slot for multi-layer key match.
+/// Check a slot where ikey already matched. Verifies keylenx and suffix.
 ///
-/// Returns `Some(LookupResult)` if the slot matches or is a layer pointer,
+/// Returns `Some(LookupResult)` if the slot is a value or layer pointer,
 /// `None` to continue searching.
 #[inline(always)]
-fn check_slot_multi_layer<S, L>(
+fn check_slot_match<S, L>(
     leaf: &L,
     slot: usize,
-    target_ikey: u64,
     search_keylenx: u8,
     key: &Key<'_>,
 ) -> Option<LookupResult>
@@ -127,11 +134,6 @@ where
     S::Output: Send + Sync,
     L: LayerCapableLeaf<S>,
 {
-    let slot_ikey: u64 = leaf.ikey(slot);
-    if slot_ikey != target_ikey {
-        return None;
-    }
-
     let slot_keylenx: u8 = leaf.keylenx(slot);
     let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
@@ -377,56 +379,56 @@ where
 
             'search_loop: loop {
                 // Optimized linear search with loop unrolling (3 at a time)
+                // Speculative batch load: load slots and ikeys upfront for better ILP
                 let perm = leaf.permutation();
                 let size = perm.size();
                 let mut found_ptr: *mut u8 = std::ptr::null_mut();
                 let mut i: usize = 0;
 
                 // Unrolled loop: process 3 slots per iteration
-                while i + 3 <= size {
-                    // // Prefetch ahead (disabled - no measurable benefit)
-                    // if i + 5 <= size {
-                    //     leaf.prefetch_ikey(perm.get(i + 3));
-                    // }
-
-                    // Check slot 0 of triplet
+                'unrolled: while i + 3 <= size {
+                    // Batch load slots (bit extraction only, no memory access)
                     let s0: usize = perm.get(i);
+                    let s1: usize = perm.get(i + 1);
+                    let s2: usize = perm.get(i + 2);
+
+                    // Batch load ikeys (memory loads can be issued in parallel)
                     let ikey0: u64 = leaf.ikey(s0);
+                    let ikey1: u64 = leaf.ikey(s1);
+                    let ikey2: u64 = leaf.ikey(s2);
+
+                    // Check slot 0
                     if ikey0 == target_ikey {
                         let kx0: u8 = leaf.keylenx(s0);
                         if kx0 == search_keylenx {
                             let ptr: *mut u8 = leaf.leaf_value_ptr(s0);
                             if !ptr.is_null() {
                                 found_ptr = ptr;
-                                break;
+                                break 'unrolled;
                             }
                         }
                     }
 
-                    // Check slot 1 of triplet
-                    let s1: usize = perm.get(i + 1);
-                    let ikey1: u64 = leaf.ikey(s1);
+                    // Check slot 1
                     if ikey1 == target_ikey {
                         let kx1: u8 = leaf.keylenx(s1);
                         if kx1 == search_keylenx {
                             let ptr: *mut u8 = leaf.leaf_value_ptr(s1);
                             if !ptr.is_null() {
                                 found_ptr = ptr;
-                                break;
+                                break 'unrolled;
                             }
                         }
                     }
 
-                    // Check slot 2 of triplet
-                    let s2: usize = perm.get(i + 2);
-                    let ikey2: u64 = leaf.ikey(s2);
+                    // Check slot 2
                     if ikey2 == target_ikey {
                         let kx2: u8 = leaf.keylenx(s2);
                         if kx2 == search_keylenx {
                             let ptr: *mut u8 = leaf.leaf_value_ptr(s2);
                             if !ptr.is_null() {
                                 found_ptr = ptr;
-                                break;
+                                break 'unrolled;
                             }
                         }
                     }
