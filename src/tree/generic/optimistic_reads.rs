@@ -8,6 +8,8 @@
 //! - Optional SIMD search with `simd` feature flag
 //! - Unified implementation via closure for value extraction
 
+use std::ptr as StdPtr;
+
 use super::{
     Key, LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, NodeVersion,
     ValueSlot,
@@ -198,12 +200,12 @@ where
     ) -> (*mut L, u32, bool) {
         let (advanced, new_version) = self.advance_to_key_generic(leaf, key, version, guard);
 
-        if std::ptr::eq(advanced, leaf) {
+        if StdPtr::eq(advanced, leaf) {
             // Same leaf, new version - retry search
-            (std::ptr::from_ref(leaf).cast_mut(), new_version, false)
+            (StdPtr::from_ref(leaf).cast_mut(), new_version, false)
         } else {
             // Different leaf - search there
-            (std::ptr::from_ref(advanced).cast_mut(), new_version, true)
+            (StdPtr::from_ref(advanced).cast_mut(), new_version, true)
         }
     }
 
@@ -361,6 +363,7 @@ where
     /// Completely inline search without `LookupResult` enum overhead.
     /// This is the hot path for most workloads.
     #[inline(always)]
+    #[expect(clippy::too_many_lines, reason = "Verbose unrolling of loop")]
     fn get_impl_single_layer<R, F>(
         &self,
         key: &Key<'_>,
@@ -412,8 +415,10 @@ where
                     // Check slot 0
                     if ikey0 == target_ikey {
                         let kx0: u8 = leaf.keylenx(s0);
+
                         if kx0 == search_keylenx {
                             let ptr: *mut u8 = leaf.leaf_value_ptr(s0);
+
                             if !ptr.is_null() {
                                 found_ptr = ptr;
                                 break 'unrolled;
@@ -424,8 +429,10 @@ where
                     // Check slot 1
                     if ikey1 == target_ikey {
                         let kx1: u8 = leaf.keylenx(s1);
+
                         if kx1 == search_keylenx {
                             let ptr: *mut u8 = leaf.leaf_value_ptr(s1);
+
                             if !ptr.is_null() {
                                 found_ptr = ptr;
                                 break 'unrolled;
@@ -436,8 +443,10 @@ where
                     // Check slot 2
                     if ikey2 == target_ikey {
                         let kx2: u8 = leaf.keylenx(s2);
+
                         if kx2 == search_keylenx {
                             let ptr: *mut u8 = leaf.leaf_value_ptr(s2);
+
                             if !ptr.is_null() {
                                 found_ptr = ptr;
                                 break 'unrolled;
@@ -455,8 +464,10 @@ where
 
                     if slot_ikey == target_ikey {
                         let slot_keylenx: u8 = leaf.keylenx(slot);
+
                         if slot_keylenx == search_keylenx {
                             let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
                             if !ptr.is_null() {
                                 found_ptr = ptr;
                             }
@@ -470,8 +481,8 @@ where
                     let (advanced, new_version) =
                         self.advance_to_key_generic(leaf, key, version, guard);
 
-                    if !std::ptr::eq(advanced, leaf) {
-                        leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
+                    if !StdPtr::eq(advanced, leaf) {
+                        leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
                         continue 'leaf_loop;
                     }
 

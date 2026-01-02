@@ -167,7 +167,7 @@ impl<S: ValueSlot> InternodeNode<S> {
     /// - The memory does not need to be initialized (will be overwritten)
     #[inline]
     pub unsafe fn init_at(ptr: *mut Self, height: u32) {
-        debug_assert!(height <= 15, "init_at: height {} exceeds maximum 15", height);
+        debug_assert!(height <= 15, "init_at: height {height} exceeds maximum 15");
 
         // SAFETY: All operations here are safe because:
         // - ptr is valid for writes and properly aligned (caller guarantees)
@@ -648,7 +648,7 @@ impl<S: ValueSlot> InternodeNode<S> {
     ///
     /// # Memory Ordering
     ///
-    /// Keys use Relaxed ordering (internal operation), while children use WRITE_ORD
+    /// Keys use Relaxed ordering (internal operation), while children use [`WRITE_ORD`]
     /// (pointers need visibility ordering). The caller is responsible for publishing
     /// via `nkeys.store(WRITE_ORD)` after this function returns, which acts as a
     /// release barrier making all prior writes visible.
@@ -789,6 +789,10 @@ impl<S: ValueSlot> InternodeNode<S> {
                 let child: *mut u8 = new_right.child(i);
                 if !child.is_null() {
                     // SAFETY: height > 0 means children are InternodeNode<S>
+                    #[expect(
+                        clippy::cast_ptr_alignment,
+                        reason = "height > 0 means children are InternodeNode<S>"
+                    )]
                     unsafe {
                         (*child.cast::<Self>()).set_parent(new_right_ptr_u8);
                     }
@@ -869,7 +873,7 @@ impl<S: ValueSlot> InternodeNode<S> {
         // Prefetch cache line 1 (ikey0[6..13]) before we need it
         // CL0 is already in cache from loading nkeys
         if n > 6 {
-            crate::prefetch::prefetch_read(&self.ikey0[6]);
+            crate::prefetch::prefetch_read(&raw const self.ikey0[6]);
         }
 
         // Unrolled loop: process 4 keys per iteration

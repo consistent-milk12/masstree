@@ -10,6 +10,8 @@
 //! (`MassTree24`, `MassTree15`, `MassTree24Inline`, `MassTree15Inline`)
 //! because they are type aliases for `MassTreeGeneric`.
 
+#![allow(clippy::indexing_slicing)]
+
 use std::collections::BTreeSet;
 
 // ============================================================================
@@ -140,10 +142,9 @@ pub fn sequential_keys(prefix: &[u8], start: usize, end: usize, width: usize) ->
 /// tree.insert_batch(entries)?;
 /// ```
 #[must_use]
+#[inline(always)]
 pub fn sequential_u64_keys(start: u64, end: u64) -> Vec<Vec<u8>> {
-    (start..end)
-        .map(|i| i.to_be_bytes().to_vec())
-        .collect()
+    (start..end).map(|i| i.to_be_bytes().to_vec()).collect()
 }
 
 // ============================================================================
@@ -153,8 +154,8 @@ pub fn sequential_u64_keys(start: u64, end: u64) -> Vec<Vec<u8>> {
 /// Statistics about a batch of entries before insertion.
 ///
 /// Use this to estimate batch performance and optimize entry ordering.
-#[derive(Debug, Clone, Default)]
 #[must_use]
+#[derive(Debug, Clone, Default)]
 pub struct BatchStats {
     /// Total number of entries.
     pub count: usize,
@@ -230,10 +231,16 @@ impl BatchStats {
             }
         }
 
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Statistical averages don't need full usize precision"
+        )]
+        let avg_key_len = total_key_len as f64 / count as f64;
+
         Self {
             count,
             unique_ikeys: unique_ikeys.len(),
-            avg_key_len: total_key_len as f64 / count as f64,
+            avg_key_len,
             keys_with_suffix,
             single_layer_keys,
         }
@@ -258,6 +265,11 @@ impl BatchStats {
     /// }
     /// ```
     #[inline]
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Locality ratio doesn't need full usize precision"
+    )]
     pub fn locality_factor(&self) -> f64 {
         if self.count == 0 || self.unique_ikeys == 0 {
             return 0.0;
@@ -270,14 +282,16 @@ impl BatchStats {
     ///
     /// This is a rough estimate based on unique ikey prefixes.
     /// Actual leaf count may be higher if leaves split during insertion.
-    #[inline]
-    pub fn estimated_leaves(&self) -> usize {
+    #[must_use]
+    #[inline(always)]
+    pub const fn estimated_leaves(&self) -> usize {
         self.unique_ikeys
     }
 
     /// Check if single-layer optimization applies to all keys.
-    #[inline]
-    pub fn all_single_layer(&self) -> bool {
+    #[must_use]
+    #[inline(always)]
+    pub const fn all_single_layer(&self) -> bool {
         self.keys_with_suffix == 0
     }
 }

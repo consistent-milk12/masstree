@@ -9,13 +9,13 @@
 //! - Concurrent access (multi-threaded batch + single inserts)
 //! - Split handling (batches that trigger splits)
 
-#![expect(clippy::unwrap_used)]
+#![expect(clippy::unwrap_used, clippy::pedantic, clippy::indexing_slicing)]
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 
-use masstree::{MassTree24, MassTree15, MassTree24Inline, MassTree15Inline};
+use masstree::{MassTree15, MassTree15Inline, MassTree24, MassTree24Inline};
 
 // ============================================================================
 //  Basic Functionality Tests
@@ -80,7 +80,8 @@ fn test_batch_insert_with_updates() {
 
     // Insert initial values
     for i in 0..50 {
-        tree.insert(format!("key{i:03}").as_bytes(), i as u64).unwrap();
+        tree.insert(format!("key{i:03}").as_bytes(), i as u64)
+            .unwrap();
     }
     assert_eq!(tree.len(), 50);
 
@@ -117,7 +118,8 @@ fn test_batch_insert_all_updates() {
 
     // Insert initial values
     for i in 0..100 {
-        tree.insert(format!("key{i:03}").as_bytes(), i as u64).unwrap();
+        tree.insert(format!("key{i:03}").as_bytes(), i as u64)
+            .unwrap();
     }
 
     // Batch update all values
@@ -197,7 +199,7 @@ fn test_batch_insert_inline_with_updates() {
 
     // Batch insert with overlaps
     let entries: Vec<(Vec<u8>, i32)> = (0..100)
-        .map(|i| (format!("k{i}").into_bytes(), i * -1))
+        .map(|i| (format!("k{i}").into_bytes(), -i))
         .collect();
 
     let result = tree.insert_batch(entries).unwrap();
@@ -300,9 +302,7 @@ fn test_batch_insert_short_keys() {
     let tree: MassTree24<u64> = MassTree24::new();
 
     // Very short keys (1-4 bytes)
-    let entries: Vec<(Vec<u8>, u64)> = (0..256)
-        .map(|i| (vec![i as u8], i as u64))
-        .collect();
+    let entries: Vec<(Vec<u8>, u64)> = (0..256).map(|i| (vec![i as u8], i as u64)).collect();
 
     let result = tree.insert_batch(entries).unwrap();
 
@@ -479,7 +479,9 @@ fn test_batch_insert_mixed_with_single_inserts() {
     let tree2 = Arc::clone(&tree);
     let handle2 = thread::spawn(move || {
         for i in 0..500 {
-            tree2.insert(format!("single_{i:04}").as_bytes(), i as u64).unwrap();
+            tree2
+                .insert(format!("single_{i:04}").as_bytes(), i as u64)
+                .unwrap();
         }
     });
 
@@ -487,7 +489,7 @@ fn test_batch_insert_mixed_with_single_inserts() {
     let _ = handle1.join().unwrap();
     handle2.join().unwrap();
 
-    assert!(tree.len() > 0);
+    assert!(!tree.is_empty());
 }
 
 // ============================================================================
@@ -559,9 +561,9 @@ fn test_batch_insert_same_ikey_different_keylen() {
 
     // Keys with same first 8 bytes but different lengths
     let entries: Vec<(Vec<u8>, u64)> = vec![
-        (b"abcdefgh".to_vec(), 1),      // exactly 8 bytes
-        (b"abcdefg".to_vec(), 2),       // 7 bytes
-        (b"abcdef".to_vec(), 3),        // 6 bytes
+        (b"abcdefgh".to_vec(), 1), // exactly 8 bytes
+        (b"abcdefg".to_vec(), 2),  // 7 bytes
+        (b"abcdef".to_vec(), 3),   // 6 bytes
     ];
 
     let result = tree.insert_batch(entries).unwrap();

@@ -6,20 +6,19 @@ use std::ptr as StdPtr;
 
 #[test]
 fn test_scan_state_properties() {
+    // Test is_emit
     assert!(ScanState::Emit.is_emit());
     assert!(!ScanState::FindNext.is_emit());
+    assert!(!ScanState::Down.is_emit());
+    assert!(!ScanState::Up.is_emit());
+    assert!(!ScanState::Retry.is_emit());
 
+    // Test is_layer_transition
     assert!(ScanState::Down.is_layer_transition());
     assert!(ScanState::Up.is_layer_transition());
     assert!(!ScanState::Emit.is_layer_transition());
     assert!(!ScanState::FindNext.is_layer_transition());
     assert!(!ScanState::Retry.is_layer_transition());
-
-    assert!(ScanState::Emit.should_continue());
-    assert!(ScanState::FindNext.should_continue());
-    assert!(ScanState::Down.should_continue());
-    assert!(ScanState::Up.should_continue());
-    assert!(ScanState::Retry.should_continue());
 }
 
 #[test]

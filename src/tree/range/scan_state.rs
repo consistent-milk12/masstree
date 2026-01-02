@@ -126,17 +126,6 @@ pub enum ScanState {
 }
 
 impl ScanState {
-    /// Check if scan should continue (not in terminal state).
-    ///
-    /// Returns `false` only when scan is complete (after handling `Up`
-    /// with empty layer stack).
-    #[inline(always)]
-    #[expect(clippy::unused_self)]
-    pub const fn should_continue(self) -> bool {
-        // All states continue; Up becomes terminal only when layer_stack is empty
-        true
-    }
-
     /// Check if this state will yield an entry.
     #[inline(always)]
     pub const fn is_emit(self) -> bool {
@@ -210,6 +199,8 @@ where
     _marker: PhantomData<S>,
 }
 
+// Manual Clone impl to avoid requiring `L: Clone` and `S: Clone` bounds.
+// All fields are Copy types (pointers, primitives, PhantomData).
 impl<L, S> Clone for ScanStackElement<L, S>
 where
     L: TreeLeafNode<S>,
@@ -326,6 +317,19 @@ where
         unsafe { self.leaf.unwrap_unchecked().as_ref() }
     }
 
+    /// Try to get a reference to the current leaf.
+    ///
+    /// Returns `None` if the leaf is null.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the guard that protects this pointer is still alive.
+    #[inline(always)]
+    pub unsafe fn try_leaf_ref(&self) -> Option<&L> {
+        // SAFETY: Caller ensures guard is held
+        self.leaf.map(|nn| unsafe { nn.as_ref() })
+    }
+
     /// Get the cached version.
     #[inline(always)]
     pub const fn version(&self) -> u32 {
@@ -428,22 +432,14 @@ where
     /// # Safety
     ///
     /// The caller must ensure `self.leaf` is `Some` and valid.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if permutation loaded successfully.
-    /// `Err(())` if permutation is frozen (split in progress).
-    #[expect(clippy::unnecessary_wraps, reason = "API Consistency")]
-    pub unsafe fn refresh_from_leaf(&mut self, ki: usize) -> Result<(), ()> {
+    pub unsafe fn refresh_from_leaf(&mut self, ki: usize) {
         debug_assert!(self.leaf.is_some(), "refresh_from_leaf called on null leaf");
         // SAFETY: Caller ensures leaf is valid
         let leaf: &L = unsafe { self.leaf.unwrap_unchecked().as_ref() };
 
         self.version = leaf.version().stable();
-
         self.perm = leaf.permutation();
         self.ki = ki;
-        Ok(())
     }
 }
 
@@ -497,15 +493,28 @@ impl<L> LayerContext<L> {
     ///
     /// # Panics
     ///
-    /// Debug-panics if `leaf` is null (indicates a bug in scan logic).
+    /// Panics if `leaf` is null. A null leaf indicates a bug in scan logic
+    /// since layer contexts are only created when descending from a valid
+    /// leaf position.
+    #[track_caller]
     #[inline(always)]
-    pub fn new(root: *const u8, leaf: *mut L) -> Self {
-        debug_assert!(!leaf.is_null(), "LayerContext::new called with null leaf");
+    #[expect(clippy::expect_used, reason = "Infallible")]
+    pub const fn new(root: *const u8, leaf: *mut L) -> Self {
         Self {
             root,
-            // SAFETY: We just checked that leaf is non-null
-            leaf: unsafe { NonNull::new_unchecked(leaf) },
+            leaf: NonNull::new(leaf).expect("LayerContext requires non-null leaf"),
         }
+    }
+
+    /// Try to create a new layer context.
+    ///
+    /// Returns `None` if `leaf` is null.
+    #[inline(always)]
+    pub fn try_new(root: *const u8, leaf: *mut L) -> Option<Self> {
+        Some(Self {
+            root,
+            leaf: NonNull::new(leaf)?,
+        })
     }
 
     /// Get the leaf as a raw mutable pointer.
@@ -538,7 +547,7 @@ impl<L> LayerContext<L> {
 ///     stack.set_root(parent.root);
 ///     stack.set_leaf(parent.leaf_ptr());
 /// }
-///
+/// ```
 pub type LayerStack<L> = SmallVec<[LayerContext<L>; 4]>;
 
 // ============================================================================
@@ -563,7 +572,7 @@ pub struct ScanSnapshot<S: ValueSlot> {
     /// The key length at current layer.
     ///
     /// For inline keys: 0-8 (actual length)
-    /// For suffix keys:`8 + suffix.len()`
+    /// For suffix keys: `8 + suffix.len()`
     pub key_len: usize,
 }
 
@@ -630,11 +639,21 @@ impl<V> ScanSnapshotPtr<V> {
     /// # Safety
     ///
     /// The caller must ensure:
-    /// 1. The guard is still held
+    /// 1. The guard is still held (prevents deallocation)
     /// 2. The version hasn't changed since the snapshot was created
+    ///
+    /// # Lifetime Warning
+    ///
+    /// The returned reference appears to borrow from `self`, but actually
+    /// borrows from the underlying tree data protected by the guard. Do not
+    /// hold this reference across operations that might invalidate the guard
+    /// or allow version changes.
+    ///
+    /// Prefer dereferencing `value_ptr` directly in performance-critical code
+    /// to make the unsafety more visible at the call site.
     #[inline(always)]
     pub const unsafe fn value_ref(&self) -> &V {
-        // SAFETY: Caller ensures pointer is valid
+        // SAFETY: Caller ensures pointer is valid and guard is held
         unsafe { &*self.value_ptr }
     }
 }

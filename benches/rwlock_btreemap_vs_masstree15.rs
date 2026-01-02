@@ -17,7 +17,6 @@
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::pedantic)]
 #![expect(clippy::indexing_slicing)]
-#![expect(clippy::redundant_locals)]
 
 mod bench_utils;
 
@@ -762,9 +761,12 @@ mod mixed_zipf_hotset_95_5_64b {
                             let mut i = 0usize;
                             while i < OPS_PER_THREAD {
                                 let idx = indices[base + i];
-                                if i % WRITE_EVERY == 0 {
+
+                                if i.is_multiple_of(WRITE_EVERY) {
                                     let mut guard = map.write().unwrap();
                                     guard.insert(keys[idx], i as u64);
+                                    drop(guard);
+
                                     i += 1;
                                     continue;
                                 }
@@ -863,9 +865,12 @@ mod mixed_zipf_hotset_95_5_64b {
                             let mut i = 0usize;
                             while i < OPS_PER_THREAD {
                                 let idx = indices[base + i];
-                                if i % WRITE_EVERY == 0 {
+
+                                if i.is_multiple_of(WRITE_EVERY) {
                                     let mut guard = map.write();
                                     guard.insert(keys[idx], i as u64);
+                                    drop(guard);
+
                                     i += 1;
                                     continue;
                                 }

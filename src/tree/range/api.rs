@@ -260,7 +260,7 @@ where
     ///
     /// Expected 1.3-1.5x improvement over `scan_ref` for large scans, from:
     /// - Eliminating `match state {}` dispatch overhead
-    /// - Inlining the common FindNext → Emit path
+    /// - Inlining the common `FindNext` → `Emit` path
     ///
     /// # Arguments
     ///

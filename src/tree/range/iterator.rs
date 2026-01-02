@@ -5,6 +5,65 @@
 //! Provides [`RangeIter`], an iterator over key-value pairs in lexicographic order.
 //! The iterator yields [`ScanEntry`] items containing owned keys and values.
 //!
+//! # State Machine
+//!
+//! The iterator is implemented as an explicit state machine with the following states:
+//!
+//! ```text
+//!                     ┌────────────────────────────────────────┐
+//!                     │                                        │
+//!                     ▼                                        │
+//!               ┌──────────┐                                   │
+//!          ┌───▶│  Emit    │───── yield entry ─────────────────┤
+//!          │    └──────────┘                                   │
+//!          │         │                                         │
+//!          │         │ advance ki                              │
+//!          │         ▼                                         │
+//!          │    ┌──────────┐                                   │
+//!          ├────│ FindNext │◀──────────────────────────────────┤
+//!          │    └──────────┘                                   │
+//!          │         │                                         │
+//!          │    ┌────┴────┬────────────┐                       │
+//!          │    ▼         ▼            ▼                       │
+//!          │  found    layer_ptr    leaf_exhausted             │
+//!          │    │         │            │                       │
+//!          │    │    ┌────┴────┐  ┌────┴────┐                  │
+//!          │    │    │  Down   │  │   Up    │                  │
+//!          │    │    └────┬────┘  └────┬────┘                  │
+//!          │    │         │            │                       │
+//!          │    │  shift_clear()   unshift()                   │
+//!          │    │         │            │                       │
+//!          │    │         ▼            │                       │
+//!          │    │    ┌──────────┐      │                       │
+//!          │    │    │  Retry   │◀─────┘                       │
+//!          │    │    └────┬─────┘                              │
+//!          │    │         │                                    │
+//!          │    │    find_retry()                              │
+//!          │    │         │                                    │
+//!          └────┴─────────┴────────────────────────────────────┘
+//! ```
+//!
+//! ## State Descriptions
+//!
+//! - **`Emit`**: Ready to yield a key-value pair to the caller
+//! - **`FindNext`**: Searching for the next entry in the current leaf
+//! - **`Down`**: Descending into a sublayer (encountered a layer pointer)
+//! - **`Up`**: Ascending to parent layer (current layer exhausted)
+//! - **`Retry`**: Repositioning after version conflict or layer transition
+//!
+//! ## Key Transitions
+//!
+//! | From | To | Trigger |
+//! |------|-----|---------|
+//! | `FindNext` | `Emit` | Found valid entry |
+//! | `FindNext` | `Down` | Encountered layer pointer |
+//! | `FindNext` | `Up` | Leaf exhausted, no next leaf |
+//! | `FindNext` | `Retry` | Version changed |
+//! | `Emit` | `FindNext` | Entry yielded |
+//! | `Down` | `Retry` | After `shift_clear()` |
+//! | `Up` | `FindNext` | After `unshift()` and state refresh |
+//! | `Retry` | `FindNext` | After `find_retry()` repositioning |
+//!
 //! # Usage
 //!
 //! ```ignore
@@ -32,6 +91,7 @@ use seize::LocalGuard;
 use smallvec::SmallVec;
 
 use crate::alloc_trait::NodeAllocatorGeneric;
+use crate::key::IKEY_SIZE;
 use crate::leaf_trait::{LayerCapableLeaf, TreeLeafNode};
 use crate::slot::ValueSlot;
 use crate::tree::MassTreeGeneric;
@@ -134,6 +194,11 @@ impl<'a> RangeBound<'a> {
     }
 
     /// Get the bound key if this is a bounded bound.
+    ///
+    /// # Note
+    ///
+    /// This method is provided for API completeness and may be useful for
+    /// external callers who need to inspect bounds programmatically.
     #[must_use]
     #[inline(always)]
     pub const fn key(&self) -> Option<&'a [u8]> {
@@ -317,7 +382,10 @@ where
     /// back to the standard multi-layer path.
     single_layer_mode: bool,
 
-    /// Tracks the last output pointer allocated by `advance_no_alloc_ref`.
+    /// Tracks the output pointer from `initialize()`'s snapshot.
+    ///
+    /// This field is **only** used for the first entry case in `advance_no_alloc_ref`,
+    /// where we convert the `ScanSnapshot` from `initialize()` to a raw pointer.
     ///
     /// For `LeafValueIndex<V>` (Copy types), `output_to_raw` allocates a Box
     /// to provide a stable pointer. This field tracks that allocation so we
@@ -327,6 +395,13 @@ where
     ///
     /// For `LeafValue<V>` (Arc types), this tracks the cloned Arc that needs
     /// to be decremented when no longer needed.
+    ///
+    /// # Why Only First Entry?
+    ///
+    /// After the first entry, `find_next_ptr` returns `ScanSnapshotPtr` with
+    /// pointers directly into the leaf node (protected by guard), so no
+    /// allocation tracking is needed. Only the `initialize()` snapshot path
+    /// requires allocation tracking because it converts `S::Output` → raw pointer.
     last_output_ptr: Option<*mut u8>,
 
     /// Marker for lifetime and type parameter covariance.
@@ -345,6 +420,20 @@ where
             .field("initialized", &self.initialized)
             .field("state", &self.state)
             .finish_non_exhaustive()
+    }
+}
+
+// SAFETY: Use a scope guard to ensure cleanup on panic.
+// If visitor() panics, the guard's Drop will run and clean up ptr.
+struct CleanupGuard<S: ValueSlot> {
+    ptr: *mut u8,
+    _marker: PhantomData<S>,
+}
+
+impl<S: ValueSlot> Drop for CleanupGuard<S> {
+    fn drop(&mut self) {
+        // SAFETY: ptr was created by S::output_to_raw
+        unsafe { S::cleanup_output_raw(self.ptr) };
     }
 }
 
@@ -385,13 +474,17 @@ where
         let stack = ScanStackElement::new(root);
 
         // Determine if we can use single-layer fast path.
-        // Single-layer mode is valid when both bounds are ≤ 8 bytes.
+        // Single-layer mode is valid when both bounds fit within a single ikey.
         // If we encounter a layer pointer during iteration, we fall back.
+        //
+        // Note: Unbounded end bounds are considered "ok" because the fallback
+        // mechanism (setting `single_layer_mode = false` on Down) handles
+        // unexpected layer pointers gracefully.
         let single_layer_mode = {
-            let start_ok = start_key.len() <= 8;
+            let start_ok = start_key.len() <= IKEY_SIZE;
             let end_ok = match &end {
                 RangeBound::Unbounded => true,
-                RangeBound::Included(k) | RangeBound::Excluded(k) => k.len() <= 8,
+                RangeBound::Included(k) | RangeBound::Excluded(k) => k.len() <= IKEY_SIZE,
             };
             start_ok && end_ok
         };
@@ -415,6 +508,17 @@ where
     }
 
     /// Initialize the iterator (lazy initialization on first `next()` call).
+    ///
+    /// # State Machine Initialization
+    ///
+    /// This function handles the initial descent from the tree root to the
+    /// starting position. It may descend through multiple layers if the
+    /// start key has a layer pointer prefix.
+    ///
+    /// The loop handles:
+    /// - `Down`: Descend into sublayer, shift cursor key
+    /// - `Retry`: Re-traverse after version conflict
+    /// - Other: Ready to iterate
     fn initialize(&mut self) {
         if self.initialized {
             return;
@@ -429,6 +533,12 @@ where
 
         // Run initial descent loop
         loop {
+            // IMPORTANT: Save parent ROOT before find_initial, because
+            // find_initial may update stack.root to the layer pointer.
+            // However, stack.leaf is still valid after find_initial returns
+            // (it points to the parent leaf where the layer pointer was found).
+            let parent_root: *const u8 = self.stack.root();
+
             let (state, snapshot) = find_initial(
                 self.stack.root(),
                 &mut self.stack,
@@ -440,10 +550,12 @@ where
 
             match state {
                 ScanState::Down => {
-                    // Start key descends into a sublayer
-                    // Push current context and shift key
+                    // Start key descends into a sublayer.
+                    // - parent_root: saved before find_initial modified stack.root
+                    // - stack.leaf_ptr(): still points to the parent leaf (not modified)
+                    // find_initial already set stack.root to the layer pointer.
                     self.layer_stack
-                        .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
+                        .push(LayerContext::new(parent_root, self.stack.leaf_ptr()));
 
                     // If the key has more bytes (suffix), shift to use them.
                     // Otherwise, the prefix exactly matches the layer pointer's ikey,
@@ -454,13 +566,11 @@ where
                         self.cursor_key.shift_clear();
                     }
 
-                    // Update root to layer pointer
-                    // (find_initial would have set this in a real impl)
-                    // Continue loop to descend further
+                    // Continue loop to descend further into the new layer
                 }
 
                 ScanState::Retry => {
-                    // Version conflict, retry
+                    // Version conflict, retry from current root
                 }
 
                 _ => {
@@ -838,6 +948,7 @@ where
     ///
     /// Number of entries visited.
     #[inline]
+    #[expect(clippy::too_many_lines, reason = "Complex state management logic")]
     pub fn for_each_batch_ref<F>(mut self, mut visitor: F) -> usize
     where
         F: FnMut(&[u8], &S::Value) -> bool,
@@ -857,7 +968,7 @@ where
 
         let mut count: usize = 0;
 
-        // Note: We don't use advance_no_alloc_ref here because it has issues
+        // NOTE: We don't use advance_no_alloc_ref here because it has issues
         // with multi-layer keys. Instead, we use the batch loop for all entries
         // which correctly handles cursor_key updates via find_next_ptr.
 
@@ -874,13 +985,19 @@ where
 
                 // Convert snapshot to reference
                 let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
+
+                let guard = CleanupGuard::<S> {
+                    ptr,
+                    _marker: PhantomData,
+                };
+
                 let value_ref: &S::Value = unsafe { &*ptr.cast::<S::Value>() };
 
                 count += 1;
                 let should_continue = visitor(key, value_ref);
 
-                // Clean up the temporary pointer
-                unsafe { S::cleanup_output_raw(ptr) };
+                // Explicitly drop guard to clean up (also runs on panic)
+                drop(guard);
 
                 if !should_continue {
                     return count;
@@ -995,9 +1112,75 @@ where
                 }
 
                 // Other states are handled at the top of the loop
-                ScanState::FindNext | ScanState::Down | ScanState::Up | ScanState::Retry => {
-                    continue;
+                ScanState::FindNext | ScanState::Down | ScanState::Up | ScanState::Retry => {}
+            }
+        }
+    }
+
+    /// Fallible iteration with zero-copy value references.
+    ///
+    /// Like [`Self::for_each_ref`], but the visitor can return an error to stop
+    /// iteration early. This is useful when processing entries might fail (e.g.,
+    /// serialization, validation, I/O).
+    ///
+    /// # Arguments
+    ///
+    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `Ok(true)` to
+    ///   continue, `Ok(false)` to stop early, or `Err(E)` to stop with an error.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(count)`: Number of entries successfully visited
+    /// - `Err(e)`: The error returned by the visitor
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let result = tree.iter(&guard).try_for_each_ref(|key, value| {
+    ///     if key.len() > MAX_KEY_LEN {
+    ///         return Err(ValidationError::KeyTooLong);
+    ///     }
+    ///     writer.write_entry(key, value)?;
+    ///     Ok(true)
+    /// });
+    ///
+    /// match result {
+    ///     Ok(count) => println!("Wrote {} entries", count),
+    ///     Err(e) => eprintln!("Failed: {}", e),
+    /// }
+    /// ```
+    #[inline]
+    pub fn try_for_each_ref<F, E>(mut self, mut visitor: F) -> Result<usize, E>
+    where
+        F: FnMut(&[u8], &S::Value) -> Result<bool, E>,
+    {
+        if self.exhausted {
+            return Ok(0);
+        }
+
+        // Lazy initialization
+        if !self.initialized {
+            self.initialize();
+            if self.exhausted {
+                return Ok(0);
+            }
+        }
+
+        let mut count: usize = 0;
+
+        loop {
+            // Use the zero-copy advance method
+            if let Some((key, value_ref)) = self.advance_no_alloc_ref() {
+                count += 1;
+                match visitor(key, value_ref) {
+                    Ok(true) => {}
+
+                    Ok(false) => return Ok(count),
+
+                    Err(e) => return Err(e),
                 }
+            } else {
+                return Ok(count);
             }
         }
     }
@@ -1120,15 +1303,19 @@ where
 
                         // Push PARENT context to layer_stack before setting new root.
                         // find_next_single_layer_ptr already stored the ikey to cursor.
-                        self.layer_stack.push(LayerContext::new(
-                            self.stack.root(),
-                            self.stack.leaf_ptr(),
-                        ));
+                        self.layer_stack
+                            .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
 
                         // Read the layer pointer from current slot and set as new root.
                         // Stack position is still at the layer pointer slot.
                         // SAFETY: find_next_single_layer_ptr verified leaf is valid
-                        let slot = self.stack.kp().expect("Down state requires valid slot");
+                        let Some(slot) = self.stack.kp() else {
+                            // Defensive: shouldn't happen, but if slot is somehow invalid,
+                            // fall back to multi-layer retry path
+                            debug_assert!(false, "Down state should have valid slot");
+                            self.state = ScanState::Retry;
+                            continue;
+                        };
                         let leaf: &L = unsafe { self.stack.leaf_ref() };
                         let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
                         self.stack.set_root(layer_ptr);

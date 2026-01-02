@@ -141,12 +141,10 @@ where
         // so we must remove the pointer before deferring retirement.
         let found = {
             let mut ptrs = self.leaf_ptrs.lock();
-            if let Some(pos) = ptrs.iter().position(|&p| p == ptr) {
+            ptrs.iter().position(|&p| p == ptr).is_some_and(|pos| {
                 ptrs.swap_remove(pos);
                 true
-            } else {
-                false
-            }
+            })
         };
 
         debug_assert!(
@@ -164,10 +162,6 @@ where
     }
 
     #[inline(always)]
-    #[expect(
-        clippy::cast_ptr_alignment,
-        reason = "Caller guarantees node_ptr is properly aligned for InternodeNode"
-    )]
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
         // Caller passes a valid pointer to an allocated InternodeNode<S>.
         // Just cast and track - no Box round-trip needed.
@@ -188,12 +182,12 @@ where
         // Step 1: Remove from tracking to prevent double-free.
         let found = {
             let mut ptrs = self.internode_ptrs.lock();
-            if let Some(pos) = ptrs.iter().position(|&p| p == typed_ptr) {
-                ptrs.swap_remove(pos);
-                true
-            } else {
-                false
-            }
+            ptrs.iter()
+                .position(|&p| p == typed_ptr)
+                .is_some_and(|pos| {
+                    ptrs.swap_remove(pos);
+                    true
+                })
         };
 
         debug_assert!(
@@ -214,8 +208,7 @@ where
     fn teardown_tree(&self, _root_ptr: *mut u8) {
         // Free all tracked nodes using interior mutability
         let leaves: Vec<*mut LeafNode15<S>> = StdMem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode<S>> =
-            StdMem::take(&mut *self.internode_ptrs.lock());
+        let internodes: Vec<*mut InternodeNode<S>> = StdMem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
             // SAFETY: ptr came from Box::into_raw or alloc()

@@ -647,7 +647,7 @@ fn scan_batch_ref_multiple_entries() {
     let tree: MassTree<u64> = MassTree::new();
 
     for i in 0..100u64 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         tree.insert(key.as_bytes(), i).unwrap();
     }
 
@@ -675,7 +675,7 @@ fn scan_batch_ref_range_bounds() {
     let tree: MassTree<u64> = MassTree::new();
 
     for i in 0..100u64 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         tree.insert(key.as_bytes(), i).unwrap();
     }
 
@@ -701,7 +701,7 @@ fn scan_batch_ref_early_stop() {
     let tree: MassTree<u64> = MassTree::new();
 
     for i in 0..100u64 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         tree.insert(key.as_bytes(), i).unwrap();
     }
 
@@ -721,13 +721,13 @@ fn scan_batch_ref_early_stop() {
     assert_eq!(count, 50);
 }
 
-/// Critical test: scan_batch_ref must produce identical results to scan_ref.
+/// Critical test: `scan_batch_ref` must produce identical results to `scan_ref`.
 #[test]
 fn scan_batch_ref_vs_scan_ref_consistency() {
     let tree: MassTree<u64> = MassTree::new();
 
     for i in 0..1000u64 {
-        let key = format!("key{:05}", i);
+        let key = format!("key{i:05}");
         tree.insert(key.as_bytes(), i).unwrap();
     }
 
@@ -760,7 +760,10 @@ fn scan_batch_ref_vs_scan_ref_consistency() {
     // Must produce identical results
     assert_eq!(scan_ref_entries.len(), batch_entries.len());
     for (a, b) in scan_ref_entries.iter().zip(batch_entries.iter()) {
-        assert_eq!(a, b, "scan_ref and scan_batch_ref produced different results");
+        assert_eq!(
+            a, b,
+            "scan_ref and scan_batch_ref produced different results"
+        );
     }
 }
 
@@ -770,7 +773,7 @@ fn scan_batch_ref_single_layer_keys() {
     let tree: MassTree<u64> = MassTree::new();
 
     for i in 0..100u64 {
-        let key = format!("k{:06}", i); // 7 bytes
+        let key = format!("k{i:06}"); // 7 bytes
         tree.insert(key.as_bytes(), i).unwrap();
     }
 
@@ -799,7 +802,7 @@ fn scan_batch_ref_long_keys_with_layers() {
     let mut expected: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
     for i in 0..100u64 {
-        let key = format!("long_prefix_key_{:05}", i); // >8 bytes = 21 bytes
+        let key = format!("long_prefix_key_{i:05}"); // >8 bytes = 21 bytes
         tree.insert(key.as_bytes(), i).unwrap();
         expected.insert(key.into_bytes(), i);
     }
@@ -819,7 +822,11 @@ fn scan_batch_ref_long_keys_with_layers() {
     );
 
     // Verify count
-    assert_eq!(batch_entries.len(), expected.len(), "Wrong number of entries");
+    assert_eq!(
+        batch_entries.len(),
+        expected.len(),
+        "Wrong number of entries"
+    );
 
     // Verify each entry matches expected
     for (key, value) in &batch_entries {
@@ -848,7 +855,7 @@ fn scan_batch_ref_concurrent_reads() {
 
     // Pre-populate
     for i in 0..10000u64 {
-        let key = format!("key{:08}", i);
+        let key = format!("key{i:08}");
         tree.insert(key.as_bytes(), i).unwrap();
     }
 
@@ -882,13 +889,13 @@ fn scan_batch_ref_concurrent_reads() {
     }
 }
 
-/// Test for_each_batch_ref on RangeIter directly.
+/// Test `for_each_batch_ref` on [`RangeIter`] directly.
 #[test]
 fn for_each_batch_ref_basic() {
     let tree: MassTree<u64> = MassTree::new();
 
     for i in 0..100u64 {
-        let key = format!("key{:03}", i);
+        let key = format!("key{i:03}");
         tree.insert(key.as_bytes(), i).unwrap();
     }
 
@@ -910,8 +917,8 @@ fn for_each_batch_ref_basic() {
 //  scan_ref correctness tests for multi-layer keys
 // ============================================================================
 
-/// Test scan_ref with multi-layer keys against BTreeMap.
-/// This specifically targets the bug where scan_ref was returning incorrect keys
+/// Test `scan_ref` with multi-layer keys against [`BTreeMap`]
+/// This specifically targets the bug where `scan_ref` was returning incorrect keys
 /// for multi-layer entries (8 null bytes prepended to keys).
 #[test]
 fn scan_ref_long_keys_matches_btreemap() {
@@ -920,7 +927,7 @@ fn scan_ref_long_keys_matches_btreemap() {
 
     // Insert multi-layer keys (> 8 bytes triggers layer creation)
     for i in 0..100u64 {
-        let key = format!("long_prefix_key_{:05}", i); // 21 bytes
+        let key = format!("long_prefix_key_{i:05}"); // 21 bytes
         tree.insert(key.as_bytes(), i).unwrap();
         expected.insert(key.into_bytes(), i);
     }
@@ -964,7 +971,8 @@ fn scan_ref_long_keys_matches_btreemap() {
     for (i, (scan_entry, exp_entry)) in scan_ref_entries.iter().zip(expected_vec.iter()).enumerate()
     {
         assert_eq!(
-            scan_entry, exp_entry,
+            scan_entry,
+            exp_entry,
             "Mismatch at index {}: scan_ref={:?}, expected={:?}",
             i,
             String::from_utf8_lossy(&scan_entry.0),
@@ -973,7 +981,7 @@ fn scan_ref_long_keys_matches_btreemap() {
     }
 }
 
-/// Test scan_ref with very deep layers (3+ layers).
+/// Test `scan_ref` with very deep layers (3+ layers).
 #[test]
 fn scan_ref_deep_layers_matches_btreemap() {
     let tree: MassTree<u64> = MassTree::new();
@@ -983,7 +991,7 @@ fn scan_ref_deep_layers_matches_btreemap() {
     let shared_prefix = b"AAAAAAAABBBBBBBBCCCCCCCC";
 
     for i in 0..50u64 {
-        let suffix = format!("{:06}", i);
+        let suffix = format!("{i:06}");
         let key = [shared_prefix.as_ref(), suffix.as_bytes()].concat(); // 30 bytes
         tree.insert(&key, i).unwrap();
         expected.insert(key, i);
@@ -1017,7 +1025,7 @@ fn scan_ref_deep_layers_matches_btreemap() {
     }
 }
 
-/// Test scan_ref with mixed single-layer and multi-layer keys.
+/// Test `scan_ref` with mixed single-layer and multi-layer keys.
 #[test]
 fn scan_ref_mixed_layer_keys() {
     let tree: MassTree<u64> = MassTree::new();
@@ -1026,12 +1034,12 @@ fn scan_ref_mixed_layer_keys() {
     // Mix of short (single layer) and long (multi layer) keys
     for i in 0..50u64 {
         // Short key (8 bytes = single layer)
-        let short_key = format!("short{:02}", i);
+        let short_key = format!("short{i:02}");
         tree.insert(short_key.as_bytes(), i).unwrap();
         expected.insert(short_key.into_bytes(), i);
 
         // Long key (20+ bytes = multi layer)
-        let long_key = format!("this_is_a_long_key_{:05}", i);
+        let long_key = format!("this_is_a_long_key_{i:05}");
         tree.insert(long_key.as_bytes(), i + 1000).unwrap();
         expected.insert(long_key.into_bytes(), i + 1000);
     }

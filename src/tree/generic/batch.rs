@@ -24,13 +24,8 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use seize::{Guard, LocalGuard};
 
 use crate::{
-    MassTreeGeneric, NodeAllocatorGeneric,
-    key::Key,
-    leaf_trait::LayerCapableLeaf,
-    nodeversion::LockGuard,
-    slot::ValueSlot,
-    tree::InsertError,
-    is_marked, unmark_ptr,
+    MassTreeGeneric, NodeAllocatorGeneric, is_marked, key::Key, leaf_trait::LayerCapableLeaf,
+    nodeversion::LockGuard, slot::ValueSlot, tree::InsertError, unmark_ptr,
 };
 
 use super::{InsertSearchResultGeneric, TreePermutation};
@@ -45,7 +40,10 @@ use super::{InsertSearchResultGeneric, TreePermutation};
 /// The output is created via `S::into_output()` before sorting to ensure
 /// allocation happens exactly once per entry.
 #[must_use]
-#[expect(missing_debug_implementations, reason = "Debug on S::Output may not be available")]
+#[expect(
+    missing_debug_implementations,
+    reason = "Debug on S::Output may not be available"
+)]
 pub struct BatchEntry<S: ValueSlot> {
     /// The key bytes (owned for sorting).
     pub key: Vec<u8>,
@@ -75,14 +73,18 @@ impl<S: ValueSlot> BatchEntry<S> {
     ///
     /// Use this when you already have an `S::Output` (e.g., from a previous
     /// failed batch that needs retry).
-    #[inline]
+    #[inline(always)]
     pub fn from_output(key: Vec<u8>, output: S::Output) -> Self {
         let ikey = Self::compute_ikey(&key);
         Self { key, output, ikey }
     }
 
     /// Compute the ikey (first 8 bytes as big-endian u64).
-    #[inline]
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "len is bounded by min(key.len(), 8), so slicing is safe"
+    )]
     fn compute_ikey(key: &[u8]) -> u64 {
         let mut buf = [0u8; 8];
         let len = key.len().min(8);
@@ -91,14 +93,14 @@ impl<S: ValueSlot> BatchEntry<S> {
     }
 
     /// Get the cached ikey.
-    #[inline]
-    pub fn ikey(&self) -> u64 {
+    #[inline(always)]
+    pub const fn ikey(&self) -> u64 {
         self.ikey
     }
 
     /// Check if this key has a suffix (> 8 bytes).
-    #[inline]
-    pub fn has_suffix(&self) -> bool {
+    #[inline(always)]
+    pub const fn has_suffix(&self) -> bool {
         self.key.len() > 8
     }
 }
@@ -153,7 +155,7 @@ impl<O> BatchInsertResult<O> {
     }
 
     /// Create a result with pre-allocated capacity for old values.
-    #[inline]
+    #[inline(always)]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inserted: 0,
@@ -164,8 +166,8 @@ impl<O> BatchInsertResult<O> {
     }
 
     /// Record a successful new key insertion.
-    #[inline]
-    pub fn record_insert(&mut self) {
+    #[inline(always)]
+    pub const fn record_insert(&mut self) {
         self.inserted += 1;
     }
 
@@ -177,20 +179,22 @@ impl<O> BatchInsertResult<O> {
     }
 
     /// Record a failed entry.
-    #[inline]
-    pub fn record_failure(&mut self) {
+    #[inline(always)]
+    pub const fn record_failure(&mut self) {
         self.failed += 1;
     }
 
     /// Total entries processed (inserted + updated + failed).
-    #[inline]
-    pub fn total(&self) -> usize {
+    #[must_use]
+    #[inline(always)]
+    pub const fn total(&self) -> usize {
         self.inserted + self.updated + self.failed
     }
 
     /// Check if all entries succeeded.
-    #[inline]
-    pub fn all_succeeded(&self) -> bool {
+    #[must_use]
+    #[inline(always)]
+    pub const fn all_succeeded(&self) -> bool {
         self.failed == 0
     }
 }
@@ -309,10 +313,7 @@ where
     ///
     /// Returns `Err` only for unrecoverable errors. Individual entry failures
     /// are tracked in the result's `failed` count.
-    pub fn insert_batch<I>(
-        &self,
-        entries: I,
-    ) -> Result<BatchInsertResult<S::Output>, InsertError>
+    pub fn insert_batch<I>(&self, entries: I) -> Result<BatchInsertResult<S::Output>, InsertError>
     where
         I: IntoIterator<Item = (Vec<u8>, S::Value)>,
     {
@@ -356,10 +357,10 @@ where
         }
 
         // Sort by ikey for cache locality and leaf clustering
-        batch.sort_unstable_by_key(|entry| entry.ikey());
+        batch.sort_unstable_by_key(BatchEntry::ikey);
 
         // Process the sorted batch
-        self.process_sorted_batch(&mut batch, guard)
+        self.process_sorted_batch(&batch, guard)
     }
 
     /// Insert pre-constructed batch entries.
@@ -376,6 +377,11 @@ where
     ///
     /// A `BatchInsertResult` with insertion statistics.
     ///
+    /// # Errors
+    ///
+    /// Currently this function always succeeds. The `Result` return type is
+    /// reserved for future error conditions (e.g., memory allocation failures).
+    ///
     /// # Note
     ///
     /// The entries slice will be sorted by ikey in place.
@@ -389,15 +395,15 @@ where
         }
 
         // Sort by ikey for cache locality
-        entries.sort_unstable_by_key(|entry| entry.ikey());
+        entries.sort_unstable_by_key(BatchEntry::ikey);
 
         // Convert slice to Vec for processing
-        let mut batch: Vec<BatchEntry<S>> = entries
+        let batch: Vec<BatchEntry<S>> = entries
             .iter()
             .map(|e| BatchEntry::from_output(e.key.clone(), e.output.clone()))
             .collect();
 
-        self.process_sorted_batch(&mut batch, guard)
+        self.process_sorted_batch(&batch, guard)
     }
 
     // ========================================================================
@@ -407,9 +413,17 @@ where
     /// Process a sorted batch of entries.
     ///
     /// Entries must be sorted by ikey before calling this method.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Result kept for API consistency and future error handling"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Index bounds are checked in the while condition"
+    )]
     fn process_sorted_batch(
         &self,
-        batch: &mut Vec<BatchEntry<S>>,
+        batch: &[BatchEntry<S>],
         guard: &LocalGuard<'_>,
     ) -> Result<BatchInsertResult<S::Output>, InsertError> {
         let mut result = BatchInsertResult::with_capacity(batch.len() / 4);
@@ -519,6 +533,14 @@ where
     /// Insert as many entries as possible into a locked leaf.
     ///
     /// Returns the number of entries processed (inserted, updated, or marked failed).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Batch insertion requires context"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Index bounds checked in while condition"
+    )]
     fn insert_batch_into_locked_leaf(
         &self,
         leaf: &L,
@@ -558,10 +580,10 @@ where
             let entry = &batch[start_index + processed];
 
             // Check if this entry belongs to a sibling leaf
-            if let Some(bound) = upper_bound {
-                if entry.ikey() >= bound {
-                    break;
-                }
+            if let Some(bound) = upper_bound
+                && entry.ikey() >= bound
+            {
+                break;
             }
 
             // Check if leaf has space - if not, stop and let caller retry
@@ -585,14 +607,7 @@ where
                     guard,
                 )
             } else {
-                self.try_insert_entry_multi_layer(
-                    leaf,
-                    lock,
-                    &key,
-                    &entry.output,
-                    &mut perm,
-                    guard,
-                )
+                self.try_insert_entry_multi_layer(leaf, lock, &key, &entry.output, &mut perm, guard)
             };
 
             match insert_result {
@@ -633,6 +648,7 @@ where
     // ========================================================================
 
     /// Try to insert a single entry in single-layer mode (keys ≤ 8 bytes).
+    #[expect(clippy::too_many_arguments, reason = "Insertion requires full context")]
     fn try_insert_entry_single_layer(
         &self,
         leaf: &L,
@@ -652,7 +668,8 @@ where
                 }
 
                 // Update existing value and return old value
-                let old_value = self.update_value_in_slot_batch(leaf, lock, slot, value.clone(), guard);
+                let old_value =
+                    self.update_value_in_slot_batch(leaf, lock, slot, value.clone(), guard);
                 BatchEntryResult::Updated(old_value)
             }
 
@@ -692,6 +709,7 @@ where
     }
 
     /// Try to insert a single entry in multi-layer mode (keys > 8 bytes).
+    #[expect(clippy::too_many_arguments, reason = "Insertion requires full context")]
     fn try_insert_entry_multi_layer(
         &self,
         leaf: &L,
@@ -711,7 +729,8 @@ where
                 }
 
                 // Update existing value and return old value
-                let old_value = self.update_value_in_slot_batch(leaf, lock, slot, value.clone(), guard);
+                let old_value =
+                    self.update_value_in_slot_batch(leaf, lock, slot, value.clone(), guard);
                 BatchEntryResult::Updated(old_value)
             }
 
@@ -762,6 +781,10 @@ where
 
     /// Find a usable slot for insertion.
     #[inline(always)]
+    #[expect(
+        clippy::unused_self,
+        reason = "Method for consistency with other helpers"
+    )]
     fn find_usable_slot_batch(&self, leaf: &L, perm: &L::Perm, ikey: u64) -> FindSlotResult {
         if perm.size() >= L::WIDTH {
             return FindSlotResult::NeedsSplit;
@@ -793,6 +816,10 @@ where
 
     /// Validate post-lock state.
     #[inline(always)]
+    #[expect(
+        clippy::unused_self,
+        reason = "Method for consistency with other helpers"
+    )]
     fn validate_post_lock_batch(
         &self,
         leaf: &L,
@@ -804,6 +831,10 @@ where
 
     /// Validate membership.
     #[inline(always)]
+    #[expect(
+        clippy::unused_self,
+        reason = "Method for consistency with other helpers"
+    )]
     fn validate_membership_batch(&self, leaf: &L, key: &Key<'_>) -> Result<(), MembershipError> {
         let next_raw: *mut L = leaf.next_raw();
 
@@ -828,6 +859,10 @@ where
 
     /// Check if an empty leaf can be reused.
     #[inline(always)]
+    #[expect(
+        clippy::unused_self,
+        reason = "Method for consistency with other helpers"
+    )]
     fn can_reuse_empty_leaf_batch(&self, leaf: &L, key: &Key<'_>) -> bool {
         if leaf.prev().is_null() {
             return true;
@@ -853,6 +888,10 @@ where
     }
 
     /// Update a value in an existing slot, returning the old value.
+    #[expect(
+        clippy::unused_self,
+        reason = "Method for consistency with other helpers"
+    )]
     fn update_value_in_slot_batch(
         &self,
         leaf: &L,
