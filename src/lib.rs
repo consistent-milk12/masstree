@@ -7,19 +7,26 @@
 //! - B+tree at each trie node for the current 8-byte slice
 //! - Cache-friendly: 8-byte key slices fit in registers
 //!
-//! ## Status: Alpha
+//! ## Status: v0.3.0 (Core Feature Complete)
 //!
-//! **Not production ready.** Core concurrent operations work but memory
-//! reclamation is incomplete and range scans/deletion are not implemented.
+//! All core operations implemented and tested. Not yet production-ready—concurrent
+//! data structures require extensive stress testing beyond what Miri and proptests provide.
 //!
 //! | Feature | Status |
 //! |---------|--------|
-//! | Concurrent get | Works (lock-free, version-validated) |
-//! | Concurrent insert | Works (CAS fast path + locked fallback) |
-//! | Split propagation | Works (leaf and internode) |
-//! | Memory reclamation | Partial (nodes not freed until tree drop) |
-//! | Range scans | Not implemented |
-//! | Deletion | Not implemented |
+//! | Concurrent get | Lock-free, version-validated |
+//! | Concurrent insert | Fine-grained leaf locking |
+//! | Concurrent remove | Fine-grained locking + lazy coalescing |
+//! | Split propagation | Leaf and internode |
+//! | Range scans | `scan`, `scan_ref`, `scan_prefix`, iterator |
+//! | Memory reclamation | Seize-based epoch reclamation |
+//! | Lazy leaf coalescing | Queue-based background cleanup |
+//!
+//! ### Not Yet Implemented
+//!
+//! - `Entry` API (like `std::collections::HashMap`)
+//! - `DoubleEndedIterator` (reverse iteration)
+//! - `Extend`, `FromIterator` traits
 //!
 //! ## Thread Safety
 //!
@@ -59,12 +66,24 @@
 //! - **`MassTreeIndex<V: Copy>`**: Convenience wrapper that copies values.
 //!   Note: Currently wraps `MassTree<V>` internally; true inline storage is
 //!   planned for a future release.
+//!
+//! ## Feature Flags
+//!
+//! ### `tracing`
+//!
+//! Enables structured logging for debugging concurrent operations.
+//! See the crate-level documentation for details.
+//!
+//! ### `mimalloc`
+//!
+//! Uses mimalloc as the global allocator for improved performance.
 
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 // We use extensive benchmarking to verify #[inline(always)] placement is correct.
 #![allow(clippy::inline_always)]
+#![allow(clippy::multiple_crate_versions)]
 
 // Global allocator selection (enabled via features)
 #[cfg(feature = "mimalloc")]
@@ -98,36 +117,28 @@ static GLOBAL: MiMalloc = MiMalloc;
 /// ```
 #[cfg(feature = "tracing")]
 pub fn init_tracing() {
-    use std::env;
-    use std::sync::Once;
-    static INIT: Once = Once::new();
+    use std::env as StdEnv;
+    use std::fs as StdFs;
+    use std::sync::OnceLock;
+    use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
     // Store the guard in a static to keep the non-blocking writer alive.
-    // Leaking is intentional - we want logs to flush on process exit.
-    static mut GUARD: Option<tracing_appender::non_blocking::WorkerGuard> = None;
+    // The guard ensures logs are flushed on process exit.
+    static GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
-    INIT.call_once(|| {
-        use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
-
+    // OnceLock::get_or_init ensures this runs exactly once
+    GUARD.get_or_init(|| {
         // Configuration from environment
-        let log_dir = env::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
+        let log_dir = StdEnv::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
         let console_enabled = false;
-        let filter_str = env::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
+        let filter_str = StdEnv::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
 
         // Create log directory
-        let _ = std::fs::create_dir_all(&log_dir);
+        let _ = StdFs::create_dir_all(&log_dir);
 
         // File appender - non-rotating, writes to masstree.jsonl (NDJSON)
         let file_appender = tracing_appender::rolling::never(&log_dir, "masstree.jsonl");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-
-        // Store guard to prevent dropping (logs would be lost)
-        // SAFETY: This is only called once due to Once::call_once, and we never read GUARD
-        // after this point except implicitly when the process exits.
-        #[allow(static_mut_refs)]
-        unsafe {
-            GUARD = Some(guard);
-        }
 
         // File layer - JSON format for structured analysis
         let file_layer = tracing_subscriber::fmt::layer()
@@ -161,6 +172,9 @@ pub fn init_tracing() {
             .with(file_layer)
             .with(console_layer)
             .try_init();
+
+        // Return the guard to be stored in OnceLock
+        guard
     });
 }
 
@@ -168,12 +182,13 @@ pub fn init_tracing() {
 #[cfg(not(feature = "tracing"))]
 pub const fn init_tracing() {}
 
+pub mod alloc15;
 pub mod alloc24;
 pub mod alloc_trait;
-pub mod freeze24;
 pub mod internode;
 pub mod key;
 pub mod ksearch;
+pub mod leaf15;
 pub mod leaf24;
 pub mod leaf_trait;
 pub mod link;
@@ -182,14 +197,13 @@ pub mod ordering;
 pub mod permuter;
 pub mod permuter24;
 pub mod prefetch;
+pub mod ptr;
 pub mod slot;
 pub mod suffix;
-mod tracing_helpers;
 pub mod tree;
 pub mod value;
 
 // Re-export freeze types for convenience
-pub use freeze24::Freeze24Utils;
 
 // Re-export leaf node traits for generic tree operations
 pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
@@ -197,14 +211,19 @@ pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
 // Re-export allocator trait for generic tree operations
 pub use alloc_trait::NodeAllocatorGeneric;
 
-// Re-export Permuter24 types
+// Re-export Permuter types
+pub use permuter::{AtomicPermuter, AtomicPermuter15, Permuter, Permuter15};
 pub use permuter24::{AtomicPermuter24, Permuter24, WIDTH_24};
 
-// Re-export LeafNode24 types
-pub use leaf24::{LeafNode24, WIDTH_24 as LEAF24_WIDTH};
+// Re-export leaf node types
+pub use leaf15::{LeafNode15, WIDTH_15};
+pub use leaf24::{
+    LeafNode24, MODSTATE_DELETED_LAYER, MODSTATE_INSERT, MODSTATE_REMOVE, WIDTH_24 as LEAF24_WIDTH,
+};
 
-// Re-export allocator24 types
-pub use alloc24::{NodeAllocator24, SeizeAllocator24};
+// Re-export allocator types
+pub use alloc15::SeizeAllocator15;
+pub use alloc24::SeizeAllocator24;
 
 // Re-export value types
 pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
@@ -212,23 +231,15 @@ pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
 // Re-export link utilities
 pub use link::{is_marked, mark_ptr, unmark_ptr};
 
+// Re-export pointer types
+pub use ptr::NodePtr;
+
 // Re-export main types for convenience
 pub use slot::ValueSlot;
-pub use suffix::{PermutationProvider, SuffixBag};
+pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
+pub use tree::RemoveError;
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
-pub use tree::{MassTree, MassTree24, MassTree24Inline, MassTreeGeneric, MassTreeIndex};
-
-// Re-export debug counters for diagnosis (only when tracing is enabled)
-#[cfg(feature = "tracing")]
 pub use tree::{
-    ADVANCE_BLINK_COUNT, BLINK_ADVANCE_ANOMALY_COUNT, BLINK_SHOULD_FOLLOW_COUNT,
-    CAS_INSERT_FALLBACK_COUNT, CAS_INSERT_RETRY_COUNT, CAS_INSERT_SUCCESS_COUNT, DebugCounters,
-    LOCKED_INSERT_COUNT, PARENT_WAIT_HIT_COUNT, PARENT_WAIT_MAX_NS, PARENT_WAIT_MAX_SPINS,
-    PARENT_WAIT_TOTAL_NS, PARENT_WAIT_TOTAL_SPINS, ParentWaitStats, SEARCH_NOT_FOUND_COUNT,
-    SPLIT_COUNT, WRONG_LEAF_INSERT_COUNT, get_all_debug_counters, get_debug_counters,
-    get_parent_wait_stats, reset_debug_counters,
+    MassTree, MassTree15, MassTree15Inline, MassTree24, MassTree24Inline, MassTreeGeneric,
+    MassTreeIndex,
 };
-
-// Re-export RAII helpers for internal use
-#[expect(unused_imports, reason = "Used by split propagation code paths")]
-pub(crate) use tree::ExitGuard;

@@ -19,14 +19,6 @@
 //! - No `mem::forget` patterns
 //! - All locks use existing `NodeVersion::lock()` implementation
 //!
-//! # RAII Helpers
-//!
-//! Two complementary RAII patterns are available:
-//!
-//! - [`PropagationContext`]: Unified-lifetime context for lock guards
-//!   (complex lock transfer across loop iterations)
-//! - [`ExitGuard`]: Simple scope-exit callbacks (cleanup, rollback)
-//!
 //! # Module Organization
 //!
 //! - [`PropagationContext`]: Unified-lifetime context for RAII guards
@@ -34,11 +26,9 @@
 //! - [`RootCreation`]: Root and layer-root creation helpers
 //! - [`ParentLocking`]: Membership validation helpers
 
-mod exit_guard;
 mod parent_locking;
 mod propagation;
 mod propagation_context;
 mod root_creation;
 
-pub use exit_guard::ExitGuard;
 pub use propagation::Propagation;

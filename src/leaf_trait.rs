@@ -15,6 +15,7 @@
 //! - [`TreePermutation`]: `Permuter<WIDTH>`, `Permuter24`
 //! - [`TreeLeafNode`]: `LeafNode<S, WIDTH>`, `LeafNode24<S>`
 
+use std::cmp::Ordering;
 use std::fmt::Debug;
 
 use crate::key::Key;
@@ -28,40 +29,6 @@ use seize::LocalGuard;
 
 pub use crate::value::InsertTarget;
 pub use crate::value::SplitPoint;
-
-// ============================================================================
-//  CAS Permutation Error
-// ============================================================================
-
-/// Error returned when a CAS permutation operation fails.
-///
-/// Contains the current permutation value that caused the CAS to fail.
-/// Use `is_frozen()` to check if a split is in progress.
-#[derive(Debug, Clone, Copy)]
-pub struct CasPermutationError<P: TreePermutation> {
-    /// The current permutation value in the node.
-    pub current: P,
-}
-
-impl<P: TreePermutation> CasPermutationError<P> {
-    /// Create a new CAS permutation error.
-    #[inline(always)]
-    pub const fn new(current: P) -> Self {
-        Self { current }
-    }
-
-    /// Check if the failure was due to frozen state (split in progress).
-    #[inline(always)]
-    pub fn is_frozen(&self) -> bool {
-        P::is_frozen_raw(self.current.value())
-    }
-
-    /// Get the current permutation value.
-    #[inline(always)]
-    pub const fn current(&self) -> P {
-        self.current
-    }
-}
 
 // ============================================================================
 //  TreePermutation Trait
@@ -202,57 +169,14 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
     /// Set the size without changing slot positions.
     fn set_size(&mut self, n: usize);
 
-    // ========================================================================
-    //  Freeze Operations
-    // ========================================================================
-
-    /// Check if a raw permutation value is frozen.
+    /// Remove the slot at logical position `i`.
     ///
-    /// A frozen permutation indicates a split is in progress.
-    /// CAS insert threads should fall back to the locked path.
-    fn is_frozen_raw(raw: Self::Raw) -> bool;
-
-    /// Freeze a raw permutation value.
+    /// The slot is moved to the free region (back) and size is decremented.
     ///
-    /// Returns a frozen value that will fail any CAS with a valid expected.
-    fn freeze_raw(raw: Self::Raw) -> Self::Raw;
-}
-
-// ============================================================================
-//  FreezeGuardOps Trait
-// ============================================================================
-
-/// Operations that freeze guards must support.
-///
-/// This trait abstracts over `FreezeGuard<'a, S, WIDTH>` (WIDTH=15) and
-/// `FreezeGuard24<'a, S>` (WIDTH=24), enabling generic split operations.
-///
-/// A freeze guard captures a snapshot of the permutation at freeze time and
-/// provides panic safety by restoring the original permutation if dropped
-/// while still active.
-///
-/// # Implementors
-///
-/// - `FreezeGuard<'a, S, WIDTH>` for WIDTH in 1..=15
-/// - `FreezeGuard24<'a, S>` for WIDTH=24
-pub trait FreezeGuardOps<P: TreePermutation> {
-    /// Get the permutation snapshot captured at freeze time.
+    /// # Panics
     ///
-    /// This is the authoritative membership for split computation.
-    /// It includes all CAS inserts that published before freeze succeeded.
-    fn snapshot(&self) -> P;
-
-    /// Get the raw snapshot value.
-    ///
-    /// Used for debugging/logging and low-level operations.
-    fn snapshot_raw(&self) -> P::Raw;
-
-    /// Set whether the guard is active.
-    ///
-    /// When active, dropping the guard will restore the original permutation
-    /// (panic safety). Set to `false` before successful unfreeze to prevent
-    /// rollback on normal drop.
-    fn set_active(&mut self, active: bool);
+    /// Debug-panics if `i >= size()`.
+    fn remove(&mut self, i: usize);
 }
 
 // ============================================================================
@@ -261,8 +185,8 @@ pub trait FreezeGuardOps<P: TreePermutation> {
 
 /// Trait for internode types used in a `MassTree`.
 ///
-/// Abstracts over `InternodeNode<S, WIDTH>` for different WIDTH values,
-/// enabling generic tree operations.
+/// Abstracts over `InternodeNode<S>` for generic tree operations.
+/// Internode WIDTH is fixed at 15 (matching leaf WIDTH for optimal B+tree fanout).
 ///
 /// # Type Parameters
 ///
@@ -270,8 +194,7 @@ pub trait FreezeGuardOps<P: TreePermutation> {
 ///
 /// # Implementors
 ///
-/// - `InternodeNode<S, WIDTH>` for WIDTH in 1..=15
-/// - `InternodeNode<S, 24>` for WIDTH=24
+/// - `InternodeNode<S>` (fixed WIDTH=15)
 pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Node width (max number of children).
     const WIDTH: usize;
@@ -348,7 +271,7 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     fn set_ikey(&self, idx: usize, key: u64);
 
     /// Compare key at position with search key.
-    fn compare_key(&self, search_ikey: u64, p: usize) -> std::cmp::Ordering;
+    fn compare_key(&self, search_ikey: u64, p: usize) -> Ordering;
 
     /// Find insert position for a key.
     fn find_insert_position(&self, insert_ikey: u64) -> usize;
@@ -359,6 +282,15 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Get child pointer at index.
     fn child(&self, idx: usize) -> *mut u8;
+
+    /// Get child pointer with prefetch hint for the next likely child.
+    ///
+    /// Default implementation just calls `child()` without prefetching.
+    /// Optimized implementations can prefetch the next child to hide latency.
+    #[inline(always)]
+    fn child_with_prefetch(&self, idx: usize, _nkeys: usize) -> *mut u8 {
+        self.child(idx)
+    }
 
     /// Set child pointer at index.
     fn set_child(&self, idx: usize, child: *mut u8);
@@ -422,23 +354,13 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
         insert_ikey: u64,
         insert_child: *mut u8,
     ) -> (u64, bool);
-
-    // ========================================================================
-    //  Performance
-    // ========================================================================
-
-    /// Prefetch the internode's data into cache.
-    ///
-    /// Brings the node's key and child arrays into CPU cache before they're
-    /// accessed, reducing memory latency during traversal.
-    fn prefetch(&self);
 }
 
 // ============================================================================
 //  TreeLeafNode Trait
 // ============================================================================
 
-/// Trait for leaf node types that can be used in a [`MassTree`].
+/// Trait for leaf node types that can be used in a [`crate::MassTree`].
 ///
 /// Abstracts over `LeafNode<S, WIDTH>` and `LeafNode24<S>`, enabling generic
 /// tree operations that work with both WIDTH=15 and WIDTH=24 nodes.
@@ -511,39 +433,29 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Used for freeze detection without constructing a Permuter.
     fn permutation_raw(&self) -> <Self::Perm as TreePermutation>::Raw;
 
-    /// Check if permutation is frozen (split in progress).
-    ///
-    /// Convenience method that checks the raw value.
-    #[inline(always)]
-    fn is_perm_frozen(&self) -> bool {
-        Self::Perm::is_frozen_raw(self.permutation_raw())
-    }
-
-    /// Try to load permutation, returning error if frozen.
-    ///
-    /// Used in CAS insert path to detect ongoing splits.
-    ///
-    /// # Errors
-    /// Fails when trying to load a frozen permutation.
-    #[expect(clippy::result_unit_err)]
-    fn permutation_try(&self) -> Result<Self::Perm, ()>;
-
-    /// Wait for permutation to unfreeze.
-    ///
-    /// Spins with progressive backoff until permutation is valid.
-    /// May timeout and return empty permutation if stuck too long.
-    fn permutation_wait(&self) -> Self::Perm;
-
     // ========================================================================
     //  Key Operations
     // ========================================================================
 
-    /// Get ikey at physical slot.
+    /// Get ikey at physical slot using Acquire ordering.
     ///
     /// # Panics
     ///
     /// Debug-panics if `slot >= WIDTH`.
     fn ikey(&self, slot: usize) -> u64;
+
+    /// Get ikey at physical slot using Relaxed ordering.
+    ///
+    /// # Safety Justification
+    ///
+    /// Safe to use when caller has already loaded permutation with Acquire
+    /// ordering and will validate with OCC at the end of the read operation.
+    /// Avoids redundant Acquire fences on each ikey load.
+    ///
+    /// # Panics
+    ///
+    /// Debug-panics if `slot >= WIDTH`.
+    fn ikey_relaxed(&self, slot: usize) -> u64;
 
     /// Set ikey at physical slot.
     ///
@@ -602,7 +514,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Load value pointer at slot.
     ///
-    /// Returns raw pointer to either an Arc<V> (value mode) or
+    /// Returns raw pointer to either an `Arc<V>` (value mode) or
     /// a sublayer root node (layer mode).
     fn leaf_value_ptr(&self, slot: usize) -> *mut u8;
 
@@ -624,6 +536,34 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
         expected: *mut u8,
         new_value: *mut u8,
     ) -> Result<(), *mut u8>;
+
+    // ========================================================================
+    //  Slot Clearing (for gc_layer)
+    // ========================================================================
+
+    /// Clear a slot completely, removing any value or layer pointer.
+    ///
+    /// Used by `gc_layer` when cleaning up an empty sublayer.
+    /// The parent leaf's slot that pointed to the sublayer is cleared.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - The leaf is locked
+    /// - The slot is valid (0..WIDTH)
+    /// - Any value/layer at this slot has been or will be properly retired
+    fn clear_slot(&self, slot: usize);
+
+    /// Clear a slot and update permutation.
+    ///
+    /// This is a convenience method that:
+    /// 1. Clears the slot contents
+    /// 2. Removes the slot from the permutation
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the leaf is locked.
+    fn clear_slot_and_permutation(&self, slot: usize);
 
     // ========================================================================
     //  Size Operations
@@ -677,6 +617,17 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Set previous leaf pointer.
     fn set_prev(&self, prev: *mut Self);
 
+    /// Unlink this leaf from the B-link doubly-linked chain.
+    ///
+    /// Used when removing an empty leaf from the tree.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the version lock on this leaf
+    /// - `self.prev()` must be non-null (not the leftmost leaf)
+    /// - The prev and next pointers must be valid leaves
+    unsafe fn unlink_from_chain(&self);
+
     /// Get parent internode pointer.
     fn parent(&self) -> *mut u8;
 
@@ -726,36 +677,9 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Spins until the next pointer is unmarked and version is stable.
     fn wait_for_split(&self);
 
-    /// CAS the permutation from expected to new value.
-    ///
-    /// The raw permutation value is used for atomic comparison.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(CasPermutationError)` if:
-    /// - The permutation is frozen (split in progress)
-    /// - The current permutation value does not match `expected` (concurrent modification)
-    ///
-    /// # Freeze Safety
-    ///
-    /// If the permutation is frozen (split in progress), the CAS will fail.
-    fn cas_permutation_raw(
-        &self,
-        expected: Self::Perm,
-        new: Self::Perm,
-    ) -> Result<(), CasPermutationError<Self::Perm>>;
-
     // ========================================================================
     //  Split Operations
     // ========================================================================
-
-    /// The freeze guard type for this leaf.
-    ///
-    /// Used by split operations to atomically freeze the permutation and
-    /// capture a snapshot for computing the split.
-    type FreezeGuard<'a>: FreezeGuardOps<Self::Perm>
-    where
-        Self: 'a;
 
     /// Calculate the optimal split point.
     ///
@@ -772,26 +696,27 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Split this leaf at `split_pos` using a pre-allocated target.
     ///
-    /// Moves entries from `split_pos..size` to `new_leaf`.
+    /// Moves entries from `split_pos..size` to `new_leaf_ptr`.
+    /// The caller is responsible for allocating and tracking the new leaf.
     ///
     /// # Returns
     ///
-    /// `(new_leaf_box, split_ikey, insert_target)` tuple where:
-    /// - `new_leaf_box` is the new right leaf with moved entries
+    /// `(split_ikey, insert_target)` tuple where:
     /// - `split_ikey` is the first key of the new leaf (separator for parent)
     /// - `insert_target` indicates which leaf should receive the new key
     ///
     /// # Safety
     ///
     /// - Caller must hold the leaf lock (if concurrent)
-    /// - `new_leaf` must be freshly allocated (empty)
+    /// - `new_leaf_ptr` must point to valid, initialized leaf memory
+    /// - The new leaf should be freshly allocated (empty) with split-locked version
     /// - `guard` must be valid
     unsafe fn split_into_preallocated(
         &self,
         split_pos: usize,
-        new_leaf: Box<Self>,
+        new_leaf_ptr: *mut Self,
         guard: &seize::LocalGuard<'_>,
-    ) -> (Box<Self>, u64, InsertTarget);
+    ) -> (u64, InsertTarget);
 
     /// Move ALL entries to a new right leaf.
     ///
@@ -803,41 +728,9 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Same requirements as `split_into_preallocated`.
     unsafe fn split_all_to_right_preallocated(
         &self,
-        new_leaf: Box<Self>,
+        new_leaf_ptr: *mut Self,
         guard: &seize::LocalGuard<'_>,
-    ) -> (Box<Self>, u64, InsertTarget);
-
-    // ========================================================================
-    //  Freeze Operations
-    // ========================================================================
-
-    /// Freeze the permutation for split operations.
-    ///
-    /// Returns a guard that captures the pre-freeze permutation snapshot.
-    /// The guard provides panic safety by restoring a valid permutation if
-    /// the split is aborted.
-    ///
-    /// # Preconditions
-    ///
-    /// - Caller must hold the leaf lock
-    /// - Caller must have called `version().mark_split()`
-    fn freeze_permutation(&self) -> Self::FreezeGuard<'_>;
-
-    /// Unfreeze the permutation and publish the final split result.
-    ///
-    /// This consumes the freeze guard and atomically publishes the new
-    /// permutation, making the split visible to readers.
-    ///
-    /// # Arguments
-    ///
-    /// * `guard` - The freeze guard from `freeze_permutation()`
-    /// * `perm` - The new permutation to publish
-    fn unfreeze_set_permutation(&self, guard: Self::FreezeGuard<'_>, perm: Self::Perm);
-
-    /// Check if the permutation is currently frozen.
-    ///
-    /// A frozen permutation indicates a split is in progress.
-    fn is_permutation_frozen(&self) -> bool;
+    ) -> (u64, InsertTarget);
 
     // ========================================================================
     //  Sibling Link Helper (for split)
@@ -911,7 +804,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// Panics in debug mode if `slot >= WIDTH`.
     #[must_use]
-    fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering>;
+    fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering>;
 
     /// Get the suffix for a slot, or an empty slice if none.
     ///
@@ -988,6 +881,106 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// Matches C++ `leaf::prefetch()` pattern from `masstree_scan.hh:195, 299`.
     fn prefetch(&self);
+
+    /// Prefetch the ikey at the given slot into CPU cache.
+    ///
+    /// This is used during linear search to hide memory latency by
+    /// prefetching future ikeys while processing current ones.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Physical slot index (0..WIDTH)
+    ///
+    /// # Default Implementation
+    ///
+    /// No-op. Implementations may override with actual prefetch.
+    #[inline(always)]
+    fn prefetch_ikey(&self, _slot: usize) {
+        // Default no-op; implementations may override
+    }
+
+    /// Prefetch permutation and ikeys for point lookups.
+    ///
+    /// Lighter-weight than [`Self::prefetch`] - only fetches cache lines
+    /// needed for the search loop. Call before `version.stable()` to
+    /// hide memory latency during version spin-wait.
+    ///
+    /// # Default Implementation
+    ///
+    /// No-op. Implementations may override with actual prefetch.
+    #[inline(always)]
+    fn prefetch_for_search(&self) {
+        // Default no-op; implementations may override
+    }
+
+    // ========================================================================
+    //  Modification State (modstate) Operations
+    // ========================================================================
+
+    /// Get the modification state.
+    ///
+    /// Returns one of:
+    /// - `0` (`MODSTATE_INSERT`): Normal insert mode
+    /// - `1` (`MODSTATE_REMOVE`): Node is being removed
+    /// - `2` (`MODSTATE_DELETED_LAYER`): Layer has been garbage collected
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `leaf::modstate_` in `masstree_struct.hh:264-270`.
+    fn modstate(&self) -> u8;
+
+    /// Set the modification state.
+    fn set_modstate(&self, state: u8);
+
+    /// Check if this layer has been deleted (garbage collected).
+    ///
+    /// This is distinct from `version.is_deleted()`:
+    /// - `is_deleted()` means the node itself is removed from the tree
+    /// - `deleted_layer()` means the sublayer this node was root of has been gc'd
+    ///
+    /// When `deleted_layer()` is true, readers should reset their key position
+    /// and retry from the main tree root.
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `leaf::deleted_layer()` in `masstree_struct.hh:456-458`.
+    fn deleted_layer(&self) -> bool;
+
+    /// Mark this layer as deleted (for `gc_layer`).
+    ///
+    /// Called when garbage collecting an empty sublayer.
+    fn mark_deleted_layer(&self);
+
+    /// Mark this node as being in remove mode.
+    ///
+    /// Called at the start of a remove operation.
+    fn mark_remove(&self);
+
+    /// Check if this node is in remove mode.
+    fn is_removing(&self) -> bool;
+
+    // =========================================================================
+    //  Empty State (for lazy coalescing)
+    // =========================================================================
+
+    /// Check if this leaf is in empty state (modstate == `MODSTATE_EMPTY`).
+    ///
+    /// Empty state means all keys were removed and the leaf is available
+    /// for reuse by insert or cleanup by background coalescing.
+    ///
+    /// Note: Use `is_empty()` (inherited from trait) to check if permutation
+    /// size is 0. Use `is_empty_state()` to check the modstate flag.
+    fn is_empty_state(&self) -> bool;
+
+    /// Mark this leaf as empty (all keys removed).
+    ///
+    /// Called when the last key is removed from a leaf.
+    fn mark_empty(&self);
+
+    /// Clear empty state, returning to normal insert mode.
+    ///
+    /// Called when an empty leaf is being reused for a new insert.
+    fn clear_empty_state(&self);
 }
 
 // =============================================================================
@@ -1079,251 +1072,4 @@ where
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::leaf24::LeafNode24;
-    use crate::permuter24::Permuter24;
-    use crate::value::LeafValue;
-
-    // ========================================================================
-    //  TreePermutation Tests
-    // ========================================================================
-
-    fn test_permutation_empty<P: TreePermutation>() {
-        let p = P::empty();
-        assert_eq!(p.size(), 0);
-        assert_eq!(p.back(), 0);
-    }
-
-    fn test_permutation_insert<P: TreePermutation>() {
-        let mut p = P::empty();
-        assert_eq!(p.size(), 0);
-
-        let slot = p.insert_from_back(0);
-        assert_eq!(slot, 0);
-        assert_eq!(p.size(), 1);
-        assert_eq!(p.get(0), 0);
-    }
-
-    fn test_permutation_insert_immutable<P: TreePermutation>() {
-        let p = P::empty();
-        let (new_p, slot) = p.insert_from_back_immutable(0);
-
-        // Original unchanged
-        assert_eq!(p.size(), 0);
-
-        // New permuter has insert
-        assert_eq!(new_p.size(), 1);
-        assert_eq!(slot, 0);
-        assert_eq!(new_p.get(0), 0);
-    }
-
-    fn test_permutation_freeze<P: TreePermutation>() {
-        let p = P::empty();
-        assert!(!P::is_frozen_raw(p.value()));
-
-        let frozen = P::freeze_raw(p.value());
-        assert!(P::is_frozen_raw(frozen));
-    }
-
-    fn test_permutation_roundtrip<P: TreePermutation>() {
-        let p = P::empty();
-        let raw = p.value();
-        let p2 = P::from_value(raw);
-        assert_eq!(p, p2);
-    }
-
-    #[test]
-    fn test_permuter24_trait_empty() {
-        test_permutation_empty::<Permuter24>();
-    }
-
-    #[test]
-    fn test_permuter24_trait_insert() {
-        test_permutation_insert::<Permuter24>();
-    }
-
-    #[test]
-    fn test_permuter24_trait_insert_immutable() {
-        test_permutation_insert_immutable::<Permuter24>();
-    }
-
-    #[test]
-    fn test_permuter24_trait_freeze() {
-        test_permutation_freeze::<Permuter24>();
-    }
-
-    #[test]
-    fn test_permuter24_trait_roundtrip() {
-        test_permutation_roundtrip::<Permuter24>();
-    }
-
-    // ========================================================================
-    //  TreeLeafNode Tests
-    // ========================================================================
-
-    fn test_leaf_new<L: TreeLeafNode<LeafValue<u64>>>() {
-        let leaf: Box<L> = L::new_boxed();
-        assert!(leaf.is_empty());
-        assert!(!leaf.is_full());
-        assert_eq!(leaf.size(), 0);
-    }
-
-    fn test_leaf_permutation<L: TreeLeafNode<LeafValue<u64>>>() {
-        let leaf: Box<L> = L::new_boxed();
-        let perm = leaf.permutation();
-        assert_eq!(perm.size(), 0);
-
-        // Insert via permutation
-        let mut new_perm = perm;
-        let slot = new_perm.insert_from_back(0);
-        leaf.set_permutation(new_perm);
-
-        assert_eq!(leaf.size(), 1);
-        assert_eq!(leaf.permutation().get(0), slot);
-    }
-
-    fn test_leaf_ikey<L: TreeLeafNode<LeafValue<u64>>>() {
-        let leaf: Box<L> = L::new_boxed();
-        leaf.set_ikey(0, 12345);
-        assert_eq!(leaf.ikey(0), 12345);
-        assert_eq!(leaf.ikey_bound(), 12345);
-    }
-
-    fn test_leaf_keylenx<L: TreeLeafNode<LeafValue<u64>>>() {
-        let leaf: Box<L> = L::new_boxed();
-        leaf.set_keylenx(1, 8);
-        assert_eq!(leaf.keylenx(1), 8);
-        assert!(!leaf.is_layer(1));
-        assert!(!leaf.has_ksuf(1));
-
-        // Test layer marker
-        leaf.set_keylenx(2, 128);
-        assert!(leaf.is_layer(2));
-    }
-
-    fn test_leaf_linking<L: TreeLeafNode<LeafValue<u64>>>() {
-        let leaf1: Box<L> = L::new_boxed();
-        let leaf2: Box<L> = L::new_boxed();
-        let leaf2_ptr = Box::into_raw(leaf2);
-
-        leaf1.set_next(leaf2_ptr);
-        assert_eq!(leaf1.safe_next(), leaf2_ptr);
-        assert!(!leaf1.next_is_marked());
-
-        leaf1.mark_next();
-        assert!(leaf1.next_is_marked());
-        assert_eq!(leaf1.safe_next(), leaf2_ptr);
-
-        leaf1.unmark_next();
-        assert!(!leaf1.next_is_marked());
-
-        // Cleanup
-        let _ = unsafe { Box::from_raw(leaf2_ptr) };
-    }
-
-    fn test_leaf_version<L: TreeLeafNode<LeafValue<u64>>>() {
-        let leaf: Box<L> = L::new_boxed();
-        let version = leaf.version();
-
-        // Should be unlocked initially
-        assert!(!version.is_locked());
-
-        // Can lock (guard unlocks on drop)
-        {
-            let _guard = version.lock();
-            assert!(version.is_locked());
-        }
-        // Guard dropped, should be unlocked
-        assert!(!version.is_locked());
-    }
-
-    #[test]
-    fn test_leafnode24_trait_new() {
-        test_leaf_new::<LeafNode24<LeafValue<u64>>>();
-    }
-
-    #[test]
-    fn test_leafnode24_trait_permutation() {
-        test_leaf_permutation::<LeafNode24<LeafValue<u64>>>();
-    }
-
-    #[test]
-    fn test_leafnode24_trait_ikey() {
-        test_leaf_ikey::<LeafNode24<LeafValue<u64>>>();
-    }
-
-    #[test]
-    fn test_leafnode24_trait_keylenx() {
-        test_leaf_keylenx::<LeafNode24<LeafValue<u64>>>();
-    }
-
-    #[test]
-    fn test_leafnode24_trait_linking() {
-        test_leaf_linking::<LeafNode24<LeafValue<u64>>>();
-    }
-
-    #[test]
-    fn test_leafnode24_trait_version() {
-        test_leaf_version::<LeafNode24<LeafValue<u64>>>();
-    }
-
-    // ========================================================================
-    //  WIDTH Constant Verification
-    // ========================================================================
-
-    #[test]
-    fn test_width_constants() {
-        // Permutation WIDTH matches leaf WIDTH
-        assert_eq!(
-            <Permuter24 as TreePermutation>::WIDTH,
-            <LeafNode24<LeafValue<u64>> as TreeLeafNode<LeafValue<u64>>>::WIDTH
-        );
-
-        // Verify actual values
-        assert_eq!(
-            <LeafNode24<LeafValue<u64>> as TreeLeafNode<LeafValue<u64>>>::WIDTH,
-            24
-        );
-    }
-
-    // ========================================================================
-    //  Generic Function Tests (prove traits enable generic code)
-    // ========================================================================
-
-    /// Generic function that works with any permutation type
-    fn generic_perm_fill<P: TreePermutation>(count: usize) -> P {
-        let mut perm = P::empty();
-        for i in 0..count.min(P::WIDTH) {
-            perm.insert_from_back(i);
-        }
-        perm
-    }
-
-    /// Generic function that works with any leaf node type
-    #[allow(clippy::unnecessary_box_returns)]
-    fn generic_leaf_setup<L: TreeLeafNode<LeafValue<u64>>>(ikey: u64) -> Box<L> {
-        let leaf = L::new_boxed();
-        leaf.set_ikey(0, ikey);
-        leaf.set_keylenx(0, 8);
-
-        let mut perm = leaf.permutation();
-        perm.insert_from_back(0);
-        leaf.set_permutation(perm);
-
-        leaf
-    }
-
-    #[test]
-    fn test_generic_perm_fill_24() {
-        let perm: Permuter24 = generic_perm_fill(10);
-        assert_eq!(perm.size(), 10);
-    }
-
-    #[test]
-    fn test_generic_leaf_setup_24() {
-        let leaf: Box<LeafNode24<LeafValue<u64>>> = generic_leaf_setup(42);
-        assert_eq!(leaf.ikey(0), 42);
-        assert_eq!(leaf.size(), 1);
-    }
-}
+mod unit_tests;

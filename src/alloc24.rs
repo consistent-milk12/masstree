@@ -1,7 +1,7 @@
 //! Node allocation for [`LeafNode24`] (WIDTH=24).
 //!
-//! This module provides allocators that work with the 24-slot leaf nodes,
-//! mirroring the design of `alloc.rs` but for the larger WIDTH.
+//! This module provides [`SeizeAllocator24`], a Miri-compliant allocator for
+//! 24-slot leaf nodes using `seize` for memory reclamation.
 //!
 //! # Note on Internode WIDTH
 //!
@@ -13,95 +13,32 @@
 use parking_lot::Mutex;
 use seize::{Guard, LocalGuard};
 
+use crate::alloc_trait::NodeAllocatorGeneric;
 use crate::internode::InternodeNode;
 use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
 
-/// Width constant for internodes (limited by 4-bit permutation slots).
-const INTERNODE_WIDTH: usize = 15;
-
-/// Trait for allocating and deallocating 24-slot tree nodes.
-///
-/// Similar to [`NodeAllocator`](crate::alloc::NodeAllocator) but for `LeafNode24`.
-///
-/// # Type Parameters
-///
-/// * `S` - The slot type implementing [`ValueSlot`]
-///
-/// # Note
-///
-/// Uses interior mutability (`parking_lot::Mutex`) so all methods take `&self`.
-pub trait NodeAllocator24<S: ValueSlot> {
-    /// Allocate a [`LeafNode24`] and return a stable raw pointer.
-    fn alloc_leaf24(&self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S>;
-
-    /// Allocate an internode and return a stable raw pointer.
-    ///
-    /// Note: Internodes are WIDTH=15 (max for 4-bit permutation slots).
-    fn alloc_internode24(
-        &self,
-        node: Box<InternodeNode<S, INTERNODE_WIDTH>>,
-    ) -> *mut InternodeNode<S, INTERNODE_WIDTH>;
-
-    /// Track a leaf24 pointer for cleanup (concurrent-safe via `&self`).
-    #[inline(always)]
-    #[expect(unused_variables, reason = "by default it's no op")]
-    fn track_leaf24(&self, ptr: *mut LeafNode24<S>) {
-        // Default: no-op
-    }
-
-    /// Track an internode pointer for cleanup (concurrent-safe via `&self`).
-    #[inline(always)]
-    #[expect(unused_variables, reason = "by default it's no op")]
-    fn track_internode24(&self, ptr: *mut InternodeNode<S, INTERNODE_WIDTH>) {
-        // Default: no-op
-    }
-
-    /// Retire a leaf24 node that has been unlinked from the tree.
-    ///
-    /// # Safety
-    ///
-    /// - `ptr` must have been allocated by this allocator.
-    /// - `ptr` must be unreachable from the tree by any new traversal.
-    #[inline(always)]
-    #[expect(unused_variables, reason = "by default it's no op")]
-    unsafe fn retire_leaf24(&self, ptr: *mut LeafNode24<S>, guard: &LocalGuard<'_>) {
-        // Default: no-op
-    }
-
-    /// Retire an internode that has been unlinked from the tree.
-    ///
-    /// # Safety
-    ///
-    /// - `ptr` must have been allocated by this allocator.
-    /// - `ptr` must be unreachable from the tree by any new traversal.
-    #[inline(always)]
-    #[expect(unused_variables, reason = "by default it's no op")]
-    unsafe fn retire_internode24(
-        &self,
-        ptr: *mut InternodeNode<S, INTERNODE_WIDTH>,
-        guard: &LocalGuard<'_>,
-    ) {
-        // Default: no-op
-    }
-
-    /// Teardown reachable nodes at tree drop.
-    #[inline(always)]
-    #[expect(unused_variables, reason = "by default it's no op")]
-    fn teardown_tree24(&self, root_ptr: *mut u8) {
-        // Default: no-op
-    }
-}
-
 /// Miri-compliant allocator for 24-slot leaf nodes.
 ///
 /// Uses `Box::into_raw()` for clean provenance and `Mutex` for concurrent tracking.
+/// Implements [`NodeAllocatorGeneric`] for use with [`crate::MassTreeGeneric`].
+///
+/// # Design
+///
+/// - Tracks all allocations in `Vec`s protected by `Mutex`
+/// - Supports deferred retirement via `seize` guards
+/// - Frees all tracked nodes on drop
+///
+/// # Thread Safety
+///
+/// All methods use interior mutability via `parking_lot::Mutex`, allowing
+/// concurrent allocation from multiple threads with only `&self`.
 pub struct SeizeAllocator24<S: ValueSlot> {
     /// Raw pointers to allocated [`LeafNode24`] nodes.
     leaf_ptrs: Mutex<Vec<*mut LeafNode24<S>>>,
 
     /// Raw pointers to allocated internode nodes (WIDTH=15).
-    internode_ptrs: Mutex<Vec<*mut InternodeNode<S, INTERNODE_WIDTH>>>,
+    internode_ptrs: Mutex<Vec<*mut InternodeNode<S>>>,
 }
 
 // SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
@@ -129,7 +66,7 @@ impl<S: ValueSlot> SeizeAllocator24<S> {
         }
     }
 
-    /// Return the number of tracked leaf24 nodes.
+    /// Return the number of tracked leaf nodes.
     #[must_use]
     pub fn leaf_count(&self) -> usize {
         self.leaf_ptrs.lock().len()
@@ -148,31 +85,47 @@ impl<S: ValueSlot> Default for SeizeAllocator24<S> {
     }
 }
 
-impl<S: ValueSlot> NodeAllocator24<S> for SeizeAllocator24<S> {
-    fn alloc_leaf24(&self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S> {
+impl<S: ValueSlot> Drop for SeizeAllocator24<S> {
+    fn drop(&mut self) {
+        // Free all tracked nodes on allocator drop
+        for ptr in self.leaf_ptrs.lock().drain(..) {
+            // SAFETY: ptr came from Box::into_raw or alloc()
+            unsafe {
+                drop(Box::from_raw(ptr));
+            }
+        }
+
+        for ptr in self.internode_ptrs.lock().drain(..) {
+            // SAFETY: ptr came from Box::into_raw or alloc()
+            unsafe {
+                drop(Box::from_raw(ptr));
+            }
+        }
+    }
+}
+
+// =============================================================================
+// NodeAllocatorGeneric Implementation
+// =============================================================================
+
+impl<S> NodeAllocatorGeneric<S, LeafNode24<S>> for SeizeAllocator24<S>
+where
+    S: ValueSlot + Send + Sync + 'static,
+{
+    #[inline(always)]
+    fn alloc_leaf(&self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S> {
         let ptr: *mut LeafNode24<S> = Box::into_raw(node);
         self.leaf_ptrs.lock().push(ptr);
         ptr
     }
 
-    fn alloc_internode24(
-        &self,
-        node: Box<InternodeNode<S, INTERNODE_WIDTH>>,
-    ) -> *mut InternodeNode<S, INTERNODE_WIDTH> {
-        let ptr: *mut InternodeNode<S, INTERNODE_WIDTH> = Box::into_raw(node);
-        self.internode_ptrs.lock().push(ptr);
-        ptr
-    }
-
-    fn track_leaf24(&self, ptr: *mut LeafNode24<S>) {
+    #[inline(always)]
+    fn track_leaf(&self, ptr: *mut LeafNode24<S>) {
         self.leaf_ptrs.lock().push(ptr);
     }
 
-    fn track_internode24(&self, ptr: *mut InternodeNode<S, INTERNODE_WIDTH>) {
-        self.internode_ptrs.lock().push(ptr);
-    }
-
-    unsafe fn retire_leaf24(&self, ptr: *mut LeafNode24<S>, guard: &LocalGuard<'_>) {
+    #[inline(always)]
+    unsafe fn retire_leaf(&self, ptr: *mut LeafNode24<S>, guard: &LocalGuard<'_>) {
         // Step 1: Remove from tracking to prevent double-free.
         // The allocator's Drop iterates leaf_ptrs and frees everything,
         // so we must remove the pointer before deferring retirement.
@@ -192,15 +145,35 @@ impl<S: ValueSlot> NodeAllocator24<S> for SeizeAllocator24<S> {
         }
     }
 
-    unsafe fn retire_internode24(
-        &self,
-        ptr: *mut InternodeNode<S, INTERNODE_WIDTH>,
-        guard: &LocalGuard<'_>,
-    ) {
+    #[inline(always)]
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "Caller guarantees node_ptr is properly aligned for InternodeNode"
+    )]
+    fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
+        // SAFETY: Caller passes a valid Box<InternodeNode<S>> as *mut u8.
+        // The pointer was originally created from Box::into_raw on an InternodeNode,
+        // so alignment is guaranteed.
+        let node: Box<InternodeNode<S>> =
+            unsafe { Box::from_raw(node_ptr.cast::<InternodeNode<S>>()) };
+        let ptr: *mut InternodeNode<S> = Box::into_raw(node);
+        self.internode_ptrs.lock().push(ptr);
+        ptr.cast()
+    }
+
+    #[inline(always)]
+    fn track_internode_erased(&self, ptr: *mut u8) {
+        self.internode_ptrs.lock().push(ptr.cast());
+    }
+
+    #[inline(always)]
+    unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
+        let typed_ptr: *mut InternodeNode<S> = ptr.cast();
+
         // Step 1: Remove from tracking to prevent double-free.
         {
             let mut ptrs = self.internode_ptrs.lock();
-            if let Some(pos) = ptrs.iter().position(|&p| p == ptr) {
+            if let Some(pos) = ptrs.iter().position(|&p| p == typed_ptr) {
                 ptrs.swap_remove(pos);
             }
         }
@@ -208,105 +181,32 @@ impl<S: ValueSlot> NodeAllocator24<S> for SeizeAllocator24<S> {
         // Step 2: Defer retirement via seize.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
         unsafe {
-            guard.defer_retire(ptr, |p, _| {
+            guard.defer_retire(typed_ptr, |p, _| {
                 drop(Box::from_raw(p));
             });
         }
     }
 
-    fn teardown_tree24(&self, _root_ptr: *mut u8) {
+    #[inline(always)]
+    fn teardown_tree(&self, _root_ptr: *mut u8) {
         // Free all tracked nodes using interior mutability
         let leaves: Vec<*mut LeafNode24<S>> = std::mem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode<S, INTERNODE_WIDTH>> =
+        let internodes: Vec<*mut InternodeNode<S>> =
             std::mem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
-            // SAFETY: ptr came from Box::into_raw in alloc_leaf24
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
                 drop(Box::from_raw(ptr));
             }
         }
 
         for ptr in internodes {
-            // SAFETY: ptr came from Box::into_raw in alloc_internode24
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
                 drop(Box::from_raw(ptr));
             }
         }
-    }
-}
-
-impl<S: ValueSlot> Drop for SeizeAllocator24<S> {
-    fn drop(&mut self) {
-        // Free all tracked nodes on allocator drop
-        for ptr in self.leaf_ptrs.lock().drain(..) {
-            // SAFETY: ptr came from Box::into_raw in alloc_leaf24
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
-
-        for ptr in self.internode_ptrs.lock().drain(..) {
-            // SAFETY: ptr came from Box::into_raw in alloc_internode24
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
-    }
-}
-
-// =============================================================================
-// NodeAllocatorGeneric Implementation
-// =============================================================================
-
-impl<S> crate::alloc_trait::NodeAllocatorGeneric<S, LeafNode24<S>> for SeizeAllocator24<S>
-where
-    S: ValueSlot + Send + Sync + 'static,
-{
-    #[inline(always)]
-    fn alloc_leaf(&self, node: Box<LeafNode24<S>>) -> *mut LeafNode24<S> {
-        NodeAllocator24::alloc_leaf24(self, node)
-    }
-
-    #[inline(always)]
-    fn track_leaf(&self, ptr: *mut LeafNode24<S>) {
-        NodeAllocator24::track_leaf24(self, ptr);
-    }
-
-    #[inline(always)]
-    unsafe fn retire_leaf(&self, ptr: *mut LeafNode24<S>, guard: &LocalGuard<'_>) {
-        // SAFETY: Caller guarantees ptr is valid and unreachable
-        unsafe { NodeAllocator24::retire_leaf24(self, ptr, guard) }
-    }
-
-    #[inline(always)]
-    #[expect(
-        clippy::cast_ptr_alignment,
-        reason = "Caller guarantees node_ptr is properly aligned for InternodeNode"
-    )]
-    fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
-        // SAFETY: Caller passes a valid Box<InternodeNode<S, INTERNODE_WIDTH>> as *mut u8.
-        // The pointer was originally created from Box::into_raw on an InternodeNode,
-        // so alignment is guaranteed.
-        let node: Box<InternodeNode<S, INTERNODE_WIDTH>> =
-            unsafe { Box::from_raw(node_ptr.cast::<InternodeNode<S, INTERNODE_WIDTH>>()) };
-        NodeAllocator24::alloc_internode24(self, node).cast()
-    }
-
-    #[inline(always)]
-    fn track_internode_erased(&self, ptr: *mut u8) {
-        NodeAllocator24::track_internode24(self, ptr.cast());
-    }
-
-    #[inline(always)]
-    unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        // SAFETY: Caller guarantees ptr is valid InternodeNode<S, 15>
-        unsafe { NodeAllocator24::retire_internode24(self, ptr.cast(), guard) }
-    }
-
-    #[inline(always)]
-    fn teardown_tree(&self, root_ptr: *mut u8) {
-        NodeAllocator24::teardown_tree24(self, root_ptr);
     }
 
     #[inline(always)]
@@ -314,6 +214,111 @@ where
         // TODO: Implement subtree traversal for WIDTH=24
         // For now, subtree retirement is not supported for WIDTH=24
         // The allocator's Drop will clean up all nodes
+    }
+
+    /// Allocate a leaf directly without Box intermediate.
+    ///
+    /// Uses raw allocation + `init_at` to avoid stack-to-heap copy.
+    #[inline]
+    fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode24<S> {
+        use std::alloc::{Layout, alloc};
+
+        let layout = Layout::new::<LeafNode24<S>>();
+        // SAFETY: Layout is valid (non-zero size)
+        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid (non-zero size)")]
+        let ptr: *mut LeafNode24<S> = unsafe { alloc(layout).cast::<LeafNode24<S>>() };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        // Initialize in-place
+        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        unsafe {
+            LeafNode24::init_at(ptr, is_root || is_layer_root);
+        }
+
+        // Track for cleanup
+        self.leaf_ptrs.lock().push(ptr);
+        ptr
+    }
+
+    /// Allocate an internode directly without Box intermediate.
+    #[inline]
+    fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
+        use std::alloc::{Layout, alloc};
+
+        let layout = Layout::new::<InternodeNode<S>>();
+        // SAFETY: Layout is valid
+        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid (non-zero size)")]
+        let ptr: *mut InternodeNode<S> =
+            unsafe { alloc(layout).cast::<InternodeNode<S>>() };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        // Initialize in-place
+        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        unsafe {
+            InternodeNode::init_at(ptr, height);
+        }
+
+        // Track for cleanup
+        self.internode_ptrs.lock().push(ptr);
+        ptr.cast()
+    }
+
+    /// Allocate an internode as root directly without Box intermediate.
+    #[inline]
+    fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
+        use std::alloc::{Layout, alloc};
+
+        let layout = Layout::new::<InternodeNode<S>>();
+        // SAFETY: Layout is valid
+        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
+        let ptr: *mut InternodeNode<S> =
+            unsafe { alloc(layout).cast::<InternodeNode<S>>() };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        // Initialize in-place as root
+        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        unsafe {
+            InternodeNode::init_at_root(ptr, height);
+        }
+
+        // Track for cleanup
+        self.internode_ptrs.lock().push(ptr);
+        ptr.cast()
+    }
+
+    /// Allocate an internode for split directly without Box intermediate.
+    #[inline]
+    fn alloc_internode_direct_for_split(
+        &self,
+        parent_version: &crate::nodeversion::NodeVersion,
+        height: u32,
+    ) -> *mut u8 {
+        use std::alloc::{Layout, alloc};
+
+        let layout = Layout::new::<InternodeNode<S>>();
+        // SAFETY: Layout is valid
+        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
+        let ptr: *mut InternodeNode<S> =
+            unsafe { alloc(layout).cast::<InternodeNode<S>>() };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        // Initialize in-place with split-locked version
+        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        unsafe {
+            InternodeNode::init_at_for_split(ptr, parent_version, height);
+        }
+
+        // Track for cleanup
+        self.internode_ptrs.lock().push(ptr);
+        ptr.cast()
     }
 }
 
@@ -334,7 +339,7 @@ mod tests {
         let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
         let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
 
-        let ptr = alloc.alloc_leaf24(leaf);
+        let ptr = alloc.alloc_leaf(leaf);
         assert!(!ptr.is_null());
         assert_eq!(alloc.leaf_count(), 1);
 
@@ -350,7 +355,7 @@ mod tests {
         let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
         let ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf);
 
-        alloc.track_leaf24(ptr);
+        alloc.track_leaf(ptr);
         assert_eq!(alloc.leaf_count(), 1);
     }
 
@@ -359,7 +364,7 @@ mod tests {
         let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
         let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
 
-        let _ = alloc.alloc_leaf24(leaf);
+        let _ = alloc.alloc_leaf(leaf);
         assert_eq!(alloc.leaf_count(), 1);
 
         // Drop the allocator - nodes should be freed

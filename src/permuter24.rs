@@ -19,9 +19,6 @@ use portable_atomic::{AtomicU128, Ordering};
 
 use crate::{leaf_trait::TreePermutation, suffix::PermutationProvider};
 
-// Re-export Freeze24Utils from freeze24 module
-pub use crate::freeze24::Freeze24Utils;
-
 // =============================================================================
 // Constants
 // =============================================================================
@@ -47,10 +44,6 @@ pub const FREEZE_SENTINEL: u128 = 0x1F;
 
 /// Bit position of slot 23 (freeze position).
 pub const FREEZE_SHIFT: usize = 23 * SLOT_BITS + SIZE_BITS; // = 120
-
-/// Mask for slot 23 (freeze slot).
-#[allow(dead_code)]
-const FREEZE_SLOT_MASK: u128 = SLOT_MASK << FREEZE_SHIFT;
 
 // =============================================================================
 // Permuter24
@@ -88,7 +81,7 @@ impl Permuter24 {
     /// This constant is used by both `empty()` and `AtomicPermuter24::new()`.
     /// Position i holds slot (23 - i), so `back()` returns 0 initially.
     ///
-    /// Bit layout: size=0, slot[0]=23, slot[1]=22, ..., slot[23]=0
+    /// Bit layout: `size=0, slot[0]=23, slot[1]=22, ..., slot[23]=0`
     pub const INITIAL: u128 = {
         let mut value: u128 = 0;
         let mut i: usize = 0;
@@ -122,6 +115,21 @@ impl Permuter24 {
         Self {
             value: Self::INITIAL,
         }
+    }
+
+    /// Create a permuter from a raw u128 value.
+    ///
+    /// This is used for optimistic read patterns where we capture the
+    /// permutation value before acquiring a lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `value` represents a valid permutation state.
+    /// Invalid values may cause undefined behavior in subsequent operations.
+    #[inline(always)]
+    #[must_use]
+    pub const fn from_raw(value: u128) -> Self {
+        Self { value }
     }
 
     /// Create a sorted permuter with `n` elements.
@@ -410,6 +418,35 @@ impl Permuter24 {
         #[cfg(debug_assertions)]
         self.debug_assert_valid();
     }
+
+    /// Remove a physical slot from the permutation.
+    ///
+    /// Finds the logical position of the given physical slot and removes it,
+    /// shifting subsequent slots down.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slot is not found in the permutation.
+    #[inline]
+    #[expect(clippy::expect_used, reason = "Documented invariant: slot must exist")]
+    pub fn remove_slot(&mut self, slot: usize) {
+        let size = self.size();
+
+        // Find the logical position of this slot
+        let mut found_pos: Option<usize> = None;
+
+        for i in 0..size {
+            if self.get(i) == slot {
+                found_pos = Some(i);
+                break;
+            }
+        }
+
+        let pos = found_pos.expect("remove_slot: slot not in permutation");
+
+        // Use the existing remove method which removes by logical position
+        self.remove(pos);
+    }
 }
 
 // =============================================================================
@@ -486,12 +523,6 @@ impl Permuter24 {
     /// - Not all slot indices 0-23 are present
     #[cfg(debug_assertions)]
     pub fn debug_assert_valid(&self) {
-        // Skip validation for frozen permuters (slot 23 = 0x1F)
-        // Frozen state is valid during splits but would fail slot < 24 check
-        if Freeze24Utils::is_frozen(self.value) {
-            return;
-        }
-
         let size: usize = self.size();
         assert!(size <= 24, "invalid size: {size} > 24");
 
@@ -723,13 +754,8 @@ impl TreePermutation for Permuter24 {
     }
 
     #[inline(always)]
-    fn is_frozen_raw(raw: u128) -> bool {
-        crate::freeze24::Freeze24Utils::is_frozen(raw)
-    }
-
-    #[inline(always)]
-    fn freeze_raw(raw: u128) -> u128 {
-        crate::freeze24::Freeze24Utils::freeze_raw(raw)
+    fn remove(&mut self, i: usize) {
+        Self::remove(self, i);
     }
 }
 
@@ -778,6 +804,7 @@ mod tests {
     fn test_make_sorted_full() {
         let p = Permuter24::make_sorted(24);
         assert_eq!(p.size(), 24);
+
         for i in 0..24 {
             assert_eq!(p.get(i), i);
         }
@@ -870,15 +897,6 @@ mod tests {
         assert_eq!(p.get(2), 2);
         assert_eq!(p.get(3), 1);
         assert_eq!(p.get(4), 4);
-    }
-
-    #[test]
-    fn test_freeze() {
-        let p = Permuter24::make_sorted(10);
-        let frozen = Freeze24Utils::freeze_raw(p.value());
-
-        assert!(Freeze24Utils::is_frozen(frozen));
-        assert!(!Freeze24Utils::is_frozen(p.value()));
     }
 
     #[test]

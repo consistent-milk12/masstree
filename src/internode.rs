@@ -13,20 +13,19 @@
 //! │ Cache Line 0 (64 bytes)                                         │
 //! │   version: NodeVersion (4 bytes)                                │
 //! │   nkeys: AtomicU8 (1 byte)                                      │
-//! │   height: u32 (4 bytes)                                         │
-//! │   padding (~55 bytes)                                           │
+//! │   height: u8 (1 byte)                                           │
+//! │   _pad: [u8; 2] (2 bytes alignment)                             │
+//! │   parent: AtomicPtr<u8> (8 bytes)                               │
+//! │   ikey0[0..6]: [AtomicU64; 6] (48 bytes)                        │
 //! ├─────────────────────────────────────────────────────────────────┤
 //! │ Cache Lines 1-2 (128 bytes)                                     │
-//! │   ikey0: [AtomicU64; 15] (120 bytes) - routing keys             │
+//! │   ikey0[6..15]: [AtomicU64; 9] (72 bytes)                       │
+//! │   child[0..7]: [AtomicPtr<u8>; 7] (56 bytes)                    │
 //! ├─────────────────────────────────────────────────────────────────┤
 //! │ Cache Lines 3-4 (128 bytes)                                     │
-//! │   child: [AtomicPtr<u8>; 15] (120 bytes) - child pointers       │
-//! ├─────────────────────────────────────────────────────────────────┤
-//! │ Cache Line 5 (partial)                                          │
-//! │   rightmost_child: AtomicPtr<u8> (8 bytes)                      │
-//! │   parent: AtomicPtr<u8> (8 bytes)                               │
+//! │   child[7..16]: [AtomicPtr<u8>; 9] (72 bytes)                   │
 //! └─────────────────────────────────────────────────────────────────┘
-//! Total: ~320 bytes (5 cache lines)
+//! Total: ~280 bytes (5 cache lines)
 //! ```
 //!
 //! # B+Tree Routing Model
@@ -54,6 +53,7 @@
 //! - **Memory Ordering:** Atomic fields use `Acquire`/`Release` ordering
 //!   to ensure proper visibility of modifications across threads.
 
+use std::array as StdArray;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
@@ -68,63 +68,78 @@ use crate::slot::ValueSlot;
 use crate::value::LeafValue;
 
 // ============================================================================
+//  Constants
+// ============================================================================
+
+/// Number of keys in an internode.
+/// Fixed at 15 to match leaf WIDTH and enable unified child array.
+pub const WIDTH: usize = 15;
+
+/// Number of children in an internode (WIDTH + 1).
+const NUM_CHILDREN: usize = WIDTH + 1;
+
+// ============================================================================
 //  InternodeNode
 // ============================================================================
 
 /// An internal routing node in the `MassTree`.
 ///
-/// Stores up to WIDTH keys and WIDTH+1 child pointers. Keys are always
+/// Stores up to 15 keys and 16 child pointers. Keys are always
 /// in sorted physical order (no permutation needed).
 ///
 /// # Type Parameters
 /// * `S` - The slot type implementing [`ValueSlot`] (phantom, for type consistency)
-/// * `WIDTH` - Number of key slots (default: 15, max: 15)
 ///
 /// # Invariants
-/// - `nkeys <= WIDTH`
+/// - `nkeys <= WIDTH` (max 15 keys)
 /// - For `nkeys` keys, there are `nkeys + 1` valid children (child[0..=nkeys])
-/// - Keys are in ascending order: `ikey0[i] < ikey0[i+1]` for all `i < nkeys-1`
-/// - `child[i]` contains keys `< ikey0[i]`
-/// - `child[i+1]` contains keys `>= ikey0[i]`
+/// - Keys are in ascending order: `ikey[i] < ikey[i+1]` for all `i < nkeys-1`
+/// - `child[i]` contains keys `< ikey[i]`
+/// - `child[i+1]` contains keys `>= ikey[i]`
 ///
 /// # Memory Layout
 /// Uses `#[repr(C, align(64))]` for cache-line alignment.
-/// For WIDTH=15, total size is ~320 bytes (5 cache lines).
+/// Total size is ~280 bytes (5 cache lines).
 #[repr(C, align(64))]
-pub struct InternodeNode<S: ValueSlot, const WIDTH: usize = 15> {
+pub struct InternodeNode<S: ValueSlot> {
+    // ========================================================================
+    // Cache Line 0 (64 bytes)
+    // ========================================================================
     /// Version for optimistic concurrency control.
-    version: NodeVersion,
+    version: NodeVersion, // 4 bytes
 
     /// Number of keys (0 to WIDTH).
-    nkeys: AtomicU8,
+    nkeys: AtomicU8, // 1 byte
 
     /// Tree height (0 = children are leaves, 1+ = children are internodes).
-    height: u32,
+    /// Max practical height is ~15 (supports billions of keys).
+    height: u8, // 1 byte
 
-    /// Routing keys in sorted order.
-    ikey0: [AtomicU64; WIDTH],
-
-    /// Child pointers for slots 0..WIDTH.
-    /// - child[i] contains keys < ikey0[i]
-    /// - Type is `*mut u8` for uniformity; cast to LeafNode/InternodeNode based on height
-    ///   Note: The rightmost child (at index nkeys) is stored in `rightmost_child`
-    ///   to avoid `WIDTH + 1` which requires unstable `generic_const_exprs`.
-    child: [AtomicPtr<u8>; WIDTH],
-
-    /// Rightmost child pointer (child at index nkeys).
-    /// Stored separately to avoid `[*mut u8; WIDTH + 1]` which requires unstable features.
-    rightmost_child: AtomicPtr<u8>,
+    /// Padding for 8-byte alignment of parent pointer.
+    _pad: [u8; 2], // 2 bytes
 
     /// Parent internode pointer (null for root).
-    /// Type is `*mut u8` for uniformity with `LeafNode` (both use `*mut u8`).
-    /// Cast to `*mut InternodeNode` at usage sites.
-    parent: AtomicPtr<u8>,
+    parent: AtomicPtr<u8>, // 8 bytes
+
+    // ========================================================================
+    // Cache Lines 0-2 (keys - contiguous for prefetcher)
+    // ========================================================================
+    /// Routing keys in sorted order.
+    ikey0: [AtomicU64; WIDTH], // 120 bytes
+
+    // ========================================================================
+    // Cache Lines 2-4 (children)
+    // ========================================================================
+    /// Child pointers (16 children for 15 keys).
+    /// - child[i] contains keys < ikey0[i]
+    /// - child[nkeys] is the rightmost child (keys >= ikey0[nkeys-1])
+    child: [AtomicPtr<u8>; NUM_CHILDREN], // 128 bytes
 
     /// Phantom data to hold S type parameter for tree type consistency.
     _marker: PhantomData<S>,
 }
 
-impl<S: ValueSlot, const WIDTH: usize> StdFmt::Debug for InternodeNode<S, WIDTH> {
+impl<S: ValueSlot> StdFmt::Debug for InternodeNode<S> {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("InternodeNode")
             .field("nkeys", &self.nkeys())
@@ -134,16 +149,104 @@ impl<S: ValueSlot, const WIDTH: usize> StdFmt::Debug for InternodeNode<S, WIDTH>
     }
 }
 
-// Compile-time assertion: WIDTH must be 1..=15
-impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
-    const WIDTH_CHECK: () = {
-        assert!(WIDTH > 0, "WIDTH must be at least 1");
+impl<S: ValueSlot> InternodeNode<S> {
+    // ========================================================================
+    //  In-Place Initialization (for pool allocators)
+    // ========================================================================
 
-        assert!(WIDTH <= 15, "WIDTH must be at most 15");
-    };
-}
+    /// Initialize an internode in-place at the given pointer.
+    ///
+    /// This is used by pool allocators to initialize directly in pool memory,
+    /// avoiding the intermediate Box allocation.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must be valid for writes of `size_of::<Self>()` bytes
+    /// - `ptr` must be properly aligned for `Self`
+    /// - The caller must have exclusive access to the memory
+    /// - The memory does not need to be initialized (will be overwritten)
+    #[inline]
+    pub unsafe fn init_at(ptr: *mut Self, height: u32) {
+        debug_assert!(height <= 15, "init_at: height {} exceeds maximum 15", height);
 
-impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
+        // SAFETY: All operations here are safe because:
+        // - ptr is valid for writes and properly aligned (caller guarantees)
+        // - We have exclusive access to the memory (caller guarantees)
+        // - write_bytes initializes all bytes to zero, making the memory valid
+        // - After zeroing, we can safely create a mutable reference because:
+        //   - All atomic types (AtomicU8, AtomicU64, AtomicPtr) are valid when zeroed
+        //   - PhantomData is zero-sized
+        //   - NodeVersion contains AtomicU32 which is valid when zeroed
+        // - ptr::write is used for NodeVersion to properly initialize it
+        unsafe {
+            // Zero the entire struct first (most fields are zero-initialized)
+            StdPtr::write_bytes(ptr, 0, 1);
+
+            // Now write the non-zero fields
+            let node = &mut *ptr;
+
+            // Version: internode (not leaf), not root
+            StdPtr::write(&raw mut node.version, NodeVersion::new(false));
+
+            // Height (truncate to u8 - max practical height is ~15)
+            #[expect(clippy::cast_possible_truncation, reason = "height <= 15 in practice")]
+            {
+                node.height = height as u8;
+            }
+
+            // nkeys, ikey0, child, parent are all zero/null
+            // which is correct for a fresh internode
+        }
+    }
+
+    /// Initialize an internode in-place as a root node.
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as [`Self::init_at`].
+    #[inline]
+    pub unsafe fn init_at_root(ptr: *mut Self, height: u32) {
+        // SAFETY: Caller guarantees ptr validity
+        unsafe {
+            Self::init_at(ptr, height);
+            (*ptr).version.mark_root();
+        }
+    }
+
+    /// Initialize an internode in-place for a split operation.
+    ///
+    /// Creates a split-locked version copied from the parent's locked version.
+    /// This prevents other threads from locking the sibling until installed.
+    ///
+    /// # Safety
+    ///
+    /// - Same requirements as [`Self::init_at`]
+    /// - `parent_version` must be from a locked node
+    #[inline]
+    pub unsafe fn init_at_for_split(ptr: *mut Self, parent_version: &NodeVersion, height: u32) {
+        // SAFETY: Caller guarantees ptr validity
+        unsafe {
+            // Zero the entire struct first
+            StdPtr::write_bytes(ptr, 0, 1);
+
+            let node = &mut *ptr;
+
+            // Create split-locked version from parent's locked version
+            let split_version: NodeVersion = NodeVersion::new_for_split(parent_version);
+            StdPtr::write(&raw mut node.version, split_version);
+
+            // Height (truncate to u8)
+            #[expect(clippy::cast_possible_truncation, reason = "height <= 15 in practice")]
+            {
+                node.height = height as u8;
+            }
+        }
+    }
+
+    // ========================================================================
+    //  Boxed Constructors
+    // ========================================================================
+
     /// Create a new internode at the given height.
     ///
     /// # Arguments
@@ -154,17 +257,15 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     #[must_use]
     #[inline]
     pub fn new(height: u32) -> Box<Self> {
-        // Trigger compile-time WIDTH check
-        let _: () = Self::WIDTH_CHECK;
-
+        #[expect(clippy::cast_possible_truncation, reason = "height <= 15 in practice")]
         Box::new(Self {
             version: NodeVersion::new(false), // false = not a leaf
             nkeys: AtomicU8::new(0),
-            height,
-            ikey0: std::array::from_fn(|_| AtomicU64::new(0)),
-            child: std::array::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-            rightmost_child: AtomicPtr::new(StdPtr::null_mut()),
+            height: height as u8,
+            _pad: [0; 2],
             parent: AtomicPtr::new(StdPtr::null_mut()),
+            ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
+            child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
             _marker: PhantomData,
         })
     }
@@ -208,22 +309,20 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     #[must_use]
     #[inline]
     pub fn new_for_split(parent_version: &NodeVersion, height: u32) -> Box<Self> {
-        // Trigger compile-time WIDTH check
-        let _: () = Self::WIDTH_CHECK;
-
         // Create split-locked version from parent's locked version.
         // This ensures the sibling cannot be locked by other threads until
         // we call unlock_for_split() after installation.
         let split_version: NodeVersion = NodeVersion::new_for_split(parent_version);
 
+        #[expect(clippy::cast_possible_truncation, reason = "height <= 15 in practice")]
         Box::new(Self {
             version: split_version,
             nkeys: AtomicU8::new(0),
-            height,
-            ikey0: std::array::from_fn(|_| AtomicU64::new(0)),
-            child: std::array::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-            rightmost_child: AtomicPtr::new(StdPtr::null_mut()),
+            height: height as u8,
+            _pad: [0; 2],
             parent: AtomicPtr::new(StdPtr::null_mut()),
+            ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
+            child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
             _marker: PhantomData,
         })
     }
@@ -285,9 +384,19 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn ikey(&self, i: usize) -> u64 {
-        debug_assert!(i < WIDTH, "ikey: index out of bounds");
-
+        debug_assert!(i < WIDTH, "ikey: index {i} out of bounds (WIDTH={WIDTH})");
         self.ikey0[i].load(READ_ORD)
+    }
+
+    /// Get the key at the given index using Relaxed ordering.
+    ///
+    /// Used in internal operations where ordering is handled by caller.
+    #[must_use]
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
+    fn ikey_relaxed(&self, i: usize) -> u64 {
+        debug_assert!(i < WIDTH, "ikey_relaxed: index {i} out of bounds");
+        self.ikey0[i].load(RELAXED)
     }
 
     /// Set the key at the given index.
@@ -297,9 +406,15 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn set_ikey(&self, i: usize, ikey: u64) {
-        debug_assert!(i < WIDTH, "set_ikey: index out of bounds");
-
+        debug_assert!(i < WIDTH, "set_ikey: index {i} out of bounds");
         self.ikey0[i].store(ikey, WRITE_ORD);
+    }
+
+    /// Set key using Relaxed ordering (for internal shifting during insert).
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked by caller")]
+    fn set_ikey_relaxed(&self, i: usize, ikey: u64) {
+        self.ikey0[i].store(ikey, RELAXED);
     }
 
     /// Get the tree height.
@@ -309,7 +424,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     #[must_use]
     #[inline(always)]
     pub const fn height(&self) -> u32 {
-        self.height
+        self.height as u32
     }
 
     /// Check if children are leaves (height == 0).
@@ -326,7 +441,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// Get the child pointer at the given index.
     ///
     /// Valid indices are `0..=nkeys` (one more child than keys).
-    /// Index WIDTH returns the rightmost child.
+    /// Index 15 (WIDTH) returns the rightmost child.
     ///
     /// # Panics
     /// Panics in debug mode if `i > WIDTH`.
@@ -334,41 +449,100 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "bounds checked via debug_assert; i < WIDTH"
+        reason = "bounds checked via debug_assert; i <= WIDTH (16 children)"
     )]
     pub fn child(&self, i: usize) -> *mut u8 {
-        debug_assert!(i <= WIDTH, "child: index out of bounds");
-        if i < WIDTH {
-            self.child[i].load(READ_ORD)
-        } else {
-            self.rightmost_child.load(READ_ORD)
+        debug_assert!(i <= WIDTH, "child: index {i} out of bounds");
+        self.child[i].load(READ_ORD)
+    }
+
+    /// Get the child pointer with prefetch hint for the next likely child.
+    ///
+    /// This is used in the optimized traversal path to hide memory latency.
+    /// Prefetches both the next child node (`child[i+1]`) and its key array
+    /// (cache line 1 at offset 64) while returning `child[i]`.
+    ///
+    /// # Arguments
+    /// * `i` - Child index to return
+    /// * `nkeys` - Current number of keys (to avoid prefetching beyond valid children)
+    ///
+    /// # Prefetch Strategy
+    ///
+    /// When descending to `child[i]`, we speculatively prefetch `child[i+1]`:
+    /// - Offset 0: Node header + first 6 ikeys (cache line 0)
+    /// - Offset 64: Remaining ikeys (cache line 1)
+    ///
+    /// Prefetching null pointers is harmless on x86/ARM (becomes a no-op).
+    #[must_use]
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
+    pub fn child_with_prefetch(&self, i: usize, nkeys: usize) -> *mut u8 {
+        debug_assert!(i <= WIDTH, "child_with_prefetch: index out of bounds");
+
+        let ptr = self.child[i].load(READ_ORD);
+
+        // Speculatively prefetch next child's node header + ikey array
+        if i < nkeys {
+            let next_child_ptr = self.child[i + 1].load(RELAXED);
+
+            // SAFETY: Prefetch instructions are safe even with null/invalid pointers.
+            // On x86/ARM, prefetching an invalid address is a no-op (silently ignored).
+            // The CPU's prefetch unit handles TLB misses gracefully.
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                // Prefetch cache line 0: header + ikey0[0..5]
+                std::arch::x86_64::_mm_prefetch(
+                    next_child_ptr.cast::<i8>(),
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
+                // Prefetch cache line 1: ikey0[6..13]
+                std::arch::x86_64::_mm_prefetch(
+                    next_child_ptr.cast::<i8>().wrapping_add(64),
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
+            }
+
+            // SAFETY: Same as x86_64 - prefetch of invalid addresses is harmless.
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                // Prefetch cache line 0: header + ikey0[0..5]
+                std::arch::aarch64::_prefetch(
+                    next_child_ptr.cast::<i8>(),
+                    std::arch::aarch64::_PREFETCH_READ,
+                    std::arch::aarch64::_PREFETCH_LOCALITY3,
+                );
+                // Prefetch cache line 1: ikey0[6..13]
+                std::arch::aarch64::_prefetch(
+                    next_child_ptr.cast::<i8>().wrapping_add(64),
+                    std::arch::aarch64::_PREFETCH_READ,
+                    std::arch::aarch64::_PREFETCH_LOCALITY3,
+                );
+            }
         }
+
+        ptr
     }
 
     /// Set the child pointer at the given index.
     ///
-    /// Index WIDTH sets the rightmost child.
+    /// Valid indices are `0..=WIDTH` (16 children for 15 keys).
     ///
     /// # Panics
     /// Panics in debug mode if `i > WIDTH`.
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "bounds checked via debug_assert; i < WIDTH"
+        reason = "bounds checked via debug_assert; i <= WIDTH (16 children)"
     )]
     pub fn set_child(&self, i: usize, child: *mut u8) {
-        debug_assert!(i <= WIDTH, "set_child: index out of bounds");
-        if i < WIDTH {
-            self.child[i].store(child, WRITE_ORD);
-        } else {
-            self.rightmost_child.store(child, WRITE_ORD);
-        }
+        debug_assert!(i <= WIDTH, "set_child: index {i} out of bounds");
+        self.child[i].store(child, WRITE_ORD);
     }
 
     /// Assign a key and its right child at position `p`.
     ///
     /// Following the C++ pattern:
-    /// - `ikey0[p] = ikey`
+    /// - `ikey[p] = ikey`
     /// - `child[p + 1] = right_child`
     ///
     /// The left child (`child[p]`) must already be set.
@@ -376,11 +550,10 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// # Panics
     /// Panics in debug mode if `p >= WIDTH`.
     #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn assign(&self, p: usize, ikey: u64, right_child: *mut u8) {
-        debug_assert!(p < WIDTH, "assign: position out of bounds");
+        debug_assert!(p < WIDTH, "assign: position {p} out of bounds");
 
-        self.ikey0[p].store(ikey, WRITE_ORD);
+        self.set_ikey(p, ikey);
         self.set_child(p + 1, right_child);
     }
 
@@ -390,11 +563,17 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// Panics in debug mode if `n > WIDTH`.
     #[inline(always)]
     pub fn set_nkeys(&self, n: u8) {
-        debug_assert!((n as usize) <= WIDTH, "set_nkeys: count out of bounds");
+        debug_assert!((n as usize) <= WIDTH, "set_nkeys: count {n} out of bounds");
         self.nkeys.store(n, WRITE_ORD);
     }
 
     /// Increment the number of keys by 1.
+    ///
+    /// # Precondition
+    ///
+    /// Caller must hold the node lock. This is a load-then-store operation,
+    /// not an atomic increment, because only one writer can modify nkeys
+    /// while the lock is held.
     ///
     /// # Panics
     /// Panics in debug mode if already at WIDTH.
@@ -412,7 +591,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// Insert a key and child at position `p`, shifting existing entries right.
     ///
     /// After insertion:
-    /// - `ikey0[p] = new_ikey`
+    /// - `ikey[p] = new_ikey`
     /// - `child[p + 1] = new_child`
     /// - Keys/children at positions >= p are shifted right by 1
     ///
@@ -426,29 +605,28 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     ///
     /// # Panics
     /// Panics in debug mode if node is full or position out of bounds.
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "bounds checked via debug_assert; loop invariants ensure p,i < WIDTH"
-    )]
     pub fn insert_key_and_child(&self, p: usize, new_ikey: u64, new_child: *mut u8) {
         let n: usize = self.nkeys.load(RELAXED) as usize;
 
         debug_assert!(n < WIDTH, "insert_key_and_child: node is full");
-        debug_assert!(p <= n, "insert_key_and_child: position out of bounds");
+        debug_assert!(
+            p <= n,
+            "insert_key_and_child: position {p} out of bounds (n={n})"
+        );
 
         // Shift keys and children to the right
-        // Keys: ikey0[p..n] -> ikey0[p+1..n+1]
+        // Keys: ikey[p..n] -> ikey[p+1..n+1]
         // Children: child[p+1..n+1] -> child[p+2..n+2]
         for i in (p..n).rev() {
-            let key: u64 = self.ikey0[i].load(RELAXED);
-            self.ikey0[i + 1].store(key, RELAXED);
+            let key: u64 = self.ikey_relaxed(i);
+            self.set_ikey_relaxed(i + 1, key);
 
             let child = self.child(i + 1);
             self.set_child(i + 2, child);
         }
 
         // Insert new key and child
-        self.ikey0[p].store(new_ikey, RELAXED);
+        self.set_ikey_relaxed(p, new_ikey);
         self.set_child(p + 1, new_child);
 
         fence(WRITE_ORD);
@@ -467,15 +645,18 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// * `src` - Source internode
     /// * `src_pos` - Starting position in source
     /// * `count` - Number of entries to copy
+    ///
+    /// # Memory Ordering
+    ///
+    /// Keys use Relaxed ordering (internal operation), while children use WRITE_ORD
+    /// (pointers need visibility ordering). The caller is responsible for publishing
+    /// via `nkeys.store(WRITE_ORD)` after this function returns, which acts as a
+    /// release barrier making all prior writes visible.
     #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "caller ensures indices are within WIDTH bounds"
-    )]
     pub fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize) {
         for i in 0..count {
-            let key: u64 = src.ikey0[src_pos + i].load(RELAXED);
-            self.ikey0[dst_pos + i].store(key, RELAXED);
+            let key: u64 = src.ikey_relaxed(src_pos + i);
+            self.set_ikey_relaxed(dst_pos + i, key);
             self.set_child(dst_pos + 1 + i, src.child(src_pos + 1 + i));
         }
     }
@@ -519,26 +700,6 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// pointers of all leaf children that moved to `new_right`.** This function only
     /// updates internode children's parent pointers (when `height > 0`).
     ///
-    /// Example for the caller when splitting an internode with leaf children:
-    ///
-    /// ```ignore
-    /// let (popup_key, insert_went_left) = parent.split_into(
-    ///     &mut new_right, new_right_ptr, insert_pos, key, child
-    /// );
-    ///
-    /// // If parent.height == 0, update leaf children's parent pointers:
-    /// if parent.children_are_leaves() {
-    ///     let nr_nkeys = new_right.nkeys() as usize;
-    ///     for i in 0..=nr_nkeys {
-    ///         let leaf_ptr = new_right.child(i).cast::<LeafNode>();
-    ///         (*leaf_ptr).set_parent(new_right_ptr.cast::<u8>());
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// This must be done while still holding the parent lock, before making
-    /// `new_right` visible to other threads.
-    ///
     /// # Safety
     ///
     /// * `new_right_ptr` must point to `new_right`
@@ -547,10 +708,6 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// # Reference
     ///
     /// `reference/masstree_split.hh:123-175`
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "split logic ensures all indices < WIDTH"
-    )]
     #[expect(
         clippy::cast_possible_truncation,
         reason = "WIDTH <= 15, so mid and WIDTH-mid fit in u8"
@@ -574,14 +731,11 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
         let (popup_key, insert_went_left) = match insert_pos.cmp(&mid) {
             Ordering::Less => {
                 // Case 1: Insert goes into left (self)
-                // - new_right.child[0] = self.child[mid]
-                // - new_right gets keys [mid, WIDTH)
-                // - popup_key = self.ikey0[mid - 1] (pre-insert key at mid-1)
                 new_right.set_child(0, self.child(mid));
                 new_right.shift_from(0, self, mid, WIDTH - mid);
                 new_right.nkeys.store((WIDTH - mid) as u8, WRITE_ORD);
 
-                let popup: u64 = self.ikey0[mid - 1].load(RELAXED);
+                let popup: u64 = self.ikey_relaxed(mid - 1);
 
                 // Now insert into left side
                 self.nkeys.store((mid - 1) as u8, WRITE_ORD);
@@ -592,41 +746,31 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
 
             Ordering::Equal => {
                 // Case 2: Insert becomes the popup key
-                // - new_right.child[0] = insert_child
-                // - new_right gets keys [mid, WIDTH)
-                // - popup_key = insert_ikey
                 new_right.set_child(0, insert_child);
                 new_right.shift_from(0, self, mid, WIDTH - mid);
                 new_right.nkeys.store((WIDTH - mid) as u8, WRITE_ORD);
 
                 self.nkeys.store(mid as u8, WRITE_ORD);
 
-                (insert_ikey, false) // Technically neither left nor right
+                (insert_ikey, false)
             }
 
             Ordering::Greater => {
                 // Case 3: Insert goes into right (new_right)
-                // - new_right.child[0] = self.child[mid + 1]
-                // - new_right gets keys [mid+1, insert_pos) + insert + [insert_pos, WIDTH)
-                // - popup_key = self.ikey0[mid]
                 let right_insert_pos: usize = insert_pos - (mid + 1);
 
                 new_right.set_child(0, self.child(mid + 1));
-
-                // Copy keys before insertion point
                 new_right.shift_from(0, self, mid + 1, right_insert_pos);
 
-                // Insert the new key/child
-                new_right.ikey0[right_insert_pos].store(insert_ikey, RELAXED);
+                new_right.set_ikey_relaxed(right_insert_pos, insert_ikey);
                 new_right.set_child(right_insert_pos + 1, insert_child);
 
-                // Copy keys after insertion point (using shift_from for consistency)
                 let count_after: usize = WIDTH - insert_pos;
                 new_right.shift_from(right_insert_pos + 1, self, insert_pos, count_after);
 
                 new_right.nkeys.store((WIDTH - mid) as u8, WRITE_ORD);
 
-                let popup: u64 = self.ikey0[mid].load(RELAXED);
+                let popup: u64 = self.ikey_relaxed(mid);
                 self.nkeys.store(mid as u8, WRITE_ORD);
 
                 (popup, false)
@@ -636,53 +780,21 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
         // Set new_right's height to match self
         new_right.height = self.height;
 
-        // CRITICAL: Update children's parent pointers to point to new_right.
-        // This MUST happen inside split_into (before returning) to prevent races
-        // where a thread sees a child with a stale parent pointer.
-        // Matches C++ masstree_split.hh:163-165:
-        //   for (int i = 0; i <= nr->nkeys_; ++i) {
-        //       nr->child_[i]->set_parent(nr);
-        //   }
-        //
-        // NOTE: We only update internode children here (height > 0).
-        // For leaf children (height == 0), the caller must update them because
-        // the internode doesn't know the actual leaf type (could be LeafNode<S, WIDTH>
-        // or LeafNode24<S> for MassTree24).
+        // Update children's parent pointers (internode children only)
         if self.height > 0 {
-            // Children are internodes - we can handle this directly
             let nr_nkeys: usize = new_right.nkeys.load(RELAXED) as usize;
             let new_right_ptr_u8: *mut u8 = new_right_ptr.cast::<u8>();
-
-            #[cfg(feature = "tracing")]
-            let mut updated_internode_children: usize = 0;
 
             for i in 0..=nr_nkeys {
                 let child: *mut u8 = new_right.child(i);
                 if !child.is_null() {
-                    // SAFETY: height > 0 means children are InternodeNode<S, WIDTH>
+                    // SAFETY: height > 0 means children are InternodeNode<S>
                     unsafe {
                         (*child.cast::<Self>()).set_parent(new_right_ptr_u8);
                     }
-                    #[cfg(feature = "tracing")]
-                    {
-                        updated_internode_children += 1;
-                    }
                 }
             }
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                new_right_ptr = ?new_right_ptr,
-                height = self.height,
-                nr_nkeys,
-                updated_internode_children,
-                popup_key = format_args!("{:016x}", popup_key),
-                "INTERNODE_SPLIT_INTO: updated internode children parent pointers"
-            );
         }
-        // NOTE: For height == 0 (leaf children), the caller is responsible for
-        // updating parent pointers. This must be done immediately after split_into
-        // returns, while still holding the parent lock.
 
         (popup_key, insert_went_left)
     }
@@ -693,7 +805,7 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
 
     /// Get the parent pointer (as `*mut u8`).
     ///
-    /// Cast to `*mut InternodeNode<V, WIDTH>` at usage sites.
+    /// Cast to `*mut InternodeNode<S>` at usage sites.
     #[must_use]
     #[inline(always)]
     pub fn parent(&self) -> *mut u8 {
@@ -722,14 +834,12 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// Compare a search key against the key at position `p`.
     ///
     /// Returns:
-    /// - `Ordering::Less` if `search_ikey < ikey0[p]`
-    /// - `Ordering::Equal` if `search_ikey == ikey0[p]`
-    /// - `Ordering::Greater` if `search_ikey > ikey0[p]`
-    ///
-    /// Unlike leaf nodes, internode comparison is purely on ikey—no keylenx.
+    /// - `Ordering::Less` if `search_ikey < ikey[p]`
+    /// - `Ordering::Equal` if `search_ikey == ikey[p]`
+    /// - `Ordering::Greater` if `search_ikey > ikey[p]`
     #[must_use]
     #[inline(always)]
-    pub fn compare_key(&self, search_ikey: u64, p: usize) -> std::cmp::Ordering {
+    pub fn compare_key(&self, search_ikey: u64, p: usize) -> Ordering {
         search_ikey.cmp(&self.ikey(p))
     }
 
@@ -738,52 +848,56 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// Returns the index where `insert_ikey` should go, such that
     /// `ikey(i-1) < insert_ikey <= ikey(i)` (or at the end if greater than all).
     ///
-    /// Uses binary search for O(log n) complexity instead of O(n) linear scan.
-    /// For WIDTH=15, this reduces worst-case from 15 comparisons to ~4.
+    /// Uses linear search with loop unrolling and prefetching. Linear search is
+    /// faster than binary for small nodes (WIDTH ≤ 16) due to predictable branches
+    /// and sequential memory access.
     ///
-    /// FIXED: Used in the data race fix for recomputing child index after reacquiring lock.
+    /// # Memory Layout
+    ///
+    /// ```text
+    /// Offset 0-63 (CL0):   header (16B) + ikey0[0..5] (48B)
+    /// Offset 64-127 (CL1): ikey0[6..13] (64B)
+    /// Offset 128+ (CL2):   ikey0[14] (8B) + children
+    /// ```
+    ///
+    /// We prefetch the next cache line of keys while processing the current batch.
     #[inline]
     pub fn find_insert_position(&self, insert_ikey: u64) -> usize {
         let n: usize = self.nkeys();
+        let mut i: usize = 0;
 
-        let mut lo: usize = 0;
-        let mut hi: usize = n;
-
-        while lo < hi {
-            let mid: usize = (lo + hi) >> 1;
-            if self.ikey(mid) < insert_ikey {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
+        // Prefetch cache line 1 (ikey0[6..13]) before we need it
+        // CL0 is already in cache from loading nkeys
+        if n > 6 {
+            crate::prefetch::prefetch_read(&self.ikey0[6]);
         }
 
-        lo
-    }
-
-    /// Prefetch the internode's data into cache.
-    ///
-    /// Brings the node's key and child arrays into CPU cache before they're
-    /// accessed, reducing memory latency during traversal.
-    ///
-    /// Matches C++ `internode::prefetch()` from `reference/masstree_struct.hh:149-152`.
-    #[inline(always)]
-    pub fn prefetch(&self) {
-        use crate::prefetch::prefetch_read;
-
-        let self_ptr: *const u8 = std::ptr::from_ref::<Self>(self).cast::<u8>();
-        let max_offset: usize = core::cmp::min(16 * WIDTH + 1, 256);
-
-        // Prefetch cache lines beyond the first (which was fetched when we accessed version)
-        let mut offset: usize = 64;
-        while offset < max_offset {
-            // SAFETY: prefetch_read is a hint, safe even with invalid addresses.
-            // The CPU will simply ignore prefetch requests for unmapped memory.
-            unsafe {
-                prefetch_read(self_ptr.add(offset));
+        // Unrolled loop: process 4 keys per iteration
+        while i + 4 <= n {
+            if self.ikey(i) >= insert_ikey {
+                return i;
             }
-            offset += 64;
+            if self.ikey(i + 1) >= insert_ikey {
+                return i + 1;
+            }
+            if self.ikey(i + 2) >= insert_ikey {
+                return i + 2;
+            }
+            if self.ikey(i + 3) >= insert_ikey {
+                return i + 3;
+            }
+            i += 4;
         }
+
+        // Handle remainder (0-3 keys)
+        while i < n {
+            if self.ikey(i) >= insert_ikey {
+                return i;
+            }
+            i += 1;
+        }
+
+        n
     }
 
     // ========================================================================
@@ -800,10 +914,6 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     /// # Panics
     /// If any invariant is violated.
     #[cfg(debug_assertions)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "loop bounds ensure i-1 and i are < size <= WIDTH"
-    )]
     pub fn debug_assert_invariants(&self) {
         // Check nkeys bound
         assert!(
@@ -819,12 +929,12 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
         if size > 1 {
             for i in 1..size {
                 assert!(
-                    self.ikey0[i - 1].load(RELAXED) < self.ikey0[i].load(RELAXED),
-                    "keys not in ascending order: ikey0[{}] ({:#x}) >= ikey0[{}] ({:#x})",
+                    self.ikey_relaxed(i - 1) < self.ikey_relaxed(i),
+                    "keys not in ascending order: ikey[{}] ({:#x}) >= ikey[{}] ({:#x})",
                     i - 1,
-                    self.ikey0[i - 1].load(RELAXED),
+                    self.ikey_relaxed(i - 1),
                     i,
-                    self.ikey0[i].load(RELAXED)
+                    self.ikey_relaxed(i)
                 );
             }
         }
@@ -836,19 +946,16 @@ impl<S: ValueSlot, const WIDTH: usize> InternodeNode<S, WIDTH> {
     pub fn debug_assert_invariants(&self) {}
 }
 
-impl<S: ValueSlot, const WIDTH: usize> Default for InternodeNode<S, WIDTH> {
+impl<S: ValueSlot> Default for InternodeNode<S> {
     fn default() -> Self {
-        // Trigger compile-time WIDTH check
-        let _: () = Self::WIDTH_CHECK;
-
         Self {
             version: NodeVersion::new(false),
             nkeys: AtomicU8::new(0),
             height: 0,
-            ikey0: std::array::from_fn(|_| AtomicU64::new(0)),
-            child: std::array::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-            rightmost_child: AtomicPtr::new(StdPtr::null_mut()),
+            _pad: [0; 2],
             parent: AtomicPtr::new(StdPtr::null_mut()),
+            ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
+            child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
             _marker: PhantomData,
         }
     }
@@ -860,42 +967,34 @@ impl<S: ValueSlot, const WIDTH: usize> Default for InternodeNode<S, WIDTH> {
 
 // SAFETY: InternodeNode is safe to send/share between threads when S is.
 //
+// Note on the S: Send + Sync bound:
+// S is only stored in PhantomData<S> and is never actually accessed by
+// InternodeNode. The bound exists for type consistency with the tree's
+// generic parameters, ensuring that trees using InternodeNode<S> can be
+// Send + Sync when S is.
+//
 // Thread safety is provided by:
-// 1. Atomic fields (nkeys, ikey0, child, rightmost_child, parent) use
-//    appropriate memory orderings for concurrent access
+// 1. Atomic fields (nkeys, ikey0, child, parent) use appropriate memory
+//    orderings for concurrent access
 // 2. The NodeVersion field provides locking and optimistic concurrency control
 // 3. Raw pointers (child, parent) are protected by the tree's concurrency
 //    protocol:
 //    - Readers use version validation to detect concurrent modifications
 //    - Writers hold the node lock before modifying children
-//
-// This matches the C++ Masstree concurrency model where internode access
-// is protected by either:
-// - Version validation (readers retry on version change)
-// - Lock acquisition (writers hold lock during modifications)
-unsafe impl<S: ValueSlot + Send + Sync, const WIDTH: usize> Send for InternodeNode<S, WIDTH> {}
-unsafe impl<S: ValueSlot + Send + Sync, const WIDTH: usize> Sync for InternodeNode<S, WIDTH> {}
-
-// ============================================================================
-//  Type Aliases
-// ============================================================================
-
-/// Standard 15-key internode (default).
-pub type InternodeNode15<V> = InternodeNode<V, 15>;
-
-/// Compact 7-key internode.
-pub type InternodeNodeCompact<V> = InternodeNode<V, 7>;
+unsafe impl<S: ValueSlot + Send + Sync> Send for InternodeNode<S> {}
+unsafe impl<S: ValueSlot + Send + Sync> Sync for InternodeNode<S> {}
 
 // ============================================================================
 //  Size Assertions
 // ============================================================================
 
-/// Compile-time size check for `InternodeNode<LeafValue<u64>, 15>`.
+/// Compile-time size check for `InternodeNode<LeafValue<u64>>`.
 const _: () = {
-    const SIZE: usize = StdMem::size_of::<InternodeNode<LeafValue<u64>, 15>>();
-    const ALIGN: usize = StdMem::align_of::<InternodeNode<LeafValue<u64>, 15>>();
+    const SIZE: usize = StdMem::size_of::<InternodeNode<LeafValue<u64>>>();
+    const ALIGN: usize = StdMem::align_of::<InternodeNode<LeafValue<u64>>>();
 
-    // Should fit in 5 cache lines (320 bytes)
+    // Should fit in ~5 cache lines (320 bytes)
+    // Actual: 16 (header) + 120 (keys) + 128 (children) = 264 bytes + padding
     assert!(SIZE <= 320, "InternodeNode exceeds 5 cache lines");
 
     // Should be cache-line aligned
@@ -906,7 +1005,7 @@ const _: () = {
 //  TreeInternode Implementation
 // ============================================================================
 
-impl<S, const WIDTH: usize> TreeInternode<S> for InternodeNode<S, WIDTH>
+impl<S> TreeInternode<S> for InternodeNode<S>
 where
     S: ValueSlot + Send + Sync + 'static,
 {
@@ -976,7 +1075,7 @@ where
     }
 
     #[inline(always)]
-    fn compare_key(&self, search_ikey: u64, p: usize) -> std::cmp::Ordering {
+    fn compare_key(&self, search_ikey: u64, p: usize) -> Ordering {
         Self::compare_key(self, search_ikey, p)
     }
 
@@ -988,6 +1087,11 @@ where
     #[inline(always)]
     fn child(&self, idx: usize) -> *mut u8 {
         Self::child(self, idx)
+    }
+
+    #[inline(always)]
+    fn child_with_prefetch(&self, idx: usize, nkeys: usize) -> *mut u8 {
+        Self::child_with_prefetch(self, idx, nkeys)
     }
 
     #[inline(always)]
@@ -1043,11 +1147,6 @@ where
             insert_child,
         )
     }
-
-    #[inline(always)]
-    fn prefetch(&self) {
-        Self::prefetch(self);
-    }
 }
 
 // ============================================================================
@@ -1055,355 +1154,7 @@ where
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
-    use std::cmp::Ordering;
-
-    use super::*;
-
-    #[test]
-    fn test_new_internode() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        assert!(!node.version().is_leaf());
-        assert!(!node.version().is_root());
-        assert_eq!(node.nkeys(), 0);
-        assert_eq!(node.height(), 0);
-        assert!(node.is_empty());
-        assert!(!node.is_full());
-        assert!(node.children_are_leaves());
-        assert!(node.parent().is_null());
-    }
-
-    #[test]
-    fn test_new_root() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new_root(1);
-
-        assert!(!node.version().is_leaf());
-        assert!(node.version().is_root());
-        assert_eq!(node.height(), 1);
-        assert!(!node.children_are_leaves());
-    }
-
-    #[test]
-    fn test_key_accessors() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        node.set_ikey(0, 0x1000_0000_0000_0000);
-        node.set_ikey(1, 0x2000_0000_0000_0000);
-        node.set_ikey(2, 0x3000_0000_0000_0000);
-        node.set_nkeys(3);
-
-        assert_eq!(node.ikey(0), 0x1000_0000_0000_0000);
-        assert_eq!(node.ikey(1), 0x2000_0000_0000_0000);
-        assert_eq!(node.ikey(2), 0x3000_0000_0000_0000);
-        assert_eq!(node.size(), 3);
-    }
-
-    #[test]
-    fn test_child_accessors() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        let fake_child0: *mut u8 = std::ptr::without_provenance_mut(0x1000);
-        let fake_child1: *mut u8 = std::ptr::without_provenance_mut(0x2000);
-        let fake_child2: *mut u8 = std::ptr::without_provenance_mut(0x3000);
-
-        node.set_child(0, fake_child0);
-        node.set_child(1, fake_child1);
-        node.set_child(2, fake_child2);
-
-        assert_eq!(node.child(0), fake_child0);
-        assert_eq!(node.child(1), fake_child1);
-        assert_eq!(node.child(2), fake_child2);
-    }
-
-    #[test]
-    fn test_assign() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        let left_child: *mut u8 = std::ptr::without_provenance_mut(0x1000);
-        let right_child: *mut u8 = std::ptr::without_provenance_mut(0x2000);
-
-        // Set left child first
-        node.set_child(0, left_child);
-
-        // Assign key and right child
-        node.assign(0, 0xABCD_0000_0000_0000, right_child);
-        node.set_nkeys(1);
-
-        assert_eq!(node.ikey(0), 0xABCD_0000_0000_0000);
-        assert_eq!(node.child(0), left_child);
-        assert_eq!(node.child(1), right_child);
-        assert_eq!(node.size(), 1);
-    }
-
-    #[test]
-    fn test_inc_nkeys() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        assert_eq!(node.nkeys(), 0);
-
-        node.inc_nkeys();
-        assert_eq!(node.nkeys(), 1);
-
-        node.inc_nkeys();
-        assert_eq!(node.nkeys(), 2);
-    }
-
-    #[test]
-    fn test_is_full() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        assert!(!node.is_full());
-
-        node.set_nkeys(15);
-        assert!(node.is_full());
-    }
-
-    #[test]
-    fn test_parent_accessors() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-        let mut parent: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(1);
-
-        let parent_ptr: *mut InternodeNode<LeafValue<u64>> =
-            parent.as_mut() as *mut InternodeNode<LeafValue<u64>, 15>;
-
-        // set_parent takes *mut u8, so cast the pointer
-        node.set_parent(parent_ptr.cast::<u8>());
-        assert_eq!(node.parent(), parent_ptr.cast::<u8>());
-    }
-
-    #[test]
-    fn test_compare_key() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        node.set_ikey(0, 0x5000_0000_0000_0000);
-        node.set_nkeys(1);
-
-        assert_eq!(node.compare_key(0x3000_0000_0000_0000, 0), Ordering::Less);
-        assert_eq!(node.compare_key(0x5000_0000_0000_0000, 0), Ordering::Equal);
-        assert_eq!(
-            node.compare_key(0x7000_0000_0000_0000, 0),
-            Ordering::Greater
-        );
-    }
-
-    #[test]
-    fn test_compact_internode() {
-        let node: Box<InternodeNodeCompact<LeafValue<u64>>> = InternodeNode::new(0);
-
-        assert_eq!(node.size(), 0);
-        assert!(!node.is_full());
-    }
-
-    #[test]
-    fn test_invariants_valid() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        // Set up correctly sorted keys
-        node.set_ikey(0, 0x1000_0000_0000_0000);
-        node.set_ikey(1, 0x2000_0000_0000_0000);
-        node.set_ikey(2, 0x3000_0000_0000_0000);
-        node.set_nkeys(3);
-
-        // Should not panic
-        node.debug_assert_invariants();
-    }
-
-    #[test]
-    #[should_panic(expected = "keys not in ascending order")]
-    #[cfg(debug_assertions)]
-    fn test_invariant_unsorted_keys() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        // Set up unsorted keys
-        node.set_ikey(0, 0x3000_0000_0000_0000);
-        node.set_ikey(1, 0x1000_0000_0000_0000); // Wrong order!
-        node.set_nkeys(2);
-
-        node.debug_assert_invariants(); // Should panic
-    }
-
-    // ========================================================================
-    //  find_insert_position tests (binary search verification)
-    // ========================================================================
-
-    #[test]
-    fn test_find_insert_position_empty() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-        // Empty node: any key goes at position 0
-        assert_eq!(node.find_insert_position(0x1000), 0);
-        assert_eq!(node.find_insert_position(0), 0);
-        assert_eq!(node.find_insert_position(u64::MAX), 0);
-    }
-
-    #[test]
-    fn test_find_insert_position_single_key() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-        node.set_ikey(0, 100);
-        node.set_nkeys(1);
-
-        // Key < existing: goes before
-        assert_eq!(node.find_insert_position(50), 0);
-        // Key == existing: goes at same position
-        assert_eq!(node.find_insert_position(100), 0);
-        // Key > existing: goes after
-        assert_eq!(node.find_insert_position(150), 1);
-    }
-
-    #[test]
-    fn test_find_insert_position_multiple_keys() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        // Set up keys: 10, 20, 30, 40, 50
-        node.set_ikey(0, 10);
-        node.set_ikey(1, 20);
-        node.set_ikey(2, 30);
-        node.set_ikey(3, 40);
-        node.set_ikey(4, 50);
-        node.set_nkeys(5);
-
-        // Before all
-        assert_eq!(node.find_insert_position(5), 0);
-        // Equal to first
-        assert_eq!(node.find_insert_position(10), 0);
-        // Between first and second
-        assert_eq!(node.find_insert_position(15), 1);
-        // Equal to middle
-        assert_eq!(node.find_insert_position(30), 2);
-        // Between 30 and 40
-        assert_eq!(node.find_insert_position(35), 3);
-        // Equal to last
-        assert_eq!(node.find_insert_position(50), 4);
-        // After all
-        assert_eq!(node.find_insert_position(100), 5);
-    }
-
-    #[test]
-    fn test_find_insert_position_full_node() {
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        // Fill with keys 10, 20, 30, ..., 150
-        for i in 0..15 {
-            node.set_ikey(i, (i as u64 + 1) * 10);
-        }
-        node.set_nkeys(15);
-
-        // Verify binary search works for all positions
-        assert_eq!(node.find_insert_position(5), 0); // Before first
-        assert_eq!(node.find_insert_position(10), 0); // Equal to first
-        assert_eq!(node.find_insert_position(75), 7); // Mid-range
-        assert_eq!(node.find_insert_position(80), 7); // Equal to key[7]
-        assert_eq!(node.find_insert_position(145), 14); // Between 140 and 150
-        assert_eq!(node.find_insert_position(150), 14); // Equal to last
-        assert_eq!(node.find_insert_position(200), 15); // After all
-    }
-
-    // ========================================================================
-    //  Split edge case tests
-    // ========================================================================
-
-    #[test]
-    fn test_split_insert_at_position_0() {
-        // Test splitting when the new key goes at position 0 (smallest)
-        // Use height=0 so split_into treats children as leaves (doesn't dereference them)
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-        let mut new_right: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        // Fill the node with keys 20, 30, 40, ..., 160 (15 keys)
-        for i in 0..15 {
-            node.set_ikey(i, (i as u64 + 2) * 10);
-            node.set_child(i, std::ptr::without_provenance_mut((i + 1) * 0x1000));
-        }
-        node.set_child(15, std::ptr::without_provenance_mut(16 * 0x1000));
-        node.set_nkeys(15);
-
-        let new_right_ptr: *mut InternodeNode<LeafValue<u64>, 15> = new_right.as_mut();
-        let new_child: *mut u8 = std::ptr::without_provenance_mut(0xABCD);
-
-        // Insert key 10 at position 0 (smallest)
-        let (popup_key, insert_went_left) =
-            node.split_into(&mut new_right, new_right_ptr, 0, 10, new_child);
-
-        // Insert at position 0 < mid(8), so it goes left
-        assert!(insert_went_left, "Insert at position 0 should go left");
-
-        // Verify popup key is reasonable (should be one of the keys around mid)
-        assert!(popup_key > 0, "Popup key should be non-zero");
-    }
-
-    #[test]
-    fn test_split_insert_at_width() {
-        // Test splitting when the new key goes at position WIDTH (largest)
-        // Use height=0 so split_into treats children as leaves (doesn't dereference them)
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-        let mut new_right: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        // Fill the node with keys 10, 20, 30, ..., 150 (15 keys)
-        for i in 0..15 {
-            node.set_ikey(i, (i as u64 + 1) * 10);
-            node.set_child(i, std::ptr::without_provenance_mut((i + 1) * 0x1000));
-        }
-        node.set_child(15, std::ptr::without_provenance_mut(16 * 0x1000));
-        node.set_nkeys(15);
-
-        let new_right_ptr: *mut InternodeNode<LeafValue<u64>, 15> = new_right.as_mut();
-        let new_child: *mut u8 = std::ptr::without_provenance_mut(0xABCD);
-
-        // Insert key 200 at position 15 (largest, after all existing)
-        let (popup_key, insert_went_left) =
-            node.split_into(&mut new_right, new_right_ptr, 15, 200, new_child);
-
-        // Insert at position 15 > mid(8), so it goes right
-        assert!(
-            !insert_went_left,
-            "Insert at position WIDTH should go right"
-        );
-
-        // Verify popup key is reasonable
-        assert!(popup_key > 0, "Popup key should be non-zero");
-    }
-
-    #[test]
-    fn test_split_insert_at_midpoint() {
-        // Test splitting when the new key goes at the midpoint (becomes popup)
-        // Use height=0 so split_into treats children as leaves (doesn't dereference them)
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-        let mut new_right: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-
-        // Fill the node with keys 10, 20, 30, ..., 150 (15 keys)
-        for i in 0..15 {
-            node.set_ikey(i, (i as u64 + 1) * 10);
-            node.set_child(i, std::ptr::without_provenance_mut((i + 1) * 0x1000));
-        }
-        node.set_child(15, std::ptr::without_provenance_mut(16 * 0x1000));
-        node.set_nkeys(15);
-
-        let new_right_ptr: *mut InternodeNode<LeafValue<u64>, 15> = new_right.as_mut();
-        let new_child: *mut u8 = std::ptr::without_provenance_mut(0xABCD);
-
-        // mid = ceil(15/2) = 8
-        // Insert key 85 at position 8 (the midpoint)
-        let (popup_key, insert_went_left) =
-            node.split_into(&mut new_right, new_right_ptr, 8, 85, new_child);
-
-        // When insert_pos == mid, the insert key becomes the popup key
-        assert_eq!(popup_key, 85, "Insert at midpoint should become popup key");
-
-        // insert_went_left behavior at midpoint depends on implementation details.
-        // The key observation is that when insert_pos == mid, the inserted key
-        // becomes the popup key, so it doesn't go to either sibling.
-        // We just verify the function completed successfully.
-        let _ = insert_went_left;
-    }
-
-    #[test]
-    fn test_prefetch_does_not_crash() {
-        // Just verify prefetch doesn't crash - it's a no-op hint on most systems
-        let node: Box<InternodeNode<LeafValue<u64>, 15>> = InternodeNode::new(0);
-        node.prefetch();
-        // If we get here, prefetch worked (it's just a hint, no crash expected)
-    }
-}
+mod unit_tests;
 
 // ============================================================================
 //  Loom Tests
@@ -1420,21 +1171,23 @@ mod loom_tests {
     use loom::sync::Arc;
     use loom::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
     use loom::thread;
+    use std::array as StdArray;
+
+    use super::WIDTH;
 
     /// Simplified internode for loom testing.
     ///
     /// Uses loom atomics to enable deterministic interleaving exploration.
-    /// Only includes the fields needed for testing concurrent key access.
     struct LoomInternode {
         nkeys: AtomicU8,
-        ikey0: [AtomicU64; 4], // Small width for faster loom exploration
+        ikey0: [AtomicU64; WIDTH],
     }
 
     impl LoomInternode {
         fn new() -> Self {
             Self {
                 nkeys: AtomicU8::new(0),
-                ikey0: std::array::from_fn(|_| AtomicU64::new(0)),
+                ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             }
         }
 
@@ -1454,47 +1207,31 @@ mod loom_tests {
             self.ikey0[idx].store(key, Ordering::Release);
         }
 
-        /// Binary search matching the real implementation.
         fn find_insert_position(&self, insert_ikey: u64) -> usize {
             let n: usize = self.nkeys();
 
-            let mut lo: usize = 0;
-            let mut hi: usize = n;
-
-            while lo < hi {
-                let mid: usize = (lo + hi) >> 1;
-                if self.ikey(mid) < insert_ikey {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
+            for i in 0..n {
+                if self.ikey(i) >= insert_ikey {
+                    return i;
                 }
             }
 
-            lo
+            n
         }
 
-        /// Simulate key insertion (simplified, no children).
         fn insert_key(&self, pos: usize, key: u64) {
             let n = self.nkeys();
 
-            // Shift keys right
             for i in (pos..n).rev() {
                 let k = self.ikey(i);
                 self.set_ikey(i + 1, k);
             }
 
-            // Insert new key
             self.set_ikey(pos, key);
-
-            // Increment nkeys with release ordering
             self.set_nkeys((n + 1) as u8);
         }
     }
 
-    /// Test that concurrent reads of find_insert_position are consistent.
-    ///
-    /// Even without locking, reads should see a consistent snapshot of
-    /// the keys (either before or after modification, not partial).
     #[test]
     fn test_loom_find_position_concurrent_reads() {
         loom::model(|| {
@@ -1507,38 +1244,24 @@ mod loom_tests {
             node.set_nkeys(3);
 
             let n1 = Arc::clone(&node);
-            let t1 = thread::spawn(move || {
-                // Read: find position for key 25
-                let pos = n1.find_insert_position(25);
-                // Should be between 20 and 30, so position 2
-                // But if we see partial state, result may vary
-                pos
-            });
+            let t1 = thread::spawn(move || n1.find_insert_position(25));
 
             let n2 = Arc::clone(&node);
-            let t2 = thread::spawn(move || {
-                // Read: find position for key 15
-                let pos = n2.find_insert_position(15);
-                pos
-            });
+            let t2 = thread::spawn(move || n2.find_insert_position(15));
 
             let pos1 = t1.join().unwrap();
             let pos2 = t2.join().unwrap();
 
-            // Both should get valid positions (0-3)
             assert!(pos1 <= 3, "pos1={} should be <= 3", pos1);
             assert!(pos2 <= 3, "pos2={} should be <= 3", pos2);
         });
     }
 
-    /// Test that find_insert_position during concurrent write sees
-    /// consistent state (via atomic loads).
     #[test]
     fn test_loom_find_position_during_insert() {
         loom::model(|| {
             let node = Arc::new(LoomInternode::new());
 
-            // Setup: insert key 20
             node.set_ikey(0, 20);
             node.set_nkeys(1);
 
@@ -1546,14 +1269,12 @@ mod loom_tests {
 
             let n1 = Arc::clone(&node);
             let t1 = thread::spawn(move || {
-                // Writer: insert key 10 at position 0
                 n1.insert_key(0, 10);
             });
 
             let n2 = Arc::clone(&node);
             let r2 = Arc::clone(&results);
             let t2 = thread::spawn(move || {
-                // Reader: find position for key 15
                 let pos = n2.find_insert_position(15);
                 r2.store(pos, Ordering::Relaxed);
             });
@@ -1561,20 +1282,11 @@ mod loom_tests {
             t1.join().unwrap();
             t2.join().unwrap();
 
-            // Result depends on interleaving:
-            // - If reader runs before insert: sees [20], returns 0 (15 < 20)
-            // - If reader runs after insert: sees [10, 20], returns 1 (10 < 15 < 20)
-            // - Partial views possible but should still be valid
             let pos = results.load(Ordering::Relaxed);
             assert!(pos <= 2, "pos={} should be <= 2", pos);
         });
     }
 
-    /// Test that concurrent inserts maintain sorted order invariant.
-    ///
-    /// NOTE: In real usage, inserts are protected by locks. This test
-    /// verifies that atomic operations don't corrupt data even without
-    /// locks (the result may be non-deterministic but should be valid).
     #[test]
     fn test_loom_concurrent_reads_different_keys() {
         loom::model(|| {

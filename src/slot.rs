@@ -1,4 +1,4 @@
-//! Value slot abstraction for [`MassTree`] storage modes.
+//! Value slot abstraction for [`crate::MassTree`] storage modes.
 //!
 //! This module provides the [`ValueSlot`] trait that abstracts how values
 //! are stored in leaf nodes. The trait is implemented for existing types:
@@ -38,7 +38,7 @@ use crate::value::{LeafValue, LeafValueIndex};
 /// The core complexity is ensuring allocation happens exactly once per insert,
 /// even across retries (splits, layer creation). The trait achieves this by
 /// separating Value (user input) from Output (retryable handle). A secondary
-/// benefit is unifying the implementation via [`TreeCore<S>`] to avoid code duplication.
+/// benefit is unifying the implementation via the generic tree to avoid code duplication.
 ///
 /// # Associated Types
 /// - `Value`: The user-facing value type (what users insert)
@@ -198,6 +198,21 @@ pub trait ValueSlot: Default + Sized {
     /// - For `LeafValue<V>`: `Arc::into_raw(output)` directly
     /// - For `LeafValueIndex<V>`: `Box::into_raw(Box::new(output))`
     fn output_consume_to_raw(output: Self::Output) -> *mut u8;
+
+    /// Clean up a raw pointer created by `output_to_raw`.
+    ///
+    /// This is the counterpart to `output_to_raw` - it frees the memory
+    /// allocated when converting an output to a raw pointer.
+    ///
+    /// - For `LeafValue<V>`: Decrements Arc refcount (drops the cloned Arc)
+    /// - For `LeafValueIndex<V>`: Drops the Box
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been created by `output_to_raw`
+    /// - `ptr` must not have been already cleaned up
+    /// - Caller must ensure no references to the pointed-to value exist
+    unsafe fn cleanup_output_raw(ptr: *mut u8);
 }
 
 // ============================================================================
@@ -268,7 +283,7 @@ impl<V> ValueSlot for LeafValue<V> {
             "swap_output called on Layer slot; layer pointer would be lost"
         );
 
-        let old: Self = std::mem::replace(self, Self::Value(new_output));
+        let old: Self = StdMem::replace(self, Self::Value(new_output));
 
         match old {
             Self::Value(arc) => Some(arc),
@@ -302,6 +317,14 @@ impl<V> ValueSlot for LeafValue<V> {
     #[inline(always)]
     fn output_consume_to_raw(output: Arc<V>) -> *mut u8 {
         Arc::into_raw(output) as *mut u8
+    }
+
+    #[inline(always)]
+    unsafe fn cleanup_output_raw(ptr: *mut u8) {
+        // SAFETY: Caller guarantees ptr came from output_to_raw (Arc::into_raw)
+        unsafe {
+            drop(Arc::from_raw(ptr.cast::<V>()));
+        }
     }
 }
 
@@ -381,7 +404,7 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
             "swap_output called on Layer slot; layer pointer would be lost"
         );
 
-        let old: Self = std::mem::replace(self, Self::Value(new_output));
+        let old: Self = StdMem::replace(self, Self::Value(new_output));
         match old {
             Self::Value(v) => Some(v),
             _ => None,
@@ -415,6 +438,14 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
         // Box the value to get a stable pointer.
         Box::into_raw(Box::new(output)).cast::<u8>()
     }
+
+    #[inline(always)]
+    unsafe fn cleanup_output_raw(ptr: *mut u8) {
+        // SAFETY: Caller guarantees ptr came from output_to_raw (Box::into_raw)
+        unsafe {
+            drop(Box::from_raw(ptr.cast::<V>()));
+        }
+    }
 }
 
 // ============================================================================
@@ -423,171 +454,4 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "fail fast in tests")]
-mod tests {
-    use super::*;
-    use std::ptr as StdPtr;
-
-    // ------------------------------------------------------------------------
-    //  LeafValue<V> (Arc mode) Tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn arc_mode_into_output_allocates_once() {
-        let output1: Arc<u64> = LeafValue::<u64>::into_output(42);
-        let output2: Arc<u64> = Arc::clone(&output1);
-
-        // Both point to same allocation
-        assert_eq!(Arc::strong_count(&output1), 2);
-        assert_eq!(*output1, 42);
-        assert_eq!(*output2, 42);
-    }
-
-    #[test]
-    fn arc_mode_from_output_no_realloc() {
-        let output: Arc<u64> = Arc::new(42);
-        let slot: LeafValue<u64> = LeafValue::from_output(Arc::clone(&output));
-
-        // Slot shares the same Arc (refcount = 2)
-        assert!(slot.is_value());
-        assert_eq!(Arc::strong_count(&output), 2);
-    }
-
-    #[test]
-    fn arc_mode_swap_output() {
-        let mut slot: LeafValue<u64> = LeafValue::from_output(Arc::new(100));
-
-        let old: Option<Arc<u64>> = slot.swap_output(Arc::new(200));
-        assert_eq!(*old.unwrap(), 100);
-        assert_eq!(*slot.try_get().unwrap(), 200);
-    }
-
-    #[test]
-    fn arc_mode_swap_output_empty_returns_none() {
-        let mut slot: LeafValue<u64> = LeafValue::Empty;
-
-        let old: Option<Arc<u64>> = slot.swap_output(Arc::new(42));
-        assert!(old.is_none());
-        assert_eq!(*slot.try_get().unwrap(), 42);
-    }
-
-    #[test]
-    fn arc_mode_predicates() {
-        let empty: LeafValue<u64> = LeafValue::Empty;
-        assert!(empty.is_empty());
-        assert!(!empty.is_value());
-        assert!(!empty.is_layer());
-
-        let value: LeafValue<u64> = LeafValue::from_output(Arc::new(42));
-        assert!(!value.is_empty());
-        assert!(value.is_value());
-        assert!(!value.is_layer());
-
-        let mut layer: LeafValue<u64> = LeafValue::Empty;
-        let mut dummy: u64 = 0;
-        layer.set_layer(StdPtr::addr_of_mut!(dummy).cast());
-
-        assert!(!layer.is_empty());
-        assert!(!layer.is_value());
-        assert!(layer.is_layer());
-    }
-
-    #[test]
-    fn arc_mode_take() {
-        let mut slot: LeafValue<u64> = LeafValue::from_output(Arc::new(42));
-        let taken: LeafValue<u64> = slot.take();
-
-        assert!(slot.is_empty());
-        assert!(taken.is_value());
-        assert_eq!(*taken.try_get().unwrap(), 42);
-    }
-
-    // ------------------------------------------------------------------------
-    //  LeafValueIndex<V: Copy> (Inline mode) Tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn inline_mode_into_output_no_allocation() {
-        // into_output is identity for Copy types - no allocation!
-        let output: u64 = LeafValueIndex::<u64>::into_output(42);
-        assert_eq!(output, 42);
-    }
-
-    #[test]
-    fn inline_mode_from_output() {
-        let slot: LeafValueIndex<u64> = LeafValueIndex::from_output(42);
-        assert!(slot.is_value());
-        assert_eq!(slot.try_get(), Some(42));
-    }
-
-    #[test]
-    fn inline_mode_swap_output() {
-        let mut slot: LeafValueIndex<u64> = LeafValueIndex::from_output(100);
-
-        let old: Option<u64> = slot.swap_output(200);
-        assert_eq!(old, Some(100));
-        assert_eq!(slot.try_get(), Some(200));
-    }
-
-    #[test]
-    fn inline_mode_predicates() {
-        let empty: LeafValueIndex<u64> = LeafValueIndex::Empty;
-        assert!(empty.is_empty());
-        assert!(!empty.is_value());
-        assert!(!empty.is_layer());
-
-        let value: LeafValueIndex<u64> = LeafValueIndex::from_output(42);
-        assert!(!value.is_empty());
-        assert!(value.is_value());
-        assert!(!value.is_layer());
-    }
-
-    #[test]
-    fn inline_mode_is_copy() {
-        let slot: LeafValueIndex<u64> = LeafValueIndex::from_output(42);
-        let copied: LeafValueIndex<u64> = slot; // Copy, not move
-
-        assert_eq!(slot.try_get(), Some(42));
-        assert_eq!(copied.try_get(), Some(42));
-    }
-
-    #[test]
-    fn inline_mode_take() {
-        let mut slot: LeafValueIndex<u64> = LeafValueIndex::from_output(42);
-        let taken: LeafValueIndex<u64> = slot.take();
-
-        assert!(slot.is_empty());
-        assert_eq!(taken.try_get(), Some(42));
-    }
-
-    #[test]
-    fn inline_mode_layer() {
-        let mut slot: LeafValueIndex<u64> = LeafValueIndex::Empty;
-        let mut dummy: u64 = 0;
-        let ptr: *mut u8 = StdPtr::addr_of_mut!(dummy).cast();
-
-        slot.set_layer(ptr);
-
-        assert!(slot.is_layer());
-        assert_eq!(slot.try_layer(), Some(ptr));
-        assert!(slot.try_get().is_none());
-    }
-
-    // ------------------------------------------------------------------------
-    //  Cross-mode comparison tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn both_modes_layer_works_same() {
-        let mut arc_slot: LeafValue<u64> = LeafValue::Empty;
-        let mut inline_slot: LeafValueIndex<u64> = LeafValueIndex::Empty;
-
-        let mut dummy: u64 = 0;
-        let ptr: *mut u8 = StdPtr::addr_of_mut!(dummy).cast();
-
-        arc_slot.set_layer(ptr);
-        inline_slot.set_layer(ptr);
-
-        assert_eq!(arc_slot.try_layer(), Some(ptr));
-        assert_eq!(inline_slot.try_layer(), Some(ptr));
-    }
-}
+mod unit_tests;

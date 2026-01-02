@@ -7,6 +7,7 @@
 
 use super::*;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::thread;
 use std::time::Duration;
 
@@ -158,7 +159,7 @@ fn test_version_increment_under_contention() {
 #[test]
 fn test_try_lock_under_contention() {
     let version = Arc::new(NodeVersion::new(true));
-    let success_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let success_count = Arc::new(AtomicUsize::new(0));
     let num_threads = 8;
 
     let handles: Vec<_> = (0..num_threads)
@@ -185,7 +186,7 @@ fn test_try_lock_under_contention() {
     // At least some try_lock calls should have succeeded.
     // Note: On fast machines, all calls may succeed (no contention),
     // which is fine - it means the lock is working correctly.
-    let successes = success_count.load(Ordering::Relaxed);
+    let successes: usize = success_count.load(Ordering::Relaxed);
     assert!(successes > 0, "no try_lock succeeded");
 
     // Version should have changed after all the inserts

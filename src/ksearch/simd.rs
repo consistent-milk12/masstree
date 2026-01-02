@@ -135,6 +135,7 @@ mod sse2_impl {
             return None;
         }
 
+        // SAFETY: keys slice is valid and CPU supports SSE2 (target_feature enforced)
         unsafe {
             // Broadcast target to both lanes
             let target_vec = _mm_set1_epi64x(target as i64);
@@ -212,6 +213,7 @@ mod avx2_impl {
             return None;
         }
 
+        // SAFETY: keys slice is valid and CPU supports AVX2 (target_feature enforced)
         unsafe {
             let target_vec = _mm256_set1_epi64x(target as i64);
             let mut i = 0;
@@ -269,6 +271,7 @@ mod avx2_impl {
             return 0;
         }
 
+        // SAFETY: keys slice is valid for `size` elements and CPU supports AVX2
         unsafe {
             let target_vec = _mm256_set1_epi64x(target as i64);
             let mut count = 0;
@@ -394,6 +397,7 @@ mod find_all_impl {
             return 0;
         }
 
+        // SAFETY: keys slice is valid for `len` elements and CPU supports SSE4.1
         unsafe {
             let mut mask: u32 = 0;
             let target_vec = _mm_set1_epi64x(target as i64);
@@ -441,6 +445,7 @@ mod find_all_impl {
             return 0;
         }
 
+        // SAFETY: keys slice is valid for `len` elements and CPU supports AVX2
         unsafe {
             let mut mask: u32 = 0;
             let target_vec = _mm256_set1_epi64x(target as i64);

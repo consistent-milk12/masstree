@@ -1,61 +1,48 @@
 # masstree
 
-`masstree` is a high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` and supports variable length keys by building a trie of small B+trees, based on the [Masstree paper](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf) (Mao, Kohler, Morris — EuroSys 2012).
+A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` and supports variable-length keys by building a trie of B+trees, based on the [Masstree paper](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf) (Mao, Kohler, Morris — EuroSys 2012).
 
-This release is published as `0.2.0`. The crate is feature-complete for core operations (get, insert, range scans) but still being validated for correctness and performance under high contention.
+**Disclaimer:** This is an independent implementation. It is not endorsed by, affiliated with, or connected to the original Masstree authors or their institutions (MIT PDOS, Harvard).
 
-This crate does a lot of allocation. In my testing, the default global allocator can be much slower than `mimalloc` for these patterns. The C++ Masstree codebase uses a custom allocator, and this Rust port does not have an equivalent yet.
+## Features
 
-**Disclaimer:** This is an independent learning project. It is not endorsed by, affiliated with, or connected to the original Masstree authors or their institutions (MIT PDOS, Harvard).
-
-## What it is
-
-- Ordered map for byte keys, ordered by lexicographic byte order
-- Concurrent reads with version validation, no read locks
-- Concurrent inserts with fine-grained leaf locking
-- Zero-copy range scans with weakly consistent iteration
-- Variable length keys (default limit: 256 bytes, configurable)
-
-If you only need `u64` keys, an ART like `congee` can be faster. If you do not need ordering, a hash map like `dashmap` can be simpler.
+- Ordered map for byte keys (lexicographic ordering)
+- Lock-free reads with version validation
+- Concurrent inserts and deletes with fine-grained leaf locking
+- Zero-copy range scans with `scan_ref` and `scan_prefix`
+- Memory reclamation via epoch-based deferred cleanup
+- Lazy leaf coalescing for deleted entries
+- Two node widths: `MassTree` (WIDTH=24) and `MassTree15` (WIDTH=15)
 
 ## Status
 
-This crate is in active development and still changing.
+**v0.3.0** — Core feature complete. It has been heavily tested but I am not sure about whether it should be usd in actual projects. Such low-level cncurrent data structures usually need a lot of stress testing and have a lot of edge cases that are not easily noticeable. The unsafe code passes miri with strict-provenance flag, but that doesn't really ensure correctness.
 
-Implemented:
+| Feature | Status |
+|---------|--------|
+| `get`, `get_ref` | Lock-free with version validation |
+| `insert` | Fine-grained leaf locking |
+| `remove` | Concurrent deletion with memory reclamation |
+| `scan`, `scan_ref`, `scan_prefix` | Zero-copy range iteration |
+| Leaf coalescing | Lazy queue-based cleanup |
+| Memory reclamation | Seize-based epoch reclamation |
 
-- `get`, `get_with_guard`, and `get_ref` — lock-free reads with version validation
-- `insert` and `insert_with_guard` — CAS fast path with locked fallback
-- `scan`, `scan_ref`, and `scan_prefix` — zero-copy range iteration
-- Leaf and internode splits with proper B-link tree semantics
+**Tests:** 755 tests (466 unit + 88 ported from C++ reference + integration). Miri strict provenance clean.
 
-Not implemented yet:
-
-- Deletion (planned for 0.3.0)
-- Keys longer than 256 bytes (configurable limit, currently panics)
-
-### Version roadmap
-
-| Version | Features |
-|---------|----------|
-| 0.1.x | Initial implementation (get, insert, splits) |
-| **0.2.0** | Range scans (`scan`, `scan_ref`, `scan_prefix`) |
-| 0.3.0 | Deletion (planned) |
+**Not yet implemented:** `Entry` API, `DoubleEndedIterator`, `Extend`/`FromIterator`.
 
 ## Install
 
-Add this to your `Cargo.toml`:
-
 ```toml
 [dependencies]
-masstree = { version = "0.2.0", features = ["mimalloc"] }
+masstree = { version = "0.3", features = ["mimalloc"] }
 ```
 
-MSRV is Rust `1.92`.
+MSRV is Rust 1.92+ (Edition 2024).
 
-The `mimalloc` feature sets the global allocator for your whole program. If your project already selects a global allocator, leave this feature off and configure `mimalloc` at the binary level instead.
+The `mimalloc` feature sets the global allocator. If your project already uses a custom allocator, omit this feature.
 
-## Quick start
+## Quick Start
 
 ```rust
 use masstree::MassTree;
@@ -70,83 +57,167 @@ tree.insert_with_guard(b"world", 456, &guard).unwrap();
 // Point lookup
 assert_eq!(tree.get_ref(b"hello", &guard), Some(&123));
 
+// Remove
+tree.remove_with_guard(b"hello", &guard).unwrap();
+assert_eq!(tree.get_ref(b"hello", &guard), None);
+
 // Range scan (zero-copy)
-let mut sum = 0u64;
-tree.scan_ref(b"h".., |_key, value| {
-    sum += *value;
-    true  // continue scanning
-});
-assert_eq!(sum, 123 + 456);
+tree.scan_ref(b"a"..b"z", |key, value| {
+    println!("{:?} -> {}", key, value);
+    true // continue scanning
+}, &guard);
+
+// Prefix scan
+tree.scan_prefix(b"wor", |key, value| {
+    println!("{:?} -> {}", key, value);
+    true
+}, &guard);
 ```
 
-Notes:
+## Ergonomic APIs
 
-- `get()` returns an `Arc<V>` for `MassTree<V>`. For read-heavy workloads, prefer `get_ref()` which avoids the Arc clone overhead.
-- `scan_ref()` provides zero-copy access to keys and values. Use `scan()` if you need owned values.
+For simpler use cases, auto-guard versions create guards internally:
+
+```rust
+use masstree::MassTree;
+
+let tree: MassTree<u64> = MassTree::new();
+
+// Auto-guard versions (simpler but slightly more overhead per call)
+tree.insert(b"key1", 100).unwrap();
+tree.insert(b"key2", 200).unwrap();
+
+assert_eq!(tree.get(b"key1"), Some(std::sync::Arc::new(100)));
+assert_eq!(tree.len(), 2);
+assert!(!tree.is_empty());
+
+tree.remove(b"key1").unwrap();
+```
+
+### Range Iteration
+
+```rust
+use masstree::{MassTree, RangeBound};
+
+let tree: MassTree<u64> = MassTree::new();
+let guard = tree.guard();
+
+// Populate
+for i in 0..100u64 {
+    tree.insert_with_guard(&i.to_be_bytes(), i, &guard).unwrap();
+}
+
+// Iterator-based range scan
+for entry in tree.range(RangeBound::Included(b""), RangeBound::Unbounded, &guard) {
+    println!("{:?} -> {:?}", entry.key(), entry.value());
+}
+
+// Full iteration
+for entry in tree.iter(&guard) {
+    println!("{:?}", entry.key());
+}
+```
+
+## Analysis of Benchmarks
+
+**Should be better for:**
+
+- Long keys with shared prefixes (URLs, file paths, UUIDs)
+- Range scans over ordered data
+- Mixed read/write workloads
+- High-contention scenarios
+
+**Consider alternatives for:**
+
+- Unordered point lookups → `dashmap` (1.6-1.9x faster)
+- Write-heavy at 6+ threads → `indexset` (better write scaling)
+- Integer keys only → `congee` (ART-based)
+
+## Variant Selection
+
+Two variants are provided with different performance characteristics:
+
+| Variant | Best For |
+|---------|----------|
+| `MassTree15` | Range scans, writes, shared-prefix keys, contention |
+| `MassTree` (WIDTH=24) | Random-access reads, single-threaded point ops |
+
+`MassTree15` wins **79% of benchmarks** due to cheaper u64 atomics and better cache utilization. Use it unless you have uniform random-access patterns.
+
+```rust
+use masstree::{MassTree, MassTree15, MassTree24Inline, MassTree15Inline};
+
+// Default: WIDTH=24, Arc-based storage
+let tree: MassTree<u64> = MassTree::new();
+
+// WIDTH=15, Arc-based storage (recommended for most workloads)
+let tree15: MassTree15<u64> = MassTree15::new();
+
+// Inline storage for Copy types (no Arc overhead)
+let inline: MassTree24Inline<u64> = MassTree24Inline::new();
+let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
+```
 
 ## Benchmarks
 
-These numbers are from `runs/run23_point_ops.md` (point operations, 6 physical cores) and `runs/run20_range.md` (range scans). The tables show median results.
+6 physical cores, `mimalloc` allocator.
 
-### Point Operations
+### Read Throughput (6 threads)
 
-Read throughput at 6 threads:
+| Key Size | MassTree | SkipMap | IndexSet | TreeIndex |
+|----------|----------|---------|----------|-----------|
+| 8B | **64 Mitem/s** | 44 Mitem/s | 35 Mitem/s | 33 Mitem/s |
+| 32B | **54 Mitem/s** | 18 Mitem/s | 17 Mitem/s | 17 Mitem/s |
 
-| Benchmark | `MassTree` | `SkipMap` | `IndexSet` | `TreeIndex` |
-| --- | --- | --- | --- | --- |
-| `10a_read_scaling_8B` | **86.7 Mitem/s** | 42.6 Mitem/s | 31.9 Mitem/s | 30.7 Mitem/s |
-| `10b_read_scaling_32B` | **45.0 Mitem/s** | 17.6 Mitem/s | 17.1 Mitem/s | 16.7 Mitem/s |
+### Write Performance (6 threads)
 
-Write benchmarks at 6 threads, median time per run:
+| Workload | MassTree | SkipMap | IndexSet | TreeIndex |
+|----------|----------|---------|----------|-----------|
+| Disjoint keys | **18 ms** | 28 ms | 87 ms | 18 ms |
+| High contention | **8 ms** | 15 ms | 23 ms | 24 ms |
 
-| Benchmark | `MassTree` | `SkipMap` | `IndexSet` | `TreeIndex` |
-| --- | --- | --- | --- | --- |
-| `01_concurrent_writes_disjoint` | **17.5 ms** | 28.0 ms | 80.3 ms | 18.1 ms |
-| `02_concurrent_writes_contention` | **7.6 ms** | 14.6 ms | 21.1 ms | 22.7 ms |
+### Range Scans (6 threads)
 
-Single threaded insert, median time per run:
+| Scan Type | MassTree | IndexSet | TreeIndex |
+|-----------|----------|----------|-----------|
+| Sequential | **4.7 Mitem/s** | 0.6 Mitem/s | 3.2 Mitem/s |
+| Long keys (64B) | **4.6 Mitem/s** | 0.6 Mitem/s | 3.1 Mitem/s |
 
-| Benchmark | `MassTree` | `SkipMap` | `IndexSet` | `TreeIndex` |
-| --- | --- | --- | --- | --- |
-| `03_single_threaded_insert` | **8.5 ms** | 12.5 ms | 42.0 ms | 17.9 ms |
+MassTree is **31-55% faster** than TreeIndex and **6-8x faster** than IndexSet on range scans.
 
-### Range Scans
+### vs C++ Reference
 
-Scan throughput at 6 threads (10K entries scanned per operation):
+| Workload | Rust | C++ | Ratio |
+|----------|------|-----|-------|
+| 90% reads | 12.8 Mop/s | 13.8 Mop/s | 93% |
+| 98% reads | 17.8 Mop/s | 18.9 Mop/s | 94% |
+| Contention | 3.5 Mop/s | 2.6 Mop/s | **132%** |
 
-| Benchmark | `MassTree` | `IndexSet` | `TreeIndex` |
-| --- | --- | --- | --- |
-| `01_sequential_full_scan` | **4.46 Mitem/s** | 0.61 Mitem/s | 3.56 Mitem/s |
-| `02_reverse_scan` | **4.46 Mitem/s** | 0.60 Mitem/s | 3.41 Mitem/s |
-| `12_long_keys_64b_scan` | **4.29 Mitem/s** | 0.66 Mitem/s | 3.41 Mitem/s |
+Read path is almost at parity with C++. And currently better at contention handling, but it's currently ~70% in write ops. It should be noted that there are so many fundamental divergences in this implementation (especially the current hyaline based memory reclamation using `seize`), that I am not sure that it SHOULD be called a 'masstree', but MOST of the the core ideas and algorithms are still based on the original paper and repo.
 
-MassTree outperforms TreeIndex by 25-30% on range scans for short keys (≤8 bytes) and matches it for long keys.
+## How It Works
 
-### Similar structures used in benchmarks
+Masstree splits keys into 8-byte chunks, creating a trie where each node is a B+tree:
 
-- `MassTree` from this crate
-- `SkipMap` from `crossbeam-skiplist`
-- `IndexSet` from `indexset`
-- `TreeIndex` from `scc`
-
-To reproduce the benchmark suite in this repo:
-
-```bash
-cargo bench --bench concurrent_maps24 --features mimalloc  # Point operations
-cargo bench --bench range_concurrent --features mimalloc   # Range scans
+```text
+Key: "users/alice/profile" (19 bytes)
+     └─ Layer 0: "users/al" (8 bytes)
+        └─ Layer 1: "ice/prof" (8 bytes)
+           └─ Layer 2: "ile" (3 bytes)
 ```
 
-## How keys work
+Keys with shared prefixes share upper layers, making lookups efficient for hierarchical data.
 
-Masstree splits each key into 8 byte chunks. Each chunk is handled by a B+tree layer. When keys share prefixes, they share the earlier layers.
+## Crate Features
 
-This crate currently uses 24 slot leaf nodes. That reduces split frequency, but it requires a `u128` permutation (via `portable-atomic`) and it is still being tuned.
-
-## Features
-
-- `tracing`: enables structured tracing to `logs/masstree.jsonl`
-- `mimalloc`: uses `mimalloc` as the global allocator, recommended for performance in this crate
+- `mimalloc` — Use mimalloc as global allocator (recommended)
+- `tracing` — Enable structured logging to `logs/masstree.jsonl`
 
 ## License
 
 MIT. See `LICENSE`.
+
+## References
+
+- [Masstree Paper (EuroSys 2012)](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf)
+- [C++ Reference Implementation](https://github.com/kohler/masstree-beta)

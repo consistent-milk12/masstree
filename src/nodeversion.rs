@@ -20,9 +20,12 @@
 //! // Lock released when guard drops
 //! ```
 
+use std::hint as StdHint;
 use std::marker::PhantomData;
-use std::sync::atomic::compiler_fence;
+use std::ptr as StdPtr;
+use std::sync::atomic as StdAtomic;
 use std::sync::atomic::{AtomicU32, Ordering, fence};
+use std::thread as StdThread;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -94,7 +97,7 @@ impl Backoff {
     /// a spin-wait loop.
     fn spin(&mut self) {
         for _ in 0..=self.count {
-            std::hint::spin_loop();
+            StdHint::spin_loop();
         }
         // Double count, cap at 15: 0 -> 1 -> 3 -> 7 -> 15 -> 15
         self.count = ((self.count << 1) | 1) & 15;
@@ -192,7 +195,10 @@ impl Drop for LockGuard<'_> {
 impl LockGuard<'_> {
     #[inline(always)]
     const fn version(&self) -> &NodeVersion {
-        // SAFETY: `version` is non-null and valid for the guard’s lifetime.
+        // SAFETY: `self.version` is valid for the guard's lifetime because:
+        // - LockGuard<'a> holds PhantomData<&'a NodeVersion>, enforcing lifetime
+        // - The pointer was created from a valid reference in lock()/try_lock()
+        // - Nodes are freed via deferred reclamation, never while locked
         unsafe { &*self.version }
     }
 
@@ -205,30 +211,21 @@ impl LockGuard<'_> {
 
     /// Mark the node as being inserted into.
     ///
-    /// NOTE: With auto dirty on lock strategy, the [`INSERTING_BIT`] is already set
-    /// by `lock()`. This method is kept for:
+    /// NOTE: With the always-dirty-on-lock strategy, `INSERTING_BIT` is already set
+    /// by `lock()`. This method is now a no-op kept for:
     /// 1. Explicit documentation of intent in calling code
-    /// 2. Updating `locked_value` tracking if needed
-    /// 3. Backward compatibility with code that calls this explicitly
+    /// 2. Backward compatibility with code that calls this explicitly
     ///
-    /// This method is idempotent, calling it multiple times has no additional effect.
+    /// This method is idempotent.
     #[inline]
     pub fn mark_insert(&mut self) {
-        if (self.locked_value & INSERTING_BIT) == 0 {
-            // This shouldn't happen with the always dirty on lock strategy
-            // we are currently going for. But still handle it gracefully.
-            let value: u32 = self.version().value.load(Ordering::Relaxed);
-
-            self.version()
-                .value
-                .store(value | INSERTING_BIT, Ordering::Release);
-
-            fence(Ordering::Acquire);
-
-            self.locked_value |= INSERTING_BIT;
-        }
-
-        // If already set, this is a no-op (idempotent)
+        // With always-dirty-on-lock strategy, INSERTING_BIT should always be set.
+        // Debug-assert to catch any regression if lock() behavior changes.
+        debug_assert!(
+            (self.locked_value & INSERTING_BIT) != 0,
+            "mark_insert: INSERTING_BIT should already be set by lock()"
+        );
+        // No-op: INSERTING_BIT is already set
     }
 
     /// Mark the node as being split.
@@ -240,7 +237,7 @@ impl LockGuard<'_> {
     /// Unlike `mark_insert()` (which is now auto set due to new strategy), `mark_split()`
     /// must be called explicitly before split operations. This is because:
     /// 1. Not all inserts require splits
-    /// 2. The [`SPLITTING_BIT`] affects version increment logic differently
+    /// 2. The `SPLITTING_BIT` affects version increment logic differently
     /// 3. Split operations need the split version counter incremented
     ///
     /// # Memory Ordering
@@ -266,7 +263,7 @@ impl LockGuard<'_> {
     /// Also sets the splitting bit to bump version on unlock.
     ///
     /// # Memory Ordering
-    /// Same as [`mark_insert()`]: Release store followed by Acquire fence.
+    /// Same as [`Self::mark_insert`]: Release store followed by Acquire fence.
     #[inline(always)]
     pub fn mark_deleted(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
@@ -353,6 +350,24 @@ impl NodeVersion {
         (self.value.load(Ordering::Relaxed) & LOCK_BIT) != 0
     }
 
+    /// Check if this node is in initial/unpublished state.
+    ///
+    /// A node is "unpublished" if it has never been modified (version counters
+    /// are zero). This means it was just allocated and hasn't been linked into
+    /// the tree yet, so no other thread can see it.
+    ///
+    /// Used to allow lock-free initialization of newly allocated nodes.
+    #[must_use]
+    #[inline(always)]
+    pub fn is_unpublished(&self) -> bool {
+        let v = self.value.load(Ordering::Relaxed);
+        // A newly created leaf has value = ISLEAF_BIT (possibly | ROOT_BIT)
+        // A newly created internode has value = 0 (possibly | ROOT_BIT)
+        // Mask out the allowed initial flags and check if result is zero
+        let mask = ISLEAF_BIT | ROOT_BIT;
+        (v & !mask) == 0
+    }
+
     /// Check if this node is being inserted into.
     #[must_use]
     #[inline(always)]
@@ -388,7 +403,7 @@ impl NodeVersion {
     #[must_use]
     #[inline(always)]
     pub const fn as_ptr(&self) -> *const Self {
-        std::ptr::from_ref(self)
+        StdPtr::from_ref(self)
     }
 
     // ========================================================================
@@ -398,7 +413,7 @@ impl NodeVersion {
     /// Get a stable version value for optimistic reading.
     ///
     /// Spins while dirty bits (inserting or splitting) are set, then returns
-    /// a version with no dirty bits. Use with [`has_changed()`] after reading
+    /// a version with no dirty bits. Use with [`Self::has_changed`] after reading
     /// to detect concurrent modifications.
     ///
     /// # Memory Ordering
@@ -414,43 +429,22 @@ impl NodeVersion {
     #[must_use]
     pub fn stable(&self) -> u32 {
         let mut backoff = Backoff::new();
-        #[cfg(feature = "tracing")]
-        let start = Instant::now();
-        #[cfg(feature = "tracing")]
-        let mut spins: u32 = 0;
 
         loop {
-            // Single Acquire load - establishes synchronizes-with relationship with
-            // the writer's Release store in `LockGuard::drop()`.
-            //
-            // OPTIMIZATION: Previous version did double-load (Relaxed then Acquire).
-            // Single Acquire load is sufficient and saves ~5-10% on read throughput.
-            let value: u32 = self.value.load(Ordering::Acquire);
+            // Relaxed load like C++ - only need compiler barrier at the end.
+            // C++ nodeversion.hh:40-47 uses plain reads with acquire_fence() after loop.
+            // On x86, Relaxed compiles to same `mov` as Acquire.
+            let value: u32 = self.value.load(Ordering::Relaxed);
 
             if (value & DIRTY_MASK) == 0 {
-                #[expect(clippy::cast_possible_truncation)]
-                #[cfg(feature = "tracing")]
-                {
-                    let elapsed = start.elapsed();
-                    if elapsed > Duration::from_millis(1) || spins > 100 {
-                        tracing::warn!(
-                            version_ptr = ?std::ptr::from_ref(self),
-                            elapsed_us = elapsed.as_micros() as u64,
-                            spins = spins,
-                            final_value = format_args!("{:#010x}", value),
-                            "SLOW_STABLE: stable() took >1ms waiting for dirty bits to clear"
-                        );
-                    }
-                }
+                // Acquire fence after successful read - matches C++ acquire_fence()
+                // This establishes synchronizes-with relationship with writer's Release.
+                StdAtomic::fence(Ordering::Acquire);
 
                 return value;
             }
 
             backoff.spin();
-            #[cfg(feature = "tracing")]
-            {
-                spins += 1;
-            }
         }
     }
 
@@ -493,20 +487,14 @@ impl NodeVersion {
     pub fn has_changed(&self, old: u32) -> bool {
         // Compiler fence: ensures all prior reads complete before version check.
         // This matches C++ fence() in nodeversion.hh:72.
-        // OPTIMIZATION: Acquire is sufficient - we only need to prevent reordering
-        // of reads before this fence, not full sequential consistency.
-        compiler_fence(Ordering::Acquire);
+        StdAtomic::compiler_fence(Ordering::Acquire);
 
+        // Relaxed load like C++ - the compiler fence above prevents reordering.
+        // C++ uses plain read after fence(): `return (x.v_ ^ v_) > lock_bit;`
+        //
         // XOR the versions, change = differing bits above LOCK_BIT | INSERTING_BIT.
-        //
-        // With the "always dirty on lock" strategy, we set INSERTING_BIT when acquiring
-        // the lock. This means `old` (from stable()) won't have INSERTING_BIT, but
-        // `current` (after we lock) will. We must ignore this difference, otherwise
-        // has_changed() always returns true after we acquire the lock.
-        //
         // LOCK_BIT = 1, INSERTING_BIT = 2, so LOCK_BIT | INSERTING_BIT = 3.
-        // We check if any bits above bit 1 (i.e., bits 2+) differ.
-        (old ^ self.value.load(Ordering::Acquire)) > (LOCK_BIT | INSERTING_BIT)
+        (old ^ self.value.load(Ordering::Relaxed)) > (LOCK_BIT | INSERTING_BIT)
     }
 
     /// Check if a split has occurred since `old`.
@@ -514,34 +502,43 @@ impl NodeVersion {
     /// Returns true if the split version counter changed.
     ///
     /// Uses the same compiler fence as `has_changed()` for correctness.
-    /// See [`has_changed`] for the full explanation.
+    /// See [`Self::has_changed`] for the full explanation.
     #[must_use]
     #[inline(always)]
     pub fn has_split(&self, old: u32) -> bool {
         // Compiler fence: ensures all prior reads complete before version check.
         // This matches C++ fence() in nodeversion.hh:80.
-        // Acquire is sufficient - we only need to prevent reordering of reads
-        // before this fence, not full sequential consistency.
-        compiler_fence(Ordering::Acquire);
+        StdAtomic::compiler_fence(Ordering::Acquire);
 
-        (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
+        // Relaxed load like C++ - the compiler fence above prevents reordering.
+        (old ^ self.value.load(Ordering::Relaxed)) >= VSPLIT_LOWBIT
     }
 
-    /// Check if a split has occurred since `old`, without a fence.
+    /// Check if a split has occurred since `old`, without a compiler fence.
     ///
-    /// This is a faster variant of [`has_split`] that omits the compiler fence.
-    /// Use this only when you've already issued a fence (e.g., after an Acquire load).
+    /// This is a faster variant of [`Self::has_split`] that omits the compiler fence.
+    /// Use this only when you've already issued a fence (e.g., after an Acquire load)
+    /// that ensures all prior reads are complete.
+    ///
+    /// # Ordering Note
+    ///
+    /// This method still uses `Ordering::Acquire` on the load, which provides
+    /// hardware memory ordering on ARM. The difference from [`Self::has_split`] is
+    /// the absence of the **compiler fence** that prevents the compiler from
+    /// reordering prior reads to after this check.
     ///
     /// # Safety (Logical)
+    ///
     /// The caller must ensure that all reads that need to be validated have
     /// already been completed and are visible before calling this method.
     /// Typically this means you've already done an Acquire load or fence.
     ///
     /// # Reference
+    ///
     /// C++ `nodeversion.hh` has `simple_has_split()` for this purpose.
     #[must_use]
     #[inline(always)]
-    pub fn simple_has_split(&self, old: u32) -> bool {
+    pub fn has_split_no_compiler_fence(&self, old: u32) -> bool {
         (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
     }
 
@@ -550,21 +547,21 @@ impl NodeVersion {
     /// This is a stronger check than [`Self::has_changed`] for CAS operations.
     /// It returns true if:
     /// - The version counter has changed (same as `has_changed`), OR
-    /// - The node is currently being modified ([`INSERTING_BIT`] or [`SPLITTING_BIT`] set)
+    /// - The node is currently being modified (`INSERTING_BIT` or `SPLITTING_BIT` set)
     ///
     /// CAS inserts should use this instead of `has_changed` to avoid racing
     /// with locked splits. The race scenario:
     /// 1. CAS insert reads version V via `stable()` (no dirty bits)
-    /// 2. Locked thread acquires lock, sets [`INSERTING_BIT`]
-    /// 3. CAS insert checks `has_changed(V)` - returns false (ignores [`INSERTING_BIT`])
+    /// 2. Locked thread acquires lock, sets `INSERTING_BIT`
+    /// 3. CAS insert checks `has_changed(V)` - returns false (ignores `INSERTING_BIT`)
     /// 4. CAS insert proceeds, racing with the split
     ///
-    /// By checking [`INSERTING_BIT`] directly, we catch this race.
+    /// By checking `INSERTING_BIT` directly, we catch this race.
     #[must_use]
     #[inline(always)]
     pub fn has_changed_or_locked(&self, old: u32) -> bool {
         // OPTIMIZATION: Acquire fence is sufficient for preventing read reordering.
-        compiler_fence(Ordering::Acquire);
+        StdAtomic::compiler_fence(Ordering::Acquire);
 
         let current: u32 = self.value.load(Ordering::Acquire);
 
@@ -589,7 +586,7 @@ impl NodeVersion {
     /// Acquire the lock and return a guard.
     ///
     /// Strategy: Always-Dirty-On-Lock
-    /// This implementation automatically sets the [`INSERTING_BIT`] when acquiring the lock.
+    /// This implementation automatically sets the `INSERTING_BIT` when acquiring the lock.
     /// This eliminates the race window between lock acquisition and explicit dirty marking,
     /// ensuring that CAS insert threads always wait for locked writers to complete.
     ///
@@ -608,21 +605,14 @@ impl NodeVersion {
     pub fn lock(&self) -> LockGuard<'_> {
         let mut backoff: Backoff = Backoff::new();
 
-        #[cfg(feature = "tracing")]
-        let start = Instant::now();
-
-        #[cfg(feature = "tracing")]
-        let mut spins: u32 = 0;
-
-        #[cfg(feature = "tracing")]
-        let mut contended = false;
-
         loop {
             let value: u32 = self.value.load(Ordering::Relaxed);
 
-            // Must wait for both lock bit and dirty bits to clear.
-            // This ensures we don't acquire while another writer is active.
-            if (value & (LOCK_BIT | DIRTY_MASK)) == 0 {
+            // OPTIMISTIC LOCKING: Only wait for LOCK_BIT to clear.
+            // We DON'T wait for dirty bits (INSERTING_BIT, SPLITTING_BIT).
+            // After acquiring, caller must validate version hasn't changed.
+            // This matches C++ nodeversion.hh:96 which only checks lock_bit.
+            if (value & LOCK_BIT) == 0 {
                 // STRATEGY: Set LOCK_BIT and INSERTING_BIT atomically.
                 // This ensures CAS insert threads (which call stable()) will wait for us.
                 //
@@ -638,41 +628,17 @@ impl NodeVersion {
                     .compare_exchange_weak(value, locked, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
-                    #[expect(clippy::cast_possible_truncation)]
-                    #[cfg(feature = "tracing")]
-                    {
-                        let elapsed = start.elapsed();
-                        if elapsed > Duration::from_millis(1) || spins > 100 {
-                            tracing::warn!(
-                                version_ptr = ?std::ptr::from_ref(self),
-                                elapsed_us = elapsed.as_micros() as u64,
-                                spins = spins,
-                                contended = contended,
-                                "SLOW_LOCK: lock() took >1ms"
-                            );
-                        }
-                    }
-
                     return LockGuard {
-                        version: std::ptr::from_ref(self),
+                        version: StdPtr::from_ref(self),
                         // locked_value now includes INSERTING_BIT
                         locked_value: locked,
                         _lifetime: PhantomData,
                         _marker: PhantomData,
                     };
                 }
-            } else {
-                #[cfg(feature = "tracing")]
-                {
-                    contended = true;
-                }
             }
 
             backoff.spin();
-            #[cfg(feature = "tracing")]
-            {
-                spins += 1;
-            }
         }
     }
 
@@ -690,8 +656,9 @@ impl NodeVersion {
     pub fn try_lock(&self) -> Option<LockGuard<'_>> {
         let value: u32 = self.value.load(Ordering::Relaxed);
 
-        // Fail fast if locked or dirty.
-        if (value & (LOCK_BIT | DIRTY_MASK)) != 0 {
+        // OPTIMISTIC: Fail fast only if locked (not if dirty).
+        // Matches lock() behavior - caller must validate after acquiring.
+        if (value & LOCK_BIT) != 0 {
             return None;
         }
 
@@ -704,7 +671,7 @@ impl NodeVersion {
             .compare_exchange(value, locked, Ordering::Acquire, Ordering::Relaxed)
         {
             Ok(_) => Some(LockGuard {
-                version: std::ptr::from_ref(self),
+                version: StdPtr::from_ref(self),
                 locked_value: locked,
                 _lifetime: PhantomData,
                 _marker: PhantomData,
@@ -757,7 +724,7 @@ impl NodeVersion {
 
     /// Acquire the lock using try-lock with yield.
     ///
-    /// Unlike [`lock()`] which spins with exponential backoff, this method
+    /// Unlike [`Self::lock`] which spins with exponential backoff, this method
     /// yields the CPU to other threads when the lock is contended. This is
     /// more efficient for lock convoy situations where multiple threads are
     /// waiting on the same lock.
@@ -775,56 +742,25 @@ impl NodeVersion {
     pub fn lock_with_yield(&self) -> LockGuard<'_> {
         const SPINS_BEFORE_YIELD: u32 = 4;
 
-        #[cfg(feature = "tracing")]
-        let start = Instant::now();
-
-        #[cfg(feature = "tracing")]
-        let mut total_spins: u32 = 0;
-
-        #[cfg(feature = "tracing")]
-        let mut yields: u32 = 0;
-
         let mut spin_count: u32 = 0;
 
         loop {
             // Try to acquire the lock
             if let Some(guard) = self.try_lock() {
-                #[cfg(feature = "tracing")]
-                #[expect(clippy::cast_possible_truncation)]
-                {
-                    let elapsed = start.elapsed();
-                    if elapsed > Duration::from_millis(1) || total_spins > 100 || yields > 10 {
-                        tracing::warn!(
-                            version_ptr = ?std::ptr::from_ref(self),
-                            elapsed_us = elapsed.as_micros() as u64,
-                            total_spins = total_spins,
-                            yields = yields,
-                            "SLOW_LOCK_YIELD: lock_with_yield() took >1ms"
-                        );
-                    }
-                }
                 return guard;
             }
 
             spin_count += 1;
-            #[cfg(feature = "tracing")]
-            {
-                total_spins += 1;
-            }
 
             if spin_count < SPINS_BEFORE_YIELD {
                 // Brief spin before yielding
                 for _ in 0..spin_count {
-                    std::hint::spin_loop();
+                    StdHint::spin_loop();
                 }
             } else {
                 // Yield CPU to other threads - reduces lock convoy
-                std::thread::yield_now();
+                StdThread::yield_now();
                 spin_count = 0; // Reset for next cycle
-                #[cfg(feature = "tracing")]
-                {
-                    yields += 1;
-                }
             }
         }
     }
@@ -864,9 +800,9 @@ impl NodeVersion {
     /// Create a new node version for a split sibling.
     ///
     /// The new version is:
-    /// - Locked ([`LOCK_BIT`] set)
-    /// - Marked as splitting ([`SPLITTING_BIT`] set)
-    /// - Has the same [`ISLEAF_BIT`] as the source
+    /// - Locked (`LOCK_BIT` set)
+    /// - Marked as splitting (`SPLITTING_BIT` set)
+    /// - Has the same `ISLEAF_BIT` as the source
     /// - Has zeroed version counters (fresh node)
     ///
     /// This is used during splits to create a right sibling that starts locked.
@@ -876,7 +812,7 @@ impl NodeVersion {
     /// # C++ Reference
     ///
     /// Matches `child->assign_version(*n_)` in `masstree_split.hh:198`.
-    /// However, we use [`SPLITTING_BIT`] instead of copying [`INSERTING_BIT`] because
+    /// However, we use `SPLITTING_BIT` instead of copying `INSERTING_BIT` because
     /// the right sibling's unlock should increment the split counter.
     ///
     /// # Safety Considerations
@@ -891,6 +827,7 @@ impl NodeVersion {
     /// Uses Relaxed ordering because the new node is not yet visible to other threads.
     /// The fence in `link_sibling()` establishes visibility.
     #[must_use]
+    #[inline(always)]
     pub fn new_for_split(source: &Self) -> Self {
         let source_value = source.value.load(Ordering::Relaxed);
         debug_assert!(
@@ -935,7 +872,8 @@ impl NodeVersion {
     ///
     /// # Panics
     ///
-    /// Debug-asserts that the node is locked with [`SPLITTING_BIT`] set.
+    /// Debug-asserts that the node is locked with `SPLITTING_BIT` set.
+    #[inline(always)]
     pub fn unlock_for_split(&self) {
         let locked_value = self.value.load(Ordering::Relaxed);
 
@@ -957,7 +895,7 @@ impl NodeVersion {
         // This is critical - parent pointer and all data must be visible to readers
         // before we unlock. Without this, a reader could see the unlocked version
         // but read stale/missing parent pointer.
-        compiler_fence(Ordering::SeqCst);
+        StdAtomic::compiler_fence(Ordering::SeqCst);
 
         // Release store: synchronizes with Acquire loads in stable()/has_changed()
         self.value.store(new_value, Ordering::Release);
@@ -965,7 +903,7 @@ impl NodeVersion {
 
     /// Check if this node was created for a split and hasn't been unlocked yet.
     ///
-    /// Returns true if [`LOCK_BIT`] and [`SPLITTING_BIT`] are both set.
+    /// Returns true if `LOCK_BIT` and `SPLITTING_BIT` are both set.
     /// Used for debugging and assertions.
     #[must_use]
     #[inline(always)]
@@ -1136,545 +1074,7 @@ impl Default for SingleThreadedNodeVersion {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ========================================================================
-    // !Send/!Sync Verification
-    // ========================================================================
-    //
-    // LockGuard uses PhantomData<*mut ()> to be !Send and !Sync.
-    // Raw pointers (*mut T, *const T) are neither Send nor Sync in Rust,
-    // and PhantomData<T> inherits the auto-traits of T.
-    //
-    // To verify this works, uncomment the following and observe the compile error:
-    //
-    // ```
-    // fn require_send<T: Send>() {}
-    // fn require_sync<T: Sync>() {}
-    //
-    // fn test_would_fail() {
-    //     require_send::<LockGuard<'static>>();  // ERROR: LockGuard is !Send
-    //     require_sync::<LockGuard<'static>>();  // ERROR: LockGuard is !Sync
-    // }
-    // ```
-
-    #[test]
-    fn test_new_leaf() {
-        let v = NodeVersion::new(true);
-        assert!(v.is_leaf());
-        assert!(!v.is_root());
-        assert!(!v.is_deleted());
-        assert!(!v.is_locked());
-        assert!(!v.is_dirty());
-    }
-
-    #[test]
-    fn test_new_internode() {
-        let v = NodeVersion::new(false);
-        assert!(!v.is_leaf());
-        assert!(!v.is_root());
-        assert!(!v.is_locked());
-    }
-
-    #[test]
-    fn test_lock_unlock_roundtrip() {
-        let v = NodeVersion::new(true);
-        let stable_before: u32 = v.stable();
-
-        {
-            let guard: LockGuard<'_> = v.lock();
-            assert!(v.is_locked());
-            // With "always dirty on lock" strategy, INSERTING_BIT is set automatically
-            assert_eq!(guard.locked_value() & LOCK_BIT, LOCK_BIT);
-            assert_eq!(guard.locked_value() & INSERTING_BIT, INSERTING_BIT);
-
-            // Guard drops here, releasing lock
-        }
-
-        assert!(!v.is_locked());
-
-        // With "always dirty on lock" strategy, version ALWAYS increments on unlock
-        // because INSERTING_BIT is set automatically.
-        assert!(v.has_changed(stable_before));
-    }
-
-    #[test]
-    fn test_try_lock() {
-        let v = NodeVersion::new(true);
-
-        // First try_lock succeeds
-        let guard: Option<LockGuard<'_>> = v.try_lock();
-        assert!(guard.is_some());
-        assert!(v.is_locked());
-
-        // Second try_lock fails (lock is held)
-        let second: Option<LockGuard<'_>> = v.try_lock();
-        assert!(second.is_none());
-
-        // Drop guard to release lock
-        drop(guard);
-        assert!(!v.is_locked());
-    }
-
-    #[test]
-    fn test_version_increment_on_insert() {
-        let v: NodeVersion = NodeVersion::new(true);
-        let stable_before: u32 = v.stable();
-
-        {
-            let mut guard: LockGuard<'_> = v.lock();
-            guard.mark_insert();
-
-            assert!(v.is_inserting());
-            // Guard drops, lock released, version incremented
-        }
-
-        // Version should have changed (insert counter incremented)
-        assert!(v.has_changed(stable_before));
-
-        // But no split occurred
-        assert!(!v.has_split(stable_before));
-    }
-
-    #[test]
-    fn test_version_increment_on_split() {
-        let v: NodeVersion = NodeVersion::new(true);
-        let stable_before: u32 = v.stable();
-
-        {
-            let mut guard: LockGuard<'_> = v.lock();
-            guard.mark_split();
-
-            assert!(v.is_splitting());
-            // Guard drops, lock released, version incremented
-        }
-
-        // Both changed and split should be true
-        assert!(v.has_changed(stable_before));
-        assert!(v.has_split(stable_before));
-    }
-
-    #[test]
-    fn test_version_always_increments_with_auto_dirty() {
-        // With "always dirty on lock" strategy, version ALWAYS increments
-        // because INSERTING_BIT is set automatically on lock().
-        let v: NodeVersion = NodeVersion::new(true);
-        let stable_before: u32 = v.stable();
-
-        {
-            // Lock sets INSERTING_BIT automatically
-            let _guard: LockGuard<'_> = v.lock();
-            // INSERTING_BIT is set, so version will increment on drop
-        }
-
-        // Version SHOULD have changed (auto-dirty strategy)
-        assert!(v.has_changed(stable_before));
-    }
-
-    #[test]
-    fn test_mark_root() {
-        let v = NodeVersion::new(true);
-        assert!(!v.is_root());
-
-        v.mark_root();
-        assert!(v.is_root());
-    }
-
-    #[test]
-    fn test_mark_deleted() {
-        let v = NodeVersion::new(true);
-
-        {
-            let mut guard: LockGuard<'_> = v.lock();
-            guard.mark_deleted();
-
-            assert!(v.is_deleted());
-            assert!(v.is_splitting()); // Deleted also sets splitting
-            // Guard drops here
-        }
-
-        assert!(v.is_deleted()); // Deleted bit persists
-    }
-
-    #[test]
-    fn test_mark_nonroot() {
-        let v: NodeVersion = NodeVersion::new(true);
-        v.mark_root();
-
-        assert!(v.is_root());
-
-        {
-            let mut guard: LockGuard<'_> = v.lock();
-            guard.mark_nonroot();
-
-            assert!(!v.is_root());
-            // Guard drops here
-        }
-    }
-
-    #[test]
-    fn test_has_changed_ignores_lock_bit() {
-        let v = NodeVersion::new(true);
-        let stable: u32 = v.stable();
-
-        {
-            let _guard: LockGuard<'_> = v.lock();
-
-            // Even though lock bit changed, has_changed checks for version changes.
-            // Since we haven't set dirty bits, the "version" hasn't changed.
-            // has_changed returns (old ^ new) > LOCK_BIT
-            // If only lock bit changed, XOR = 1, which is NOT > 1, so returns false.
-            // This is correct: lock-only change is not a "version change".
-            assert!(
-                !v.has_changed(stable),
-                "lock bit alone should not trigger has_changed"
-            );
-
-            // Guard drops here
-        }
-    }
-
-    #[test]
-    fn test_version_counter_wraparound() {
-        // Create a version near the insert counter maximum
-        let near_max: u32 = ISLEAF_BIT | ((VSPLIT_LOWBIT - VINSERT_LOWBIT) - VINSERT_LOWBIT);
-        let v = NodeVersion::from_value(near_max);
-
-        let stable_before: u32 = v.stable();
-
-        {
-            // Do an insert - this should increment and potentially overflow into split bits
-            let mut guard: LockGuard<'_> = v.lock();
-            guard.mark_insert();
-            // Guard drops here
-        }
-
-        // Version should have changed
-        assert!(v.has_changed(stable_before));
-    }
-
-    #[test]
-    fn test_stable_returns_clean_version() {
-        let v = NodeVersion::new(true);
-        let stable: u32 = v.stable();
-
-        // Stable version should have no dirty bits
-        assert_eq!(stable & DIRTY_MASK, 0);
-        assert_eq!(stable & LOCK_BIT, 0);
-    }
-
-    #[test]
-    fn test_flag_combinations() {
-        let v = NodeVersion::new(true);
-        v.mark_root();
-
-        {
-            let mut guard: LockGuard<'_> = v.lock();
-            guard.mark_deleted();
-
-            // Check all flags
-            assert!(v.is_leaf());
-            assert!(v.is_root()); // Root persists through delete
-            assert!(v.is_deleted());
-            assert!(v.is_locked());
-            assert!(v.is_splitting()); // Set by mark_deleted
-            // Guard drops here
-        }
-    }
-
-    // =======================================================================
-    // Type-State Pattern Tests
-    // =======================================================================
-
-    #[test]
-    fn test_guard_unlocks_on_drop() {
-        let v = NodeVersion::new(true);
-
-        let guard: LockGuard<'_> = v.lock();
-        assert!(v.is_locked());
-
-        drop(guard);
-        assert!(!v.is_locked());
-    }
-
-    #[test]
-    fn test_guard_locked_value() {
-        let v = NodeVersion::new(true);
-        let initial: u32 = v.value();
-
-        let guard: LockGuard<'_> = v.lock();
-        // With "always dirty on lock" strategy, INSERTING_BIT is set automatically
-        assert_eq!(guard.locked_value(), initial | LOCK_BIT | INSERTING_BIT);
-    }
-
-    #[test]
-    fn test_guard_mark_insert_is_idempotent() {
-        // With "always dirty on lock" strategy, INSERTING_BIT is already set.
-        // mark_insert() should be idempotent (no-op if already set).
-        let v: NodeVersion = NodeVersion::new(true);
-
-        let mut guard: LockGuard<'_> = v.lock();
-        let initial_locked: u32 = guard.locked_value();
-
-        // INSERTING_BIT is already set by lock()
-        assert_ne!(initial_locked & INSERTING_BIT, 0);
-
-        guard.mark_insert();
-
-        // Guard's locked_value should be unchanged (idempotent)
-        assert_eq!(guard.locked_value(), initial_locked);
-    }
-
-    // =======================================================================
-    // Version Wraparound Stress Tests
-    // =======================================================================
-
-    #[test]
-    fn test_insert_counter_wraparound_stress() {
-        // The insert counter is 6 bits (bits 3-8), so it wraps after 64 increments.
-        // This test verifies the counter wraps correctly without corrupting other bits.
-        let v = NodeVersion::new(true);
-        v.mark_root();
-
-        // Do 100 lock/unlock cycles (more than 64 to trigger wraparound)
-        for i in 0..100 {
-            let stable_before = v.stable();
-
-            {
-                let _guard = v.lock();
-                // INSERTING_BIT set automatically, version increments on drop
-            }
-
-            // Version should always change after unlock
-            assert!(
-                v.has_changed(stable_before),
-                "Version should change after unlock (iteration {i})"
-            );
-
-            // Flags should be preserved through wraparound
-            assert!(v.is_leaf(), "is_leaf should persist through wraparound");
-            assert!(v.is_root(), "is_root should persist through wraparound");
-            assert!(!v.is_deleted(), "is_deleted should stay false");
-        }
-    }
-
-    #[test]
-    fn test_split_counter_wraparound() {
-        // The split counter is 19 bits (bits 9-27), wrapping after ~500K splits.
-        // We can't test full wraparound, but we can verify it increments correctly.
-        let v = NodeVersion::new(true);
-
-        let mut last_value = v.stable();
-
-        for _ in 0..10 {
-            {
-                let mut guard = v.lock();
-                guard.mark_split();
-            }
-
-            let new_value = v.stable();
-
-            // Split counter should have incremented (bits 9+)
-            assert!(
-                v.has_split(last_value),
-                "has_split should detect split counter change"
-            );
-
-            last_value = new_value;
-        }
-    }
-
-    #[test]
-    fn test_simple_has_split_no_fence() {
-        // Test that simple_has_split works correctly (same logic, no fence)
-        let v = NodeVersion::new(true);
-        let before = v.stable();
-
-        {
-            let mut guard = v.lock();
-            guard.mark_split();
-        }
-
-        // simple_has_split should detect the change
-        assert!(v.simple_has_split(before));
-
-        // And should match has_split
-        assert_eq!(v.has_split(before), v.simple_has_split(before));
-    }
-
-    // =======================================================================
-    // SingleThreadedNodeVersion Tests
-    // =======================================================================
-
-    #[test]
-    fn test_single_threaded_basic() {
-        let mut v = SingleThreadedNodeVersion::new(true);
-
-        assert!(v.is_leaf());
-        assert!(!v.is_root());
-        assert!(!v.is_deleted());
-
-        v.mark_root();
-        assert!(v.is_root());
-
-        v.mark_nonroot();
-        assert!(!v.is_root());
-    }
-
-    #[test]
-    fn test_single_threaded_lock_unlock() {
-        let mut v = SingleThreadedNodeVersion::new(true);
-        let stable_before = v.stable();
-
-        {
-            let mut guard = v.lock();
-            guard.mark_insert();
-            // Guard drops, version increments
-        }
-
-        // Version should have changed
-        assert!(v.has_changed(stable_before));
-    }
-
-    #[test]
-    fn test_single_threaded_split() {
-        let mut v = SingleThreadedNodeVersion::new(true);
-        let stable_before = v.stable();
-
-        {
-            let mut guard = v.lock();
-            guard.mark_split();
-        }
-
-        assert!(v.has_split(stable_before));
-    }
-
-    #[test]
-    fn test_single_threaded_deleted() {
-        let mut v = SingleThreadedNodeVersion::new(true);
-
-        {
-            let mut guard = v.lock();
-            guard.mark_deleted();
-        }
-
-        assert!(v.is_deleted());
-    }
-
-    // =======================================================================
-    // Help-Along Protocol Tests
-    // =======================================================================
-
-    #[test]
-    fn test_new_for_split() {
-        let source = NodeVersion::new(true);
-        let _guard = source.lock();
-
-        let split_version = NodeVersion::new_for_split(&source);
-
-        // Should be locked with splitting bit
-        assert!(split_version.is_split_locked());
-        assert!(split_version.is_leaf());
-        assert!(!split_version.is_root());
-
-        // Should have LOCK_BIT and SPLITTING_BIT set
-        let value = split_version.value();
-        assert!((value & LOCK_BIT) != 0, "LOCK_BIT should be set");
-        assert!((value & SPLITTING_BIT) != 0, "SPLITTING_BIT should be set");
-        assert!((value & ISLEAF_BIT) != 0, "ISLEAF_BIT should be preserved");
-    }
-
-    #[test]
-    fn test_unlock_for_split() {
-        let source = NodeVersion::new(true);
-        let _guard = source.lock();
-
-        let split_version = NodeVersion::new_for_split(&source);
-        assert!(split_version.is_split_locked());
-
-        // Simulate setting parent pointer (would normally happen in propagate_split)
-
-        split_version.unlock_for_split();
-
-        // Should now be unlocked
-        assert!(!split_version.is_locked());
-        assert!(!split_version.is_splitting());
-        assert!(!split_version.is_split_locked());
-
-        // stable() should return immediately (no dirty bits)
-        let v = split_version.stable();
-        assert!((v & DIRTY_MASK) == 0);
-    }
-
-    #[test]
-    fn test_split_version_blocks_stable() {
-        // This test verifies that a split-locked version blocks stable()
-        // until unlock_for_split() is called.
-
-        // Create a split-locked version directly
-        let split_version = NodeVersion::from_value(ISLEAF_BIT | LOCK_BIT | SPLITTING_BIT);
-
-        // Verify it has the expected bits set
-        assert!(split_version.is_split_locked());
-        assert!(split_version.is_dirty());
-
-        // stable() would spin here, so we just verify the dirty check
-        let value = split_version.value();
-        assert!(
-            (value & DIRTY_MASK) != 0,
-            "Split-locked version should have dirty bits set"
-        );
-
-        // After unlock, stable() should work
-        split_version.unlock_for_split();
-        let stable = split_version.stable();
-        assert!((stable & DIRTY_MASK) == 0);
-    }
-
-    #[test]
-    fn test_new_for_split_preserves_isleaf() {
-        // Test with leaf node
-        let leaf_source = NodeVersion::new(true);
-        let guard1 = leaf_source.lock();
-        let split_leaf = NodeVersion::new_for_split(&leaf_source);
-        assert!(split_leaf.is_leaf());
-        drop(guard1);
-
-        // Test with internode
-        let inode_source = NodeVersion::new(false);
-        let _guard2 = inode_source.lock();
-        let split_inode = NodeVersion::new_for_split(&inode_source);
-        assert!(!split_inode.is_leaf());
-    }
-
-    #[test]
-    fn test_unlock_for_split_increments_split_counter() {
-        let source = NodeVersion::new(true);
-        let _guard = source.lock();
-
-        let split_version = NodeVersion::new_for_split(&source);
-        let before = split_version.value();
-
-        split_version.unlock_for_split();
-        let after = split_version.value();
-
-        // Split counter should have incremented (bits 9+)
-        // The split counter is in the upper bits, masked by SPLIT_UNLOCK_MASK
-        assert!(
-            after != before,
-            "Version should change after unlock_for_split"
-        );
-        assert!(
-            (after & DIRTY_MASK) == 0,
-            "Dirty bits should be cleared after unlock"
-        );
-        assert!(
-            (after & LOCK_BIT) == 0,
-            "Lock bit should be cleared after unlock"
-        );
-    }
-}
+mod unit_tests;
 
 // Concurrent tests live in a submodule to keep this file lean.
 // Guarded with `#[cfg(not(miri))]` because Miri doesn't support multi-threading well.

@@ -4,6 +4,7 @@
 #![allow(clippy::indexing_slicing)]
 #![allow(clippy::expect_used)]
 #![allow(clippy::too_many_lines)]
+#![allow(clippy::cast_possible_truncation)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -11,6 +12,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use masstree::{MassTree, RangeBound};
+
+const N: usize = 1000;
+const PREFIX_BUCKETS: u64 = 10;
 
 #[test]
 fn range_empty_tree() {
@@ -486,9 +490,6 @@ fn scan_prefix_layer_descent() {
     let tree: MassTree<u64> = MassTree::new();
     let guard = tree.guard();
 
-    const N: usize = 1000;
-    const PREFIX_BUCKETS: u64 = 10;
-
     // Generate keys similar to benchmark: 16 bytes with bucketed prefix
     for i in 0..N {
         let mut key = [0u8; 16];
@@ -528,9 +529,7 @@ fn scan_prefix_layer_descent() {
     for k in &keys_found {
         assert!(
             k.starts_with(&prefix),
-            "key {:?} doesn't start with prefix {:?}",
-            k,
-            prefix
+            "key {k:?} doesn't start with prefix {prefix:?}"
         );
     }
 
@@ -594,11 +593,11 @@ fn scan_prefix_exact_8byte_with_layer() {
     );
 
     // Remaining keys should be the longer ones, sorted
-    for i in 1..keys_found.len() {
+    (1..keys_found.len()).for_each(|i| {
         assert_eq!(keys_found[i].len(), 16, "longer keys should be 16 bytes");
         assert!(
             keys_found[i].starts_with(&prefix),
             "key should start with prefix"
         );
-    }
+    });
 }

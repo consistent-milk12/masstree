@@ -21,7 +21,7 @@ use seize::LocalGuard;
 
 use crate::key::IKEY_SIZE;
 use crate::ksearch::upper_bound_internode_generic;
-use crate::leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
+use crate::leaf_trait::{TreeInternode, TreeLeafNode};
 use crate::leaf24::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::nodeversion::NodeVersion;
 use crate::prefetch::prefetch_read;
@@ -110,13 +110,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            // Split in progress, retry
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = leaf.permutation();
 
     // Find lower bound position
     let kx: KeyIndexedPosition = lower_with_position(cursor_key, leaf, &perm);
@@ -185,9 +179,12 @@ where
         //   }
         // This is needed even when start key has no suffix (exact 8-byte prefix)
         // because we want to scan all keys under this layer pointer.
-        let slot_ikey: u64 = leaf.ikey(slot);
+        // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates at end
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
         let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
         cursor_key.assign_store_ikey(slot_ikey);
+        // Prefetch layer root before descending (hide memory latency)
+        prefetch_read(layer_ptr);
         stack.set_root(layer_ptr);
         return (ScanState::Down, None);
     }
@@ -207,7 +204,8 @@ where
                     let key_len = IKEY_SIZE + stored_suffix.len();
 
                     // Store key data in cursor for duplicate filtering
-                    cursor_key.assign_store_ikey(leaf.ikey(slot));
+                    // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates
+                    cursor_key.assign_store_ikey(leaf.ikey_relaxed(slot));
                     let _ = cursor_key.assign_store_suffix(stored_suffix);
                     cursor_key.assign_store_length(key_len);
 
@@ -229,7 +227,8 @@ where
             let key_len = keylenx as usize;
 
             // Store key data in cursor
-            cursor_key.assign_store_ikey(leaf.ikey(slot));
+            // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates
+            cursor_key.assign_store_ikey(leaf.ikey_relaxed(slot));
             cursor_key.assign_store_length(key_len);
 
             // Advance past this position for next iteration
@@ -283,6 +282,7 @@ where
 /// # C++ Reference
 ///
 /// Corresponds to `scanstackelt::find_next` in `masstree_scan.hh:246-317`.
+#[inline]
 pub fn find_next<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &mut CursorKey,
@@ -303,6 +303,7 @@ where
 /// Find the next entry with duplicate checking enabled.
 ///
 /// Called after a Retry state to skip already-emitted entries.
+#[inline]
 pub fn find_next_with_duplicate_check<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &mut CursorKey,
@@ -370,7 +371,8 @@ where
 
     // Read slot data - Guard ensures memory safety
     // No per-entry version check: validated at leaf boundaries only
-    let slot_ikey: u64 = leaf.ikey(slot);
+    // Use Relaxed ordering - permutation loaded with Acquire, OCC validates at end
+    let slot_ikey: u64 = leaf.ikey_relaxed(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
     // Check for duplicate only when needed (after Retry)
@@ -409,6 +411,8 @@ where
         let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
         layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
         cursor_key.assign_store_ikey(slot_ikey);
+        // Prefetch layer root before descending (hide memory latency)
+        prefetch_read(slot_ptr);
         stack.set_root(slot_ptr);
         return (ScanState::Down, None);
     }
@@ -540,7 +544,8 @@ where
     };
 
     // Read slot data - Guard ensures memory safety
-    let slot_ikey: u64 = leaf.ikey(slot);
+    // Use Relaxed ordering - permutation loaded with Acquire, OCC validates at end
+    let slot_ikey: u64 = leaf.ikey_relaxed(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
     // Check for duplicate only when needed (after Retry)
@@ -572,6 +577,8 @@ where
         let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
         layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
         cursor_key.assign_store_ikey(slot_ikey);
+        // Prefetch layer root before descending (hide memory latency)
+        prefetch_read(slot_ptr);
         stack.set_root(slot_ptr);
         return (ScanState::Down, None);
     }
@@ -666,7 +673,8 @@ where
     };
 
     // Read slot data
-    let slot_ikey: u64 = leaf.ikey(slot);
+    // Use Relaxed ordering - permutation loaded with Acquire, OCC validates at end
+    let slot_ikey: u64 = leaf.ikey_relaxed(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
     // Check for duplicate only when needed (after Retry)
@@ -756,6 +764,12 @@ where
     // Prefetch the next leaf's data arrays
     next_leaf.prefetch();
 
+    // Prefetch next-next leaf for deeper pipelining
+    let next_next: *mut L = next_leaf.safe_next();
+    if !next_next.is_null() {
+        prefetch_read(next_next);
+    }
+
     // Get stable version
     let next_version: u32 = next_leaf.version().stable();
 
@@ -765,12 +779,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match next_leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison
     let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
@@ -782,6 +791,7 @@ where
 /// Advance to next leaf, zero-copy variant.
 ///
 /// Same as [`advance_leaf`] but returns `ScanSnapshotPtr`.
+#[inline]
 fn advance_leaf_ptr<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &CursorKey,
@@ -816,6 +826,12 @@ where
     // Prefetch the next leaf's data arrays
     next_leaf.prefetch();
 
+    // Prefetch next-next leaf for deeper pipelining
+    let next_next: *mut L = next_leaf.safe_next();
+    if !next_next.is_null() {
+        prefetch_read(next_next);
+    }
+
     // Get stable version
     let next_version: u32 = next_leaf.version().stable();
 
@@ -825,12 +841,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match next_leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison
     let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
@@ -843,6 +854,7 @@ where
 ///
 /// Uses `lower_with_suffix` to find the correct starting position in the new
 /// leaf, matching the C++ behavior of `helper.lower(ka, this)`.
+#[inline]
 fn advance_leaf<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &CursorKey,
@@ -879,6 +891,12 @@ where
     // This brings multiple cache lines into L1/L2 before we iterate
     next_leaf.prefetch();
 
+    // Prefetch next-next leaf for deeper pipelining
+    let next_next: *mut L = next_leaf.safe_next();
+    if !next_next.is_null() {
+        prefetch_read(next_next);
+    }
+
     // Get stable version
     let next_version: u32 = next_leaf.version().stable();
 
@@ -888,12 +906,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match next_leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison (like C++ `helper.lower(ka, this)`).
     // This ensures we skip past any keys <= cursor_key.
@@ -904,6 +917,8 @@ where
 }
 
 /// Refresh stack state after version change and retry.
+#[cold]
+#[inline(never)]
 fn refresh_and_retry<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &CursorKey,
@@ -928,12 +943,7 @@ where
         return (ScanState::Retry, None);
     }
 
-    let perm: L::Perm = match leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return (ScanState::Retry, None);
-        }
-    };
+    let perm: L::Perm = leaf.permutation();
 
     // Recompute position using suffix-aware search
     // This is critical: if cursor_key has a suffix, we need to find the position
@@ -948,6 +958,8 @@ where
 }
 
 /// Follow B-links to find the correct leaf after a split.
+#[cold]
+#[inline(never)]
 #[expect(clippy::similar_names)]
 fn follow_blinks_or_retry<L, S>(
     stack: &mut ScanStackElement<L, S>,
@@ -1057,12 +1069,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = match leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            return ScanState::Retry;
-        }
-    };
+    let perm: L::Perm = leaf.permutation();
 
     // Find position using suffix-aware search
     // This ensures we find the correct position when keys share the same ikey
@@ -1081,6 +1088,7 @@ where
 /// Traverse from layer root to target leaf.
 ///
 /// Similar to `reach_leaf_concurrent_generic` but uses cursor key's ikey.
+#[inline]
 fn reach_leaf_for_scan<L, S>(
     start: *const u8,
     cursor_key: &CursorKey,
@@ -1210,14 +1218,7 @@ where
 
     let version: u32 = leaf.version().stable();
 
-    let perm: L::Perm = match leaf.permutation_try() {
-        Ok(p) => p,
-        Err(_frozen) => {
-            // Will retry via find_retry
-            stack.update_state(0, L::Perm::empty(), 0);
-            return true;
-        }
-    };
+    let perm: L::Perm = leaf.permutation();
 
     // Find position (cursor has len=9, will skip past the layer pointer)
     // Use suffix-aware search to handle keys with same ikey correctly
@@ -1234,7 +1235,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    // Integration tests are in CODE_005 and tests/range_scan_tests.rs
+    // Integration tests are in tests/range_scan_tests.rs
     // These tests would require mock leaf nodes which is complex
 
     #[test]

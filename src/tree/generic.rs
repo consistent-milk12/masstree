@@ -1,5 +1,3 @@
-#[cfg(feature = "tracing")]
-use std::time::Instant;
 use std::{
     cmp::Ordering,
     marker::PhantomData,
@@ -7,47 +5,31 @@ use std::{
     sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering},
 };
 
-use parking_lot::{Condvar, Mutex};
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
-    MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation,
+    MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation, is_marked,
     key::Key,
     leaf_trait::LayerCapableLeaf,
     leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::NodeVersion,
     slot::ValueSlot,
-    tree::split::Propagation,
-    tree::{CasInsertResultGeneric, InsertError, InsertSearchResultGeneric},
+    tree::{
+        InsertError, InsertSearchResultGeneric,
+        coalesce::{self, CoalesceQueue},
+        remove::NodeCleaner,
+        split::Propagation,
+    },
+    unmark_ptr,
 };
 
-/// Sentinel for the CLAIMING state in the Option A (Safe) CAS insert protocol.
-///
-/// When a slot's value pointer equals this sentinel, the slot is reserved by an in-progress
-/// CAS insert attempt. The inserter has exclusive right to write key metadata, but hasn't
-/// yet installed the real value pointer.
-///
-/// State machine: `NULL -> CLAIMING -> arc_ptr -> (permutation publish) -> visible`
-///
-/// This sentinel:
-/// - Must be non-null (to distinguish from "free")
-/// - Must never be dereferenced
-/// - Must be stable for the program lifetime
-/// - Must be easy to recognize (`== claiming_ptr()`)
-static CLAIMING_SENTINEL: u8 = 0;
+use super::remove::RemoveError;
 
-/// Returns the CLAIMING sentinel pointer (provenance-sound).
-#[inline(always)]
-fn claiming_ptr() -> *mut u8 {
-    StdPtr::from_ref(&CLAIMING_SENTINEL).cast_mut()
-}
-
-/// Returns true if `ptr` is the CLAIMING sentinel.
-#[inline(always)]
-#[expect(dead_code, reason = "CAS path disabled")]
-fn is_claiming_ptr(ptr: *mut u8) -> bool {
-    StdPtr::eq(ptr, claiming_ptr())
-}
+mod insert;
+mod layer;
+mod optimistic_reads;
+mod search;
+mod split;
 
 impl<S, L, A> MassTreeGeneric<S, L, A>
 where
@@ -57,90 +39,20 @@ where
     L: LayerCapableLeaf<S>,
     A: NodeAllocatorGeneric<S, L>,
 {
-    #[inline]
-    #[expect(dead_code, reason = "CAS path disabled")]
-    fn cas_insert_enabled() -> bool {
-        use std::sync::OnceLock;
-
-        // CAS insert is currently correctness-sensitive under high contention.
-        // Default to disabled unless explicitly enabled for benchmarking/experiments.
-        //
-        // - Set `MASSTREE_ENABLE_CAS=1` to enable the CAS fast path.
-        // - Set `MASSTREE_ENABLE_CAS=0` or unset to disable.
-        static ENABLE_CAS: OnceLock<bool> = OnceLock::new();
-        *ENABLE_CAS.get_or_init(|| {
-            std::env::var("MASSTREE_ENABLE_CAS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        })
-    }
-
-    /// Pick a free physical slot from the permutation's free region, skipping reserved slots.
-    ///
-    /// The Option A (Safe) CAS insert protocol uses a 3-phase state machine:
-    /// `NULL -> CLAIMING -> arc_ptr -> (permutation publish) -> visible`
-    ///
-    /// A CAS inserter can temporarily set `leaf_values[slot]` to `CLAIMING` or `arc_ptr` while
-    /// the slot is still in the permutation's free region (not yet published by permutation CAS).
-    ///
-    /// The locked insert path must treat such slots as **reserved** and avoid reusing them,
-    /// otherwise it can overwrite a CAS-reserved slot and later publish it, creating an
-    /// inconsistent (ikey/keylenx/ptr) tuple visible to readers.
-    ///
-    /// Returns `(slot, back_offset)` where `slot == perm.back_at_offset(back_offset)`.
-    #[inline(always)]
-    #[expect(dead_code, reason = "CAS path disabled")]
-    fn pick_free_slot_avoiding_reserved(
-        leaf: &L,
-        perm: &L::Perm,
-        ikey: u64,
-    ) -> Option<(usize, usize)> {
-        use crate::leaf_trait::TreePermutation;
-
-        let size: usize = perm.size();
-        debug_assert!(
-            size < L::WIDTH,
-            "pick_free_slot_avoiding_reserved: no free slots"
-        );
-
-        let free_count: usize = L::WIDTH - size;
-        for offset in 0..free_count {
-            let slot: usize = perm.back_at_offset(offset);
-
-            // Slot-0 / ikey_bound invariant: skip slot 0 if it can't be reused.
-            if slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                continue;
-            }
-
-            // Option A (Safe): treat non-null in free region as reserved.
-            // This includes both CLAIMING (reservation sentinel) and arc_ptr (value installed
-            // but not yet published via permutation CAS).
-            if !leaf.leaf_value_ptr(slot).is_null() {
-                continue;
-            }
-
-            return Some((slot, offset));
-        }
-
-        None
-    }
-
     /// Create a new empty `MassTreeGeneric` with the given allocator.
     ///
     /// The tree starts with a single empty leaf as root.
     #[must_use]
     pub fn with_allocator(allocator: A) -> Self {
-        // Create root leaf and register with allocator.
-        let root_leaf: Box<L> = L::new_root_boxed();
-        let root_ptr: *mut L = allocator.alloc_leaf(root_leaf);
+        // Create root leaf directly in allocator memory (bypasses Box for pool allocators).
+        let root_ptr: *mut L = allocator.alloc_leaf_direct(true, false);
 
         Self {
             collector: Collector::new(),
             allocator,
             root_ptr: AtomicPtr::new(root_ptr.cast::<u8>()),
             count: AtomicUsize::new(0),
-            parent_set_condvar: Condvar::new(),
-            parent_set_mutex: Mutex::new(()),
+            coalesce_queue: CoalesceQueue::new(),
             _marker: PhantomData,
         }
     }
@@ -165,66 +77,77 @@ where
     }
 
     /// Check if the tree is empty.
+    ///
+    /// Returns `true` if the tree contains no keys.
+    ///
+    /// Note: After deletions, the tree structure (internodes, empty leaves) may
+    /// persist even when empty. This method checks the key count, not the structure.
     #[must_use]
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        if self.root_is_leaf_generic() {
-            // SAFETY: root_is_leaf_generic confirmed this is a leaf
-            let leaf_ptr: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
-            unsafe { (*leaf_ptr).is_empty() }
-        } else {
-            // Internode implies at least one key
-            false
-        }
+        self.len() == 0
+    }
+
+    // ========================================================================
+    //  Lazy Coalescing (Empty Leaf Cleanup)
+    // ========================================================================
+
+    /// Get the number of empty leaves pending cleanup.
+    ///
+    /// This is the number of leaves that became empty after key removal
+    /// and are waiting to be processed by `process_coalesce()`.
+    #[must_use]
+    #[inline]
+    pub fn pending_coalesce(&self) -> usize {
+        self.coalesce_queue.len()
+    }
+
+    /// Process all pending empty leaf removals.
+    ///
+    /// Call this during low-contention periods to clean up empty leaves.
+    /// This is safe to call concurrently with other operations.
+    ///
+    /// # Returns
+    ///
+    /// The number of entries processed (including skipped/re-queued).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tree = MassTree::new();
+    /// let guard = tree.guard();
+    ///
+    /// // ... perform many removes ...
+    ///
+    /// // Clean up empty leaves
+    /// let processed = tree.process_coalesce(&guard);
+    /// println!("Processed {} empty leaves", processed);
+    /// ```
+    #[inline]
+    pub fn process_coalesce(&self, guard: &LocalGuard<'_>) -> usize {
+        coalesce::process_all::<S, L, A>(&self.coalesce_queue, &self.allocator, guard)
+    }
+
+    /// Process up to `limit` pending empty leaf removals.
+    ///
+    /// Useful for bounded cleanup during normal operations.
+    ///
+    /// # Returns
+    ///
+    /// The number of entries processed.
+    #[inline]
+    pub fn process_coalesce_batch(&self, guard: &LocalGuard<'_>, limit: usize) -> usize {
+        coalesce::process_batch::<S, L, A>(&self.coalesce_queue, &self.allocator, guard, limit)
     }
 
     // ========================================================================
     //  Internal Helpers
     // ========================================================================
 
-    /// Notify all threads waiting for a parent pointer to be set.
-    ///
-    /// Called after setting a node's parent pointer during split propagation.
-    /// This wakes up any threads waiting in the condvar.
-    #[inline(always)]
-    pub(crate) fn notify_parent_set(&self) {
-        self.parent_set_condvar.notify_all();
-    }
-
-    /// Wait for a parent pointer to be set, with timeout.
-    ///
-    /// Returns `true` if notified (should recheck condition), `false` on timeout.
-    ///
-    /// Marked `#[cold]` because waiting is rare (only during concurrent splits).
-    #[cold]
-    fn wait_for_parent_set(&self, timeout: std::time::Duration) -> bool {
-        !self
-            .parent_set_condvar
-            .wait_for(&mut self.parent_set_mutex.lock(), timeout)
-            .timed_out()
-    }
-
     /// Load the root pointer atomically.
     #[inline(always)]
     pub(crate) fn load_root_ptr_generic(&self, _guard: &LocalGuard<'_>) -> *const u8 {
         self.root_ptr.load(AtomicOrdering::Acquire)
-    }
-
-    /// Compare-and-swap the root pointer atomically.
-    #[inline(always)]
-    pub(crate) fn cas_root_ptr_generic(
-        &self,
-        expected: *mut u8,
-        new: *mut u8,
-    ) -> Result<(), *mut u8> {
-        self.root_ptr
-            .compare_exchange(
-                expected,
-                new,
-                AtomicOrdering::AcqRel,
-                AtomicOrdering::Acquire,
-            )
-            .map(|_| ())
     }
 
     /// Check if the current root is a leaf node.
@@ -238,6 +161,10 @@ where
         reason = "root_ptr points to L or L::Internode, both have NodeVersion \
                   as first field with proper alignment"
     )]
+    #[expect(
+        dead_code,
+        reason = "Kept for future use when is_empty() needs structural check"
+    )]
     fn root_is_leaf_generic(&self) -> bool {
         let root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 
@@ -245,29 +172,34 @@ where
         // `NodeVersion` is the first field of both leaf and internode types.
         let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
 
+        // SAFETY: version_ptr is valid per above invariant
         unsafe { (*version_ptr).is_leaf() }
     }
 
     /// Get a mutable reference to the allocator.
     #[inline(always)]
+    #[allow(dead_code, reason = "infrastructure for future deletion")]
     pub(crate) const fn allocator_mut(&mut self) -> &mut A {
         &mut self.allocator
     }
 
     /// Get an immutable reference to the allocator.
     #[inline(always)]
+    #[allow(dead_code, reason = "infrastructure for future deletion")]
     pub(crate) const fn allocator(&self) -> &A {
         &self.allocator
     }
 
     /// Get a reference to the collector.
     #[inline(always)]
+    #[allow(dead_code, reason = "infrastructure for future deletion")]
     pub(crate) const fn collector(&self) -> &Collector {
         &self.collector
     }
 
     /// Increment the entry count.
     #[inline(always)]
+    #[allow(dead_code, reason = "infrastructure for entry count tracking")]
     pub(crate) fn inc_count(&self) {
         self.count.fetch_add(1, AtomicOrdering::Relaxed);
     }
@@ -288,6 +220,7 @@ where
     ///
     /// Reference to the leaf node that contains or should contain the key.
     #[inline(always)]
+    #[allow(dead_code, reason = "traversal helper for future features")]
     pub(crate) fn reach_leaf_generic(&self, key: &Key<'_>) -> &L {
         let root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 
@@ -298,6 +231,7 @@ where
             reason = "root points to L or L::Internode, both properly aligned"
         )]
         let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+        // SAFETY: version_ptr is valid per comment above
         let is_leaf: bool = unsafe { (*version_ptr).is_leaf() };
 
         if is_leaf {
@@ -313,6 +247,7 @@ where
     /// Traverse from an internode down to the target leaf.
     ///
     /// Uses generic internode search to find the correct child at each level.
+    #[allow(dead_code, reason = "traversal helper for future features")]
     #[expect(
         clippy::unused_self,
         reason = "Method signature matches reach_leaf pattern"
@@ -338,6 +273,7 @@ where
                 clippy::cast_ptr_alignment,
                 reason = "child_ptr points to L or L::Internode, both properly aligned"
             )]
+            // SAFETY: child_ptr points to valid node with NodeVersion as first field
             let child_version: &NodeVersion = unsafe { &*(child_ptr.cast::<NodeVersion>()) };
 
             if child_version.is_leaf() {
@@ -353,6 +289,7 @@ where
 
     /// Reach the leaf node that should contain the given key (mutable).
     #[inline(always)]
+    #[allow(dead_code, reason = "traversal helper for future features")]
     #[expect(
         clippy::needless_pass_by_ref_mut,
         reason = "Returns &mut L which requires &mut self for lifetime"
@@ -369,6 +306,7 @@ where
             reason = "root points to L or L::Internode, both properly aligned"
         )]
         let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
+        // SAFETY: version_ptr is valid per comment above
         let is_leaf: bool = unsafe { (*version_ptr).is_leaf() };
 
         if is_leaf {
@@ -404,6 +342,7 @@ where
     /// # Safety
     ///
     /// The returned pointer is valid for as long as the tree's allocations remain valid.
+    #[allow(dead_code, reason = "traversal helper for future features")]
     fn reach_leaf_mut_iterative_generic(mut current: *mut u8, ikey: u64) -> *mut L {
         use crate::ksearch::upper_bound_internode_generic;
         use crate::prefetch::prefetch_read;
@@ -424,619 +363,6 @@ where
             }
 
             current = child_ptr;
-        }
-    }
-
-    // ========================================================================
-    //  Generic Optimistic Read Path
-    // ========================================================================
-
-    /// Get a value by key.
-    ///
-    /// Creates a guard internally. For bulk operations, prefer
-    /// [`get_with_guard`](Self::get_with_guard) to amortize guard creation cost.
-    ///
-    /// # Returns
-    ///
-    /// * `Some(Arc<V>)` - If the key was found
-    /// * `None` - If the key was not found
-    #[must_use]
-    #[inline]
-    pub fn get(&self, key: &[u8]) -> Option<S::Output> {
-        let guard = self.guard();
-        self.get_with_guard(key, &guard)
-    }
-
-    /// Get a value by key using an explicit guard.
-    ///
-    /// Use this when performing multiple operations to amortize guard overhead.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to look up (byte slice)
-    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
-    ///
-    /// # Returns
-    ///
-    /// * `Some(Arc<V>)` - If the key was found
-    /// * `None` - If the key was not found
-    #[must_use]
-    #[inline(always)]
-    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<S::Output> {
-        let mut search_key: Key<'_> = Key::new(key);
-        self.get_concurrent_generic(&mut search_key, guard)
-    }
-
-    /// Get a borrowed reference to a value by key.
-    ///
-    /// This is significantly faster than [`get_with_guard`] for read-heavy workloads
-    /// because it avoids atomic reference count operations (Arc clone/drop).
-    ///
-    /// # Performance
-    ///
-    /// Under high concurrency, `get_ref` can be **2-5x faster** than `get_with_guard`
-    /// because it eliminates cache line bouncing on shared Arc reference counts.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to look up (byte slice)
-    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
-    ///
-    /// # Returns
-    ///
-    /// * `Some(&V)` - A reference to the value, valid for the guard's lifetime
-    /// * `None` - If the key was not found
-    #[must_use]
-    #[inline(always)]
-    pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g S::Value> {
-        let mut search_key: Key<'_> = Key::new(key);
-        self.get_ref_generic(&mut search_key, guard)
-    }
-
-    /// Internal concurrent get implementation returning a reference.
-    ///
-    /// Same protocol as [`get_concurrent_generic`] but returns `&V` instead of `Arc<V>`.
-    /// Eliminates Arc clone overhead for maximum read performance.
-    ///
-    /// # Single-Layer Fast Path
-    ///
-    /// When the key is ≤ 8 bytes (no suffix), uses an optimized code path that:
-    /// - Skips layer pointer checks (`keylenx >= LAYER_KEYLENX`)
-    /// - Doesn't track layer descent state
-    /// - Eliminates suffix matching logic
-    ///
-    /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
-    #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
-    fn get_ref_generic<'g>(
-        &self,
-        key: &mut Key<'_>,
-        guard: &'g LocalGuard<'_>,
-    ) -> Option<&'g S::Value> {
-        use crate::leaf_trait::TreePermutation;
-        use crate::leaf24::KSUF_KEYLENX;
-        use crate::leaf24::LAYER_KEYLENX;
-        use crate::link::{is_marked, unmark_ptr};
-
-        // Detect single-layer mode: key ≤ 8 bytes means no suffix, no layer descent possible
-        let single_layer_mode: bool = !key.has_suffix();
-
-        // Start at tree root
-        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
-        let mut in_sublayer: bool = false;
-
-        'layer_loop: loop {
-            // Find the actual layer root (handles layer root promotion for sublayers)
-            layer_root = self.maybe_parent_generic(layer_root);
-
-            // Traverse to leaf for current layer
-            let mut leaf_ptr: *mut L =
-                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
-
-            // Inner loop for searching within a leaf (may follow B-links)
-            'leaf_loop: loop {
-                // SAFETY: leaf_ptr protected by guard
-                let leaf: &L = unsafe { &*leaf_ptr };
-
-                // Take version snapshot (spins if dirty)
-                let mut version: u32 = leaf.version().stable();
-
-                'search_loop: loop {
-                    // Check for deleted node
-                    if leaf.version().is_deleted() {
-                        continue 'layer_loop;
-                    }
-
-                    // Load permutation - if frozen, a split is in progress
-                    let Ok(perm) = leaf.permutation_try() else {
-                        version = leaf.version().stable();
-                        continue 'search_loop;
-                    };
-
-                    let target_ikey: u64 = key.ikey();
-
-                    // ================================================================
-                    // Single-layer fast path (keys ≤ 8 bytes)
-                    // ================================================================
-                    if single_layer_mode {
-                        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-                        let search_keylenx: u8 = key.current_len() as u8;
-
-                        // Optimized search: no suffix handling, no layer checks
-                        let mut match_ptr: Option<*mut u8> = None;
-
-                        for i in 0..perm.size() {
-                            let slot: usize = perm.get(i);
-                            let slot_ikey: u64 = leaf.ikey(slot);
-
-                            if slot_ikey != target_ikey {
-                                continue;
-                            }
-
-                            let slot_keylenx: u8 = leaf.keylenx(slot);
-                            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                            if slot_ptr.is_null() {
-                                continue;
-                            }
-
-                            // Exact keylenx match = found
-                            if slot_keylenx == search_keylenx {
-                                match_ptr = Some(slot_ptr);
-                                break;
-                            }
-
-                            // Layer pointer with matching ikey means a longer key exists,
-                            // but our short key (≤8 bytes) is NOT a match - continue searching
-                            // (Layer pointers have keylenx >= 128, our key has keylenx <= 8)
-                        }
-
-                        // Validate version AFTER all reads
-                        if leaf.version().has_changed(version) {
-                            let (advanced, new_version) =
-                                self.advance_to_key_generic(leaf, key, version, guard);
-
-                            if !std::ptr::eq(advanced, leaf) {
-                                leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
-                                continue 'leaf_loop;
-                            }
-
-                            version = new_version;
-                            continue 'search_loop;
-                        }
-
-                        // VERSION VALIDATED
-
-                        if let Some(ptr) = match_ptr {
-                            // Value - return reference WITHOUT cloning Arc
-                            // SAFETY: version validated, guard protects from deallocation
-                            let value_ref: &'g S::Value = unsafe { &*(ptr.cast::<S::Value>()) };
-                            return Some(value_ref);
-                        }
-
-                        // Not found - check for dirty or B-link
-                        if leaf.version().is_dirty() {
-                            version = leaf.version().stable();
-                            continue 'search_loop;
-                        }
-
-                        let next_raw: *mut L = leaf.next_raw();
-                        let next_ptr: *mut L = unmark_ptr(next_raw);
-                        if !next_ptr.is_null() && !is_marked(next_raw) {
-                            let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
-                            if target_ikey >= next_bound {
-                                leaf_ptr = next_ptr;
-                                continue 'leaf_loop;
-                            }
-                        }
-
-                        return None;
-                    }
-
-                    // ================================================================
-                    // Multi-layer path (handles layer descent)
-                    // ================================================================
-
-                    #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-                    let search_keylenx: u8 = if key.has_suffix() {
-                        KSUF_KEYLENX
-                    } else {
-                        key.current_len() as u8
-                    };
-
-                    // Search for matching key with early-exit sequential scan.
-                    // Record snapshot only - do NOT interpret until version validated.
-                    let mut match_snapshot: Option<(u8, *mut u8)> = None;
-
-                    for i in 0..perm.size() {
-                        let slot: usize = perm.get(i);
-                        let slot_ikey: u64 = leaf.ikey(slot);
-
-                        if slot_ikey != target_ikey {
-                            continue;
-                        }
-
-                        let slot_keylenx: u8 = leaf.keylenx(slot);
-                        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                        if slot_ptr.is_null() {
-                            continue;
-                        }
-
-                        if slot_keylenx == search_keylenx {
-                            let suffix_match: bool = if slot_keylenx == KSUF_KEYLENX {
-                                leaf.ksuf_equals(slot, key.suffix())
-                            } else {
-                                true
-                            };
-
-                            if suffix_match {
-                                match_snapshot = Some((slot_keylenx, slot_ptr));
-                                break;
-                            }
-                        } else if slot_keylenx >= LAYER_KEYLENX && key.has_suffix() {
-                            match_snapshot = Some((slot_keylenx, slot_ptr));
-                            break;
-                        }
-                    }
-
-                    // Validate version AFTER all reads
-                    if leaf.version().has_changed(version) {
-                        let (advanced, new_version) =
-                            self.advance_to_key_generic(leaf, key, version, guard);
-
-                        if !std::ptr::eq(advanced, leaf) {
-                            leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
-                            continue 'leaf_loop;
-                        }
-
-                        version = new_version;
-                        continue 'search_loop;
-                    }
-
-                    // VERSION VALIDATED - NOW SAFE TO INTERPRET SNAPSHOT
-                    if let Some((keylenx, ptr)) = match_snapshot {
-                        if keylenx >= LAYER_KEYLENX {
-                            // Layer pointer - descend into sublayer
-                            key.shift();
-                            layer_root = ptr;
-                            in_sublayer = true;
-                            continue 'layer_loop;
-                        }
-
-                        // Value - return reference WITHOUT cloning Arc
-                        // SAFETY: version validated, guard protects from deallocation,
-                        // ptr points to valid Arc<V> data
-                        let value_ref: &'g S::Value = unsafe { &*(ptr.cast::<S::Value>()) };
-                        return Some(value_ref);
-                    }
-
-                    // Not found - check for dirty or B-link
-                    if leaf.version().is_dirty() {
-                        version = leaf.version().stable();
-                        continue 'search_loop;
-                    }
-
-                    let next_raw: *mut L = leaf.next_raw();
-                    let next_ptr: *mut L = unmark_ptr(next_raw);
-                    if !next_ptr.is_null() && !is_marked(next_raw) {
-                        let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
-                        if target_ikey >= next_bound {
-                            leaf_ptr = next_ptr;
-                            continue 'leaf_loop;
-                        }
-                    }
-
-                    return None;
-                }
-            }
-        }
-    }
-
-    /// Internal concurrent get implementation with layer descent support.
-    ///
-    /// # Single-Layer Fast Path
-    ///
-    /// When the key is ≤ 8 bytes (no suffix), uses an optimized code path that:
-    /// - Skips layer pointer checks (`keylenx >= LAYER_KEYLENX`)
-    /// - Doesn't track layer descent state
-    /// - Eliminates suffix matching logic
-    ///
-    /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
-    #[expect(clippy::too_many_lines, reason = "Complex Concurrency Logic")]
-    fn get_concurrent_generic(
-        &self,
-        key: &mut Key<'_>,
-        guard: &LocalGuard<'_>,
-    ) -> Option<S::Output> {
-        use crate::leaf_trait::TreePermutation;
-        use crate::leaf24::KSUF_KEYLENX;
-        use crate::leaf24::LAYER_KEYLENX;
-        use crate::link::{is_marked, unmark_ptr};
-
-        #[cfg(feature = "tracing")]
-        let target_ikey_for_trace: u64 = key.ikey();
-
-        #[cfg(feature = "tracing")]
-        tracing::trace!(
-            ikey = format_args!("{:016x}", target_ikey_for_trace),
-            "get: START"
-        );
-
-        // Detect single-layer mode: key ≤ 8 bytes means no suffix, no layer descent possible
-        let single_layer_mode: bool = !key.has_suffix();
-
-        // Start at tree root
-        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
-        let mut in_sublayer: bool = false;
-
-        'layer_loop: loop {
-            // Find the actual layer root (handles layer root promotion for sublayers)
-            layer_root = self.maybe_parent_generic(layer_root);
-
-            // Traverse to leaf for current layer
-            let mut leaf_ptr: *mut L =
-                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
-
-            // Inner loop for searching within a leaf (may follow B-links)
-            'leaf_loop: loop {
-                // SAFETY: leaf_ptr protected by guard
-                let leaf: &L = unsafe { &*leaf_ptr };
-
-                // Take version snapshot (spins if dirty)
-                let mut version: u32 = leaf.version().stable();
-
-                'search_loop: loop {
-                    // Check for deleted node
-                    if leaf.version().is_deleted() {
-                        continue 'layer_loop; // Retry from layer root
-                    }
-
-                    // Load permutation - if frozen, a split is in progress
-                    let Ok(perm) = leaf.permutation_try() else {
-                        version = leaf.version().stable();
-                        continue 'search_loop;
-                    };
-
-                    let target_ikey: u64 = key.ikey();
-
-                    // ================================================================
-                    // Single-layer fast path (keys ≤ 8 bytes)
-                    // ================================================================
-                    if single_layer_mode {
-                        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-                        let search_keylenx: u8 = key.current_len() as u8;
-
-                        // Optimized search: no suffix handling, no layer checks
-                        let mut match_ptr: Option<*mut u8> = None;
-
-                        for i in 0..perm.size() {
-                            let slot: usize = perm.get(i);
-                            let slot_ikey: u64 = leaf.ikey(slot);
-
-                            if slot_ikey != target_ikey {
-                                continue;
-                            }
-
-                            let slot_keylenx: u8 = leaf.keylenx(slot);
-                            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                            if slot_ptr.is_null() {
-                                continue;
-                            }
-
-                            // Exact keylenx match = found
-                            if slot_keylenx == search_keylenx {
-                                match_ptr = Some(slot_ptr);
-                                break;
-                            }
-
-                            // Layer pointer with matching ikey means a longer key exists,
-                            // but our short key (≤8 bytes) is NOT a match - continue searching
-                            // (Layer pointers have keylenx >= 128, our key has keylenx <= 8)
-                        }
-
-                        // Validate version AFTER all reads
-                        if leaf.version().has_changed(version) {
-                            let (advanced, new_version) =
-                                self.advance_to_key_generic(leaf, key, version, guard);
-
-                            if !std::ptr::eq(advanced, leaf) {
-                                leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
-                                continue 'leaf_loop;
-                            }
-
-                            version = new_version;
-                            continue 'search_loop;
-                        }
-
-                        // VERSION VALIDATED
-
-                        if let Some(ptr) = match_ptr {
-                            // Value - NOW safe to clone
-                            // SAFETY: version validated, so ptr is valid value pointer
-                            let output: S::Output = unsafe { S::output_from_raw(ptr) };
-                            return Some(output);
-                        }
-
-                        // Not found - check for dirty or B-link
-                        if leaf.version().is_dirty() {
-                            version = leaf.version().stable();
-                            continue 'search_loop;
-                        }
-
-                        let next_raw: *mut L = leaf.next_raw();
-                        let next_ptr: *mut L = unmark_ptr(next_raw);
-                        if !next_ptr.is_null() && !is_marked(next_raw) {
-                            let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
-                            if target_ikey >= next_bound {
-                                #[cfg(feature = "tracing")]
-                                tracing::debug!(
-                                    ikey = target_ikey,
-                                    leaf_ptr = ?std::ptr::from_ref(leaf),
-                                    next_ptr = ?next_ptr,
-                                    next_bound = next_bound,
-                                    "get: NotFound but ikey >= next_bound; following B-link"
-                                );
-                                #[cfg(feature = "tracing")]
-                                crate::tree::optimistic::BLINK_SHOULD_FOLLOW_COUNT
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                                leaf_ptr = next_ptr;
-                                continue 'leaf_loop;
-                            }
-                        }
-
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            ikey = format_args!("{:016x}", target_ikey),
-                            leaf_ptr = ?std::ptr::from_ref(leaf),
-                            perm_size = perm.size(),
-                            next_ptr = ?next_ptr,
-                            is_marked = is_marked(next_raw),
-                            "get: NOT_FOUND"
-                        );
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::SEARCH_NOT_FOUND_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        return None;
-                    }
-
-                    // ================================================================
-                    // Multi-layer path (handles layer descent)
-                    // ================================================================
-
-                    #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-                    let search_keylenx: u8 = if key.has_suffix() {
-                        KSUF_KEYLENX
-                    } else {
-                        key.current_len() as u8
-                    };
-
-                    // Search for matching key with early-exit sequential scan.
-                    // CRITICAL: Only RECORD the snapshot (keylenx, ptr) here.
-                    // Do NOT interpret the pointer until AFTER version validation.
-                    //
-                    // Note: SIMD bulk-load is available via `leaf.find_ikey_matches()` but
-                    // is slower for point lookups where keys are typically found early.
-                    // SIMD will be used for range scans where full leaf iteration is needed.
-                    let mut match_snapshot: Option<(u8, *mut u8)> = None;
-
-                    for i in 0..perm.size() {
-                        let slot: usize = perm.get(i);
-                        let slot_ikey: u64 = leaf.ikey(slot);
-
-                        if slot_ikey != target_ikey {
-                            continue;
-                        }
-
-                        let slot_keylenx: u8 = leaf.keylenx(slot);
-                        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                        if slot_ptr.is_null() {
-                            continue;
-                        }
-
-                        if slot_keylenx == search_keylenx {
-                            // Potential exact match - verify suffix if present
-                            let suffix_match: bool = if slot_keylenx == KSUF_KEYLENX {
-                                leaf.ksuf_equals(slot, key.suffix())
-                            } else {
-                                true
-                            };
-
-                            if suffix_match {
-                                match_snapshot = Some((slot_keylenx, slot_ptr));
-                                break;
-                            }
-                        } else if slot_keylenx >= LAYER_KEYLENX && key.has_suffix() {
-                            // Layer pointer - record for descent after validation
-                            match_snapshot = Some((slot_keylenx, slot_ptr));
-                            break;
-                        }
-                    }
-
-                    // Validate version AFTER all reads
-                    if leaf.version().has_changed(version) {
-                        // Version changed - follow B-link chain if split occurred
-                        let (advanced, new_version) =
-                            self.advance_to_key_generic(leaf, key, version, guard);
-
-                        if !std::ptr::eq(advanced, leaf) {
-                            // Different leaf - search there
-                            leaf_ptr = std::ptr::from_ref(advanced).cast_mut();
-                            continue 'leaf_loop;
-                        }
-
-                        // Same leaf, new version - retry search with returned version
-                        version = new_version;
-                        continue 'search_loop;
-                    }
-
-                    // ================================================================
-                    //  VERSION VALIDATED - NOW SAFE TO INTERPRET SNAPSHOT
-                    // ================================================================
-
-                    if let Some((keylenx, ptr)) = match_snapshot {
-                        if keylenx >= LAYER_KEYLENX {
-                            // Layer pointer - descend into sublayer
-                            key.shift();
-                            layer_root = ptr;
-                            in_sublayer = true;
-                            continue 'layer_loop;
-                        }
-
-                        // Value - NOW safe to clone
-                        // SAFETY: version validated, so keylenx correctly identifies ptr as value
-                        let output: S::Output = unsafe { S::output_from_raw(ptr) };
-                        return Some(output);
-                    }
-
-                    // Not found - but might be in wrong leaf due to split!
-                    // If version is dirty (split/insert in progress), retry
-                    if leaf.version().is_dirty() {
-                        version = leaf.version().stable();
-                        continue 'search_loop;
-                    }
-
-                    // Check if key belongs to a right sibling via B-link
-                    let next_raw: *mut L = leaf.next_raw();
-                    let next_ptr: *mut L = unmark_ptr(next_raw);
-                    if !next_ptr.is_null() && !is_marked(next_raw) {
-                        // SAFETY: next_ptr is valid
-                        let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
-                        if target_ikey >= next_bound {
-                            // Key should be in the next leaf - follow B-link
-                            #[cfg(feature = "tracing")]
-                            tracing::debug!(
-                                ikey = target_ikey,
-                                leaf_ptr = ?std::ptr::from_ref(leaf),
-                                next_ptr = ?next_ptr,
-                                next_bound = next_bound,
-                                "get: NotFound but ikey >= next_bound; following B-link"
-                            );
-                            #[cfg(feature = "tracing")]
-                            crate::tree::optimistic::BLINK_SHOULD_FOLLOW_COUNT
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                            leaf_ptr = next_ptr;
-                            continue 'leaf_loop;
-                        }
-                    }
-
-                    // Truly not found
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        ikey = format_args!("{:016x}", target_ikey),
-                        leaf_ptr = ?std::ptr::from_ref(leaf),
-                        perm_size = perm.size(),
-                        next_ptr = ?next_ptr,
-                        is_marked = is_marked(next_raw),
-                        "get: NOT_FOUND"
-                    );
-                    #[cfg(feature = "tracing")]
-                    crate::tree::optimistic::SEARCH_NOT_FOUND_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    return None;
-                }
-            }
         }
     }
 
@@ -1067,17 +393,51 @@ where
         }
     }
 
-    /// Traverse from layer root to target leaf with version validation.
+    /// Single-step parent traversal (C++ `maybe_parent()` equivalent).
     ///
-    /// Simple loop that descends through internodes to find the target leaf.
-    /// B-link walking in `advance_to_key` handles any splits that occur.
-    #[expect(clippy::unused_self, reason = "API Consistency")]
-    #[expect(clippy::used_underscore_binding, reason = "Lock guard")]
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(level = "trace", skip(self, _guard), fields(ikey = %format_args!("{:016x}", key.ikey())))
-    )]
-    fn reach_leaf_concurrent_generic(
+    /// Returns the parent node if it exists, otherwise returns `node` itself.
+    /// Used in root fix-up loop during traversal retries.
+    #[inline(always)]
+    #[expect(clippy::unused_self, reason = "Method signature pattern")]
+    fn maybe_parent_one_step(&self, node: *const u8) -> *const u8 {
+        // SAFETY: node is valid, both types have NodeVersion as first field
+        #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+        let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+
+        let parent: *mut u8 = if version.is_leaf() {
+            // SAFETY: version.is_leaf() confirmed
+            let leaf: &L = unsafe { &*(node.cast::<L>()) };
+            leaf.parent()
+        } else {
+            // SAFETY: !version.is_leaf() confirmed
+            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+            inode.parent()
+        };
+
+        if parent.is_null() {
+            node
+        } else {
+            parent.cast_const()
+        }
+    }
+
+    /// Double-buffer traversal from root to leaf.
+    ///
+    /// This implements the C++ Masstree `reach_leaf()` pattern with:
+    /// - Two-pointer technique to avoid stale child pointer validation
+    /// - Split detection with key comparison to avoid unnecessary root restarts
+    ///
+    /// # Algorithm
+    ///
+    /// The double-buffer technique uses two slots for node/version pairs:
+    /// 1. Read child pointer into the OTHER buffer (sense ^ 1)
+    /// 2. Get child's stable version
+    /// 3. Validate parent version
+    /// 4. If valid: swap sense (we're now "at" child)
+    /// 5. If invalid due to split: check if key > `last_key`
+    /// 6. Only restart from root if key actually escaped to sibling
+    #[expect(clippy::indexing_slicing, reason = "sense is always 0 or 1")]
+    pub(crate) fn reach_leaf_concurrent_generic(
         &self,
         start: *const u8,
         key: &Key<'_>,
@@ -1089,557 +449,178 @@ where
         use crate::prefetch::prefetch_read;
 
         let target_ikey: u64 = key.ikey();
-        let mut node: *const u8 = start;
 
-        loop {
-            // SAFETY: node is valid, both node types have NodeVersion as first field
-            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
+        // Double-buffer: two node/version pairs, alternating via sense
+        // n[sense] is current node, n[sense ^ 1] is candidate child
+        // Note: n[0] is set in root fix-up loop, n[1] is set before being read
+        let mut n: [*const u8; 2] = [StdPtr::null(); 2];
+        let mut v: [u32; 2] = [0; 2];
 
-            // Get stable version (spins if dirty)
-            let v: u32 = version.stable();
+        #[expect(unused_assignments, reason = "sense is set at top of retry loop")]
+        let mut sense: usize = 0;
 
-            if version.is_leaf() {
-                // Reached a leaf
-                return node.cast_mut().cast::<L>();
+        'retry: loop {
+            // ==================================================================
+            // Root fix-up: walk up until we find the actual layer root
+            // ==================================================================
+            // C++ comment: "Get a non-stale root. Detect staleness by checking
+            // whether n has ever split. The true root has never split."
+            //
+            // When a node splits, SPLIT_UNLOCK_MASK clears the ROOT_BIT.
+            // So we walk up via parent pointers until we find a node with
+            // is_root() set, which is the current layer root.
+            sense = 0;
+            n[sense] = start;
+            loop {
+                // SAFETY: n[sense] is valid, NodeVersion is first field
+                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+                let version: &NodeVersion = unsafe { &*(n[sense].cast::<NodeVersion>()) };
+                v[sense] = version.stable();
+
+                if version.is_root() {
+                    // Found the current layer root
+                    break;
+                }
+
+                // Walk up to parent
+                n[sense] = self.maybe_parent_one_step(n[sense]);
             }
 
-            // It's an internode - traverse down
-            // SAFETY: !is_leaf() confirmed above
-            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+            // ==================================================================
+            // Traverse internodes using double-buffer pattern
+            // ==================================================================
+            loop {
+                // SAFETY: n[sense] is valid, NodeVersion is first field
+                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+                let version: &NodeVersion = unsafe { &*(n[sense].cast::<NodeVersion>()) };
 
-            // Binary search for child
-            let child_idx: usize =
-                upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
-            let child: *mut u8 = inode.child(child_idx);
+                // Get stable version of current node
+                v[sense] = version.stable();
 
-            // Prefetch child node while we validate version (hides memory latency)
-            prefetch_read(child);
+                // Check if we've reached a leaf
+                if version.is_leaf() {
+                    // Return the leaf pointer - caller must check deleted_layer()
+                    // and handle by unshifting key and restarting from main root.
+                    // We cannot handle deleted_layer here because `start` is fixed
+                    // to the sublayer root, causing an infinite loop if we retry.
+                    return n[sense].cast_mut().cast::<L>();
+                }
 
-            if child.is_null() {
-                // Concurrent split in progress - retry from start
-                node = start;
-                continue;
-            }
+                // It's an internode - traverse down
+                // SAFETY: !is_leaf() confirmed above
+                let inode: &L::Internode = unsafe { &*(n[sense].cast::<L::Internode>()) };
 
-            // Check if internode changed during our read
-            if inode.version().has_changed(v) {
-                // Version changed - check for split
-                if inode.version().has_split(v) {
-                    // Key might have escaped to sibling - retry from start
-                    node = start;
+                // Binary/linear search for child pointer
+                let child_idx: usize =
+                    upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
+
+                // Read child into the OTHER buffer (sense ^ 1)
+                let other: usize = sense ^ 1;
+                let child: *mut u8 = inode.child(child_idx);
+                n[other] = child.cast_const();
+
+                // Null child means concurrent split in progress
+                if child.is_null() {
+                    // Retry - root fix-up loop will find current root
+                    continue 'retry;
+                }
+
+                // Prefetch child while we validate (hide memory latency)
+                prefetch_read(child);
+
+                // Get stable version of child BEFORE validating parent
+                // This is the key insight: we have child's version captured,
+                // so even if parent changes, we know child state at read time
+                // SAFETY: child is non-null and valid
+                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
+                let child_version: &NodeVersion = unsafe { &*(child.cast::<NodeVersion>()) };
+                v[other] = child_version.stable();
+
+                // Now validate parent - did it change during our read?
+                if !inode.version().has_changed(v[sense]) {
+                    // Success! Parent unchanged, child read is valid
+                    // Swap sense to "move" to child
+                    sense = other;
                     continue;
                 }
-                // Just retry this internode
-                continue;
-            }
 
-            // Descend to child
-            node = child;
+                // Parent changed - check if it was a split that moved our key
+                let old_v: u32 = v[sense];
+                v[sense] = inode.version().stable(); // Re-read parent version
+
+                if inode.version().has_split(old_v) {
+                    // Split occurred - check if our key moved to the right sibling
+                    // If target_ikey > last_key, key is beyond this internode's range
+                    let nkeys: usize = inode.nkeys();
+                    if nkeys > 0 {
+                        let last_key: u64 = inode.ikey(nkeys - 1);
+                        if target_ikey > last_key {
+                            // Key escaped to sibling - must restart from root
+                            // Retry - root fix-up loop will find current root
+                            continue 'retry;
+                        }
+                    }
+                }
+
+                // Minor change (insert) or split that didn't move our key
+                // Just retry this level (sense stays the same, loop continues)
+            }
         }
     }
 
-    // ========================================================================
-    //  Generic CAS Insert Path (disabled - kept for future reference)
-    // ========================================================================
-
-    /// Maximum CAS retry attempts before falling back to locked path.
-    const MAX_CAS_RETRIES_GENERIC: usize = 3;
-
-    /// Try CAS-based lock-free insert.
+    /// Compare a key with the last key in a leaf, retrying until stable.
     ///
-    /// Attempts to insert a new key-value pair using optimistic concurrency.
-    /// Returns result indicating success or reason for fallback.
-    #[expect(dead_code, reason = "CAS path disabled")]
-    #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
-    pub(crate) fn try_cas_insert_generic(
-        &self,
-        key: &Key<'_>,
-        value: &S::Output,
-        guard: &LocalGuard<'_>,
-    ) -> CasInsertResultGeneric<S::Output> {
-        use crate::leaf_trait::TreePermutation;
-        use std::ptr as StdPtr;
-
-        let ikey: u64 = key.ikey();
-
-        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-        let keylenx: u8 = key.current_len() as u8;
-
-        // Suffix keys require locked path
-        if key.has_suffix() {
-            return CasInsertResultGeneric::ContentionFallback;
-        }
-
-        let mut retries: usize = 0;
-        let mut leaf_ptr: *mut L = StdPtr::null_mut();
-        let mut use_reach: bool = true;
-
+    /// Returns:
+    /// - `Ordering::Less` if key < last key in leaf
+    /// - `Ordering::Equal` if key == last key in leaf
+    /// - `Ordering::Greater` if key > last key in leaf, or leaf is empty
+    ///
+    /// This matches C++ `leaf::stable_last_key_compare()` from `masstree_struct.hh:603-626`.
+    ///
+    /// # Reference
+    /// ```cpp
+    /// template <typename P>
+    /// inline int leaf<P>::stable_last_key_compare(const key_type& k, nodeversion_type v,
+    ///                                              threadinfo& ti) const {
+    ///     while (true) {
+    ///         typename leaf<P>::permuter_type perm(permutation_);
+    ///         int n = perm.size();
+    ///         int p = perm[n ? n - 1 : 0];
+    ///         int cmp = compare_key(k, p);
+    ///         if (likely(!this->has_changed(v))) {
+    ///             return cmp;
+    ///         }
+    ///         v = this->stable_annotated(ti.stable_fence());
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    fn stable_last_key_compare(leaf: &L, key: &Key<'_>, mut version: u32) -> Ordering {
         loop {
-            // 1. Optimistic traversal to find target leaf
-            // CAS path only operates on layer 0 (no suffix keys), so is_sublayer=false
-            if use_reach {
-                let layer_root: *const u8 = self.load_root_ptr_generic(guard);
-                // Note: get_fresh_root inside reach_leaf_concurrent_generic handles parent traversal
-                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
+            let perm: L::Perm = leaf.permutation();
+            let n: usize = perm.size();
+
+            // If empty, return Greater (key should look elsewhere)
+            // If non-empty, compare with last slot in permutation
+            let cmp: Ordering = if n == 0 {
+                // Empty leaf - return Greater so caller will check siblings
+                // C++ comment: "it is always safe to return 1, because then the
+                // caller will check more precisely whether k belongs in this"
+                Ordering::Greater
             } else {
-                use_reach = true;
-            }
-
-            let leaf: &L = unsafe { &*leaf_ptr };
-
-            // B-link advance if needed
-            let (advanced, exceeded_hop_limit) =
-                self.advance_to_key_by_bound_generic(leaf, key, guard);
-
-            // If we exceeded the hop limit, fall back to locked path which will re-traverse
-            if exceeded_hop_limit {
-                return CasInsertResultGeneric::ContentionFallback;
-            }
-
-            if !StdPtr::eq(advanced, leaf) {
-                leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
-                use_reach = false;
-                continue;
-            }
-
-            // 2. Get version (fail-fast if dirty)
-            let version: u32 = leaf.version().value();
-            if leaf.version().is_dirty() {
-                return CasInsertResultGeneric::ContentionFallback;
-            }
-
-            // Check for frozen permutation
-            // If frozen, wait briefly for version to stabilize before falling back.
-            // This prevents spinning on a transient frozen state (Fix B: freeze-wait protocol).
-            let Ok(perm) = leaf.permutation_try() else {
-                let _ = leaf.version().stable();
-                return CasInsertResultGeneric::ContentionFallback;
+                let last_slot: usize = perm.get(n - 1);
+                let slot_ikey: u64 = leaf.ikey(last_slot);
+                let slot_keylenx: u8 = leaf.keylenx(last_slot);
+                key.compare(slot_ikey, slot_keylenx as usize)
             };
 
-            // 3. Search for key position
-            let search_result = self.search_for_insert_generic(leaf, key, &perm);
-
-            match search_result {
-                InsertSearchResultGeneric::Found { slot } => {
-                    return CasInsertResultGeneric::ExistsNeedLock { slot };
-                }
-
-                InsertSearchResultGeneric::Layer { slot, .. }
-                | InsertSearchResultGeneric::Conflict { slot } => {
-                    return CasInsertResultGeneric::LayerNeedLock { slot };
-                }
-
-                InsertSearchResultGeneric::NotFound { logical_pos } => {
-                    // 4. Check if leaf has space
-                    if perm.size() >= L::WIDTH {
-                        return CasInsertResultGeneric::FullNeedLock;
-                    }
-
-                    // 5. Pick a free slot from the free region, scanning for usable slots.
-                    //
-                    // This mirrors the locked path's `pick_free_slot_avoiding_reserved`:
-                    // - Skip slot 0 if it can't be reused (ikey_bound invariant)
-                    // - Skip slots that are already reserved (non-null in free region)
-                    //
-                    // This is a key optimization: instead of only trying perm.back(),
-                    // we scan all free slots to find one that's actually available.
-                    let size: usize = perm.size();
-                    let free_count: usize = L::WIDTH - size;
-
-                    let mut found_slot: Option<(usize, usize)> = None; // (slot, offset)
-                    for offset in 0..free_count {
-                        let slot: usize = perm.back_at_offset(offset);
-
-                        // Slot-0 / ikey_bound invariant: skip slot 0 if it can't be reused
-                        if slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                            continue;
-                        }
-
-                        // Skip reserved slots (CLAIMING or arc_ptr from another CAS in progress)
-                        if !leaf.load_slot_value(slot).is_null() {
-                            continue;
-                        }
-
-                        found_slot = Some((slot, offset));
-                        break;
-                    }
-
-                    let Some((slot, back_offset)) = found_slot else {
-                        // No usable slot found - all free slots are either:
-                        // - slot 0 that can't be reused, or
-                        // - reserved by another CAS in progress
-                        // Fall back to locked path which can wait for reservations to clear
-                        return CasInsertResultGeneric::ContentionFallback;
-                    };
-
-                    // 6. Compute new permutation with the chosen slot.
-                    //
-                    // If the slot is not at offset 0 (the natural back position),
-                    // we need to swap it to the back before inserting.
-                    let (new_perm, allocated_slot) = if back_offset == 0 {
-                        // Slot is already at back, use directly
-                        perm.insert_from_back_immutable(logical_pos)
-                    } else {
-                        // Swap the chosen slot to back position, then insert
-                        let mut perm_copy = perm;
-                        let back_pos: usize = L::WIDTH - 1;
-                        let chosen_pos: usize = back_pos - back_offset;
-                        perm_copy.swap_free_slots(back_pos, chosen_pos);
-                        let allocated = perm_copy.insert_from_back(logical_pos);
-                        (perm_copy, allocated)
-                    };
-                    debug_assert_eq!(allocated_slot, slot, "slot mismatch after insert");
-
-                    // ============================================================
-                    // Option A (Safe) Protocol: 3-phase CAS insert
-                    //
-                    // State machine: NULL -> CLAIMING -> arc_ptr -> (perm publish)
-                    //
-                    // Phase 1: Reserve slot (NULL -> CLAIMING)
-                    // Phase 2: Write key metadata (exclusive access via CLAIMING)
-                    // Phase 3: Install value (CLAIMING -> arc_ptr)
-                    // Phase 4: Publish (permutation CAS)
-                    // ============================================================
-
-                    // 8. Phase 1: Reserve the slot (NULL -> CLAIMING).
-                    //
-                    // This gives us exclusive right to write key metadata into this slot.
-                    // The CLAIMING sentinel is non-null, so other CAS attempts and the
-                    // locked path will see it as "reserved".
-                    let claiming: *mut u8 = claiming_ptr();
-                    if leaf
-                        .cas_slot_value(slot, StdPtr::null_mut(), claiming)
-                        .is_err()
-                    {
-                        // Contention: another thread claimed this slot first.
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 9. Version check before writing metadata.
-                    //
-                    // If version changed (split, etc.), release the reservation and retry.
-                    if leaf.version().has_changed_or_locked(version) {
-                        // Release reservation: CLAIMING -> NULL
-                        let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 10. Phase 2: Write key metadata.
-                    //
-                    // We have exclusive access to this slot via CLAIMING. No other CAS
-                    // attempt can write metadata here until we release the reservation.
-                    // The slot is not visible to readers until permutation publishes.
-                    unsafe {
-                        leaf.store_key_data_for_cas(slot, ikey, keylenx);
-                    }
-
-                    // 11. Version check after metadata.
-                    if leaf.version().has_changed_or_locked(version) {
-                        // Release reservation: CLAIMING -> NULL
-                        let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 12. Phase 3: Install the value pointer (CLAIMING -> arc_ptr).
-                    //
-                    // Prepare the value pointer and transition from CLAIMING to the real value.
-                    let value_ptr: *mut u8 = S::output_to_raw(value);
-                    match leaf.cas_slot_value(slot, claiming, value_ptr) {
-                        Ok(()) => {
-                            // Successfully installed value pointer.
-                        }
-                        Err(actual) => {
-                            // Invariant violation: nobody else should touch a CLAIMING slot
-                            // in the free region. If this fires, prefer leaking over double-free.
-                            debug_assert!(
-                                false,
-                                "CLAIMING->value_ptr CAS failed; expected CLAIMING, actual={actual:p}"
-                            );
-                            // Drop the value we just created (it was never installed).
-                            // SAFETY: value_ptr was just created by output_to_raw
-                            unsafe { S::cleanup_value_ptr(value_ptr) };
-                            // Best-effort release: try to reset to NULL.
-                            let _ = leaf.cas_slot_value(slot, claiming, StdPtr::null_mut());
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                    }
-
-                    // 13. Verify slot ownership (should still be value_ptr).
-                    if leaf.load_slot_value(slot) != value_ptr {
-                        // Slot was stolen after we installed value_ptr. This is unexpected
-                        // but we handle it by cleaning up our value and falling back.
-                        // SAFETY: value_ptr was just created by output_to_raw
-                        unsafe { S::cleanup_value_ptr(value_ptr) };
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 14. Final version check before permutation publish.
-                    if leaf.version().has_changed_or_locked(version) {
-                        match leaf.cas_slot_value(slot, value_ptr, StdPtr::null_mut()) {
-                            Ok(()) | Err(_) => {
-                                // SAFETY: value_ptr was just created by output_to_raw
-                                unsafe { S::cleanup_value_ptr(value_ptr) };
-                            }
-                        }
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        retries += 1;
-                        if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                            return CasInsertResultGeneric::ContentionFallback;
-                        }
-                        Self::backoff_generic(retries);
-                        continue;
-                    }
-
-                    // 15. Phase 4: CAS permutation to publish.
-                    //
-                    // The permutation CAS is the linearization point. Once it succeeds,
-                    // the insert is logically complete and visible to other threads.
-                    // No post-publish waits or checks are needed because:
-                    //
-                    // 1. Permutation freezing prevents CAS racing with splits
-                    // 2. If a split happens immediately after, entry migrates correctly
-                    // 3. Post-publish waits (stable(), wait_for_split(), permutation_wait())
-                    //    defeat the purpose of a fast path and can take milliseconds
-                    match leaf.cas_permutation_raw(perm, new_perm) {
-                        Ok(()) => {
-                            // Success! Increment count and return.
-                            self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                            return CasInsertResultGeneric::Success(None);
-                        }
-
-                        Err(failure) => {
-                            match leaf.cas_slot_value(slot, value_ptr, StdPtr::null_mut()) {
-                                Ok(()) | Err(_) => {
-                                    // SAFETY: value_ptr was just created by output_to_raw
-                                    unsafe { S::cleanup_value_ptr(value_ptr) };
-                                }
-                            }
-
-                            if failure.is_frozen() {
-                                return CasInsertResultGeneric::ContentionFallback;
-                            }
-
-                            #[cfg(feature = "tracing")]
-                            crate::tree::optimistic::CAS_INSERT_RETRY_COUNT
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                            retries += 1;
-                            if retries > Self::MAX_CAS_RETRIES_GENERIC {
-                                return CasInsertResultGeneric::ContentionFallback;
-                            }
-                            Self::backoff_generic(retries);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Exponential backoff for CAS retries.
-    ///
-    /// Marked `#[cold]` because backoff only happens during contention.
-    #[cold]
-    fn backoff_generic(retries: usize) {
-        let spins = 1usize << retries.min(6);
-        for _ in 0..spins {
-            std::hint::spin_loop();
-        }
-    }
-
-    /// Search for insert position in a leaf (generic version).
-    #[expect(clippy::unused_self, reason = "API Consistency")]
-    fn search_for_insert_generic(
-        &self,
-        leaf: &L,
-        key: &Key<'_>,
-        perm: &L::Perm,
-    ) -> InsertSearchResultGeneric {
-        use crate::leaf_trait::TreePermutation;
-        use crate::leaf24::KSUF_KEYLENX;
-        use crate::leaf24::LAYER_KEYLENX;
-        use std::cmp::Ordering;
-
-        let target_ikey: u64 = key.ikey();
-
-        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-        let search_keylenx: u8 = if key.has_suffix() {
-            KSUF_KEYLENX
-        } else {
-            key.current_len() as u8
-        };
-
-        for i in 0..perm.size() {
-            let slot: usize = perm.get(i);
-            let slot_ikey: u64 = leaf.ikey(slot);
-
-            if slot_ikey == target_ikey {
-                let slot_keylenx: u8 = leaf.keylenx(slot);
-                let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                if slot_ptr.is_null() {
-                    continue;
-                }
-
-                // Layer pointer - only descend if the new key has more bytes
-                if slot_keylenx >= LAYER_KEYLENX {
-                    if key.has_suffix() {
-                        // Key has more bytes - descend into the layer
-                        return InsertSearchResultGeneric::Layer {
-                            slot,
-                            shift_amount: 8,
-                        };
-                    }
-                    // Key terminates here - it must sort before the layer pointer.
-                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
-                }
-
-                // Exact match check
-                if slot_keylenx == search_keylenx {
-                    if slot_keylenx == KSUF_KEYLENX {
-                        // Both have suffixes - compare them
-                        let key_suffix: &[u8] = key.suffix();
-                        if let Some(slot_suffix) = leaf.ksuf(slot) {
-                            if key_suffix == slot_suffix {
-                                // Same suffix = same key
-                                return InsertSearchResultGeneric::Found { slot };
-                            }
-                            // Different suffixes = conflict, need layer
-                            return InsertSearchResultGeneric::Conflict { slot };
-                        }
-                        // No stored suffix (shouldn't happen for KSUF_KEYLENX)
-                        // but treat as conflict to be safe
-                        return InsertSearchResultGeneric::Conflict { slot };
-                    }
-                    // Inline keys (no suffix) with matching keylenx = same key
-                    return InsertSearchResultGeneric::Found { slot };
-                }
-
-                // Same ikey, different keylenx - check if conflict is needed
-                let slot_has_suffix: bool = slot_keylenx == KSUF_KEYLENX;
-                let key_has_suffix: bool = key.has_suffix();
-
-                if slot_has_suffix && key_has_suffix {
-                    // Both have suffixes with same 8-byte prefix - need layer
-                    return InsertSearchResultGeneric::Conflict { slot };
-                }
-
-                // Distinct keys with the same ikey: insertion order is determined by
-                // Masstree `key.compare(ikey, keylenx)` semantics (length vs keylenx).
-                if key.compare(slot_ikey, slot_keylenx as usize) == Ordering::Less {
-                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
-                }
+            // Check if version is still valid
+            if !leaf.version().has_changed(version) {
+                return cmp;
             }
 
-            // Sorted order - found insert position
-            if slot_ikey > target_ikey {
-                return InsertSearchResultGeneric::NotFound { logical_pos: i };
-            }
-        }
-
-        // Insert at end
-        InsertSearchResultGeneric::NotFound {
-            logical_pos: perm.size(),
-        }
-    }
-
-
-    /// Single-layer fast path for insert search (keys ≤ 8 bytes).
-    ///
-    /// Optimized version that:
-    /// - Skips suffix comparison logic  
-    /// - Only returns `Found` or `NotFound` (never `Layer` or `Conflict`)
-    ///
-    /// For layer pointers: an 8-byte key sorts BEFORE a layer pointer with
-    /// the same ikey (layer pointers handle keys > 8 bytes).
-    #[inline(always)]
-    #[expect(clippy::unused_self, reason = "API Consistency")]
-    fn search_for_insert_single_layer(
-        &self,
-        leaf: &L,
-        key: &Key<'_>,
-        perm: &L::Perm,
-    ) -> InsertSearchResultGeneric {
-        use crate::leaf_trait::TreePermutation;
-        use crate::leaf24::LAYER_KEYLENX;
-
-        let target_ikey: u64 = key.ikey();
-
-        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-        let search_keylenx: u8 = key.current_len() as u8;
-
-        for i in 0..perm.size() {
-            let slot: usize = perm.get(i);
-            let slot_ikey: u64 = leaf.ikey(slot);
-
-            if slot_ikey == target_ikey {
-                let slot_keylenx: u8 = leaf.keylenx(slot);
-                let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                if slot_ptr.is_null() {
-                    continue;
-                }
-
-                // Layer pointer: short key (≤8 bytes) sorts before layer pointer
-                // (layer pointers handle keys > 8 bytes with same prefix)
-                if slot_keylenx >= LAYER_KEYLENX {
-                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
-                }
-
-                // Exact match - same ikey and keylenx
-                if slot_keylenx == search_keylenx {
-                    return InsertSearchResultGeneric::Found { slot };
-                }
-
-                // Same ikey, different keylenx - check insertion order
-                // For single-layer, shorter keys sort before longer keys
-                if search_keylenx < slot_keylenx {
-                    return InsertSearchResultGeneric::NotFound { logical_pos: i };
-                }
-            }
-
-            // Sorted order - found insert position
-            if slot_ikey > target_ikey {
-                return InsertSearchResultGeneric::NotFound { logical_pos: i };
-            }
-        }
-
-        // Insert at end
-        InsertSearchResultGeneric::NotFound {
-            logical_pos: perm.size(),
+            // Version changed, get new stable version and retry
+            version = leaf.version().stable();
         }
     }
 
@@ -1647,6 +628,11 @@ where
     ///
     /// This is called when `has_changed(old_version)` returns true, indicating
     /// a split may have occurred. It follows B-links to find the correct leaf.
+    ///
+    /// # Algorithm (from C++ `leaf::advance_to_key`)
+    /// 1. Get stable version
+    /// 2. If `has_split` AND key > last key in leaf: walk B-link chain
+    /// 3. Otherwise: key belongs in current leaf
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_generic<'a>(
         &'a self,
@@ -1660,17 +646,24 @@ where
         let key_ikey: u64 = key.ikey();
         let mut version: u32 = leaf.version().stable();
 
-        // Only follow chain if split occurred or is in progress
-        if !leaf.version().has_split(old_version) {
-            // Double-check: split could have started after has_split check
-            if !leaf.version().is_splitting() {
-                return (leaf, version);
-            }
+        // Check if we need to walk the B-link chain
+        // C++: if (unlikely(v.has_split(oldv)) && n->stable_last_key_compare(ka, v, ti) > 0)
+        let needs_walk: bool = if leaf.version().has_split(old_version) {
+            // Split occurred - check if key is greater than last key in leaf
+            Self::stable_last_key_compare(leaf, key, version) == Ordering::Greater
+        } else if leaf.version().is_splitting() {
+            // Split in progress - wait and check
+            version = leaf.version().stable();
+            Self::stable_last_key_compare(leaf, key, version) == Ordering::Greater
+        } else {
+            false
+        };
+
+        if !needs_walk {
+            return (leaf, version);
         }
 
-        // Wait for any in-progress split to complete
-        version = leaf.version().stable();
-
+        // Walk B-link chain to find correct leaf
         while !leaf.version().is_deleted() {
             let next_raw: *mut L = leaf.next_raw();
 
@@ -1739,12 +732,6 @@ where
         loop {
             // Check hop limit to prevent unbounded B-link walks
             if hops >= Self::MAX_BLINK_HOPS {
-                #[cfg(feature = "tracing")]
-                tracing::warn!(
-                    ikey = format_args!("{:016x}", key_ikey),
-                    hops = hops,
-                    "BLINK_HOP_LIMIT_EXCEEDED: too many sibling hops, signaling re-descent"
-                );
                 return (leaf, true);
             }
 
@@ -1828,470 +815,58 @@ where
         self.insert_concurrent_generic(&mut key, output, guard)
     }
 
-    /// Internal concurrent insert with CAS fast path and locked fallback.
+    // ========================================================================
+    //  Remove Operations
+    // ========================================================================
+
+    /// Remove a key from the tree.
     ///
-    /// # Single-Layer Fast Path
+    /// Returns `Ok(Some(value))` if the key existed and was removed,
+    /// `Ok(None)` if the key was not found, or an error on failure.
     ///
-    /// When the key is ≤ 8 bytes (no suffix), uses an optimized code path that:
-    /// - Uses simplified search (no suffix/layer handling)
-    /// - Only handles `Found` and `NotFound` results
-    /// - Skips layer descent tracking
+    /// # Example
     ///
-    /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(level = "debug", skip_all, fields(ikey = %format_args!("{:016x}", key.ikey())))
-    )]
-    #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
-    fn insert_concurrent_generic(
+    /// ```rust,ignore
+    /// let tree = MassTree24::new();
+    /// tree.insert(b"key", 42)?;
+    ///
+    /// let removed = tree.remove(b"key")?;
+    /// assert_eq!(removed, Some(Arc::new(42)));
+    ///
+    /// let not_found = tree.remove(b"key")?;
+    /// assert_eq!(not_found, None);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `RemoveError::RetryLimitExceeded` if the operation cannot
+    /// complete after the retry limit (extremely rare, indicates contention).
+    pub fn remove(&self, key: &[u8]) -> Result<Option<S::Output>, RemoveError> {
+        let guard = self.guard();
+        self.remove_with_guard(key, &guard)
+    }
+
+    /// Remove a key using an existing guard.
+    ///
+    /// Use this when performing multiple operations under the same guard
+    /// to amortize guard creation overhead.
+    ///
+    /// # Errors
+    /// If fails to remove
+    pub fn remove_with_guard(
         &self,
-        key: &mut Key<'_>,
-        value: S::Output,
+        key: &[u8],
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<S::Output>, InsertError> {
-        #[cfg(feature = "tracing")]
-        let ikey_for_trace: u64 = key.ikey();
-
-        #[cfg(feature = "tracing")]
-        let _insert_start = Instant::now();
-
-        #[cfg(feature = "tracing")]
-        let mut retry_count: u32 = 0;
-
-        #[cfg(feature = "tracing")]
-        tracing::trace!(
-            ikey = format_args!("{:016x}", ikey_for_trace),
-            "INSERT_START"
-        );
-
-        // Detect single-layer mode: key ≤ 8 bytes means no suffix, no layer operations
-        let single_layer_mode: bool = !key.has_suffix();
-
-        // Track current layer root
-        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
-
-        // Track whether we're in a sublayer (for layer traversal)
-        let mut in_sublayer: bool = false;
-
-        loop {
-            // Find the actual layer root (handles layer root promotion for sublayers)
-            layer_root = self.maybe_parent_generic(layer_root);
-
-            // Locked path - traverse to leaf
-            let leaf_ptr: *mut L =
-                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
-
-            let leaf: &L = unsafe { &*leaf_ptr };
-
-            // B-link advance if needed
-            let (leaf, exceeded_hop_limit) = self.advance_to_key_by_bound_generic(leaf, key, guard);
-
-            // If we exceeded the hop limit, re-traverse from root
-            if exceeded_hop_limit {
-                layer_root = self.load_root_ptr_generic(guard);
-                continue;
-            }
-
-            // Lock the leaf
-            #[cfg(feature = "tracing")]
-            let lock_start = Instant::now();
-
-            let mut lock = leaf.version().lock();
-
-            #[cfg(feature = "tracing")]
-            #[expect(clippy::cast_possible_truncation)]
-            {
-                let lock_elapsed = lock_start.elapsed();
-                if lock_elapsed > std::time::Duration::from_millis(1) {
-                    tracing::warn!(
-                        ikey = format_args!("{:016x}", ikey_for_trace),
-                        leaf_ptr = ?std::ptr::from_ref(leaf),
-                        lock_elapsed_us = lock_elapsed.as_micros() as u64,
-                        retry_count = retry_count,
-                        "SLOW_LEAF_LOCK: acquiring leaf lock took >1ms"
-                    );
-                }
-            }
-
-            // Post-lock membership check (C++ masstree_insert/split pattern):
-            // The key may have moved to a newly-linked right sibling between:
-            // 1) `advance_to_key_by_bound_generic` and
-            // 2) acquiring the lock.
-            //
-            // If we insert into the wrong (left) leaf, the key becomes unreachable via the
-            // normal get path (which only follows B-links to the right).
-            {
-                use crate::link::{is_marked, unmark_ptr};
-
-                let next_raw: *mut L = leaf.next_raw();
-                if is_marked(next_raw) {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        ikey = format_args!("{:016x}", ikey_for_trace),
-                        leaf_ptr = ?std::ptr::from_ref(leaf),
-                        "INSERT_RETRY: leaf marked for split, waiting"
-                    );
-                    leaf.wait_for_split();
-                    drop(lock);
-                    #[cfg(feature = "tracing")]
-                    {
-                        retry_count += 1;
-                    }
-                    continue;
-                }
-
-                let next_ptr: *mut L = unmark_ptr(next_raw);
-                if !next_ptr.is_null() {
-                    // SAFETY: next_ptr is a valid leaf pointer (protected by the guard).
-                    let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
-                    if key.ikey() >= next_bound {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            ikey = format_args!("{:016x}", ikey_for_trace),
-                            leaf_ptr = ?std::ptr::from_ref(leaf),
-                            next_bound = format_args!("{:016x}", next_bound),
-                            "INSERT_RETRY: key moved to next sibling (post-lock check)"
-                        );
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::WRONG_LEAF_INSERT_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        drop(lock);
-                        #[cfg(feature = "tracing")]
-                        {
-                            retry_count += 1;
-                        }
-                        continue;
-                    }
-                }
-            }
-
-            // Get permutation (must not be frozen since we hold lock)
-            let perm = leaf.permutation();
-
-            // ================================================================
-            // Single-layer fast path (keys ≤ 8 bytes)
-            // ================================================================
-            if single_layer_mode {
-                let search_result = self.search_for_insert_single_layer(leaf, key, &perm);
-
-                match search_result {
-                    InsertSearchResultGeneric::Found { slot } => {
-                        // Key exists - update value
-                        let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-                        if !old_ptr.is_null() {
-                            let old_output: S::Output = unsafe { S::output_from_raw(old_ptr) };
-                            let new_ptr: *mut u8 = S::output_consume_to_raw(value);
-
-                            lock.mark_insert();
-                            leaf.set_leaf_value_ptr(slot, new_ptr);
-                            drop(lock);
-
-                            unsafe {
-                                guard.defer_retire(old_ptr, |ptr, _| {
-                                    S::cleanup_value_ptr(ptr);
-                                });
-                            }
-
-                            #[cfg(feature = "tracing")]
-                            crate::tree::optimistic::LOCKED_INSERT_COUNT
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                            return Ok(Some(old_output));
-                        }
-                        drop(lock);
-                        continue;
-                    }
-
-                    InsertSearchResultGeneric::NotFound { logical_pos } => {
-                        let ikey: u64 = key.ikey();
-
-                        // Check if leaf has space
-                        if perm.size() >= L::WIDTH {
-                            let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
-                            self.handle_leaf_split_generic(
-                                leaf_ptr_current,
-                                lock,
-                                logical_pos,
-                                ikey,
-                                guard,
-                            )?;
-                            continue;
-                        }
-
-                        let slot: usize = perm.back();
-
-                        // Check slot-0 rule
-                        if slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                            let free_count: usize = L::WIDTH - perm.size();
-                            let mut found_slot: Option<(usize, usize)> = None;
-
-                            for offset in 1..free_count {
-                                let candidate: usize = perm.back_at_offset(offset);
-                                if candidate != 0 {
-                                    found_slot = Some((candidate, offset));
-                                    break;
-                                }
-                            }
-
-                            if let Some((alt_slot, back_offset)) = found_slot {
-                                self.assign_slot_generic(leaf, &mut lock, alt_slot, key, &value, guard);
-
-                                let mut new_perm = perm;
-                                let back_pos: usize = L::WIDTH - 1;
-                                let chosen_pos: usize = back_pos - back_offset;
-                                new_perm.swap_free_slots(back_pos, chosen_pos);
-                                let allocated: usize = new_perm.insert_from_back(logical_pos);
-                                debug_assert_eq!(allocated, alt_slot, "allocated unexpected slot");
-                                leaf.set_permutation(new_perm);
-                                drop(lock);
-
-                                self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                                #[cfg(feature = "tracing")]
-                                crate::tree::optimistic::LOCKED_INSERT_COUNT
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                                return Ok(None);
-                            }
-
-                            let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
-                            self.handle_leaf_split_generic(
-                                leaf_ptr_current,
-                                lock,
-                                logical_pos,
-                                ikey,
-                                guard,
-                            )?;
-                            continue;
-                        }
-
-                        self.assign_slot_generic(leaf, &mut lock, slot, key, &value, guard);
-
-                        let mut new_perm = perm;
-                        let allocated: usize = new_perm.insert_from_back(logical_pos);
-                        debug_assert_eq!(allocated, slot, "allocated unexpected slot");
-                        leaf.set_permutation(new_perm);
-                        drop(lock);
-
-                        self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::LOCKED_INSERT_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        return Ok(None);
-                    }
-
-                    // These can't happen - search_for_insert_single_layer only returns Found/NotFound
-                    InsertSearchResultGeneric::Layer { .. }
-                    | InsertSearchResultGeneric::Conflict { .. } => {
-                        unreachable!("single-layer search never returns Layer or Conflict")
-                    }
-                }
-            }
-
-            // ================================================================
-            // Multi-layer path (handles layer descent and conflicts)
-            // ================================================================
-
-            // Search for insert position
-            let search_result = self.search_for_insert_generic(leaf, key, &perm);
-
-            match search_result {
-                InsertSearchResultGeneric::Found { slot } => {
-                    // Key exists - update value
-                    let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-                    if !old_ptr.is_null() {
-                        // Clone old value for return BEFORE we store new pointer.
-                        // SAFETY: old_ptr is non-null and came from output_to_raw
-                        let old_output: S::Output = unsafe { S::output_from_raw(old_ptr) };
-
-                        let new_ptr: *mut u8 = S::output_consume_to_raw(value);
-
-                        // Mark insert, store value, unlock happens on drop
-                        lock.mark_insert();
-                        leaf.set_leaf_value_ptr(slot, new_ptr);
-                        drop(lock);
-
-                        // Defer retirement of the old value.
-                        // This ensures readers who captured old_ptr before our store
-                        // can safely complete their validation and retry.
-                        // SAFETY: old_ptr came from output_to_raw
-                        unsafe {
-                            guard.defer_retire(old_ptr, |ptr, _| {
-                                S::cleanup_value_ptr(ptr);
-                            });
-                        }
-
-                        #[cfg(feature = "tracing")]
-                        crate::tree::optimistic::LOCKED_INSERT_COUNT
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        return Ok(Some(old_output));
-                    }
-                    drop(lock);
-                }
-
-                InsertSearchResultGeneric::NotFound { logical_pos } => {
-                    let ikey: u64 = key.ikey();
-
-                    // New key - check if leaf has space
-                    if perm.size() >= L::WIDTH {
-                        // Leaf is full - perform split using SPLIT-THEN-RETRY pattern
-                        let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
-
-                        // Split the leaf (takes lock ownership, releases before returning)
-                        self.handle_leaf_split_generic(
-                            leaf_ptr_current,
-                            lock, // Move lock ownership
-                            logical_pos,
-                            ikey,
-                            guard,
-                        )?;
-
-                        // Lock was released by handle_leaf_split_generic.
-                        // Retry the insert - next iteration will find correct leaf with space.
-                        continue;
-                    }
-
-                    // Pick a free slot, handling slot-0 / ikey_bound invariant.
-                    // Since we hold the lock, we can use perm.back() directly.
-                    let slot: usize = perm.back();
-
-                    // Check slot-0 rule: slot 0 stores ikey_bound and can only be
-                    // reused if the new key has the same ikey as the current bound.
-                    if slot == 0 && !leaf.can_reuse_slot0(ikey) {
-                        // Need to find another slot or split.
-                        // Scan free region for a non-zero slot.
-                        let free_count: usize = L::WIDTH - perm.size();
-                        let mut found_slot: Option<(usize, usize)> = None;
-
-                        for offset in 1..free_count {
-                            let candidate: usize = perm.back_at_offset(offset);
-                            if candidate != 0 {
-                                found_slot = Some((candidate, offset));
-                                break;
-                            }
-                        }
-
-                        if let Some((alt_slot, back_offset)) = found_slot {
-                            // Use the alternative slot
-                            self.assign_slot_generic(leaf, &mut lock, alt_slot, key, &value, guard);
-
-                            let mut new_perm = perm;
-                            let back_pos: usize = L::WIDTH - 1;
-                            let chosen_pos: usize = back_pos - back_offset;
-                            new_perm.swap_free_slots(back_pos, chosen_pos);
-                            let allocated: usize = new_perm.insert_from_back(logical_pos);
-                            debug_assert_eq!(allocated, alt_slot, "allocated unexpected slot");
-                            leaf.set_permutation(new_perm);
-                            drop(lock);
-
-                            self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                            #[cfg(feature = "tracing")]
-                            crate::tree::optimistic::LOCKED_INSERT_COUNT
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                            return Ok(None);
-                        }
-
-                        // Only slot 0 is free and can't be reused - must split
-                        let leaf_ptr_current: *mut L = std::ptr::from_ref(leaf).cast_mut();
-                        self.handle_leaf_split_generic(
-                            leaf_ptr_current,
-                            lock,
-                            logical_pos,
-                            ikey,
-                            guard,
-                        )?;
-                        continue;
-                    }
-
-                    // Use perm.back() directly - simple case
-                    self.assign_slot_generic(leaf, &mut lock, slot, key, &value, guard);
-
-                    let mut new_perm = perm;
-                    let allocated: usize = new_perm.insert_from_back(logical_pos);
-                    debug_assert_eq!(allocated, slot, "allocated unexpected slot");
-                    leaf.set_permutation(new_perm);
-                    drop(lock);
-
-                    self.count.fetch_add(1, AtomicOrdering::Relaxed);
-                    #[cfg(feature = "tracing")]
-                    crate::tree::optimistic::LOCKED_INSERT_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    return Ok(None);
-                }
-
-                InsertSearchResultGeneric::Layer { slot, .. } => {
-                    // Descend into sublayer
-                    let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-                    drop(lock);
-
-                    key.shift();
-
-                    layer_root = layer_ptr;
-                    in_sublayer = true; // We're now in a sublayer
-                }
-
-                InsertSearchResultGeneric::Conflict { slot } => {
-                    // =================================================================
-                    // Suffix Conflict: Same ikey, different suffix
-                    // Create a new layer to distinguish the keys
-                    // =================================================================
-
-                    // Mark insert before modifying the node
-                    lock.mark_insert();
-
-                    // Create new layer for the conflicting keys
-                    //
-                    // SAFETY:
-                    // - We hold the lock on `leaf`
-                    // - `guard` is from this tree's collector
-                    let layer_ptr: *mut u8 = unsafe {
-                        self.create_layer_concurrent_generic(leaf, slot, key, value.clone(), guard)
-                    };
-
-                    // CRITICAL: Defer retirement of the existing value in the conflict slot.
-                    //
-                    // The create_layer_concurrent_generic function cloned it via try_clone_output(),
-                    // so the slot's reference is now redundant. We must retire it to avoid
-                    // leaking memory when we overwrite with the layer pointer.
-                    //
-                    // IMPORTANT: We use defer_retire instead of immediate cleanup because
-                    // concurrent get_ref() readers may still hold references to this value.
-                    // The guard ensures the value isn't freed until all readers have completed.
-                    //
-                    // SAFETY:
-                    // - We hold the lock, so no concurrent modification
-                    // - old_ptr came from output_to_raw during the original insert
-                    // - defer_retire ensures readers complete before cleanup
-                    let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
-                    if !old_ptr.is_null() {
-                        unsafe {
-                            guard.defer_retire(old_ptr, |ptr, _| {
-                                S::cleanup_value_ptr(ptr);
-                            });
-                        }
-                    }
-
-                    // Clear any existing suffix for this slot
-                    // SAFETY: We hold the lock
-                    unsafe { leaf.clear_ksuf(slot, guard) };
-
-                    // Install the layer pointer in the conflict slot
-                    //
-                    // NOTE: The original ikey remains unchanged (it's the shared prefix).
-                    // We only change keylenx to indicate this is now a layer pointer,
-                    // and set the pointer to the new layer chain.
-                    leaf.set_keylenx(slot, LAYER_KEYLENX);
-                    leaf.set_leaf_value_ptr(slot, layer_ptr);
-
-                    // Release lock and increment entry count
-                    // (new key was added to the layer, so count increases by 1)
-                    drop(lock);
-                    self.count.fetch_add(1, AtomicOrdering::Relaxed);
-
-                    #[cfg(feature = "tracing")]
-                    crate::tree::optimistic::LOCKED_INSERT_COUNT
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    return Ok(None);
-                }
-            }
-        }
+    ) -> Result<Option<S::Output>, RemoveError> {
+        NodeCleaner::remove_concurrent_generic(self, key, guard)
+    }
+
+    /// Decrement the entry count after successful removal.
+    ///
+    /// Called by `finish_remove_generic` after updating the permutation.
+    #[inline(always)]
+    pub(crate) fn dec_count(&self) {
+        self.count.fetch_sub(1, AtomicOrdering::Relaxed);
     }
 
     /// Assign a value to a slot in a locked leaf.
@@ -2332,490 +907,5 @@ where
             let keylenx: u8 = key.current_len() as u8;
             leaf.set_keylenx(slot, keylenx);
         }
-    }
-
-    // ========================================================================
-    // Generic Split Methods
-    // ========================================================================
-
-    /// Handle a leaf split when the leaf is full.
-    ///
-    /// This function implements the SPLIT-THEN-RETRY pattern:
-    ///
-    /// # Performance
-    ///
-    /// Marked `#[cold]` because splits are rare (~1 per WIDTH inserts).
-    /// Marked `#[inline(never)]` to keep split code out of the hot insert path.
-    /// 1. Calculate split point
-    /// 2. Allocate new leaf (pre-allocation before marking split)
-    /// 3. Mark split in progress
-    /// 4. Perform split (creates split-locked right sibling)
-    /// 5. Link leaves (B-link)
-    /// 6. Propagate to parent using TRUE hand-over-hand
-    /// 7. Return Ok - caller retries insert
-    ///
-    /// # Arguments
-    ///
-    /// - `left_leaf_ptr`: Pointer to the leaf being split
-    /// - `lock`: Lock guard (ownership transferred to propagation)
-    /// - `logical_pos`: Insert position for split point calculation
-    /// - `ikey`: Key being inserted
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Lock Protocol
-    ///
-    /// The left leaf's lock is maintained throughout propagation. This is the
-    /// key difference from the previous (broken) implementation that dropped
-    /// the lock before propagation.
-    ///
-    /// # Split-Locked Right Sibling
-    ///
-    /// The right sibling is created with a split-locked version in
-    /// `split_into_preallocated()`. This is NOT done by the allocator.
-    /// The split-locked version prevents other threads from operating on
-    /// the right sibling until its parent pointer is set.
-    ///
-    /// # C++ Reference
-    ///
-    /// Matches `tcursor::make_split()` in `reference/masstree_split.hh:179-297`.
-    #[cfg_attr(
-    feature = "tracing",
-    tracing::instrument(
-        level = "debug",
-        skip(self, lock, guard),
-        fields(
-            left_leaf = ?left_leaf_ptr,
-            ikey = %format_args!("{:016x}", ikey)
-        )
-    )
-)]
-    #[cold]
-    #[inline(never)]
-    fn handle_leaf_split_generic(
-        &self,
-        left_leaf_ptr: *mut L,
-        lock: crate::nodeversion::LockGuard<'_>,
-        logical_pos: usize,
-        ikey: u64,
-        guard: &LocalGuard<'_>,
-    ) -> Result<(), InsertError> {
-        #[cfg(feature = "tracing")]
-        let split_start = Instant::now();
-
-        #[cfg(feature = "tracing")]
-        tracing::info!(
-            left_leaf_ptr = ?left_leaf_ptr,
-            ikey = format_args!("{:016x}", ikey),
-            logical_pos,
-            "SPLIT_START: beginning leaf split"
-        );
-
-        let left_leaf: &L = unsafe { &*left_leaf_ptr };
-        #[cfg(feature = "tracing")]
-        crate::tree::optimistic::SPLIT_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
-
-        // Calculate split point
-        let split_point = left_leaf
-            .calculate_split_point(logical_pos, ikey)
-            .ok_or(InsertError::SplitFailed)?;
-
-        // =========================================================================
-        //  CRITICAL: Capture root status BEFORE mark_split
-        // =========================================================================
-        //
-        // SPLIT_UNLOCK_MASK clears ROOT_BIT on unlock. We must capture both
-        // booleans separately BEFORE marking:
-        //
-        // - is_main_root: This leaf is THE main tree root (root_ptr points here)
-        // - is_layer_root: This leaf is a layer root (null parent, root flag, NOT main)
-        //
-        // These are MUTUALLY EXCLUSIVE for handling:
-        // - Main root: CAS on root_ptr to install new internode
-        // - Layer root: NO CAS, just parent pointer updates
-
-        let root_flag_set: bool = left_leaf.version().is_root();
-        let parent_is_null: bool = left_leaf.parent().is_null();
-
-        let is_main_root: bool = root_flag_set && {
-            let current_root: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
-            std::ptr::eq(current_root, left_leaf_ptr)
-        };
-
-        // Layer root: has root flag, null parent, but is NOT the main tree root
-        let is_layer_root: bool = root_flag_set && parent_is_null && !is_main_root;
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            root_flag_set,
-            parent_is_null,
-            is_main_root,
-            is_layer_root,
-            "SPLIT_START: captured root status BEFORE mark_split"
-        );
-
-        // Allocate new leaf BEFORE marking split
-        // This ensures allocation doesn't happen while we hold the split lock
-        let new_leaf: Box<L> = L::new_boxed();
-
-        // Mark split in progress (sets SPLITTING_BIT)
-        let mut lock = lock;
-        lock.mark_split();
-
-        // Perform the split
-        // NOTE: The right sibling receives a split-locked version from
-        // split_into_preallocated() - this is NOT done by the allocator!
-        // insert_target is ignored - we use SPLIT-THEN-RETRY pattern
-        let (new_leaf_box, split_ikey, _insert_target) =
-            unsafe { left_leaf.split_into_preallocated(split_point.pos, new_leaf, guard) };
-
-        // Allocate new leaf in allocator (just tracks it, doesn't set version)
-        let right_leaf_ptr: *mut L = self.allocator.alloc_leaf(new_leaf_box);
-
-        #[cfg(feature = "tracing")]
-        {
-            let right_leaf: &L = unsafe { &*right_leaf_ptr };
-            tracing::debug!(
-                right_leaf_ptr = ?right_leaf_ptr,
-                split_ikey = format_args!("{:016x}", split_ikey),
-                right_is_split_locked = right_leaf.version().is_split_locked(),
-                "SPLIT_CREATED: right sibling allocated (split-locked by split_into_preallocated)"
-            );
-        }
-
-        // Link leaves in B-link order (while left is still locked)
-        unsafe { left_leaf.link_sibling(right_leaf_ptr) };
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            left_leaf_ptr = ?left_leaf_ptr,
-            right_leaf_ptr = ?right_leaf_ptr,
-            "SPLIT_LINKED: B-link established"
-        );
-
-        // =========================================================================
-        // TRUE HAND-OVER-HAND PROPAGATION
-        // =========================================================================
-        //
-        // Pass ownership of the lock to Propagation::make_split_leaf.
-        // The lock is maintained throughout propagation - this is the key
-        // difference from the previous (broken) implementation.
-
-        let result: Result<(), InsertError> = Propagation::make_split_leaf::<S, L, A>(
-            &self.root_ptr,
-            &self.allocator,
-            left_leaf_ptr,
-            lock, // Ownership transferred - lock maintained during propagation
-            right_leaf_ptr,
-            split_ikey,
-            is_main_root,
-            is_layer_root,
-            guard,
-        );
-
-        #[cfg(feature = "tracing")]
-        #[expect(clippy::cast_possible_truncation, reason = "logs")]
-        {
-            let total_elapsed = split_start.elapsed();
-            if total_elapsed > std::time::Duration::from_millis(1) {
-                tracing::warn!(
-                    left_leaf_ptr = ?left_leaf_ptr,
-                    right_leaf_ptr = ?right_leaf_ptr,
-                    split_ikey = format_args!("{:016x}", split_ikey),
-                    total_elapsed_us = total_elapsed.as_micros() as u64,
-                    "SLOW_SPLIT: leaf split took >1ms"
-                );
-            }
-        }
-
-        result
-    }
-
-    /// Propagate a leaf split to the parent.
-    ///
-    /// # Arguments
-    /// * `is_layer_root` - True if the left leaf was a layer root BEFORE the lock was dropped.
-    ///   This must be captured before `drop(lock)` because `SPLIT_UNLOCK_MASK` clears `ROOT_BIT`.
-    ///
-    /// # Help-Along Protocol
-    ///
-    /// The right sibling (`right_leaf_ptr`) is created with a split-locked version
-    /// ([`LOCK_BIT`] | [`SPLITTING_BIT`] set). This function unlocks it after setting its
-    /// parent pointer. This prevents other threads from trying to split the right
-    /// sibling while its parent is NULL.
-    ///
-    /// All exit paths must call `(*right_leaf_ptr).version().unlock_for_split()`.
-    /// Try to find the child index for a given child pointer in an internode.
-    ///
-    /// Returns `Some(index)` if found, `None` if not found. Use this in retry loops
-    /// where not finding the child is a valid transient state during concurrent splits.
-    #[expect(clippy::unused_self, reason = "API Consistency")]
-    fn try_find_child_index_generic(&self, parent: &L::Internode, child: *mut u8) -> Option<usize> {
-        use crate::leaf_trait::TreeInternode;
-
-        let nkeys = parent.nkeys();
-        (0..=nkeys).find(|&i| parent.child(i) == child)
-    }
-
-    /// Find the child index for a given child pointer in an internode.
-    /// Panics if not found.
-    #[expect(clippy::expect_used, reason = "FATAL: Fail Fast")]
-    fn find_child_index_generic(&self, parent: &L::Internode, child: *mut u8) -> usize {
-        self.try_find_child_index_generic(parent, child)
-            .expect("Child not found in parent internode")
-    }
-}
-
-// =============================================================================
-// Generic Layer Creation
-// =============================================================================
-
-impl<S, L, A> MassTreeGeneric<S, L, A>
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    /// Create a new layer for suffix conflict (generic version).
-    ///
-    /// Called when two keys share the same 8-byte ikey but have different suffixes.
-    /// Creates a twig chain if needed, ending in a leaf with both keys.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Extract existing key's suffix and Arc value from conflict slot
-    /// 2. Shift `new_key` past the matching ikey
-    /// 3. While both keys have matching ikeys AND both have more bytes:
-    ///    - Create intermediate "twig" layer node with just the matching ikey
-    ///    - Chain twig nodes together via layer pointers
-    /// 4. Create final leaf with both keys (now diverged)
-    /// 5. Link twig chain to final leaf
-    /// 6. Return head of chain (or final leaf if no chain)
-    ///
-    /// # Arguments
-    ///
-    /// * `parent_leaf` - The leaf containing the conflict slot
-    /// * `conflict_slot` - Physical slot index with the existing key
-    /// * `new_key` - The new key being inserted (will be mutated via shift)
-    /// * `new_value` - Arc value for the new key
-    /// * `guard` - Seize guard for memory reclamation
-    ///
-    /// # Returns
-    ///
-    /// Raw pointer to the head of the layer chain (either a twig or the final leaf).
-    /// This pointer should be stored in the conflict slot with `LAYER_KEYLENX`.
-    ///
-    /// # Safety
-    ///
-    /// - Caller must hold the lock on `parent_leaf`
-    /// - Caller must have called `lock.mark_insert()` before calling this
-    /// - `guard` must come from this tree's collector
-    ///
-    /// # Performance
-    ///
-    /// Marked `#[cold]` because layer creation is rare (only for suffix conflicts).
-    #[cold]
-    #[inline(never)]
-    unsafe fn create_layer_concurrent_generic(
-        &self,
-        parent_leaf: &L,
-        conflict_slot: usize,
-        new_key: &mut Key<'_>,
-        new_value: S::Output,
-        guard: &LocalGuard<'_>,
-    ) -> *mut u8 {
-        // =====================================================================
-        // Step 1: Extract existing key's suffix and Arc value
-        // =====================================================================
-
-        // Get existing suffix (empty slice if no suffix stored)
-        let existing_suffix: &[u8] = parent_leaf.ksuf(conflict_slot).unwrap_or(&[]);
-
-        // Create a Key iterator from the existing suffix for comparison
-        let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
-
-        // Clone the existing value from the conflict slot
-        // INVARIANT: Conflict case means the slot contains a value, not a layer pointer.
-        let existing_output: Option<S::Output> = parent_leaf.try_clone_output(conflict_slot);
-        debug_assert!(
-            existing_output.is_some(),
-            "create_layer_concurrent_generic: conflict slot {} should contain a value, \
-             not a layer pointer. keylenx={}",
-            conflict_slot,
-            parent_leaf.keylenx(conflict_slot)
-        );
-
-        // =====================================================================
-        // Step 2: Shift new_key past the matching ikey
-        // =====================================================================
-
-        // The new_key's current ikey matched the conflict slot's ikey.
-        // If new_key has more bytes (suffix), shift to the next 8-byte chunk.
-        if new_key.has_suffix() {
-            new_key.shift();
-        }
-
-        // =====================================================================
-        // Step 3: Compare keys to determine twig chain depth
-        // =====================================================================
-
-        // Compare the next ikeys of both keys
-        let mut cmp: Ordering = existing_key.compare(new_key.ikey(), new_key.current_len());
-
-        // =====================================================================
-        // Step 4: Create twig chain while ikeys match AND both have more bytes
-        // =====================================================================
-
-        // Twig chain head (first twig node, returned to caller)
-        let mut twig_head: Option<*mut L> = None;
-        // Twig chain tail (last twig node, where we link the next node)
-        let mut twig_tail: *mut L = std::ptr::null_mut();
-
-        while cmp == Ordering::Equal && existing_key.has_suffix() && new_key.has_suffix() {
-            // Both keys have the same ikey at this level AND both have more bytes.
-            // Create an intermediate twig node that just holds this matching ikey.
-
-            // Allocate new twig node configured as layer root
-            let twig: Box<L> = L::new_layer_root_boxed();
-            let twig_ptr: *mut L = self.allocator.alloc_leaf(twig);
-
-            // Initialize twig with the matching ikey in slot 0
-            // SAFETY: twig_ptr is valid, we just allocated it
-            unsafe {
-                (*twig_ptr).set_ikey(0, existing_key.ikey());
-                // Twig has exactly 1 entry (the matching ikey, will point to next layer)
-                (*twig_ptr).set_permutation(<L::Perm as TreePermutation>::make_sorted(1));
-            }
-
-            // Link to previous twig in chain (if any)
-            if twig_head.is_some() {
-                // Previous twig's slot 0 now points to this twig as a layer
-                // SAFETY: twig_tail is valid from previous iteration
-                unsafe {
-                    (*twig_tail).set_keylenx(0, LAYER_KEYLENX);
-                    (*twig_tail).set_leaf_value_ptr(0, twig_ptr.cast::<u8>());
-                }
-            } else {
-                // First twig becomes the head of the chain
-                twig_head = Some(twig_ptr);
-            }
-            twig_tail = twig_ptr;
-
-            // Shift both keys to compare the next 8-byte chunk
-            existing_key.shift();
-            new_key.shift();
-            cmp = existing_key.compare(new_key.ikey(), new_key.current_len());
-        }
-
-        // =====================================================================
-        // Step 5: Create final leaf with both keys (now diverged or one is prefix)
-        // =====================================================================
-
-        let final_leaf: Box<L> = L::new_layer_root_boxed();
-        let final_ptr: *mut L = self.allocator.alloc_leaf(final_leaf);
-
-        // Assign both entries to the final leaf in sorted order
-        // SAFETY: final_ptr is valid (just allocated), guard is from caller
-        unsafe {
-            self.assign_final_layer_entries(
-                final_ptr,
-                &existing_key,
-                existing_output,
-                new_key,
-                Some(new_value),
-                cmp,
-                guard,
-            );
-        }
-
-        // =====================================================================
-        // Step 6: Link twig chain to final leaf
-        // =====================================================================
-
-        twig_head.map_or_else(
-            || final_ptr.cast::<u8>(),
-            |head| {
-                // Link last twig to the final leaf
-                // SAFETY: twig_tail is valid (we have at least one twig since head is Some)
-                unsafe {
-                    (*twig_tail).set_keylenx(0, LAYER_KEYLENX);
-                    (*twig_tail).set_leaf_value_ptr(0, final_ptr.cast::<u8>());
-                }
-                // Return head of twig chain
-                head.cast::<u8>()
-            },
-        )
-    }
-
-    /// Assign two entries to the final layer leaf in sorted order.
-    ///
-    /// The entries are ordered by:
-    /// 1. ikey comparison (lexicographic via u64 big-endian)
-    /// 2. If ikeys equal: shorter key first (prefix before extension)
-    ///
-    /// # Safety
-    ///
-    /// - `final_ptr` must be valid and point to an empty leaf
-    /// - `guard` must come from this tree's collector
-    /// - Caller must ensure no concurrent access to `final_ptr`
-    #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    #[expect(clippy::unused_self, reason = "API Consistency")]
-    unsafe fn assign_final_layer_entries(
-        &self,
-        final_ptr: *mut L,
-        existing_key: &Key<'_>,
-        existing_output: Option<S::Output>,
-        new_key: &Key<'_>,
-        new_arc: Option<S::Output>,
-        cmp: Ordering,
-        guard: &LocalGuard<'_>,
-    ) {
-        // SAFETY: final_ptr is valid per caller contract
-        let final_leaf: &L = unsafe { &*final_ptr };
-
-        match cmp {
-            Ordering::Less => {
-                // existing_key.ikey() < new_key.ikey()
-                // existing goes in slot 0, new goes in slot 1
-                // SAFETY: guard requirement passed through from caller
-                unsafe {
-                    final_leaf.assign_from_key_arc(0, existing_key, existing_output, guard);
-                    final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
-                }
-            }
-            Ordering::Greater => {
-                // new_key.ikey() < existing_key.ikey()
-                // new goes in slot 0, existing goes in slot 1
-                // SAFETY: guard requirement passed through from caller
-                unsafe {
-                    final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
-                    final_leaf.assign_from_key_arc(1, existing_key, existing_output, guard);
-                }
-            }
-            Ordering::Equal => {
-                // Keys have same ikey at this level.
-                // This happens when one key is a prefix of the other.
-                // Convention: shorter key first (prefix before extension).
-                if existing_key.current_len() <= new_key.current_len() {
-                    // existing is shorter or equal length -> existing first
-                    // SAFETY: guard requirement passed through from caller
-                    unsafe {
-                        final_leaf.assign_from_key_arc(0, existing_key, existing_output, guard);
-                        final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
-                    }
-                } else {
-                    // new is shorter -> new first
-                    // SAFETY: guard requirement passed through from caller
-                    unsafe {
-                        final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
-                        final_leaf.assign_from_key_arc(1, existing_key, existing_output, guard);
-                    }
-                }
-            }
-        }
-
-        // Set permutation: final leaf now has exactly 2 entries in slots 0 and 1
-        final_leaf.set_permutation(<L::Perm as TreePermutation>::make_sorted(2));
     }
 }

@@ -1,6 +1,6 @@
 //! Filepath: src/tree/range/mod.rs
 //!
-//! Range scan module for [`MassTree`].
+//! Range scan module for [`crate::MassTree`].
 //!
 //! This module implements ordered range iteration over the tree.
 //!
@@ -11,7 +11,7 @@
 //! - `helper`: Forward scan helper and lower bound search
 //! - `find`: Core algorithm (`find_initial`, `find_next`, `find_retry`)
 //! - `iterator`: [`RangeIter`] and [`ScanEntry`] types
-//! - `api`: Public API methods on [`MassTreeGeneric`]
+//! - `api`: Public API methods on [`crate::MassTreeGeneric`]
 //!
 //! # Public API
 //!
@@ -39,10 +39,20 @@
 //!
 
 mod api;
+#[allow(
+    dead_code,
+    reason = "scaffolding for future features (reverse iteration, layer optimization)"
+)]
 mod cursor_key;
+#[allow(dead_code, reason = "scaffolding for future features")]
 mod find;
+#[allow(
+    dead_code,
+    reason = "scaffolding for future features (reverse iteration)"
+)]
 mod helper;
 mod iterator;
+#[allow(dead_code, reason = "scaffolding for future features")]
 mod scan_state;
 
 // Re-export public types

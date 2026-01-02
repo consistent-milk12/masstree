@@ -177,7 +177,14 @@ mod sequential_full_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -207,7 +214,14 @@ mod sequential_full_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -288,7 +302,14 @@ mod reverse_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -318,7 +339,14 @@ mod reverse_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -403,7 +431,14 @@ mod clustered_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -433,7 +468,14 @@ mod clustered_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -516,7 +558,14 @@ mod sparse_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -546,7 +595,14 @@ mod sparse_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -629,7 +685,14 @@ mod shared_prefix_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -659,7 +722,14 @@ mod shared_prefix_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -740,7 +810,14 @@ mod suffix_differ_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -770,7 +847,14 @@ mod suffix_differ_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -856,7 +940,14 @@ mod hierarchical_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -886,7 +977,14 @@ mod hierarchical_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -967,7 +1065,14 @@ mod adversarial_splits_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -997,7 +1102,14 @@ mod adversarial_splits_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1090,7 +1202,14 @@ mod interleaved_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1124,7 +1243,14 @@ mod interleaved_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1205,7 +1331,14 @@ mod blink_stress_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1235,7 +1368,14 @@ mod blink_stress_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1316,7 +1456,14 @@ mod random_keys_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1346,7 +1493,14 @@ mod random_keys_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1427,7 +1581,14 @@ mod long_keys_scan {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1457,7 +1618,14 @@ mod long_keys_scan {
                             barrier.wait();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                total += map.iter().take(SCAN_LIMIT).count();
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1483,7 +1651,8 @@ mod scan_while_insert {
     const INSERT_N: usize = 100_000;
     const WRITERS: usize = 2;
 
-    #[divan::bench(args = [2, 4, 8, 16, 32])]
+    // Minimum 3 threads: 2 writers + 1 reader
+    #[divan::bench(args = [3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
         let initial_keys = keys::<8>(INITIAL_N);
         let insert_keys: Vec<_> = keys::<8>(INITIAL_N + INSERT_N)[INITIAL_N..].to_vec();
@@ -1551,7 +1720,7 @@ mod scan_while_insert {
             });
     }
 
-    #[divan::bench(args = [2, 4, 8, 16, 32])]
+    #[divan::bench(args = [3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
         let initial_keys = keys::<8>(INITIAL_N);
         let insert_keys: Vec<_> = keys::<8>(INITIAL_N + INSERT_N)[INITIAL_N..].to_vec();
@@ -1590,7 +1759,14 @@ mod scan_while_insert {
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let guard = sdd::Guard::new();
-                                total += tree.iter(&guard).take(SCAN_LIMIT).count();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
                             }
                             black_box(total);
                         })
@@ -1661,7 +1837,8 @@ mod prefix_scan {
 mod full_scan_aggregate {
     use super::*;
 
-    const SCAN_N: usize = 100_000; // Smaller dataset for full scans
+    const SCAN_N: usize = 50_000; // Smaller dataset for full scans
+    const FULL_SCAN_OPS: usize = 100; // Reduced iterations for full scans
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree24(bencher: Bencher, threads: usize) {
@@ -1669,9 +1846,7 @@ mod full_scan_aggregate {
         let tree = Arc::new(setup_masstree24(&keys));
 
         bencher
-            .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD / 10),
-            ))
+            .counter(divan::counter::ItemsCount::new(threads * FULL_SCAN_OPS))
             .bench_local(|| {
                 let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -1681,7 +1856,7 @@ mod full_scan_aggregate {
                         thread::spawn(move || {
                             barrier.wait();
                             let mut grand_total = 0u64;
-                            for _ in 0..(OPS_PER_THREAD / 10) {
+                            for _ in 0..FULL_SCAN_OPS {
                                 let guard = tree.guard();
                                 let mut sum = 0u64;
                                 tree.scan_ref(
@@ -1712,9 +1887,7 @@ mod full_scan_aggregate {
         let tree = Arc::new(setup_tree_index(&keys));
 
         bencher
-            .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD / 10),
-            ))
+            .counter(divan::counter::ItemsCount::new(threads * FULL_SCAN_OPS))
             .bench_local(|| {
                 let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -1724,7 +1897,7 @@ mod full_scan_aggregate {
                         thread::spawn(move || {
                             barrier.wait();
                             let mut grand_total = 0u64;
-                            for _ in 0..(OPS_PER_THREAD / 10) {
+                            for _ in 0..FULL_SCAN_OPS {
                                 let guard = sdd::Guard::new();
                                 let sum: u64 = tree.iter(&guard).map(|(_, v)| *v).sum();
                                 grand_total += sum;
@@ -1746,9 +1919,7 @@ mod full_scan_aggregate {
         let map = Arc::new(setup_indexset(&keys));
 
         bencher
-            .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD / 10),
-            ))
+            .counter(divan::counter::ItemsCount::new(threads * FULL_SCAN_OPS))
             .bench_local(|| {
                 let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -1758,7 +1929,7 @@ mod full_scan_aggregate {
                         thread::spawn(move || {
                             barrier.wait();
                             let mut grand_total = 0u64;
-                            for _ in 0..(OPS_PER_THREAD / 10) {
+                            for _ in 0..FULL_SCAN_OPS {
                                 let sum: u64 = map.iter().map(|(_, v)| *v).sum();
                                 grand_total += sum;
                             }
@@ -1768,6 +1939,524 @@ mod full_scan_aggregate {
                     .collect();
 
                 for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 16: INSERT-HEAVY - 90% writes, 10% reads (high write contention)
+// =============================================================================
+
+#[divan::bench_group(name = "16_insert_heavy")]
+mod insert_heavy {
+    use super::*;
+
+    const INITIAL_N: usize = 100_000;
+    const OPS: usize = 10_000;
+    const WRITE_RATIO: usize = 90; // 90% writes
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree24(bencher: Bencher, threads: usize) {
+        // Pre-generate insert keys (unique per thread)
+        let initial_keys: Vec<[u8; 8]> = keys_sequential::<8>(INITIAL_N);
+        let insert_keys: Vec<Vec<[u8; 8]>> = (0..threads)
+            .map(|t| {
+                (0..OPS)
+                    .map(|i| {
+                        let val = (INITIAL_N + t * OPS + i) as u64;
+                        val.to_be_bytes()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS))
+            .with_inputs(|| {
+                let tree = Arc::new(setup_masstree24(&initial_keys));
+                (tree, insert_keys.clone())
+            })
+            .bench_refs(|(tree, thread_keys)| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(tree);
+                        let barrier = Arc::clone(&barrier);
+                        let keys = thread_keys[t].clone();
+                        let read_keys = initial_keys.clone();
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+                            let mut rng_state = t as u64;
+                            for (i, key) in keys.iter().enumerate() {
+                                // Simple LCG for deterministic "random"
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                if (rng_state % 100) < WRITE_RATIO as u64 {
+                                    let _ = tree.insert_with_guard(key, i as u64, &guard);
+                                } else {
+                                    let idx = (rng_state as usize) % read_keys.len();
+                                    black_box(tree.get_with_guard(&read_keys[idx], &guard));
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn tree_index(bencher: Bencher, threads: usize) {
+        let initial_keys: Vec<[u8; 8]> = keys_sequential::<8>(INITIAL_N);
+        let insert_keys: Vec<Vec<[u8; 8]>> = (0..threads)
+            .map(|t| {
+                (0..OPS)
+                    .map(|i| {
+                        let val = (INITIAL_N + t * OPS + i) as u64;
+                        val.to_be_bytes()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS))
+            .with_inputs(|| {
+                let tree = Arc::new(setup_tree_index(&initial_keys));
+                (tree, insert_keys.clone())
+            })
+            .bench_refs(|(tree, thread_keys)| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(tree);
+                        let barrier = Arc::clone(&barrier);
+                        let keys = thread_keys[t].clone();
+                        let read_keys = initial_keys.clone();
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let mut rng_state = t as u64;
+                            for (i, key) in keys.iter().enumerate() {
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                if (rng_state % 100) < WRITE_RATIO as u64 {
+                                    let _ = tree.insert_sync(*key, i as u64);
+                                } else {
+                                    let idx = (rng_state as usize) % read_keys.len();
+                                    black_box(tree.peek_with(&read_keys[idx], |_, v| *v));
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn indexset(bencher: Bencher, threads: usize) {
+        let initial_keys: Vec<[u8; 8]> = keys_sequential::<8>(INITIAL_N);
+        let insert_keys: Vec<Vec<[u8; 8]>> = (0..threads)
+            .map(|t| {
+                (0..OPS)
+                    .map(|i| {
+                        let val = (INITIAL_N + t * OPS + i) as u64;
+                        val.to_be_bytes()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS))
+            .with_inputs(|| {
+                let map = Arc::new(setup_indexset(&initial_keys));
+                (map, insert_keys.clone())
+            })
+            .bench_refs(|(map, thread_keys)| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(map);
+                        let barrier = Arc::clone(&barrier);
+                        let keys = thread_keys[t].clone();
+                        let read_keys = initial_keys.clone();
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let mut rng_state = t as u64;
+                            for (i, key) in keys.iter().enumerate() {
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                if (rng_state % 100) < WRITE_RATIO as u64 {
+                                    map.insert(*key, i as u64);
+                                } else {
+                                    let idx = (rng_state as usize) % read_keys.len();
+                                    black_box(map.get(&read_keys[idx]));
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 17: HOT-SPOT - All threads target narrow key range (localized contention)
+// =============================================================================
+
+#[divan::bench_group(name = "17_hot_spot")]
+mod hot_spot {
+    use super::*;
+
+    const TOTAL_N: usize = 1_000_000;
+    const HOT_RANGE: usize = 10; // Only 10 keys are "hot" - extreme contention
+    const OPS: usize = 10_000;
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree24(bencher: Bencher, threads: usize) {
+        let all_keys: Vec<[u8; 8]> = keys_sequential::<8>(TOTAL_N);
+        let hot_keys: Vec<[u8; 8]> = all_keys[..HOT_RANGE].to_vec();
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS))
+            .with_inputs(|| Arc::new(setup_masstree24(&all_keys)))
+            .bench_refs(|tree| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(tree);
+                        let barrier = Arc::clone(&barrier);
+                        let hot = hot_keys.clone();
+
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+                            let mut rng_state = t as u64;
+
+                            for i in 0..OPS {
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                let idx = (rng_state as usize) % hot.len();
+
+                                // 50% read, 50% update (insert over existing)
+                                if rng_state.is_multiple_of(2) {
+                                    black_box(tree.get_with_guard(&hot[idx], &guard));
+                                } else {
+                                    let _ = tree.insert_with_guard(&hot[idx], i as u64, &guard);
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn tree_index(bencher: Bencher, threads: usize) {
+        let all_keys: Vec<[u8; 8]> = keys_sequential::<8>(TOTAL_N);
+        let hot_keys: Vec<[u8; 8]> = all_keys[..HOT_RANGE].to_vec();
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS))
+            .with_inputs(|| Arc::new(setup_tree_index(&all_keys)))
+            .bench_refs(|tree| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(tree);
+                        let barrier = Arc::clone(&barrier);
+                        let hot = hot_keys.clone();
+
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let mut rng_state = t as u64;
+
+                            for i in 0..OPS {
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                let idx = (rng_state as usize) % hot.len();
+
+                                if rng_state.is_multiple_of(2) {
+                                    black_box(tree.peek_with(&hot[idx], |_, v| *v));
+                                } else {
+                                    // TreeIndex doesn't support update, insert returns error if exists
+                                    let _ = tree.insert_sync(hot[idx], i as u64);
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn indexset(bencher: Bencher, threads: usize) {
+        let all_keys: Vec<[u8; 8]> = keys_sequential::<8>(TOTAL_N);
+        let hot_keys: Vec<[u8; 8]> = all_keys[..HOT_RANGE].to_vec();
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS))
+            .with_inputs(|| Arc::new(setup_indexset(&all_keys)))
+            .bench_refs(|map| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(map);
+                        let barrier = Arc::clone(&barrier);
+                        let hot = hot_keys.clone();
+
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let mut rng_state = t as u64;
+
+                            for i in 0..OPS {
+                                rng_state =
+                                    rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                                let idx = (rng_state as usize) % hot.len();
+
+                                if rng_state.is_multiple_of(2) {
+                                    black_box(map.get(&hot[idx]));
+                                } else {
+                                    map.insert(hot[idx], i as u64);
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 18: SPLIT-INDUCING SCAN - Sequential inserts cause splits while readers scan
+// =============================================================================
+
+#[divan::bench_group(name = "18_split_inducing_scan")]
+mod split_inducing_scan {
+    use super::*;
+
+    const INITIAL_N: usize = 100_000;
+    const INSERT_N: usize = 50_000;
+    const WRITERS: usize = 2;
+
+    // Minimum 3 threads: 2 writers + 1 reader
+    #[divan::bench(args = [3, 4, 5, 6])]
+    fn masstree24(bencher: Bencher, threads: usize) {
+        let initial_keys = keys_sequential::<8>(INITIAL_N);
+        // Sequential keys after initial range - will cause splits
+        let insert_keys: Vec<[u8; 8]> = (INITIAL_N..INITIAL_N + INSERT_N)
+            .map(|i| (i as u64).to_be_bytes())
+            .collect();
+        let readers = threads - WRITERS;
+
+        bencher
+            .with_inputs(|| {
+                let tree = Arc::new(setup_masstree24(&initial_keys));
+                (tree, insert_keys.clone())
+            })
+            .bench_refs(|(tree, new_keys)| {
+                let barrier = Arc::new(Barrier::new(threads));
+
+                // Writer threads - sequential inserts cause leaf splits
+                let writer_handles: Vec<_> = (0..WRITERS)
+                    .map(|w| {
+                        let tree = Arc::clone(tree);
+                        let barrier = Arc::clone(&barrier);
+                        let chunk_size = INSERT_N / WRITERS;
+                        let chunk: Vec<_> = new_keys[w * chunk_size..(w + 1) * chunk_size].to_vec();
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+                            for (i, key) in chunk.iter().enumerate() {
+                                let _ = tree.insert_with_guard(key, i as u64, &guard);
+                            }
+                        })
+                    })
+                    .collect();
+
+                // Reader threads - scan during structural modifications
+                let reader_handles: Vec<_> = (0..readers)
+                    .map(|_| {
+                        let tree = Arc::clone(tree);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let mut total = 0usize;
+                            for _ in 0..OPS_PER_THREAD {
+                                let guard = tree.guard();
+                                let mut count = 0usize;
+                                tree.scan_ref(
+                                    RangeBound::Unbounded,
+                                    RangeBound::Unbounded,
+                                    |_, v| {
+                                        black_box(v);
+                                        count += 1;
+                                        count < SCAN_LIMIT
+                                    },
+                                    &guard,
+                                );
+                                total += count;
+                            }
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in writer_handles {
+                    h.join().unwrap();
+                }
+                for h in reader_handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [3, 4, 5, 6])]
+    fn tree_index(bencher: Bencher, threads: usize) {
+        let initial_keys = keys_sequential::<8>(INITIAL_N);
+        let insert_keys: Vec<[u8; 8]> = (INITIAL_N..INITIAL_N + INSERT_N)
+            .map(|i| (i as u64).to_be_bytes())
+            .collect();
+        let readers = threads - WRITERS;
+
+        bencher
+            .with_inputs(|| {
+                let tree = Arc::new(setup_tree_index(&initial_keys));
+                (tree, insert_keys.clone())
+            })
+            .bench_refs(|(tree, new_keys)| {
+                let barrier = Arc::new(Barrier::new(threads));
+
+                let writer_handles: Vec<_> = (0..WRITERS)
+                    .map(|w| {
+                        let tree = Arc::clone(tree);
+                        let barrier = Arc::clone(&barrier);
+                        let chunk_size = INSERT_N / WRITERS;
+                        let chunk: Vec<_> = new_keys[w * chunk_size..(w + 1) * chunk_size].to_vec();
+                        thread::spawn(move || {
+                            barrier.wait();
+                            for (i, key) in chunk.iter().enumerate() {
+                                let _ = tree.insert_sync(*key, i as u64);
+                            }
+                        })
+                    })
+                    .collect();
+
+                let reader_handles: Vec<_> = (0..readers)
+                    .map(|_| {
+                        let tree = Arc::clone(tree);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let mut total = 0usize;
+                            for _ in 0..OPS_PER_THREAD {
+                                let guard = sdd::Guard::new();
+                                total += tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
+                            }
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in writer_handles {
+                    h.join().unwrap();
+                }
+                for h in reader_handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [3, 4, 5, 6])]
+    fn indexset(bencher: Bencher, threads: usize) {
+        let initial_keys = keys_sequential::<8>(INITIAL_N);
+        let insert_keys: Vec<[u8; 8]> = (INITIAL_N..INITIAL_N + INSERT_N)
+            .map(|i| (i as u64).to_be_bytes())
+            .collect();
+        let readers = threads - WRITERS;
+
+        bencher
+            .with_inputs(|| {
+                let map = Arc::new(setup_indexset(&initial_keys));
+                (map, insert_keys.clone())
+            })
+            .bench_refs(|(map, new_keys)| {
+                let barrier = Arc::new(Barrier::new(threads));
+
+                let writer_handles: Vec<_> = (0..WRITERS)
+                    .map(|w| {
+                        let map = Arc::clone(map);
+                        let barrier = Arc::clone(&barrier);
+                        let chunk_size = INSERT_N / WRITERS;
+                        let chunk: Vec<_> = new_keys[w * chunk_size..(w + 1) * chunk_size].to_vec();
+                        thread::spawn(move || {
+                            barrier.wait();
+                            for (i, key) in chunk.iter().enumerate() {
+                                map.insert(*key, i as u64);
+                            }
+                        })
+                    })
+                    .collect();
+
+                let reader_handles: Vec<_> = (0..readers)
+                    .map(|_| {
+                        let map = Arc::clone(map);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let mut total = 0usize;
+                            for _ in 0..OPS_PER_THREAD {
+                                total += map
+                                    .iter()
+                                    .take(SCAN_LIMIT)
+                                    .map(|(_, v)| {
+                                        black_box(v);
+                                        1usize
+                                    })
+                                    .sum::<usize>();
+                            }
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in writer_handles {
+                    h.join().unwrap();
+                }
+                for h in reader_handles {
                     h.join().unwrap();
                 }
             });

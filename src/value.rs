@@ -6,13 +6,14 @@
 //!
 //! These types are leaf-implementation agnostic and can be used with any WIDTH.
 
+use std::fmt as StdFmt;
 use std::sync::Arc;
 
 // ============================================================================
 //  LeafValue<V> - Arc-based storage
 // ============================================================================
 
-/// Value stored in a leaf slot (default mode with `Arc<V>`).
+/// Value stored in a leaf slot (default mode with Arc-wrapped values).
 ///
 /// Uses reference counting for cheap cloning on reads.
 #[derive(Default)]
@@ -111,7 +112,7 @@ impl<V> LeafValue<V> {
             .expect("LeafValue::as_value called on non-Value variant")
     }
 
-    /// Clone the Arc<V> (cheap reference counting increment).
+    /// Clone the `Arc<V>` (cheap reference counting increment).
     ///
     /// # Panics
     /// Panics if this is not a Value variant.
@@ -141,7 +142,9 @@ impl<V> Clone for LeafValue<V> {
     fn clone(&self) -> Self {
         match self {
             Self::Empty => Self::Empty,
+
             Self::Value(arc) => Self::Value(Arc::clone(arc)),
+
             Self::Layer(ptr) => Self::Layer(*ptr),
         }
     }
@@ -154,11 +157,13 @@ impl<V> Clone for LeafValue<V> {
 unsafe impl<V: Send + Sync> Send for LeafValue<V> {}
 unsafe impl<V: Send + Sync> Sync for LeafValue<V> {}
 
-impl<V> std::fmt::Debug for LeafValue<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<V> StdFmt::Debug for LeafValue<V> {
+    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         match self {
             Self::Empty => write!(f, "Empty"),
+
             Self::Value(_) => write!(f, "Value(...)"),
+
             Self::Layer(ptr) => write!(f, "Layer({ptr:?})"),
         }
     }
@@ -264,11 +269,13 @@ impl<V: Copy> LeafValueIndex<V> {
 
 impl<V: Copy> Copy for LeafValueIndex<V> {}
 
-impl<V: Copy> std::fmt::Debug for LeafValueIndex<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<V: Copy> StdFmt::Debug for LeafValueIndex<V> {
+    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         match self {
             Self::Empty => write!(f, "Empty"),
+
             Self::Value(_) => write!(f, "Value(...)"),
+
             Self::Layer(ptr) => write!(f, "Layer({ptr:?})"),
         }
     }
@@ -283,6 +290,7 @@ impl<V: Copy> std::fmt::Debug for LeafValueIndex<V> {
 pub struct SplitPoint {
     /// Logical position where to split (in post-insert coordinates).
     pub pos: usize,
+
     /// The ikey that will be the first key of the new (right) leaf.
     pub split_ikey: u64,
 }
@@ -292,6 +300,7 @@ pub struct SplitPoint {
 pub enum InsertTarget {
     /// Insert into the original (left) leaf.
     Left,
+
     /// Insert into the new (right) leaf.
     Right,
 }

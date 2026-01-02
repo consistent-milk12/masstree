@@ -1,7 +1,7 @@
 //! SIMD-accelerated search functions for tree nodes.
 //!
 //! This module provides high-level search functions that use SIMD primitives
-//! from the [`simd`](super::simd) module when beneficial.
+//! from the [`super::simd`] module when beneficial.
 //!
 //! # Design Philosophy
 //!
@@ -69,6 +69,7 @@ mod tests {
     use super::*;
     use crate::value::LeafValue;
 
+    #[cfg(not(miri))]
     fn make_leaf_with_ikeys(ikeys: &[u64]) -> Box<LeafNode24<LeafValue<()>>> {
         let leaf = LeafNode24::<LeafValue<()>>::new();
         for (i, &ikey) in ikeys.iter().enumerate() {

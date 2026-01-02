@@ -1,7 +1,7 @@
 //! Generic allocator trait for tree nodes.
 //!
 //! This module defines [`NodeAllocatorGeneric`] that abstracts over allocators
-//! for different leaf node types (`LeafNode<S, WIDTH>` and `LeafNode24<S>`).
+//! for different leaf node types.
 //!
 //! # Design
 //!
@@ -11,18 +11,17 @@
 //!
 //! # Implementors
 //!
-//! - `SeizeAllocator<S, WIDTH>` for `LeafNode<S, WIDTH>`
-//! - `SeizeAllocator24<S>` for `LeafNode24<S>`
+//! - [`SeizeAllocator24<S>`](crate::alloc24::SeizeAllocator24) for `LeafNode24<S>`
 
 use seize::LocalGuard;
 
-use crate::leaf_trait::TreeLeafNode;
+use crate::leaf_trait::{TreeInternode, TreeLeafNode};
+use crate::nodeversion::NodeVersion;
 use crate::slot::ValueSlot;
 
 /// Trait for allocating and deallocating tree nodes generically.
 ///
-/// Abstracts over `SeizeAllocator<S, WIDTH>` and `SeizeAllocator24<S>`, enabling
-/// tree operations to work with any leaf type implementing [`TreeLeafNode`].
+/// Enables tree operations to work with any leaf type implementing [`TreeLeafNode`].
 ///
 /// # Type Parameters
 ///
@@ -40,8 +39,7 @@ use crate::slot::ValueSlot;
 ///
 /// # Implementors
 ///
-/// - `SeizeAllocator<S, WIDTH>` for `L = LeafNode<S, WIDTH>`
-/// - `SeizeAllocator24<S>` for `L = LeafNode24<S>`
+/// - [`SeizeAllocator24<S>`](crate::alloc24::SeizeAllocator24) for `L = LeafNode24<S>`
 pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     // ========================================================================
     // Leaf Allocation
@@ -64,6 +62,35 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// Uses interior mutability (`parking_lot::Mutex`) so this can be called
     /// from concurrent code paths with only `&self`.
     fn alloc_leaf(&self, node: Box<L>) -> *mut L;
+
+    /// Allocate a leaf node directly without going through Box.
+    ///
+    /// This is an optimization for pool allocators that can write directly
+    /// to pool memory, avoiding the intermediate Box allocation.
+    ///
+    /// # Arguments
+    ///
+    /// * `is_root` - Whether this is a tree root node
+    /// * `is_layer_root` - Whether this is a layer root node
+    ///
+    /// # Returns
+    ///
+    /// A raw mutable pointer to the initialized node.
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to creating a Box and calling `alloc_leaf`.
+    #[inline]
+    fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut L {
+        let node = if is_layer_root {
+            L::new_layer_root_boxed()
+        } else if is_root {
+            L::new_root_boxed()
+        } else {
+            L::new_boxed()
+        };
+        self.alloc_leaf(node)
+    }
 
     /// Track a leaf pointer for cleanup (concurrent-safe via `&self`).
     ///
@@ -93,12 +120,12 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
 
     /// Allocate an internode and return a type-erased pointer.
     ///
-    /// The concrete type is `InternodeNode<S, L::WIDTH>` but represented as
-    /// `*mut u8` to avoid const generic limitations.
+    /// The concrete type is `InternodeNode<S>` but represented as
+    /// `*mut u8` for uniformity with leaf node pointers.
     ///
     /// # Arguments
     ///
-    /// * `node_ptr` - A `Box<InternodeNode<S, WIDTH>>` cast to `*mut u8` via `Box::into_raw().cast()`
+    /// * `node_ptr` - A `Box<InternodeNode<S>>` cast to `*mut u8` via `Box::into_raw().cast()`
     ///
     /// # Returns
     ///
@@ -115,6 +142,66 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// from concurrent code paths with only `&self`.
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8;
 
+    /// Allocate an internode directly without going through Box.
+    ///
+    /// This is an optimization for pool allocators that can write directly
+    /// to pool memory, avoiding the intermediate Box allocation.
+    ///
+    /// # Arguments
+    ///
+    /// * `height` - Tree height for the internode (0 = children are leaves)
+    ///
+    /// # Returns
+    ///
+    /// A type-erased pointer to the initialized internode.
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to creating a Box and calling `alloc_internode_erased`.
+    #[inline]
+    fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
+        let node: Box<L::Internode> = L::Internode::new_boxed(height);
+        self.alloc_internode_erased(Box::into_raw(node).cast())
+    }
+
+    /// Allocate an internode as a root node directly without Box.
+    ///
+    /// # Arguments
+    ///
+    /// * `height` - Tree height for the internode
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to creating a Box and calling `alloc_internode_erased`.
+    #[inline]
+    fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
+        let node: Box<L::Internode> = L::Internode::new_boxed(height);
+        node.version().mark_root();
+        self.alloc_internode_erased(Box::into_raw(node).cast())
+    }
+
+    /// Allocate an internode for a split operation directly without Box.
+    ///
+    /// Creates an internode with a split-locked version copied from the parent.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_version` - Version from the parent being split (must be locked)
+    /// * `height` - Tree height for the internode
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to creating a Box and calling `alloc_internode_erased`.
+    #[inline]
+    fn alloc_internode_direct_for_split(
+        &self,
+        parent_version: &NodeVersion,
+        height: u32,
+    ) -> *mut u8 {
+        let node: Box<L::Internode> = L::Internode::new_boxed_for_split(parent_version, height);
+        self.alloc_internode_erased(Box::into_raw(node).cast())
+    }
+
     /// Track an internode pointer for cleanup (concurrent-safe).
     ///
     /// # Arguments
@@ -126,7 +213,7 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     ///
     /// # Safety
     ///
-    /// - `ptr` must point to a valid `InternodeNode<S, L::WIDTH>`
+    /// - `ptr` must point to a valid `InternodeNode<S>`
     /// - `ptr` must be unreachable from the tree by any new traversal
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>);
 
