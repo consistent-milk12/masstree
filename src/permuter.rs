@@ -319,8 +319,8 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
 
     /// Set the size without changing slot positions.
     ///
-    /// # Safety
-    /// Caller must ensure the new size is valid (0..=WIDTH).
+    /// # Panics
+    /// Debug-panics if `n > WIDTH`.
     #[inline(always)]
     pub fn set_size(&mut self, n: usize) {
         debug_assert!(n <= WIDTH, "set_size: n ({n}) > WIDTH ({WIDTH})");
@@ -659,7 +659,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
             return;
         }
 
-        // mask covers positions 0..i-1 (bits to keep unchanged)
+        // mask covers size nibble + positions 0..i-1 (bits to keep unchanged)
         let i_shift: usize = (i + 1) * 4;
         let mask: u64 = (1u64 << i_shift) - 1;
 
@@ -700,7 +700,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let size: usize = self.size();
         assert!(size <= WIDTH, "invalid size: {size} > {WIDTH}");
 
-        // Check all slots 0-14 appear exactly once
+        // Check all slots 0..(WIDTH-1) appear exactly once
         let mut seen: u16 = 0;
 
         for i in 0..WIDTH {
