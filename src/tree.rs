@@ -16,6 +16,7 @@ use crate::value::{LeafValue, LeafValueIndex};
 use coalesce::CoalesceQueue;
 use seize::Collector;
 
+mod batch_utils;
 mod coalesce;
 mod generic;
 mod index;
@@ -26,9 +27,38 @@ mod split;
 #[cfg(test)]
 pub mod test_hooks;
 
+pub use generic::{BatchEntry, BatchInsertResult};
 pub use index::MassTreeIndex;
 pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use remove::RemoveError;
+
+/// Batch insert utilities and helpers.
+///
+/// This module provides utility functions for preparing and analyzing
+/// batch insert operations. The `insert_batch()` method is available
+/// directly on all tree types.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use masstree::MassTree24;
+///
+/// let tree: MassTree24<u64> = MassTree24::new();
+/// let entries = vec![
+///     (b"key1".to_vec(), 1u64),
+///     (b"key2".to_vec(), 2u64),
+/// ];
+/// let result = tree.insert_batch(entries)?;
+/// ```
+pub mod batch {
+    pub use super::batch_utils::{
+        zip_into_entries,
+        from_iter,
+        sequential_keys,
+        sequential_u64_keys,
+        BatchStats,
+    };
+}
 
 // ============================================================================
 //  InsertError

@@ -58,6 +58,11 @@ pub const MATCH_RESULT_MISMATCH: i32 = 0;
 ///
 /// This is `-IKEY_SIZE` (i.e., `-8`), signaling the caller should descend into
 /// the sublayer rather than treating this as a key match or mismatch.
+#[expect(
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    reason = "Known const behavior"
+)]
 pub const MATCH_RESULT_LAYER: i32 = -(IKEY_SIZE as i32);
 
 /// Modification state: node is in insert mode (normal operation).
@@ -396,11 +401,11 @@ impl<S: ValueSlot> LeafNode15<S> {
     ///
     /// # Arguments
     ///
-    /// * `slot` - Physical slot index (0..WIDTH_15)
+    /// * `slot` - Physical slot index `(0..WIDTH_15)`
     ///
     /// # Safety
     ///
-    /// The slot must be in range [0, WIDTH_15). No bounds check in release mode.
+    /// The slot must be in range `[0, WIDTH_15)`. No bounds check in release mode.
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "Caller ensures slot is valid")]
     pub fn prefetch_ikey(&self, slot: usize) {
@@ -466,7 +471,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         // SAFETY: Offsets are within LeafNode15 bounds (768 bytes total).
         // Prefetch is a hint - invalid addresses cause no fault.
         unsafe {
-            prefetch_read(self_ptr.add(64));  // CL1: permutation
+            prefetch_read(self_ptr.add(64)); // CL1: permutation
             prefetch_read(self_ptr.add(128)); // CL2: ikey0[0..7]
             prefetch_read(self_ptr.add(192)); // CL3: ikey0[8..14]
         }
@@ -1168,7 +1173,6 @@ impl<S: ValueSlot> LeafNode15<S> {
             }
         }
     }
-
 
     /// Unlink this leaf from the B-link doubly-linked chain.
     ///
@@ -2287,11 +2291,11 @@ impl<V: Copy + Send + Sync + 'static>
 //   CL 2-3: ikey0 (key comparison)
 //   CL 4-5: leaf_values (on match)
 
-/// Verify LeafNode15 size is exactly 768 bytes (12 cache lines).
+/// Verify [`LeafNode15`] size is exactly 768 bytes (12 cache lines).
 /// This ensures the hot path layout is cache-optimal.
 ///
 /// Note: Uses `LeafValue<u64>` as the concrete slot type for size checks.
-/// PhantomData<S> is zero-sized, so LeafNode15 size is S-independent.
+/// [`PhantomData<S>`] is zero-sized, so [`LeafNode15`] size is S-independent.
 const _: () = {
     use crate::value::LeafValue;
 
@@ -2307,7 +2311,7 @@ const _: () = {
     use crate::nodeversion::NodeVersion;
     use crate::permuter::AtomicPermuter15;
     use crate::suffix::InlineSuffixBag;
-    use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8};
+    use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
     assert!(std::mem::size_of::<NodeVersion>() == 4);
     assert!(std::mem::size_of::<AtomicPermuter15>() == 8);

@@ -288,6 +288,10 @@ harness = false
 name = "rwlock_btreemap_vs_masstree15"
 harness = false
 
+[[bench]]
+name = "batch_insert"
+harness = false
+
 # CLI tools - require `bins` feature to compile
 [[bin]]
 name = "divan_parser"

@@ -25,11 +25,15 @@ use crate::{
 
 use super::remove::RemoveError;
 
+mod batch;
 mod insert;
 mod layer;
 mod optimistic_reads;
 mod search;
 mod split;
+
+// Re-export batch types
+pub use batch::{BatchEntry, BatchInsertResult};
 
 impl<S, L, A> MassTreeGeneric<S, L, A>
 where

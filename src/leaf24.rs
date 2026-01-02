@@ -55,6 +55,11 @@ pub const MATCH_RESULT_MISMATCH: i32 = 0;
 ///
 /// This is `-IKEY_SIZE` (i.e., `-8`), signaling the caller should descend into
 /// the sublayer rather than treating this as a key match or mismatch.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "Known const behavior"
+)]
 pub const MATCH_RESULT_LAYER: i32 = -(IKEY_SIZE as i32);
 
 /// Modification state: node is in insert mode (normal operation).
@@ -432,11 +437,11 @@ impl<S: ValueSlot> LeafNode24<S> {
     ///
     /// # Arguments
     ///
-    /// * `slot` - Physical slot index (0..WIDTH_24)
+    /// * `slot` - Physical slot index `(0..WIDTH_24)`
     ///
     /// # Safety
     ///
-    /// The slot must be in range [0, WIDTH_24). No bounds check in release mode.
+    /// The slot must be in range `[0, WIDTH_24)`. No bounds check in release mode.
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "Caller ensures slot is valid")]
     pub fn prefetch_ikey(&self, slot: usize) {

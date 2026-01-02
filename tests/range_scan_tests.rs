@@ -601,3 +601,470 @@ fn scan_prefix_exact_8byte_with_layer() {
         );
     });
 }
+
+// ============================================================================
+//  Batch Scan Tests
+// ============================================================================
+
+#[test]
+fn scan_batch_ref_empty_tree() {
+    let tree: MassTree<u64> = MassTree::new();
+    let guard = tree.guard();
+
+    let count = tree.scan_batch_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |_, _| true,
+        &guard,
+    );
+
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn scan_batch_ref_single_entry() {
+    let tree: MassTree<u64> = MassTree::new();
+    tree.insert(b"key1", 42).unwrap();
+
+    let guard = tree.guard();
+    let mut entries = Vec::new();
+    tree.scan_batch_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |key, value| {
+            entries.push((key.to_vec(), *value));
+            true
+        },
+        &guard,
+    );
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0], (b"key1".to_vec(), 42));
+}
+
+#[test]
+fn scan_batch_ref_multiple_entries() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    for i in 0..100u64 {
+        let key = format!("key{i:03}");
+        tree.insert(key.as_bytes(), i).unwrap();
+    }
+
+    let guard = tree.guard();
+    let mut count = 0usize;
+    let mut sum = 0u64;
+
+    tree.scan_batch_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |_, value| {
+            count += 1;
+            sum += *value;
+            true
+        },
+        &guard,
+    );
+
+    assert_eq!(count, 100);
+    assert_eq!(sum, (0..100).sum::<u64>());
+}
+
+#[test]
+fn scan_batch_ref_range_bounds() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    for i in 0..100u64 {
+        let key = format!("key{i:03}");
+        tree.insert(key.as_bytes(), i).unwrap();
+    }
+
+    let guard = tree.guard();
+    let mut entries = Vec::new();
+    tree.scan_batch_ref(
+        RangeBound::Included(b"key020"),
+        RangeBound::Excluded(b"key030"),
+        |key, value| {
+            entries.push((key.to_vec(), *value));
+            true
+        },
+        &guard,
+    );
+
+    assert_eq!(entries.len(), 10);
+    assert_eq!(entries[0].1, 20);
+    assert_eq!(entries[9].1, 29);
+}
+
+#[test]
+fn scan_batch_ref_early_stop() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    for i in 0..100u64 {
+        let key = format!("key{i:03}");
+        tree.insert(key.as_bytes(), i).unwrap();
+    }
+
+    let guard = tree.guard();
+    let mut count = 0usize;
+    let result = tree.scan_batch_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |_, _| {
+            count += 1;
+            count < 50 // Stop after 50 entries
+        },
+        &guard,
+    );
+
+    assert_eq!(result, 50);
+    assert_eq!(count, 50);
+}
+
+/// Critical test: `scan_batch_ref` must produce identical results to `scan_ref`.
+#[test]
+fn scan_batch_ref_vs_scan_ref_consistency() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    for i in 0..1000u64 {
+        let key = format!("key{i:05}");
+        tree.insert(key.as_bytes(), i).unwrap();
+    }
+
+    let guard = tree.guard();
+
+    // Collect with scan_ref
+    let mut scan_ref_entries = Vec::new();
+    tree.scan_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |key, value| {
+            scan_ref_entries.push((key.to_vec(), *value));
+            true
+        },
+        &guard,
+    );
+
+    // Collect with scan_batch_ref
+    let mut batch_entries = Vec::new();
+    tree.scan_batch_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |key, value| {
+            batch_entries.push((key.to_vec(), *value));
+            true
+        },
+        &guard,
+    );
+
+    // Must produce identical results
+    assert_eq!(scan_ref_entries.len(), batch_entries.len());
+    for (a, b) in scan_ref_entries.iter().zip(batch_entries.iter()) {
+        assert_eq!(
+            a, b,
+            "scan_ref and scan_batch_ref produced different results"
+        );
+    }
+}
+
+#[test]
+fn scan_batch_ref_single_layer_keys() {
+    // Test with short keys (≤ 8 bytes) - uses optimized single-layer path
+    let tree: MassTree<u64> = MassTree::new();
+
+    for i in 0..100u64 {
+        let key = format!("k{i:06}"); // 7 bytes
+        tree.insert(key.as_bytes(), i).unwrap();
+    }
+
+    let guard = tree.guard();
+    let mut sum = 0u64;
+    let count = tree.scan_batch_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |_, value| {
+            sum += *value;
+            true
+        },
+        &guard,
+    );
+
+    assert_eq!(count, 100);
+    assert_eq!(sum, (0..100).sum::<u64>());
+}
+
+/// Test batch scan with keys > 8 bytes (requires layer navigation).
+#[test]
+fn scan_batch_ref_long_keys_with_layers() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    // Create a map of expected keys for verification
+    let mut expected: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+
+    for i in 0..100u64 {
+        let key = format!("long_prefix_key_{i:05}"); // >8 bytes = 21 bytes
+        tree.insert(key.as_bytes(), i).unwrap();
+        expected.insert(key.into_bytes(), i);
+    }
+
+    let guard = tree.guard();
+
+    // Collect with batch scan
+    let mut batch_entries = Vec::new();
+    tree.scan_batch_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |key, value| {
+            batch_entries.push((key.to_vec(), *value));
+            true
+        },
+        &guard,
+    );
+
+    // Verify count
+    assert_eq!(
+        batch_entries.len(),
+        expected.len(),
+        "Wrong number of entries"
+    );
+
+    // Verify each entry matches expected
+    for (key, value) in &batch_entries {
+        assert!(
+            expected.get(key) == Some(value),
+            "Key {:?} has wrong value or doesn't exist",
+            String::from_utf8_lossy(key)
+        );
+    }
+
+    // Verify sorted order
+    for window in batch_entries.windows(2) {
+        assert!(
+            window[0].0 < window[1].0,
+            "Keys not in sorted order: {:?} >= {:?}",
+            String::from_utf8_lossy(&window[0].0),
+            String::from_utf8_lossy(&window[1].0)
+        );
+    }
+}
+
+/// Concurrent batch scans should be safe.
+#[test]
+fn scan_batch_ref_concurrent_reads() {
+    let tree = Arc::new(MassTree::<u64>::new());
+
+    // Pre-populate
+    for i in 0..10000u64 {
+        let key = format!("key{i:08}");
+        tree.insert(key.as_bytes(), i).unwrap();
+    }
+
+    // Concurrent batch scans
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let tree = Arc::clone(&tree);
+            thread::spawn(move || {
+                let guard = tree.guard();
+                let mut sum = 0u64;
+                let count = tree.scan_batch_ref(
+                    RangeBound::Unbounded,
+                    RangeBound::Unbounded,
+                    |_, value| {
+                        sum += *value;
+                        true
+                    },
+                    &guard,
+                );
+                (count, sum)
+            })
+        })
+        .collect();
+
+    let expected_sum: u64 = (0..10000).sum();
+
+    for handle in handles {
+        let (count, sum) = handle.join().unwrap();
+        assert_eq!(count, 10000);
+        assert_eq!(sum, expected_sum);
+    }
+}
+
+/// Test `for_each_batch_ref` on [`RangeIter`] directly.
+#[test]
+fn for_each_batch_ref_basic() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    for i in 0..100u64 {
+        let key = format!("key{i:03}");
+        tree.insert(key.as_bytes(), i).unwrap();
+    }
+
+    let guard = tree.guard();
+    let mut sum = 0u64;
+
+    let count = tree
+        .range(RangeBound::Unbounded, RangeBound::Unbounded, &guard)
+        .for_each_batch_ref(|_, value| {
+            sum += *value;
+            true
+        });
+
+    assert_eq!(count, 100);
+    assert_eq!(sum, (0..100).sum::<u64>());
+}
+
+// ============================================================================
+//  scan_ref correctness tests for multi-layer keys
+// ============================================================================
+
+/// Test `scan_ref` with multi-layer keys against [`BTreeMap`]
+/// This specifically targets the bug where `scan_ref` was returning incorrect keys
+/// for multi-layer entries (8 null bytes prepended to keys).
+#[test]
+fn scan_ref_long_keys_matches_btreemap() {
+    let tree: MassTree<u64> = MassTree::new();
+    let mut expected: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+
+    // Insert multi-layer keys (> 8 bytes triggers layer creation)
+    for i in 0..100u64 {
+        let key = format!("long_prefix_key_{i:05}"); // 21 bytes
+        tree.insert(key.as_bytes(), i).unwrap();
+        expected.insert(key.into_bytes(), i);
+    }
+
+    let guard = tree.guard();
+
+    // Collect with scan_ref
+    let mut scan_ref_entries = Vec::new();
+    tree.scan_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |key, value| {
+            scan_ref_entries.push((key.to_vec(), *value));
+            true
+        },
+        &guard,
+    );
+
+    // Verify count matches
+    assert_eq!(
+        scan_ref_entries.len(),
+        expected.len(),
+        "scan_ref returned wrong number of entries"
+    );
+
+    // Verify each entry matches expected
+    for (key, value) in &scan_ref_entries {
+        let exp_value = expected.get(key);
+        assert!(
+            exp_value == Some(value),
+            "scan_ref: key {:?} (len={}) has wrong value {:?}, expected {:?}",
+            String::from_utf8_lossy(key),
+            key.len(),
+            Some(value),
+            exp_value
+        );
+    }
+
+    // Verify sorted order matches BTreeMap
+    let expected_vec: Vec<_> = expected.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    for (i, (scan_entry, exp_entry)) in scan_ref_entries.iter().zip(expected_vec.iter()).enumerate()
+    {
+        assert_eq!(
+            scan_entry,
+            exp_entry,
+            "Mismatch at index {}: scan_ref={:?}, expected={:?}",
+            i,
+            String::from_utf8_lossy(&scan_entry.0),
+            String::from_utf8_lossy(&exp_entry.0)
+        );
+    }
+}
+
+/// Test `scan_ref` with very deep layers (3+ layers).
+#[test]
+fn scan_ref_deep_layers_matches_btreemap() {
+    let tree: MassTree<u64> = MassTree::new();
+    let mut expected: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+
+    // 24-byte shared prefix forces 3 layers
+    let shared_prefix = b"AAAAAAAABBBBBBBBCCCCCCCC";
+
+    for i in 0..50u64 {
+        let suffix = format!("{i:06}");
+        let key = [shared_prefix.as_ref(), suffix.as_bytes()].concat(); // 30 bytes
+        tree.insert(&key, i).unwrap();
+        expected.insert(key, i);
+    }
+
+    let guard = tree.guard();
+
+    // Collect with scan_ref
+    let mut scan_ref_entries = Vec::new();
+    tree.scan_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |key, value| {
+            scan_ref_entries.push((key.to_vec(), *value));
+            true
+        },
+        &guard,
+    );
+
+    // Verify count
+    assert_eq!(scan_ref_entries.len(), expected.len());
+
+    // Verify each key is correct
+    for (key, value) in &scan_ref_entries {
+        assert!(
+            expected.get(key) == Some(value),
+            "Key {:?} (len={}) not found or has wrong value in expected",
+            String::from_utf8_lossy(key),
+            key.len()
+        );
+    }
+}
+
+/// Test `scan_ref` with mixed single-layer and multi-layer keys.
+#[test]
+fn scan_ref_mixed_layer_keys() {
+    let tree: MassTree<u64> = MassTree::new();
+    let mut expected: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+
+    // Mix of short (single layer) and long (multi layer) keys
+    for i in 0..50u64 {
+        // Short key (8 bytes = single layer)
+        let short_key = format!("short{i:02}");
+        tree.insert(short_key.as_bytes(), i).unwrap();
+        expected.insert(short_key.into_bytes(), i);
+
+        // Long key (20+ bytes = multi layer)
+        let long_key = format!("this_is_a_long_key_{i:05}");
+        tree.insert(long_key.as_bytes(), i + 1000).unwrap();
+        expected.insert(long_key.into_bytes(), i + 1000);
+    }
+
+    let guard = tree.guard();
+
+    let mut scan_ref_entries = Vec::new();
+    tree.scan_ref(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |key, value| {
+            scan_ref_entries.push((key.to_vec(), *value));
+            true
+        },
+        &guard,
+    );
+
+    assert_eq!(scan_ref_entries.len(), expected.len());
+
+    for (key, value) in &scan_ref_entries {
+        assert!(
+            expected.get(key) == Some(value),
+            "Key {:?} (len={}) not found or wrong value",
+            String::from_utf8_lossy(key),
+            key.len()
+        );
+    }
+}
