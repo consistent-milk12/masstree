@@ -197,7 +197,6 @@ pub mod ordering;
 pub mod permuter;
 pub mod permuter24;
 pub mod prefetch;
-pub mod ptr;
 pub mod slot;
 pub mod suffix;
 pub mod tree;
@@ -230,9 +229,6 @@ pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
 
 // Re-export link utilities
 pub use link::{is_marked, mark_ptr, unmark_ptr};
-
-// Re-export pointer types
-pub use ptr::NodePtr;
 
 // Re-export main types for convenience
 pub use slot::ValueSlot;

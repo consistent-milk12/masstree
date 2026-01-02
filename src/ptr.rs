@@ -287,9 +287,11 @@ mod tests {
         // Use real allocated memory for strict provenance compatibility
         let mut value: u8 = 42;
         let raw: *mut u8 = &raw mut value;
+
         // SAFETY: raw points to valid stack memory
         let ptr3 = unsafe { NodePtr::from_raw(raw) };
         let ptr4 = unsafe { NodePtr::from_raw(raw) };
+
         assert_eq!(ptr3, ptr4);
         assert_ne!(ptr1, ptr3);
     }
