@@ -56,6 +56,7 @@ enum LookupResult {
 /// 1. `permutation()` uses Acquire ordering, synchronizing with writer's Release
 /// 2. OCC version validation at the end catches any races
 #[inline(always)]
+#[expect(clippy::collapsible_if, reason = "Leads to unusual regressions?!")]
 fn search_leaf_multi_layer<S, L>(leaf: &L, key: &Key<'_>) -> LookupResult
 where
     S: ValueSlot,
@@ -97,11 +98,13 @@ where
                 return result;
             }
         }
+
         if ikey1 == target_ikey {
             if let Some(result) = check_slot_match(leaf, s1, search_keylenx, key) {
                 return result;
             }
         }
+
         if ikey2 == target_ikey {
             if let Some(result) = check_slot_match(leaf, s2, search_keylenx, key) {
                 return result;
@@ -115,11 +118,13 @@ where
     while i < size {
         let slot: usize = perm.get(i);
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
+
         if slot_ikey == target_ikey {
             if let Some(result) = check_slot_match(leaf, slot, search_keylenx, key) {
                 return result;
             }
         }
+
         i += 1;
     }
 

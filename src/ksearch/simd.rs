@@ -404,7 +404,7 @@ mod find_all_impl {
             let mut i = 0;
 
             // Process 2 keys at a time
-            while i + 2 <= len && i + 2 <= keys.len() {
+            while (i + 2 <= len) && (i + 2 <= keys.len()) {
                 let keys_vec = _mm_loadu_si128(keys.as_ptr().add(i).cast());
                 let cmp = _mm_cmpeq_epi64(keys_vec, target_vec);
                 let byte_mask = _mm_movemask_epi8(cmp);
@@ -421,10 +421,11 @@ mod find_all_impl {
             }
 
             // Handle remainder
-            while i < len && i < keys.len() {
+            while (i < len) && (i < keys.len()) {
                 if keys[i] == target {
                     mask |= 1 << i;
                 }
+
                 i += 1;
             }
 
@@ -452,7 +453,7 @@ mod find_all_impl {
             let mut i = 0;
 
             // Process 4 keys at a time
-            while i + 4 <= len && i + 4 <= keys.len() {
+            while (i + 4 <= len) && (i + 4 <= keys.len()) {
                 let keys_vec = _mm256_loadu_si256(keys.as_ptr().add(i).cast());
                 let cmp = _mm256_cmpeq_epi64(keys_vec, target_vec);
                 let byte_mask = _mm256_movemask_epi8(cmp).cast_unsigned();
@@ -476,7 +477,7 @@ mod find_all_impl {
 
             // Handle remainder with SSE2
             let target_sse = _mm_set1_epi64x(target as i64);
-            while i + 2 <= len && i + 2 <= keys.len() {
+            while (i + 2 <= len) && (i + 2 <= keys.len()) {
                 let keys_vec = _mm_loadu_si128(keys.as_ptr().add(i).cast());
                 let cmp = _mm_cmpeq_epi64(keys_vec, target_sse);
                 let byte_mask = _mm_movemask_epi8(cmp);
@@ -492,7 +493,7 @@ mod find_all_impl {
             }
 
             // Handle final element
-            while i < len && i < keys.len() {
+            while (i < len) && (i < keys.len()) {
                 if keys[i] == target {
                     mask |= 1 << i;
                 }

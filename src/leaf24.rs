@@ -1685,7 +1685,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 
         // Adjust for equal ikeys: if keys at split boundary are equal,
         // move split point to keep equal keys together
-        while split_pos > 0 && split_pos < size {
+        while (split_pos > 0) && (split_pos < size) {
             let left_slot = perm.get(split_pos - 1);
             let right_slot = perm.get(split_pos);
             let left_ikey = self.ikey(left_slot);

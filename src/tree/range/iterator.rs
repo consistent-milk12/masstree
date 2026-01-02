@@ -1149,6 +1149,10 @@ where
     ///     Err(e) => eprintln!("Failed: {}", e),
     /// }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if fails to advance
     #[inline]
     pub fn try_for_each_ref<F, E>(mut self, mut visitor: F) -> Result<usize, E>
     where
