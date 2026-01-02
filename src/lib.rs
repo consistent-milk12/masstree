@@ -243,3 +243,6 @@ pub use tree::{
     MassTree, MassTree15, MassTree15Inline, MassTree24, MassTree24Inline, MassTreeGeneric,
     MassTreeIndex,
 };
+
+// Re-export batch insert types
+pub use tree::{BatchEntry, BatchInsertResult, batch};

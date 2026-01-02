@@ -697,8 +697,22 @@ where
     }
 
     // DEFENSIVE: If we encounter a layer pointer, signal fallback
-    // This shouldn't happen for truly single-layer data
+    // This shouldn't happen for truly single-layer data, but can occur
+    // when single_layer_mode was set based on bounds, not actual keys
     if slot_keylenx >= LAYER_KEYLENX {
+        // CRITICAL: Store the slot ikey to cursor before returning Down.
+        // This ensures shift_clear() in handle_down preserves the ikey in the buffer.
+        // Without this, the full_key() would have null bytes at the parent layer offset.
+        cursor_key.assign_store_ikey(slot_ikey);
+
+        // Prefetch the layer pointer for the caller
+        let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        prefetch_read(layer_ptr);
+
+        // NOTE: We do NOT set stack.root here because the caller needs to
+        // push the current (parent) context to layer_stack BEFORE setting root.
+        // The caller will handle: push layer_stack, then set root, then call handle_down.
+
         return (ScanState::Down, None);
     }
 
