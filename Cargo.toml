@@ -11,10 +11,9 @@ documentation = "https://docs.rs/masstree"
 keywords = [
 	"data-structures",
 	"concurrent",
-	"btree",
 	"ordered-map",
-	"lock-free",
 	"range-scans",
+	"trie",
 ]
 categories = ["data-structures", "concurrency", "database-implementations"]
 readme = "README.md"
