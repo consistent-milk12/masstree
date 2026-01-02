@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::thread;
 
 use divan::{Bencher, counter::ItemsCount};
-use masstree::{MassTree24, MassTree15, MassTree24Inline};
+use masstree::{MassTree15, MassTree24, MassTree24Inline};
 
 fn main() {
     masstree::init_tracing();
@@ -387,9 +387,7 @@ mod concurrent_batch {
 
                 for entries in entries_per_thread {
                     let tree = Arc::clone(&tree);
-                    let handle = thread::spawn(move || {
-                        tree.insert_batch(entries).unwrap()
-                    });
+                    let handle = thread::spawn(move || tree.insert_batch(entries).unwrap());
                     handles.push(handle);
                 }
 
@@ -424,7 +422,12 @@ mod concurrent_batch {
                     let handle = thread::spawn(move || {
                         let guard = tree.guard();
                         for (i, key) in keys.iter().enumerate() {
-                            tree.insert_with_guard(key, (t * ENTRIES_PER_THREAD + i) as u64, &guard).unwrap();
+                            tree.insert_with_guard(
+                                key,
+                                (t * ENTRIES_PER_THREAD + i) as u64,
+                                &guard,
+                            )
+                            .unwrap();
                         }
                     });
                     handles.push(handle);

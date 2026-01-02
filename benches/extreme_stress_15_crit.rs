@@ -36,14 +36,14 @@
 
 mod bench_utils;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode};
+use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use masstree::MassTree15;
 use scc::TreeIndex;
 use sdd::Guard as SddGuard;
 use std::hint::black_box;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Barrier;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 // =============================================================================

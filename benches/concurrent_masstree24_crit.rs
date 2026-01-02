@@ -21,7 +21,9 @@ mod bench_utils;
 use std::hint::black_box;
 
 use bench_utils::{keys, keys_shared_prefix, keys_shared_prefix_chunks, uniform_indices};
-use criterion::{BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
+use criterion::{
+    BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
+};
 use masstree::MassTree24;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};

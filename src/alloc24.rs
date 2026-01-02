@@ -250,8 +250,7 @@ where
         let layout = Layout::new::<InternodeNode<S>>();
         // SAFETY: Layout is valid
         #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid (non-zero size)")]
-        let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout).cast::<InternodeNode<S>>() };
+        let ptr: *mut InternodeNode<S> = unsafe { alloc(layout).cast::<InternodeNode<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -275,8 +274,7 @@ where
         let layout = Layout::new::<InternodeNode<S>>();
         // SAFETY: Layout is valid
         #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
-        let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout).cast::<InternodeNode<S>>() };
+        let ptr: *mut InternodeNode<S> = unsafe { alloc(layout).cast::<InternodeNode<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -304,8 +302,7 @@ where
         let layout = Layout::new::<InternodeNode<S>>();
         // SAFETY: Layout is valid
         #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid")]
-        let ptr: *mut InternodeNode<S> =
-            unsafe { alloc(layout).cast::<InternodeNode<S>>() };
+        let ptr: *mut InternodeNode<S> = unsafe { alloc(layout).cast::<InternodeNode<S>>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }

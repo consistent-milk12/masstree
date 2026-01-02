@@ -52,11 +52,7 @@ pub use remove::RemoveError;
 /// ```
 pub mod batch {
     pub use super::batch_utils::{
-        zip_into_entries,
-        from_iter,
-        sequential_keys,
-        sequential_u64_keys,
-        BatchStats,
+        BatchStats, from_iter, sequential_keys, sequential_u64_keys, zip_into_entries,
     };
 }
 

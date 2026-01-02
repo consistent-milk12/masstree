@@ -49,7 +49,9 @@ use bench_utils::{
     keys_interleaved_ranges, keys_reverse, keys_sequential, keys_shared_prefix, keys_sparse,
     keys_suffix_only_differ,
 };
-use criterion::{BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
+use criterion::{
+    BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
+};
 use masstree::{MassTree15, RangeBound};
 use std::hint::black_box;
 use std::sync::Arc;
