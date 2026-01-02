@@ -266,7 +266,7 @@ impl Permuter24 {
     /// Swap two slots in the free region (positions >= size).
     #[inline(always)]
     pub fn swap_free_slots(&mut self, pos_i: usize, pos_j: usize) {
-        let size = self.size();
+        let size: usize = self.size();
         debug_assert!(pos_i >= size, "swap_free_slots: pos_i in use region");
         debug_assert!(pos_j >= size, "swap_free_slots: pos_j in use region");
         debug_assert!(pos_i < 24 && pos_j < 24, "swap_free_slots: out of range");
@@ -276,9 +276,9 @@ impl Permuter24 {
         }
 
         // XOR swap
-        let i_shift = pos_i * SLOT_BITS + SIZE_BITS;
-        let j_shift = pos_j * SLOT_BITS + SIZE_BITS;
-        let diff = ((self.value >> i_shift) ^ (self.value >> j_shift)) & SLOT_MASK;
+        let i_shift: usize = pos_i * SLOT_BITS + SIZE_BITS;
+        let j_shift: usize = pos_j * SLOT_BITS + SIZE_BITS;
+        let diff: u128 = ((self.value >> i_shift) ^ (self.value >> j_shift)) & SLOT_MASK;
         self.value ^= (diff << i_shift) | (diff << j_shift);
     }
 }

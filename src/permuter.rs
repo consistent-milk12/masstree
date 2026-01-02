@@ -133,6 +133,19 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
             "WIDTH must be at most 15 (u64 encoding limit)"
         );
     };
+
+    /// Initial value with slots in reverse order, size = 0.
+    ///
+    /// This constant is used by both `empty()` and `AtomicPermuter::new()`.
+    /// Position i holds slot (WIDTH - 1 - i), so `back()` returns 0 initially.
+    ///
+    /// For WIDTH=15: `0x0123_4567_89AB_CDE0`
+    pub const INITIAL: u64 = PermuterUtils::compute_initial_value::<WIDTH>();
+
+    /// Sorted value: position i -> slot i, size = 0.
+    ///
+    /// For WIDTH=15: `0xEDCB_A987_6543_2100`
+    const SORTED: u64 = PermuterUtils::compute_sorted_value::<WIDTH>();
 }
 
 impl<const WIDTH: usize> Default for Permuter<WIDTH> {
@@ -162,7 +175,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let _: () = Self::WIDTH_CHECK;
 
         Self {
-            value: PermuterUtils::compute_initial_value::<WIDTH>(),
+            value: Self::INITIAL,
         }
     }
 
@@ -196,7 +209,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
             // Fully sorted: positions 0..WIDTH map to slots 0..WIDTH, size = WIDTH
             // Uses sorted_value (position i → slot i), NOT initial_value (reverse order)
             return Self {
-                value: PermuterUtils::compute_sorted_value::<WIDTH>() | (WIDTH as u64),
+                value: Self::SORTED | (WIDTH as u64),
             };
         }
 
@@ -206,7 +219,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         //   so that back() returns next slot to allocate
 
         // Start with sorted value (positions map to their slot indices)
-        let sorted: u64 = PermuterUtils::compute_sorted_value::<WIDTH>();
+        let sorted: u64 = Self::SORTED;
 
         // We need positions 0..n to be sorted (slot i at position i)
         // and positions n..WIDTH to hold remaining slots in reverse order
@@ -751,7 +764,7 @@ impl<const WIDTH: usize> AtomicPermuter<WIDTH> {
     #[inline(always)]
     pub const fn new() -> Self {
         Self {
-            inner: AtomicU64::new(Permuter::<WIDTH>::empty().value()),
+            inner: AtomicU64::new(Permuter::<WIDTH>::INITIAL),
         }
     }
 

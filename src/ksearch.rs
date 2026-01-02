@@ -224,6 +224,7 @@ where
 {
     for i in 0..size {
         let p = perm.get(i);
+
         match compare(p) {
             Ordering::Less => {
                 // search_key < key_at_slot, found insertion point
@@ -389,6 +390,7 @@ pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
         if search_ikey < k0 {
             return l;
         }
+
         if search_ikey == k0 {
             return l + 1;
         }
@@ -398,6 +400,7 @@ pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
         if search_ikey < k1 {
             return l + 1;
         }
+
         if search_ikey == k1 {
             return l + 2;
         }
@@ -407,6 +410,7 @@ pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
         if search_ikey < k2 {
             return l + 2;
         }
+
         if search_ikey == k2 {
             return l + 3;
         }
@@ -416,6 +420,7 @@ pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
         if search_ikey < k3 {
             return l + 3;
         }
+
         if search_ikey == k3 {
             return l + 4;
         }
@@ -430,9 +435,11 @@ pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
         if search_ikey < node_ikey {
             return l;
         }
+
         if search_ikey == node_ikey {
             return l + 1;
         }
+
         l += 1;
     }
 

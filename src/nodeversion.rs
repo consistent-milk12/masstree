@@ -92,13 +92,14 @@ impl Backoff {
 
     /// Spin for `count+1` iterations using CPU pause hints, then increase count.
     ///
-    /// Uses `std::hint::spin_loop()` which maps to the x86 `PAUSE` instruction,
+    /// Uses [`StdHint::spin_loop()`] which maps to the x86 `PAUSE` instruction,
     /// improving performance on hyper-threaded CPUs by hinting that we're in
     /// a spin-wait loop.
     fn spin(&mut self) {
         for _ in 0..=self.count {
             StdHint::spin_loop();
         }
+
         // Double count, cap at 15: 0 -> 1 -> 3 -> 7 -> 15 -> 15
         self.count = ((self.count << 1) | 1) & 15;
     }
@@ -962,7 +963,7 @@ impl Drop for SingleThreadedLockGuard<'_> {
         // Same logic as the real LockGuard drop:
         // - If splitting: increment split counter, clear dirty/lock bits
         // - If inserting: increment insert counter, clear inserting/lock bits
-        let value = self.version.value;
+        let value: u32 = self.version.value;
         self.version.value = if (value & SPLITTING_BIT) != 0 {
             (value.wrapping_add(VSPLIT_LOWBIT)) & SPLIT_UNLOCK_MASK
         } else {
