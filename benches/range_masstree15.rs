@@ -115,11 +115,11 @@ mod sequential_full_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -165,11 +165,11 @@ mod reverse_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -219,11 +219,11 @@ mod clustered_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -271,11 +271,11 @@ mod sparse_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -323,11 +323,11 @@ mod shared_prefix_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -373,11 +373,11 @@ mod suffix_differ_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -428,11 +428,11 @@ mod hierarchical_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -478,11 +478,11 @@ mod adversarial_splits_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -536,11 +536,11 @@ mod interleaved_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -586,11 +586,11 @@ mod blink_stress_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -636,11 +636,11 @@ mod random_keys_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -686,11 +686,11 @@ mod long_keys_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, _| {
@@ -765,9 +765,9 @@ mod scan_while_insert {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
                                 tree.scan_ref(
                                     RangeBound::Unbounded,
@@ -824,9 +824,9 @@ mod prefix_scan {
                         let thread_prefix = ((t as u64) % PREFIX_BUCKETS).to_be_bytes();
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..PREFIX_OPS {
-                                let guard = tree.guard();
                                 total += tree.scan_prefix(&thread_prefix, |_, _| true, &guard);
                             }
                             black_box(total);
@@ -867,11 +867,11 @@ mod full_scan_aggregate {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut grand_total = 0u64;
                             for _ in 0..FULL_SCAN_OPS {
-                                let guard = tree.guard();
                                 let mut sum = 0u64;
-                                tree.scan_ref(
+                                tree.scan_intra_leaf_batch_ref(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
                                     |_, v| {
@@ -1071,9 +1071,9 @@ mod split_inducing_scan {
                         let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             barrier.wait();
+                            let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
-                                let guard = tree.guard();
                                 let mut count = 0usize;
                                 tree.scan_ref(
                                     RangeBound::Unbounded,
