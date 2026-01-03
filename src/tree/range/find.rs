@@ -778,10 +778,13 @@ where
     // Prefetch the next leaf's data arrays
     next_leaf.prefetch();
 
-    // Prefetch next-next leaf for deeper pipelining
+    // Prefetch next-next leaf for 3-way pipelining
+    // Full prefetch (6 cache lines) instead of just CL0
     let next_next: *mut L = next_leaf.safe_next();
     if !next_next.is_null() {
-        prefetch_read(next_next);
+        // SAFETY: next_next is non-null and derived from a valid leaf's B-link
+        let next_next_leaf: &L = unsafe { &*next_next };
+        next_next_leaf.prefetch();
     }
 
     // Get stable version
@@ -840,10 +843,13 @@ where
     // Prefetch the next leaf's data arrays
     next_leaf.prefetch();
 
-    // Prefetch next-next leaf for deeper pipelining
+    // Prefetch next-next leaf for 3-way pipelining
+    // Full prefetch (6 cache lines) instead of just CL0
     let next_next: *mut L = next_leaf.safe_next();
     if !next_next.is_null() {
-        prefetch_read(next_next);
+        // SAFETY: next_next is non-null and derived from a valid leaf's B-link
+        let next_next_leaf: &L = unsafe { &*next_next };
+        next_next_leaf.prefetch();
     }
 
     // Get stable version
@@ -905,10 +911,13 @@ where
     // This brings multiple cache lines into L1/L2 before we iterate
     next_leaf.prefetch();
 
-    // Prefetch next-next leaf for deeper pipelining
+    // Prefetch next-next leaf for 3-way pipelining
+    // Full prefetch (6 cache lines) instead of just CL0
     let next_next: *mut L = next_leaf.safe_next();
     if !next_next.is_null() {
-        prefetch_read(next_next);
+        // SAFETY: next_next is non-null and derived from a valid leaf's B-link
+        let next_next_leaf: &L = unsafe { &*next_next };
+        next_next_leaf.prefetch();
     }
 
     // Get stable version
