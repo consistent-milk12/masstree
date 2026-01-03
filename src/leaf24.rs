@@ -11,6 +11,7 @@
 //! The 24-slot design requires 5 bits per slot (values 0-23) vs 4 bits for WIDTH=15.
 //! Total: 5 (size) + 24×5 (slots) = 125 bits, requiring u128 storage.
 
+use static_assertions::const_assert_eq;
 use std::array as StdArray;
 use std::cell::UnsafeCell;
 use std::cmp::Ordering;
@@ -184,6 +185,10 @@ impl<S: ValueSlot> StdFmt::Debug for LeafNode24<S> {
             .finish_non_exhaustive()
     }
 }
+
+// Compile-time layout verification.
+// LeafNode24 must be cache-line aligned (64 bytes) for optimal performance.
+const_assert_eq!(std::mem::align_of::<LeafNode24<crate::LeafValue<u64>>>(), 64);
 
 impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================

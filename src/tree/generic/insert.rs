@@ -220,7 +220,7 @@ where
         leaf.set_permutation(new_perm);
 
         // Increment count
-        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.count.increment();
 
         Ok(None)
     }
@@ -329,7 +329,7 @@ where
         leaf.set_leaf_value_ptr(slot, layer_ptr);
 
         // Increment count (new key was added to the layer)
-        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.count.increment();
     }
 }
 
@@ -404,8 +404,8 @@ where
             let pre_lock_version: u32 = leaf.version().stable();
             let pre_lock_perm_raw = leaf.permutation_raw();
 
-            // Lock the leaf
-            let mut lock = leaf.version().lock();
+            // Lock the leaf (with yield to reduce lock convoy under contention)
+            let mut lock = leaf.version().lock_with_yield();
 
             // ================================================================
             // POST-LOCK VALIDATION
@@ -483,7 +483,7 @@ where
                                     guard,
                                 );
                                 drop(lock);
-                                self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                                self.count.increment();
                                 return Ok(None);
                             }
 
@@ -545,7 +545,7 @@ where
                                 guard,
                             );
                             drop(lock);
-                            self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                            self.count.increment();
                             return Ok(None);
                         }
 

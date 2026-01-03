@@ -2,12 +2,13 @@ use std::{
     cmp::Ordering,
     marker::PhantomData,
     ptr as StdPtr,
-    sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering},
+    sync::atomic::{AtomicPtr, Ordering as AtomicOrdering},
 };
 
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
+    shard_counter::ShardedCounter,
     MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation, is_marked,
     key::Key,
     leaf_trait::LayerCapableLeaf,
@@ -55,7 +56,7 @@ where
             collector: Collector::new(),
             allocator,
             root_ptr: AtomicPtr::new(root_ptr.cast::<u8>()),
-            count: AtomicUsize::new(0),
+            count: ShardedCounter::new(),
             coalesce_queue: CoalesceQueue::new(),
             _marker: PhantomData,
         }
@@ -71,13 +72,21 @@ where
         self.collector.enter()
     }
 
-    /// Get the number of keys in the tree.
+    /// Get the approximate number of keys in the tree.
     ///
-    /// This is O(1) as we track the count incrementally.
+    /// # Consistency
+    ///
+    /// During concurrent mutations, this returns an approximate count
+    /// (sharded counter sums multiple atomics). After all mutating threads
+    /// have joined/quiesced, this returns the exact count.
+    ///
+    /// # Performance
+    ///
+    /// O(16) - reads 16 cache-line-aligned shards.
     #[must_use]
     #[inline(always)]
     pub fn len(&self) -> usize {
-        self.count.load(AtomicOrdering::Relaxed)
+        self.count.load()
     }
 
     /// Check if the tree is empty.
@@ -205,7 +214,7 @@ where
     #[inline(always)]
     #[allow(dead_code, reason = "infrastructure for entry count tracking")]
     pub(crate) fn inc_count(&self) {
-        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.count.increment();
     }
 
     // ========================================================================
@@ -870,7 +879,7 @@ where
     /// Called by `finish_remove_generic` after updating the permutation.
     #[inline(always)]
     pub(crate) fn dec_count(&self) {
-        self.count.fetch_sub(1, AtomicOrdering::Relaxed);
+        self.count.decrement();
     }
 
     /// Assign a value to a slot in a locked leaf.

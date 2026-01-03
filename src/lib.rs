@@ -197,7 +197,7 @@ pub mod ordering;
 pub mod permuter;
 pub mod permuter24;
 pub mod prefetch;
-pub mod shard_counter;
+mod shard_counter;
 pub mod slot;
 pub mod suffix;
 pub mod tree;

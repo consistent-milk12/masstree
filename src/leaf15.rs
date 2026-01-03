@@ -15,6 +15,7 @@
 //! The "15" in `LeafNode15` refers to the slot count (WIDTH=15), matching the
 //! internode width. See `leaf24.rs` for the WIDTH=24 variant.
 
+use static_assertions::const_assert_eq;
 use std::array as StdArray;
 use std::cell::UnsafeCell;
 use std::cmp::Ordering;
@@ -188,6 +189,10 @@ impl<S: ValueSlot> StdFmt::Debug for LeafNode15<S> {
             .finish_non_exhaustive()
     }
 }
+
+// Compile-time layout verification.
+// LeafNode15 must be cache-line aligned (64 bytes) for optimal performance.
+const_assert_eq!(std::mem::align_of::<LeafNode15<crate::LeafValue<u64>>>(), 64);
 
 impl<S: ValueSlot> LeafNode15<S> {
     // ============================================================================

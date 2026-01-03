@@ -53,6 +53,7 @@
 //! - **Memory Ordering:** Atomic fields use `Acquire`/`Release` ordering
 //!   to ensure proper visibility of modifications across threads.
 
+use static_assertions::const_assert_eq;
 use std::array as StdArray;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
@@ -148,6 +149,10 @@ impl<S: ValueSlot> StdFmt::Debug for InternodeNode<S> {
             .finish_non_exhaustive()
     }
 }
+
+// Compile-time layout verification.
+// InternodeNode must be cache-line aligned (64 bytes) for optimal performance.
+const_assert_eq!(std::mem::align_of::<InternodeNode<crate::LeafValue<u64>>>(), 64);
 
 impl<S: ValueSlot> InternodeNode<S> {
     // ========================================================================

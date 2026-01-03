@@ -460,8 +460,8 @@ where
                 let pre_lock_version = leaf.version().stable();
                 let pre_lock_perm_raw = leaf.permutation_raw();
 
-                // Lock the leaf
-                let mut lock = leaf.version().lock();
+                // Lock the leaf (with yield to reduce lock convoy under contention)
+                let mut lock = leaf.version().lock_with_yield();
 
                 // Validate post-lock state
                 if !self.validate_post_lock_batch(leaf, pre_lock_version, pre_lock_perm_raw) {
@@ -689,7 +689,7 @@ where
                             value,
                             guard,
                         );
-                        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                        self.count.increment();
 
                         // Update perm for next iteration
                         *perm = leaf.permutation();
@@ -750,7 +750,7 @@ where
                             value,
                             guard,
                         );
-                        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+                        self.count.increment();
 
                         // Update perm for next iteration
                         *perm = leaf.permutation();
@@ -884,7 +884,7 @@ where
         self.assign_slot_generic(leaf, lock, slot, key, value, guard);
         let new_perm = L::Perm::make_sorted(1);
         leaf.set_permutation(new_perm);
-        self.count.fetch_add(1, AtomicOrdering::Relaxed);
+        self.count.increment();
     }
 
     /// Update a value in an existing slot, returning the old value.

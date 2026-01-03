@@ -5,7 +5,9 @@
 
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
+
+use crate::shard_counter::ShardedCounter;
 
 use crate::alloc15::SeizeAllocator15;
 use crate::alloc24::SeizeAllocator24;
@@ -160,8 +162,15 @@ where
     /// The node type is determined by the node's version field.
     root_ptr: AtomicPtr<u8>,
 
-    /// Number of key-value pairs in the tree (atomic for concurrent access).
-    count: AtomicUsize,
+    /// Number of key-value pairs in the tree.
+    ///
+    /// Uses a sharded counter to minimize cache-line contention during
+    /// concurrent inserts. Each thread increments a different shard,
+    /// avoiding the cache-line bouncing that occurs with a single AtomicUsize.
+    ///
+    /// Note: `len()` sums multiple shards and is not linearizable during
+    /// concurrent mutations. The count is exact after all threads quiesce.
+    count: ShardedCounter,
 
     /// Queue of empty leaves pending cleanup (lazy coalescing).
     ///
@@ -182,7 +191,7 @@ where
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("MassTreeGeneric")
             .field("root_ptr", &self.root_ptr.load(AtomicOrdering::Relaxed))
-            .field("count", &self.count.load(AtomicOrdering::Relaxed))
+            .field("count", &self.count.load())
             .field("width", &L::WIDTH)
             .field("pending_coalesce", &self.coalesce_queue.len())
             .finish_non_exhaustive()
