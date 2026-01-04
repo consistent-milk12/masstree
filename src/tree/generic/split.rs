@@ -21,8 +21,10 @@ where
     ///
     /// # Performance
     ///
-    /// Marked `#[cold]` because splits are rare (~1 per WIDTH inserts).
     /// Marked `#[inline(never)]` to keep split code out of the hot insert path.
+    /// Not marked `#[cold]` - while splits are infrequent (~1 per WIDTH inserts),
+    /// in insert-heavy workloads (building from empty) they can be common enough
+    /// that cold placement hurts more than it helps.
     /// 1. Calculate split point
     /// 2. Allocate new leaf (pre-allocation before marking split)
     /// 3. Mark split in progress
@@ -55,7 +57,6 @@ where
     /// # C++ Reference
     ///
     /// Matches `tcursor::make_split()` in `reference/masstree_split.hh:179-297`.
-    #[cold]
     #[inline(never)]
     pub(crate) fn handle_leaf_split_generic(
         &self,

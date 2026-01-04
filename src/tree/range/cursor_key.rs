@@ -35,6 +35,15 @@ use std::cmp::Ordering;
 
 use crate::key::{IKEY_SIZE, MAX_KEY_LENGTH};
 
+/// Sentinel length value set by [`CursorKey::unshift`] after ascending from a sublayer.
+///
+/// This value (9 = `IKEY_SIZE + 1`) ensures that when comparing against the layer
+/// pointer slot in the parent, `compare()` returns `Ordering::Equal` or `Greater`,
+/// causing the scan to skip the layer pointer (since we've already scanned its contents).
+///
+/// See [`CursorKey::unshift`] for the full algorithm explanation.
+pub const UNSHIFT_SENTINEL_LEN: usize = IKEY_SIZE + 1;
+
 /// Mutable key buffer for scan operations.
 ///
 /// Tracks the current scan position within the trie and stores the "last emitted"
@@ -332,8 +341,8 @@ impl CursorKey {
         // Recompute ikey from buffer at parent offset
         self.ikey = Self::read_ikey_from_buf(&self.buf, self.offset, IKEY_SIZE);
 
-        // Set len = 9 as sentinel (see docstring)
-        self.len = IKEY_SIZE + 1;
+        // Set sentinel length to skip layer pointer (see UNSHIFT_SENTINEL_LEN docs)
+        self.len = UNSHIFT_SENTINEL_LEN;
     }
 
     /// Reset to root layer (undo all shifts).

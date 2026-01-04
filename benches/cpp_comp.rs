@@ -23,7 +23,7 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::pedantic)]
 
-use masstree::{MassTree24, MassTree24Inline};
+use masstree::{MassTree15, MassTree15Inline};
 use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -193,7 +193,7 @@ fn report(test_name: &str, threads: usize, duration: Duration, ops: u64) {
 // =============================================================================
 
 fn run_rw1(threads: usize, duration_secs: u64) {
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -205,6 +205,9 @@ fn run_rw1(threads: usize, duration_secs: u64) {
             let timeout = Arc::clone(&timeout);
             let total_ops = Arc::clone(&total_ops);
             thread::spawn(move || {
+                // Create guard once per thread (optimal)
+                let guard = tree.guard();
+
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
@@ -213,7 +216,7 @@ fn run_rw1(threads: usize, duration_secs: u64) {
                 while !timeout.load(Ordering::Relaxed) {
                     let x = rng.rand();
                     let key = key_var(u64::from(x));
-                    let _ = tree.insert(&key, u64::from(x + 1));
+                    let _ = tree.insert_with_guard(&key, u64::from(x + 1), &guard);
                     puts += 1;
                 }
 
@@ -232,7 +235,7 @@ fn run_rw1(threads: usize, duration_secs: u64) {
                 let mut gets = 0u64;
                 for x in keys {
                     let key = key_var(u64::from(x));
-                    std::hint::black_box(tree.get(&key));
+                    std::hint::black_box(tree.get_with_guard(&key, &guard));
                     gets += 1;
                 }
 
@@ -261,7 +264,7 @@ fn run_rw1(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_rw2_internal(test_name: &str, threads: usize, duration_secs: u64, get_frac: f64) {
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -279,6 +282,9 @@ fn run_rw2_internal(test_name: &str, threads: usize, duration_secs: u64, get_fra
             let timeout = Arc::clone(&timeout);
             let total_ops = Arc::clone(&total_ops);
             thread::spawn(move || {
+                // Create guard once per thread (optimal)
+                let guard = tree.guard();
+
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
                 let offset = rng.rand();
@@ -291,13 +297,13 @@ fn run_rw2_internal(test_name: &str, threads: usize, duration_secs: u64, get_fra
                     if puts == 0 || !rng.bernoulli(get_frac) {
                         let x = (offset.wrapping_add(puts as u32)).wrapping_mul(C);
                         let key = key_var(u64::from(x));
-                        let _ = tree.insert(&key, u64::from(x + 1));
+                        let _ = tree.insert_with_guard(&key, u64::from(x + 1), &guard);
                         puts += 1;
                     } else {
                         let idx = rng.uniform(puts as u32);
                         let x = (offset.wrapping_add(idx)).wrapping_mul(C);
                         let key = key_var(u64::from(x));
-                        std::hint::black_box(tree.get(&key));
+                        std::hint::black_box(tree.get_with_guard(&key, &guard));
                         gets += 1;
                     }
                 }
@@ -337,7 +343,7 @@ fn run_rw2g98(threads: usize, duration_secs: u64) {
 
 fn run_rw3(threads: usize, duration_secs: u64) {
     // Use inline storage - no Arc allocation per insert (matches C++)
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -355,18 +361,21 @@ fn run_rw3(threads: usize, duration_secs: u64) {
             let timeout = Arc::clone(&timeout);
             let total_ops = Arc::clone(&total_ops);
             thread::spawn(move || {
+                // Create guard once per thread (optimal)
+                let guard = tree.guard();
+
                 // Put phase
                 let mut n = 0u64;
                 while !timeout.load(Ordering::Relaxed) {
                     let key = key8(n);
-                    let _ = tree.insert(&key, n + 1);
+                    let _ = tree.insert_with_guard(&key, n + 1, &guard);
                     n += 1;
                 }
 
                 // Get phase
                 for i in 0..n {
                     let key = key8(i);
-                    std::hint::black_box(tree.get(&key));
+                    std::hint::black_box(tree.get_with_guard(&key, &guard));
                 }
 
                 total_ops.fetch_add(n * 2, Ordering::Relaxed);
@@ -391,7 +400,7 @@ fn run_rw3(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_rw3_disjoint(threads: usize, duration_secs: u64) {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -451,7 +460,7 @@ fn run_rw3_mttest(threads: usize, duration_secs: u64) {
     use std::sync::Mutex;
 
     // Use inline storage - no Arc allocation per insert (matches C++)
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     // Collect per-thread results: (ops, elapsed_secs)
     let results: Arc<Mutex<Vec<(u64, f64)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -538,7 +547,7 @@ fn run_rw3_mttest(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_rw3_w15(threads: usize, duration_secs: u64) {
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -592,7 +601,7 @@ fn run_rw3_w15(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_rw3_bin(threads: usize, duration_secs: u64) {
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -647,7 +656,7 @@ fn run_rw3_bin(threads: usize, duration_secs: u64) {
 
 fn run_rw4(threads: usize, duration_secs: u64) {
     const TOP: u64 = 2_147_483_647;
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -699,7 +708,7 @@ fn run_rw4(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_same(threads: usize, duration_secs: u64) {
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -717,6 +726,9 @@ fn run_same(threads: usize, duration_secs: u64) {
             let timeout = Arc::clone(&timeout);
             let total_ops = Arc::clone(&total_ops);
             thread::spawn(move || {
+                // Create guard once per thread (optimal)
+                let guard = tree.guard();
+
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
@@ -724,7 +736,7 @@ fn run_same(threads: usize, duration_secs: u64) {
                 while !timeout.load(Ordering::Relaxed) {
                     let x = rng.uniform(10);
                     let key = key_var(u64::from(x));
-                    let _ = tree.insert(&key, u64::from(x + 1));
+                    let _ = tree.insert_with_guard(&key, u64::from(x + 1), &guard);
                     n += 1;
                 }
 
@@ -750,7 +762,7 @@ fn run_same(threads: usize, duration_secs: u64) {
 // =============================================================================
 
 fn run_wscale(threads: usize, duration_secs: u64) {
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -768,6 +780,9 @@ fn run_wscale(threads: usize, duration_secs: u64) {
             let timeout = Arc::clone(&timeout);
             let total_ops = Arc::clone(&total_ops);
             thread::spawn(move || {
+                // Create guard once per thread (optimal)
+                let guard = tree.guard();
+
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
@@ -775,7 +790,7 @@ fn run_wscale(threads: usize, duration_secs: u64) {
                 while !timeout.load(Ordering::Relaxed) {
                     let x = u64::from(rng.rand());
                     let key = key_var(x);
-                    let _ = tree.insert(&key, x + 1);
+                    let _ = tree.insert_with_guard(&key, x + 1, &guard);
                     n += 1;
                 }
 
@@ -802,7 +817,7 @@ fn run_wscale(threads: usize, duration_secs: u64) {
 
 fn run_rscale(threads: usize, duration_secs: u64) {
     const PARTSZ: usize = 500_000;
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let nseqkeys = (PARTSZ * threads) as u64;
 
     // Pre-populate (like ruscale_init)
@@ -841,6 +856,9 @@ fn run_rscale(threads: usize, duration_secs: u64) {
             let timeout = Arc::clone(&timeout);
             let total_ops = Arc::clone(&total_ops);
             thread::spawn(move || {
+                // Create guard once per thread (optimal)
+                let guard = tree.guard();
+
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
@@ -848,7 +866,7 @@ fn run_rscale(threads: usize, duration_secs: u64) {
                 while !timeout.load(Ordering::Relaxed) {
                     let x = u64::from(rng.rand()) % nseqkeys;
                     let key = key_var(x);
-                    std::hint::black_box(tree.get(&key));
+                    std::hint::black_box(tree.get_with_guard(&key, &guard));
                     n += 1;
                 }
 
@@ -875,7 +893,7 @@ fn run_rscale(threads: usize, duration_secs: u64) {
 
 fn run_uscale(threads: usize, duration_secs: u64) {
     const PARTSZ: usize = 500_000;
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let nseqkeys = (PARTSZ * threads) as u64;
 
     // Pre-populate
@@ -902,6 +920,9 @@ fn run_uscale(threads: usize, duration_secs: u64) {
             let timeout = Arc::clone(&timeout);
             let total_ops = Arc::clone(&total_ops);
             thread::spawn(move || {
+                // Create guard once per thread (optimal)
+                let guard = tree.guard();
+
                 let seed = KvRandom::FIRST_SEED + tid as u64;
                 let mut rng = KvRandom::new(seed);
 
@@ -909,7 +930,7 @@ fn run_uscale(threads: usize, duration_secs: u64) {
                 while !timeout.load(Ordering::Relaxed) {
                     let x = u64::from(rng.rand()) % nseqkeys;
                     let key = key_var(x);
-                    let _ = tree.insert(&key, x + 1);
+                    let _ = tree.insert_with_guard(&key, x + 1, &guard);
                     n += 1;
                 }
 
@@ -937,7 +958,7 @@ fn run_uscale(threads: usize, duration_secs: u64) {
 fn run_rw1long(threads: usize, duration_secs: u64) {
     const FORMATS: [&str; 4] = ["user", "machine", "opening", "fartparade"];
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 
@@ -1010,7 +1031,7 @@ fn run_rw1long(threads: usize, duration_secs: u64) {
 fn run_rwsmall24(threads: usize, duration_secs: u64) {
     const NKEYS: u32 = 24;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let timeout = Arc::new(AtomicBool::new(false));
     let total_ops = Arc::new(AtomicU64::new(0));
 

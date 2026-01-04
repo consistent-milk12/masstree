@@ -12,6 +12,17 @@
 //! 2. **Deferred cleanup**: Background processing removes truly stale leaves
 //! 3. **Safe traversal**: Traversal already handles deleted nodes via retry
 //!
+//! # Safety
+//!
+//! Leaf retirement is now safe because we properly implement parent cleanup:
+//! 1. Mark leaf as deleted (version bit)
+//! 2. Unlink from B-link chain (prev/next)
+//! 3. Remove from parent internode (lock coupling walk)
+//! 4. Retire leaf (epoch-based reclamation)
+//!
+//! After step 3, the leaf is unreachable from the tree. Existing references
+//! are protected by seize guards and will be reclaimed safely.
+//!
 //! # Thread Safety
 //!
 //! The queue uses `parking_lot::Mutex` for interior mutability. This is
@@ -26,16 +37,17 @@ use parking_lot::Mutex;
 use seize::LocalGuard;
 
 use crate::alloc_trait::NodeAllocatorGeneric;
-use crate::leaf_trait::{LayerCapableLeaf, TreePermutation};
+use crate::leaf_trait::LayerCapableLeaf;
 use crate::slot::ValueSlot;
+use crate::tree::remove::NodeCleaner;
 
 /// Entry in the coalesce queue: pointer to empty leaf and its `ikey_bound`.
 #[derive(Debug, Clone, Copy)]
 struct CoalesceEntry<L> {
     /// Pointer to the empty leaf.
     leaf_ptr: *mut L,
+
     /// The `ikey_bound` of the leaf (for debugging/logging).
-    #[allow(dead_code)]
     ikey_bound: u64,
 }
 
@@ -118,163 +130,216 @@ impl<L> CoalesceQueue<L> {
     }
 }
 
-/// Try to remove a single queued leaf.
-///
-/// Returns `true` if a leaf was processed (removed or skipped),
-/// `false` if the queue was empty.
-///
-/// # Leaf Processing
-///
-/// For each dequeued leaf:
-/// 1. Try to lock - if contention, re-queue for later
-/// 2. Check if still empty - if not (reused by insert), skip
-/// 3. Check if leftmost - leftmost leaves cannot be removed
-/// 4. Remove: mark deleted, unlink, retire
-///
-/// # Arguments
-///
-/// * `queue` - The coalesce queue to process
-/// * `allocator` - Node allocator for retirement
-/// * `guard` - Epoch guard for safe memory reclamation
-pub fn try_remove_one<S, L, A>(
-    queue: &CoalesceQueue<L>,
-    allocator: &A,
-    guard: &LocalGuard<'_>,
-) -> bool
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    // Pop an entry from the queue
-    let entry = {
-        let mut q = queue.pending.lock();
-        q.pop_front()
-    };
-
-    let Some(entry) = entry else {
-        return false; // Queue empty
-    };
-
-    let leaf_ptr = entry.leaf_ptr;
-
-    // SAFETY: leaf_ptr came from a valid allocation and is protected by guard.
-    let leaf: &L = unsafe { &*leaf_ptr };
-
-    // Step 1: Try to lock the leaf
-    let Some(mut lock) = leaf.version().try_lock() else {
-        // Contention - re-queue for later
-        queue.pending.lock().push_back(entry);
-        return true; // Still "processed" an entry
-    };
-
-    // Step 2: Check if still empty (might have been reused by insert)
-    if leaf.permutation().size() > 0 {
-        // Leaf was reused - nothing to do
-        drop(lock);
-        return true;
-    }
-
-    // Step 3: Check if leftmost (cannot remove leftmost leaf)
-    if leaf.prev().is_null() {
-        // Leftmost leaf - stays as sentinel
-        drop(lock);
-        return true;
-    }
-
-    // Step 4: Safe to remove - mark deleted, unlink, retire
-    // Mark as deleted (sets splitting flag in version)
-    lock.mark_deleted();
-
-    // Unlink from B-link chain
-    // SAFETY: We hold the lock, and prev is non-null (checked above)
-    unsafe { leaf.unlink_from_chain() };
-
-    // Retire the leaf via seize
-    // SAFETY: The leaf is marked deleted and unlinked, no new references
-    // can be acquired. Existing references are protected by guards.
-    unsafe { allocator.retire_leaf(leaf_ptr, guard) };
-
-    // Note: Parent cleanup is skipped for now (Phase 11 in TODO.md).
-    // Traversal already handles stale/deleted child pointers via retry.
-    true
-}
-
-/// Process all queued removals.
-///
-/// Call this during low-contention periods (e.g., between batch operations
-/// or in a background thread).
-///
-/// # Returns
-///
-/// The number of entries processed (including skipped/re-queued).
-///
-/// # Arguments
-///
-/// * `queue` - The coalesce queue to process
-/// * `allocator` - Node allocator for retirement
-/// * `guard` - Epoch guard for safe memory reclamation
-pub fn process_all<S, L, A>(
-    queue: &CoalesceQueue<L>,
-    allocator: &A,
-    guard: &LocalGuard<'_>,
-) -> usize
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    let mut processed = 0;
-    while try_remove_one::<S, L, A>(queue, allocator, guard) {
-        processed += 1;
-    }
-    processed
-}
-
-/// Process up to `limit` queued removals.
-///
-/// Useful for bounded cleanup during normal operations.
-///
-/// # Returns
-///
-/// The number of entries processed.
-///
-/// # Arguments
-///
-/// * `queue` - The coalesce queue to process
-/// * `allocator` - Node allocator for retirement
-/// * `guard` - Epoch guard for safe memory reclamation
-/// * `limit` - Maximum number of entries to process
-pub fn process_batch<S, L, A>(
-    queue: &CoalesceQueue<L>,
-    allocator: &A,
-    guard: &LocalGuard<'_>,
-    limit: usize,
-) -> usize
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    let mut processed = 0;
-    while processed < limit && try_remove_one::<S, L, A>(queue, allocator, guard) {
-        processed += 1;
-    }
-    processed
-}
-
 impl<L> std::fmt::Debug for CoalesceQueue<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let len = self.pending.lock().len();
         f.debug_struct("CoalesceQueue")
             .field("pending_count", &len)
             .finish()
+    }
+}
+
+pub struct Coalesce;
+
+impl Coalesce {
+    /// Process all queued removals.
+    ///
+    /// Call this during low-contention periods (e.g., between batch operations
+    /// or in a background thread).
+    ///
+    /// # Returns
+    ///
+    /// The number of entries processed (including skipped/re-queued).
+    ///
+    /// # Arguments
+    ///
+    /// * `queue` - The coalesce queue to process
+    /// * `allocator` - Node allocator for retirement
+    /// * `guard` - Reclamation guard for safe memory reclamation
+    pub fn process_all<S, L, A>(
+        queue: &CoalesceQueue<L>,
+        allocator: &A,
+        guard: &LocalGuard<'_>,
+    ) -> usize
+    where
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
+    {
+        let mut processed = 0;
+
+        while Self::try_remove_one::<S, L, A>(queue, allocator, guard) {
+            processed += 1;
+        }
+
+        processed
+    }
+
+    /// Process up to `limit` queued removals.
+    ///
+    /// Useful for bounded cleanup during normal operations.
+    ///
+    /// # Returns
+    ///
+    /// The number of entries processed.
+    ///
+    /// # Arguments
+    ///
+    /// * `queue` - The coalesce queue to process
+    /// * `allocator` - Node allocator for retirement
+    /// * `guard` - Reclamation guard for safe memory reclamation
+    /// * `limit` - Maximum number of entries to process
+    pub fn process_batch<S, L, A>(
+        queue: &CoalesceQueue<L>,
+        allocator: &A,
+        guard: &LocalGuard<'_>,
+        limit: usize,
+    ) -> usize
+    where
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
+    {
+        let mut processed = 0;
+
+        while processed < limit && Self::try_remove_one::<S, L, A>(queue, allocator, guard) {
+            processed += 1;
+        }
+
+        processed
+    }
+
+    /// Try to remove one empty leaf from the queue.
+    ///
+    /// Returns `true` if an entry was processed (removed or re-queued).
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Pop an entry from the queue
+    /// 2. Try to lock the leaf
+    /// 3. Verify still empty
+    /// 4. Verify not leftmost (cannot remove leftmost)
+    /// 5. Mark as deleted
+    /// 6. Unlink from B-link chain
+    /// 7. **Remove from parent internode** (enables safe retirement)
+    /// 8. Retire the leaf (only if parent cleanup succeeded)
+    fn try_remove_one<S, L, A>(
+        queue: &CoalesceQueue<L>,
+        allocator: &A,
+        guard: &LocalGuard<'_>,
+    ) -> bool
+    where
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
+    {
+        let entry: CoalesceEntry<L> = {
+            let mut pending = queue.pending.lock();
+            match pending.pop_front() {
+                Some(e) => e,
+                None => return false,
+            }
+        };
+
+        let leaf_ptr: *mut L = entry.leaf_ptr;
+        let entry_ikey_bound: u64 = entry.ikey_bound;
+
+        // SAFETY: leaf_ptr was valid when queued, and seize protects it from reclamation
+        // while any thread might hold a reference.
+        let leaf: &L = unsafe { &*leaf_ptr };
+
+        // Step 1: Try to lock the leaf
+        let Some(mut lock) = leaf.version().try_lock() else {
+            // Leaf is locked by another thread - re-queue for later
+            queue.schedule(leaf_ptr, entry_ikey_bound);
+            return true;
+        };
+
+        // Step 2: Verify leaf is still empty
+        if leaf.size() > 0 {
+            // Leaf was reused for new inserts - done
+            drop(lock);
+            return true;
+        }
+
+        // Step 3: Verify leaf is not leftmost
+        // The leftmost leaf must be preserved for B-link traversal invariants
+        if leaf.prev().is_null() {
+            // Leftmost leaf - cannot remove, re-queue
+            queue.schedule(leaf_ptr, entry_ikey_bound);
+            drop(lock);
+            return true;
+        }
+
+        // Step 4: Mark as deleted
+        // This sets the DELETED bit in the version, signaling to readers
+        // that this leaf is being removed.
+        //
+        // IMPORTANT: We must mark deleted BEFORE unlinking or removing from parent,
+        // because concurrent readers check is_deleted() to know to follow B-links.
+        lock.mark_deleted();
+
+        // Step 5: Unlink from B-link chain
+        // This removes the leaf from the prev<->next chain so B-link traversal
+        // will skip over it. The next pointer is left marked to signal deletion.
+        //
+        // SAFETY: We hold the lock, and prev is non-null (checked above).
+        unsafe { leaf.unlink_from_chain() };
+
+        // Step 6: Get ikey_bound for parent lookup
+        // The ikey_bound identifies this leaf's position in the parent internode.
+        let ikey_bound: u64 = leaf.ikey_bound();
+
+        // Step 7: Remove from parent internode (enables safe retirement)
+        //
+        // This uses lock coupling to walk up the tree:
+        // 1. Lock parent while leaf is still locked
+        // 2. Remove child pointer from parent
+        // 3. Shift remaining entries
+        // 4. If parent becomes empty, continue walking up
+        //
+        // After this call returns true, the leaf is unreachable from the tree
+        // and can be safely retired.
+        //
+        // Note: The lock is consumed by this function.
+        let parent_cleanup_succeeded = NodeCleaner::remove_leaf_from_parent_for_coalesce::<S, L, A>(
+            allocator,
+            guard,
+            leaf_ptr,
+            lock,
+            ikey_bound,
+        );
+
+        // Step 8: Retire the leaf (only if parent cleanup succeeded)
+        //
+        // SAFETY: Only retire if parent_cleanup_succeeded is true, meaning:
+        // - Marked deleted (version has DELETED bit)
+        // - Unlinked from B-link chain (prev/next pointers)
+        // - Removed from parent internode (no child pointer references it)
+        //
+        // If parent cleanup failed (e.g., lock coupling exceeded retry limit),
+        // the leaf is still marked deleted and unlinked from B-link chain,
+        // but still reachable from parent. In this case we do NOT retire -
+        // the leaf will be "leaked" but safe. This is a rare edge case.
+        //
+        // Existing references are protected by seize guards and will be handled
+        // by epoch-based reclamation.
+        if parent_cleanup_succeeded {
+            // SAFETY: Leaf is now unreachable from tree (marked deleted, unlinked,
+            // removed from parent). Guard ensures deferred reclamation.
+            unsafe { allocator.retire_leaf(leaf_ptr, guard) };
+        }
+        // Note: If parent cleanup failed, the leaf remains allocated but
+        // logically deleted. This is a memory leak but prevents UAF.
+        // Future improvement: re-queue for retry or track leaked nodes.
+
+        true
     }
 }
 

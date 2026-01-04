@@ -1117,6 +1117,170 @@ where
         }
     }
 
+    /// Intra-leaf batch iteration with maximum performance.
+    ///
+    /// This is the highest-performance iteration method. It processes entire
+    /// leaves in tight loops, minimizing per-entry overhead.
+    ///
+    /// # Performance Characteristics
+    ///
+    /// - Processes all entries in a leaf before moving to next leaf
+    /// - Single OCC validation per leaf (vs per-entry in `for_each_batch_ref`)
+    /// - No function call overhead per entry within a leaf
+    /// - Falls back to state machine for layer transitions
+    ///
+    /// Expected 2-3x improvement over `for_each_batch_ref` for large scans
+    /// with many entries per leaf (typical case).
+    ///
+    /// # Arguments
+    ///
+    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue.
+    ///
+    /// # Returns
+    ///
+    /// Number of entries visited.
+    #[inline]
+    #[expect(clippy::too_many_lines)]
+    pub fn for_each_intra_leaf_batch_ref<F>(mut self, mut visitor: F) -> usize
+    where
+        F: FnMut(&[u8], &S::Value) -> bool,
+    {
+        use super::find::{
+            LeafBatchResult, advance_leaf_ptr, find_retry, handle_down, handle_up,
+            process_leaf_batch_ptr,
+        };
+
+        if self.exhausted {
+            return 0;
+        }
+
+        // Lazy initialization
+        if !self.initialized {
+            self.initialize();
+            if self.exhausted {
+                return 0;
+            }
+        }
+
+        let mut count: usize = 0;
+
+        // Handle initial Emit state from initialize() if present
+        if self.state == ScanState::Emit {
+            if let Some(snapshot) = self.snapshot.take() {
+                let key: &[u8] = self.cursor_key.full_key();
+
+                if !self.end_bound.contains(key) {
+                    self.exhausted = true;
+                    return 0;
+                }
+
+                let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
+                let guard = CleanupGuard::<S> {
+                    ptr,
+                    _marker: PhantomData,
+                };
+                let value_ref: &S::Value = unsafe { &*ptr.cast::<S::Value>() };
+
+                count += 1;
+                let should_continue = visitor(key, value_ref);
+                drop(guard);
+
+                if !should_continue {
+                    return count;
+                }
+            }
+            self.state = ScanState::FindNext;
+        }
+
+        loop {
+            // Handle rare states (layer transitions, retries)
+            match self.state {
+                ScanState::Down => {
+                    self.single_layer_mode = false;
+                    handle_down(&mut self.stack, &mut self.cursor_key);
+                    self.state = ScanState::Retry;
+                    self.needs_duplicate_check = true;
+                    continue;
+                }
+
+                ScanState::Up => {
+                    if !handle_up(
+                        &mut self.stack,
+                        &mut self.cursor_key,
+                        &mut self.layer_stack,
+                        self.guard,
+                    ) {
+                        self.exhausted = true;
+                        return count;
+                    }
+                    self.state = ScanState::FindNext;
+                    self.needs_duplicate_check = true;
+                    continue;
+                }
+
+                ScanState::Retry => {
+                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
+                    self.needs_duplicate_check = true;
+                    continue;
+                }
+
+                ScanState::Emit | ScanState::FindNext => {}
+            }
+
+            // Check for null stack (layer exhausted)
+            if self.stack.is_null() {
+                if self.layer_stack.is_empty() {
+                    self.exhausted = true;
+                    return count;
+                }
+                self.state = ScanState::Up;
+                continue;
+            }
+
+            // Check leaf deletion
+            let leaf: &L = unsafe { self.stack.leaf_ref() };
+            if leaf.version().is_deleted() {
+                self.state = ScanState::Retry;
+                continue;
+            }
+
+            // ================================================================
+            // INTRA-LEAF BATCH: Process all remaining entries in this leaf
+            // ================================================================
+
+            let result = process_leaf_batch_ptr(
+                &mut self.stack,
+                &mut self.cursor_key,
+                &mut self.layer_stack,
+                &self.end_bound,
+                &mut visitor,
+                &mut count,
+            );
+
+            match result {
+                LeafBatchResult::LeafExhausted => {
+                    // Advance to next leaf
+                    let (state, _) =
+                        advance_leaf_ptr(&mut self.stack, &self.cursor_key, self.guard);
+                    self.state = state;
+                }
+                LeafBatchResult::LayerEncountered => {
+                    self.state = ScanState::Down;
+                }
+                LeafBatchResult::VersionChanged => {
+                    self.state = ScanState::Retry;
+                }
+                LeafBatchResult::Stopped => {
+                    return count;
+                }
+                LeafBatchResult::EndBoundExceeded => {
+                    self.exhausted = true;
+                    return count;
+                }
+            }
+        }
+    }
+
     /// Fallible iteration with zero-copy value references.
     ///
     /// Like [`Self::for_each_ref`], but the visitor can return an error to stop

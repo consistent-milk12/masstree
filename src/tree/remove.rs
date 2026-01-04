@@ -74,7 +74,7 @@ enum RemoveSearchResult {
 
         /// Physical slot index (0..WIDTH).
         /// Discarded after locking - position is re-verified.
-        #[expect(dead_code, reason = "Slot position is re-verified after locking")]
+        #[allow(dead_code, reason = "Captured for debugging, verified under lock")]
         kp: usize,
     },
 
@@ -143,10 +143,7 @@ where
 /// Sublayer roots have NULL parent pointers (they're marked as roots).
 /// We cannot use `sublayer_leaf.parent()` to find the parent leaf.
 /// Instead, we track this information during the layer descent.
-#[allow(
-    dead_code,
-    reason = "Used by gc_layer which is reserved for leaf coalescing"
-)]
+#[allow(dead_code, reason = "Deferred: inline structural removal")]
 #[derive(Debug, Clone, Copy)]
 struct LayerContext {
     /// Pointer to the parent leaf that contains the layer slot.
@@ -164,10 +161,6 @@ struct LayerContext {
 const MAX_RETRIES: usize = 1000;
 
 /// Maximum retries when locking parent during tree walk.
-#[allow(
-    dead_code,
-    reason = "Used by locked_parent_generic for leaf coalescing"
-)]
 const MAX_PARENT_RETRIES: usize = 100;
 
 // ============================================================================
@@ -218,7 +211,7 @@ where
     kp: usize,
 
     /// Context for sublayer cleanup (parent leaf + slot).
-    #[allow(dead_code, reason = "Used by gc_layer for leaf coalescing")]
+    #[allow(dead_code, reason = "Deferred: inline structural removal")]
     layer_context: Option<LayerContext>,
 
     /// Guard for memory reclamation.
@@ -373,8 +366,9 @@ where
     /// # C++ Reference
     ///
     /// `masstree_remove.hh:178-255` - `remove_leaf()`
+    #[allow(dead_code, reason = "Deferred: inline structural removal")]
     #[cold]
-    #[allow(dead_code, reason = "Reserved for leaf coalescing feature")]
+    #[inline(never)]
     fn try_remove_leaf(mut self) -> Option<Self> {
         // Get leaf info before any borrows
         let prev_is_null: bool = self.leaf().prev().is_null();
@@ -434,8 +428,9 @@ where
     /// # C++ Reference
     ///
     /// `masstree_remove.hh:24-115` - `gc_layer()`
+    #[allow(dead_code, reason = "Deferred: inline structural removal")]
     #[cold]
-    #[allow(dead_code, reason = "Reserved for leaf coalescing feature")]
+    #[inline(never)]
     fn gc_layer(self) -> bool {
         // Capture values we need
         let tree = self.tree;
@@ -508,8 +503,9 @@ where
     /// # C++ Reference
     ///
     /// `masstree_remove.hh:217-255` - the main loop in `remove_leaf()`
+    #[allow(dead_code, reason = "Deferred: inline structural removal")]
     #[cold]
-    #[allow(dead_code, reason = "Reserved for leaf coalescing feature")]
+    #[inline(never)]
     fn remove_from_parent(self, child: *mut u8, ikey_bound: u64, replacement: Option<*mut u8>) {
         // Capture values we need before consuming self
         let tree = self.tree;
@@ -644,7 +640,7 @@ where
     /// # Safety
     ///
     /// `current_ptr` must point to a valid, locked node.
-    #[allow(dead_code, reason = "Reserved for leaf coalescing feature")]
+    #[allow(dead_code, reason = "Deferred: inline structural removal")]
     unsafe fn locked_parent<SS, LL>(current_ptr: *mut u8) -> (Option<LockGuard<'static>>, *mut u8)
     where
         SS: ValueSlot,
@@ -686,6 +682,196 @@ where
 pub struct NodeCleaner;
 
 impl NodeCleaner {
+    /// Remove a leaf from its parent internode(s) during coalesce.
+    ///
+    /// This function makes a leaf unreachable from the tree by removing all
+    /// parent child pointers that reference it. After this function returns,
+    /// the leaf can be safely retired.
+    ///
+    /// # Algorithm (Lock Coupling)
+    /// 1. Start with locked leaf
+    /// 2. Acquire parent lock (while leaf still locked)
+    /// 3. Find leaf position in parent using `upper_bound` search
+    /// 4. Verify leaf is still at expected position
+    /// 5. Set child pointer to null
+    /// 6. Shift remaining entries to fill gap (if not leftmost)
+    /// 7. Release leaf lock (keep parent lock)
+    /// 8. If parent is empty and not root, mark deleted and continue up
+    /// 9. Otherwise, release parent lock and return
+    ///
+    /// # Safety
+    /// - `leaf_ptr` must point to a valid, locked, deleted leaf
+    /// - `lock` must be the lock guard for the leaf at `leaf_ptr`
+    /// - The leaf must already be marked deleted and unlinked from B-link chain
+    ///
+    /// # Returns
+    /// `true` if parent cleanup succeeded (safe to retire), `false` if it failed
+    /// (parent not found or lock coupling failed - do not retire the leaf).
+    #[cold]
+    #[inline(never)]
+    #[expect(clippy::too_many_lines)]
+    pub fn remove_leaf_from_parent_for_coalesce<S, L, A>(
+        allocator: &A,
+        guard: &LocalGuard<'_>,
+        leaf_ptr: *mut L,
+        leaf_lock: LockGuard<'_>, // Consumed - ownership transferred to lock coupling
+        ikey_bound: u64,
+    ) -> bool
+    where
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
+    {
+        let mut current: *mut u8 = leaf_ptr.cast();
+        let mut current_ikey: u64 = ikey_bound;
+        let mut current_replacement: Option<*mut u8> = None;
+        let mut current_lock: LockGuard<'_> = leaf_lock;
+
+        loop {
+            // Step 1: Lock parent while current is locked
+            // SAFETY: current is valid and locked; we hold current_lock.
+            let (parent_lock_opt, parent_ptr): (Option<LockGuard<'_>>, *mut u8) =
+                unsafe { Self::locked_parent_generic::<S, L>(current) };
+
+            let Some(mut parent_lock) = parent_lock_opt else {
+                // No parent - we're at the layer root
+                // The leaf is the only node in this layer (root leaf), nothing to remove from.
+                // This is a valid success case - the leaf has no parent pointer to clean up.
+                drop(current_lock);
+                return true;
+            };
+
+            // SAFETY: parent_ptr is a valid internode pointer returned by locked_parent.
+            // We hold parent_lock which guarantees exclusive access.
+            let parent: &L::Internode = unsafe { &*parent_ptr.cast::<L::Internode>() };
+
+            // Step 2: Mark parent as being modified
+            parent_lock.mark_insert();
+
+            debug_assert!(
+                !parent.version().is_deleted(),
+                "remove_leaf_from_parent: parent should not be deleted"
+            );
+
+            // Step 3: Find child position using upper_bound
+            let mut kp: usize = upper_bound_internode_generic(current_ikey, parent);
+
+            // Step 4: Validate child is at expected position
+            if parent.child(kp) != current {
+                // Child not at expected position - search for it linearly.
+                // This can happen if concurrent operations changed the parent structure.
+                let nkeys: usize = parent.nkeys();
+                let mut found_kp: Option<usize> = None;
+                for i in 0..=nkeys {
+                    if parent.child(i) == current {
+                        found_kp = Some(i);
+                        break;
+                    }
+                }
+
+                if let Some(actual_kp) = found_kp {
+                    // Found at different position - use the actual position
+                    kp = actual_kp;
+                } else {
+                    // Not found - already removed by another thread (concurrent coalesce)
+                    // This is a success case: the parent cleanup is already done.
+                    drop(current_lock);
+                    drop(parent_lock);
+                    return true;
+                }
+            }
+
+            // Step 5: Update child pointer
+            let new_child: *mut u8 = current_replacement.unwrap_or(StdPtr::null_mut());
+            parent.set_child(kp, new_child);
+
+            // Step 6: Handle replacement or shift
+            if let Some(repl) = current_replacement {
+                if !repl.is_null() {
+                    // SAFETY: repl is a valid node pointer (the replacement child).
+                    // parent_ptr is valid and we hold parent_lock.
+                    unsafe {
+                        Self::set_parent_erased::<S, L>(repl, parent_ptr);
+                    }
+                } else if kp > 0 {
+                    Self::shift_internode_down_generic::<S, L::Internode>(parent, kp);
+                }
+            } else if kp > 0 {
+                Self::shift_internode_down_generic::<S, L::Internode>(parent, kp);
+            }
+
+            // Step 7: Handle redirect if leftmost child removed
+            //
+            // When we remove a child at position 0 or 1, and after shifting child[0]
+            // becomes null (because the original child[0] was the one removed), we
+            // need to update ancestor separator keys that used the old ikey_bound.
+            //
+            // This happens when:
+            // - kp == 0: We removed the leftmost child directly
+            // - kp == 1 and after shift child[0] is null: Edge case from prior collapse
+            //
+            // The redirect walks up ancestors updating separator keys from old_ikey
+            // to new_ikey (the first key of the new leftmost child).
+            if (kp <= 1) && (parent.nkeys() > 0) && parent.child(0).is_null() {
+                let new_ikey: u64 = parent.ikey(0);
+                Self::redirect_ikey_bounds_generic::<S, L>(
+                    parent_ptr,
+                    &mut parent_lock,
+                    current_ikey,
+                    new_ikey,
+                );
+                current_ikey = new_ikey;
+            }
+
+            // Step 8: Drop current lock AFTER parent update is complete
+            // This is the lock coupling protocol - never release current before parent is updated
+            drop(current_lock);
+
+            // Step 9: Check if parent should be collapsed
+            if parent.nkeys() > 0 || parent.version().is_root() {
+                // Parent still has children or is root - we're done successfully
+                drop(parent_lock);
+                return true;
+            }
+
+            // Parent is empty (nkeys == 0) and not root
+            let child0: *mut u8 = parent.child(0);
+            if child0.is_null() {
+                // No remaining child - this can happen if we removed the last child.
+                // The parent is now an empty non-root internode. We still mark it
+                // deleted but there's nothing to propagate up as replacement.
+                parent_lock.mark_deleted();
+                unsafe {
+                    allocator.retire_internode_erased(parent_ptr, guard);
+                }
+                drop(parent_lock);
+                return true;
+            }
+
+            // Step 10: Collapse empty parent
+            // The parent has exactly one child (child[0]). We'll mark the parent
+            // deleted and continue walking up, installing child[0] as the replacement
+            // in the grandparent.
+            parent_lock.mark_deleted();
+
+            // SAFETY: parent_ptr is a valid internode that we hold locked (parent_lock).
+            // We just marked it deleted. Guard ensures deferred reclamation.
+            unsafe {
+                allocator.retire_internode_erased(parent_ptr, guard);
+            }
+
+            // Clear child pointer (the child will become the replacement)
+            parent.set_child(0, StdPtr::null_mut());
+
+            // Continue walking up with the remaining child as replacement
+            current = parent_ptr;
+            current_replacement = Some(child0);
+            current_lock = parent_lock; // Transfer lock ownership
+        }
+    }
+
     // ============================================================================
     //  Public Entry Point
     // ============================================================================
@@ -1001,11 +1187,14 @@ impl NodeCleaner {
     /// Returns `true` if the sublayer is valid and can be descended into,
     /// `false` if the sublayer has been garbage collected.
     ///
+    /// This check runs on every layer descent (hot path). Only finding a deleted
+    /// sublayer is rare. The function is tiny (pointer cast + load), so inlining
+    /// is always beneficial.
+    ///
     /// # Safety
     ///
     /// `layer_ptr` must point to a valid node protected by a guard.
-    #[cold]
-    #[inline(never)]
+    #[inline(always)]
     fn is_sublayer_valid(layer_ptr: *mut u8) -> bool {
         // SAFETY: layer_ptr came from a valid slot, protected by guard
         #[expect(clippy::cast_ptr_alignment, reason = "Checked")]
@@ -1044,7 +1233,6 @@ impl NodeCleaner {
     /// `masstree_remove.hh:231`: `p->shift_down(kp - 1, kp, p->nkeys_ - kp)`
     #[cold]
     #[inline(never)]
-    #[allow(dead_code, reason = "Reserved for leaf coalescing feature")]
     fn shift_internode_down_generic<S, I>(inode: &I, removed_pos: usize)
     where
         S: ValueSlot,
@@ -1120,7 +1308,6 @@ impl NodeCleaner {
     #[cold]
     #[inline(never)]
     #[expect(clippy::cast_sign_loss)]
-    #[allow(dead_code, reason = "Reserved for leaf coalescing feature")]
     fn redirect_ikey_bounds_generic<S, L>(
         start_internode: *mut u8,
         _start_lock: &mut LockGuard<'_>,
@@ -1208,7 +1395,6 @@ impl NodeCleaner {
     ///
     /// # Safety
     /// `node_ptr` must point to a valid leaf or internode.
-    #[allow(dead_code, reason = "Reserved for leaf coalescing feature")]
     unsafe fn get_parent_erased<S, L>(node_ptr: *mut u8) -> *mut u8
     where
         S: ValueSlot,
@@ -1276,7 +1462,6 @@ impl NodeCleaner {
     ///     return static_cast<internode<P>*>(p);
     /// }
     /// ```
-    #[allow(dead_code, reason = "Reserved for leaf coalescing feature")]
     unsafe fn locked_parent_generic<'a, S, L>(
         current_ptr: *mut u8,
     ) -> (Option<LockGuard<'a>>, *mut u8)
@@ -1334,7 +1519,6 @@ impl NodeCleaner {
     /// - `node_ptr` must point to a valid leaf or internode
     /// - The node's type must match what [`NodeVersion::is_leaf`] reports
     #[inline(always)]
-    #[allow(dead_code, reason = "Reserved for leaf coalescing feature")]
     unsafe fn set_parent_erased<S, L>(node_ptr: *mut u8, new_parent: *mut u8)
     where
         S: ValueSlot,

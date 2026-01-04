@@ -405,11 +405,12 @@ impl<'a> Key<'a> {
         0
     }
 
-    /// Slow path for reading partial ikeys (1-7 bytes).
+    /// Read partial ikeys (1-7 bytes).
     ///
-    /// Separated from `read_ikey` to keep the hot path small for I-cache.
-    #[cold]
-    #[inline(never)]
+    /// This handles keys shorter than 8 bytes, which are common for small
+    /// identifiers. The function is small (pad + copy + from_be_bytes),
+    /// so inlining is beneficial when short keys are frequent.
+    #[inline]
     #[must_use]
     pub fn read_ikey_slow(remaining: &[u8]) -> u64 {
         let mut bytes: [u8; 8] = [0u8; 8];

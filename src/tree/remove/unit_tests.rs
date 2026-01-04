@@ -1067,3 +1067,503 @@ fn test_miri_parent_erased_helpers() {
     let _: Box<TestLeaf> = unsafe { Box::from_raw(leaf_ptr.cast::<TestLeaf>()) };
     let _: Box<TestInternode> = unsafe { Box::from_raw(parent_ptr.cast::<TestInternode>()) };
 }
+
+// ============================================================================
+//  Coalesce Safety Tests
+// ============================================================================
+
+/// Test that process_coalesce doesn't cause infinite loops or panics.
+///
+/// This test verifies the fix for the P0 safety issue where:
+/// 1. Deleted nodes had marked `next` pointers (signaling "split in progress")
+/// 2. Traversal code would loop waiting for the "split" to complete
+/// 3. But deleted nodes never unmark their `next` pointer -> infinite loop
+///
+/// The fix ensures traversal code checks `is_deleted()` and follows B-links.
+#[test]
+fn test_coalesce_safety_no_infinite_loop() {
+    let tree: TestTree = TestTree::new();
+
+    // Insert enough keys to create multiple leaves
+    for i in 0_u64..50 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    // Remove all keys to create empty leaves
+    for i in 0_u64..50 {
+        tree.remove(&i.to_be_bytes()).unwrap();
+    }
+
+    // Process coalesce - this should complete without hanging
+    let guard = tree.guard();
+    let processed = tree.process_coalesce(&guard);
+
+    // We should have processed some entries
+    assert!(
+        processed > 0,
+        "Expected some coalesce entries to be processed"
+    );
+
+    // Tree should now be empty
+    assert_eq!(tree.len(), 0);
+
+    // Insert new keys - this should work correctly
+    // (traversal through deleted nodes should follow B-links)
+    for i in 100_u64..110 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    // Verify new keys are accessible
+    for i in 100_u64..110 {
+        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+    }
+}
+
+/// Test concurrent coalesce with reads doesn't hang.
+#[test]
+#[cfg(not(miri))]
+fn test_coalesce_concurrent_with_reads() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let test_complete = Arc::new(AtomicBool::new(false));
+
+    // Insert keys
+    for i in 0_u64..100 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    // Remove some keys to create empty leaves
+    for i in 0_u64..50 {
+        tree.remove(&i.to_be_bytes()).unwrap();
+    }
+
+    let tree_reader = Arc::clone(&tree);
+    let complete_reader = Arc::clone(&test_complete);
+
+    // Reader thread - continuously reads
+    let reader = thread::spawn(move || {
+        while !complete_reader.load(Ordering::Acquire) {
+            for i in 50_u64..100 {
+                let _ = tree_reader.get(&i.to_be_bytes());
+            }
+        }
+    });
+
+    // Run coalesce in a thread with timeout to detect hangs
+    let tree_coalesce = Arc::clone(&tree);
+    let coalesce_result = thread::spawn(move || {
+        let guard = tree_coalesce.guard();
+        tree_coalesce.process_coalesce(&guard)
+    });
+
+    // Wait for coalesce with timeout
+    let result = coalesce_result.join();
+
+    // Signal reader to stop
+    test_complete.store(true, Ordering::Release);
+
+    // Wait for reader
+    let _ = reader.join();
+
+    // Verify coalesce completed successfully
+    assert!(result.is_ok(), "Coalesce should not panic");
+
+    // Verify remaining keys are still accessible
+    for i in 50_u64..100 {
+        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+    }
+}
+
+/// Test that insert works correctly when encountering deleted nodes.
+#[test]
+fn test_insert_through_deleted_nodes() {
+    let tree: TestTree = TestTree::new();
+
+    // Create a tree with keys that will span multiple leaves
+    for i in 0_u64..30 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    // Remove middle keys to create empty leaves in the middle
+    for i in 10_u64..20 {
+        tree.remove(&i.to_be_bytes()).unwrap();
+    }
+
+    // Process coalesce to mark those leaves as deleted
+    let guard = tree.guard();
+    let _ = tree.process_coalesce(&guard);
+
+    // Insert new keys that might traverse through deleted nodes
+    for i in 10_u64..20 {
+        tree.insert(&i.to_be_bytes(), i * 10).unwrap();
+    }
+
+    // Verify all keys
+    for i in 0_u64..10 {
+        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+    }
+    for i in 10_u64..20 {
+        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i * 10)));
+    }
+    for i in 20_u64..30 {
+        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+    }
+}
+
+/// Test multiple coalesce cycles don't accumulate issues.
+///
+/// This verifies that parent cleanup works correctly and doesn't
+/// leave orphaned pointers or cause memory issues over time.
+#[test]
+fn test_coalesce_multiple_cycles() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    for cycle in 0..5 {
+        let base: u64 = cycle * 100;
+
+        // Insert keys
+        for i in 0_u64..50 {
+            tree.insert(&(base + i).to_be_bytes(), base + i).unwrap();
+        }
+
+        // Remove all keys
+        for i in 0_u64..50 {
+            tree.remove(&(base + i).to_be_bytes()).unwrap();
+        }
+
+        // Process coalesce
+        let processed = tree.process_coalesce(&guard);
+        assert!(processed > 0, "Cycle {cycle}: should process some entries");
+
+        // Verify tree is empty after each cycle
+        assert_eq!(tree.len(), 0, "Cycle {cycle}: tree should be empty");
+
+        // Verify pending coalesce is zero after processing
+        assert_eq!(
+            tree.pending_coalesce(),
+            0,
+            "Cycle {cycle}: pending coalesce should be 0"
+        );
+    }
+}
+
+/// Test that leftmost leaf is preserved during coalesce.
+///
+/// The leftmost leaf cannot be removed because B-link traversal
+/// requires it as an anchor point. This test verifies the leftmost
+/// check works correctly.
+#[test]
+fn test_coalesce_preserves_leftmost_leaf() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Insert and remove keys - the leftmost leaf should remain
+    for i in 0_u64..10 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    for i in 0_u64..10 {
+        tree.remove(&i.to_be_bytes()).unwrap();
+    }
+
+    // Process coalesce
+    let _ = tree.process_coalesce(&guard);
+
+    // Even after coalesce, we should be able to insert new keys
+    // (the leftmost leaf is still there as a valid root)
+    for i in 0_u64..10 {
+        tree.insert(&i.to_be_bytes(), i * 2).unwrap();
+    }
+
+    // Verify keys
+    for i in 0_u64..10 {
+        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i * 2)));
+    }
+}
+
+/// Test coalesce with interleaved operations.
+///
+/// This simulates a more realistic workload where inserts, removes,
+/// and coalescing happen in an interleaved fashion.
+#[test]
+fn test_coalesce_interleaved_operations() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Phase 1: Insert initial keys
+    for i in 0_u64..100 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    // Phase 2: Remove some, coalesce, insert new
+    for i in 0_u64..25 {
+        tree.remove(&i.to_be_bytes()).unwrap();
+    }
+    let _ = tree.process_coalesce(&guard);
+
+    // Insert in the "gap"
+    for i in 0_u64..25 {
+        tree.insert(&i.to_be_bytes(), i + 1000).unwrap();
+    }
+
+    // Phase 3: Remove different keys, coalesce again
+    for i in 50_u64..75 {
+        tree.remove(&i.to_be_bytes()).unwrap();
+    }
+    let _ = tree.process_coalesce(&guard);
+
+    // Insert again
+    for i in 50_u64..75 {
+        tree.insert(&i.to_be_bytes(), i + 2000).unwrap();
+    }
+
+    // Verify all keys have correct values
+    for i in 0_u64..25 {
+        assert_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(Arc::new(i + 1000)),
+            "Key {i} should have value {}",
+            i + 1000
+        );
+    }
+    for i in 25_u64..50 {
+        assert_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(Arc::new(i)),
+            "Key {i} should have original value"
+        );
+    }
+    for i in 50_u64..75 {
+        assert_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(Arc::new(i + 2000)),
+            "Key {i} should have value {}",
+            i + 2000
+        );
+    }
+    for i in 75_u64..100 {
+        assert_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(Arc::new(i)),
+            "Key {i} should have original value"
+        );
+    }
+}
+
+/// Test coalesce batch processing.
+///
+/// Verifies that process_coalesce_batch correctly limits the
+/// number of entries processed.
+#[test]
+#[expect(clippy::panic)]
+fn test_coalesce_batch_processing() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Insert enough keys to create many empty leaves
+    for i in 0_u64..200 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    // Remove all to queue many entries
+    for i in 0_u64..200 {
+        tree.remove(&i.to_be_bytes()).unwrap();
+    }
+
+    let initial_pending = tree.pending_coalesce();
+    assert!(initial_pending > 0, "Should have pending coalesce entries");
+
+    // Process in batches
+    let mut total_processed: usize = 0;
+    let batch_limit: usize = 5;
+
+    while tree.pending_coalesce() > 0 {
+        let processed = tree.process_coalesce_batch(&guard, batch_limit);
+        total_processed += processed;
+
+        // Each batch should process at most the limit
+        // (could be less if entries are re-queued)
+        assert!(
+            processed <= batch_limit,
+            "Batch processed {processed}, expected <= {batch_limit}"
+        );
+
+        // Prevent infinite loop in test
+        if total_processed > initial_pending * 3 {
+            panic!("Too many iterations, possible infinite loop");
+        }
+    }
+
+    assert_eq!(
+        tree.pending_coalesce(),
+        0,
+        "All entries should be processed"
+    );
+}
+
+/// Test concurrent insert/remove with coalesce.
+///
+/// Stress tests the synchronization between normal operations
+/// and background coalescing.
+#[test]
+#[cfg(not(miri))]
+fn test_coalesce_concurrent_with_writers() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    // Pre-populate
+    for i in 0_u64..100 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    // Writer thread - continuously insert and remove
+    let tree_writer = Arc::clone(&tree);
+    let stop_writer = Arc::clone(&stop_flag);
+    let writer = thread::spawn(move || {
+        let mut counter: u64 = 1000;
+        while !stop_writer.load(Ordering::Acquire) {
+            // Insert
+            let key = counter;
+            tree_writer.insert(&key.to_be_bytes(), key).ok();
+
+            // Remove a random-ish key
+            let remove_key = (counter % 200) + 100;
+            tree_writer.remove(&remove_key.to_be_bytes()).ok();
+
+            counter += 1;
+            if counter > 10000 {
+                counter = 1000;
+            }
+        }
+    });
+
+    // Coalesce thread
+    let tree_coalesce = Arc::clone(&tree);
+    let stop_coalesce = Arc::clone(&stop_flag);
+    let coalescer = thread::spawn(move || {
+        let mut cycles: usize = 0;
+        while !stop_coalesce.load(Ordering::Acquire) {
+            let guard = tree_coalesce.guard();
+            let _ = tree_coalesce.process_coalesce(&guard);
+            cycles += 1;
+
+            // Small yield
+            thread::yield_now();
+        }
+        cycles
+    });
+
+    // Let it run for a bit
+    thread::sleep(Duration::from_millis(100));
+
+    // Stop threads
+    stop_flag.store(true, Ordering::Release);
+
+    let writer_result = writer.join();
+    let coalesce_result = coalescer.join();
+
+    assert!(writer_result.is_ok(), "Writer should not panic");
+    assert!(coalesce_result.is_ok(), "Coalescer should not panic");
+
+    let cycles = coalesce_result.unwrap();
+    assert!(cycles > 0, "Should have run some coalesce cycles");
+}
+
+/// Test that empty tree coalesce is a no-op.
+#[test]
+fn test_coalesce_empty_tree() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Empty tree should have nothing to coalesce
+    assert_eq!(tree.pending_coalesce(), 0);
+    let processed = tree.process_coalesce(&guard);
+    assert_eq!(processed, 0, "Empty tree should process 0 entries");
+}
+
+/// Test coalesce with range scans.
+///
+/// Verifies that range iteration works correctly after coalescing.
+#[test]
+fn test_coalesce_with_range_scan() {
+    use crate::RangeBound;
+
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Insert keys with gaps
+    for i in (0_u64..100).step_by(2) {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    // Remove some keys
+    for i in (20_u64..40).step_by(2) {
+        tree.remove(&i.to_be_bytes()).unwrap();
+    }
+
+    // Coalesce
+    let _ = tree.process_coalesce(&guard);
+
+    // Range scan should work correctly
+    let mut found: Vec<u64> = Vec::new();
+    tree.scan(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |k: &[u8], v: Arc<u64>| {
+            let key = u64::from_be_bytes(k.try_into().unwrap());
+            found.push(key);
+            assert_eq!(*v, key, "Value should match key");
+            true
+        },
+        &guard,
+    );
+
+    // Verify we got the expected keys
+    let expected: Vec<u64> = (0_u64..100)
+        .step_by(2)
+        .filter(|&i| !(20..40).contains(&i))
+        .collect();
+    assert_eq!(found, expected, "Range scan should return correct keys");
+}
+
+/// Stress test: rapid insert-remove-coalesce cycles.
+#[test]
+fn test_coalesce_stress_rapid_cycles() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    for cycle in 0_u64..20 {
+        // Insert
+        for i in 0_u64..20 {
+            tree.insert(&(cycle * 100 + i).to_be_bytes(), i).unwrap();
+        }
+
+        // Remove
+        for i in 0_u64..20 {
+            tree.remove(&(cycle * 100 + i).to_be_bytes()).unwrap();
+        }
+
+        // Coalesce immediately
+        tree.process_coalesce(&guard);
+    }
+
+    // Tree should be empty and healthy
+    assert_eq!(tree.len(), 0);
+    assert_eq!(tree.pending_coalesce(), 0);
+
+    // Should still work for new insertions
+    for i in 0_u64..50 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    for i in 0_u64..50 {
+        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+    }
+}

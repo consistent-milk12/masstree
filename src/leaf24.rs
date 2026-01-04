@@ -1475,6 +1475,8 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     // Internodes use fixed WIDTH=15 (4-bit permutation slots)
     type Internode = crate::internode::InternodeNode<S>;
     const WIDTH: usize = WIDTH_24;
+    /// 80% of 24 = 19.2, use 19 to trigger splits earlier
+    const SPLIT_THRESHOLD: usize = 19;
 
     #[inline(always)]
     fn new_boxed() -> Box<Self> {

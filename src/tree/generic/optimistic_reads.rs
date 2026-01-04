@@ -55,7 +55,10 @@ enum LookupResult {
 /// This is safe because:
 /// 1. `permutation()` uses Acquire ordering, synchronizing with writer's Release
 /// 2. OCC version validation at the end catches any races
-#[inline(always)]
+///
+/// Uses `#[inline]` - medium-sized function with loop unrolling; let compiler
+/// decide based on call-site context to avoid I-cache pressure.
+#[inline]
 #[expect(clippy::collapsible_if, reason = "Leads to unusual regressions?!")]
 fn search_leaf_multi_layer<S, L>(leaf: &L, key: &Key<'_>) -> LookupResult
 where
@@ -244,11 +247,10 @@ where
     ///
     /// Returns `true` if sublayer is valid, `false` if deleted (key not found).
     ///
-    /// Marked `#[cold]` because finding a deleted sublayer is rare (only during
-    /// concurrent GC). The layer descent itself is hot, but the deletion check
-    /// almost always returns true. This keeps branch prediction accurate.
-    #[cold]
-    #[inline(never)]
+    /// This check runs on every layer descent (hot path). Only finding a deleted
+    /// sublayer is rare. The function is tiny (pointer cast + load), so inlining
+    /// is always beneficial.
+    #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_sublayer_valid(&self, layer_ptr: *mut u8) -> bool {
         // SAFETY: ptr is non-null (came from valid slot) and protected by guard.

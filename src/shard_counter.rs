@@ -191,6 +191,7 @@ impl ShardedCounter {
     }
 
     /// Add a provided value to the counter.
+    #[allow(dead_code, reason = "Public API")]
     #[inline(always)]
     pub fn add(&self, val: isize) {
         self.get_shard().fetch_add(val, AtomicOrdering::Relaxed);
@@ -233,6 +234,7 @@ impl ShardedCounter {
     /// Reset the counter to zero.
     ///
     /// # Thread Safety
+    #[allow(dead_code, reason = "Public API")]
     #[inline]
     pub fn reset(&self) {
         for shard in &self.shards {

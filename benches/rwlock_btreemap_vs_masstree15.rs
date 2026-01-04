@@ -1415,3 +1415,156 @@ mod point_get_uniform_shared_prefix_64b {
             });
     }
 }
+
+#[divan::bench_group(name = "07_mixed_90_10_shared_prefix_64B")]
+mod mixed_90_10_shared_prefix_64b {
+    use super::*;
+
+    const N: usize = 200_000;
+    const OPS_PER_THREAD: usize = 50_000;
+    const PREFIX_CHUNKS: usize = 3;
+    const PREFIX_BUCKETS: u64 = 256;
+    const WRITE_RATIO: usize = 10; // 10% writes
+
+    fn prefix_keys() -> Vec<[u8; 64]> {
+        keys_shared_prefix_chunks::<64>(N, PREFIX_CHUNKS, PREFIX_BUCKETS)
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(prefix_keys());
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| Arc::new(setup_masstree15::<64>(keys.as_ref())))
+            .bench_local_values(|tree| {
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(&tree);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let guard = tree.guard();
+                            let mut sum = 0u64;
+                            let base = t * OPS_PER_THREAD;
+                            start.wait();
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[base + i];
+                                if i % 100 < WRITE_RATIO {
+                                    // 10% writes
+                                    let _ = tree.insert_with_guard(
+                                        &keys[idx],
+                                        idx as u64,
+                                        &guard,
+                                    );
+                                } else {
+                                    // 90% reads
+                                    if let Some(v) = tree.get_ref(&keys[idx], &guard) {
+                                        sum = sum.wrapping_add(*v);
+                                    }
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn std_rwlock_btreemap(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(prefix_keys());
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref())))
+            .bench_local_values(|map| {
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let base = t * OPS_PER_THREAD;
+                            start.wait();
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[base + i];
+                                if i % 100 < WRITE_RATIO {
+                                    // 10% writes - need write lock
+                                    let mut guard = map.write().unwrap();
+                                    guard.insert(keys[idx], idx as u64);
+                                } else {
+                                    // 90% reads - read lock
+                                    let guard = map.read().unwrap();
+                                    if let Some(v) = guard.get(&keys[idx]) {
+                                        sum = sum.wrapping_add(*v);
+                                    }
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn parking_rwlock_btreemap(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(prefix_keys());
+        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref())))
+            .bench_local_values(|map| {
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let indices = Arc::clone(&indices);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let mut sum = 0u64;
+                            let base = t * OPS_PER_THREAD;
+                            start.wait();
+                            for i in 0..OPS_PER_THREAD {
+                                let idx = indices[base + i];
+                                if i % 100 < WRITE_RATIO {
+                                    // 10% writes - need write lock
+                                    let mut guard = map.write();
+                                    guard.insert(keys[idx], idx as u64);
+                                } else {
+                                    // 90% reads - read lock
+                                    let guard = map.read();
+                                    if let Some(v) = guard.get(&keys[idx]) {
+                                        sum = sum.wrapping_add(*v);
+                                    }
+                                }
+                            }
+                            black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}

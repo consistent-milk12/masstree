@@ -8,9 +8,9 @@
 //! - Unified slot allocation and value update logic
 
 use super::{
-    AtomicOrdering, Guard, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX,
-    LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, TreePermutation,
-    ValueSlot, is_marked, unmark_ptr,
+    Guard, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf,
+    LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot, is_marked,
+    unmark_ptr,
 };
 
 use std::ptr as StdPtr;

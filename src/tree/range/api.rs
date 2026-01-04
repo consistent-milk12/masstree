@@ -303,6 +303,61 @@ where
         self.range(start, end, guard).for_each_batch_ref(visitor)
     }
 
+    /// Intra-leaf batch scan with maximum performance.
+    ///
+    /// This is the highest-performance scan method. It processes entire
+    /// leaves in tight loops, minimizing per-entry overhead.
+    ///
+    /// # Performance Characteristics
+    ///
+    /// - Processes all entries in a leaf before moving to next leaf
+    /// - Single OCC validation per leaf (vs per-entry in `scan_batch_ref`)
+    /// - No function call overhead per entry within a leaf
+    /// - Falls back to state machine for layer transitions (sublayers)
+    ///
+    /// Expected 2-3x improvement over `scan_batch_ref` for large scans.
+    ///
+    /// # Arguments
+    ///
+    /// - `start`: Start bound of the range
+    /// - `end`: End bound of the range
+    /// - `visitor`: Callback function `fn(&[u8], &V) -> bool`
+    /// - `guard`: Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// Number of entries visited.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let guard = tree.guard();
+    /// let mut sum = 0u64;
+    ///
+    /// // Fastest scan for large ranges
+    /// tree.scan_intra_leaf_batch_ref(
+    ///     RangeBound::Unbounded,
+    ///     RangeBound::Unbounded,
+    ///     |_key, value| {
+    ///         sum += *value;
+    ///         true
+    ///     },
+    ///     &guard
+    /// );
+    /// ```
+    pub fn scan_intra_leaf_batch_ref<F>(
+        &self,
+        start: RangeBound<'_>,
+        end: RangeBound<'_>,
+        visitor: F,
+        guard: &LocalGuard<'_>,
+    ) -> usize
+    where
+        F: FnMut(&[u8], &S::Value) -> bool,
+    {
+        self.range(start, end, guard).for_each_intra_leaf_batch_ref(visitor)
+    }
+
     /// Scan all entries with a prefix.
     ///
     /// Convenience method for scanning all keys that start with a given prefix.

@@ -17,7 +17,7 @@ use crate::{
     slot::ValueSlot,
     tree::{
         InsertError, InsertSearchResultGeneric,
-        coalesce::{self, CoalesceQueue},
+        coalesce::{Coalesce, CoalesceQueue},
         remove::NodeCleaner,
         split::Propagation,
     },
@@ -120,6 +120,15 @@ where
     /// Call this during low-contention periods to clean up empty leaves.
     /// This is safe to call concurrently with other operations.
     ///
+    /// # Algorithm
+    ///
+    /// For each queued empty leaf:
+    /// 1. Lock the leaf and verify still empty
+    /// 2. Mark as deleted
+    /// 3. Unlink from B-link chain
+    /// 4. Remove from parent internode (lock coupling)
+    /// 5. Retire the leaf for epoch-based reclamation
+    ///
     /// # Returns
     ///
     /// The number of entries processed (including skipped/re-queued).
@@ -132,25 +141,27 @@ where
     ///
     /// // ... perform many removes ...
     ///
-    /// // Clean up empty leaves
+    /// // Clean up empty leaves (fully removes and reclaims memory)
     /// let processed = tree.process_coalesce(&guard);
     /// println!("Processed {} empty leaves", processed);
     /// ```
     #[inline]
     pub fn process_coalesce(&self, guard: &LocalGuard<'_>) -> usize {
-        coalesce::process_all::<S, L, A>(&self.coalesce_queue, &self.allocator, guard)
+        Coalesce::process_all::<S, L, A>(&self.coalesce_queue, &self.allocator, guard)
     }
 
     /// Process up to `limit` pending empty leaf removals.
     ///
     /// Useful for bounded cleanup during normal operations.
     ///
+    /// See [`process_coalesce`](Self::process_coalesce) for the full algorithm.
+    ///
     /// # Returns
     ///
     /// The number of entries processed.
     #[inline]
     pub fn process_coalesce_batch(&self, guard: &LocalGuard<'_>, limit: usize) -> usize {
-        coalesce::process_batch::<S, L, A>(&self.coalesce_queue, &self.allocator, guard, limit)
+        Coalesce::process_batch::<S, L, A>(&self.coalesce_queue, &self.allocator, guard, limit)
     }
 
     // ========================================================================
@@ -267,6 +278,7 @@ where
     )]
     fn reach_leaf_via_internode_generic(&self, mut inode: &L::Internode, key: &Key<'_>) -> &L {
         use crate::ksearch::upper_bound_internode_generic;
+        use crate::leaf_trait::TreeInternode;
         use crate::prefetch::prefetch_read;
 
         let target_ikey: u64 = key.ikey();
@@ -277,8 +289,19 @@ where
                 upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
             let child_ptr: *mut u8 = inode.child(child_idx);
 
-            // Prefetch child node
+            // Prefetch child node (hides memory latency for next iteration)
             prefetch_read(child_ptr);
+
+            // Speculatively prefetch grandchild if children are internodes
+            // This overlaps the grandchild fetch with the current child access
+            if !inode.children_are_leaves() {
+                // Child is an internode - prefetch its first child (grandchild)
+                // SAFETY: children_are_leaves() is false, so child is an internode
+                let child_inode: &L::Internode =
+                    unsafe { &*(child_ptr.cast::<L::Internode>()) };
+                let grandchild_ptr: *mut u8 = child_inode.child(0);
+                prefetch_read(grandchild_ptr);
+            }
 
             // Check child type via NodeVersion
             // SAFETY: All children have NodeVersion as first field, properly aligned
@@ -358,6 +381,7 @@ where
     #[allow(dead_code, reason = "traversal helper for future features")]
     fn reach_leaf_mut_iterative_generic(mut current: *mut u8, ikey: u64) -> *mut L {
         use crate::ksearch::upper_bound_internode_generic;
+        use crate::leaf_trait::TreeInternode;
         use crate::prefetch::prefetch_read;
 
         loop {
@@ -374,6 +398,12 @@ where
                 // SAFETY: children_are_leaves() guarantees child is a leaf
                 return child_ptr.cast::<L>();
             }
+
+            // Child is an internode - prefetch its first child (grandchild)
+            // SAFETY: !children_are_leaves() so child is an internode
+            let child_inode: &L::Internode = unsafe { &*(child_ptr.cast::<L::Internode>()) };
+            let grandchild_ptr: *mut u8 = child_inode.child(0);
+            prefetch_read(grandchild_ptr);
 
             current = child_ptr;
         }
@@ -541,6 +571,17 @@ where
                 // Prefetch child while we validate (hide memory latency)
                 prefetch_read(child);
 
+                // Speculatively prefetch grandchild if children are internodes
+                // This overlaps the grandchild fetch with validation
+                if !inode.children_are_leaves() {
+                    // Child is an internode - prefetch its first child (grandchild)
+                    // SAFETY: children_are_leaves() is false, so child is an internode
+                    let child_inode: &L::Internode =
+                        unsafe { &*(child.cast::<L::Internode>()) };
+                    let grandchild_ptr: *mut u8 = child_inode.child(0);
+                    prefetch_read(grandchild_ptr);
+                }
+
                 // Get stable version of child BEFORE validating parent
                 // This is the key insight: we have child's version captured,
                 // so even if parent changes, we know child state at read time
@@ -680,9 +721,13 @@ where
         while !leaf.version().is_deleted() {
             let next_raw: *mut L = leaf.next_raw();
 
-            // Check for marked pointer (split in progress)
+            // Check for marked pointer (split in progress OR deleted node)
             if is_marked(next_raw) {
                 leaf.wait_for_split();
+                // After wait_for_split returns, re-check is_deleted via the
+                // while condition. If deleted, we exit the loop. If not deleted
+                // (split completed), we re-read next_raw which should now be
+                // unmarked.
                 continue;
             }
 
@@ -705,6 +750,11 @@ where
             // Key belongs in current leaf
             break;
         }
+
+        // Note: With proper parent cleanup in coalesce, deleted leaves are now
+        // unreachable from the tree. The while loop's is_deleted() check provides
+        // defense-in-depth, but the post-loop handling is no longer needed since
+        // we won't exit the loop due to deletion (leaf is already removed from tree).
 
         (leaf, version)
     }
@@ -748,9 +798,28 @@ where
                 return (leaf, true);
             }
 
+            // Check if current leaf was deleted (e.g., by coalescing)
+            // If so, follow B-link to successor and continue from there
+            if leaf.version().is_deleted() {
+                let next_raw: *mut L = leaf.next_raw();
+                let next_ptr: *mut L = unmark_ptr(next_raw);
+                if next_ptr.is_null() {
+                    // Deleted leaf has no successor - return it, caller will
+                    // detect the deleted state and retry from root
+                    break;
+                }
+                // SAFETY: next_ptr is valid, protected by guard
+                leaf = unsafe { &*next_ptr };
+                hops += 1;
+                continue;
+            }
+
             let next_raw: *mut L = leaf.next_raw();
             if is_marked(next_raw) {
                 leaf.wait_for_split();
+                // After wait_for_split returns, re-check: either the split
+                // completed (next unmarked) or the node was deleted (handled
+                // at top of loop on next iteration)
                 continue;
             }
 

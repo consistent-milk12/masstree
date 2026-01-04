@@ -166,7 +166,7 @@ where
     ///
     /// Uses a sharded counter to minimize cache-line contention during
     /// concurrent inserts. Each thread increments a different shard,
-    /// avoiding the cache-line bouncing that occurs with a single AtomicUsize.
+    /// avoiding the cache-line bouncing that occurs with a single [`AtomicUsize`].
     ///
     /// Note: `len()` sums multiple shards and is not linearizable during
     /// concurrent mutations. The count is exact after all threads quiesce.

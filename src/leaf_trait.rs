@@ -388,6 +388,15 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Node width (number of slots).
     const WIDTH: usize;
 
+    /// Split threshold (trigger split when size >= this).
+    ///
+    /// Default is 80% of WIDTH to reduce split frequency on hot keys.
+    /// This leaves headroom for inserts before triggering a split.
+    ///
+    /// - WIDTH=15: threshold=12 (80%)
+    /// - WIDTH=24: threshold=19 (79%)
+    const SPLIT_THRESHOLD: usize;
+
     // ========================================================================
     //  Construction
     // ========================================================================
