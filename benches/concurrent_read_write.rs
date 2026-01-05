@@ -1883,12 +1883,12 @@ mod latency_single {
             let guard = tree.guard();
             let mut latencies = Vec::with_capacity(OPS);
 
-            for i in 0..OPS {
+            (0..OPS).for_each(|i| {
                 let idx = indices[i];
                 let start = Instant::now();
                 black_box(tree.get_with_guard(&keys[idx], &guard));
                 latencies.push(start.elapsed().as_nanos() as u64);
-            }
+            });
 
             latencies.sort_unstable();
             let p50 = percentile(&latencies, 50.0);
@@ -1908,12 +1908,13 @@ mod latency_single {
         bencher.bench_local(|| {
             let mut latencies = Vec::with_capacity(OPS);
 
-            for i in 0..OPS {
+            (0..OPS).for_each(|i| {
                 let idx = indices[i];
                 let start = Instant::now();
+
                 black_box(map.get(&keys[idx]));
                 latencies.push(start.elapsed().as_nanos() as u64);
-            }
+            });
 
             latencies.sort_unstable();
             let p50 = percentile(&latencies, 50.0);
@@ -1933,12 +1934,13 @@ mod latency_single {
         bencher.bench_local(|| {
             let mut latencies = Vec::with_capacity(OPS);
 
-            for i in 0..OPS {
+            (0..OPS).for_each(|i| {
                 let idx = indices[i];
                 let start = Instant::now();
+
                 black_box(map.get(&keys[idx]));
                 latencies.push(start.elapsed().as_nanos() as u64);
-            }
+            });
 
             latencies.sort_unstable();
             let p50 = percentile(&latencies, 50.0);
@@ -1959,12 +1961,13 @@ mod latency_single {
             let guard = SddGuard::new();
             let mut latencies = Vec::with_capacity(OPS);
 
-            for i in 0..OPS {
+            (0..OPS).for_each(|i| {
                 let idx = indices[i];
                 let start = Instant::now();
+
                 black_box(tree.peek(&keys[idx], &guard));
                 latencies.push(start.elapsed().as_nanos() as u64);
-            }
+            });
 
             latencies.sort_unstable();
             let p50 = percentile(&latencies, 50.0);
