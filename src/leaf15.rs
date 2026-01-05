@@ -36,6 +36,8 @@ use crate::suffix::{InlineSuffixBag, SuffixBag};
 use crate::{is_marked, mark_ptr};
 use seize::{Guard, LocalGuard};
 
+mod value_traits;
+
 /// Default capacity for inline suffix storage (bytes).
 /// Matches C++ Masstree's typical iksuf size.
 const INLINE_KSUF_CAPACITY: usize = 256;
@@ -192,7 +194,10 @@ impl<S: ValueSlot> StdFmt::Debug for LeafNode15<S> {
 
 // Compile-time layout verification.
 // LeafNode15 must be cache-line aligned (64 bytes) for optimal performance.
-const_assert_eq!(std::mem::align_of::<LeafNode15<crate::LeafValue<u64>>>(), 64);
+const_assert_eq!(
+    std::mem::align_of::<LeafNode15<crate::LeafValue<u64>>>(),
+    64
+);
 
 impl<S: ValueSlot> LeafNode15<S> {
     // ============================================================================

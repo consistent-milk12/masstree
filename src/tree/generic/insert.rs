@@ -102,7 +102,7 @@ where
     ) -> S::Output {
         let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
-        // Clone old value for return BEFORE we store new pointer.
+        // Clone old value for return before we store new pointer.
         // SAFETY: old_ptr is non-null and came from output_to_raw
         let old_output: S::Output = unsafe { S::output_from_raw(old_ptr) };
         let new_ptr: *mut u8 = S::output_consume_to_raw(new_value);
@@ -111,12 +111,12 @@ where
         lock.mark_insert();
         leaf.set_leaf_value_ptr(slot, new_ptr);
 
-        // Defer retirement of the old value.
-        // SAFETY: old_ptr came from output_to_raw
-        unsafe {
-            guard.defer_retire(old_ptr, |ptr, _| {
-                S::cleanup_value_ptr(ptr);
-            });
+        // Defer retirement of the old value (only for pointer-backed nodes).
+        if S::NEEDS_RETIREMENT {
+            // SAFETY: old_ptr came from output_to_raw and is valid for cleanup
+            unsafe {
+                guard.defer_retire(old_ptr, |ptr: *mut u8, _| S::cleanup_value_ptr(ptr));
+            };
         }
 
         old_output
@@ -281,13 +281,7 @@ where
         Ok(())
     }
 
-    /// Handle suffix conflict: same ikey, different suffix.
-    ///
-    /// Creates a new layer to distinguish the conflicting keys.
-    ///
-    /// Takes ownership of `value` to avoid an unnecessary `Arc::clone`.
-    #[cold]
-    #[inline(never)]
+    /// Takes ownership of `value` to avoid an unnecessary [`Arc::clone`].
     #[expect(
         clippy::too_many_arguments,
         reason = "Layer creation requires full context"
@@ -305,16 +299,20 @@ where
         lock.mark_insert();
 
         // Create new layer for the conflicting keys
+        //
         // SAFETY: We hold the lock on `leaf`, guard is from this tree's collector
-        // NOTE: We pass `value` by ownership (no clone) since this function consumes it
+        //
+        // NOTE: We pass `value` by ownership (no clone) since this function consumes it.
         let layer_ptr: *mut u8 =
             unsafe { self.create_layer_concurrent_generic(leaf, slot, key, value, guard) };
 
-        // Retire the existing value in the conflict slot
+        // Retire the existing value in the conflict slot (only for pointer-backed nodes)
         let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
-        if !old_ptr.is_null() {
+
+        if !old_ptr.is_null() && S::NEEDS_RETIREMENT {
+            // SAFETY: old_ptr came from take_leaf_value_ptr and is valid for cleanup
             unsafe {
-                guard.defer_retire(old_ptr, |ptr, _| {
+                guard.defer_retire(old_ptr, |ptr: *mut u8, _| {
                     S::cleanup_value_ptr(ptr);
                 });
             }
@@ -337,6 +335,7 @@ where
 enum MembershipError {
     /// A split is in progress - wait and retry.
     SplitInProgress,
+
     /// Key has moved to a sibling leaf - retry traversal.
     KeyMovedToSibling,
 }
@@ -482,8 +481,10 @@ where
                                     &value,
                                     guard,
                                 );
+
                                 drop(lock);
                                 self.count.increment();
+
                                 return Ok(None);
                             }
 

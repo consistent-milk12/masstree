@@ -9,10 +9,13 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use crate::shard_counter::ShardedCounter;
 
-use crate::alloc15::SeizeAllocator15;
+use crate::alloc15::{SeizeAllocator15, SeizeAllocator15TrueInline};
 use crate::alloc24::SeizeAllocator24;
+use crate::inline::bits::InlineBits;
+use crate::inline::leaf15_true::LeafNode15TrueInline;
 use crate::leaf15::LeafNode15;
 use crate::leaf24::LeafNode24;
+use crate::slot::true_inline::TrueInlineSlot;
 use crate::slot::ValueSlot;
 use crate::value::{LeafValue, LeafValueIndex};
 use coalesce::CoalesceQueue;
@@ -328,14 +331,21 @@ pub type MassTree24Inline<V> = MassTreeGeneric<
 pub type MassTree15<V> =
     MassTreeGeneric<LeafValue<V>, LeafNode15<LeafValue<V>>, SeizeAllocator15<LeafValue<V>>>;
 
-/// [`MassTree15`] with inline value storage for `Copy` types.
+/// [`MassTree15`] with **true-inline** value storage for types implementing [`InlineBits`].
 ///
-/// Uses `LeafNode15` with u64 permutation and inline value storage.
-/// Best for small, `Copy` types like `u64`, `i32`, pointers.
+/// Values are stored directly in `[AtomicU64; 15]` arrays within leaf nodes—no heap
+/// allocation per insert. Best for small types like `u64`, `i32`, tuples fitting in 64 bits.
+///
+/// ## Breaking changes from previous versions:
+/// - `V` now requires `InlineBits` instead of just `Copy`
+/// - `get_ref()` is **not available** (values stored as atomic bits, not at stable addresses)
+/// - Use `get()` which returns `Option<V>` (the value is `Copy`)
+///
+/// [`InlineBits`]: crate::inline::bits::InlineBits
 pub type MassTree15Inline<V> = MassTreeGeneric<
-    LeafValueIndex<V>,
-    LeafNode15<LeafValueIndex<V>>,
-    SeizeAllocator15<LeafValueIndex<V>>,
+    TrueInlineSlot<V>,
+    LeafNode15TrueInline<V>,
+    SeizeAllocator15TrueInline<V>,
 >;
 
 // ============================================================================
@@ -394,17 +404,17 @@ impl<V: Send + Sync + 'static> Default for MassTree15<V> {
     }
 }
 
-impl<V: Copy + Send + Sync + 'static> MassTree15Inline<V> {
+impl<V: InlineBits> MassTree15Inline<V> {
     /// Create a new empty `MassTree15Inline`.
     #[must_use]
     #[inline(always)]
     pub fn new() -> Self {
-        let allocator = SeizeAllocator15::new();
+        let allocator = SeizeAllocator15TrueInline::new();
         Self::with_allocator(allocator)
     }
 }
 
-impl<V: Copy + Send + Sync + 'static> Default for MassTree15Inline<V> {
+impl<V: InlineBits> Default for MassTree15Inline<V> {
     fn default() -> Self {
         Self::new()
     }

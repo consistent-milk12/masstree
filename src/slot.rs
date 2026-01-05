@@ -25,6 +25,8 @@
 use std::mem as StdMem;
 use std::sync::Arc;
 
+pub mod true_inline;
+
 use crate::value::{LeafValue, LeafValueIndex};
 
 // ================================================================================
@@ -47,6 +49,30 @@ use crate::value::{LeafValue, LeafValueIndex};
 /// # Why `Output` is separate from `Value`
 /// Insert operations may retry
 pub trait ValueSlot: Default + Sized {
+    /// Whether value pointers produced by this slot type require deferred retirement.
+    ///
+    /// - `true` (default): values are heap-backed ([`Arc`]/[`Box`]), old pointers must be retired
+    /// - `false`: values are heap-backed (future true-inline), skip defer retire
+    ///
+    /// # Usage
+    ///
+    /// Guard value retirement sites with:
+    /// ```ignore
+    /// if S::NEEDS_RETIREMENT {
+    ///     unsafe {
+    ///         guard.defer_retire(old_ptr, |ptr, _| {
+    ///             S::cleanup_value_ptr(ptr);
+    ///         });
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Scope
+    ///
+    /// This flag applies only to value pointer retirement (via `cleanup_value_ptr`).
+    /// It must not be used for structural retirement (leaves, internodes, suffix bags).
+    const NEEDS_RETIREMENT: bool = true;
+
     /// The user facing value type.
     ///
     /// This is what users provide to `insert()`.
@@ -54,8 +80,8 @@ pub trait ValueSlot: Default + Sized {
 
     /// The type returned from get operations and carried across retries.
     ///
-    /// - For `LeafValue<V>`: `Arc<V>` (cheap clone via refcount)
-    /// - For `LeafValueIndex<V>`: `V` (direct copy)
+    /// - For [`LeafValue<V>`]: [`Arc<V>`] (cheap clone via refcount)
+    /// - For [`LeafValueIndex<V>`]: `V` (direct copy)
     ///
     /// Mus be [`Clone`] to support returning values from optimistic reads.
     type Output: Clone;
@@ -220,6 +246,9 @@ pub trait ValueSlot: Default + Sized {
 // ============================================================================
 
 impl<V> ValueSlot for LeafValue<V> {
+    /// Explicitly set for clarity (matches default)
+    const NEEDS_RETIREMENT: bool = true;
+
     type Value = V;
     type Output = Arc<V>;
 
@@ -341,6 +370,9 @@ impl<V> ValueSlot for LeafValue<V> {
 // pointer-punning could be used for that path while keeping `get_ref()` working.
 
 impl<V: Copy> ValueSlot for LeafValueIndex<V> {
+    // Explicitly set for clarity (matches default)
+    const NEEDS_RETIREMENT: bool = true;
+
     type Value = V;
     type Output = V; // Returns V directly, no Arc!
 

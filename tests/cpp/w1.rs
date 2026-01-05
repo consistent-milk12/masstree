@@ -9,7 +9,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::thread;
@@ -27,7 +27,7 @@ fn make_key10(x: u64) -> [u8; 10] {
 
 #[test]
 fn w1_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
     let mut rng = StdRng::seed_from_u64(SEED);
 
@@ -54,7 +54,7 @@ fn w1_concurrent_6() {
 }
 
 fn w1_concurrent(num_threads: usize) {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let per_thread = N / num_threads;
 
     let handles: Vec<_> = (0..num_threads)
@@ -81,7 +81,7 @@ fn w1_concurrent(num_threads: usize) {
 #[test]
 fn w1_sequential_keys() {
     // Write sequential keys (worst case for some data structures)
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     for i in 0..N as u64 {

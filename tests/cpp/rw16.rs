@@ -14,7 +14,7 @@
     clippy::cast_possible_wrap
 )]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
 use std::thread;
@@ -35,7 +35,7 @@ const fn make_val16(x: i32) -> u64 {
 
 #[test]
 fn rw16_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
     let mut rng = StdRng::seed_from_u64(SEED);
 
@@ -63,7 +63,7 @@ fn rw16_single_thread() {
 
 #[test]
 fn rw16_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 4;
     let per_thread = N / num_threads;
 
@@ -105,7 +105,7 @@ fn rw16_concurrent() {
 #[test]
 fn rw16_sequential_keys() {
     // Test with sequential 16-byte keys
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     (0..N as i32).for_each(|i| {

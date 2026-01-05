@@ -12,7 +12,7 @@
     clippy::cast_possible_truncation
 )]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use std::sync::Arc;
 use std::thread;
 
@@ -20,7 +20,7 @@ const N: u64 = 100_000;
 
 #[test]
 fn rw3_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Put phase: sequential ascending
@@ -39,7 +39,7 @@ fn rw3_single_thread() {
 
 #[test]
 fn rw3_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 4;
 
     // Each thread inserts its own sequential range
@@ -75,7 +75,7 @@ fn rw3_concurrent() {
 /// Interleaved sequential: threads compete on same key space
 #[test]
 fn rw3_interleaved() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 4;
     let total = N * num_threads as u64;
 

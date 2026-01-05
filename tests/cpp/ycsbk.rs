@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
 use std::thread;
@@ -27,7 +27,7 @@ fn make_ycsb_key(rng: &mut StdRng) -> String {
 
 #[test]
 fn ycsbk_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
     let mut rng = StdRng::seed_from_u64(SEED);
 
@@ -54,7 +54,7 @@ fn ycsbk_single_thread() {
 
 #[test]
 fn ycsbk_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 4;
     let per_thread = N / num_threads;
 

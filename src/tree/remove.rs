@@ -268,24 +268,18 @@ where
 
     /// Complete the removal of a key from the locked leaf.
     ///
-    /// This is the main entry point after finding the key. It:
+    /// This is the main entry point after finding the key. It,
     /// 1. Extracts the value for return
-    /// 2. Schedules value retirement via seize
+    /// 2. Schedules value retirement via `seize`
     /// 3. Clears suffix if present
     /// 4. Updates permutation
     /// 5. If leaf is now empty, triggers leaf removal
     ///
     /// # Returns
-    ///
     /// The removed value (if any).
-    ///
-    /// # C++ Reference
-    ///
-    /// `masstree_remove.hh:162-176` - `finish_remove()`
     #[must_use]
-    #[inline(always)]
     pub fn finish_remove(mut self) -> Option<S::Output> {
-        let leaf = self.leaf();
+        let leaf: &L = self.leaf();
 
         // Step 1: Extract the value pointer
         let value_ptr: *mut u8 = leaf.leaf_value_ptr(self.kp);
@@ -297,11 +291,13 @@ where
             leaf.try_clone_output(self.kp)
         };
 
-        // Step 3: Schedule value retirement
-        if !value_ptr.is_null() {
-            // SAFETY: value_ptr is valid (from leaf.leaf_value_ptr()), guard protects reclamation.
+        // Step 3: Schedule value retirement (only for pointer-backed nodes)
+        // For true-inline nodes (NEEDS_RETIREMENT = false), this is a no-op
+        // and the compiler will eliminate this entire block.
+        if !value_ptr.is_null() && S::NEEDS_RETIREMENT {
+            // SAFETY: value_ptr is valid (from leaf.leaf_value_ptr()), guard proects reclamation.
             unsafe {
-                self.guard.defer_retire(value_ptr, |ptr, _| {
+                self.guard.defer_retire(value_ptr, |ptr: *mut u8, _| {
                     S::cleanup_value_ptr(ptr);
                 });
             }
@@ -323,23 +319,23 @@ where
         // Step 6: Clear the slot value pointer
         leaf.set_leaf_value_ptr(self.kp, StdPtr::null_mut());
 
-        // Step 7: Decrement entry count
+        // Step 7: Decrecment entry count
         self.tree.dec_count();
 
         // Step 8: Lazy coalescing for empty leaves
         //
-        // When a leaf becomes empty, we:
+        // When a leaf because empty, we:
         // 1. Mark it as empty (so insert can reuse it)
         // 2. Schedule it for background cleanup (if not leftmost)
         //
         // This avoids the lock-coupling approach from C++ that caused infinite loops.
-        // See TODO.md "Background: Why C++ Port Failed" for details.
         if new_perm.size() == 0 {
             leaf.mark_empty();
 
             // Schedule for cleanup if not leftmost (leftmost is sentinel)
             if !leaf.prev().is_null() {
-                let ikey_bound = leaf.ikey_bound();
+                let ikey_bound: u64 = leaf.ikey_bound();
+
                 self.tree.coalesce_queue.schedule(self.leaf, ikey_bound);
             }
         }

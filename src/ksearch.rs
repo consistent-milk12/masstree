@@ -1,20 +1,14 @@
 //! Key search algorithms for `MassTree`.
 //!
-//! Provides binary search for:
-//! - Upper bound in internodes (routing to children)
-//!
-//! SIMD-accelerated search for:
-//! - Leaf ikey matching (find all slots with target ikey)
+//! Provides:
+//! - Binary/linear search for upper bound in internodes (routing to children)
+//! - Scalar ikey matching for leaves (find all slots with target ikey)
 //!
 //! # Reference
 //! Based on `ksearch.hh` from the C++ Masstree implementation.
 
-pub mod simd;
-pub mod simd_search;
-
-pub use simd_search::find_ikey_matches_leaf24;
-
 use crate::internode::InternodeNode;
+use crate::leaf24::LeafNode24;
 use crate::leaf_trait::TreeInternode;
 use crate::permuter::Permuter;
 use crate::slot;
@@ -373,54 +367,52 @@ pub fn upper_bound_internode_direct<S: slot::ValueSlot>(
 ///
 /// # Returns
 /// Child index (0 to nkeys). Use `node.child(result)` to get the child pointer.
+/// Find the upper bound position for a search key in an internode.
+///
+/// Uses optimized linear search with loop unrolling. Linear search outperforms
+/// binary search for small nodes (WIDTH ≤ 16) due to predictable branches and
+/// cache-friendly sequential access.
+///
+/// Returns the child index to follow: the first position where `ikey[i] >= search_ikey`,
+/// or `nkeys` if the search key is greater than all keys.
 #[inline(always)]
 pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
     search_ikey: u64,
     node: &I,
 ) -> usize {
-    // Optimized linear search with loop unrolling
-    // Linear search like C++ key_find_upper_bound_by (ksearch.hh:83-95)
     let size: usize = node.nkeys();
     let mut l: usize = 0;
 
     // Unrolled loop: process 4 keys per iteration
     while l + 4 <= size {
-        // Check key 0
         let k0: u64 = node.ikey(l);
         if search_ikey < k0 {
             return l;
         }
-
         if search_ikey == k0 {
             return l + 1;
         }
 
-        // Check key 1
         let k1: u64 = node.ikey(l + 1);
         if search_ikey < k1 {
             return l + 1;
         }
-
         if search_ikey == k1 {
             return l + 2;
         }
 
-        // Check key 2
         let k2: u64 = node.ikey(l + 2);
         if search_ikey < k2 {
             return l + 2;
         }
-
         if search_ikey == k2 {
             return l + 3;
         }
 
-        // Check key 3
         let k3: u64 = node.ikey(l + 3);
         if search_ikey < k3 {
             return l + 3;
         }
-
         if search_ikey == k3 {
             return l + 4;
         }
@@ -431,19 +423,46 @@ pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
     // Handle remainder (0-3 keys)
     while l < size {
         let node_ikey: u64 = node.ikey(l);
-
         if search_ikey < node_ikey {
             return l;
         }
-
         if search_ikey == node_ikey {
             return l + 1;
         }
-
         l += 1;
     }
 
     l
+}
+
+// ============================================================================
+//  Leaf ikey Matching (Scalar)
+// ============================================================================
+
+/// Find all slots in a leaf where `ikey == target_ikey`.
+///
+/// Returns a bitmask where bit `i` is set if `leaf.ikey(i) == target_ikey`.
+///
+/// # Arguments
+/// * `target_ikey` - The 8-byte key slice to search for
+/// * `leaf` - The leaf node to search
+///
+/// # Returns
+/// A `u32` bitmask with bits set for matching slots (0-23 for WIDTH=24).
+#[inline]
+#[must_use]
+pub fn find_ikey_matches_leaf24<S: slot::ValueSlot>(target_ikey: u64, leaf: &LeafNode24<S>) -> u32 {
+    use crate::leaf24::WIDTH_24;
+
+    let mut mask: u32 = 0;
+
+    for i in 0..WIDTH_24 {
+        if leaf.ikey(i) == target_ikey {
+            mask |= 1 << i;
+        }
+    }
+
+    mask
 }
 
 // ============================================================================

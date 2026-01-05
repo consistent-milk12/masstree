@@ -4,8 +4,7 @@
 //!
 //! Refactored for performance with:
 //! - `#[inline(always)]` on hot path helpers
-//! - Linear search by default (predictable branches, cache-friendly)
-//! - Optional SIMD search with `simd` feature flag
+//! - Linear search (predictable branches, cache-friendly)
 //! - Unified implementation via closure for value extraction
 
 use std::ptr as StdPtr;
@@ -19,6 +18,10 @@ use crate::leaf_trait::TreePermutation;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
 use crate::link::{is_marked, unmark_ptr};
+use crate::ref_value_slot::RefValueSlot;
+use crate::value::traits::LeafValueLoad;
+
+mod get_guarded;
 
 // ============================================================================
 //  LookupResult - Search outcome enum
@@ -29,10 +32,12 @@ use crate::link::{is_marked, unmark_ptr};
 /// This enum captures the three possible outcomes without interpreting
 /// the pointer until after version validation.
 enum LookupResult {
-    /// Found a value pointer. The `keylenx` confirms it's a value (< `LAYER_KEYLENX`).
-    Value(*mut u8),
+    /// Found a terminal value at the given slot index.
+    /// The `keylenx` confirms it's a value (< [`LAYER_KEYLENX`])
+    ValueSlot(usize),
 
     /// Found a layer pointer. Need to descend into sublayer.
+    /// Still returns the raw pointer since layer pointers are always real pointers.
     Layer(*mut u8),
 
     /// Key not found in this leaf.
@@ -134,11 +139,6 @@ where
     LookupResult::NotFound
 }
 
-/// Check a slot where ikey already matched. Verifies keylenx and suffix.
-///
-/// Returns `Some(LookupResult)` if the slot is a value or layer pointer,
-/// `None` to continue searching.
-#[inline(always)]
 fn check_slot_match<S, L>(
     leaf: &L,
     slot: usize,
@@ -154,12 +154,13 @@ where
     let slot_keylenx: u8 = leaf.keylenx(slot);
     let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
+    // Null pointer means slot is being modified - skip
     if slot_ptr.is_null() {
         return None;
     }
 
     if slot_keylenx == search_keylenx {
-        // Potential exact match - verify suffix if present
+        // Potential exact match, verify suffix if present
         let suffix_match: bool = if slot_keylenx == KSUF_KEYLENX {
             leaf.ksuf_equals(slot, key.suffix())
         } else {
@@ -167,10 +168,11 @@ where
         };
 
         if suffix_match {
-            return Some(LookupResult::Value(slot_ptr));
+            // Return slot index, not pointer
+            return Some(LookupResult::ValueSlot(slot));
         }
-    } else if slot_keylenx >= LAYER_KEYLENX && key.has_suffix() {
-        // Layer pointer - record for descent after validation
+    } else if (slot_keylenx >= LAYER_KEYLENX) && key.has_suffix() {
+        // Layer pointer, still return the actual pointer for descent
         return Some(LookupResult::Layer(slot_ptr));
     }
 
@@ -269,8 +271,8 @@ impl<S, L, A> MassTreeGeneric<S, L, A>
 where
     S: ValueSlot,
     S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
+    S::Output: Send + Sync + Clone,
+    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
     A: NodeAllocatorGeneric<S, L>,
 {
     /// Get a value by key.
@@ -287,58 +289,6 @@ where
     pub fn get(&self, key: &[u8]) -> Option<S::Output> {
         let guard = self.guard();
         self.get_with_guard(key, &guard)
-    }
-
-    /// Get a value by key using an explicit guard.
-    ///
-    /// Use this when performing multiple operations to amortize guard overhead.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to look up (byte slice)
-    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
-    ///
-    /// # Returns
-    ///
-    /// * `Some(Arc<V>)` - If the key was found
-    /// * `None` - If the key was not found
-    #[must_use]
-    #[inline(always)]
-    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<S::Output> {
-        let mut search_key: Key<'_> = Key::new(key);
-        self.get_impl(&mut search_key, guard, |ptr| {
-            // SAFETY: version validated, ptr points to valid value
-            unsafe { S::output_from_raw(ptr) }
-        })
-    }
-
-    /// Get a borrowed reference to a value by key.
-    ///
-    /// This is significantly faster than [`Self::get_with_guard`] for read-heavy workloads
-    /// because it avoids atomic reference count operations (Arc clone/drop).
-    ///
-    /// # Performance
-    ///
-    /// Under high concurrency, `get_ref` can be **2-5x faster** than `get_with_guard`
-    /// because it eliminates cache line bouncing on shared Arc reference counts.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to look up (byte slice)
-    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
-    ///
-    /// # Returns
-    ///
-    /// * `Some(&V)` - A reference to the value, valid for the guard's lifetime
-    /// * `None` - If the key was not found
-    #[must_use]
-    #[inline(always)]
-    pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g S::Value> {
-        let mut search_key: Key<'_> = Key::new(key);
-        self.get_impl(&mut search_key, guard, |ptr| {
-            // SAFETY: version validated, guard protects from deallocation
-            unsafe { &*(ptr.cast::<S::Value>()) }
-        })
     }
 
     /// Unified get implementation.
@@ -574,7 +524,8 @@ where
                     }
 
                     match result {
-                        LookupResult::Value(ptr) => {
+                        LookupResult::ValueSlot(slot) => {
+                            let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
                             return Some(extract(ptr));
                         }
 
@@ -606,5 +557,56 @@ where
                 }
             }
         }
+    }
+}
+
+// ============================================================================
+//  Reference-Returning API (Pointer-Backed Storage Only)
+// ============================================================================
+
+impl<S, L, A> MassTreeGeneric<S, L, A>
+where
+    S: ValueSlot + RefValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync + Clone,
+    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
+    A: NodeAllocatorGeneric<S, L>,
+{
+    /// Get a borrowed reference to a value by key.
+    ///
+    /// This is significantly faster than [`Self::get_with_guard`] for read-heavy workloads
+    /// because it avoids atomic reference count operations (Arc clone/drop).
+    ///
+    /// # Performance
+    ///
+    /// Under high concurrency, `get_ref` can be **2-5x faster** than `get_with_guard`
+    /// because it eliminates cache line bouncing on shared Arc reference counts.
+    ///
+    /// # Note
+    ///
+    /// This method is only available for pointer-backed storage modes
+    /// (`MassTree24`, `MassTree15`, `MassTree24Inline`, `MassTree15Inline`).
+    /// It is not available for true-inline storage (`MassTree24TrueInline`, etc.)
+    /// because values are stored as bits, not at stable addresses.
+    ///
+    /// For true-inline trees, use `get` or `get_copy` instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up (byte slice)
+    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
+    ///
+    /// # Returns
+    ///
+    /// * `Some(&V)` - A reference to the value, valid for the guard's lifetime
+    /// * `None` - If the key was not found
+    #[must_use]
+    #[inline(always)]
+    pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g S::Value> {
+        let mut search_key: Key<'_> = Key::new(key);
+        self.get_impl(&mut search_key, guard, |ptr: *mut u8| {
+            // SAFETY: version validated, guard protects from deallocation
+            unsafe { &*(ptr.cast::<S::Value>()) }
+        })
     }
 }

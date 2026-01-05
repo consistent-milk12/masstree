@@ -1,4 +1,4 @@
-//! # `MassTree`
+//! # [`MassTree`]
 //!
 //! A concurrent ordered map based on a trie of B+trees.
 //!
@@ -185,6 +185,9 @@ pub const fn init_tracing() {}
 pub mod alloc15;
 pub mod alloc24;
 pub mod alloc_trait;
+
+pub mod inline;
+
 pub mod internode;
 pub mod key;
 pub mod ksearch;
@@ -197,6 +200,7 @@ pub mod ordering;
 pub mod permuter;
 pub mod permuter24;
 pub mod prefetch;
+pub mod ref_value_slot;
 mod shard_counter;
 pub mod slot;
 pub mod suffix;
@@ -222,8 +226,13 @@ pub use leaf24::{
 };
 
 // Re-export allocator types
-pub use alloc15::SeizeAllocator15;
+pub use alloc15::{SeizeAllocator15, SeizeAllocator15TrueInline};
 pub use alloc24::SeizeAllocator24;
+
+// Re-export inline types for true-inline storage
+pub use inline::bits::InlineBits;
+pub use inline::leaf15_true::LeafNode15TrueInline;
+pub use slot::true_inline::TrueInlineSlot;
 
 // Re-export value types
 pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
@@ -232,6 +241,7 @@ pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
 pub use link::{is_marked, mark_ptr, unmark_ptr};
 
 // Re-export main types for convenience
+pub use ref_value_slot::RefValueSlot;
 pub use slot::ValueSlot;
 pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
 pub use tree::RemoveError;

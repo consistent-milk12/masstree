@@ -9,6 +9,8 @@
 use std::fmt as StdFmt;
 use std::sync::Arc;
 
+pub mod traits;
+
 // ============================================================================
 //  LeafValue<V> - Arc-based storage
 // ============================================================================
@@ -64,6 +66,7 @@ impl<V> LeafValue<V> {
     pub const fn try_as_value(&self) -> Option<&Arc<V>> {
         match self {
             Self::Value(arc) => Some(arc),
+
             _ => None,
         }
     }
@@ -74,6 +77,7 @@ impl<V> LeafValue<V> {
     pub fn try_clone_arc(&self) -> Option<Arc<V>> {
         match self {
             Self::Value(arc) => Some(Arc::clone(arc)),
+
             _ => None,
         }
     }
@@ -84,6 +88,7 @@ impl<V> LeafValue<V> {
     pub const fn try_as_layer(&self) -> Option<*mut u8> {
         match self {
             Self::Layer(ptr) => Some(*ptr),
+
             _ => None,
         }
     }
@@ -133,6 +138,7 @@ impl<V> LeafValue<V> {
     pub fn as_value_mut(&mut self) -> &mut Arc<V> {
         match self {
             Self::Value(arc) => arc,
+
             _ => panic!("LeafValue::as_value_mut called on non-value variant"),
         }
     }

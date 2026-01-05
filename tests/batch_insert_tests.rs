@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 
-use masstree::{MassTree15, MassTree15Inline, MassTree24, MassTree24Inline};
+use masstree::{MassTree15, MassTree15Inline, MassTree24};
 
 // ============================================================================
 //  Basic Functionality Tests
@@ -169,7 +169,7 @@ fn test_batch_insert_masstree15() {
 
 #[test]
 fn test_batch_insert_inline_u64() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     let entries: Vec<(Vec<u8>, u64)> = (0..500)
         .map(|i| (format!("key{i:04}").into_bytes(), i as u64))
@@ -641,10 +641,10 @@ fn test_batch_arc_mode_old_value_type() {
     assert_eq!(old.as_str(), "initial");
 }
 
-/// Verify that MassTree24Inline (Copy mode) returns V directly in old_values
+/// Verify that MassTree15Inline (Copy mode) returns V directly in old_values
 #[test]
 fn test_batch_inline_mode_old_value_type() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     // Insert initial value
     tree.insert(b"key", 100u64).unwrap();

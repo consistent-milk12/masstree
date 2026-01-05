@@ -185,15 +185,20 @@ let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
 
 MassTree is **31-55% faster** than TreeIndex and **6-8x faster** than IndexSet on range scans.
 
-### vs C++ Reference
+### vs C++ Reference (6 threads, Divan benchmark)
 
-| Workload | Rust | C++ | Ratio |
-|----------|------|-----|-------|
-| 90% reads | 12.8 Mop/s | 13.8 Mop/s | 93% |
-| 98% reads | 17.8 Mop/s | 18.9 Mop/s | 94% |
-| Contention | 3.5 Mop/s | 2.6 Mop/s | **132%** |
+| Workload | Rust | C++ | vs C++ |
+|----------|------|-----|--------|
+| 98% reads (rw2g98) | 37.68 M/s | 19.1 M/s | **197%** |
+| 90% reads (rw2g90) | 29.58 M/s | 13.5 M/s | **219%** |
+| Hotspot contention (same) | 6.67 M/s | 2.57 M/s | **259%** |
+| Updates (uscale) | 17.68 M/s | 9.3 M/s | **190%** |
+| Sequential keys (rw3) | 33.91 M/s | 39.3 M/s | 86% |
+| Reverse sequential (rw4) | 27.22 M/s | 35.9 M/s | 76% |
 
-Read path is almost at parity with C++. And currently better at contention handling, but it's currently ~70% in write ops. It should be noted that there are so many fundamental divergences in this implementation (especially the current hyaline based memory reclamation using `seize`), that I am not sure that it SHOULD be called a 'masstree', but MOST of the the core ideas and algorithms are still based on the original paper and repo.
+**Beats C++ on 4/6 benchmarks.** Wins decisively on contention-heavy and mixed read/write workloads (1.9-2.6x faster). Sequential key patterns still trail at 76-86% due to tree traversal overhead.
+
+Note: There are fundamental divergences in this implementation (especially the hyaline-based memory reclamation using `seize`), but the core ideas and algorithms are based on the original paper and C++ reference.
 
 ## How It Works
 

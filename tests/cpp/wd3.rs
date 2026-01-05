@@ -11,7 +11,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use std::sync::Arc;
 use std::thread;
 
@@ -26,7 +26,7 @@ fn make_key(prefix: &[u8], val: u64) -> Vec<u8> {
 
 #[test]
 fn wd3_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
     let prefix = b"test";
 
@@ -62,7 +62,7 @@ fn wd3_single_thread() {
 
 #[test]
 fn wd3_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 4;
 
     let handles: Vec<_> = (0..num_threads)
@@ -119,7 +119,7 @@ fn wd3_concurrent() {
 #[test]
 fn wd3_with_prefix() {
     // Test with variable length prefixes (multi-layer keys)
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
     let prefix = b"longerprefix/path/to/";
 

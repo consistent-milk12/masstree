@@ -23,10 +23,6 @@ include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md"]
 default = []
 # Alternative global allocators for benchmarking
 mimalloc = ["dep:mimalloc"]
-# Use SIMD (AVX2) for leaf ikey matching in get operations.
-# May improve performance for some workloads, but adds overhead for others.
-# Benchmark your specific workload before enabling.
-simd = []
 # When disabled (default), all tracing calls compile to no-ops with zero overhead.
 # When enabled, auto-initializes a subscriber that writes NDJSON logs to logs/masstree.jsonl.
 # Respects RUST_LOG env var (default: info). Set MASSTREE_LOG_CONSOLE=0 to disable console.
@@ -41,6 +37,7 @@ bins = [
 	"dep:regex",
 	"dep:nom",
 ]
+true-inline = [] # Enable true-inline value storage
 
 [dependencies]
 anyhow = "1.0.100"

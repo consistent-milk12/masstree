@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::thread;
@@ -18,7 +18,7 @@ const C: u64 = 2_654_435_761; // Golden ratio hash multiplier
 const N: usize = 100_000;
 
 fn rw2_seed(get_frac: f64) {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
     let mut rng = StdRng::seed_from_u64(SEED);
     let offset: u64 = rng.random();
@@ -70,7 +70,7 @@ fn rw2g98() {
 /// Concurrent rw2 with 50% gets
 #[test]
 fn rw2_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 4;
     let per_thread = N / num_threads;
 

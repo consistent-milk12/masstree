@@ -12,7 +12,7 @@
     clippy::cast_possible_truncation
 )]
 
-use masstree::{MassTree15Inline as MassTree24Inline, RangeBound};
+use masstree::{MassTree15Inline as MassTree15Inline, RangeBound};
 use std::sync::Arc;
 use std::thread;
 
@@ -20,7 +20,7 @@ const N: u64 = 10_000;
 
 #[test]
 fn rscan1_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Populate
@@ -31,7 +31,7 @@ fn rscan1_single_thread() {
 
     // Reverse scan - collect all keys
     let mut keys: Vec<u64> = Vec::new();
-    tree.scan_ref(
+    tree.scan(
         RangeBound::Unbounded,
         RangeBound::Unbounded,
         |key, _| {
@@ -62,7 +62,7 @@ fn rscan1_single_thread() {
 
 #[test]
 fn rscan1_range_descending() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Populate
@@ -76,7 +76,7 @@ fn rscan1_range_descending() {
     let end = 200u64.to_be_bytes();
     let mut keys: Vec<u64> = Vec::new();
 
-    tree.scan_ref(
+    tree.scan(
         RangeBound::Included(&start),
         RangeBound::Excluded(&end),
         |key, _| {
@@ -98,7 +98,7 @@ fn rscan1_range_descending() {
 
 #[test]
 fn rscan1_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
 
     // Populate
     {
@@ -117,7 +117,7 @@ fn rscan1_concurrent() {
                 let guard = tree.guard();
 
                 let mut keys: Vec<u64> = Vec::new();
-                tree.scan_ref(
+                tree.scan(
                     RangeBound::Unbounded,
                     RangeBound::Unbounded,
                     |key, _| {

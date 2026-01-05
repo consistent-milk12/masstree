@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
 
-use masstree::{MassTree15Inline as MassTree24Inline, RangeBound};
+use masstree::{MassTree15Inline as MassTree15Inline, RangeBound};
 use std::sync::Arc;
 use std::thread;
 
@@ -16,7 +16,7 @@ const N: u64 = 10_000;
 
 #[test]
 fn scan1_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Populate with sequential keys
@@ -28,12 +28,12 @@ fn scan1_single_thread() {
     // Full scan
     let mut count = 0u64;
     let mut last_key: Option<u64> = None;
-    tree.scan_ref(
+    tree.scan(
         RangeBound::Unbounded,
         RangeBound::Unbounded,
         |key, value| {
             let key_val = u64::from_be_bytes(key.try_into().unwrap());
-            assert_eq!(key_val, *value, "value mismatch");
+            assert_eq!(key_val, value, "value mismatch");
 
             if let Some(last) = last_key {
                 assert!(key_val > last, "keys not in order: {last} >= {key_val}");
@@ -50,7 +50,7 @@ fn scan1_single_thread() {
 
 #[test]
 fn scan1_range() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Populate
@@ -64,13 +64,13 @@ fn scan1_range() {
     let end = 200u64.to_be_bytes();
     let mut count = 0u64;
 
-    tree.scan_ref(
+    tree.scan(
         RangeBound::Included(&start),
         RangeBound::Excluded(&end),
         |key, value| {
             let key_val = u64::from_be_bytes(key.try_into().unwrap());
             assert!((100..200).contains(&key_val));
-            assert_eq!(key_val, *value);
+            assert_eq!(key_val, value);
             count += 1;
             true
         },
@@ -82,7 +82,7 @@ fn scan1_range() {
 
 #[test]
 fn scan1_concurrent_read() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
 
     // Populate
     {
@@ -102,7 +102,7 @@ fn scan1_concurrent_read() {
 
                 // Each thread does full scan
                 let mut count = 0u64;
-                tree.scan_ref(
+                tree.scan(
                     RangeBound::Unbounded,
                     RangeBound::Unbounded,
                     |_, _| {
@@ -124,7 +124,7 @@ fn scan1_concurrent_read() {
 
 #[test]
 fn scan1_concurrent_with_writes() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
 
     // Populate initial data
     {
@@ -147,7 +147,7 @@ fn scan1_concurrent_with_writes() {
             let guard = tree.guard();
             for _ in 0..100 {
                 let mut count = 0u64;
-                tree.scan_ref(
+                tree.scan(
                     RangeBound::Unbounded,
                     RangeBound::Unbounded,
                     |_, _| {

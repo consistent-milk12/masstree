@@ -9,7 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
@@ -18,7 +18,7 @@ const N: u64 = 50_000;
 
 #[test]
 fn wd1_single_pair() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let done = Arc::new(AtomicBool::new(false));
     let writer_pos = Arc::new(AtomicU64::new(0));
 
@@ -108,7 +108,7 @@ fn wd1_single_pair() {
 
 #[test]
 fn wd1_multi_pair() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let done = Arc::new(AtomicBool::new(false));
     let num_pairs = 2;
     let per_pair = N / num_pairs as u64;

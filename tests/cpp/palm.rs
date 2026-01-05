@@ -9,7 +9,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::thread;
@@ -21,7 +21,7 @@ const PALM_BATCH: usize = 341; // 8192 / 24
 
 #[test]
 fn palma_sequential_insert() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Sequential inserts
@@ -40,7 +40,7 @@ fn palma_sequential_insert() {
 
 #[test]
 fn palmb_batched_reads() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Pre-populate (like palma)
@@ -79,7 +79,7 @@ fn palmb_batched_reads() {
 #[test]
 #[expect(clippy::cast_sign_loss)]
 fn palm_concurrent_insert() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 4;
     let per_thread = PALM_N / num_threads as u64;
 
@@ -114,7 +114,7 @@ fn palm_concurrent_insert() {
 
 #[test]
 fn palm_concurrent_read() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
 
     // Pre-populate
     {

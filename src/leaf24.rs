@@ -33,6 +33,8 @@ use crate::suffix::{InlineSuffixBag, SuffixBag};
 use crate::{is_marked, mark_ptr};
 use seize::{Guard, LocalGuard};
 
+mod value_traits;
+
 /// Default capacity for inline suffix storage (bytes).
 /// Matches C++ Masstree's typical iksuf size.
 const INLINE_KSUF_CAPACITY: usize = 256;

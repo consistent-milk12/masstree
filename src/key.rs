@@ -408,7 +408,7 @@ impl<'a> Key<'a> {
     /// Read partial ikeys (1-7 bytes).
     ///
     /// This handles keys shorter than 8 bytes, which are common for small
-    /// identifiers. The function is small (pad + copy + from_be_bytes),
+    /// identifiers. The function is small `(pad + copy + from_be_bytes)`,
     /// so inlining is beneficial when short keys are frequent.
     #[inline]
     #[must_use]

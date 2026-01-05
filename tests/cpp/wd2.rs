@@ -13,7 +13,7 @@
     clippy::cast_possible_truncation
 )]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,7 +44,7 @@ fn make_main_key(client_id: usize, suffix: Option<char>) -> Vec<u8> {
 
 #[test]
 fn wd2_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let done = Arc::new(AtomicBool::new(false));
     let num_threads = 4;
 
@@ -130,7 +130,7 @@ fn wd2_concurrent() {
 #[test]
 fn wd2_simple() {
     // Simplified version: one writer, one deleter on same keys
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let done = Arc::new(AtomicBool::new(false));
 
     let tree_w = Arc::clone(&tree);

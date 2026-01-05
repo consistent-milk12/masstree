@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::{MassTree15Inline as MassTree24Inline, RangeBound};
+use masstree::{MassTree15Inline as MassTree15Inline, RangeBound};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +20,7 @@ const INITIAL_KEYS: u64 = 10_000;
 
 #[test]
 fn conflictscan_single_writer() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let done = Arc::new(AtomicBool::new(false));
 
     // Pre-populate
@@ -69,7 +69,7 @@ fn conflictscan_single_writer() {
 
                 while !done.load(Ordering::Relaxed) {
                     let mut count = 0u64;
-                    tree.scan_ref(
+                    tree.scan(
                         RangeBound::Unbounded,
                         RangeBound::Unbounded,
                         |_, _| {
@@ -102,7 +102,7 @@ fn conflictscan_single_writer() {
 
 #[test]
 fn conflictscan_multi_writer() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let done = Arc::new(AtomicBool::new(false));
 
     // Pre-populate
@@ -151,7 +151,7 @@ fn conflictscan_multi_writer() {
 
                 while !done.load(Ordering::Relaxed) {
                     let mut count = 0u64;
-                    tree.scan_ref(
+                    tree.scan(
                         RangeBound::Unbounded,
                         RangeBound::Unbounded,
                         |_, _| {
@@ -179,7 +179,7 @@ fn conflictscan_multi_writer() {
 
 #[test]
 fn conflictscan_range_scan() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let done = Arc::new(AtomicBool::new(false));
 
     // Pre-populate range [0, 10000)
@@ -215,7 +215,7 @@ fn conflictscan_range_scan() {
 
         while !reader_done.load(Ordering::Relaxed) {
             let mut count = 0u64;
-            reader_tree.scan_ref(
+            reader_tree.scan(
                 RangeBound::Included(&start),
                 RangeBound::Excluded(&end),
                 |_, _| {

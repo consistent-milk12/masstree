@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::thread;
@@ -19,7 +19,7 @@ const NUM_KEYS: u64 = 10; // Same as C++
 
 #[test]
 fn same_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
     let mut rng = StdRng::seed_from_u64(SEED);
 
@@ -39,7 +39,7 @@ fn same_single_thread() {
 
 #[test]
 fn same_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 8; // High contention
     let per_thread = N / num_threads;
 
@@ -75,7 +75,7 @@ fn same_concurrent() {
 /// Extreme contention: 32 threads on 10 keys
 #[test]
 fn same_extreme_contention() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 32;
     let per_thread = 10_000;
 

@@ -911,7 +911,7 @@ where
         leaf.set_leaf_value_ptr(slot, new_ptr);
 
         // Defer retirement of the old value
-        if !old_ptr.is_null() {
+        if !old_ptr.is_null() && S::NEEDS_RETIREMENT {
             // SAFETY: old_ptr came from output_to_raw
             unsafe {
                 guard.defer_retire(old_ptr, |ptr, _| {

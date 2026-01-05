@@ -9,7 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::cast_sign_loss)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,7 +21,7 @@ const N: u64 = 20_000;
 
 #[test]
 fn splitremove_sequential() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Insert sequential keys (will cause many splits)
@@ -51,7 +51,7 @@ fn splitremove_sequential() {
 
 #[test]
 fn splitremove_concurrent_insert_remove() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let insert_done = Arc::new(AtomicBool::new(false));
     let inserted_count = Arc::new(AtomicU64::new(0));
 
@@ -114,7 +114,7 @@ fn splitremove_concurrent_insert_remove() {
 
 #[test]
 fn splitremove_random() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let done = Arc::new(AtomicBool::new(false));
 
     // Pre-populate
@@ -166,7 +166,7 @@ fn splitremove_random() {
 
 #[test]
 fn splitremove_reinsert() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Insert, remove, reinsert cycle

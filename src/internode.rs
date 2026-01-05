@@ -152,7 +152,10 @@ impl<S: ValueSlot> StdFmt::Debug for InternodeNode<S> {
 
 // Compile-time layout verification.
 // InternodeNode must be cache-line aligned (64 bytes) for optimal performance.
-const_assert_eq!(std::mem::align_of::<InternodeNode<crate::LeafValue<u64>>>(), 64);
+const_assert_eq!(
+    std::mem::align_of::<InternodeNode<crate::LeafValue<u64>>>(),
+    64
+);
 
 impl<S: ValueSlot> InternodeNode<S> {
     // ========================================================================
@@ -404,6 +407,38 @@ impl<S: ValueSlot> InternodeNode<S> {
         self.ikey0[i].load(RELAXED)
     }
 
+    /// Batch load all ikeys into a local array.
+    ///
+    /// This allows the search loop to operate on a local array without
+    /// per-element atomic load overhead. The compiler can optimize the
+    /// sequential loads and the subsequent search operates on cached data.
+    ///
+    /// # Note
+    ///
+    /// This method is NOT used by `upper_bound_internode_generic` because
+    /// internode search benefits from early exit (most lookups find their
+    /// key in the first few comparisons). Batch loading all 15 keys upfront
+    /// wastes work for the common case.
+    ///
+    /// This method may be useful for other scenarios (e.g., serialization,
+    /// debugging, or operations that need all keys).
+    ///
+    /// # Returns
+    ///
+    /// An array of all WIDTH ikeys. Only the first `nkeys` are valid.
+    #[must_use]
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing)]
+    pub fn load_all_ikeys(&self) -> [u64; WIDTH] {
+        let mut ikeys = [0u64; WIDTH];
+
+        (0..WIDTH).for_each(|i| {
+            ikeys[i] = self.ikey0[i].load(READ_ORD);
+        });
+
+        ikeys
+    }
+
     /// Set the key at the given index.
     ///
     /// # Panics
@@ -516,6 +551,7 @@ impl<S: ValueSlot> InternodeNode<S> {
                     std::arch::aarch64::_PREFETCH_READ,
                     std::arch::aarch64::_PREFETCH_LOCALITY3,
                 );
+
                 // Prefetch cache line 1: ikey0[6..13]
                 std::arch::aarch64::_prefetch(
                     next_child_ptr.cast::<i8>().wrapping_add(64),

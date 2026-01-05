@@ -24,7 +24,7 @@ mod bench_utils;
 
 use bench_utils::{keys, keys_shared_prefix, keys_shared_prefix_chunks, uniform_indices};
 use divan::{Bencher, black_box};
-use masstree::MassTree15;
+use masstree::{MassTree15, MassTree15Inline};
 use std::sync::Arc;
 use std::sync::Barrier;
 use std::thread;
@@ -37,8 +37,8 @@ fn main() {
 // Setup Helpers
 // =============================================================================
 
-fn setup_masstree15<const K: usize>(keys: &[[u8; K]]) -> MassTree15<u64> {
-    let tree = MassTree15::new();
+fn setup_masstree15<const K: usize>(keys: &[[u8; K]]) -> MassTree15Inline<u64> {
+    let tree = MassTree15Inline::new();
     {
         let guard = tree.guard();
         for (i, key) in keys.iter().enumerate() {
@@ -78,7 +78,7 @@ mod concurrent_writes_disjoint {
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         bencher
-            .with_inputs(|| Arc::new(MassTree15::<u64>::new()))
+            .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -169,7 +169,7 @@ mod single_threaded_insert {
     #[divan::bench]
     fn masstree15(bencher: Bencher) {
         bencher.bench_local(|| {
-            let tree = MassTree15::<u64>::new();
+            let tree = MassTree15Inline::<u64>::new();
             {
                 let guard = tree.guard();
                 for i in 0..KEY_COUNT {
@@ -192,8 +192,8 @@ mod read_after_write {
 
     const KEY_COUNT: usize = 50_000;
 
-    fn local_setup_masstree15() -> MassTree15<u64> {
-        let tree = MassTree15::new();
+    fn local_setup_masstree15() -> MassTree15Inline<u64> {
+        let tree = MassTree15Inline::new();
         {
             let guard = tree.guard();
             for i in 0..KEY_COUNT {
@@ -221,7 +221,7 @@ mod read_after_write {
                             start.wait();
                             for i in 0..ops {
                                 let key = ((base + i) as u64).to_be_bytes();
-                                black_box(tree.get_ref(&key, &guard));
+                                black_box(tree.get_with_guard(&key, &guard));
                             }
                         })
                     })
@@ -254,8 +254,8 @@ mod get_by_key_size {
             let guard = tree.guard();
             let mut sum = 0u64;
             for &idx in &lookup_keys {
-                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                    sum += *v;
+                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                    sum += v;
                 }
             }
             black_box(sum)
@@ -298,7 +298,7 @@ mod insert_by_key_size {
         bencher
             .with_inputs(|| keys.clone())
             .bench_local_values(|keys| {
-                let tree = MassTree15::<u64>::new();
+                let tree = MassTree15Inline::<u64>::new();
                 {
                     let guard = tree.guard();
                     for (i, key) in keys.iter().enumerate() {
@@ -362,8 +362,8 @@ mod concurrent_reads_scaling {
                         start_barrier.wait();
                         for i in 0..OPS_PER_THREAD {
                             let idx = indices[(i + offset) % indices.len()];
-                            if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                sum += *v;
+                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                sum += v;
                             }
                         }
                         black_box(sum);
@@ -410,8 +410,8 @@ mod concurrent_reads_long_keys {
                         start_barrier.wait();
                         for i in 0..OPS_PER_THREAD {
                             let idx = indices[(i + offset) % indices.len()];
-                            if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                sum += *v;
+                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                sum += v;
                             }
                         }
                         black_box(sum);
@@ -464,8 +464,8 @@ mod mixed_uniform {
 
                                 if i % WRITE_RATIO == 0 {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum += *v;
+                                } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum += v;
                                 }
                             }
                             black_box(sum);
@@ -513,8 +513,8 @@ mod read_scaling_8b {
                             start_barrier.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = (start + i) % keys.len();
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum += *v;
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum += v;
                                 }
                             }
                             black_box(sum);
@@ -561,8 +561,8 @@ mod read_scaling_32b {
                             start_barrier.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = (start + i) % keys.len();
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum += *v;
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum += v;
                                 }
                             }
                             black_box(sum);
@@ -595,7 +595,7 @@ mod write_scaling_32b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| {
-                let tree = MassTree15::<u64>::new();
+                let tree = MassTree15Inline::<u64>::new();
                 // Pre-populate with half the keys
                 {
                     let guard = tree.guard();
@@ -669,8 +669,8 @@ mod single_hot_key {
                                         (t * OPS_PER_THREAD + i) as u64,
                                         &guard,
                                     );
-                                } else if let Some(v) = tree.get_ref(&hot_key, &guard) {
-                                    sum += *v;
+                                } else if let Some(v) = tree.get_with_guard(&hot_key, &guard) {
+                                    sum += v;
                                 }
                             }
                             black_box(sum);
@@ -706,8 +706,8 @@ mod get_by_key_size_shared_prefix {
             let guard = tree.guard();
             let mut sum = 0u64;
             for &idx in &lookup_keys {
-                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                    sum += *v;
+                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                    sum += v;
                 }
             }
             black_box(sum)
@@ -763,8 +763,8 @@ mod concurrent_reads_long_keys_shared_prefix {
                         start_barrier.wait();
                         for i in 0..OPS_PER_THREAD {
                             let idx = indices[(i + offset) % indices.len()];
-                            if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                sum += *v;
+                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                sum += v;
                             }
                         }
                         black_box(sum);
@@ -820,8 +820,8 @@ mod random_read_8b {
                             start_barrier.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[start + i];
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum += *v;
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum += v;
                                 }
                             }
                             black_box(sum);
@@ -866,8 +866,8 @@ mod random_read_32b {
                             start_barrier.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[start + i];
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum += *v;
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum += v;
                                 }
                             }
                             black_box(sum);
@@ -919,7 +919,7 @@ mod string_values_read {
                             start_barrier.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[start + i];
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     len_sum += v.len();
                                 }
                             }
@@ -1042,8 +1042,8 @@ mod aggressive_shared_prefix_read {
                             start_barrier.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[start + i];
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum += *v;
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum += v;
                                 }
                             }
                             black_box(sum);
@@ -1078,7 +1078,7 @@ mod aggressive_shared_prefix_write {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| {
-                let tree = MassTree15::<u64>::new();
+                let tree = MassTree15Inline::<u64>::new();
                 {
                     let guard = tree.guard();
                     for (i, key) in keys.iter().take(N / 2).enumerate() {

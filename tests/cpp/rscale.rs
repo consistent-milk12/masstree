@@ -6,7 +6,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::thread;
@@ -15,7 +15,7 @@ const SEED: u64 = 31949;
 const POPULATE: usize = 100_000;
 const READS: usize = 100_000;
 
-fn populate_tree(tree: &MassTree24Inline<u64>) {
+fn populate_tree(tree: &MassTree15Inline<u64>) {
     let guard = tree.guard();
     let mut rng = StdRng::seed_from_u64(SEED);
 
@@ -28,7 +28,7 @@ fn populate_tree(tree: &MassTree24Inline<u64>) {
 
 #[test]
 fn rscale_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     populate_tree(&tree);
 
     let guard = tree.guard();
@@ -59,7 +59,7 @@ fn rscale_concurrent_6() {
 }
 
 fn rscale_threads(num_threads: usize) {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     populate_tree(&tree);
 
     let reads_per_thread = READS / num_threads;

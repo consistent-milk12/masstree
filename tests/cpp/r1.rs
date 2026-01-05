@@ -11,7 +11,7 @@
 #![allow(clippy::indexing_slicing)]
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
 use std::thread;
@@ -26,7 +26,7 @@ fn make_key10(x: u64) -> [u8; 10] {
     key
 }
 
-fn populate_tree(tree: &MassTree24Inline<u64>, seed: u64) -> Vec<u64> {
+fn populate_tree(tree: &MassTree15Inline<u64>, seed: u64) -> Vec<u64> {
     let guard = tree.guard();
     let mut rng = StdRng::seed_from_u64(seed);
     let mut keys = Vec::with_capacity(N);
@@ -42,7 +42,7 @@ fn populate_tree(tree: &MassTree24Inline<u64>, seed: u64) -> Vec<u64> {
 
 #[test]
 fn r1_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     // Populate
     let mut keys = populate_tree(&tree, SEED);
@@ -76,7 +76,7 @@ fn r1_concurrent_6() {
 }
 
 fn r1_concurrent(num_threads: usize) {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
 
     // Populate (single-threaded for determinism)
     let keys = populate_tree(&tree, SEED);
@@ -121,7 +121,7 @@ fn r1_concurrent(num_threads: usize) {
 #[test]
 fn r1_hot_keys() {
     // Read same keys repeatedly (hot path test)
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Insert a small set of keys

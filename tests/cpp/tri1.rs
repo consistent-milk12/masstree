@@ -10,7 +10,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use std::sync::Arc;
 use std::thread;
 
@@ -19,7 +19,7 @@ const INITIAL_POS: u64 = 0;
 
 #[test]
 fn tri1_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
     let incr = 1u64;
 
@@ -45,7 +45,7 @@ fn tri1_single_thread() {
 #[test]
 fn tri1_check() {
     // Pre-populate with triangle pattern, then verify
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
     let incr = 1u64;
 
@@ -69,7 +69,7 @@ fn tri1_check() {
 
 #[test]
 fn tri1_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 4;
 
     // Each thread works on separate key ranges
@@ -110,7 +110,7 @@ fn tri1_concurrent() {
 #[test]
 fn tri1_stress_overwrites() {
     // Stress test: many overwrites to same key
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     let key = 12345u64.to_be_bytes();

@@ -12,7 +12,7 @@
     clippy::cast_sign_loss
 )]
 
-use masstree::MassTree15Inline as MassTree24Inline;
+use masstree::MassTree15Inline as MassTree15Inline;
 use std::sync::Arc;
 use std::thread;
 
@@ -21,7 +21,7 @@ const N: u64 = 100_000;
 
 #[test]
 fn rw4_single_thread() {
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     // Put phase: sequential descending
@@ -42,7 +42,7 @@ fn rw4_single_thread() {
 
 #[test]
 fn rw4_concurrent() {
-    let tree = Arc::new(MassTree24Inline::<u64>::new());
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
     let num_threads = 4;
 
     let handles: Vec<_> = (0..num_threads)
