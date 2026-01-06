@@ -219,24 +219,31 @@ where
         }
     }
 
-    /// Check if key should be in a sibling leaf via B-link.
-    ///
-    /// Returns `Some(next_leaf_ptr)` if we should follow the B-link,
-    /// `None` if key is definitively not found.
-    ///
-    /// Marked `#[cold]` because B-link traversal is rare in the common case
-    /// (no concurrent splits). Keeps the hot path code smaller for better
-    /// instruction cache utilization.
-    #[cold]
-    #[inline(never)]
-    #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_blink_chain(&self, leaf: &L, target_ikey: u64) -> Option<*mut L> {
         let next_raw: *mut L = leaf.next_raw();
+
+        // If leaf is deleted, we gotta follow the next ptr (unmarked) to find our key.
+        // C++ ref: masstree_struct.hh:704 - "while (likely(!v.deleted()) && ..."
+        // When deleted, the next ptr is marked but still valid.
+        if leaf.version().is_deleted() {
+            let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
+
+            if !next_ptr.is_null() {
+                return Some(next_ptr);
+            }
+
+            // Deleted leaf with no successor, key can not exist
+            return None;
+        }
+
+        // Normal case: follow B-link if key >= next leaf's bound
+        // only follow unmarked ptr's (marked = being unlinked)
         let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
 
         if !next_ptr.is_null() && !Linker::is_marked(next_raw) {
             // SAFETY: next_ptr is valid (protected by guard in caller)
             let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
+
             if target_ikey >= next_bound {
                 return Some(next_ptr);
             }
@@ -315,12 +322,37 @@ where
         self.get_impl_multi_layer(key, guard, extract)
     }
 
-    /// Single-layer fast path (keys ≤ 8 bytes).
+    /// Handle landing on a deleted leaf during point read.
     ///
-    /// Completely inline search without `LookupResult` enum overhead.
-    /// This is the hot path for most workloads.
+    /// Called when we detect `is_deleted()` at the start of leaf processing.
+    /// Follows B-link chain to find the correct successor leaf.
+    ///
+    /// Returns the next valid leaf pointer, or restarts from root if no successor.
+    #[cold]
+    #[inline(never)]
+    fn handle_deleted_leaf(
+        &self,
+        leaf: &L,
+        layer_root: *const u8,
+        key: &Key<'_>,
+        is_sublayer: bool,
+        guard: &LocalGuard<'_>,
+    ) -> *mut L {
+        // Try to follow B-link to successor
+        let next_raw: *mut L = leaf.next_raw();
+        let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
+
+        if !next_ptr.is_null() {
+            // Follow to successor leaf
+            return next_ptr;
+        }
+
+        // No successor mean we must restart from root
+        // This can happen if the deleted leaf was the last in its layer
+        self.reach_leaf_concurrent_generic(layer_root, key, is_sublayer, guard)
+    }
+
     #[inline(always)]
-    #[expect(clippy::too_many_lines, reason = "Verbose unrolling of loop")]
     fn get_impl_single_layer<R, F>(
         &self,
         key: &Key<'_>,
@@ -332,6 +364,7 @@ where
     {
         let layer_root: *const u8 = self.load_root_ptr_generic(guard);
         let target_ikey: u64 = key.ikey();
+
         #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
         let search_keylenx: u8 = key.current_len() as u8;
 
@@ -343,123 +376,72 @@ where
             // SAFETY: leaf_ptr protected by guard
             let leaf: &L = unsafe { &*leaf_ptr };
 
+            // If we landed on a deleted leaf, follow B-link to successor.
+            // This can happen during concurrent coalesce operations.
+            if leaf.version().is_deleted() {
+                leaf_ptr = self.handle_deleted_leaf(leaf, layer_root, key, false, guard);
+
+                continue 'leaf_loop;
+            }
+
             // Prefetch ikey cache lines while waiting for stable version.
-            // This hides memory latency if the node is locked (version spinning).
+            // This hides memory latency if the node is locked (version spining).
             leaf.prefetch_for_search();
 
             let mut version: u32 = leaf.version().stable();
 
             'search_loop: loop {
-                // Optimized linear search with loop unrolling (3 at a time)
-                // Speculative batch load: load slots and ikeys upfront for better ILP
                 let perm = leaf.permutation();
-                let size = perm.size();
-                let mut found_ptr: *mut u8 = std::ptr::null_mut();
-                let mut i: usize = 0;
+                let size: usize = perm.size();
+                let mut found_ptr: *mut u8 = StdPtr::null_mut();
 
-                // Unrolled loop: process 3 slots per iteration
-                'unrolled: while i + 3 <= size {
-                    // Batch load slots (bit extraction only, no memory access)
-                    let s0: usize = perm.get(i);
-                    let s1: usize = perm.get(i + 1);
-                    let s2: usize = perm.get(i + 2);
-
-                    // Batch load ikeys (memory loads can be issued in parallel)
-                    let ikey0: u64 = leaf.ikey(s0);
-                    let ikey1: u64 = leaf.ikey(s1);
-                    let ikey2: u64 = leaf.ikey(s2);
-
-                    // Check slot 0
-                    if ikey0 == target_ikey {
-                        let kx0: u8 = leaf.keylenx(s0);
-
-                        if kx0 == search_keylenx {
-                            let ptr: *mut u8 = leaf.leaf_value_ptr(s0);
-
-                            if !ptr.is_null() {
-                                found_ptr = ptr;
-                                break 'unrolled;
-                            }
-                        }
-                    }
-
-                    // Check slot 1
-                    if ikey1 == target_ikey {
-                        let kx1: u8 = leaf.keylenx(s1);
-
-                        if kx1 == search_keylenx {
-                            let ptr: *mut u8 = leaf.leaf_value_ptr(s1);
-
-                            if !ptr.is_null() {
-                                found_ptr = ptr;
-                                break 'unrolled;
-                            }
-                        }
-                    }
-
-                    // Check slot 2
-                    if ikey2 == target_ikey {
-                        let kx2: u8 = leaf.keylenx(s2);
-
-                        if kx2 == search_keylenx {
-                            let ptr: *mut u8 = leaf.leaf_value_ptr(s2);
-
-                            if !ptr.is_null() {
-                                found_ptr = ptr;
-                                break 'unrolled;
-                            }
-                        }
-                    }
-
-                    i += 3;
-                }
-
-                // Handle remainder (0-2 elements)
-                while i < size && found_ptr.is_null() {
+                // Simple linear search - let LLVM decide optimal unrolling.
+                // LLVM SHOULD auto unroll with #[inline(always)], and speculative batch
+                // loads waste work on early matches.
+                for i in 0..size {
                     let slot: usize = perm.get(i);
-                    let slot_ikey: u64 = leaf.ikey(slot);
 
-                    if slot_ikey == target_ikey {
-                        let slot_keylenx: u8 = leaf.keylenx(slot);
+                    if (leaf.ikey(slot) == target_ikey) && (leaf.keylenx(slot) == search_keylenx) {
+                        let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
-                        if slot_keylenx == search_keylenx {
-                            let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+                        if !ptr.is_null() {
+                            found_ptr = ptr;
 
-                            if !ptr.is_null() {
-                                found_ptr = ptr;
-                            }
+                            break;
                         }
                     }
-                    i += 1;
                 }
 
-                // Version validation AFTER all reads
+                // Version validation after all reads
                 if leaf.version().has_changed(version) {
                     let (advanced, new_version) =
                         self.advance_to_key_generic(leaf, key, version, guard);
 
                     if !StdPtr::eq(advanced, leaf) {
                         leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
+
                         continue 'leaf_loop;
                     }
 
                     version = new_version;
+
                     continue 'search_loop;
                 }
 
-                // Version validated - interpret result
                 if !found_ptr.is_null() {
                     return Some(extract(found_ptr));
                 }
 
-                // Not found - check dirty or B-link
+                // Not found, check dirty or B-link (also handles deleted via check_blink_chain)
                 if leaf.version().is_dirty() {
                     version = leaf.version().stable();
+
                     continue 'search_loop;
                 }
 
                 if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
                     leaf_ptr = next_ptr;
+
                     continue 'leaf_loop;
                 }
 
@@ -471,7 +453,7 @@ where
     /// Multi-layer path for keys > 8 bytes.
     ///
     /// Handles layer descent, suffix matching, and complex key structures.
-    #[inline]
+    #[inline(always)]
     fn get_impl_multi_layer<R, F>(
         &self,
         key: &mut Key<'_>,
@@ -493,6 +475,14 @@ where
             'leaf_loop: loop {
                 let leaf: &L = unsafe { &*leaf_ptr };
 
+                // If we landed on a deleted leaf, follow B-link to successor.
+                // This can happen during concurrent coalesce operations.
+                if leaf.version().is_deleted() {
+                    leaf_ptr = self.handle_deleted_leaf(leaf, layer_root, key, in_sublayer, guard);
+
+                    continue 'leaf_loop;
+                }
+
                 // Prefetch ikey cache lines while waiting for stable version.
                 leaf.prefetch_for_search();
 
@@ -504,6 +494,7 @@ where
                         key.unshift_all();
                         layer_root = self.load_root_ptr_generic(guard);
                         in_sublayer = false;
+
                         continue 'layer_loop;
                     }
 
@@ -516,10 +507,12 @@ where
 
                         if changed_leaf {
                             leaf_ptr = new_ptr;
+
                             continue 'leaf_loop;
                         }
 
                         version = new_version;
+
                         continue 'search_loop;
                     }
 
@@ -537,17 +530,21 @@ where
                             key.shift();
                             layer_root = ptr;
                             in_sublayer = true;
+
                             continue 'layer_loop;
                         }
 
                         LookupResult::NotFound => {
                             if leaf.version().is_dirty() {
                                 version = leaf.version().stable();
+
                                 continue 'search_loop;
                             }
 
+                            // check_blink_chain now also handles deleted leaves
                             if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
                                 leaf_ptr = next_ptr;
+
                                 continue 'leaf_loop;
                             }
 
