@@ -1922,3 +1922,6 @@ impl<V: InlineBits> Drop for LeafNode15TrueInline<V> {
         }
     }
 }
+
+#[cfg(test)]
+mod drop_tests;
