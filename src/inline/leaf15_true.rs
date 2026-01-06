@@ -19,6 +19,7 @@ use crate::Linker;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::CAS_FAILURE;
 use crate::ordering::CAS_SUCCESS;
+use crate::ordering::RELAXED;
 use crate::ordering::{READ_ORD, WRITE_ORD};
 use crate::permuter::{AtomicPermuter15, Permuter15};
 use crate::slot::true_inline::TrueInlineSlot;
@@ -1890,6 +1891,34 @@ impl<V: InlineBits> crate::leaf_trait::LayerCapableLeaf<TrueInlineSlot<V>>
         } else {
             let len = key.current_len().min(8) as u8;
             self.set_keylenx(slot, len);
+        }
+    }
+}
+
+// ============================================================================
+//  Drop Implementation
+// ============================================================================
+
+impl<V: InlineBits> Drop for LeafNode15TrueInline<V> {
+    /// FIXED: Drop the leaf node, cleaning up the external suffix bag.
+    /// This was leading to OOM's in benchmarks for [`MassTree15Inline`].
+    ///
+    /// # What's cleaned up
+    /// - `external_ksuf`: Heap-allocated [`SuffixBag`] for overflow suffix storage
+    ///
+    /// # What's not cleaned up here
+    /// - `inline_values`: Just [`AtomicU64`] bits, no heap allocation
+    /// - `inline_ksuf`: Embedded in struct, dropped automatically
+    /// - Layer Pointers: Ownded by tree, freed during teardown traversal
+    /// - Values: [`TrueInlineSlot::NEEDS_RETIREMENT = false`], no cleanup needed
+    fn drop(&mut self) {
+        // Free external suffix bag if allocated
+        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+
+        if !ext_ptr.is_null() {
+            // SAFETY: ext_ptr came from [`Box::into_raw`] in `assign_ksuf` or
+            // `ensure_external_ksuf`. We have `&mut self` so no concurrent access.
+            unsafe { drop(Box::from_raw(ext_ptr)) }
         }
     }
 }
