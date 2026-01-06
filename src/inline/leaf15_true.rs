@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
 use super::bits::InlineBits;
 use super::sentinel::InlineSentinel;
+use crate::Linker;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::CAS_FAILURE;
 use crate::ordering::CAS_SUCCESS;
@@ -531,7 +532,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     /// Get the next leaf pointer (without mark bit).
     #[inline(always)]
     pub fn safe_next(&self) -> *mut Self {
-        crate::unmark_ptr(self.next.load(READ_ORD))
+        Linker::unmark_ptr(self.next.load(READ_ORD))
     }
 
     /// Set the next leaf pointer.
@@ -834,11 +835,11 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     fn lock_next(&self) -> *mut Self {
         loop {
             let next: *mut Self = self.next.load(READ_ORD);
-            if crate::is_marked(next) {
+            if Linker::is_marked(next) {
                 self.wait_for_split();
                 continue;
             }
-            let marked: *mut Self = crate::mark_ptr(next);
+            let marked: *mut Self = Linker::mark_ptr(next);
             match self
                 .next
                 .compare_exchange(next, marked, CAS_SUCCESS, CAS_FAILURE)
@@ -860,7 +861,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
 
         let next: *mut Self = self.lock_next();
         let self_ptr: *mut Self = StdPtr::from_ref(self).cast_mut();
-        let marked_self: *mut Self = crate::mark_ptr(self_ptr);
+        let marked_self: *mut Self = Linker::mark_ptr(self_ptr);
 
         let final_prev: *mut Self;
         loop {
@@ -879,10 +880,11 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
                     break;
                 }
                 Err(current) => {
-                    if crate::is_marked(current) {
+                    if Linker::is_marked(current) {
                         // SAFETY: prev is valid
                         unsafe { (*prev).wait_for_split() };
                     }
+
                     std::hint::spin_loop();
                 }
             }

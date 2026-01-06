@@ -8,9 +8,8 @@
 //! - Unified slot allocation and value update logic
 
 use super::{
-    Guard, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf,
-    LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot, is_marked,
-    unmark_ptr,
+    Guard, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf, Linker,
+    LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
 };
 
 use std::ptr as StdPtr;
@@ -262,12 +261,12 @@ where
         let next_raw: *mut L = leaf.next_raw();
 
         // Check for split in progress
-        if is_marked(next_raw) {
+        if Linker::is_marked(next_raw) {
             leaf.wait_for_split();
             return Err(MembershipError::SplitInProgress);
         }
 
-        let next_ptr: *mut L = unmark_ptr(next_raw);
+        let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
 
         if !next_ptr.is_null() {
             // SAFETY: next_ptr is a valid leaf pointer (protected by the guard).

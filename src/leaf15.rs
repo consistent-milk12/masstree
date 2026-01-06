@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::{self as StdAtomic, Ordering as AtomicOrdering};
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
+use crate::Linker;
 use crate::key::IKEY_SIZE;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
@@ -33,7 +34,6 @@ use crate::permuter::{AtomicPermuter15, Permuter15};
 use crate::prefetch::prefetch_read;
 use crate::slot::ValueSlot;
 use crate::suffix::{InlineSuffixBag, SuffixBag};
-use crate::{is_marked, mark_ptr};
 use seize::{Guard, LocalGuard};
 
 mod value_traits;
@@ -1159,13 +1159,13 @@ impl<S: ValueSlot> LeafNode15<S> {
             let next: *mut Self = self.next.load(READ_ORD);
 
             // Already marked: another split is in progress, wait
-            if is_marked(next) {
+            if Linker::is_marked(next) {
                 self.wait_for_split();
                 continue;
             }
 
             // Try to mark the pointer via CAS
-            let marked: *mut Self = mark_ptr(next);
+            let marked: *mut Self = Linker::mark_ptr(next);
             match self
                 .next
                 .compare_exchange(next, marked, CAS_SUCCESS, CAS_FAILURE)
@@ -1219,7 +1219,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         // a new node becomes our predecessor and we need to CAS on that node instead.
         // (This matches the C++ implementation in btree_leaflink.hh:86-91)
         let self_ptr: *mut Self = StdPtr::from_ref(self).cast_mut();
-        let marked_self: *mut Self = mark_ptr(self_ptr);
+        let marked_self: *mut Self = Linker::mark_ptr(self_ptr);
 
         let final_prev: *mut Self;
         loop {
@@ -1242,7 +1242,7 @@ impl<S: ValueSlot> LeafNode15<S> {
                 Err(current) => {
                     // If prev->next is already marked, wait for it to clear
                     // This can happen if prev is splitting
-                    if is_marked(current) {
+                    if Linker::is_marked(current) {
                         // SAFETY: prev is valid
                         unsafe { (*prev).wait_for_split() };
                     }

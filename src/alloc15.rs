@@ -14,15 +14,19 @@
 //! is sufficient. The benefit of WIDTH=24 comes from leaves holding more keys
 //! and splitting less often.
 
+use std::alloc as StdAlloc;
+use std::alloc::Layout;
 use std::mem as StdMem;
 
-use parking_lot::Mutex;
+use parking_lot::lock_api::MutexGuard;
+use parking_lot::{Mutex, RawMutex};
 use seize::{Guard, LocalGuard};
 
 use crate::alloc_trait::NodeAllocatorGeneric;
 use crate::internode::InternodeNode;
 use crate::leaf15::LeafNode15;
 use crate::slot::ValueSlot;
+use crate::{AllocError, AllocResult};
 
 /// Miri-compliant allocator for masstree nodes (WIDTH=24 leaves, WIDTH=15 internodes).
 ///
@@ -242,29 +246,11 @@ where
     /// Uses raw allocation + `init_at` to avoid stack-to-heap copy.
     #[inline]
     fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode15<S> {
-        use std::alloc::{Layout, alloc};
-
-        let layout = Layout::new::<LeafNode15<S>>();
-        // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
-        // The global allocator returns memory aligned to layout.align().
-        #[expect(
-            clippy::cast_ptr_alignment,
-            reason = "Layout::new::<LeafNode15> guarantees alignment"
-        )]
-        let ptr: *mut LeafNode15<S> = unsafe { alloc(layout).cast::<LeafNode15<S>>() };
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
-
-        // Initialize in-place
-        // SAFETY: ptr is valid, properly aligned, and we have exclusive access
-        unsafe {
-            LeafNode15::init_at(ptr, is_root || is_layer_root);
-        }
-
-        // Track for cleanup
-        self.leaf_ptrs.lock().push(ptr);
-        ptr
+        self.try_alloc_leaf(is_root, is_layer_root)
+            .unwrap_or_else(|_| {
+                let layout = Layout::new::<LeafNode15<S>>();
+                StdAlloc::handle_alloc_error(layout)
+            })
     }
 
     /// Allocate an internode directly without Box intermediate.
@@ -353,6 +339,57 @@ where
         // Track for cleanup
         self.internode_ptrs.lock().push(ptr);
         ptr.cast()
+    }
+
+    fn try_alloc_leaf(
+        &self,
+        is_root: bool,
+        is_layer_root: bool,
+    ) -> AllocResult<*mut LeafNode15<S>> {
+        // Step 1: Allocate raw memory
+        let layout: Layout = Layout::new::<LeafNode15<S>>();
+
+        // SAFETY: Layout is valid (derived from type)
+        let raw_ptr: *mut u8 = unsafe { StdAlloc::alloc(layout) };
+
+        if raw_ptr.is_null() {
+            return Err(AllocError::for_leaf::<LeafNode15<S>>());
+        }
+
+        let ptr: *mut LeafNode15<S> = raw_ptr.cast();
+
+        // Step 2: Initialize in-place using init_at
+        //
+        // This is_layer_root flag is passed to init_at as is_root because
+        // layer roots also have ROOT_BIT (they're roots of sublayers).
+        //
+        // SAFETY: ptr is valid, properly aligned, and we have exclusive access
+        unsafe {
+            LeafNode15::init_at(ptr, is_root || is_layer_root);
+        }
+
+        // Step 3: Reserve space in tracking vector before push
+        //
+        // CRITICAL: [`Vec::push`] can reallocate and abort if capacity
+        // is exhausted. By calling `try_reserve` first, we make tracking fallible.
+        {
+            let mut ptrs: MutexGuard<'_, RawMutex, Vec<*mut LeafNode15<S>>> = self.leaf_ptrs.lock();
+
+            if ptrs.try_reserve(1).is_err() {
+                // Tracking failed, must deallocate the node
+                // SAFETY: ptr was just allocated with this layout
+                unsafe { StdAlloc::dealloc(raw_ptr, layout) };
+
+                return Err(AllocError::for_tracking(StdMem::size_of::<
+                    *mut LeafNode15<S>,
+                >()));
+            }
+
+            // Now push cannot fail (we just reserved space)
+            ptrs.push(ptr);
+        }
+
+        Ok(ptr)
     }
 }
 
@@ -519,8 +556,7 @@ impl<V: InlineBits + Send + Sync + 'static>
 
     #[inline(always)]
     fn teardown_tree(&self, _root_ptr: *mut u8) {
-        let leaves: Vec<*mut LeafNode15TrueInline<V>> =
-            StdMem::take(&mut *self.leaf_ptrs.lock());
+        let leaves: Vec<*mut LeafNode15TrueInline<V>> = StdMem::take(&mut *self.leaf_ptrs.lock());
         let internodes: Vec<*mut InternodeNode<TrueInlineSlot<V>>> =
             StdMem::take(&mut *self.internode_ptrs.lock());
 
@@ -541,28 +577,24 @@ impl<V: InlineBits + Send + Sync + 'static>
 
     #[inline(always)]
     unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, _guard: &LocalGuard<'_>) {
-        debug_assert!(!root_ptr.is_null(), "retire_subtree_root: received null pointer");
+        debug_assert!(
+            !root_ptr.is_null(),
+            "retire_subtree_root: received null pointer"
+        );
     }
 
     #[inline]
-    fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode15TrueInline<V> {
-        use std::alloc::{Layout, alloc};
+    fn alloc_leaf_direct(
+        &self,
+        is_root: bool,
+        is_layer_root: bool,
+    ) -> *mut LeafNode15TrueInline<V> {
+        self.try_alloc_leaf(is_root, is_layer_root)
+            .unwrap_or_else(|_| {
+                let layout = Layout::new::<LeafNode15TrueInline<V>>();
 
-        let layout = Layout::new::<LeafNode15TrueInline<V>>();
-        #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut LeafNode15TrueInline<V> =
-            unsafe { alloc(layout).cast::<LeafNode15TrueInline<V>>() };
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
-
-        // SAFETY: ptr is valid, properly aligned, and we have exclusive access
-        unsafe {
-            LeafNode15TrueInline::init_at(ptr, is_root || is_layer_root);
-        }
-
-        self.leaf_ptrs.lock().push(ptr);
-        ptr
+                StdAlloc::handle_alloc_error(layout)
+            })
     }
 
     #[inline]
@@ -630,6 +662,46 @@ impl<V: InlineBits + Send + Sync + 'static>
 
         self.internode_ptrs.lock().push(ptr);
         ptr.cast()
+    }
+
+    fn try_alloc_leaf(
+        &self,
+        is_root: bool,
+        is_layer_root: bool,
+    ) -> AllocResult<*mut LeafNode15TrueInline<V>> {
+        // Step 1: Allocate raw memory
+        let layout = Layout::new::<LeafNode15TrueInline<V>>();
+        let raw_ptr: *mut u8 = unsafe { StdAlloc::alloc(layout) };
+
+        if raw_ptr.is_null() {
+            return Err(AllocError::for_leaf::<LeafNode15TrueInline<V>>());
+        }
+
+        let ptr: *mut LeafNode15TrueInline<V> = raw_ptr.cast();
+
+        // Step 2: Initialize in-place
+        // SAFETY: ptr is valid, properly aligned, exclusive access
+        unsafe {
+            LeafNode15TrueInline::init_at(ptr, is_root || is_layer_root);
+        }
+
+        // Step 3: Fallible tracking
+        {
+            let mut ptrs: MutexGuard<'_, RawMutex, Vec<*mut LeafNode15TrueInline<V>>> =
+                self.leaf_ptrs.lock();
+
+            if ptrs.try_reserve(1).is_err() {
+                unsafe { StdAlloc::dealloc(raw_ptr, layout) };
+
+                return Err(AllocError::for_tracking(StdMem::size_of::<
+                    *mut LeafNode15TrueInline<V>,
+                >()));
+            }
+
+            ptrs.push(ptr);
+        }
+
+        Ok(ptr)
     }
 }
 

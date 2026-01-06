@@ -184,9 +184,9 @@ pub const fn init_tracing() {}
 
 pub mod alloc15;
 pub mod alloc24;
-pub mod alloc_common;
+mod alloc_common;
 pub mod alloc_trait;
-pub mod error;
+mod error;
 pub mod inline;
 pub mod internode;
 pub mod key;
@@ -207,7 +207,9 @@ pub mod suffix;
 pub mod tree;
 pub mod value;
 
-// Re-export freeze types for convenience
+// Internal use for `alloc_common`
+pub(crate) use alloc_common::{BoxAllocator, GenericAllocator};
+pub use error::{AllocError, AllocKind, AllocResult};
 
 // Re-export leaf node traits for generic tree operations
 pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
@@ -238,7 +240,7 @@ pub use slot::true_inline::TrueInlineSlot;
 pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
 
 // Re-export link utilities
-pub use link::{is_marked, mark_ptr, unmark_ptr};
+pub use link::Linker;
 
 // Re-export main types for convenience
 pub use ref_value_slot::RefValueSlot;

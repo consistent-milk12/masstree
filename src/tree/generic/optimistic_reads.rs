@@ -17,7 +17,7 @@ use super::{
 use crate::leaf_trait::TreePermutation;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
-use crate::link::{is_marked, unmark_ptr};
+use crate::link::Linker;
 use crate::ref_value_slot::RefValueSlot;
 use crate::value::traits::LeafValueLoad;
 
@@ -232,9 +232,9 @@ where
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_blink_chain(&self, leaf: &L, target_ikey: u64) -> Option<*mut L> {
         let next_raw: *mut L = leaf.next_raw();
-        let next_ptr: *mut L = unmark_ptr(next_raw);
+        let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
 
-        if !next_ptr.is_null() && !is_marked(next_raw) {
+        if !next_ptr.is_null() && !Linker::is_marked(next_raw) {
             // SAFETY: next_ptr is valid (protected by guard in caller)
             let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
             if target_ikey >= next_bound {

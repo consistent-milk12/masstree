@@ -24,8 +24,8 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use seize::{Guard, LocalGuard};
 
 use crate::{
-    MassTreeGeneric, NodeAllocatorGeneric, is_marked, key::Key, leaf_trait::LayerCapableLeaf,
-    nodeversion::LockGuard, slot::ValueSlot, tree::InsertError, unmark_ptr,
+    Linker, MassTreeGeneric, NodeAllocatorGeneric, key::Key, leaf_trait::LayerCapableLeaf,
+    nodeversion::LockGuard, slot::ValueSlot, tree::InsertError,
 };
 
 use super::{InsertSearchResultGeneric, TreePermutation};
@@ -555,7 +555,7 @@ where
 
         // Determine the ikey upper bound for this leaf
         let next_raw: *mut L = leaf.next_raw();
-        let next_ptr: *mut L = unmark_ptr(next_raw);
+        let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
         let upper_bound: Option<u64> = if next_ptr.is_null() {
             None
         } else {
@@ -838,12 +838,12 @@ where
     fn validate_membership_batch(&self, leaf: &L, key: &Key<'_>) -> Result<(), MembershipError> {
         let next_raw: *mut L = leaf.next_raw();
 
-        if is_marked(next_raw) {
+        if Linker::is_marked(next_raw) {
             leaf.wait_for_split();
             return Err(MembershipError::SplitInProgress);
         }
 
-        let next_ptr: *mut L = unmark_ptr(next_raw);
+        let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
 
         if !next_ptr.is_null() {
             // SAFETY: next_ptr is valid, protected by guard

@@ -8,12 +8,12 @@ use std::{
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
-    shard_counter::ShardedCounter,
-    MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation, is_marked,
+    Linker, MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation,
     key::Key,
     leaf_trait::LayerCapableLeaf,
     leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::NodeVersion,
+    shard_counter::ShardedCounter,
     slot::ValueSlot,
     tree::{
         InsertError, InsertSearchResultGeneric,
@@ -21,7 +21,6 @@ use crate::{
         remove::NodeCleaner,
         split::Propagation,
     },
-    unmark_ptr,
 };
 
 use super::remove::RemoveError;
@@ -297,8 +296,7 @@ where
             if !inode.children_are_leaves() {
                 // Child is an internode - prefetch its first child (grandchild)
                 // SAFETY: children_are_leaves() is false, so child is an internode
-                let child_inode: &L::Internode =
-                    unsafe { &*(child_ptr.cast::<L::Internode>()) };
+                let child_inode: &L::Internode = unsafe { &*(child_ptr.cast::<L::Internode>()) };
                 let grandchild_ptr: *mut u8 = child_inode.child(0);
                 prefetch_read(grandchild_ptr);
             }
@@ -576,8 +574,7 @@ where
                 if !inode.children_are_leaves() {
                     // Child is an internode - prefetch its first child (grandchild)
                     // SAFETY: children_are_leaves() is false, so child is an internode
-                    let child_inode: &L::Internode =
-                        unsafe { &*(child.cast::<L::Internode>()) };
+                    let child_inode: &L::Internode = unsafe { &*(child.cast::<L::Internode>()) };
                     let grandchild_ptr: *mut u8 = child_inode.child(0);
                     prefetch_read(grandchild_ptr);
                 }
@@ -695,8 +692,6 @@ where
         old_version: u32,
         _guard: &LocalGuard<'_>,
     ) -> (&'a L, u32) {
-        use crate::link::{is_marked, unmark_ptr};
-
         let key_ikey: u64 = key.ikey();
         let mut version: u32 = leaf.version().stable();
 
@@ -722,7 +717,7 @@ where
             let next_raw: *mut L = leaf.next_raw();
 
             // Check for marked pointer (split in progress OR deleted node)
-            if is_marked(next_raw) {
+            if Linker::is_marked(next_raw) {
                 leaf.wait_for_split();
                 // After wait_for_split returns, re-check is_deleted via the
                 // while condition. If deleted, we exit the loop. If not deleted
@@ -731,7 +726,7 @@ where
                 continue;
             }
 
-            let next_ptr: *mut L = unmark_ptr(next_raw);
+            let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
             if next_ptr.is_null() {
                 break;
             }
@@ -782,8 +777,6 @@ where
         key: &Key<'_>,
         _guard: &LocalGuard<'_>,
     ) -> (&'a L, bool) {
-        use crate::link::{is_marked, unmark_ptr};
-
         let key_ikey: u64 = key.ikey();
         let mut hops: usize = 0;
 
@@ -802,7 +795,7 @@ where
             // If so, follow B-link to successor and continue from there
             if leaf.version().is_deleted() {
                 let next_raw: *mut L = leaf.next_raw();
-                let next_ptr: *mut L = unmark_ptr(next_raw);
+                let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
                 if next_ptr.is_null() {
                     // Deleted leaf has no successor - return it, caller will
                     // detect the deleted state and retry from root
@@ -815,7 +808,7 @@ where
             }
 
             let next_raw: *mut L = leaf.next_raw();
-            if is_marked(next_raw) {
+            if Linker::is_marked(next_raw) {
                 leaf.wait_for_split();
                 // After wait_for_split returns, re-check: either the split
                 // completed (next unmarked) or the node was deleted (handled
@@ -823,7 +816,7 @@ where
                 continue;
             }
 
-            let next_ptr: *mut L = unmark_ptr(next_raw);
+            let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
             if next_ptr.is_null() {
                 break;
             }
