@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -40,7 +40,6 @@ bins = [
 true-inline = [] # Enable true-inline value storage
 
 [dependencies]
-anyhow = "1.0.100"
 seize = "0.5.1"
 parking_lot = "0.12.5"
 portable-atomic = "1.12.0"
