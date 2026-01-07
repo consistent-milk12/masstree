@@ -84,6 +84,10 @@ where
         key.current_len() as u8
     };
 
+    // OPTIMIZATION: Fast path flag - if search key has no suffix, skip suffix/layer checks
+    // For inline keys (≤8 bytes), we don't need to compare suffixes or check for layer pointers
+    let needs_suffix_check: bool = key.has_suffix();
+
     let mut i: usize = 0;
 
     // Unrolled loop: process 3 slots per iteration
@@ -102,19 +106,19 @@ where
 
         // Now check sequentially with early exit
         if ikey0 == target_ikey {
-            if let Some(result) = check_slot_match(leaf, s0, search_keylenx, key) {
+            if let Some(result) = check_slot_match(leaf, s0, search_keylenx, key, needs_suffix_check) {
                 return result;
             }
         }
 
         if ikey1 == target_ikey {
-            if let Some(result) = check_slot_match(leaf, s1, search_keylenx, key) {
+            if let Some(result) = check_slot_match(leaf, s1, search_keylenx, key, needs_suffix_check) {
                 return result;
             }
         }
 
         if ikey2 == target_ikey {
-            if let Some(result) = check_slot_match(leaf, s2, search_keylenx, key) {
+            if let Some(result) = check_slot_match(leaf, s2, search_keylenx, key, needs_suffix_check) {
                 return result;
             }
         }
@@ -128,7 +132,7 @@ where
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
         if slot_ikey == target_ikey {
-            if let Some(result) = check_slot_match(leaf, slot, search_keylenx, key) {
+            if let Some(result) = check_slot_match(leaf, slot, search_keylenx, key, needs_suffix_check) {
                 return result;
             }
         }
@@ -139,11 +143,18 @@ where
     LookupResult::NotFound
 }
 
+/// Optimized slot match check with suffix-check bypass.
+///
+/// When `needs_suffix_check` is false (inline keys ≤8 bytes), skips:
+/// - Suffix comparison (no suffix exists)
+/// - Layer pointer detection (inline keys can't be layer pointers)
+#[inline(always)]
 fn check_slot_match<S, L>(
     leaf: &L,
     slot: usize,
     search_keylenx: u8,
     key: &Key<'_>,
+    needs_suffix_check: bool,
 ) -> Option<LookupResult>
 where
     S: ValueSlot,
@@ -160,18 +171,19 @@ where
     }
 
     if slot_keylenx == search_keylenx {
-        // Potential exact match, verify suffix if present
-        let suffix_match: bool = if slot_keylenx == KSUF_KEYLENX {
-            leaf.ksuf_equals(slot, key.suffix())
-        } else {
-            true
-        };
-
-        if suffix_match {
-            // Return slot index, not pointer
-            return Some(LookupResult::ValueSlot(slot));
+        // Potential exact match
+        // OPTIMIZATION: Only check suffix if the search key has one
+        if needs_suffix_check && slot_keylenx == KSUF_KEYLENX {
+            if !leaf.ksuf_equals(slot, key.suffix()) {
+                return None;
+            }
         }
-    } else if (slot_keylenx >= LAYER_KEYLENX) && key.has_suffix() {
+        // Return slot index, not pointer
+        return Some(LookupResult::ValueSlot(slot));
+    }
+
+    // OPTIMIZATION: Layer pointer check only relevant if search key has suffix
+    if needs_suffix_check && slot_keylenx >= LAYER_KEYLENX {
         // Layer pointer, still return the actual pointer for descent
         return Some(LookupResult::Layer(slot_ptr));
     }
