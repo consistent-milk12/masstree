@@ -2,6 +2,14 @@
 //!
 //! Direct port of C++ mttest benchmark suite using proper statistical benchmarking.
 //!
+//! ## Methodology
+//!
+//! Each benchmark follows a rigorous methodology:
+//! 1. **Explicit warmup**: Each thread warms up the data structure before measurement
+//! 2. **Memory barriers**: Inserted before/after measurement to prevent reordering
+//! 3. **Consistent setup**: All benchmarks use `.with_inputs()` for fresh state
+//! 4. **Increased samples**: 200 samples for better statistical significance
+//!
 //! ## Running
 //!
 //! ```bash
@@ -18,6 +26,9 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::pedantic)]
 
+mod bench_utils;
+
+use bench_utils::{post_measurement_barrier, pre_measurement_barrier};
 use divan::{Bencher, black_box};
 use masstree::MassTree15Inline;
 use std::sync::Arc;
@@ -27,6 +38,13 @@ use std::thread;
 fn main() {
     divan::main();
 }
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Warmup iterations per thread before measurement
+const WARMUP_OPS: usize = 500;
 
 // =============================================================================
 // C++ compatible LCG RNG (from kvrandom.hh)
@@ -118,7 +136,7 @@ fn key_var(n: u64) -> Vec<u8> {
 // RW1: Random keys - insert then shuffled read
 // =============================================================================
 
-#[divan::bench_group(name = "rw1")]
+#[divan::bench_group(name = "rw1", sample_count = 200)]
 mod rw1 {
     use super::*;
 
@@ -132,16 +150,31 @@ mod rw1 {
             ))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|tid| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                             let mut rng = KvRandom::new(seed);
 
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let x = rng.rand();
+                                let key = key_var(u64::from(x));
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // Reset RNG for measurement
+                            rng = KvRandom::new(seed);
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             // Put phase
@@ -160,10 +193,16 @@ mod rw1 {
                             }
 
                             // Get phase
+                            let mut sum = 0u64;
                             for x in keys_inserted {
                                 let key = key_var(u64::from(x));
-                                black_box(tree.get_with_guard(&key, &guard));
+                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                    sum = sum.wrapping_add(v);
+                                }
                             }
+
+                            post_measurement_barrier();
+                            black_box(sum);
                         })
                     })
                     .collect();
@@ -180,7 +219,7 @@ mod rw1 {
 // RW2: Interleaved insert/read with configurable get fraction
 // =============================================================================
 
-#[divan::bench_group(name = "rw2")]
+#[divan::bench_group(name = "rw2", sample_count = 200)]
 mod rw2 {
     use super::*;
 
@@ -191,21 +230,37 @@ mod rw2 {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|tid| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                             let mut rng = KvRandom::new(seed);
+
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let x = rng.rand();
+                                let key = key_var(u64::from(x));
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // Reset RNG for measurement
+                            rng = KvRandom::new(seed);
                             let offset = rng.rand();
                             const C: u32 = 2_654_435_761;
 
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             let mut puts = 0u64;
+                            let mut sum = 0u64;
                             for _ in 0..OPS_PER_THREAD {
                                 if puts == 0 || !rng.bernoulli(get_frac) {
                                     let x = (offset.wrapping_add(puts as u32)).wrapping_mul(C);
@@ -216,9 +271,14 @@ mod rw2 {
                                     let idx = rng.uniform(puts as u32);
                                     let x = (offset.wrapping_add(idx)).wrapping_mul(C);
                                     let key = key_var(u64::from(x));
-                                    black_box(tree.get_with_guard(&key, &guard));
+                                    if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                        sum = sum.wrapping_add(v);
+                                    }
                                 }
                             }
+
+                            post_measurement_barrier();
+                            black_box(sum);
                         })
                     })
                     .collect();
@@ -250,7 +310,7 @@ mod rw2 {
 // RW3: Sequential 8-byte keys
 // =============================================================================
 
-#[divan::bench_group(name = "rw3_sequential")]
+#[divan::bench_group(name = "rw3_sequential", sample_count = 200)]
 mod rw3 {
     use super::*;
 
@@ -264,14 +324,25 @@ mod rw3 {
             ))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|_| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
 
+                            // === WARMUP PHASE ===
+                            for n in 0..WARMUP_OPS {
+                                let key = key8(n as u64);
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             // Put phase
@@ -281,10 +352,16 @@ mod rw3 {
                             }
 
                             // Get phase
+                            let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
                                 let key = key8(i as u64);
-                                black_box(tree.get_with_guard(&key, &guard));
+                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                    sum = sum.wrapping_add(v);
+                                }
                             }
+
+                            post_measurement_barrier();
+                            black_box(sum);
                         })
                     })
                     .collect();
@@ -304,15 +381,26 @@ mod rw3 {
             ))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|tid| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = (tid as u64) * 10_000_000;
 
+                            // === WARMUP PHASE ===
+                            for n in 0..WARMUP_OPS {
+                                let key = key8(base + n as u64);
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             // Put phase
@@ -322,10 +410,16 @@ mod rw3 {
                             }
 
                             // Get phase
+                            let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
                                 let key = key8(base + i as u64);
-                                black_box(tree.get_with_guard(&key, &guard));
+                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                    sum = sum.wrapping_add(v);
+                                }
                             }
+
+                            post_measurement_barrier();
+                            black_box(sum);
                         })
                     })
                     .collect();
@@ -345,14 +439,25 @@ mod rw3 {
             ))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|_| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
 
+                            // === WARMUP PHASE ===
+                            for n in 0..WARMUP_OPS {
+                                let key = (n as u64).to_be_bytes();
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             // Put phase - BINARY keys
@@ -362,10 +467,16 @@ mod rw3 {
                             }
 
                             // Get phase
+                            let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
                                 let key = (i as u64).to_be_bytes();
-                                black_box(tree.get_with_guard(&key, &guard));
+                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                    sum = sum.wrapping_add(v);
+                                }
                             }
+
+                            post_measurement_barrier();
+                            black_box(sum);
                         })
                     })
                     .collect();
@@ -382,7 +493,7 @@ mod rw3 {
 // RW4: Reverse sequential
 // =============================================================================
 
-#[divan::bench_group(name = "rw4_reverse")]
+#[divan::bench_group(name = "rw4_reverse", sample_count = 200)]
 mod rw4 {
     use super::*;
 
@@ -397,14 +508,25 @@ mod rw4 {
             ))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|_| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
 
+                            // === WARMUP PHASE ===
+                            for n in 0..WARMUP_OPS {
+                                let key = key8(TOP - n as u64);
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             // Put phase
@@ -414,10 +536,16 @@ mod rw4 {
                             }
 
                             // Get phase
+                            let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
                                 let key = key8(TOP - i as u64);
-                                black_box(tree.get_with_guard(&key, &guard));
+                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                    sum = sum.wrapping_add(v);
+                                }
                             }
+
+                            post_measurement_barrier();
+                            black_box(sum);
                         })
                     })
                     .collect();
@@ -434,7 +562,7 @@ mod rw4 {
 // SAME: Hot spot - 10 keys (high contention)
 // =============================================================================
 
-#[divan::bench_group(name = "same_hotspot")]
+#[divan::bench_group(name = "same_hotspot", sample_count = 200)]
 mod same {
     use super::*;
 
@@ -447,16 +575,31 @@ mod same {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|tid| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                             let mut rng = KvRandom::new(seed);
 
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let x = rng.uniform(NUM_KEYS);
+                                let key = key_var(u64::from(x));
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // Reset RNG for measurement
+                            rng = KvRandom::new(seed);
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             for _ in 0..OPS_PER_THREAD {
@@ -464,6 +607,8 @@ mod same {
                                 let key = key_var(u64::from(x));
                                 let _ = tree.insert_with_guard(&key, u64::from(x + 1), &guard);
                             }
+
+                            post_measurement_barrier();
                         })
                     })
                     .collect();
@@ -480,7 +625,7 @@ mod same {
 // WSCALE: Pure random writes
 // =============================================================================
 
-#[divan::bench_group(name = "wscale")]
+#[divan::bench_group(name = "wscale", sample_count = 200)]
 mod wscale {
     use super::*;
 
@@ -492,16 +637,31 @@ mod wscale {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|tid| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                             let mut rng = KvRandom::new(seed);
 
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let x = u64::from(rng.rand());
+                                let key = key_var(x);
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // Reset RNG for measurement
+                            rng = KvRandom::new(seed);
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             for _ in 0..OPS_PER_THREAD {
@@ -509,6 +669,8 @@ mod wscale {
                                 let key = key_var(x);
                                 let _ = tree.insert_with_guard(&key, x + 1, &guard);
                             }
+
+                            post_measurement_barrier();
                         })
                     })
                     .collect();
@@ -525,7 +687,7 @@ mod wscale {
 // RSCALE: Pure random reads on pre-populated tree
 // =============================================================================
 
-#[divan::bench_group(name = "rscale")]
+#[divan::bench_group(name = "rscale", sample_count = 200)]
 mod rscale {
     use super::*;
 
@@ -561,16 +723,31 @@ mod rscale {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|tid| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                             let mut rng = KvRandom::new(seed);
 
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let x = u64::from(rng.rand()) % nseqkeys;
+                                let key = key_var(x);
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // Reset RNG for measurement
+                            rng = KvRandom::new(seed);
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             let mut sum = 0u64;
@@ -581,6 +758,8 @@ mod rscale {
                                     sum += v;
                                 }
                             }
+
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -597,7 +776,7 @@ mod rscale {
 // USCALE: Pure random updates on pre-populated tree
 // =============================================================================
 
-#[divan::bench_group(name = "uscale")]
+#[divan::bench_group(name = "uscale", sample_count = 200)]
 mod uscale {
     use super::*;
 
@@ -621,16 +800,31 @@ mod uscale {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|tid| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let seed = KvRandom::FIRST_SEED + tid as u64;
                             let mut rng = KvRandom::new(seed);
 
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let x = u64::from(rng.rand()) % nseqkeys;
+                                let key = key_var(x);
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // Reset RNG for measurement
+                            rng = KvRandom::new(seed);
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             for _ in 0..OPS_PER_THREAD {
@@ -638,6 +832,8 @@ mod uscale {
                                 let key = key_var(x);
                                 let _ = tree.insert_with_guard(&key, x + 1, &guard);
                             }
+
+                            post_measurement_barrier();
                         })
                     })
                     .collect();
@@ -653,7 +849,7 @@ mod uscale {
 // RW1LONG: String keys with prefixes
 // =============================================================================
 
-#[divan::bench_group(name = "rw1long")]
+#[divan::bench_group(name = "rw1long", sample_count = 200)]
 mod rw1long {
     use super::*;
 
@@ -668,16 +864,32 @@ mod rw1long {
             ))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|tid| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                             let mut rng = KvRandom::new(seed);
 
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let x = rng.rand();
+                                let fmt = rng.uniform(4) as usize;
+                                let key = format!("{}{}", FORMATS[fmt], x).into_bytes();
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // Reset RNG for measurement
+                            rng = KvRandom::new(seed);
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
                             // Put phase
@@ -697,10 +909,16 @@ mod rw1long {
                             }
 
                             // Get phase
+                            let mut sum = 0u64;
                             for (fmt, x) in keys_inserted {
                                 let key = format!("{}{}", FORMATS[fmt], x).into_bytes();
-                                black_box(tree.get_with_guard(&key, &guard));
+                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                    sum = sum.wrapping_add(v);
+                                }
                             }
+
+                            post_measurement_barrier();
+                            black_box(sum);
                         })
                     })
                     .collect();
@@ -717,7 +935,7 @@ mod rw1long {
 // RWSMALL24: 24 keys, 87.5% reads
 // =============================================================================
 
-#[divan::bench_group(name = "rwsmall24")]
+#[divan::bench_group(name = "rwsmall24", sample_count = 200)]
 mod rwsmall24 {
     use super::*;
 
@@ -730,18 +948,35 @@ mod rwsmall24 {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|tid| {
                         let tree = Arc::clone(&tree);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                             let mut rng = KvRandom::new(seed);
 
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let x = rng.uniform(NKEYS << 3);
+                                let key_idx = x >> 3;
+                                let key = key_var(u64::from(key_idx));
+                                black_box(tree.get_with_guard(&key, &guard));
+                            }
+                            warmup_done.wait();
+
+                            // Reset RNG for measurement
+                            rng = KvRandom::new(seed);
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
 
+                            let mut sum = 0u64;
                             for n in 0..OPS_PER_THREAD {
                                 let x = rng.uniform(NKEYS << 3);
                                 let key_idx = x >> 3;
@@ -749,12 +984,17 @@ mod rwsmall24 {
 
                                 if (x & 7) != 0 {
                                     // 87.5% reads
-                                    black_box(tree.get_with_guard(&key, &guard));
+                                    if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                        sum = sum.wrapping_add(v);
+                                    }
                                 } else {
                                     // 12.5% writes
                                     let _ = tree.insert_with_guard(&key, n as u64, &guard);
                                 }
                             }
+
+                            post_measurement_barrier();
+                            black_box(sum);
                         })
                     })
                     .collect();

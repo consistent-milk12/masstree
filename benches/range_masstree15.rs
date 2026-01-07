@@ -1,6 +1,6 @@
 //! Concurrent range scan stress benchmarks.
 //!
-//! Compares MassTree15Inline, scc::TreeIndex, and indexset::BTreeMap across
+//! Compares MassTree15, scc::TreeIndex, and indexset::BTreeMap across
 //! various key patterns designed to stress different aspects of concurrent
 //! ordered map implementations.
 //!
@@ -60,7 +60,7 @@ use bench_utils::{
     keys_suffix_only_differ,
 };
 use divan::{Bencher, black_box};
-use masstree::{MassTree15Inline, RangeBound};
+use masstree::{MassTree15, RangeBound};
 use std::sync::Arc;
 use std::sync::Barrier;
 use std::thread;
@@ -81,8 +81,8 @@ const SCAN_LIMIT: usize = 100; // Early termination for partial scans
 // Setup Helpers
 // =============================================================================
 
-fn setup_masstree15<const K: usize>(keys: &[[u8; K]]) -> MassTree15Inline<u64> {
-    let tree = MassTree15Inline::new();
+fn setup_masstree15<const K: usize>(keys: &[[u8; K]]) -> MassTree15<u64> {
+    let tree = MassTree15::new();
     {
         let guard = tree.guard();
         for (i, key) in keys.iter().enumerate() {

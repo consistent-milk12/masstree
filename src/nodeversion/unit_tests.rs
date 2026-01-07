@@ -535,3 +535,75 @@ fn test_unlock_for_split_increments_split_counter() {
         "Lock bit should be cleared after unlock"
     );
 }
+
+// =======================================================================
+// Non-Spinning Version Acquisition Tests
+// =======================================================================
+
+#[test]
+fn test_try_stable_clean_node() {
+    let v = NodeVersion::new(true);
+    // Clean node should return Some
+    let result = v.try_stable();
+    assert!(result.is_some());
+    // Returned value should have no dirty bits
+    assert_eq!(result.unwrap() & DIRTY_MASK, 0);
+}
+
+#[test]
+fn test_try_stable_equals_stable_on_clean() {
+    let v = NodeVersion::new(true);
+    // On clean node, try_stable() should return same value as stable()
+    let try_result = v.try_stable().unwrap();
+    let stable_result = v.stable();
+    assert_eq!(try_result, stable_result);
+}
+
+#[test]
+fn test_acquire_raw_clean_node() {
+    let v = NodeVersion::new(true);
+    let raw = v.acquire_raw();
+    // Clean node should not have dirty bits
+    assert!(!NodeVersion::is_dirty_value(raw));
+}
+
+#[test]
+fn test_is_dirty_value_static() {
+    // Test the static helper with various bit patterns
+    // DIRTY_MASK = INSERTING_BIT | SPLITTING_BIT (not LOCK_BIT)
+    assert!(!NodeVersion::is_dirty_value(0));
+    assert!(!NodeVersion::is_dirty_value(ISLEAF_BIT));
+    assert!(!NodeVersion::is_dirty_value(LOCK_BIT)); // Lock alone is not "dirty"
+    assert!(NodeVersion::is_dirty_value(INSERTING_BIT));
+    assert!(NodeVersion::is_dirty_value(SPLITTING_BIT));
+    assert!(NodeVersion::is_dirty_value(INSERTING_BIT | SPLITTING_BIT));
+    assert!(NodeVersion::is_dirty_value(LOCK_BIT | INSERTING_BIT)); // Dirty due to INSERTING
+}
+
+#[test]
+fn test_stable_yield_clean_node() {
+    let v = NodeVersion::new(true);
+    // Clean node should return immediately
+    let result = v.stable_yield();
+    // Should have no dirty bits
+    assert_eq!(result & DIRTY_MASK, 0);
+    // Should match stable()
+    assert_eq!(result, v.stable());
+}
+
+#[test]
+fn test_acquire_raw_vs_stable_equivalence_when_clean() {
+    // When node is clean, acquire_raw and stable should return same value
+    let v = NodeVersion::new(true);
+    v.mark_root();
+
+    let raw = v.acquire_raw();
+    let stable = v.stable();
+
+    // Both should be clean
+    assert!(!NodeVersion::is_dirty_value(raw));
+    assert_eq!(raw & DIRTY_MASK, 0);
+
+    // Values should match
+    assert_eq!(raw, stable);
+}

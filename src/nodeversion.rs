@@ -449,6 +449,128 @@ impl NodeVersion {
         }
     }
 
+    /// Acquire a version value without spinning on dirty bits.
+    ///
+    /// Unlike [`stable()`](Self::stable), this method returns immediately with
+    /// whatever value is currently stored, even if dirty bits are set.
+    ///
+    /// # Use Cases
+    ///
+    /// Use this when you want to detect concurrent modification and retry at
+    /// a higher level rather than spinning locally. For example:
+    ///
+    /// ```rust,ignore
+    /// let v = version.acquire_raw();
+    /// if NodeVersion::is_dirty_value(v) {
+    ///     continue 'retry;  // Let outer loop handle retry
+    /// }
+    /// // ... proceed with read ...
+    /// ```
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses `Ordering::Acquire` to synchronize with writer's Release store.
+    /// The returned value may have dirty bits set.
+    #[must_use]
+    #[inline(always)]
+    pub fn acquire_raw(&self) -> u32 {
+        self.value.load(Ordering::Acquire)
+    }
+
+    /// Check if a version value has dirty bits set.
+    ///
+    /// This is a static helper for checking values returned by [`acquire_raw()`](Self::acquire_raw).
+    #[must_use]
+    #[inline(always)]
+    pub const fn is_dirty_value(v: u32) -> bool {
+        (v & DIRTY_MASK) != 0
+    }
+
+    /// Try to get a stable version without spinning.
+    ///
+    /// Returns `Some(version)` if the node is not dirty (not being modified).
+    /// Returns `None` if the node is currently being modified (dirty bits set).
+    ///
+    /// # Use Cases
+    ///
+    /// Use this for opportunistic reads where you want to skip nodes that are
+    /// currently being modified rather than waiting for them:
+    ///
+    /// ```rust,ignore
+    /// loop {
+    ///     match version.try_stable() {
+    ///         Some(v) => {
+    ///             // Node is clean, proceed with read
+    ///             // ... read data ...
+    ///             if !version.has_changed(v) {
+    ///                 return result;
+    ///             }
+    ///         }
+    ///         None => {
+    ///             // Node is dirty, retry from higher level
+    ///             continue 'retry;
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Memory Ordering
+    ///
+    /// Uses `Ordering::Acquire` on success to synchronize with writer's Release.
+    #[must_use]
+    #[inline(always)]
+    pub fn try_stable(&self) -> Option<u32> {
+        let value: u32 = self.value.load(Ordering::Acquire);
+
+        if (value & DIRTY_MASK) == 0 {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    /// Get a stable version, with a hint to yield on contention.
+    ///
+    /// This is a variant of [`stable()`](Self::stable) that yields the CPU
+    /// after a few spin iterations rather than using exponential backoff.
+    /// This can be more efficient when there's high contention on a node.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Try to read a clean version
+    /// 2. If dirty, spin briefly with `spin_loop` hints
+    /// 3. After a few spins, yield the CPU to other threads
+    /// 4. Repeat until clean version obtained
+    ///
+    /// # Memory Ordering
+    ///
+    /// Same as [`stable()`](Self::stable): Acquire fence on success.
+    #[must_use]
+    pub fn stable_yield(&self) -> u32 {
+        const SPINS_BEFORE_YIELD: u32 = 4;
+        let mut spin_count: u32 = 0;
+
+        loop {
+            let value: u32 = self.value.load(Ordering::Relaxed);
+
+            if (value & DIRTY_MASK) == 0 {
+                StdAtomic::fence(Ordering::Acquire);
+                return value;
+            }
+
+            spin_count += 1;
+
+            if spin_count < SPINS_BEFORE_YIELD {
+                for _ in 0..spin_count {
+                    StdHint::spin_loop();
+                }
+            } else {
+                StdThread::yield_now();
+                spin_count = 0;
+            }
+        }
+    }
+
     /// Check if the version has changed since `old`.
     ///
     /// Returns true if any version relevant bits changed (ignoring lock bit).
