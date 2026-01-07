@@ -589,7 +589,7 @@ where
                 // Speculatively prefetch for internode chains
                 // This overlaps the grandchild fetch with validation
                 if !inode.children_are_leaves() {
-                    // Child is an internode - prefetch its ikeys AND first grandchild
+                    // Child is an internode - prefetch its ikeys AND likely grandchild
                     // SAFETY: children_are_leaves() is false, so child is an internode
                     let child_inode: &L::Internode = unsafe { &*(child.cast::<L::Internode>()) };
                     // Prefetch the child internode's ikeys (second cache line)
@@ -598,8 +598,22 @@ where
                             .cast::<u8>()
                             .wrapping_add(64),
                     );
-                    // Also prefetch the first grandchild for deeper pipelining
-                    let grandchild_ptr: *mut u8 = child_inode.child(0);
+
+                    // OPTIMIZATION: Bidirectional grandchild prefetch
+                    // Instead of always prefetching child(0), prefetch based on key direction.
+                    // For reverse-sequential keys, the target is often in higher-indexed children.
+                    // Use child_idx as a hint: if we went right in parent, likely go right in child.
+                    let child_nkeys: usize = child_inode.nkeys();
+                    let grandchild_idx: usize = if child_idx == 0 {
+                        0 // Leftmost path - continue left
+                    } else if child_idx > child_nkeys / 2 {
+                        // Right side of parent - prefetch right side of child
+                        child_nkeys // Rightmost child
+                    } else {
+                        // Middle - use same relative position
+                        child_idx.min(child_nkeys)
+                    };
+                    let grandchild_ptr: *mut u8 = child_inode.child(grandchild_idx);
                     if !grandchild_ptr.is_null() {
                         prefetch_read(grandchild_ptr);
                     }
