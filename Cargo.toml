@@ -103,8 +103,8 @@ criterion = { version = "0.8.1", features = [
 iai-callgrind = "0.16.1"
 
 # Examples dependencies
-rayon = "1.10"
-tokio = { version = "1.43", features = ["full"] }
+rayon = "1.11.0"
+tokio = { version = "1.49.0", features = ["full"] }
 
 [lints.rust]
 # Allow loom and shuttle cfg for deterministic concurrency testing

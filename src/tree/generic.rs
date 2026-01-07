@@ -551,6 +551,19 @@ where
                 // SAFETY: !is_leaf() confirmed above
                 let inode: &L::Internode = unsafe { &*(n[sense].cast::<L::Internode>()) };
 
+                // ============================================================
+                // OPTIMIZATION: Prefetch internode's ikeys BEFORE search
+                // ============================================================
+                // This matches C++ `in->prefetch()` at masstree_struct.hh:659
+                // The prefetch hides memory latency during the upper_bound search
+                // that follows. We prefetch cache lines beyond the version field
+                // which contains the ikeys array.
+                //
+                // Internode layout: [version:4][nkeys:1][height:4][ikeys:WIDTH*8][children:(WIDTH+1)*8]
+                // First cache line (64 bytes) contains version + first ~7 ikeys
+                // Second cache line contains remaining ikeys
+                prefetch_read((inode as *const L::Internode as *const u8).wrapping_add(64));
+
                 // Binary/linear search for child pointer
                 let child_idx: usize =
                     upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
@@ -569,14 +582,20 @@ where
                 // Prefetch child while we validate (hide memory latency)
                 prefetch_read(child);
 
-                // Speculatively prefetch grandchild if children are internodes
+                // Speculatively prefetch for internode chains
                 // This overlaps the grandchild fetch with validation
                 if !inode.children_are_leaves() {
-                    // Child is an internode - prefetch its first child (grandchild)
+                    // Child is an internode - prefetch its ikeys AND first grandchild
                     // SAFETY: children_are_leaves() is false, so child is an internode
-                    let child_inode: &L::Internode = unsafe { &*(child.cast::<L::Internode>()) };
+                    let child_inode: &L::Internode =
+                        unsafe { &*(child.cast::<L::Internode>()) };
+                    // Prefetch the child internode's ikeys (second cache line)
+                    prefetch_read((child_inode as *const L::Internode as *const u8).wrapping_add(64));
+                    // Also prefetch the first grandchild for deeper pipelining
                     let grandchild_ptr: *mut u8 = child_inode.child(0);
-                    prefetch_read(grandchild_ptr);
+                    if !grandchild_ptr.is_null() {
+                        prefetch_read(grandchild_ptr);
+                    }
                 }
 
                 // Get stable version of child BEFORE validating parent
