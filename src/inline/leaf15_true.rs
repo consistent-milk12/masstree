@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 use super::bits::InlineBits;
 use super::sentinel::InlineSentinel;
 use crate::Linker;
+use crate::alloc_common::BoxAllocator;
+use crate::error::{AllocKind, AllocResult};
 use crate::nodeversion::NodeVersion;
 use crate::ordering::CAS_FAILURE;
 use crate::ordering::CAS_SUCCESS;
@@ -1001,7 +1003,10 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
 
-        let mut new_bag: SuffixBag<WIDTH_15> = inline.drain_to_external(&perm, slot, suffix);
+        // This infallible path aborts on OOM. Use `try_assign_ksuf` for fallible version.
+        let mut new_bag: SuffixBag<WIDTH_15> = inline
+            .drain_to_external(&perm, slot, suffix)
+            .expect("OOM: suffix bag allocation failed");
 
         let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
         if !old_ext.is_null() {
@@ -1030,6 +1035,117 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+    }
+
+    /// Try to assign a suffix to a slot, returning error on allocation failure.
+    ///
+    /// This is the fallible version of `assign_ksuf`. It tries inline storage
+    /// first, then falls back to external storage, returning an error if
+    /// allocation fails.
+    ///
+    /// # Safety
+    /// - Caller must hold lock and have called `mark_insert()`
+    /// - `guard` must come from this tree's collector
+    ///
+    /// # Errors
+    /// Returns `Err(AllocError)` if external bag allocation fails.
+    #[expect(clippy::indexing_slicing)]
+    pub unsafe fn try_assign_ksuf(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &LocalGuard<'_>,
+    ) -> AllocResult<()> {
+        debug_assert!(slot < WIDTH_15, "try_assign_ksuf: slot out of bounds");
+        debug_assert!(
+            self.version.is_locked() || self.version.is_unpublished(),
+            "try_assign_ksuf: caller must hold lock or node must be unpublished"
+        );
+
+        // FAST PATH 1: Try inline storage first (no allocation!)
+        let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+            unsafe { &mut *self.inline_ksuf.get() };
+
+        if inline.try_assign(slot, suffix) {
+            self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+            return Ok(());
+        }
+
+        // FAST PATH 2: Try external storage in-place (if exists and has room)
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        if !old_ext.is_null() {
+            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
+            if bag.try_assign_in_place(slot, suffix) {
+                inline.clear(slot);
+                self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+                return Ok(());
+            }
+        }
+
+        // SLOW PATH: Drain inline to external and allocate new external bag (fallible)
+        unsafe { self.try_assign_ksuf_slow(slot, suffix, guard) }
+    }
+
+    /// Slow path for fallible suffix assignment: allocate/reallocate external bag.
+    ///
+    /// # Safety
+    /// Same as `try_assign_ksuf`.
+    ///
+    /// # Errors
+    /// Returns `Err(AllocError)` if allocation fails.
+    #[cold]
+    #[inline(never)]
+    #[expect(clippy::indexing_slicing)]
+    unsafe fn try_assign_ksuf_slow(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &LocalGuard<'_>,
+    ) -> AllocResult<()> {
+        debug_assert!(
+            self.version.is_locked(),
+            "try_assign_ksuf_slow: caller must hold lock"
+        );
+
+        let perm = self.permutation();
+        let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+            unsafe { &mut *self.inline_ksuf.get() };
+
+        // Drain inline to a new external bag with the new suffix (FALLIBLE)
+        let mut new_bag: SuffixBag<WIDTH_15> = inline.drain_to_external(&perm, slot, suffix)?;
+
+        // Merge with existing external suffixes (if any)
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        if !old_ext.is_null() {
+            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
+
+            for i in 0..perm.size() {
+                let s: usize = perm.get(i);
+
+                if s != slot
+                    && let Some(ext_suffix) = old_bag.get(s)
+                {
+                    new_bag.assign(s, ext_suffix);
+                }
+            }
+        }
+
+        // Install new external bag (FALLIBLE: use try_box)
+        let new_ptr: *mut SuffixBag<WIDTH_15> =
+            Box::into_raw(BoxAllocator::try_box_with_kind(new_bag, AllocKind::Suffix)?);
+        self.external_ksuf.store(new_ptr, WRITE_ORD);
+
+        // Retire old external bag
+        if !old_ext.is_null() {
+            unsafe {
+                guard.defer_retire(old_ext, |ptr, _| {
+                    drop(Box::from_raw(ptr));
+                });
+            }
+        }
+
+        self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+        Ok(())
     }
 
     /// Clear the suffix from a slot.

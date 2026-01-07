@@ -1,3 +1,5 @@
+use crate::{SplitPoint, nodeversion::LockGuard};
+
 use super::{
     AtomicOrdering, InsertError, LayerCapableLeaf, LocalGuard, MassTreeGeneric,
     NodeAllocatorGeneric, Propagation, ValueSlot,
@@ -19,18 +21,20 @@ where
     ///
     /// This function implements the SPLIT-THEN-RETRY pattern:
     ///
-    /// # Performance
+    /// #  FALLIBLE: Allocation (Current Phase)
     ///
-    /// Marked `#[inline(never)]` to keep split code out of the hot insert path.
-    /// Not marked `#[cold]` - while splits are infrequent (~1 per WIDTH inserts),
-    /// in insert-heavy workloads (building from empty) they can be common enough
-    /// that cold placement hurts more than it helps.
+    /// The right sibling leaf is allocated using `try_alloc_leaf` BEFORE
+    /// marking the split. If allocation fails, we return `Err(AllocationFailed)`
+    /// without modifying the tree. The leaf remains full but consistent.
+    ///
+    /// # Steps
+    ///
     /// 1. Calculate split point
-    /// 2. Allocate new leaf (pre-allocation before marking split)
+    /// 2. **Fallible:** Allocate new leaf (BEFORE `mark_split`)
     /// 3. Mark split in progress
-    /// 4. Perform split (creates split-locked right sibling)
+    /// 4. Perform split (sets split-locked version on right sibling)
     /// 5. Link leaves (B-link)
-    /// 6. Propagate to parent using TRUE hand-over-hand
+    /// 6. **Infallible:** Propagate to parent (internode allocations abort on OOM)
     /// 7. Return Ok - caller retries insert
     ///
     /// # Arguments
@@ -40,6 +44,11 @@ where
     /// - `logical_pos`: Insert position for split point calculation
     /// - `ikey`: Key being inserted
     /// - `guard`: Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Split completed, caller should retry insert
+    /// * `Err(InsertError::AllocationFailed)` - Could not allocate sibling leaf
     ///
     /// # Lock Protocol
     ///
@@ -57,11 +66,10 @@ where
     /// # C++ Reference
     ///
     /// Matches `tcursor::make_split()` in `reference/masstree_split.hh:179-297`.
-    #[inline(never)]
     pub(crate) fn handle_leaf_split_generic(
         &self,
         left_leaf_ptr: *mut L,
-        lock: crate::nodeversion::LockGuard<'_>,
+        lock: LockGuard<'_>,
         logical_pos: usize,
         ikey: u64,
         guard: &LocalGuard<'_>,
@@ -69,7 +77,7 @@ where
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
 
         // Calculate split point
-        let split_point = left_leaf
+        let split_point: SplitPoint = left_leaf
             .calculate_split_point(logical_pos, ikey)
             .ok_or(InsertError::SplitFailed)?;
 
@@ -78,15 +86,7 @@ where
         // =========================================================================
         //
         // SPLIT_UNLOCK_MASK clears ROOT_BIT on unlock. We must capture both
-        // booleans separately BEFORE marking:
-        //
-        // - is_main_root: This leaf is THE main tree root (root_ptr points here)
-        // - is_layer_root: This leaf is a layer root (null parent, root flag, NOT main)
-        //
-        // These are MUTUALLY EXCLUSIVE for handling:
-        // - Main root: CAS on root_ptr to install new internode
-        // - Layer root: NO CAS, just parent pointer updates
-
+        // booleans separately BEFORE marking.
         let root_flag_set: bool = left_leaf.version().is_root();
         let parent_is_null: bool = left_leaf.parent().is_null();
 
@@ -95,41 +95,51 @@ where
             std::ptr::eq(current_root, left_leaf_ptr)
         };
 
-        // Layer root: has root flag, null parent, but is NOT the main tree root
         let is_layer_root: bool = root_flag_set && parent_is_null && !is_main_root;
 
-        // Allocate new leaf directly from pool BEFORE marking split
-        // This ensures allocation doesn't happen while we hold the split lock
-        // The leaf is initialized but split_into_preallocated will set up the split-locked version
-        let right_leaf_ptr: *mut L = self.allocator.alloc_leaf_direct(false, false);
+        // =========================================================================
+        // FALLIBLE POINT: Allocate right sibling BEFORE mark_split
+        // =========================================================================
+        //
+        // This is the only fallible allocation in the split path (Tier 1).
+        // If this fails, we return Err without modifying the tree.
+        //
+        // The leaf is initialized but NOT split-locked yet - that happens in
+        // split_into_preallocated() after mark_split().
+        let right_leaf_ptr: *mut L = self.allocator.try_alloc_leaf(false, false)?;
 
-        // Mark split in progress (sets SPLITTING_BIT)
-        let mut lock = lock;
+        // =========================================================================
+        // PAST POINT OF NO RETURN: mark_split() and beyond
+        // =========================================================================
+        //
+        // After mark_split(), we MUST complete the split. All subsequent
+        // allocations (internode in propagation) are infallible and abort on OOM.
+        let mut lock: LockGuard<'_> = lock;
         lock.mark_split();
 
         // Perform the split
-        // NOTE: The right sibling receives a split-locked version from
-        // split_into_preallocated() - this is NOT done by the allocator!
-        // insert_target is ignored - we use SPLIT-THEN-RETRY pattern
-        let (split_ikey, _insert_target) =
+        // NOTE: split_into_preallocated sets the split-locked version on right_leaf
+        let (split_ikey, _) =
             unsafe { left_leaf.split_into_preallocated(split_point.pos, right_leaf_ptr, guard) };
 
-        // Link leaves in B-link order (while left is still locked)
+        // Link leaves in B-link order
         unsafe { left_leaf.link_sibling(right_leaf_ptr) };
 
         // =========================================================================
-        // TRUE HAND-OVER-HAND PROPAGATION
+        //   INFALLIBLE: Propagation (Tier 1)
         // =========================================================================
         //
-        // Pass ownership of the lock to Propagation::make_split_leaf.
-        // The lock is maintained throughout propagation - this is the key
-        // difference from the previous (broken) implementation.
+        // Internode allocations during propagation remain infallible and abort
+        // on OOM. This is acceptable because:
+        // 1. No-abandon invariant requires completion
+        // 2. Internode splits are rare
+        // 3. The alternative (corruption) is worse
 
         let result: Result<(), InsertError> = Propagation::make_split_leaf::<S, L, A>(
             &self.root_ptr,
             &self.allocator,
             left_leaf_ptr,
-            lock, // Ownership transferred - lock maintained during propagation
+            lock,
             right_leaf_ptr,
             split_ikey,
             is_main_root,

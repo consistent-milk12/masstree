@@ -1,4 +1,5 @@
 use super::*;
+use crate::permuter24::Permuter24;
 
 // ========================================================================
 //  Basic Tests
@@ -601,19 +602,7 @@ fn test_inline_suffix_compare() {
 
 #[test]
 fn test_inline_drain_to_external() {
-    struct MockPerm {
-        slots: Vec<usize>,
-    }
-
-    impl PermutationProvider for MockPerm {
-        fn size(&self) -> usize {
-            self.slots.len()
-        }
-
-        fn get(&self, i: usize) -> usize {
-            self.slots[i]
-        }
-    }
+    use crate::leaf_trait::TreePermutation;
 
     let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
 
@@ -622,16 +611,17 @@ fn test_inline_drain_to_external() {
     bag.try_assign(1, b"suffix1");
     bag.try_assign(2, b"suffix2");
 
-    let perm = MockPerm {
-        slots: vec![0, 1, 2],
-    };
+    // Create a permutation with 3 sorted entries (slots 0, 1, 2)
+    let perm = Permuter24::make_sorted(3);
 
     // Drain to external with a new suffix for slot 3
-    let external = bag.drain_to_external(&perm, 3, b"new_suffix");
+    let external = bag
+        .drain_to_external(&perm, 3, b"new_suffix")
+        .expect("drain_to_external should succeed");
 
-    // Inline bag should be cleared
+    // Inline bag slots should be cleared (count = 0)
+    // Note: used() may still be non-zero since clear() doesn't compact
     assert_eq!(bag.count(), 0);
-    assert_eq!(bag.used(), 0);
 
     // External bag should have all suffixes
     assert_eq!(external.get(0), Some(b"suffix0".as_slice()));
@@ -642,29 +632,20 @@ fn test_inline_drain_to_external() {
 
 #[test]
 fn test_inline_drain_replaces_slot() {
-    struct MockPerm {
-        slots: Vec<usize>,
-    }
-
-    impl PermutationProvider for MockPerm {
-        fn size(&self) -> usize {
-            self.slots.len()
-        }
-
-        fn get(&self, i: usize) -> usize {
-            self.slots[i]
-        }
-    }
+    use crate::leaf_trait::TreePermutation;
 
     let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"old_suffix");
     bag.try_assign(1, b"keep_this");
 
-    let perm = MockPerm { slots: vec![0, 1] };
+    // Create a permutation with 2 sorted entries (slots 0, 1)
+    let perm = Permuter24::make_sorted(2);
 
     // Replace slot 0's suffix during drain
-    let external = bag.drain_to_external(&perm, 0, b"new_suffix");
+    let external = bag
+        .drain_to_external(&perm, 0, b"new_suffix")
+        .expect("drain_to_external should succeed");
 
     // External should have new suffix for slot 0
     assert_eq!(external.get(0), Some(b"new_suffix".as_slice()));

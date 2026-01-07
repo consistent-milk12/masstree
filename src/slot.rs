@@ -27,6 +27,8 @@ use std::sync::Arc;
 
 pub mod true_inline;
 
+use crate::alloc_common::BoxAllocator;
+use crate::error::{AllocKind, AllocResult};
 use crate::value::{LeafValue, LeafValueIndex};
 
 // ================================================================================
@@ -239,6 +241,32 @@ pub trait ValueSlot: Default + Sized {
     /// - `ptr` must not have been already cleaned up
     /// - Caller must ensure no references to the pointed-to value exist
     unsafe fn cleanup_output_raw(ptr: *mut u8);
+
+    // ========================================================================
+    //  Fallible Raw Pointer Operations (Tier 1)
+    // ========================================================================
+
+    /// Try to convert an output to a raw pointer, returning error on allocation failure.
+    ///
+    /// This is the fallible version of `output_to_raw`. Only implementations
+    /// that allocate (like [`LeafValueIndex`]) need to override this.
+    ///
+    /// # Default Impl
+    ///
+    /// Delegates to `output_to_raw` (may abort on OOM).
+    /// Impl's that allocate MUST override this.
+    fn try_output_to_raw(output: &Self::Output) -> AllocResult<*mut u8> {
+        Ok(Self::output_to_raw(output))
+    }
+
+    /// Try to convert an output to a raw pointer, consuming the output.
+    ///
+    /// This is the fallible version of `output_consume_to_raw`.
+    ///
+    /// # Default Impleme
+    fn try_output_consume_to_raw(output: Self::Output) -> AllocResult<*mut u8> {
+        Ok(Self::output_consume_to_raw(output))
+    }
 }
 
 // ============================================================================
@@ -477,6 +505,20 @@ impl<V: Copy> ValueSlot for LeafValueIndex<V> {
         unsafe {
             drop(Box::from_raw(ptr.cast::<V>()));
         }
+    }
+
+    #[inline(always)]
+    fn try_output_to_raw(output: &V) -> AllocResult<*mut u8> {
+        // Use fallible Box allocation
+        let boxed: Box<V> = BoxAllocator::try_box_with_kind(*output, AllocKind::Value)?;
+        Ok(Box::into_raw(boxed).cast::<u8>())
+    }
+
+    #[inline(always)]
+    fn try_output_consume_to_raw(output: V) -> AllocResult<*mut u8> {
+        // Use fallible Box allocation
+        let boxed: Box<V> = BoxAllocator::try_box_with_kind(output, AllocKind::Value)?;
+        Ok(Box::into_raw(boxed).cast::<u8>())
     }
 }
 

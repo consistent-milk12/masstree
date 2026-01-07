@@ -207,8 +207,6 @@ pub mod suffix;
 pub mod tree;
 pub mod value;
 
-// Internal use for `alloc_common`
-pub(crate) use alloc_common::{BoxAllocator, GenericAllocator};
 pub use error::{AllocError, AllocKind, AllocResult};
 
 // Re-export leaf node traits for generic tree operations
@@ -246,7 +244,7 @@ pub use link::Linker;
 pub use ref_value_slot::RefValueSlot;
 pub use slot::ValueSlot;
 pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
-pub use tree::RemoveError;
+pub use tree::{InsertError, RemoveError};
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use tree::{
     MassTree, MassTree15, MassTree15Inline, MassTree24, MassTree24Inline, MassTreeGeneric,

@@ -5,6 +5,8 @@
 //! When a key is longer than 8 bytes, the first 8 bytes are stored as `ikey0`
 //! and the remaining bytes are stored in a [`SuffixBag`].
 
+use crate::{AllocError, AllocResult, TreePermutation};
+
 /// Initial capacity for suffix storage (matches C++ `INITIAL_KSUF_CAPACITY`).
 const INITIAL_CAPACITY: usize = 128;
 
@@ -138,6 +140,127 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     #[inline(always)]
     pub fn count(&self) -> usize {
         self.slots.iter().filter(|s| s.has_suffix()).count()
+    }
+
+    // ========================================================================
+    //  Fallible Operations
+    // ========================================================================
+
+    /// Try to create a new suffix bag with initial capacity.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(bag)` - Successfully allocated bag
+    /// * `Err(AllocError)` - Could not allocate capacity
+    ///
+    /// # Errors
+    ///
+    /// Upon allocation failure.
+    #[inline(always)]
+    pub fn try_with_capacity(capacity: usize) -> AllocResult<Self> {
+        let mut data: Vec<u8> = Vec::new();
+        data.try_reserve(capacity)
+            .map_err(|_| AllocError::for_suffix(capacity))?;
+
+        Ok(Self {
+            slots: [SlotMeta::EMPTY; WIDTH],
+            data,
+        })
+    }
+
+    /// Try to assign a suffix, returning error if allocation fails.
+    ///
+    /// Unlike `assign`, this method returns an error instead of panicking
+    /// if the [`Vec`] needs to grow and allocation fails.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Suffix assigned successfully
+    /// * `Err(AllocError)` - Could not grow storage
+    ///
+    /// # Errors
+    ///
+    /// Upon allocation failure.
+    ///
+    /// # Panics
+    ///
+    /// If suffix is longer than `u16::MAX`
+    #[expect(clippy::indexing_slicing, reason = "Checked access")]
+    pub fn try_assign(&mut self, slot: usize, suffix: &[u8]) -> AllocResult<()> {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+
+        let suffix_len: usize = suffix.len();
+
+        assert!(
+            u16::try_from(suffix_len).is_ok(),
+            "suffix too long: {suffix_len} > {}",
+            u16::MAX
+        );
+
+        let meta: SlotMeta = self.slots[slot];
+
+        // Fast path 1: Reuse existing slot if new suffix fits
+        if meta.has_suffix() && (suffix_len <= (meta.len as usize)) {
+            let start: usize = meta.offset as usize;
+            self.data[start..(start + suffix_len)].copy_from_slice(suffix);
+
+            #[expect(clippy::cast_possible_truncation)]
+            {
+                self.slots[slot] = SlotMeta {
+                    offset: meta.offset,
+                    len: suffix_len as u16,
+                };
+            }
+
+            return Ok(());
+        }
+
+        // Fast path 2: Append if there's room
+        let new_offset: usize = self.data.len();
+
+        if (new_offset + suffix_len) <= self.data.capacity() {
+            self.data.extend_from_slice(suffix);
+
+            #[expect(clippy::cast_possible_truncation)]
+            {
+                self.slots[slot] = SlotMeta {
+                    offset: new_offset as u32,
+                    len: suffix_len as u16,
+                };
+            }
+
+            return Ok(());
+        }
+
+        // Slow path: Need to grow, try to reserve
+        self.data
+            .try_reserve(suffix_len)
+            .map_err(|_| AllocError::for_suffix(suffix_len))?;
+
+        // Now we have capacity
+        let new_offset = self.data.len();
+        self.data.extend_from_slice(suffix);
+
+        #[expect(clippy::cast_possible_truncation)]
+        {
+            self.slots[slot] = SlotMeta {
+                offset: new_offset as u32,
+                len: suffix_len as u16,
+            };
+        }
+
+        Ok(())
+    }
+
+    /// Try to grow capacity, returning error on allocation failure.
+    ///
+    /// # Errors
+    ///
+    /// Upon allocation failure.
+    pub fn try_reserve(&mut self, additional: usize) -> AllocResult<()> {
+        self.data
+            .try_reserve(additional)
+            .map_err(|_| AllocError::for_suffix(additional))
     }
 
     // ========================================================================
@@ -620,6 +743,70 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     }
 
     // ========================================================================
+    //  Fallible Operations
+    // ========================================================================
+
+    /// Try to drain inline suffixes to a new external bag.
+    ///
+    /// Called when inline storage is full and we need to create an external bag.
+    ///
+    /// # Argument
+    ///
+    /// * `perm` - Current permutation (to iterate active slots)
+    /// * `new_slot` - Slot for the new suffix being added
+    /// * `new_suffix` - The new suffix that triggered this drain
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(bag)` - New external bag with drained suffixes plus new one
+    /// * `Err(AllocError)` - Could not allocate external bag
+    pub fn drain_to_external(
+        &mut self,
+        perm: &impl TreePermutation,
+        new_slot: usize,
+        new_suffix: &[u8],
+    ) -> AllocResult<SuffixBag<WIDTH>> {
+        // calculate required cap
+        let mut required_capacity: usize = new_suffix.len();
+
+        for i in 0..perm.size() {
+            let slot: usize = perm.get(i);
+
+            if slot != new_slot
+                && let Some(suffix) = self.get(slot)
+            {
+                required_capacity += suffix.len();
+            }
+        }
+
+        // Try to allocate external bag with capacity
+        let mut external: SuffixBag<_> = SuffixBag::try_with_capacity(required_capacity)?;
+
+        // Copy existing suffixes from inline storage
+        for i in 0..perm.size() {
+            let slot: usize = perm.get(i);
+
+            if slot != new_slot
+                && let Some(suffix) = self.get(slot)
+            {
+                // This should not fail since we pre-reserved capcity.
+                external.assign(slot, suffix);
+            }
+        }
+
+        // Assign new suffix (also should fail)
+        external.assign(new_slot, new_suffix);
+
+        // Clear inline storage
+        for i in 0..perm.size() {
+            let slot: usize = perm.get(i);
+            self.clear(slot);
+        }
+
+        Ok(external)
+    }
+
+    // ========================================================================
     //  Slot Access
     // ========================================================================
 
@@ -778,65 +965,6 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     pub const fn clear_all(&mut self) {
         self.slots = [InlineSlotMeta::EMPTY; WIDTH];
         self.size = 0;
-    }
-
-    // ========================================================================
-    //  Drain to External
-    // ========================================================================
-
-    /// Drain active suffixes to a new external `SuffixBag`.
-    ///
-    /// This is called when the inline bag is full and we need to
-    /// allocate an external bag. It:
-    /// 1. Creates a new `SuffixBag` with appropriate capacity
-    /// 2. Copies all active suffixes (per permutation) to it
-    /// 3. Assigns the new suffix that triggered the drain
-    /// 4. Clears this inline bag
-    ///
-    /// # Arguments
-    ///
-    /// * `perm` - Permutation indicating which slots are active
-    /// * `new_slot` - The slot that needs the new suffix
-    /// * `new_suffix` - The suffix that didn't fit
-    ///
-    /// # Returns
-    ///
-    /// A new `SuffixBag` containing all active suffixes plus the new one.
-    pub fn drain_to_external<P: PermutationProvider>(
-        &mut self,
-        perm: &P,
-        new_slot: usize,
-        new_suffix: &[u8],
-    ) -> SuffixBag<WIDTH> {
-        // Estimate capacity: current used bytes + new suffix, rounded to power of 2.
-        // This avoids iterating twice to calculate exact size.
-        let estimated_size: usize = self.size as usize + new_suffix.len();
-        let capacity: usize = estimated_size.next_power_of_two().max(256);
-        let mut bag: SuffixBag<WIDTH> = SuffixBag::with_capacity(capacity);
-
-        // Single pass: copy existing suffixes and assign new one
-        for i in 0..perm.size() {
-            let s: usize = perm.get(i);
-
-            if s >= WIDTH {
-                continue;
-            }
-
-            if s == new_slot {
-                continue;
-            }
-
-            let Some(suffix) = self.get(s) else { continue };
-            bag.assign(s, suffix);
-        }
-
-        // Assign the new suffix
-        bag.assign(new_slot, new_suffix);
-
-        // Clear inline storage
-        self.clear_all();
-
-        bag
     }
 
     // ========================================================================

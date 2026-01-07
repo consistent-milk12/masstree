@@ -280,7 +280,17 @@ where
         Ok(())
     }
 
-    /// Takes ownership of `value` to avoid an unnecessary [`Arc::clone`].
+    /// Handle a suffix conflict by creating a new layer.
+    ///
+    /// Takes ownership of `value` to avoid an unnecessary clone.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Layer created, value inserted
+    /// * `Err(InsertError::AllocationFailed)` - Could not allocate layer nodes
+    #[cold]
+    #[rustfmt::skip]
+    #[inline(never)]
     #[expect(
         clippy::too_many_arguments,
         reason = "Layer creation requires full context"
@@ -293,23 +303,22 @@ where
         key: &mut Key<'_>,
         value: S::Output,
         guard: &LocalGuard<'_>,
-    ) {
+    ) -> Result<(), InsertError> {
         // Mark insert before modifying the node
         lock.mark_insert();
 
-        // Create new layer for the conflicting keys
+        // Create new layer for the conflicting keys (FALLIBLE)
         //
         // SAFETY: We hold the lock on `leaf`, guard is from this tree's collector
-        //
-        // NOTE: We pass `value` by ownership (no clone) since this function consumes it.
-        let layer_ptr: *mut u8 =
-            unsafe { self.create_layer_concurrent_generic(leaf, slot, key, value, guard) };
+        let layer_ptr: *mut u8 = unsafe {
+            self.try_create_layer_concurrent_generic(leaf, slot, key, value, guard)?
+        };
 
-        // Retire the existing value in the conflict slot (only for pointer-backed nodes)
+        // Retire the existing value in the conflict slot
         let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
 
         if !old_ptr.is_null() && S::NEEDS_RETIREMENT {
-            // SAFETY: old_ptr came from take_leaf_value_ptr and is valid for cleanup
+            // SAFETY: old_ptr came from take_leaf_value_ptr
             unsafe {
                 guard.defer_retire(old_ptr, |ptr: *mut u8, _| {
                     S::cleanup_value_ptr(ptr);
@@ -317,16 +326,20 @@ where
             }
         }
 
-        // Clear any existing suffix for this slot
-        // SAFETY: We hold the lock
-        unsafe { leaf.clear_ksuf(slot, guard) };
+        // Clear any existing suffix
+        //  SAFETY: We hold the lock
+        unsafe {
+            leaf.clear_ksuf(slot, guard);
+        };
 
-        // Install the layer pointer in the conflict slot
+        // Install the layer pointer
         leaf.set_keylenx(slot, LAYER_KEYLENX);
         leaf.set_leaf_value_ptr(slot, layer_ptr);
 
-        // Increment count (new key was added to the layer)
+        // Increment count
         self.count.increment();
+
+        Ok(())
     }
 }
 
@@ -487,15 +500,18 @@ where
                                 return Ok(None);
                             }
 
+                            // In the match arm for NeedsSplit:
                             FindSlotResult::NeedsSplit => {
-                                let leaf_ptr_current: *mut L = StdPtr::from_ref(leaf).cast_mut();
+                                // Split the leaf (FALLIBLE allocation for sibling)
                                 self.handle_leaf_split_generic(
-                                    leaf_ptr_current,
+                                    StdPtr::from_ref::<L>(leaf).cast_mut(),
                                     lock,
                                     logical_pos,
-                                    ikey,
+                                    key.ikey(),
                                     guard,
                                 )?;
+
+                                // Retry from beginning
                                 continue;
                             }
                         }
@@ -573,8 +589,8 @@ where
                 }
 
                 InsertSearchResultGeneric::Conflict { slot } => {
-                    self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard);
-                    drop(lock);
+                    // Handle suffix conflict by creating a new layer (FALLIBLE)
+                    self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard)?;
                     return Ok(None);
                 }
             }

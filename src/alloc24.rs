@@ -10,10 +10,15 @@
 //! This is fine since internodes just hold child pointers; the benefit of WIDTH=24
 //! comes from leaves holding more keys and splitting less often.
 
+use std::alloc::Layout;
+use std::alloc as StdAlloc;
+use std::mem as StdMem;
+
 use parking_lot::Mutex;
 use seize::{Guard, LocalGuard};
 
 use crate::alloc_trait::NodeAllocatorGeneric;
+use crate::error::{AllocError, AllocResult};
 use crate::internode::InternodeNode;
 use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
@@ -219,27 +224,82 @@ where
     /// Allocate a leaf directly without Box intermediate.
     ///
     /// Uses raw allocation + `init_at` to avoid stack-to-heap copy.
+    /// Delegates to `try_alloc_leaf` and aborts on allocation failure.
     #[inline]
     fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode24<S> {
-        use std::alloc::{Layout, alloc};
+        self.try_alloc_leaf(is_root, is_layer_root)
+            .unwrap_or_else(|_| {
+                let layout: Layout = Layout::new::<LeafNode24<S>>();
+                StdAlloc::handle_alloc_error(layout)
+            })
+    }
 
-        let layout = Layout::new::<LeafNode24<S>>();
-        // SAFETY: Layout is valid (non-zero size)
-        #[expect(clippy::cast_ptr_alignment, reason = "Layout is valid (non-zero size)")]
-        let ptr: *mut LeafNode24<S> = unsafe { alloc(layout).cast::<LeafNode24<S>>() };
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
+    /// Try to allocate a leaf node, returning an error on failure.
+    ///
+    /// This is the fallible version of `alloc_leaf_direct`. Use this in
+    /// production code paths that need to handle OOM gracefully.
+    ///
+    /// # Steps
+    ///
+    /// 1. Allocate raw memory (fallible)
+    /// 2. Initialize in-place using `init_at`
+    /// 3. Reserve space in tracking vector (fallible)
+    /// 4. Push pointer to tracking vector
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(AllocError)` if:
+    /// - Raw memory allocation fails
+    /// - Tracking vector reservation fails (node is deallocated on this error)
+    fn try_alloc_leaf(
+        &self,
+        is_root: bool,
+        is_layer_root: bool,
+    ) -> AllocResult<*mut LeafNode24<S>> {
+        // Step 1: Allocate raw memory
+        let layout: Layout = Layout::new::<LeafNode24<S>>();
+
+        // SAFETY: Layout is valid (derived from type)
+        let raw_ptr: *mut u8 = unsafe { StdAlloc::alloc(layout) };
+
+        if raw_ptr.is_null() {
+            return Err(AllocError::for_leaf::<LeafNode24<S>>());
         }
 
-        // Initialize in-place
-        // SAFETY: ptr is valid, aligned, and we have exclusive access
+        let ptr: *mut LeafNode24<S> = raw_ptr.cast();
+
+        // Step 2: Initialize in-place using init_at
+        //
+        // The is_layer_root flag is passed to init_at as is_root because
+        // layer roots also have ROOT_BIT set (they're roots of sublayers).
+        //
+        // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
             LeafNode24::init_at(ptr, is_root || is_layer_root);
         }
 
-        // Track for cleanup
-        self.leaf_ptrs.lock().push(ptr);
-        ptr
+        // Step 3: Reserve space in tracking vector BEFORE push
+        //
+        // CRITICAL: Vec::push can reallocate and abort if capacity
+        // is exhausted. By calling try_reserve first, we make tracking fallible.
+        {
+            let mut ptrs = self.leaf_ptrs.lock();
+
+            if ptrs.try_reserve(1).is_err() {
+                // Tracking failed - must deallocate the node
+                // SAFETY: ptr was just allocated with this layout
+                unsafe { StdAlloc::dealloc(raw_ptr, layout) };
+
+                return Err(AllocError::for_tracking(StdMem::size_of::<
+                    *mut LeafNode24<S>,
+                >()));
+            }
+
+            // Now push cannot fail (we just reserved space)
+            ptrs.push(ptr);
+        }
+
+        Ok(ptr)
     }
 
     /// Allocate an internode directly without Box intermediate.
