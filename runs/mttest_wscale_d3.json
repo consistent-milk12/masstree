@@ -1,0 +1,60 @@
+{
+  "experiments": {
+    "x0": {
+      "cores": 6,
+      "runs": ["x0\/wscale\/mb\/0"]
+    }
+  },
+  "data": {
+    "x0\/wscale\/mb\/0": [
+      {
+        "table": "mb",
+        "test": "wscale",
+        "trial": 0,
+        "thread": 0,
+        "puts": 4377936,
+        "puts_per_sec": 1459311.0722
+      },
+      {
+        "table": "mb",
+        "test": "wscale",
+        "trial": 0,
+        "thread": 1,
+        "puts": 4285196,
+        "puts_per_sec": 1428484.3786
+      },
+      {
+        "table": "mb",
+        "test": "wscale",
+        "trial": 0,
+        "thread": 2,
+        "puts": 4269120,
+        "puts_per_sec": 1423130.14088
+      },
+      {
+        "table": "mb",
+        "test": "wscale",
+        "trial": 0,
+        "thread": 3,
+        "puts": 4366038,
+        "puts_per_sec": 1455464.446
+      },
+      {
+        "table": "mb",
+        "test": "wscale",
+        "trial": 0,
+        "thread": 4,
+        "puts": 4359855,
+        "puts_per_sec": 1453456.53287
+      },
+      {
+        "table": "mb",
+        "test": "wscale",
+        "trial": 0,
+        "thread": 5,
+        "puts": 4223775,
+        "puts_per_sec": 1408112.77953
+      }
+    ]
+  }
+}

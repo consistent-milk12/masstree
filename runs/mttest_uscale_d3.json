@@ -1,0 +1,60 @@
+{
+  "experiments": {
+    "x0": {
+      "cores": 6,
+      "runs": ["x0\/uscale\/mb\/0"]
+    }
+  },
+  "data": {
+    "x0\/uscale\/mb\/0": [
+      {
+        "table": "mb",
+        "test": "uscale",
+        "trial": 0,
+        "thread": 0,
+        "puts": 4722981,
+        "puts_per_sec": 1574353.77534
+      },
+      {
+        "table": "mb",
+        "test": "uscale",
+        "trial": 0,
+        "thread": 1,
+        "puts": 4666806,
+        "puts_per_sec": 1555710.30579
+      },
+      {
+        "table": "mb",
+        "test": "uscale",
+        "trial": 0,
+        "thread": 2,
+        "puts": 4738670,
+        "puts_per_sec": 1579664.00372
+      },
+      {
+        "table": "mb",
+        "test": "uscale",
+        "trial": 0,
+        "thread": 3,
+        "puts": 4625334,
+        "puts_per_sec": 1541919.77968
+      },
+      {
+        "table": "mb",
+        "test": "uscale",
+        "trial": 0,
+        "thread": 4,
+        "puts": 4967154,
+        "puts_per_sec": 1655933.82695
+      },
+      {
+        "table": "mb",
+        "test": "uscale",
+        "trial": 0,
+        "thread": 5,
+        "puts": 4669104,
+        "puts_per_sec": 1556624.82077
+      }
+    ]
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "experiments": {
+    "x0": {
+      "cores": 6,
+      "runs": ["x0\/same\/mb\/0"]
+    }
+  },
+  "data": {
+    "x0\/same\/mb\/0": [
+      {
+        "table": "mb",
+        "test": "same",
+        "trial": 0,
+        "thread": 0,
+        "puts": 1331326,
+        "puts_per_sec": 443798.576225
+      },
+      {
+        "table": "mb",
+        "test": "same",
+        "trial": 0,
+        "thread": 1,
+        "puts": 1405582,
+        "puts_per_sec": 468544.499393
+      },
+      {
+        "table": "mb",
+        "test": "same",
+        "trial": 0,
+        "thread": 2,
+        "puts": 1342750,
+        "puts_per_sec": 447601.546287
+      },
+      {
+        "table": "mb",
+        "test": "same",
+        "trial": 0,
+        "thread": 3,
+        "puts": 1193175,
+        "puts_per_sec": 397760.151584
+      },
+      {
+        "table": "mb",
+        "test": "same",
+        "trial": 0,
+        "thread": 4,
+        "puts": 1210015,
+        "puts_per_sec": 403384.176408
+      },
+      {
+        "table": "mb",
+        "test": "same",
+        "trial": 0,
+        "thread": 5,
+        "puts": 1191678,
+        "puts_per_sec": 397280.431873
+      }
+    ]
+  }
+}

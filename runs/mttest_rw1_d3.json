@@ -1,0 +1,84 @@
+{
+  "experiments": {
+    "x0": {
+      "cores": 6,
+      "runs": ["x0\/rw1\/mb\/0"]
+    }
+  },
+  "data": {
+    "x0\/rw1\/mb\/0": [
+      {
+        "table": "mb",
+        "test": "rw1",
+        "trial": 0,
+        "thread": 0,
+        "puts": 4600289,
+        "puts_per_sec": 1533493.52713,
+        "gets": 4600289,
+        "gets_per_sec": 1464256.19801,
+        "ops": 9200578,
+        "ops_per_sec": 1498075.29487
+      },
+      {
+        "table": "mb",
+        "test": "rw1",
+        "trial": 0,
+        "thread": 1,
+        "puts": 4517915,
+        "puts_per_sec": 1506045.99402,
+        "gets": 4517915,
+        "gets_per_sec": 1420595.24829,
+        "ops": 9035830,
+        "ops_per_sec": 1462073.14507
+      },
+      {
+        "table": "mb",
+        "test": "rw1",
+        "trial": 0,
+        "thread": 2,
+        "puts": 4488547,
+        "puts_per_sec": 1496248.2101,
+        "gets": 4488547,
+        "gets_per_sec": 1415390.45335,
+        "ops": 8977094,
+        "ops_per_sec": 1454696.60023
+      },
+      {
+        "table": "mb",
+        "test": "rw1",
+        "trial": 0,
+        "thread": 3,
+        "puts": 4324973,
+        "puts_per_sec": 1441806.16813,
+        "gets": 4324973,
+        "gets_per_sec": 1415251.01038,
+        "ops": 8649946,
+        "ops_per_sec": 1428405.17968
+      },
+      {
+        "table": "mb",
+        "test": "rw1",
+        "trial": 0,
+        "thread": 4,
+        "puts": 4541251,
+        "puts_per_sec": 1513898.68032,
+        "gets": 4541251,
+        "gets_per_sec": 1473578.61075,
+        "ops": 9082502,
+        "ops_per_sec": 1493466.55845
+      },
+      {
+        "table": "mb",
+        "test": "rw1",
+        "trial": 0,
+        "thread": 5,
+        "puts": 4374698,
+        "puts_per_sec": 1458405.24718,
+        "gets": 4374698,
+        "gets_per_sec": 1408782.52052,
+        "ops": 8749396,
+        "ops_per_sec": 1433164.47092
+      }
+    ]
+  }
+}

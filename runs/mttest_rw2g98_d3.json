@@ -1,0 +1,72 @@
+{
+  "experiments": {
+    "x0": {
+      "cores": 6,
+      "runs": ["x0\/rw2g98\/mb\/0"]
+    }
+  },
+  "data": {
+    "x0\/rw2g98\/mb\/0": [
+      {
+        "table": "mb",
+        "test": "rw2g98",
+        "trial": 0,
+        "thread": 0,
+        "puts": 191898,
+        "gets": 9949045,
+        "ops": 10140943,
+        "ops_per_sec": 3380353.82435
+      },
+      {
+        "table": "mb",
+        "test": "rw2g98",
+        "trial": 0,
+        "thread": 1,
+        "puts": 180852,
+        "gets": 9958044,
+        "ops": 10138896,
+        "ops_per_sec": 3379721.97972
+      },
+      {
+        "table": "mb",
+        "test": "rw2g98",
+        "trial": 0,
+        "thread": 2,
+        "puts": 204320,
+        "gets": 10008000,
+        "ops": 10212320,
+        "ops_per_sec": 3404243.83298
+      },
+      {
+        "table": "mb",
+        "test": "rw2g98",
+        "trial": 0,
+        "thread": 3,
+        "puts": 188773,
+        "gets": 9787091,
+        "ops": 9975864,
+        "ops_per_sec": 3325459.78447
+      },
+      {
+        "table": "mb",
+        "test": "rw2g98",
+        "trial": 0,
+        "thread": 4,
+        "puts": 192639,
+        "gets": 9987490,
+        "ops": 10180129,
+        "ops_per_sec": 3393603.68992
+      },
+      {
+        "table": "mb",
+        "test": "rw2g98",
+        "trial": 0,
+        "thread": 5,
+        "puts": 179520,
+        "gets": 9884716,
+        "ops": 10064236,
+        "ops_per_sec": 3355014.89892
+      }
+    ]
+  }
+}
