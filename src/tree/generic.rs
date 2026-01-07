@@ -478,6 +478,10 @@ where
     /// 5. If invalid due to split: check if key > `last_key`
     /// 6. Only restart from root if key actually escaped to sibling
     #[expect(clippy::indexing_slicing, reason = "sense is always 0 or 1")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "hot-path tree traversal, logically cohesive and performance-critical"
+    )]
     pub(crate) fn reach_leaf_concurrent_generic(
         &self,
         start: *const u8,

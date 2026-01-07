@@ -415,17 +415,18 @@ where
             // OPTIMIZATION: Use try_stable() to avoid spinning on locked leaf.
             // If leaf is locked, opportunistically check B-link chain - under
             // high contention, our key may have moved to a sibling leaf.
-            let mut version: u32 = match leaf.version().try_stable() {
-                Some(v) => v,
-                None => {
-                    // Leaf is locked - check if key might be in sibling
-                    if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
-                        leaf_ptr = next_ptr;
-                        continue 'leaf_loop;
-                    }
-                    // No B-link escape route, must wait for lock
-                    leaf.version().stable()
+            let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
+                v
+            } else {
+                // Leaf is locked - check if key might be in sibling
+                if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
+                    leaf_ptr = next_ptr;
+
+                    continue 'leaf_loop;
                 }
+
+                // No B-link escape route, must wait for lock
+                leaf.version().stable()
             };
 
             'search_loop: loop {
@@ -525,16 +526,18 @@ where
                 leaf.prefetch_for_search();
 
                 // OPTIMIZATION: Use try_stable() to avoid spinning on locked leaf.
-                let mut version: u32 = match leaf.version().try_stable() {
-                    Some(v) => v,
-                    None => {
-                        let target_ikey: u64 = key.ikey();
-                        if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
-                            leaf_ptr = next_ptr;
-                            continue 'leaf_loop;
-                        }
-                        leaf.version().stable()
+                let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
+                    v
+                } else {
+                    let target_ikey: u64 = key.ikey();
+
+                    if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
+                        leaf_ptr = next_ptr;
+
+                        continue 'leaf_loop;
                     }
+
+                    leaf.version().stable()
                 };
 
                 'search_loop: loop {
