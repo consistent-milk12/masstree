@@ -168,7 +168,7 @@ where
             }
 
             // Link to previous twig in chain
-            if let Some(_) = twig_head {
+            if twig_head.is_some() {
                 // SAFETY: twig_tail is valid from previous iteration
                 unsafe {
                     (*twig_tail).set_keylenx(0, LAYER_KEYLENX);

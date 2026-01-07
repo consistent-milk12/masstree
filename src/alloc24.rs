@@ -10,8 +10,8 @@
 //! This is fine since internodes just hold child pointers; the benefit of WIDTH=24
 //! comes from leaves holding more keys and splitting less often.
 
-use std::alloc::Layout;
 use std::alloc as StdAlloc;
+use std::alloc::Layout;
 use std::mem as StdMem;
 
 use parking_lot::Mutex;

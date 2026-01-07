@@ -309,11 +309,7 @@ impl Coalesce {
         //
         // Note: The lock is consumed by this function.
         let parent_cleanup_succeeded = NodeCleaner::remove_leaf_from_parent_for_coalesce::<S, L, A>(
-            allocator,
-            guard,
-            leaf_ptr,
-            lock,
-            ikey_bound,
+            allocator, guard, leaf_ptr, lock, ikey_bound,
         );
 
         // Step 8: Retire the leaf (only if parent cleanup succeeded)

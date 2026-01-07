@@ -118,20 +118,21 @@ for entry in tree.iter(&guard) {
 }
 ```
 
-## Analysis of Benchmarks
+## When to Use
 
-**Should be better for:**
+**May work well for:**
 
 - Long keys with shared prefixes (URLs, file paths, UUIDs)
 - Range scans over ordered data
 - Mixed read/write workloads
-- High-contention scenarios
+- High-contention scenarios (the trie structure helps here)
 
 **Consider alternatives for:**
 
-- Unordered point lookups → `dashmap` (1.6-1.9x faster)
-- Write-heavy at 6+ threads → `indexset` (better write scaling)
+- Unordered point lookups → `dashmap`
+- Pure insert-only workloads → `scc::TreeIndex`
 - Integer keys only → `congee` (ART-based)
+- Read-heavy with rare writes → `RwLock<BTreeMap>`
 
 ## Variant Selection
 
@@ -142,7 +143,7 @@ Two variants are provided with different performance characteristics:
 | `MassTree15` | Range scans, writes, shared-prefix keys, contention |
 | `MassTree` (WIDTH=24) | Random-access reads, single-threaded point ops |
 
-`MassTree15` wins **79% of benchmarks** due to cheaper u64 atomics and better cache utilization. Use it unless you have uniform random-access patterns.
+`MassTree15` tends to perform better in our benchmarks due to cheaper u64 atomics and better cache utilization. Consider it for most workloads unless you have uniform random-access patterns.
 
 ```rust
 use masstree::{MassTree, MassTree15, MassTree24Inline, MassTree15Inline};
@@ -160,45 +161,71 @@ let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
 
 ## Benchmarks
 
-6 physical cores, `mimalloc` allocator.
+6 physical cores, `mimalloc` allocator, 200 samples per benchmark. Your mileage may vary.
 
-### Read Throughput (6 threads)
+### Mixed Read/Write (90% read, 10% write, 6 threads)
 
-| Key Size | MassTree | SkipMap | IndexSet | TreeIndex |
-|----------|----------|---------|----------|-----------|
-| 8B | **64 Mitem/s** | 44 Mitem/s | 35 Mitem/s | 33 Mitem/s |
-| 32B | **54 Mitem/s** | 18 Mitem/s | 17 Mitem/s | 17 Mitem/s |
+| Workload | MassTree15 | IndexSet | TreeIndex | SkipMap |
+|----------|------------|----------|-----------|---------|
+| Uniform | 19.3 M/s | 10.3 M/s | 11.0 M/s | 7.8 M/s |
+| Zipfian | 21.9 M/s | 5.0 M/s | 9.5 M/s | 8.5 M/s |
+| High contention | 51.7 M/s | 3.7 M/s | 12.0 M/s | 11.4 M/s |
+| Single hot key | 16.7 M/s | 3.3 M/s | 3.5 M/s | 5.4 M/s |
 
-### Write Performance (6 threads)
+The high-contention result likely reflects the per-node versioning design. Pure insert workloads favor TreeIndex.
 
-| Workload | MassTree | SkipMap | IndexSet | TreeIndex |
-|----------|----------|---------|----------|-----------|
-| Disjoint keys | **18 ms** | 28 ms | 87 ms | 18 ms |
-| High contention | **8 ms** | 15 ms | 23 ms | 24 ms |
+### Pure Read (6 threads)
 
-### Range Scans (6 threads)
+| Workload | MassTree15 | IndexSet | TreeIndex | SkipMap |
+|----------|------------|----------|-----------|---------|
+| Uniform | 27.5 M/s | 12.8 M/s | 19.2 M/s | 12.0 M/s |
+| 8-byte keys | 35.2 M/s | 13.8 M/s | 15.9 M/s | 9.6 M/s |
 
-| Scan Type | MassTree | IndexSet | TreeIndex |
-|-----------|----------|----------|-----------|
-| Sequential | **4.7 Mitem/s** | 0.6 Mitem/s | 3.2 Mitem/s |
-| Long keys (64B) | **4.6 Mitem/s** | 0.6 Mitem/s | 3.1 Mitem/s |
+### Single-Thread Latency
 
-MassTree is **31-55% faster** than TreeIndex and **6-8x faster** than IndexSet on range scans.
+| Structure | Read Latency |
+|-----------|--------------|
+| MassTree15 | 771 µs |
+| TreeIndex | 1,310 µs |
+| IndexSet | 1,377 µs |
+| SkipMap | 1,864 µs |
 
-### vs C++ Reference (6 threads, Divan benchmark)
+### vs C++ Reference (6 threads)
 
-| Workload | Rust | C++ | vs C++ |
-|----------|------|-----|--------|
-| 98% reads (rw2g98) | 37.68 M/s | 19.1 M/s | **197%** |
-| 90% reads (rw2g90) | 29.58 M/s | 13.5 M/s | **219%** |
-| Hotspot contention (same) | 6.67 M/s | 2.57 M/s | **259%** |
-| Updates (uscale) | 17.68 M/s | 9.3 M/s | **190%** |
+| Workload | Rust | C++ | Ratio |
+|----------|------|-----|-------|
+| 98% reads (rw2g98) | 37.68 M/s | 19.1 M/s | 197% |
+| 90% reads (rw2g90) | 29.58 M/s | 13.5 M/s | 219% |
+| Hotspot contention (same) | 6.67 M/s | 2.57 M/s | 259% |
+| Updates (uscale) | 17.68 M/s | 9.3 M/s | 190% |
 | Sequential keys (rw3) | 33.91 M/s | 39.3 M/s | 86% |
 | Reverse sequential (rw4) | 27.22 M/s | 35.9 M/s | 76% |
 
-**Beats C++ on 4/6 benchmarks.** Wins decisively on contention-heavy and mixed read/write workloads (1.9-2.6x faster). Sequential key patterns still trail at 76-86% due to tree traversal overhead.
+Mixed results. Performs well on contention-heavy workloads but trails on sequential key patterns (76-86%). The C++ implementation has optimizations for sequential access that aren't yet ported.
 
-Note: There are fundamental divergences in this implementation (especially the hyaline-based memory reclamation using `seize`), but the core ideas and algorithms are based on the original paper and C++ reference.
+Note: This implementation diverges from C++ in several ways (notably hyaline-based memory reclamation via `seize`). Direct comparison is imperfect.
+
+### vs RwLock\<BTreeMap\> (6 threads)
+
+The main question: when does a complex lock-free structure beat a simple `RwLock<BTreeMap>`?
+
+**Mixed read/write workloads (where MassTree is designed to help):**
+
+| Workload | MassTree15 | std::RwLock | parking_lot |
+|----------|------------|-------------|-------------|
+| 90/10 uniform | 13.6 M/s | 3.2 M/s | 5.2 M/s |
+| 95/5 zipfian (hot keys) | 36.5 M/s | 6.8 M/s | 10.8 M/s |
+
+MassTree's lock-free reads and per-node versioning help when writers need to make progress. The 2-5x advantage shows up when there's actual contention.
+
+**Pure read workloads (where RwLock naturally wins):**
+
+| Workload | MassTree15 | RwLock (batched) |
+|----------|------------|------------------|
+| Point reads | 13.2 M/s | 13.0 M/s |
+| Range scans | 125 M/s | 1.2 G/s |
+
+For read-only workloads, RwLock has minimal overhead (one atomic to acquire) while MassTree pays for version validation on every access. Range scans are particularly lopsided because RwLock holds the lock for the entire scan. This is expected - lock-free structures pay complexity costs that only matter under contention.
 
 ## How It Works
 
@@ -212,6 +239,84 @@ Key: "users/alice/profile" (19 bytes)
 ```
 
 Keys with shared prefixes share upper layers, making lookups efficient for hierarchical data.
+
+## Examples
+
+The `examples/` directory contains comprehensive usage examples:
+
+```bash
+cargo run --example basic_usage --release      # Core API walkthrough
+cargo run --example rayon_parallel --release   # Parallel processing with Rayon
+cargo run --example tokio_async --release      # Async integration with Tokio
+cargo run --example url_cache --release        # Real-world URL cache
+cargo run --example session_store --release    # Concurrent session store
+```
+
+### Rayon Integration
+
+MassTree works seamlessly with Rayon for parallel bulk operations:
+
+```rust
+use masstree::MassTree15Inline;
+use rayon::prelude::*;
+use std::sync::Arc;
+
+let tree: Arc<MassTree15Inline<u64>> = Arc::new(MassTree15Inline::new());
+
+// Parallel bulk insert (~10M ops/sec)
+(0..1_000_000).into_par_iter().for_each(|i| {
+    let key = format!("key/{i:08}");
+    let guard = tree.guard();
+    let _ = tree.insert_with_guard(key.as_bytes(), i, &guard);
+});
+
+// Parallel lookups (~45M ops/sec)
+let sum: u64 = (0..1_000_000).into_par_iter()
+    .map(|i| {
+        let key = format!("key/{i:08}");
+        let guard = tree.guard();
+        tree.get_with_guard(key.as_bytes(), &guard).unwrap_or(0)
+    })
+    .sum();
+```
+
+### Tokio Integration
+
+MassTree is thread-safe but guards cannot be held across `.await` points:
+
+```rust
+use masstree::MassTree15;
+use std::sync::Arc;
+
+let tree: Arc<MassTree15<String>> = Arc::new(MassTree15::new());
+
+// Spawn async tasks that share the tree
+let handle = tokio::spawn({
+    let tree = Arc::clone(&tree);
+    async move {
+        // Guard must be scoped - cannot be held across await!
+        {
+            let guard = tree.guard();
+            let _ = tree.insert_with_guard(b"key", "value".to_string(), &guard);
+        } // guard dropped here
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Create new guard after await
+        let guard = tree.guard();
+        tree.get_with_guard(b"key", &guard)
+    }
+});
+
+// For CPU-intensive operations, use spawn_blocking
+let tree_clone = Arc::clone(&tree);
+tokio::task::spawn_blocking(move || {
+    let guard = tree_clone.guard();
+    for entry in tree_clone.iter(&guard) {
+        // Process entries...
+    }
+}).await;
+```
 
 ## Crate Features
 

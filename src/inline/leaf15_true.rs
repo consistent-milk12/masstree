@@ -1004,6 +1004,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             unsafe { &mut *self.inline_ksuf.get() };
 
         // This infallible path aborts on OOM. Use `try_assign_ksuf` for fallible version.
+        #[expect(clippy::expect_used)]
         let mut new_bag: SuffixBag<WIDTH_15> = inline
             .drain_to_external(&perm, slot, suffix)
             .expect("OOM: suffix bag allocation failed");

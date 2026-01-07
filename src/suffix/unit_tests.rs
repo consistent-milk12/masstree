@@ -602,8 +602,6 @@ fn test_inline_suffix_compare() {
 
 #[test]
 fn test_inline_drain_to_external() {
-    use crate::leaf_trait::TreePermutation;
-
     let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
 
     // Fill inline bag
@@ -615,6 +613,10 @@ fn test_inline_drain_to_external() {
     let perm = Permuter24::make_sorted(3);
 
     // Drain to external with a new suffix for slot 3
+    #[expect(
+        clippy::expect_used,
+        reason = "test code - panic on failure is intended"
+    )]
     let external = bag
         .drain_to_external(&perm, 3, b"new_suffix")
         .expect("drain_to_external should succeed");
@@ -632,8 +634,6 @@ fn test_inline_drain_to_external() {
 
 #[test]
 fn test_inline_drain_replaces_slot() {
-    use crate::leaf_trait::TreePermutation;
-
     let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"old_suffix");
@@ -643,6 +643,10 @@ fn test_inline_drain_replaces_slot() {
     let perm = Permuter24::make_sorted(2);
 
     // Replace slot 0's suffix during drain
+    #[expect(
+        clippy::expect_used,
+        reason = "test code - panic on failure is intended"
+    )]
     let external = bag
         .drain_to_external(&perm, 0, b"new_suffix")
         .expect("drain_to_external should succeed");

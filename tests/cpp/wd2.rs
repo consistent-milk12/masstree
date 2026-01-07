@@ -13,7 +13,7 @@
     clippy::cast_possible_truncation
 )]
 
-use masstree::MassTree15Inline as MassTree15Inline;
+use masstree::MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

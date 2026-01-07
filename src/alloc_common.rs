@@ -3,6 +3,8 @@
 //! This module provides helper functions for allocating and initializing
 //! nodes with proper error handling.
 
+#![allow(dead_code)]
+
 use core::alloc::Layout;
 use core::ptr as CorePtr;
 use std::alloc as StdAlloc;

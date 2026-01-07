@@ -11,7 +11,7 @@
 #![allow(clippy::indexing_slicing)]
 #![allow(clippy::unwrap_used)]
 
-use masstree::MassTree15Inline as MassTree15Inline;
+use masstree::MassTree15Inline;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
 use std::thread;

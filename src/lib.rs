@@ -1,11 +1,17 @@
 //! # [`MassTree`]
 //!
-//! A concurrent ordered map based on a trie of B+trees.
+//! A high-performance concurrent ordered map for Rust. Stores keys as `&[u8]` and
+//! supports variable-length keys by building a trie of B+trees.
 //!
-//! This crate implements Masstree, combining tries and B+trees:
-//! - Trie structure for variable-length key prefixes (8-byte chunks)
-//! - B+tree at each trie node for the current 8-byte slice
-//! - Cache-friendly: 8-byte key slices fit in registers
+//! ## Features
+//!
+//! - Ordered map for byte keys (lexicographic ordering)
+//! - Lock-free reads with version validation
+//! - Concurrent inserts and deletes with fine-grained leaf locking
+//! - Zero-copy range scans with `scan_ref` and `scan_prefix`
+//! - Memory reclamation via epoch-based deferred cleanup
+//! - Lazy leaf coalescing for deleted entries
+//! - Two node widths: [`MassTree`] (WIDTH=24) and [`MassTree15`] (WIDTH=15)
 //!
 //! ## Status: v0.3.0 (Core Feature Complete)
 //!
@@ -17,21 +23,87 @@
 //! | Concurrent get | Lock-free, version-validated |
 //! | Concurrent insert | Fine-grained leaf locking |
 //! | Concurrent remove | Fine-grained locking + lazy coalescing |
-//! | Split propagation | Leaf and internode |
 //! | Range scans | `scan`, `scan_ref`, `scan_prefix`, iterator |
 //! | Memory reclamation | Seize-based epoch reclamation |
-//! | Lazy leaf coalescing | Queue-based background cleanup |
 //!
-//! ### Not Yet Implemented
+//! **Not yet implemented:** `Entry` API, `DoubleEndedIterator`, `Extend`/`FromIterator`.
 //!
-//! - `Entry` API (like `std::collections::HashMap`)
-//! - `DoubleEndedIterator` (reverse iteration)
-//! - `Extend`, `FromIterator` traits
+//! ## When to Use
+//!
+//! **May work well for:**
+//! - Long keys with shared prefixes (URLs, file paths, UUIDs)
+//! - Range scans over ordered data
+//! - Mixed read/write workloads
+//! - High-contention scenarios (the trie structure helps here)
+//!
+//! **Consider alternatives for:**
+//! - Unordered point lookups → `dashmap`
+//! - Pure insert-only workloads → `scc::TreeIndex`
+//! - Integer keys only → `congee` (ART-based)
+//! - Read-heavy with rare writes → `RwLock<BTreeMap>`
+//!
+//! ## Variant Selection
+//!
+//! | Variant | Best For |
+//! |---------|----------|
+//! | [`MassTree15`] | Range scans, writes, shared-prefix keys, contention |
+//! | [`MassTree`] (WIDTH=24) | Random-access reads, single-threaded point ops |
+//!
+//! [`MassTree15`] tends to perform better due to cheaper u64 atomics and better
+//! cache utilization. Consider it for most workloads.
+//!
+//! ```rust
+//! use masstree::{MassTree, MassTree15, MassTree24Inline, MassTree15Inline};
+//!
+//! // Default: WIDTH=24, Arc-based storage
+//! let tree: MassTree<u64> = MassTree::new();
+//!
+//! // WIDTH=15, Arc-based storage (recommended for most workloads)
+//! let tree15: MassTree15<u64> = MassTree15::new();
+//!
+//! // Inline storage for Copy types (no Arc overhead)
+//! let inline: MassTree24Inline<u64> = MassTree24Inline::new();
+//! let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
+//! ```
+//!
+//! ## Performance Notes
+//!
+//! On mixed read/write workloads (90% read, 10% write) at 6 threads, [`MassTree15`]
+//! achieves 2-5x higher throughput than `RwLock<BTreeMap>` due to lock-free reads
+//! and per-node versioning. The advantage increases under contention.
+//!
+//! For pure read workloads, `RwLock<BTreeMap>` is competitive or faster—lock-free
+//! structures pay complexity costs that only matter when there's actual contention.
+//!
+//! ## Quick Start
+//!
+//! ```rust
+//! use masstree::MassTree;
+//!
+//! let tree: MassTree<u64> = MassTree::new();
+//! let guard = tree.guard();
+//!
+//! // Insert
+//! tree.insert_with_guard(b"hello", 123, &guard).unwrap();
+//!
+//! // Point lookup (lock-free)
+//! assert_eq!(tree.get_ref(b"hello", &guard), Some(&123));
+//!
+//! // Remove
+//! tree.remove_with_guard(b"hello", &guard).unwrap();
+//!
+//! // Range scan (zero-copy)
+//! tree.scan_ref(b"a"..b"z", |key, value| {
+//!     println!("{:?} -> {}", key, value);
+//!     true // continue scanning
+//! }, &guard);
+//! ```
 //!
 //! ## Thread Safety
 //!
 //! `MassTree<V>` is `Send + Sync` when `V: Send + Sync`. Concurrent access
-//! requires using the guard-based API:
+//! requires using the guard-based API. The guard ties operations to an epoch
+//! for safe memory reclamation.
 //!
 //! ```rust
 //! use masstree::MassTree;
@@ -46,37 +118,34 @@
 //! let old = tree.insert_with_guard(b"key", 42, &guard);
 //! ```
 //!
-//! The non-guard methods (`get`, `insert`) exist for convenience but require
-//! `&mut self` for insert, making them unsuitable for concurrent use.
-//!
 //! ## Key Constraints
 //!
 //! - Keys must be 0-256 bytes. Longer keys will panic.
 //! - Keys are byte slices (`&[u8]`), not generic types.
 //!
-//! ## Design
+//! ## How It Works
 //!
-//! Keys are split into 8-byte slices. Each slice is handled by a B+tree.
-//! When a key is longer than 8 bytes, the B+tree leaf points to another
-//! layer (another B+tree for the next 8 bytes).
+//! Keys are split into 8-byte slices, creating a trie where each node is a B+tree:
+//!
+//! ```text
+//! Key: "users/alice/profile" (19 bytes)
+//!      └─ Layer 0: "users/al" (8 bytes)
+//!         └─ Layer 1: "ice/prof" (8 bytes)
+//!            └─ Layer 2: "ile" (3 bytes)
+//! ```
+//!
+//! Keys with shared prefixes share upper layers, making lookups efficient for
+//! hierarchical data.
 //!
 //! ## Value Storage
 //!
 //! - **`MassTree<V>`**: Stores values as `Arc<V>`. Returns `Arc<V>` on get.
 //! - **`MassTreeIndex<V: Copy>`**: Convenience wrapper that copies values.
-//!   Note: Currently wraps `MassTree<V>` internally; true inline storage is
-//!   planned for a future release.
 //!
 //! ## Feature Flags
 //!
-//! ### `tracing`
-//!
-//! Enables structured logging for debugging concurrent operations.
-//! See the crate-level documentation for details.
-//!
-//! ### `mimalloc`
-//!
-//! Uses mimalloc as the global allocator for improved performance.
+//! - **`mimalloc`**: Uses mimalloc as the global allocator (recommended).
+//! - **`tracing`**: Enables structured logging to `logs/masstree.jsonl`.
 
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]

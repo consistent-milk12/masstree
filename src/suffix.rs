@@ -759,7 +759,10 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// # Returns
     ///
     /// * `Ok(bag)` - New external bag with drained suffixes plus new one
-    /// * `Err(AllocError)` - Could not allocate external bag
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(AllocError)` if the external bag allocation fails.
     pub fn drain_to_external(
         &mut self,
         perm: &impl TreePermutation,

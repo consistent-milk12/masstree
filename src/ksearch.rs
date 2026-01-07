@@ -8,8 +8,8 @@
 //! Based on `ksearch.hh` from the C++ Masstree implementation.
 
 use crate::internode::InternodeNode;
-use crate::leaf24::LeafNode24;
 use crate::leaf_trait::TreeInternode;
+use crate::leaf24::LeafNode24;
 use crate::permuter::Permuter;
 use crate::slot;
 use std::cmp::Ordering;

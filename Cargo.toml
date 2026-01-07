@@ -102,6 +102,10 @@ criterion = { version = "0.8.1", features = [
 ] }
 iai-callgrind = "0.16.1"
 
+# Examples dependencies
+rayon = "1.10"
+tokio = { version = "1.43", features = ["full"] }
+
 [lints.rust]
 # Allow loom and shuttle cfg for deterministic concurrency testing
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(shuttle)'] }
@@ -231,3 +235,27 @@ harness = false
 [[bench]]
 name = "rwlock_btreemap_vs_masstree15"
 harness = false
+
+# =========================================================================
+# Examples
+# =========================================================================
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[example]]
+name = "rayon_parallel"
+path = "examples/rayon_parallel.rs"
+
+[[example]]
+name = "tokio_async"
+path = "examples/tokio_async.rs"
+
+[[example]]
+name = "url_cache"
+path = "examples/url_cache.rs"
+
+[[example]]
+name = "session_store"
+path = "examples/session_store.rs"

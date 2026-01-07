@@ -12,7 +12,7 @@
     clippy::cast_sign_loss
 )]
 
-use masstree::MassTree15Inline as MassTree15Inline;
+use masstree::MassTree15Inline;
 use std::sync::Arc;
 use std::thread;
 

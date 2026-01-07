@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use masstree::{MassTree15Inline as MassTree15Inline, RangeBound};
+use masstree::{MassTree15Inline, RangeBound};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

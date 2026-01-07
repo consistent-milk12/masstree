@@ -85,7 +85,10 @@ fn test_alloc_kind_display() {
     assert_eq!(format!("{}", AllocKind::Internode), "internode");
     assert_eq!(format!("{}", AllocKind::Suffix), "suffix");
     assert_eq!(format!("{}", AllocKind::Value), "value");
-    assert_eq!(format!("{}", AllocKind::AllocatorTracking), "allocator tracking");
+    assert_eq!(
+        format!("{}", AllocKind::AllocatorTracking),
+        "allocator tracking"
+    );
     assert_eq!(format!("{}", AllocKind::Other), "other");
 }
 
@@ -97,26 +100,22 @@ fn test_alloc_kind_display() {
 fn test_insert_error_allocation_failed_typed() {
     let err = InsertError::allocation_failed_typed::<[u8; 1024]>(AllocKind::Leaf);
 
-    match err {
-        InsertError::AllocationFailed { size, kind } => {
-            assert_eq!(size, 1024);
-            assert_eq!(kind, AllocKind::Leaf);
-        }
-        _ => panic!("expected AllocationFailed variant"),
-    }
+    let InsertError::AllocationFailed { size, kind } = err else {
+        unreachable!("expected AllocationFailed variant")
+    };
+    assert_eq!(size, 1024);
+    assert_eq!(kind, AllocKind::Leaf);
 }
 
 #[test]
 fn test_insert_error_allocation_failed() {
     let err = InsertError::allocation_failed(2048, AllocKind::Suffix);
 
-    match err {
-        InsertError::AllocationFailed { size, kind } => {
-            assert_eq!(size, 2048);
-            assert_eq!(kind, AllocKind::Suffix);
-        }
-        _ => panic!("expected AllocationFailed variant"),
-    }
+    let InsertError::AllocationFailed { size, kind } = err else {
+        unreachable!("expected AllocationFailed variant")
+    };
+    assert_eq!(size, 2048);
+    assert_eq!(kind, AllocKind::Suffix);
 }
 
 #[test]
@@ -135,13 +134,11 @@ fn test_insert_error_from_alloc_error() {
     let alloc_err = AllocError::new(512, 8, AllocKind::Value);
     let insert_err: InsertError = alloc_err.into();
 
-    match insert_err {
-        InsertError::AllocationFailed { size, kind } => {
-            assert_eq!(size, 512);
-            assert_eq!(kind, AllocKind::Value);
-        }
-        _ => panic!("expected AllocationFailed variant"),
-    }
+    let InsertError::AllocationFailed { size, kind } = insert_err else {
+        unreachable!("expected AllocationFailed variant")
+    };
+    assert_eq!(size, 512);
+    assert_eq!(kind, AllocKind::Value);
 }
 
 #[test]
@@ -160,7 +157,7 @@ fn test_insert_error_display() {
 #[test]
 fn test_alloc_result_ok() {
     let result: AllocResult<i32> = Ok(42);
-    assert_eq!(result.unwrap(), 42);
+    assert_eq!(result, Ok(42));
 }
 
 #[test]
@@ -211,9 +208,9 @@ fn test_masstree24_many_inserts_succeed() {
 
     // Many inserts should all succeed under normal memory conditions
     for i in 0..1000u64 {
-        let key = format!("key_{:04}", i);
+        let key = format!("key_{i:04}");
         let result = tree.insert(key.as_bytes(), i);
-        assert!(result.is_ok(), "insert {} failed: {:?}", i, result);
+        assert!(result.is_ok(), "insert {i} failed: {result:?}");
     }
 
     // Verify all values present
@@ -228,9 +225,9 @@ fn test_masstree24_long_keys_with_suffixes() {
 
     // Keys longer than 8 bytes require suffix storage
     for i in 0..100u64 {
-        let key = format!("this_is_a_very_long_key_that_requires_suffix_storage_{:04}", i);
+        let key = format!("this_is_a_very_long_key_that_requires_suffix_storage_{i:04}");
         let result = tree.insert(key.as_bytes(), i);
-        assert!(result.is_ok(), "long key insert {} failed: {:?}", i, result);
+        assert!(result.is_ok(), "long key insert {i} failed: {result:?}");
     }
 
     // Verify lookups work
@@ -266,8 +263,7 @@ fn test_masstree15_insert_returns_result() {
 
     // Verify value was inserted
     let value = tree.get(b"key1");
-    assert!(value.is_some());
-    assert_eq!(value.unwrap().as_str(), "hello");
+    assert_eq!(value.as_ref().map(|s| s.as_str()), Some("hello"));
 }
 
 // ============================================================================
@@ -288,16 +284,20 @@ fn test_split_allocation_before_mark_split() {
 
     // Insert enough keys to trigger multiple splits (WIDTH=24, so >24 keys)
     for i in 0..100u64 {
-        let key = format!("{:08}", i); // Fixed-width keys for predictable ordering
+        let key = format!("{i:08}"); // Fixed-width keys for predictable ordering
         let result = tree.insert(key.as_bytes(), i);
-        assert!(result.is_ok(), "insert {} triggered error: {:?}", i, result);
+        assert!(result.is_ok(), "insert {i} triggered error: {result:?}");
     }
 
     // Verify all keys present after splits
     for i in 0..100u64 {
-        let key = format!("{:08}", i);
+        let key = format!("{i:08}");
         let value = tree.get(key.as_bytes());
-        assert_eq!(value, Some(std::sync::Arc::new(i)), "key {} missing after splits", i);
+        assert_eq!(
+            value,
+            Some(std::sync::Arc::new(i)),
+            "key {i} missing after splits"
+        );
     }
 }
 
@@ -314,14 +314,14 @@ fn test_layer_creation_allocation() {
     let prefixes = ["aaaa", "aaab", "aaac", "aaba", "aabb", "abaa", "abab"];
 
     for (i, prefix) in prefixes.iter().enumerate() {
-        let key = format!("{}_{:04}", prefix, i);
+        let key = format!("{prefix}_{i:04}");
         let result = tree.insert(key.as_bytes(), i as u64);
-        assert!(result.is_ok(), "layer insert {} failed: {:?}", i, result);
+        assert!(result.is_ok(), "layer insert {i} failed: {result:?}");
     }
 
     // Verify all keys present
     for (i, prefix) in prefixes.iter().enumerate() {
-        let key = format!("{}_{:04}", prefix, i);
+        let key = format!("{prefix}_{i:04}");
         let value = tree.get(key.as_bytes());
         assert_eq!(value, Some(std::sync::Arc::new(i as u64)));
     }
@@ -346,16 +346,20 @@ fn test_concurrent_inserts_return_results() {
             let tree = Arc::clone(&tree);
             thread::spawn(move || {
                 for i in 0..keys_per_thread {
-                    let key = format!("thread_{}_key_{:04}", t, i);
+                    let key = format!("thread_{t}_key_{i:04}");
                     let value = (t * keys_per_thread + i) as u64;
                     let result = tree.insert(key.as_bytes(), value);
-                    assert!(result.is_ok(), "concurrent insert failed: {:?}", result);
+                    assert!(result.is_ok(), "concurrent insert failed: {result:?}");
                 }
             })
         })
         .collect();
 
     for handle in handles {
+        #[expect(
+            clippy::expect_used,
+            reason = "test code - need to propagate thread panics"
+        )]
         handle.join().expect("thread panicked");
     }
 

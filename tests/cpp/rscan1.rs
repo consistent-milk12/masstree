@@ -12,7 +12,7 @@
     clippy::cast_possible_truncation
 )]
 
-use masstree::{MassTree15Inline as MassTree15Inline, RangeBound};
+use masstree::{MassTree15Inline, RangeBound};
 use std::sync::Arc;
 use std::thread;
 

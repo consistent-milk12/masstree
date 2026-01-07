@@ -355,7 +355,8 @@ where
     where
         F: FnMut(&[u8], &S::Value) -> bool,
     {
-        self.range(start, end, guard).for_each_intra_leaf_batch_ref(visitor)
+        self.range(start, end, guard)
+            .for_each_intra_leaf_batch_ref(visitor)
     }
 
     /// Scan all entries with a prefix.

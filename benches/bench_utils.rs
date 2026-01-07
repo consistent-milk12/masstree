@@ -44,7 +44,7 @@
 //! | `scan_ranges` | Generate overlapping/non-overlapping range pairs |
 //! | `scan_prefixes` | Generate prefix list for prefix scan benchmarks |
 
-#![allow(dead_code, unfulfilled_lint_expectations)]
+#![allow(dead_code, unfulfilled_lint_expectations, missing_docs)]
 #![expect(
     clippy::needless_range_loop,
     clippy::cast_possible_truncation,
@@ -799,4 +799,173 @@ pub fn scan_prefixes(prefix_buckets: u64) -> Vec<Vec<u8>> {
     }
 
     prefixes
+}
+
+// =============================================================================
+// Benchmark Warmup & Methodology Helpers
+// =============================================================================
+
+/// Number of warmup iterations to run before actual measurement.
+/// This ensures CPU caches, branch predictors, and JIT are stable.
+pub const DEFAULT_WARMUP_ITERS: usize = 1000;
+
+/// Perform explicit warmup by running a closure multiple times.
+///
+/// This should be called before the measured benchmark loop to ensure:
+/// - CPU instruction caches are warm
+/// - Branch predictors are trained
+/// - Memory pages are faulted in
+/// - CPU frequency has ramped up
+///
+/// # Example
+/// ```ignore
+/// warmup(|| {
+///     black_box(tree.get(&keys[0]));
+/// }, 1000);
+/// ```
+#[inline(never)]
+pub fn warmup<F: FnMut()>(mut f: F, iterations: usize) {
+    for _ in 0..iterations {
+        f();
+    }
+    // Memory barrier to ensure warmup effects are visible
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Warmup a data structure by accessing random elements.
+///
+/// Generic helper that warms up any data structure with a get-like operation.
+/// Uses the provided indices to touch memory locations.
+#[inline(never)]
+pub fn warmup_with_indices<F: FnMut(usize)>(
+    mut access_fn: F,
+    indices: &[usize],
+    iterations: usize,
+) {
+    let n = indices.len();
+    if n == 0 {
+        return;
+    }
+    for i in 0..iterations {
+        let idx = indices[i % n];
+        access_fn(idx);
+    }
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Force memory barrier before measurement.
+///
+/// Call this right before starting the timed portion to ensure
+/// all prior memory operations are complete.
+pub fn pre_measurement_barrier() {
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    // Also try to prevent instruction reordering
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Force memory barrier after measurement.
+///
+/// Call this right after the timed portion to ensure the compiler
+/// doesn't move measured work outside the timing window.
+pub fn post_measurement_barrier() {
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Try to pin the current thread to a specific CPU core.
+///
+/// Returns `true` if pinning succeeded, `false` if not available.
+/// Pinning reduces variance from CPU migration during benchmarks.
+///
+/// Note: Currently returns false on all platforms. To enable actual CPU pinning
+/// on Linux, add `libc` as a dev-dependency and uncomment the implementation.
+#[allow(dead_code)]
+#[must_use]
+pub const fn try_pin_to_core(_core_id: usize) -> bool {
+    // CPU pinning requires libc. Enable if needed:
+    // #[cfg(target_os = "linux")]
+    // {
+    //     use std::mem::MaybeUninit;
+    //     unsafe {
+    //         let mut cpuset: libc::cpu_set_t = MaybeUninit::zeroed().assume_init();
+    //         libc::CPU_ZERO(&mut cpuset);
+    //         libc::CPU_SET(_core_id, &mut cpuset);
+    //         let result = libc::pthread_setaffinity_np(
+    //             libc::pthread_self(),
+    //             std::mem::size_of::<libc::cpu_set_t>(),
+    //             &cpuset,
+    //         );
+    //         return result == 0;
+    //     }
+    // }
+    false
+}
+
+/// Helper to run a benchmark with proper setup.
+///
+/// This provides a standard pattern for benchmarks:
+/// 1. Pin thread (if possible)
+/// 2. Run warmup iterations
+/// 3. Insert memory barrier
+/// 4. Run measured iterations
+/// 5. Insert memory barrier
+#[derive(Debug)]
+pub struct BenchmarkRunner {
+    pub warmup_iters: usize,
+
+    pub pin_core: Option<usize>,
+}
+
+impl Default for BenchmarkRunner {
+    fn default() -> Self {
+        Self {
+            warmup_iters: DEFAULT_WARMUP_ITERS,
+            pin_core: None,
+        }
+    }
+}
+
+impl BenchmarkRunner {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub const fn with_warmup(mut self, iters: usize) -> Self {
+        self.warmup_iters = iters;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_pin(mut self, core: usize) -> Self {
+        self.pin_core = Some(core);
+        self
+    }
+
+    /// Execute warmup and setup, then run the benchmark closure.
+    pub fn run<W, B, R>(&self, warmup_fn: W, bench_fn: B) -> R
+    where
+        W: FnMut(),
+        B: FnOnce() -> R,
+    {
+        // Pin if requested
+        if let Some(core) = self.pin_core {
+            let _ = try_pin_to_core(core);
+        }
+
+        // Warmup
+        warmup(warmup_fn, self.warmup_iters);
+
+        // Barrier before measurement
+        pre_measurement_barrier();
+
+        // Run benchmark
+        let result = bench_fn();
+
+        // Barrier after measurement
+        post_measurement_barrier();
+
+        result
+    }
 }

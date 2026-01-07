@@ -255,6 +255,10 @@ pub trait ValueSlot: Default + Sized {
     ///
     /// Delegates to `output_to_raw` (may abort on OOM).
     /// Impl's that allocate MUST override this.
+    #[expect(
+        clippy::missing_errors_doc,
+        reason = "default impl never fails; overrides document their own errors"
+    )]
     fn try_output_to_raw(output: &Self::Output) -> AllocResult<*mut u8> {
         Ok(Self::output_to_raw(output))
     }
@@ -263,7 +267,14 @@ pub trait ValueSlot: Default + Sized {
     ///
     /// This is the fallible version of `output_consume_to_raw`.
     ///
-    /// # Default Impleme
+    /// # Default Impl
+    ///
+    /// Delegates to `output_consume_to_raw` (may abort on OOM).
+    /// Impl's that allocate MUST override this.
+    #[expect(
+        clippy::missing_errors_doc,
+        reason = "default impl never fails; overrides document their own errors"
+    )]
     fn try_output_consume_to_raw(output: Self::Output) -> AllocResult<*mut u8> {
         Ok(Self::output_consume_to_raw(output))
     }

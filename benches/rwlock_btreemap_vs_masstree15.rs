@@ -20,7 +20,10 @@
 
 mod bench_utils;
 
-use bench_utils::{keys, keys_shared_prefix_chunks, uniform_indices, zipfian_indices};
+use bench_utils::{
+    keys, keys_shared_prefix_chunks, post_measurement_barrier, pre_measurement_barrier,
+    uniform_indices, zipfian_indices,
+};
 use divan::{Bencher, black_box};
 use masstree::{MassTree15, RangeBound};
 use parking_lot::RwLock as ParkingRwLock;
@@ -70,10 +73,16 @@ fn setup_parking_rwlock_btreemap<const K: usize>(
 }
 
 // =============================================================================
+// Warmup iterations per thread before measurement
+// =============================================================================
+
+const WARMUP_OPS: usize = 500;
+
+// =============================================================================
 // 01: Uniform random point reads (64B keys)
 // =============================================================================
 
-#[divan::bench_group(name = "01_point_get_uniform_64B")]
+#[divan::bench_group(name = "01_point_get_uniform_64B", sample_count = 200)]
 mod point_get_uniform_64b {
     use super::*;
 
@@ -89,17 +98,29 @@ mod point_get_uniform_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                black_box(tree.get_ref(&keys[idx], &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
@@ -107,6 +128,7 @@ mod point_get_uniform_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -127,16 +149,29 @@ mod point_get_uniform_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                let guard = map.read().unwrap();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
@@ -145,6 +180,7 @@ mod point_get_uniform_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -169,16 +205,31 @@ mod point_get_uniform_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            {
+                                let guard = map.read().unwrap();
+                                for i in 0..WARMUP_OPS {
+                                    let idx = indices[base + (i % OPS_PER_THREAD)];
+                                    black_box(guard.get(&keys[idx]));
+                                }
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             let guard = map.read().unwrap();
                             for i in 0..OPS_PER_THREAD {
@@ -187,6 +238,7 @@ mod point_get_uniform_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -207,16 +259,29 @@ mod point_get_uniform_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                let guard = map.read();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
@@ -225,6 +290,7 @@ mod point_get_uniform_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -246,16 +312,31 @@ mod point_get_uniform_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            {
+                                let guard = map.read();
+                                for i in 0..WARMUP_OPS {
+                                    let idx = indices[base + (i % OPS_PER_THREAD)];
+                                    black_box(guard.get(&keys[idx]));
+                                }
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             let guard = map.read();
                             for i in 0..OPS_PER_THREAD {
@@ -264,6 +345,7 @@ mod point_get_uniform_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -280,7 +362,7 @@ mod point_get_uniform_64b {
 // 02: Zipfian point reads (64B keys) - hot key distribution
 // =============================================================================
 
-#[divan::bench_group(name = "02_point_get_zipf_64B")]
+#[divan::bench_group(name = "02_point_get_zipf_64B", sample_count = 200)]
 mod point_get_zipf_64b {
     use super::*;
 
@@ -296,17 +378,29 @@ mod point_get_zipf_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                black_box(tree.get_ref(&keys[idx], &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
@@ -314,6 +408,7 @@ mod point_get_zipf_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -334,16 +429,29 @@ mod point_get_zipf_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                let guard = map.read().unwrap();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
@@ -352,6 +460,7 @@ mod point_get_zipf_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -372,16 +481,31 @@ mod point_get_zipf_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            {
+                                let guard = map.read().unwrap();
+                                for i in 0..WARMUP_OPS {
+                                    let idx = indices[base + (i % OPS_PER_THREAD)];
+                                    black_box(guard.get(&keys[idx]));
+                                }
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             let guard = map.read().unwrap();
                             for i in 0..OPS_PER_THREAD {
@@ -390,6 +514,7 @@ mod point_get_zipf_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -410,16 +535,29 @@ mod point_get_zipf_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                let guard = map.read();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
@@ -428,6 +566,7 @@ mod point_get_zipf_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -448,16 +587,31 @@ mod point_get_zipf_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            {
+                                let guard = map.read();
+                                for i in 0..WARMUP_OPS {
+                                    let idx = indices[base + (i % OPS_PER_THREAD)];
+                                    black_box(guard.get(&keys[idx]));
+                                }
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             let guard = map.read();
                             for i in 0..OPS_PER_THREAD {
@@ -466,6 +620,7 @@ mod point_get_zipf_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -482,7 +637,7 @@ mod point_get_zipf_64b {
 // 03: Mixed workload (90% reads / 10% writes) - uniform keys (64B)
 // =============================================================================
 
-#[divan::bench_group(name = "03_mixed_uniform_90_10_64B")]
+#[divan::bench_group(name = "03_mixed_uniform_90_10_64B", sample_count = 200)]
 mod mixed_uniform_90_10_64b {
     use super::*;
 
@@ -499,18 +654,29 @@ mod mixed_uniform_90_10_64b {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15::<64>(keys.as_ref())))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
-                            let mut sum = 0u64;
                             let offset = t * 7919;
 
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[(i + offset) % indices.len()];
+                                black_box(tree.get_ref(&keys[idx], &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[(i + offset) % indices.len()];
@@ -520,6 +686,7 @@ mod mixed_uniform_90_10_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -541,17 +708,29 @@ mod mixed_uniform_90_10_64b {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref())))
             .bench_local_values(|map| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let offset = t * 7919;
 
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[(i + offset) % indices.len()];
+                                let guard = map.read().unwrap();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[(i + offset) % indices.len()];
@@ -565,6 +744,7 @@ mod mixed_uniform_90_10_64b {
                                     }
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -586,17 +766,29 @@ mod mixed_uniform_90_10_64b {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref())))
             .bench_local_values(|map| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let offset = t * 7919;
 
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[(i + offset) % indices.len()];
+                                let guard = map.read();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[(i + offset) % indices.len()];
@@ -610,6 +802,7 @@ mod mixed_uniform_90_10_64b {
                                     }
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -636,7 +829,7 @@ mod mixed_uniform_90_10_64b {
 // space, while still being deterministic.
 // =============================================================================
 
-#[divan::bench_group(name = "03b_mixed_zipf_hotset_95_5_64B")]
+#[divan::bench_group(name = "03b_mixed_zipf_hotset_95_5_64B", sample_count = 200)]
 mod mixed_zipf_hotset_95_5_64b {
     use super::*;
 
@@ -659,19 +852,30 @@ mod mixed_zipf_hotset_95_5_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
-                            start.wait();
 
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                black_box(tree.get_ref(&keys[idx], &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
+                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if i % WRITE_EVERY == 0 {
@@ -680,6 +884,7 @@ mod mixed_zipf_hotset_95_5_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -701,18 +906,30 @@ mod mixed_zipf_hotset_95_5_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
-                            start.wait();
 
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                let guard = map.read().unwrap();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
+                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if i % WRITE_EVERY == 0 {
@@ -725,6 +942,7 @@ mod mixed_zipf_hotset_95_5_64b {
                                     }
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -746,16 +964,31 @@ mod mixed_zipf_hotset_95_5_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            {
+                                let guard = map.read().unwrap();
+                                for i in 0..WARMUP_OPS {
+                                    let idx = indices[base + (i % OPS_PER_THREAD)];
+                                    black_box(guard.get(&keys[idx]));
+                                }
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
 
                             let mut i = 0usize;
@@ -784,6 +1017,7 @@ mod mixed_zipf_hotset_95_5_64b {
                                 i = end;
                             }
 
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -805,18 +1039,30 @@ mod mixed_zipf_hotset_95_5_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
-                            start.wait();
 
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                let guard = map.read();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
+                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if i % WRITE_EVERY == 0 {
@@ -829,6 +1075,7 @@ mod mixed_zipf_hotset_95_5_64b {
                                     }
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -850,16 +1097,31 @@ mod mixed_zipf_hotset_95_5_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            {
+                                let guard = map.read();
+                                for i in 0..WARMUP_OPS {
+                                    let idx = indices[base + (i % OPS_PER_THREAD)];
+                                    black_box(guard.get(&keys[idx]));
+                                }
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
 
                             let mut i = 0usize;
@@ -888,6 +1150,7 @@ mod mixed_zipf_hotset_95_5_64b {
                                 i = end;
                             }
 
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -904,7 +1167,7 @@ mod mixed_zipf_hotset_95_5_64b {
 // 04: Range scan (contiguous window) - 64B keys
 // =============================================================================
 
-#[divan::bench_group(name = "04_range_scan_window_64B")]
+#[divan::bench_group(name = "04_range_scan_window_64B", sample_count = 200)]
 mod range_scan_window_64b {
     use super::*;
 
@@ -923,16 +1186,28 @@ mod range_scan_window_64b {
                 threads * SCANS_PER_THREAD * SCAN_LEN,
             ))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let starts = Arc::clone(&starts);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * SCANS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS.min(SCANS_PER_THREAD) {
+                                let start_idx = starts[base + i];
+                                black_box(tree.get_ref(&keys[start_idx], &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             let mut sum = 0u64;
                             start.wait();
                             for i in 0..SCANS_PER_THREAD {
@@ -950,6 +1225,7 @@ mod range_scan_window_64b {
                                     &guard,
                                 );
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -972,15 +1248,28 @@ mod range_scan_window_64b {
                 threads * SCANS_PER_THREAD * SCAN_LEN,
             ))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let starts = Arc::clone(&starts);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let base = t * SCANS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS.min(SCANS_PER_THREAD) {
+                                let start_idx = starts[base + i];
+                                let guard = map.read().unwrap();
+                                black_box(guard.get(&keys[start_idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             let mut sum = 0u64;
                             start.wait();
                             for i in 0..SCANS_PER_THREAD {
@@ -991,6 +1280,7 @@ mod range_scan_window_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1013,15 +1303,28 @@ mod range_scan_window_64b {
                 threads * SCANS_PER_THREAD * SCAN_LEN,
             ))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let starts = Arc::clone(&starts);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let base = t * SCANS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS.min(SCANS_PER_THREAD) {
+                                let start_idx = starts[base + i];
+                                let guard = map.read();
+                                black_box(guard.get(&keys[start_idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             let mut sum = 0u64;
                             start.wait();
                             for i in 0..SCANS_PER_THREAD {
@@ -1032,6 +1335,7 @@ mod range_scan_window_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1052,7 +1356,7 @@ mod range_scan_window_64b {
 // - `MassTree15` scans should progress without global blocking.
 // =============================================================================
 
-#[divan::bench_group(name = "05_range_scan_window_with_writes_64B")]
+#[divan::bench_group(name = "05_range_scan_window_with_writes_64B", sample_count = 200)]
 mod range_scan_window_with_writes_64b {
     use super::*;
 
@@ -1083,6 +1387,7 @@ mod range_scan_window_with_writes_64b {
             ))
             .bench_local(|| {
                 let total_threads = scan_threads + WRITER_THREADS;
+                let warmup_done = Arc::new(Barrier::new(total_threads));
                 let start = Arc::new(Barrier::new(total_threads));
 
                 let writers: Vec<_> = (0..WRITER_THREADS)
@@ -1090,15 +1395,27 @@ mod range_scan_window_with_writes_64b {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let writer_idxs = Arc::clone(&writer_idxs);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let offset = t * 7919;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = writer_idxs[(i + offset) % writer_idxs.len()];
+                                black_box(tree.get_ref(&keys[idx], &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
                             for i in 0..WRITES_PER_WRITER {
                                 let idx = writer_idxs[(i + offset) % writer_idxs.len()];
                                 let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                             }
+                            post_measurement_barrier();
                         })
                     })
                     .collect();
@@ -1108,10 +1425,21 @@ mod range_scan_window_with_writes_64b {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let starts = Arc::clone(&starts);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * SCANS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS.min(SCANS_PER_THREAD) {
+                                let start_idx = starts[base + i];
+                                black_box(tree.get_ref(&keys[start_idx], &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             let mut sum = 0u64;
                             start.wait();
                             for i in 0..SCANS_PER_THREAD {
@@ -1129,6 +1457,7 @@ mod range_scan_window_with_writes_64b {
                                     &guard,
                                 );
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1160,6 +1489,7 @@ mod range_scan_window_with_writes_64b {
             ))
             .bench_local(|| {
                 let total_threads = scan_threads + WRITER_THREADS;
+                let warmup_done = Arc::new(Barrier::new(total_threads));
                 let start = Arc::new(Barrier::new(total_threads));
 
                 let writers: Vec<_> = (0..WRITER_THREADS)
@@ -1167,15 +1497,28 @@ mod range_scan_window_with_writes_64b {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let writer_idxs = Arc::clone(&writer_idxs);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let offset = t * 7919;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = writer_idxs[(i + offset) % writer_idxs.len()];
+                                let guard = map.read().unwrap();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
                             for i in 0..WRITES_PER_WRITER {
                                 let idx = writer_idxs[(i + offset) % writer_idxs.len()];
                                 let mut guard = map.write().unwrap();
                                 guard.insert(keys[idx], i as u64);
                             }
+                            post_measurement_barrier();
                         })
                     })
                     .collect();
@@ -1185,9 +1528,21 @@ mod range_scan_window_with_writes_64b {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let starts = Arc::clone(&starts);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let base = t * SCANS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS.min(SCANS_PER_THREAD) {
+                                let start_idx = starts[base + i];
+                                let guard = map.read().unwrap();
+                                black_box(guard.get(&keys[start_idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             let mut sum = 0u64;
                             start.wait();
                             for i in 0..SCANS_PER_THREAD {
@@ -1198,6 +1553,7 @@ mod range_scan_window_with_writes_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1229,6 +1585,7 @@ mod range_scan_window_with_writes_64b {
             ))
             .bench_local(|| {
                 let total_threads = scan_threads + WRITER_THREADS;
+                let warmup_done = Arc::new(Barrier::new(total_threads));
                 let start = Arc::new(Barrier::new(total_threads));
 
                 let writers: Vec<_> = (0..WRITER_THREADS)
@@ -1236,15 +1593,28 @@ mod range_scan_window_with_writes_64b {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let writer_idxs = Arc::clone(&writer_idxs);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let offset = t * 7919;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = writer_idxs[(i + offset) % writer_idxs.len()];
+                                let guard = map.read();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             start.wait();
                             for i in 0..WRITES_PER_WRITER {
                                 let idx = writer_idxs[(i + offset) % writer_idxs.len()];
                                 let mut guard = map.write();
                                 guard.insert(keys[idx], i as u64);
                             }
+                            post_measurement_barrier();
                         })
                     })
                     .collect();
@@ -1254,9 +1624,21 @@ mod range_scan_window_with_writes_64b {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let starts = Arc::clone(&starts);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let base = t * SCANS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS.min(SCANS_PER_THREAD) {
+                                let start_idx = starts[base + i];
+                                let guard = map.read();
+                                black_box(guard.get(&keys[start_idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
                             let mut sum = 0u64;
                             start.wait();
                             for i in 0..SCANS_PER_THREAD {
@@ -1267,6 +1649,7 @@ mod range_scan_window_with_writes_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1288,7 +1671,7 @@ mod range_scan_window_with_writes_64b {
 // This is the regime where MassTree's layered/trie design is expected to help.
 // =============================================================================
 
-#[divan::bench_group(name = "06_point_get_uniform_shared_prefix_64B")]
+#[divan::bench_group(name = "06_point_get_uniform_shared_prefix_64B", sample_count = 200)]
 mod point_get_uniform_shared_prefix_64b {
     use super::*;
 
@@ -1310,17 +1693,29 @@ mod point_get_uniform_shared_prefix_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                black_box(tree.get_ref(&keys[idx], &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
@@ -1328,6 +1723,7 @@ mod point_get_uniform_shared_prefix_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1348,16 +1744,31 @@ mod point_get_uniform_shared_prefix_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            {
+                                let guard = map.read().unwrap();
+                                for i in 0..WARMUP_OPS {
+                                    let idx = indices[base + (i % OPS_PER_THREAD)];
+                                    black_box(guard.get(&keys[idx]));
+                                }
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             let guard = map.read().unwrap();
                             for i in 0..OPS_PER_THREAD {
@@ -1366,6 +1777,7 @@ mod point_get_uniform_shared_prefix_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1386,16 +1798,31 @@ mod point_get_uniform_shared_prefix_64b {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            {
+                                let guard = map.read();
+                                for i in 0..WARMUP_OPS {
+                                    let idx = indices[base + (i % OPS_PER_THREAD)];
+                                    black_box(guard.get(&keys[idx]));
+                                }
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             let guard = map.read();
                             for i in 0..OPS_PER_THREAD {
@@ -1404,6 +1831,7 @@ mod point_get_uniform_shared_prefix_64b {
                                     sum = sum.wrapping_add(*v);
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1416,7 +1844,7 @@ mod point_get_uniform_shared_prefix_64b {
     }
 }
 
-#[divan::bench_group(name = "07_mixed_90_10_shared_prefix_64B")]
+#[divan::bench_group(name = "07_mixed_90_10_shared_prefix_64B", sample_count = 200)]
 mod mixed_90_10_shared_prefix_64b {
     use super::*;
 
@@ -1439,27 +1867,35 @@ mod mixed_90_10_shared_prefix_64b {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15::<64>(keys.as_ref())))
             .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                black_box(tree.get_ref(&keys[idx], &guard));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if i % 100 < WRITE_RATIO {
                                     // 10% writes
-                                    let _ = tree.insert_with_guard(
-                                        &keys[idx],
-                                        idx as u64,
-                                        &guard,
-                                    );
+                                    let _ = tree.insert_with_guard(&keys[idx], idx as u64, &guard);
                                 } else {
                                     // 90% reads
                                     if let Some(v) = tree.get_ref(&keys[idx], &guard) {
@@ -1467,6 +1903,7 @@ mod mixed_90_10_shared_prefix_64b {
                                     }
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1487,16 +1924,29 @@ mod mixed_90_10_shared_prefix_64b {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref())))
             .bench_local_values(|map| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                let guard = map.read().unwrap();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
@@ -1512,6 +1962,7 @@ mod mixed_90_10_shared_prefix_64b {
                                     }
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })
@@ -1532,16 +1983,29 @@ mod mixed_90_10_shared_prefix_64b {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref())))
             .bench_local_values(|map| {
+                let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let map = Arc::clone(&map);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
+                        let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
-                            let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
+
+                            // === WARMUP PHASE ===
+                            for i in 0..WARMUP_OPS {
+                                let idx = indices[base + (i % OPS_PER_THREAD)];
+                                let guard = map.read();
+                                black_box(guard.get(&keys[idx]));
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            pre_measurement_barrier();
+                            let mut sum = 0u64;
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
@@ -1557,6 +2021,7 @@ mod mixed_90_10_shared_prefix_64b {
                                     }
                                 }
                             }
+                            post_measurement_barrier();
                             black_box(sum);
                         })
                     })

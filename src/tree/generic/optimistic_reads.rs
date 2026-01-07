@@ -219,6 +219,10 @@ where
         }
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "method signature kept for API consistency"
+    )]
     fn check_blink_chain(&self, leaf: &L, target_ikey: u64) -> Option<*mut L> {
         let next_raw: *mut L = leaf.next_raw();
 
