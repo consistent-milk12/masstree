@@ -104,8 +104,8 @@ where
     // Get stable version
     let version: u32 = leaf.version().stable();
 
-    // Check if deleted
-    if leaf.version().is_deleted() {
+    // Check if deleted (use version we already loaded to avoid extra atomic)
+    if NodeVersion::is_deleted_version(version) {
         // Retry from root
         return (ScanState::Retry, None);
     }
@@ -800,8 +800,8 @@ where
     // Get stable version
     let next_version: u32 = next_leaf.version().stable();
 
-    // Check if deleted
-    if next_leaf.version().is_deleted() {
+    // Check if deleted (use version we already loaded)
+    if NodeVersion::is_deleted_version(next_version) {
         return (ScanState::Retry, None);
     }
 
@@ -872,8 +872,8 @@ where
     // Get stable version
     let next_version: u32 = next_leaf.version().stable();
 
-    // Check if deleted
-    if next_leaf.version().is_deleted() {
+    // Check if deleted (use version we already loaded)
+    if NodeVersion::is_deleted_version(next_version) {
         return (ScanState::Retry, None);
     }
 
@@ -944,8 +944,8 @@ where
     // Get stable version
     let next_version: u32 = next_leaf.version().stable();
 
-    // Check if deleted
-    if next_leaf.version().is_deleted() {
+    // Check if deleted (use version we already loaded)
+    if NodeVersion::is_deleted_version(next_version) {
         return (ScanState::Retry, None);
     }
 
@@ -958,64 +958,6 @@ where
     stack.update_state(next_version, perm, kx.i);
 
     (ScanState::FindNext, None)
-}
-
-/// Follow B-links to find the correct leaf after a split.
-#[cold]
-#[inline(never)]
-#[expect(clippy::similar_names)]
-fn follow_blinks_or_retry<L, S>(
-    stack: &mut ScanStackElement<L, S>,
-    cursor_key: &CursorKey,
-) -> (ScanState, Option<ScanSnapshot<S>>)
-where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-{
-    let cursor_ikey: u64 = cursor_key.current_ikey();
-
-    // Follow B-links until we find the right leaf
-    let mut current: *mut L = stack.leaf_ptr();
-
-    loop {
-        // SAFETY: current is protected by guard
-        let leaf: &L = unsafe { &*current };
-
-        // Check if cursor key belongs in this leaf
-        let bound: u64 = leaf.ikey_bound();
-
-        if cursor_ikey < bound {
-            // Key belongs in this leaf or earlier
-            // (But we've already passed earlier leaves)
-            break;
-        }
-
-        // Get next leaf
-        let next: *mut L = leaf.safe_next();
-
-        if next.is_null() {
-            // End of chain
-            break;
-        }
-
-        // Check if key is before next leaf's bound
-        let next_leaf: &L = unsafe { &*next };
-        let next_bound: u64 = next_leaf.ikey_bound();
-
-        if cursor_ikey < next_bound {
-            // Key belongs in current leaf
-            break;
-        }
-
-        // Move to next
-        current = next;
-    }
-
-    // Update stack with new leaf
-    stack.set_leaf(current);
-
-    // Retry will refresh state
-    (ScanState::Retry, None)
 }
 
 // ============================================================================
@@ -1066,8 +1008,8 @@ where
     // Get stable version
     let version: u32 = leaf.version().stable();
 
-    // Check if deleted
-    if leaf.version().is_deleted() {
+    // Check if deleted (use version we already loaded)
+    if NodeVersion::is_deleted_version(version) {
         return ScanState::Retry;
     }
 
@@ -1242,21 +1184,22 @@ where
 
 /// Result of processing entries within a single leaf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum LeafBatchResult {
     /// All entries in leaf processed, need to advance to next leaf
-    LeafExhausted,
+    LeafExhausted = 0,
 
     /// Encountered a layer pointer, need to descend
-    LayerEncountered,
+    LayerEncountered = 1,
 
     /// Version changed during processing, need retry
-    VersionChanged,
+    VersionChanged = 2,
 
     /// Visitor returned false, stop iteration
-    Stopped,
+    Stopped = 3,
 
     /// End bound exceeded, stop iteration
-    EndBoundExceeded,
+    EndBoundExceeded = 4,
 }
 
 /// Process remaining entries in current leaf in a tight loop.
@@ -1303,6 +1246,12 @@ where
     let perm = stack.perm();
     let perm_size = perm.size();
     let cached_version = stack.version();
+
+    // Check if leaf was deleted since we cached the version
+    // This makes the function self-contained (caller also checks, but belt-and-suspenders)
+    if leaf.version().is_deleted() {
+        return LeafBatchResult::VersionChanged;
+    }
 
     // Process remaining entries in this leaf
     while stack.ki() < perm_size {

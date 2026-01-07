@@ -344,6 +344,26 @@ impl NodeVersion {
         (self.value.load(Ordering::Relaxed) & DELETED_BIT) != 0
     }
 
+    /// Check if a version value indicates the node is deleted.
+    ///
+    /// This is a static check on an already-loaded version value, avoiding
+    /// an additional atomic load. Use after calling [`stable()`] when you
+    /// need to check both version stability and deleted status.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let version = node.version().stable();
+    /// if NodeVersion::is_deleted_version(version) {
+    ///     // Node was deleted, need to retry
+    /// }
+    /// ```
+    #[must_use]
+    #[inline(always)]
+    pub const fn is_deleted_version(version: u32) -> bool {
+        (version & DELETED_BIT) != 0
+    }
+
     /// Check if this node is locked.
     #[must_use]
     #[inline(always)]
@@ -1148,6 +1168,16 @@ impl SingleThreadedNodeVersion {
     #[inline(always)]
     pub const fn is_deleted(&self) -> bool {
         (self.value & DELETED_BIT) != 0
+    }
+
+    /// Check if a version value indicates the node is deleted.
+    ///
+    /// In single-threaded mode, this is equivalent to `is_deleted()` but
+    /// provided for API consistency with concurrent mode.
+    #[must_use]
+    #[inline(always)]
+    pub const fn is_deleted_version(version: u32) -> bool {
+        (version & DELETED_BIT) != 0
     }
 
     /// Get a stable version (returns immediately in single-threaded mode).

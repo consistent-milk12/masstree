@@ -93,7 +93,8 @@
 //! tree.remove_with_guard(b"hello", &guard).unwrap();
 //!
 //! // Range scan (zero-copy)
-//! tree.scan_ref(b"a"..b"z", |key, value| {
+//! use masstree::RangeBound;
+//! tree.scan_ref(RangeBound::Included(b"a"), RangeBound::Excluded(b"z"), |key, value| {
 //!     println!("{:?} -> {}", key, value);
 //!     true // continue scanning
 //! }, &guard);
