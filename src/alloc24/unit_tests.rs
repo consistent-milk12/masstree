@@ -1,4 +1,4 @@
-use super::*;
+use super::{LeafNode24, NodeAllocatorGeneric, SeizeAllocator24};
 use crate::value::LeafValue;
 
 #[test]
@@ -13,7 +13,7 @@ fn test_seize_allocator24_alloc_leaf() {
     let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
     let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
 
-    let ptr = alloc.alloc_leaf(leaf);
+    let ptr: *mut LeafNode24<LeafValue<u64>> = alloc.alloc_leaf(leaf);
     assert!(!ptr.is_null());
     assert_eq!(alloc.leaf_count(), 1);
 

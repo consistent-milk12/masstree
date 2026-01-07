@@ -1,4 +1,4 @@
-use super::*;
+use super::{CACHE_LINE_SIZE, PaddedCounter, SHARDS, ShardedCounter};
 use std::{sync::Arc, thread::Scope};
 
 #[test]

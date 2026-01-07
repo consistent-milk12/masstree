@@ -15,9 +15,11 @@ where
     #[inline(always)]
     fn try_load_output(&self, slot: usize) -> Option<<S as ValueSlot>::Output> {
         let ptr: *const u8 = self.leaf_value_ptr(slot);
+
         if ptr.is_null() {
             return None;
         }
+
         // SAFETY: ptr is non-null and came from output_to_raw
         Some(unsafe { S::output_from_raw(ptr) })
     }

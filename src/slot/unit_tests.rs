@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, LeafValue, LeafValueIndex, ValueSlot};
 use std::ptr as StdPtr;
 
 // ------------------------------------------------------------------------

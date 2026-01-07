@@ -106,19 +106,25 @@ where
 
         // Now check sequentially with early exit
         if ikey0 == target_ikey {
-            if let Some(result) = check_slot_match(leaf, s0, search_keylenx, key, needs_suffix_check) {
+            if let Some(result) =
+                check_slot_match(leaf, s0, search_keylenx, key, needs_suffix_check)
+            {
                 return result;
             }
         }
 
         if ikey1 == target_ikey {
-            if let Some(result) = check_slot_match(leaf, s1, search_keylenx, key, needs_suffix_check) {
+            if let Some(result) =
+                check_slot_match(leaf, s1, search_keylenx, key, needs_suffix_check)
+            {
                 return result;
             }
         }
 
         if ikey2 == target_ikey {
-            if let Some(result) = check_slot_match(leaf, s2, search_keylenx, key, needs_suffix_check) {
+            if let Some(result) =
+                check_slot_match(leaf, s2, search_keylenx, key, needs_suffix_check)
+            {
                 return result;
             }
         }
@@ -132,7 +138,9 @@ where
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
         if slot_ikey == target_ikey {
-            if let Some(result) = check_slot_match(leaf, slot, search_keylenx, key, needs_suffix_check) {
+            if let Some(result) =
+                check_slot_match(leaf, slot, search_keylenx, key, needs_suffix_check)
+            {
                 return result;
             }
         }
@@ -173,10 +181,11 @@ where
     if slot_keylenx == search_keylenx {
         // Potential exact match
         // OPTIMIZATION: Only check suffix if the search key has one
-        if needs_suffix_check && slot_keylenx == KSUF_KEYLENX {
-            if !leaf.ksuf_equals(slot, key.suffix()) {
-                return None;
-            }
+        if needs_suffix_check
+            && slot_keylenx == KSUF_KEYLENX
+            && !leaf.ksuf_equals(slot, key.suffix())
+        {
+            return None;
         }
         // Return slot index, not pointer
         return Some(LookupResult::ValueSlot(slot));

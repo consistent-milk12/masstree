@@ -1,6 +1,6 @@
 #![allow(clippy::pedantic, clippy::needless_collect, clippy::indexing_slicing)]
 
-use super::*;
+use super::NodeCleaner;
 use crate::internode::InternodeNode;
 use crate::leaf24::LeafNode24;
 use crate::nodeversion::{LockGuard, NodeVersion};

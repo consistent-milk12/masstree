@@ -15,42 +15,43 @@
 //! # States
 //!
 //! ```text
-//!                    ┌────────────────────────────────────────┐
-//!                    │                                        │
-//!                    ▼                                        │
-//!              ┌──────────┐                                   │
-//!         ┌───▶│  Emit    │───── emit entry ─────────────────▶│
-//!         │    └──────────┘                                   │
-//!         │         │                                         │
-//!         │         │ advance ki                              │
-//!         │         ▼                                         │
-//!         │    ┌──────────┐                                   │
-//!         ├────│ FindNext │◀──────────────────────────────────┤
-//!         │    └──────────┘                                   │
-//!         │         │                                         │
-//!         │    ┌────┴────┬────────────┐                       │
-//!         │    ▼         ▼            ▼                       │
-//!         │  found    layer_ptr    exhausted                  │
-//!         │    │         │            │                       │
-//!         │    │    ┌────┴────┐  ┌────┴────┐                  │
-//!         │    │    │  Down   │  │   Up    │                  │
-//!         │    │    └────┬────┘  └────┬────┘                  │
-//!         │    │         │            │                       │
-//!         │    │  shift_clear()   unshift()                   │
-//!         │    │         │            │                       │
-//!         │    │         ▼            │                       │
-//!         │    │    ┌──────────┐      │                       │
-//!         │    │    │  Retry   │◀─────┘                       │
-//!         │    │    └────┬─────┘                              │
-//!         │    │         │                                    │
-//!         │    │    find_retry()                              │
-//!         │    │         │                                    │
-//!         └────┴─────────┴────────────────────────────────────┘
+//!                    ┌────────────────────────────────────────────┐
+//!                    │                                            │
+//!                    ▼                                            │
+//!              ┌──────────┐                                       │
+//!         ┌───▶│  Emit    │──────── emit entry ──────────────────▶│
+//!         │    └──────────┘                                       │
+//!         │         │                                             │
+//!         │         │ advance ki                                  │
+//!         │         ▼                                             │
+//!         │    ┌──────────┐                                       │
+//!         ├────│ FindNext │◀──────────────────────────────────────┤
+//!         │    └────┬─────┘                                       │
+//!         │         │                                             │
+//!         │    ┌────┼────────┬────────────┬────────────┐          │
+//!         │    ▼    │        ▼            ▼            ▼          │
+//!         │ found   │     layer_ptr    exhausted   version_fail   │
+//!         │    │    │        │            │            │          │
+//!         │    │    │   ┌────┴────┐  ┌────┴────┐       │          │
+//!         │    │    │   │  Down   │  │   Up    │       │          │
+//!         │    │    │   └────┬────┘  └────┬────┘       │          │
+//!         │    │    │        │            │            │          │
+//!         │    │    │ shift_clear()   unshift()        │          │
+//!         │    │    │        │            │            │          │
+//!         │    │    │        └─────┬──────┴────────────┘          │
+//!         │    │    │              ▼                              │
+//!         │    │    │       ┌──────────┐                          │
+//!         │    │    └──────▶│  Retry   │                          │
+//!         │    │            └────┬─────┘                          │
+//!         │    │                 │                                │
+//!         │    │           find_retry()                           │
+//!         │    │                 │                                │
+//!         └────┴─────────────────┴────────────────────────────────┘
 //!
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use smallvec::SmallVec;
+use arrayvec::ArrayVec;
 
 use crate::leaf_trait::{TreeLeafNode, TreePermutation};
 use crate::slot::ValueSlot;
@@ -68,6 +69,7 @@ use crate::slot::ValueSlot;
 /// - [`Down`](ScanState::Down): Descending into a sublayer (encountered layer pointer)
 /// - [`Up`](ScanState::Up): Ascending to parent layer (current layer exhausted)
 /// - [`Retry`](ScanState::Retry): Repositioning after version change or layer transition
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanState {
     /// Ready to emit the current entry to the visitor.
@@ -78,7 +80,7 @@ pub enum ScanState {
     /// 2. Extract key from `CursorKey::full_key()`
     /// 3. Clone value from captured snapshot
     /// 4. Advance `ki` and transition to `FindNext`
-    Emit,
+    Emit = 0,
 
     /// Searching for the next entry within the current leaf/layer.
     ///
@@ -86,7 +88,7 @@ pub enum ScanState {
     /// 1. Check if current position has a valid slot
     /// 2. If yes: validate version, check duplicate, prepare for emit
     /// 3. If no: advance to next leaf or transition to `Up`
-    FindNext,
+    FindNext = 1,
 
     /// Descending into a sublayer (encountered a layer pointer).
     ///
@@ -98,7 +100,7 @@ pub enum ScanState {
     /// 2. Set `root = layer_ptr`
     /// 3. Call `cursor_key.shift_clear()`
     /// 4. Transition to `Retry`
-    Down,
+    Down = 2,
 
     /// Ascending to parent layer (current layer exhausted).
     ///
@@ -109,9 +111,8 @@ pub enum ScanState {
     /// 1. If `LayerStack` is empty: scan is complete
     /// 2. Else: pop `(root, leaf)` from stack
     /// 3. Call `cursor_key.unshift()`
-    /// 4. Refresh leaf state (version, perm)
-    /// 5. Continue with `FindNext`
-    Up,
+    /// 4. Transition to `Retry` for repositioning
+    Up = 3,
 
     /// Repositioning after a conflict or layer transition.
     ///
@@ -122,7 +123,7 @@ pub enum ScanState {
     ///
     /// The scan will call `find_retry()` to reposition at the correct
     /// leaf and slot for the current `CursorKey` state.
-    Retry,
+    Retry = 4,
 }
 
 impl ScanState {
@@ -548,7 +549,7 @@ impl<L> LayerContext<L> {
 ///     stack.set_leaf(parent.leaf_ptr());
 /// }
 /// ```
-pub type LayerStack<L> = SmallVec<[LayerContext<L>; 4]>;
+pub type LayerStack<L> = ArrayVec<LayerContext<L>, 6>;
 
 // ============================================================================
 //  ScanSnapshot - Captured slot data for emission

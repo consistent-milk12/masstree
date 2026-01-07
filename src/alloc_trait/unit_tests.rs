@@ -1,4 +1,4 @@
-use super::*;
+use super::{NodeAllocatorGeneric, TreeLeafNode, ValueSlot};
 use crate::alloc24::SeizeAllocator24;
 use crate::leaf24::LeafNode24;
 use crate::value::LeafValue;
@@ -14,13 +14,13 @@ where
     L: TreeLeafNode<S>,
     A: NodeAllocatorGeneric<S, L>,
 {
-    let leaf = L::new_boxed();
-    let ptr = alloc.alloc_leaf(leaf);
+    let leaf: Box<L> = L::new_boxed();
+    let ptr: *mut L = alloc.alloc_leaf(leaf);
     assert!(!ptr.is_null());
 
     // Verify leaf is accessible
     unsafe {
-        let leaf_ref = &*ptr;
+        let leaf_ref: &L = &*ptr;
         assert!(leaf_ref.is_empty());
     }
 }
@@ -32,8 +32,8 @@ where
     L: TreeLeafNode<S>,
     A: NodeAllocatorGeneric<S, L>,
 {
-    let leaf = L::new_boxed();
-    let ptr = Box::into_raw(leaf);
+    let leaf: Box<L> = L::new_boxed();
+    let ptr: *mut L = Box::into_raw(leaf);
     alloc.track_leaf(ptr);
     // Just verify it doesn't panic - actual cleanup happens at drop
 }

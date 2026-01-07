@@ -562,7 +562,11 @@ where
                 // Internode layout: [version:4][nkeys:1][height:4][ikeys:WIDTH*8][children:(WIDTH+1)*8]
                 // First cache line (64 bytes) contains version + first ~7 ikeys
                 // Second cache line contains remaining ikeys
-                prefetch_read((inode as *const L::Internode as *const u8).wrapping_add(64));
+                prefetch_read(
+                    StdPtr::from_ref::<L::Internode>(inode)
+                        .cast::<u8>()
+                        .wrapping_add(64),
+                );
 
                 // Binary/linear search for child pointer
                 let child_idx: usize =
@@ -587,10 +591,13 @@ where
                 if !inode.children_are_leaves() {
                     // Child is an internode - prefetch its ikeys AND first grandchild
                     // SAFETY: children_are_leaves() is false, so child is an internode
-                    let child_inode: &L::Internode =
-                        unsafe { &*(child.cast::<L::Internode>()) };
+                    let child_inode: &L::Internode = unsafe { &*(child.cast::<L::Internode>()) };
                     // Prefetch the child internode's ikeys (second cache line)
-                    prefetch_read((child_inode as *const L::Internode as *const u8).wrapping_add(64));
+                    prefetch_read(
+                        StdPtr::from_ref::<L::Internode>(child_inode)
+                            .cast::<u8>()
+                            .wrapping_add(64),
+                    );
                     // Also prefetch the first grandchild for deeper pipelining
                     let grandchild_ptr: *mut u8 = child_inode.child(0);
                     if !grandchild_ptr.is_null() {

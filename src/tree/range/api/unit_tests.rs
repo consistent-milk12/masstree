@@ -1,4 +1,4 @@
-use super::*;
+use super::compute_prefix_upper_bound;
 
 #[test]
 fn test_compute_prefix_upper_bound() {

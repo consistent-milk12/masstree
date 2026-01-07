@@ -1,4 +1,4 @@
-use super::*;
+use super::{LeafNode15TrueInline, SuffixBag, WIDTH_15};
 use std::sync::atomic::Ordering as AtomicOrdering;
 
 #[test]

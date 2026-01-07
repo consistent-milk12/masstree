@@ -1,4 +1,9 @@
-use super::*;
+#![expect(clippy::unwrap_used, reason = "Fail fast in tests")]
+
+use super::{
+    DIRTY_MASK, INSERTING_BIT, ISLEAF_BIT, LOCK_BIT, LockGuard, NodeVersion, SPLITTING_BIT,
+    SingleThreadedNodeVersion, VINSERT_LOWBIT, VSPLIT_LOWBIT,
+};
 
 // ========================================================================
 // !Send/!Sync Verification

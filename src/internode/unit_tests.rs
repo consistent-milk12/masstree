@@ -1,4 +1,5 @@
-use super::*;
+use super::{InternodeNode, LeafValue, Ordering};
+use std::ptr as StdPtr;
 
 #[test]
 fn test_new_internode() {

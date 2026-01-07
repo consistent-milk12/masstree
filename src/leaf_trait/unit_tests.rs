@@ -1,4 +1,4 @@
-use super::*;
+use super::{TreeLeafNode, TreePermutation};
 use crate::leaf24::LeafNode24;
 use crate::permuter24::Permuter24;
 use crate::value::LeafValue;

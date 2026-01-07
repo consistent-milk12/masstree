@@ -1,4 +1,4 @@
-use super::*;
+use super::{INITIAL_CAPACITY, InlineSuffixBag, PermutationProvider, SuffixBag};
 use crate::permuter24::Permuter24;
 
 // ========================================================================

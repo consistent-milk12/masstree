@@ -10,37 +10,38 @@
 //! The iterator is implemented as an explicit state machine with the following states:
 //!
 //! ```text
-//!                     ┌────────────────────────────────────────┐
-//!                     │                                        │
-//!                     ▼                                        │
-//!               ┌──────────┐                                   │
-//!          ┌───▶│  Emit    │───── yield entry ─────────────────┤
-//!          │    └──────────┘                                   │
-//!          │         │                                         │
-//!          │         │ advance ki                              │
-//!          │         ▼                                         │
-//!          │    ┌──────────┐                                   │
-//!          ├────│ FindNext │◀──────────────────────────────────┤
-//!          │    └──────────┘                                   │
-//!          │         │                                         │
-//!          │    ┌────┴────┬────────────┐                       │
-//!          │    ▼         ▼            ▼                       │
-//!          │  found    layer_ptr    leaf_exhausted             │
-//!          │    │         │            │                       │
-//!          │    │    ┌────┴────┐  ┌────┴────┐                  │
-//!          │    │    │  Down   │  │   Up    │                  │
-//!          │    │    └────┬────┘  └────┬────┘                  │
-//!          │    │         │            │                       │
-//!          │    │  shift_clear()   unshift()                   │
-//!          │    │         │            │                       │
-//!          │    │         ▼            │                       │
-//!          │    │    ┌──────────┐      │                       │
-//!          │    │    │  Retry   │◀─────┘                       │
-//!          │    │    └────┬─────┘                              │
-//!          │    │         │                                    │
-//!          │    │    find_retry()                              │
-//!          │    │         │                                    │
-//!          └────┴─────────┴────────────────────────────────────┘
+//!                     ┌────────────────────────────────────────────┐
+//!                     │                                            │
+//!                     ▼                                            │
+//!               ┌──────────┐                                       │
+//!          ┌───▶│  Emit    │──────── yield entry ─────────────────▶│
+//!          │    └──────────┘                                       │
+//!          │         │                                             │
+//!          │         │ advance ki                                  │
+//!          │         ▼                                             │
+//!          │    ┌──────────┐                                       │
+//!          ├────│ FindNext │◀──────────────────────────────────────┤
+//!          │    └────┬─────┘                                       │
+//!          │         │                                             │
+//!          │    ┌────┼────────┬────────────┬────────────┐          │
+//!          │    ▼    │        ▼            ▼            ▼          │
+//!          │ found   │     layer_ptr    exhausted   version_fail   │
+//!          │    │    │        │            │            │          │
+//!          │    │    │   ┌────┴────┐  ┌────┴────┐       │          │
+//!          │    │    │   │  Down   │  │   Up    │       │          │
+//!          │    │    │   └────┬────┘  └────┬────┘       │          │
+//!          │    │    │        │            │            │          │
+//!          │    │    │ shift_clear()   unshift()        │          │
+//!          │    │    │        │            │            │          │
+//!          │    │    │        └─────┬──────┴────────────┘          │
+//!          │    │    │              ▼                              │
+//!          │    │    │       ┌──────────┐                          │
+//!          │    │    └──────▶│  Retry   │                          │
+//!          │    │            └────┬─────┘                          │
+//!          │    │                 │                                │
+//!          │    │           find_retry()                           │
+//!          │    │                 │                                │
+//!          └────┴─────────────────┴────────────────────────────────┘
 //! ```
 //!
 //! ## State Descriptions
@@ -87,8 +88,8 @@
 use std::marker::PhantomData;
 use std::ops::Bound;
 
+use arrayvec::ArrayVec;
 use seize::LocalGuard;
-use smallvec::SmallVec;
 
 use crate::alloc_trait::NodeAllocatorGeneric;
 use crate::key::IKEY_SIZE;
@@ -278,6 +279,153 @@ impl<O> ScanEntry<O> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IterFlags(u8);
+
+#[allow(dead_code, reason = "API Completeness")]
+impl IterFlags {
+    // Bit Positions
+    const EXHAUSTED: u8 = 1 << 0;
+    const INITIALIZED: u8 = 1 << 1;
+    const EMIT_EQUAL: u8 = 1 << 2;
+    const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
+    const SINGLE_LAYER_MODE: u8 = 1 << 4;
+
+    /// Create new flags with all bits cleared.
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    /// Create flags with initial values.
+    #[inline(always)]
+    pub const fn with_values(emit_equal: bool, single_layer_mode: bool) -> Self {
+        let mut bits: u8 = 0;
+
+        if emit_equal {
+            bits |= Self::EMIT_EQUAL;
+        }
+
+        if single_layer_mode {
+            bits |= Self::SINGLE_LAYER_MODE;
+        }
+
+        Self(bits)
+    }
+
+    // ========================================================================
+    //  Getters
+    // ========================================================================
+
+    #[inline(always)]
+    pub const fn exhausted(self) -> bool {
+        self.0 & Self::EXHAUSTED != 0
+    }
+
+    #[inline(always)]
+    pub const fn initialized(self) -> bool {
+        self.0 & Self::INITIALIZED != 0
+    }
+
+    #[inline(always)]
+    pub const fn emit_equal(self) -> bool {
+        self.0 & Self::EMIT_EQUAL != 0
+    }
+
+    #[inline(always)]
+    pub const fn needs_duplicate_check(self) -> bool {
+        self.0 & Self::NEEDS_DUPLICATE_CHECK != 0
+    }
+
+    #[inline(always)]
+    pub const fn single_layer_mode(self) -> bool {
+        self.0 & Self::SINGLE_LAYER_MODE != 0
+    }
+
+    // ========================================================================
+    //  Setters
+    // ========================================================================
+
+    #[inline(always)]
+    pub const fn set_exhausted(&mut self, value: bool) {
+        if value {
+            self.0 |= Self::EXHAUSTED;
+        } else {
+            self.0 &= !Self::EXHAUSTED;
+        }
+    }
+
+    #[inline(always)]
+    pub const fn set_initialized(&mut self, value: bool) {
+        if value {
+            self.0 |= Self::INITIALIZED;
+        } else {
+            self.0 &= !Self::INITIALIZED;
+        }
+    }
+
+    #[inline(always)]
+    pub const fn set_emit_equal(&mut self, value: bool) {
+        if value {
+            self.0 |= Self::EMIT_EQUAL;
+        } else {
+            self.0 &= !Self::EMIT_EQUAL;
+        }
+    }
+
+    #[inline(always)]
+    pub const fn set_needs_duplicate_check(&mut self, value: bool) {
+        if value {
+            self.0 |= Self::NEEDS_DUPLICATE_CHECK;
+        } else {
+            self.0 &= !Self::NEEDS_DUPLICATE_CHECK;
+        }
+    }
+
+    #[inline(always)]
+    pub const fn set_single_layer_mode(&mut self, value: bool) {
+        if value {
+            self.0 |= Self::SINGLE_LAYER_MODE;
+        } else {
+            self.0 &= !Self::SINGLE_LAYER_MODE;
+        }
+    }
+
+    // ========================================================================
+    //  Convenience methods
+    // ========================================================================
+
+    /// Mark as exhausted.
+    #[inline(always)]
+    pub const fn mark_exhausted(&mut self) {
+        self.0 |= Self::EXHAUSTED;
+    }
+
+    /// Mark as initialized.
+    #[inline(always)]
+    pub const fn mark_initialized(&mut self) {
+        self.0 |= Self::INITIALIZED;
+    }
+
+    /// Clear `needs_duplicate_check` flag.
+    #[inline(always)]
+    pub const fn clear_duplicate_check(&mut self) {
+        self.0 &= !Self::NEEDS_DUPLICATE_CHECK;
+    }
+
+    /// Set `needs_duplicate_check` flag.
+    #[inline(always)]
+    pub const fn require_duplicate_check(&mut self) {
+        self.0 |= Self::NEEDS_DUPLICATE_CHECK;
+    }
+
+    /// Disable single-layer mode (fall back to multi-layer).
+    #[inline(always)]
+    pub const fn disable_single_layer_mode(&mut self) {
+        self.0 &= !Self::SINGLE_LAYER_MODE;
+    }
+}
+
 // ============================================================================
 //  RangeIter
 // ============================================================================
@@ -325,7 +473,6 @@ impl<O> ScanEntry<O> {
 ///
 /// println!("Found {} entries", count);
 /// ```
-#[expect(clippy::struct_excessive_bools)]
 pub struct RangeIter<'a, 'g, S, L, A>
 where
     S: ValueSlot,
@@ -353,34 +500,10 @@ where
     /// Captured snapshot for current entry (if in Emit state).
     snapshot: Option<ScanSnapshot<S>>,
 
-    /// Whether the scan has been exhausted.
-    exhausted: bool,
-
-    /// Whether initial positioning has been done.
-    initialized: bool,
-
-    /// Whether to emit exact matches at start bound.
-    emit_equal: bool,
-
-    /// Whether the next `find_next` call needs duplicate checking.
+    /// Packed boolean flags.
     ///
-    /// This is set to true after a Retry state, where we may have been
-    /// repositioned to a slot we already emitted. In normal forward
-    /// iteration, duplicates can't occur because `stack.next()` advances
-    /// past the previous entry.
-    needs_duplicate_check: bool,
-
-    /// Whether we're in single-layer mode (keys ≤ 8 bytes).
-    ///
-    /// When true, we use an optimized fast path that:
-    /// - Skips checking for layer pointers (`keylenx >= LAYER_KEYLENX`)
-    /// - Never handles `Down`/`Up` state transitions
-    /// - Doesn't maintain the `layer_stack`
-    ///
-    /// This is set based on the start/end bounds at initialization.
-    /// If we encounter a layer pointer unexpectedly (defensive), we fall
-    /// back to the standard multi-layer path.
-    single_layer_mode: bool,
+    /// Contains: exhausted, initialized, `emit_equal`, `needs_duplicate_check`, `single_layer_mode`
+    flags: IterFlags,
 
     /// Tracks the output pointer from `initialize()`'s snapshot.
     ///
@@ -416,8 +539,8 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RangeIter")
-            .field("exhausted", &self.exhausted)
-            .field("initialized", &self.initialized)
+            .field("exhausted", &self.flags.exhausted())
+            .field("initialized", &self.flags.initialized())
             .field("state", &self.state)
             .finish_non_exhaustive()
     }
@@ -492,16 +615,12 @@ where
         Self {
             guard,
             stack,
-            layer_stack: SmallVec::new(),
+            layer_stack: ArrayVec::new(),
             cursor_key,
             end_bound: end,
             state: ScanState::FindNext, // Will be set properly in first iteration
             snapshot: None,
-            exhausted: false,
-            initialized: false,
-            emit_equal,
-            needs_duplicate_check: false,
-            single_layer_mode,
+            flags: IterFlags::with_values(emit_equal, single_layer_mode),
             last_output_ptr: None,
             _marker: PhantomData,
         }
@@ -520,14 +639,14 @@ where
     /// - `Retry`: Re-traverse after version conflict
     /// - Other: Ready to iterate
     fn initialize(&mut self) {
-        if self.initialized {
+        if self.flags.initialized() {
             return;
         }
-        self.initialized = true;
+        self.flags.mark_initialized();
 
         // Handle empty tree
         if self.stack.root().is_null() {
-            self.exhausted = true;
+            self.flags.mark_exhausted();
             return;
         }
 
@@ -544,7 +663,7 @@ where
                 &mut self.stack,
                 &mut self.cursor_key,
                 &mut self.layer_stack,
-                self.emit_equal,
+                self.flags.emit_equal(),
                 self.guard,
             );
 
@@ -592,7 +711,7 @@ where
                     // Check end bound
                     let key = self.cursor_key.full_key();
                     if !self.end_bound.contains(key) {
-                        self.exhausted = true;
+                        self.flags.mark_exhausted();
                         return None;
                     }
 
@@ -611,8 +730,8 @@ where
                 ScanState::FindNext => {
                     // OPTIMIZATION: Only check for duplicates after a Retry,
                     // not in normal forward iteration
-                    let (new_state, snapshot) = if self.needs_duplicate_check {
-                        self.needs_duplicate_check = false;
+                    let (new_state, snapshot) = if self.flags.needs_duplicate_check() {
+                        self.flags.clear_duplicate_check();
                         find_next_with_duplicate_check(
                             &mut self.stack,
                             &mut self.cursor_key,
@@ -636,7 +755,7 @@ where
                     handle_down(&mut self.stack, &mut self.cursor_key);
                     self.state = ScanState::Retry;
                     // After layer descent, we need duplicate check
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                 }
 
                 ScanState::Up => {
@@ -647,18 +766,18 @@ where
                         self.guard,
                     ) {
                         // No parent layer, scan complete
-                        self.exhausted = true;
+                        self.flags.mark_exhausted();
                         return None;
                     }
                     self.state = ScanState::FindNext;
                     // After layer ascent, we need duplicate check
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                 }
 
                 ScanState::Retry => {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
                     // After retry, we need duplicate check on next FindNext
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                 }
             }
         }
@@ -677,14 +796,14 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.exhausted {
+        if self.flags.exhausted() {
             return None;
         }
 
         // Lazy initialization
-        if !self.initialized {
+        if !self.flags.initialized() {
             self.initialize();
-            if self.exhausted {
+            if self.flags.exhausted() {
                 return None;
             }
         }
@@ -694,7 +813,7 @@ where
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.exhausted {
+        if self.flags.exhausted() {
             (0, Some(0))
         } else {
             // We can't know the exact count without iterating
@@ -734,14 +853,14 @@ where
     where
         F: FnMut(&[u8], S::Output) -> bool,
     {
-        if self.exhausted {
+        if self.flags.exhausted() {
             return 0;
         }
 
         // Lazy initialization
-        if !self.initialized {
+        if !self.flags.initialized() {
             self.initialize();
-            if self.exhausted {
+            if self.flags.exhausted() {
                 return 0;
             }
         }
@@ -784,7 +903,7 @@ where
             let key = self.cursor_key.full_key();
 
             if !self.end_bound.contains(key) {
-                self.exhausted = true;
+                self.flags.mark_exhausted();
                 return None;
             }
 
@@ -798,7 +917,7 @@ where
                 ScanState::Down => {
                     handle_down(&mut self.stack, &mut self.cursor_key);
                     self.state = ScanState::Retry;
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
@@ -809,18 +928,18 @@ where
                         &mut self.layer_stack,
                         self.guard,
                     ) {
-                        self.exhausted = true;
+                        self.flags.mark_exhausted();
                         return None;
                     }
 
                     self.state = ScanState::FindNext;
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
                 ScanState::Retry => {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
@@ -828,8 +947,8 @@ where
             }
 
             // Main hot path: FindNext (inlined from find_next)
-            let (new_state, snapshot) = if self.needs_duplicate_check {
-                self.needs_duplicate_check = false;
+            let (new_state, snapshot) = if self.flags.needs_duplicate_check() {
+                self.flags.clear_duplicate_check();
                 find_next_with_duplicate_check(
                     &mut self.stack,
                     &mut self.cursor_key,
@@ -854,7 +973,7 @@ where
                 let key = self.cursor_key.full_key();
 
                 if !self.end_bound.contains(key) {
-                    self.exhausted = true;
+                    self.flags.mark_exhausted();
                     return None;
                 }
 
@@ -894,14 +1013,14 @@ where
     where
         F: FnMut(&[u8], &S::Value) -> bool,
     {
-        if self.exhausted {
+        if self.flags.exhausted() {
             return 0;
         }
 
         // Lazy initialization
-        if !self.initialized {
+        if !self.flags.initialized() {
             self.initialize();
-            if self.exhausted {
+            if self.flags.exhausted() {
                 return 0;
             }
         }
@@ -953,15 +1072,15 @@ where
     where
         F: FnMut(&[u8], &S::Value) -> bool,
     {
-        if self.exhausted {
+        if self.flags.exhausted() {
             return 0;
         }
 
         // Lazy initialization - reuses existing RangeIter::initialize()
         // which correctly handles start-bound descent (shift vs shift_clear)
-        if !self.initialized {
+        if !self.flags.initialized() {
             self.initialize();
-            if self.exhausted {
+            if self.flags.exhausted() {
                 return 0;
             }
         }
@@ -979,7 +1098,7 @@ where
                 let key: &[u8] = self.cursor_key.full_key();
 
                 if !self.end_bound.contains(key) {
-                    self.exhausted = true;
+                    self.flags.mark_exhausted();
                     return 0;
                 }
 
@@ -1016,10 +1135,10 @@ where
             // Handle pending state transitions first (like advance_no_alloc_ref)
             match self.state {
                 ScanState::Down => {
-                    self.single_layer_mode = false;
+                    self.flags.disable_single_layer_mode();
                     handle_down(&mut self.stack, &mut self.cursor_key);
                     self.state = ScanState::Retry;
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
@@ -1030,17 +1149,17 @@ where
                         &mut self.layer_stack,
                         self.guard,
                     ) {
-                        self.exhausted = true;
+                        self.flags.mark_exhausted();
                         return count;
                     }
                     self.state = ScanState::FindNext;
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
                 ScanState::Retry => {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
@@ -1050,7 +1169,7 @@ where
             // Check for null stack (layer exhausted)
             if self.stack.is_null() {
                 if self.layer_stack.is_empty() {
-                    self.exhausted = true;
+                    self.flags.mark_exhausted();
                     return count;
                 }
                 self.state = ScanState::Up;
@@ -1068,8 +1187,8 @@ where
             // Main hot path: FindNext → Emit (inlined)
             // ================================================================
 
-            let (new_state, snapshot_ptr) = if self.needs_duplicate_check {
-                self.needs_duplicate_check = false;
+            let (new_state, snapshot_ptr) = if self.flags.needs_duplicate_check() {
+                self.flags.clear_duplicate_check();
                 find_next_with_duplicate_check_ptr(
                     &mut self.stack,
                     &mut self.cursor_key,
@@ -1094,7 +1213,7 @@ where
 
                         // Check end bound
                         if !self.end_bound.contains(key) {
-                            self.exhausted = true;
+                            self.flags.mark_exhausted();
                             return count;
                         }
 
@@ -1150,14 +1269,14 @@ where
             process_leaf_batch_ptr,
         };
 
-        if self.exhausted {
+        if self.flags.exhausted() {
             return 0;
         }
 
         // Lazy initialization
-        if !self.initialized {
+        if !self.flags.initialized() {
             self.initialize();
-            if self.exhausted {
+            if self.flags.exhausted() {
                 return 0;
             }
         }
@@ -1170,7 +1289,7 @@ where
                 let key: &[u8] = self.cursor_key.full_key();
 
                 if !self.end_bound.contains(key) {
-                    self.exhausted = true;
+                    self.flags.mark_exhausted();
                     return 0;
                 }
 
@@ -1196,10 +1315,10 @@ where
             // Handle rare states (layer transitions, retries)
             match self.state {
                 ScanState::Down => {
-                    self.single_layer_mode = false;
+                    self.flags.disable_single_layer_mode();
                     handle_down(&mut self.stack, &mut self.cursor_key);
                     self.state = ScanState::Retry;
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
@@ -1210,17 +1329,17 @@ where
                         &mut self.layer_stack,
                         self.guard,
                     ) {
-                        self.exhausted = true;
+                        self.flags.mark_exhausted();
                         return count;
                     }
                     self.state = ScanState::FindNext;
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
                 ScanState::Retry => {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
@@ -1230,7 +1349,7 @@ where
             // Check for null stack (layer exhausted)
             if self.stack.is_null() {
                 if self.layer_stack.is_empty() {
-                    self.exhausted = true;
+                    self.flags.mark_exhausted();
                     return count;
                 }
                 self.state = ScanState::Up;
@@ -1274,7 +1393,7 @@ where
                     return count;
                 }
                 LeafBatchResult::EndBoundExceeded => {
-                    self.exhausted = true;
+                    self.flags.mark_exhausted();
                     return count;
                 }
             }
@@ -1322,14 +1441,14 @@ where
     where
         F: FnMut(&[u8], &S::Value) -> Result<bool, E>,
     {
-        if self.exhausted {
+        if self.flags.exhausted() {
             return Ok(0);
         }
 
         // Lazy initialization
-        if !self.initialized {
+        if !self.flags.initialized() {
             self.initialize();
-            if self.exhausted {
+            if self.flags.exhausted() {
                 return Ok(0);
             }
         }
@@ -1378,7 +1497,7 @@ where
             let key = self.cursor_key.full_key();
 
             if !self.end_bound.contains(key) {
-                self.exhausted = true;
+                self.flags.mark_exhausted();
                 return None;
             }
 
@@ -1416,11 +1535,11 @@ where
             // ================================================================
             // Single-layer fast path (keys ≤ 8 bytes)
             // ================================================================
-            if self.single_layer_mode {
+            if self.flags.single_layer_mode() {
                 // Retry handling in single-layer mode
                 if self.state == ScanState::Retry {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
@@ -1428,11 +1547,11 @@ where
                     &mut self.stack,
                     &mut self.cursor_key,
                     self.guard,
-                    self.needs_duplicate_check,
+                    self.flags.needs_duplicate_check(),
                 );
 
-                if self.needs_duplicate_check {
-                    self.needs_duplicate_check = false;
+                if self.flags.needs_duplicate_check() {
+                    self.flags.clear_duplicate_check();
                 }
 
                 self.state = new_state;
@@ -1443,7 +1562,7 @@ where
                             let key = self.cursor_key.full_key();
 
                             if !self.end_bound.contains(key) {
-                                self.exhausted = true;
+                                self.flags.mark_exhausted();
                                 return None;
                             }
 
@@ -1456,7 +1575,7 @@ where
 
                     ScanState::FindNext => {
                         if self.stack.is_null() {
-                            self.exhausted = true;
+                            self.flags.mark_exhausted();
                             return None;
                         }
 
@@ -1467,7 +1586,7 @@ where
 
                     ScanState::Down => {
                         // Encountered layer pointer - fall back to multi-layer
-                        self.single_layer_mode = false;
+                        self.flags.disable_single_layer_mode();
 
                         // Push PARENT context to layer_stack before setting new root.
                         // find_next_single_layer_ptr already stored the ikey to cursor.
@@ -1492,7 +1611,7 @@ where
                     }
 
                     ScanState::Up => {
-                        self.exhausted = true;
+                        self.flags.mark_exhausted();
                         return None;
                     }
                 }
@@ -1507,7 +1626,7 @@ where
                 ScanState::Down => {
                     handle_down(&mut self.stack, &mut self.cursor_key);
                     self.state = ScanState::Retry;
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
@@ -1518,18 +1637,18 @@ where
                         &mut self.layer_stack,
                         self.guard,
                     ) {
-                        self.exhausted = true;
+                        self.flags.mark_exhausted();
                         return None;
                     }
 
                     self.state = ScanState::FindNext;
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
                 ScanState::Retry => {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.needs_duplicate_check = true;
+                    self.flags.require_duplicate_check();
                     continue;
                 }
 
@@ -1537,8 +1656,8 @@ where
             }
 
             // Use zero-copy find_next variants
-            let (new_state, snapshot_ptr) = if self.needs_duplicate_check {
-                self.needs_duplicate_check = false;
+            let (new_state, snapshot_ptr) = if self.flags.needs_duplicate_check() {
+                self.flags.clear_duplicate_check();
                 find_next_with_duplicate_check_ptr(
                     &mut self.stack,
                     &mut self.cursor_key,
@@ -1563,7 +1682,7 @@ where
                 let key = self.cursor_key.full_key();
 
                 if !self.end_bound.contains(key) {
-                    self.exhausted = true;
+                    self.flags.mark_exhausted();
                     return None;
                 }
 

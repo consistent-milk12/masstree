@@ -1,4 +1,5 @@
-use super::*;
+use super::{LayerContext, LayerStack, NonNull, ScanSnapshotPtr, ScanState};
+use arrayvec::ArrayVec;
 use std::ptr as StdPtr;
 
 // Note: These tests use mock types since we can't easily construct
@@ -48,7 +49,7 @@ fn test_layer_context_creation() {
 #[test]
 #[expect(clippy::unwrap_used)]
 fn test_layer_stack_operations() {
-    let mut stack: LayerStack<u8> = SmallVec::new();
+    let mut stack: LayerStack<u8> = ArrayVec::new();
 
     assert!(stack.is_empty());
 
@@ -80,26 +81,31 @@ fn test_layer_stack_operations() {
 }
 
 #[test]
-fn test_layer_stack_inline_capacity() {
-    let mut stack: LayerStack<u8> = SmallVec::new();
+fn test_layer_stack_capacity() {
+    let mut stack: LayerStack<u8> = ArrayVec::new();
 
-    // Push 4 elements (should stay inline)
-    for i in 1..=4 {
+    // ArrayVec has fixed capacity of 6
+    assert_eq!(stack.capacity(), 6);
+    assert!(stack.is_empty());
+
+    // Push 6 elements (full capacity)
+    for i in 1..=6 {
         stack.push(LayerContext::new(
             StdPtr::without_provenance(i * 0x1000),
             StdPtr::without_provenance_mut(i * 0x2000),
         ));
     }
 
-    // SmallVec with capacity 4 should not spill
-    assert!(!stack.spilled());
+    // Stack should be full but not panicking
+    assert_eq!(stack.len(), 6);
+    assert!(stack.is_full());
 
-    // Push one more (should spill to heap)
-    stack.push(LayerContext::new(
-        StdPtr::without_provenance(0x5000),
-        StdPtr::without_provenance_mut(0x6000),
+    // try_push should fail when full
+    let result = stack.try_push(LayerContext::new(
+        StdPtr::without_provenance(0x7000),
+        StdPtr::without_provenance_mut(0x8000),
     ));
-    assert!(stack.spilled());
+    assert!(result.is_err());
 }
 
 #[test]

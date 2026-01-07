@@ -1,5 +1,6 @@
-use super::*;
+use super::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode24, WIDTH_24};
 use crate::value::LeafValue;
+use std::ptr as StdPtr;
 
 #[test]
 fn test_new_leaf24_is_empty() {

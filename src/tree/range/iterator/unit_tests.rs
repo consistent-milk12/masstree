@@ -1,4 +1,4 @@
-use super::*;
+use super::{RangeBound, ScanEntry};
 
 #[test]
 fn test_range_bound_contains() {

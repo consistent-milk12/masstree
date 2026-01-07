@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    KeyIndexPosition, Permuter, lower_bound_by, lower_bound_linear_by, upper_bound_by,
+    upper_bound_linear_by,
+};
 
 // Helper to create a sorted permutation
 fn sorted_perm<const W: usize>(size: usize) -> Permuter<W> {
