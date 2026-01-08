@@ -1567,3 +1567,277 @@ fn test_coalesce_stress_rapid_cycles() {
         assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
     }
 }
+
+// ============================================================================
+//  gc_layer Tests (Sublayer Cleanup)
+// ============================================================================
+
+/// Test basic gc_layer: create sublayer, remove all keys, verify cleanup.
+#[test]
+fn test_gc_layer_basic_sublayer_cleanup() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Create a sublayer by inserting keys with shared 8-byte prefix
+    // Keys: "prefix00" + "A", "prefix00" + "B" share the first 8 bytes
+    let key1 = b"prefix00A";
+    let key2 = b"prefix00B";
+
+    tree.insert(key1, 1).unwrap();
+    tree.insert(key2, 2).unwrap();
+    assert_eq!(tree.len(), 2);
+
+    // Verify both keys exist
+    assert_eq!(tree.get(key1), Some(Arc::new(1)));
+    assert_eq!(tree.get(key2), Some(Arc::new(2)));
+
+    // Remove all keys from the sublayer
+    assert_eq!(tree.remove(key1).unwrap(), Some(Arc::new(1)));
+    assert_eq!(tree.remove(key2).unwrap(), Some(Arc::new(2)));
+    assert_eq!(tree.len(), 0);
+
+    // Process coalesce - should trigger gc_layer for the empty sublayer
+    let processed = tree.process_coalesce(&guard);
+    assert!(processed > 0, "Should process the empty sublayer");
+
+    // Tree should still be functional - insert new keys
+    tree.insert(key1, 10).unwrap();
+    assert_eq!(tree.get(key1), Some(Arc::new(10)));
+}
+
+/// Test gc_layer with multiple sublayers.
+#[test]
+fn test_gc_layer_multiple_sublayers() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Create multiple sublayers with different prefixes
+    let prefixes = [b"aaaaaaaa", b"bbbbbbbb", b"cccccccc"];
+    let suffixes = [b"1", b"2", b"3"];
+
+    // Insert keys into each sublayer
+    for prefix in &prefixes {
+        for (i, suffix) in suffixes.iter().enumerate() {
+            let mut key = Vec::with_capacity(9);
+            key.extend_from_slice(*prefix);
+            key.extend_from_slice(*suffix);
+            tree.insert(&key, i as u64).unwrap();
+        }
+    }
+    assert_eq!(tree.len(), 9);
+
+    // Remove all keys from sublayer "aaaaaaaa"
+    for suffix in &suffixes {
+        let mut key = Vec::with_capacity(9);
+        key.extend_from_slice(b"aaaaaaaa");
+        key.extend_from_slice(*suffix);
+        tree.remove(&key).unwrap();
+    }
+    assert_eq!(tree.len(), 6);
+
+    // Process coalesce - should gc the empty sublayer
+    tree.process_coalesce(&guard);
+
+    // Other sublayers should still work
+    assert_eq!(tree.get(b"bbbbbbbb1"), Some(Arc::new(0)));
+    assert_eq!(tree.get(b"cccccccc2"), Some(Arc::new(1)));
+
+    // Can reuse the cleaned-up prefix
+    tree.insert(b"aaaaaaaaX", 99).unwrap();
+    assert_eq!(tree.get(b"aaaaaaaaX"), Some(Arc::new(99)));
+}
+
+/// Test gc_layer with deep layer chains (multiple levels of sublayers).
+#[test]
+fn test_gc_layer_deep_chain() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Create a chain of sublayers:
+    // Level 0: 8 bytes "level000"
+    // Level 1: 16 bytes "level000level001"
+    // Level 2: 24 bytes "level000level001level002"
+    let key_l2_a = b"level000level001level002A";
+    let key_l2_b = b"level000level001level002B";
+
+    tree.insert(key_l2_a, 1).unwrap();
+    tree.insert(key_l2_b, 2).unwrap();
+    assert_eq!(tree.len(), 2);
+
+    // Remove one key - sublayer should NOT be gc'd yet
+    tree.remove(key_l2_a).unwrap();
+    assert_eq!(tree.len(), 1);
+    tree.process_coalesce(&guard);
+
+    // Remaining key should still exist
+    assert_eq!(tree.get(key_l2_b), Some(Arc::new(2)));
+
+    // Remove the last key - now sublayer should be gc'd
+    tree.remove(key_l2_b).unwrap();
+    assert_eq!(tree.len(), 0);
+    tree.process_coalesce(&guard);
+
+    // Tree should be empty but functional
+    tree.insert(key_l2_a, 100).unwrap();
+    assert_eq!(tree.get(key_l2_a), Some(Arc::new(100)));
+}
+
+/// Test gc_layer doesn't affect sibling sublayers.
+#[test]
+fn test_gc_layer_preserves_siblings() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Create two sublayers under the same parent leaf
+    // Parent has slots for both "prefix_A" and "prefix_B" layer pointers
+    let key_a1 = b"prefix_Akey1";
+    let key_a2 = b"prefix_Akey2";
+    let key_b1 = b"prefix_Bkey1";
+    let key_b2 = b"prefix_Bkey2";
+
+    tree.insert(key_a1, 1).unwrap();
+    tree.insert(key_a2, 2).unwrap();
+    tree.insert(key_b1, 3).unwrap();
+    tree.insert(key_b2, 4).unwrap();
+    assert_eq!(tree.len(), 4);
+
+    // Remove all keys from sublayer A
+    tree.remove(key_a1).unwrap();
+    tree.remove(key_a2).unwrap();
+    assert_eq!(tree.len(), 2);
+
+    // Process coalesce - should gc sublayer A but not B
+    tree.process_coalesce(&guard);
+
+    // Sublayer B should be unaffected
+    assert_eq!(tree.get(key_b1), Some(Arc::new(3)));
+    assert_eq!(tree.get(key_b2), Some(Arc::new(4)));
+
+    // Can insert new keys into the cleaned-up sublayer A
+    tree.insert(key_a1, 10).unwrap();
+    assert_eq!(tree.get(key_a1), Some(Arc::new(10)));
+}
+
+/// Test gc_layer with concurrent reads.
+#[test]
+fn test_gc_layer_concurrent_reads() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let done = Arc::new(AtomicBool::new(false));
+
+    // Create sublayer
+    let key1 = b"sublayer0key1xxx";
+    let key2 = b"sublayer0key2xxx";
+    tree.insert(key1, 1).unwrap();
+    tree.insert(key2, 2).unwrap();
+
+    // Also insert some non-sublayer keys for readers to find
+    for i in 0_u64..10 {
+        tree.insert(&i.to_be_bytes(), i).unwrap();
+    }
+
+    let tree_reader = Arc::clone(&tree);
+    let done_reader = Arc::clone(&done);
+
+    // Reader thread continuously reads
+    let reader = thread::spawn(move || {
+        while !done_reader.load(Ordering::Acquire) {
+            for i in 0_u64..10 {
+                let _ = tree_reader.get(&i.to_be_bytes());
+            }
+            // Also try to read from the sublayer (may or may not exist)
+            let _ = tree_reader.get(b"sublayer0key1xxx");
+        }
+    });
+
+    // Main thread: remove sublayer keys and gc
+    tree.remove(key1).unwrap();
+    tree.remove(key2).unwrap();
+
+    let guard = tree.guard();
+    tree.process_coalesce(&guard);
+
+    // Signal reader to stop
+    done.store(true, Ordering::Release);
+    reader.join().expect("Reader thread panicked");
+
+    // Tree should be consistent
+    for i in 0_u64..10 {
+        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+    }
+}
+
+/// Test that gc_layer handles the case where parent slot changed concurrently.
+///
+/// This is hard to test deterministically, but we can at least verify
+/// the code path doesn't crash when the slot has changed.
+#[test]
+fn test_gc_layer_slot_changed() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Create sublayer
+    let key1 = b"changedXXkey1";
+    let key2 = b"changedXXkey2";
+    tree.insert(key1, 1).unwrap();
+    tree.insert(key2, 2).unwrap();
+
+    // Remove one key
+    tree.remove(key1).unwrap();
+
+    // Remove second key - sublayer becomes empty
+    tree.remove(key2).unwrap();
+
+    // Before coalesce runs, insert a new key with the same prefix
+    // This might reuse the sublayer or create a new one
+    tree.insert(b"changedXXnewkey", 99).unwrap();
+
+    // Coalesce should handle this gracefully
+    // (the old sublayer entry may be stale)
+    tree.process_coalesce(&guard);
+
+    // New key should be accessible
+    assert_eq!(tree.get(b"changedXXnewkey"), Some(Arc::new(99)));
+}
+
+/// Stress test: rapid sublayer create-remove-gc cycles.
+#[test]
+fn test_gc_layer_stress() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    for cycle in 0_u32..50 {
+        // Create unique sublayer for this cycle
+        let prefix = format!("cyc{cycle:05}");
+        let key1 = format!("{prefix}key1");
+        let key2 = format!("{prefix}key2");
+        let key3 = format!("{prefix}key3");
+
+        // Insert
+        tree.insert(key1.as_bytes(), cycle as u64).unwrap();
+        tree.insert(key2.as_bytes(), cycle as u64 + 1).unwrap();
+        tree.insert(key3.as_bytes(), cycle as u64 + 2).unwrap();
+
+        // Remove all
+        tree.remove(key1.as_bytes()).unwrap();
+        tree.remove(key2.as_bytes()).unwrap();
+        tree.remove(key3.as_bytes()).unwrap();
+
+        // Coalesce every 5 cycles
+        if cycle % 5 == 4 {
+            tree.process_coalesce(&guard);
+        }
+    }
+
+    // Final coalesce
+    tree.process_coalesce(&guard);
+
+    // Tree should be empty and healthy
+    assert_eq!(tree.len(), 0);
+
+    // Should work for new insertions
+    tree.insert(b"finaltest!", 12345).unwrap();
+    assert_eq!(tree.get(b"finaltest!"), Some(Arc::new(12345)));
+}

@@ -16,11 +16,10 @@
 
 use std::alloc as StdAlloc;
 use std::alloc::Layout;
-use std::marker::PhantomData;
 use std::mem as StdMem;
 
-use parking_lot::Mutex;
-use rustc_hash::FxHashSet;
+use parking_lot::lock_api::MutexGuard;
+use parking_lot::{Mutex, RawMutex};
 use seize::{Guard, LocalGuard};
 
 use crate::alloc_trait::NodeAllocatorGeneric;
@@ -49,14 +48,11 @@ use crate::{AllocError, AllocResult};
 /// All methods use interior mutability via `parking_lot::Mutex`, allowing
 /// concurrent allocation from multiple threads with only `&self`.
 pub struct SeizeAllocator15<S: ValueSlot> {
-    /// Raw pointers to allocated [`LeafNode15`] nodes, stored as usize for O(1) hashing.
-    leaf_ptrs: Mutex<FxHashSet<usize>>,
+    /// Raw pointers to allocated [`LeafNode15`] nodes.
+    leaf_ptrs: Mutex<Vec<*mut LeafNode15<S>>>,
 
-    /// Raw pointers to allocated internode nodes (WIDTH=15), stored as usize for O(1) hashing.
-    internode_ptrs: Mutex<FxHashSet<usize>>,
-
-    /// Marker for the slot type parameter.
-    _marker: PhantomData<S>,
+    /// Raw pointers to allocated internode nodes (WIDTH=15).
+    internode_ptrs: Mutex<Vec<*mut InternodeNode<S>>>,
 }
 
 // SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
@@ -77,11 +73,10 @@ impl<S: ValueSlot> std::fmt::Debug for SeizeAllocator15<S> {
 impl<S: ValueSlot> SeizeAllocator15<S> {
     /// Create a new allocator.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            leaf_ptrs: Mutex::new(FxHashSet::default()),
-            internode_ptrs: Mutex::new(FxHashSet::default()),
-            _marker: PhantomData,
+            leaf_ptrs: Mutex::new(Vec::new()),
+            internode_ptrs: Mutex::new(Vec::new()),
         }
     }
 
@@ -107,17 +102,17 @@ impl<S: ValueSlot> Default for SeizeAllocator15<S> {
 impl<S: ValueSlot> Drop for SeizeAllocator15<S> {
     fn drop(&mut self) {
         // Free all tracked nodes on allocator drop
-        for ptr_addr in self.leaf_ptrs.lock().drain() {
-            // SAFETY: ptr_addr came from a valid *mut LeafNode15<S> cast to usize
+        for ptr in self.leaf_ptrs.lock().drain(..) {
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
-                drop(Box::from_raw(ptr_addr as *mut LeafNode15<S>));
+                drop(Box::from_raw(ptr));
             }
         }
 
-        for ptr_addr in self.internode_ptrs.lock().drain() {
-            // SAFETY: ptr_addr came from a valid *mut InternodeNode<S> cast to usize
+        for ptr in self.internode_ptrs.lock().drain(..) {
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
-                drop(Box::from_raw(ptr_addr as *mut InternodeNode<S>));
+                drop(Box::from_raw(ptr));
             }
         }
     }
@@ -134,23 +129,31 @@ where
     #[inline(always)]
     fn alloc_leaf(&self, node: Box<LeafNode15<S>>) -> *mut LeafNode15<S> {
         let ptr: *mut LeafNode15<S> = Box::into_raw(node);
-        self.leaf_ptrs.lock().insert(ptr as usize);
+        self.leaf_ptrs.lock().push(ptr);
         ptr
     }
 
     #[inline(always)]
     fn track_leaf(&self, ptr: *mut LeafNode15<S>) {
-        self.leaf_ptrs.lock().insert(ptr as usize);
+        self.leaf_ptrs.lock().push(ptr);
     }
 
     #[inline(always)]
     unsafe fn retire_leaf(&self, ptr: *mut LeafNode15<S>, guard: &LocalGuard<'_>) {
-        // Step 1: Remove from tracking to prevent double-free (O(1) with HashSet).
-        let found = self.leaf_ptrs.lock().remove(&(ptr as usize));
+        // Step 1: Remove from tracking to prevent double-free.
+        // The allocator's Drop iterates leaf_ptrs and frees everything,
+        // so we must remove the pointer before deferring retirement.
+        let found = {
+            let mut ptrs = self.leaf_ptrs.lock();
+            ptrs.iter().position(|&p| p == ptr).is_some_and(|pos| {
+                ptrs.swap_remove(pos);
+                true
+            })
+        };
 
         debug_assert!(
             found,
-            "retire_leaf: pointer {ptr:p} not found in tracking set - possible double-retire"
+            "retire_leaf: pointer {ptr:p} not found in tracking list - possible double-retire"
         );
 
         // Step 2: Defer retirement via seize.
@@ -165,35 +168,41 @@ where
     #[inline(always)]
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
         // Caller passes a valid pointer to an allocated InternodeNode<S>.
-        // Just track - no Box round-trip needed.
-        self.internode_ptrs.lock().insert(node_ptr as usize);
-        node_ptr
+        // Just cast and track - no Box round-trip needed.
+        let ptr: *mut InternodeNode<S> = node_ptr.cast();
+        self.internode_ptrs.lock().push(ptr);
+        ptr.cast()
     }
 
     #[inline(always)]
     fn track_internode_erased(&self, ptr: *mut u8) {
-        self.internode_ptrs.lock().insert(ptr as usize);
+        self.internode_ptrs.lock().push(ptr.cast());
     }
 
     #[inline(always)]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        // Step 1: Remove from tracking to prevent double-free (O(1) with HashSet).
-        let found = self.internode_ptrs.lock().remove(&(ptr as usize));
+        let typed_ptr: *mut InternodeNode<S> = ptr.cast();
+
+        // Step 1: Remove from tracking to prevent double-free.
+        let found = {
+            let mut ptrs = self.internode_ptrs.lock();
+            ptrs.iter()
+                .position(|&p| p == typed_ptr)
+                .is_some_and(|pos| {
+                    ptrs.swap_remove(pos);
+                    true
+                })
+        };
 
         debug_assert!(
             found,
-            "retire_internode_erased: pointer {ptr:p} not found in tracking set - possible double-retire"
+            "retire_internode_erased: pointer {ptr:p} not found in tracking list - possible double-retire"
         );
 
         // Step 2: Defer retirement via seize.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
-        // The pointer was originally allocated as InternodeNode<S>, so alignment is correct.
-        #[expect(
-            clippy::cast_ptr_alignment,
-            reason = "ptr originally came from InternodeNode<S> allocation, alignment guaranteed"
-        )]
         unsafe {
-            guard.defer_retire(ptr.cast::<InternodeNode<S>>(), |p, _| {
+            guard.defer_retire(typed_ptr, |p, _| {
                 drop(Box::from_raw(p));
             });
         }
@@ -202,20 +211,20 @@ where
     #[inline(always)]
     fn teardown_tree(&self, _root_ptr: *mut u8) {
         // Free all tracked nodes using interior mutability
-        let leaves: FxHashSet<usize> = StdMem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: FxHashSet<usize> = StdMem::take(&mut *self.internode_ptrs.lock());
+        let leaves: Vec<*mut LeafNode15<S>> = StdMem::take(&mut *self.leaf_ptrs.lock());
+        let internodes: Vec<*mut InternodeNode<S>> = StdMem::take(&mut *self.internode_ptrs.lock());
 
-        for ptr_addr in leaves {
-            // SAFETY: ptr_addr came from a valid *mut LeafNode15<S> cast to usize
+        for ptr in leaves {
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
-                drop(Box::from_raw(ptr_addr as *mut LeafNode15<S>));
+                drop(Box::from_raw(ptr));
             }
         }
 
-        for ptr_addr in internodes {
-            // SAFETY: ptr_addr came from a valid *mut InternodeNode<S> cast to usize
+        for ptr in internodes {
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
-                drop(Box::from_raw(ptr_addr as *mut InternodeNode<S>));
+                drop(Box::from_raw(ptr));
             }
         }
     }
@@ -268,7 +277,7 @@ where
         }
 
         // Track for cleanup
-        self.internode_ptrs.lock().insert(ptr as usize);
+        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -296,7 +305,7 @@ where
         }
 
         // Track for cleanup
-        self.internode_ptrs.lock().insert(ptr as usize);
+        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -328,7 +337,7 @@ where
         }
 
         // Track for cleanup
-        self.internode_ptrs.lock().insert(ptr as usize);
+        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -359,20 +368,25 @@ where
             LeafNode15::init_at(ptr, is_root || is_layer_root);
         }
 
-        // Step 3: Track the pointer (FxHashSet insertion is fallible via try_reserve)
+        // Step 3: Reserve space in tracking vector before push
+        //
+        // CRITICAL: [`Vec::push`] can reallocate and abort if capacity
+        // is exhausted. By calling `try_reserve` first, we make tracking fallible.
         {
-            let mut ptrs = self.leaf_ptrs.lock();
+            let mut ptrs: MutexGuard<'_, RawMutex, Vec<*mut LeafNode15<S>>> = self.leaf_ptrs.lock();
 
             if ptrs.try_reserve(1).is_err() {
                 // Tracking failed, must deallocate the node
                 // SAFETY: ptr was just allocated with this layout
                 unsafe { StdAlloc::dealloc(raw_ptr, layout) };
 
-                return Err(AllocError::for_tracking(StdMem::size_of::<usize>()));
+                return Err(AllocError::for_tracking(StdMem::size_of::<
+                    *mut LeafNode15<S>,
+                >()));
             }
 
-            // Now insert cannot fail (we just reserved space)
-            ptrs.insert(ptr as usize);
+            // Now push cannot fail (we just reserved space)
+            ptrs.push(ptr);
         }
 
         Ok(ptr)
@@ -393,14 +407,11 @@ use crate::slot::true_inline::TrueInlineSlot;
 /// instead of [`LeafNode15`]. Since `TrueInlineSlot::NEEDS_RETIREMENT = false`,
 /// no value retirement is needed.
 pub struct SeizeAllocator15TrueInline<V: InlineBits> {
-    /// Raw pointers to allocated [`LeafNode15TrueInline`] nodes, stored as usize for O(1) hashing.
-    leaf_ptrs: Mutex<FxHashSet<usize>>,
+    /// Raw pointers to allocated [`LeafNode15TrueInline`] nodes.
+    leaf_ptrs: Mutex<Vec<*mut LeafNode15TrueInline<V>>>,
 
-    /// Raw pointers to allocated internode nodes, stored as usize for O(1) hashing.
-    internode_ptrs: Mutex<FxHashSet<usize>>,
-
-    /// Marker for the value type parameter.
-    _marker: PhantomData<V>,
+    /// Raw pointers to allocated internode nodes.
+    internode_ptrs: Mutex<Vec<*mut InternodeNode<TrueInlineSlot<V>>>>,
 }
 
 // SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
@@ -421,11 +432,10 @@ impl<V: InlineBits> std::fmt::Debug for SeizeAllocator15TrueInline<V> {
 impl<V: InlineBits> SeizeAllocator15TrueInline<V> {
     /// Create a new allocator.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            leaf_ptrs: Mutex::new(FxHashSet::default()),
-            internode_ptrs: Mutex::new(FxHashSet::default()),
-            _marker: PhantomData,
+            leaf_ptrs: Mutex::new(Vec::new()),
+            internode_ptrs: Mutex::new(Vec::new()),
         }
     }
 
@@ -450,19 +460,17 @@ impl<V: InlineBits> Default for SeizeAllocator15TrueInline<V> {
 
 impl<V: InlineBits> Drop for SeizeAllocator15TrueInline<V> {
     fn drop(&mut self) {
-        for ptr_addr in self.leaf_ptrs.lock().drain() {
-            // SAFETY: ptr_addr came from a valid *mut LeafNode15TrueInline<V> cast to usize
+        for ptr in self.leaf_ptrs.lock().drain(..) {
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
-                drop(Box::from_raw(ptr_addr as *mut LeafNode15TrueInline<V>));
+                drop(Box::from_raw(ptr));
             }
         }
 
-        for ptr_addr in self.internode_ptrs.lock().drain() {
-            // SAFETY: ptr_addr came from a valid *mut InternodeNode<TrueInlineSlot<V>> cast to usize
+        for ptr in self.internode_ptrs.lock().drain(..) {
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
-                drop(Box::from_raw(
-                    ptr_addr as *mut InternodeNode<TrueInlineSlot<V>>,
-                ));
+                drop(Box::from_raw(ptr));
             }
         }
     }
@@ -475,23 +483,28 @@ impl<V: InlineBits + Send + Sync + 'static>
     #[inline(always)]
     fn alloc_leaf(&self, node: Box<LeafNode15TrueInline<V>>) -> *mut LeafNode15TrueInline<V> {
         let ptr: *mut LeafNode15TrueInline<V> = Box::into_raw(node);
-        self.leaf_ptrs.lock().insert(ptr as usize);
+        self.leaf_ptrs.lock().push(ptr);
         ptr
     }
 
     #[inline(always)]
     fn track_leaf(&self, ptr: *mut LeafNode15TrueInline<V>) {
-        self.leaf_ptrs.lock().insert(ptr as usize);
+        self.leaf_ptrs.lock().push(ptr);
     }
 
     #[inline(always)]
     unsafe fn retire_leaf(&self, ptr: *mut LeafNode15TrueInline<V>, guard: &LocalGuard<'_>) {
-        // Step 1: Remove from tracking to prevent double-free (O(1) with FxHashSet).
-        let found = self.leaf_ptrs.lock().remove(&(ptr as usize));
+        let found = {
+            let mut ptrs = self.leaf_ptrs.lock();
+            ptrs.iter().position(|&p| p == ptr).is_some_and(|pos| {
+                ptrs.swap_remove(pos);
+                true
+            })
+        };
 
         debug_assert!(
             found,
-            "retire_leaf: pointer {ptr:p} not found in tracking set"
+            "retire_leaf: pointer {ptr:p} not found in tracking list"
         );
 
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
@@ -504,34 +517,38 @@ impl<V: InlineBits + Send + Sync + 'static>
 
     #[inline(always)]
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
-        // Just track - no Box round-trip needed.
-        self.internode_ptrs.lock().insert(node_ptr as usize);
-        node_ptr
+        let ptr: *mut InternodeNode<TrueInlineSlot<V>> = node_ptr.cast();
+        self.internode_ptrs.lock().push(ptr);
+        ptr.cast()
     }
 
     #[inline(always)]
     fn track_internode_erased(&self, ptr: *mut u8) {
-        self.internode_ptrs.lock().insert(ptr as usize);
+        self.internode_ptrs.lock().push(ptr.cast());
     }
 
     #[inline(always)]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        // Step 1: Remove from tracking to prevent double-free (O(1) with FxHashSet).
-        let found = self.internode_ptrs.lock().remove(&(ptr as usize));
+        let typed_ptr: *mut InternodeNode<TrueInlineSlot<V>> = ptr.cast();
+
+        let found = {
+            let mut ptrs = self.internode_ptrs.lock();
+            ptrs.iter()
+                .position(|&p| p == typed_ptr)
+                .is_some_and(|pos| {
+                    ptrs.swap_remove(pos);
+                    true
+                })
+        };
 
         debug_assert!(
             found,
-            "retire_internode_erased: pointer {ptr:p} not found in tracking set"
+            "retire_internode_erased: pointer {ptr:p} not found in tracking list"
         );
 
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
-        // The pointer was originally allocated as InternodeNode<TrueInlineSlot<V>>, so alignment is correct.
-        #[expect(
-            clippy::cast_ptr_alignment,
-            reason = "ptr originally came from InternodeNode allocation, alignment guaranteed"
-        )]
         unsafe {
-            guard.defer_retire(ptr.cast::<InternodeNode<TrueInlineSlot<V>>>(), |p, _| {
+            guard.defer_retire(typed_ptr, |p, _| {
                 drop(Box::from_raw(p));
             });
         }
@@ -539,22 +556,21 @@ impl<V: InlineBits + Send + Sync + 'static>
 
     #[inline(always)]
     fn teardown_tree(&self, _root_ptr: *mut u8) {
-        let leaves: FxHashSet<usize> = StdMem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: FxHashSet<usize> = StdMem::take(&mut *self.internode_ptrs.lock());
+        let leaves: Vec<*mut LeafNode15TrueInline<V>> = StdMem::take(&mut *self.leaf_ptrs.lock());
+        let internodes: Vec<*mut InternodeNode<TrueInlineSlot<V>>> =
+            StdMem::take(&mut *self.internode_ptrs.lock());
 
-        for ptr_addr in leaves {
-            // SAFETY: ptr_addr came from a valid *mut LeafNode15TrueInline<V> cast to usize
+        for ptr in leaves {
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
-                drop(Box::from_raw(ptr_addr as *mut LeafNode15TrueInline<V>));
+                drop(Box::from_raw(ptr));
             }
         }
 
-        for ptr_addr in internodes {
-            // SAFETY: ptr_addr came from a valid *mut InternodeNode<TrueInlineSlot<V>> cast to usize
+        for ptr in internodes {
+            // SAFETY: ptr came from Box::into_raw or alloc()
             unsafe {
-                drop(Box::from_raw(
-                    ptr_addr as *mut InternodeNode<TrueInlineSlot<V>>,
-                ));
+                drop(Box::from_raw(ptr));
             }
         }
     }
@@ -598,7 +614,7 @@ impl<V: InlineBits + Send + Sync + 'static>
             InternodeNode::init_at(ptr, height);
         }
 
-        self.internode_ptrs.lock().insert(ptr as usize);
+        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -619,7 +635,7 @@ impl<V: InlineBits + Send + Sync + 'static>
             InternodeNode::init_at_root(ptr, height);
         }
 
-        self.internode_ptrs.lock().insert(ptr as usize);
+        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -644,7 +660,7 @@ impl<V: InlineBits + Send + Sync + 'static>
             InternodeNode::init_at_for_split(ptr, parent_version, height);
         }
 
-        self.internode_ptrs.lock().insert(ptr as usize);
+        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -655,7 +671,6 @@ impl<V: InlineBits + Send + Sync + 'static>
     ) -> AllocResult<*mut LeafNode15TrueInline<V>> {
         // Step 1: Allocate raw memory
         let layout = Layout::new::<LeafNode15TrueInline<V>>();
-        // SAFETY: Layout is valid (derived from type)
         let raw_ptr: *mut u8 = unsafe { StdAlloc::alloc(layout) };
 
         if raw_ptr.is_null() {
@@ -670,19 +685,20 @@ impl<V: InlineBits + Send + Sync + 'static>
             LeafNode15TrueInline::init_at(ptr, is_root || is_layer_root);
         }
 
-        // Step 3: Track the pointer (FxHashSet insertion is fallible via try_reserve)
+        // Step 3: Fallible tracking
         {
-            let mut ptrs = self.leaf_ptrs.lock();
+            let mut ptrs: MutexGuard<'_, RawMutex, Vec<*mut LeafNode15TrueInline<V>>> =
+                self.leaf_ptrs.lock();
 
             if ptrs.try_reserve(1).is_err() {
-                // SAFETY: ptr was just allocated with this layout
                 unsafe { StdAlloc::dealloc(raw_ptr, layout) };
 
-                return Err(AllocError::for_tracking(StdMem::size_of::<usize>()));
+                return Err(AllocError::for_tracking(StdMem::size_of::<
+                    *mut LeafNode15TrueInline<V>,
+                >()));
             }
 
-            // Now insert cannot fail (we just reserved space)
-            ptrs.insert(ptr as usize);
+            ptrs.push(ptr);
         }
 
         Ok(ptr)

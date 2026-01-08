@@ -187,6 +187,7 @@ where
         {
             return None;
         }
+
         // Return slot index, not pointer
         return Some(LookupResult::ValueSlot(slot));
     }

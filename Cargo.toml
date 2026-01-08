@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -43,7 +43,7 @@ true-inline = [] # Enable true-inline value storage
 seize = "0.5.1"
 parking_lot = "0.12.5"
 portable-atomic = "1.12.0"
-smallvec = "1.15.1"
+arrayvec = "0.7.6"
 static_assertions = "1.1.0"
 rustc-hash = "2.1.1"
 
@@ -198,6 +198,10 @@ harness = false
 
 [[bench]]
 name = "concurrent_read_write"
+harness = false
+
+[[bench]]
+name = "concurrent_read_write_masstree"
 harness = false
 
 [[bench]]

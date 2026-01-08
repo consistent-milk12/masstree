@@ -135,7 +135,7 @@ where
 /// Context for tracking layer descent during remove operations.
 ///
 /// When descending into a sublayer, we track the parent leaf and slot
-/// so that `gc_layer` can clear the parent's layer slot if the sublayer
+/// so that sublayer cleanup can clear the parent's layer slot if the sublayer
 /// becomes empty.
 ///
 /// # Why This Is Needed
@@ -143,7 +143,6 @@ where
 /// Sublayer roots have NULL parent pointers (they're marked as roots).
 /// We cannot use `sublayer_leaf.parent()` to find the parent leaf.
 /// Instead, we track this information during the layer descent.
-#[allow(dead_code, reason = "Deferred: inline structural removal")]
 #[derive(Debug, Clone, Copy)]
 struct LayerContext {
     /// Pointer to the parent leaf that contains the layer slot.
@@ -211,7 +210,7 @@ where
     kp: usize,
 
     /// Context for sublayer cleanup (parent leaf + slot).
-    #[allow(dead_code, reason = "Deferred: inline structural removal")]
+    /// Used when the sublayer becomes empty to clear the parent's layer slot.
     layer_context: Option<LayerContext>,
 
     /// Guard for memory reclamation.
@@ -324,352 +323,34 @@ where
 
         // Step 8: Lazy coalescing for empty leaves
         //
-        // When a leaf because empty, we:
+        // When a leaf becomes empty, we:
         // 1. Mark it as empty (so insert can reuse it)
-        // 2. Schedule it for background cleanup (if not leftmost)
+        // 2. Schedule it for background cleanup
         //
         // This avoids the lock-coupling approach from C++ that caused infinite loops.
         if new_perm.size() == 0 {
             leaf.mark_empty();
 
-            // Schedule for cleanup if not leftmost (leftmost is sentinel)
-            if !leaf.prev().is_null() {
-                let ikey_bound: u64 = leaf.ikey_bound();
+            let ikey_bound: u64 = leaf.ikey_bound();
 
-                self.tree.coalesce_queue.schedule(self.leaf, ikey_bound);
-            }
+            // Convert layer context for coalesce queue
+            let sublayer_ctx = self.layer_context.map(|ctx| {
+                crate::tree::coalesce::SublayerContext {
+                    parent_leaf: ctx.parent_leaf as usize,
+                    parent_slot: ctx.parent_slot,
+                }
+            });
+
+            // Schedule for cleanup (coalesce will handle leftmost and sublayer cases)
+            self.tree
+                .coalesce_queue
+                .schedule(self.leaf, ikey_bound, sublayer_ctx);
         }
 
         // Mark insert for version increment (lock drops at end of scope)
         self.lock.mark_insert();
 
         value
-    }
-
-    /// Try to remove an empty leaf from the tree structure.
-    ///
-    /// Called when a leaf becomes empty after key removal. This method:
-    /// 1. Marks the leaf as deleted
-    /// 2. Unlinks it from the B-link chain
-    /// 3. Removes it from the parent internode
-    /// 4. Schedules the leaf for retirement
-    ///
-    /// # Returns
-    ///
-    /// - `None` if the leaf was removed (lock consumed)
-    /// - `Some(self)` if the leaf is leftmost and cannot be removed (lock retained)
-    ///
-    /// # C++ Reference
-    ///
-    /// `masstree_remove.hh:178-255` - `remove_leaf()`
-    #[allow(dead_code, reason = "Deferred: inline structural removal")]
-    #[cold]
-    #[inline(never)]
-    fn try_remove_leaf(mut self) -> Option<Self> {
-        // Get leaf info before any borrows
-        let prev_is_null: bool = self.leaf().prev().is_null();
-        let next_is_null: bool = self.leaf().safe_next().is_null();
-
-        // Case 1: Leftmost leaf (prev == null) - special handling
-        if prev_is_null {
-            if next_is_null {
-                // Only leaf in sublayer (or main tree root) - call gc_layer
-                // gc_layer always consumes self. It returns false for main tree root
-                // (leaf stays empty), but we still return None because lock was released.
-                let _ = self.gc_layer();
-                return None;
-            }
-            // Leftmost but not only leaf - cannot remove directly
-            return Some(self);
-        }
-
-        // Case 2: Non-leftmost leaf - we can remove it
-
-        // Capture values we need after consuming self
-        let tree = self.tree;
-        let leaf_ptr = self.leaf;
-        let guard = self.guard;
-        let ikey_bound: u64 = self.leaf().ikey_bound();
-
-        // Step 1: Mark as deleted
-        self.lock.mark_deleted();
-
-        // Step 2: Unlink from B-link chain
-        // SAFETY: leaf is locked, prev is non-null (checked above)
-        unsafe { self.leaf().unlink_from_chain() };
-
-        // Step 3: Remove from parent internode (consumes lock via self)
-        self.remove_from_parent(leaf_ptr.cast::<u8>(), ikey_bound, None);
-
-        // Step 4: Schedule leaf retirement
-        // SAFETY: leaf was unlinked and removed from parent
-        unsafe { tree.allocator.retire_leaf(leaf_ptr, guard) };
-
-        None
-    }
-
-    /// Garbage collect an empty sublayer.
-    ///
-    /// Called when the only leaf in a sublayer becomes empty.
-    /// Clears the parent's layer slot and retires the sublayer.
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the sublayer was cleaned up (lock consumed)
-    /// - `false` if this is the main tree root (stays empty, but lock IS consumed - caller must recreate)
-    ///
-    /// Note: This always consumes `self`. For the main tree root case, we return false
-    /// but the lock is still released (main root stays as empty leaf).
-    ///
-    /// # C++ Reference
-    ///
-    /// `masstree_remove.hh:24-115` - `gc_layer()`
-    #[allow(dead_code, reason = "Deferred: inline structural removal")]
-    #[cold]
-    #[inline(never)]
-    fn gc_layer(self) -> bool {
-        // Capture values we need
-        let tree = self.tree;
-        let leaf_ptr = self.leaf;
-        let guard = self.guard;
-        let layer_context = self.layer_context;
-
-        let Some(ctx) = layer_context else {
-            // No layer context = this is the main tree root
-            // Leave as empty leaf - don't mark deleted!
-            // Just drop the lock (mark_insert will bump version)
-            // Lock drops here, incrementing version
-            drop(self.lock);
-            return false;
-        };
-
-        // Mark sublayer as deleted_layer BEFORE releasing lock
-        // This is critical for the lock ordering fix (Phase 3 in TODO.md)
-        // SAFETY: leaf is valid and locked
-        unsafe { &*leaf_ptr }.mark_deleted_layer();
-
-        // Get sublayer pointer before releasing lock
-        let sublayer_ptr: *mut u8 = leaf_ptr.cast::<u8>();
-
-        // Release sublayer lock BEFORE acquiring parent lock
-        // This prevents deadlock (always lock in parent -> child order)
-        drop(self.lock);
-
-        // Now safe to lock parent
-        // SAFETY: ctx.parent_leaf is a valid leaf pointer obtained during traversal
-        // and protected by the guard. We released sublayer lock before acquiring parent.
-        let parent_leaf: &L = unsafe { &*ctx.parent_leaf.cast::<L>() };
-        let mut parent_lock: LockGuard<'_> = parent_leaf.version().lock();
-
-        // Verify slot still points to sublayer (may have changed concurrently)
-        let current_slot_ptr: *mut u8 = parent_leaf.leaf_value_ptr(ctx.parent_slot);
-        let current_keylenx: u8 = parent_leaf.keylenx(ctx.parent_slot);
-
-        if current_slot_ptr != sublayer_ptr || current_keylenx < LAYER_KEYLENX {
-            // Slot has changed - just retire sublayer
-            drop(parent_lock);
-
-            // SAFETY: leaf_ptr is a valid leaf allocated via allocator. The leaf is
-            // marked deleted_layer and no longer reachable. Guard ensures safe reclamation.
-            unsafe { tree.allocator.retire_leaf(leaf_ptr, guard) };
-            return true;
-        }
-
-        // Clear the layer slot in the parent
-        parent_leaf.clear_slot_and_permutation(ctx.parent_slot);
-        parent_lock.mark_insert();
-        drop(parent_lock);
-
-        // Schedule sublayer leaf for retirement
-        // SAFETY: leaf_ptr is valid, marked deleted_layer, and unlinked from parent.
-        // Guard ensures deferred reclamation after all readers finish.
-        unsafe { tree.allocator.retire_leaf(leaf_ptr, guard) };
-
-        true
-    }
-
-    /// Remove a child from its parent internode, potentially collapsing empty chains.
-    ///
-    /// This method walks up the tree from the removed child, updating parent
-    /// pointers and collapsing single-child internodes.
-    ///
-    /// The cursor's lock is used for the initial child, then transferred to
-    /// each parent as we walk up the tree (lock coupling protocol).
-    ///
-    /// # C++ Reference
-    ///
-    /// `masstree_remove.hh:217-255` - the main loop in `remove_leaf()`
-    #[allow(dead_code, reason = "Deferred: inline structural removal")]
-    #[cold]
-    #[inline(never)]
-    fn remove_from_parent(self, child: *mut u8, ikey_bound: u64, replacement: Option<*mut u8>) {
-        // Capture values we need before consuming self
-        let tree = self.tree;
-        let guard = self.guard;
-
-        let mut current: *mut u8 = child;
-        let mut current_ikey: u64 = ikey_bound;
-        let mut current_replacement: Option<*mut u8> = replacement;
-
-        // We own the lock from the cursor
-        let mut current_lock: LockGuard<'_> = self.lock;
-
-        loop {
-            // Step 1: Lock parent while current is locked
-            // SAFETY: current is valid and locked; locked_parent traverses valid parent pointer.
-            let (parent_lock_opt, parent_ptr): (Option<LockGuard<'_>>, *mut u8) =
-                unsafe { Self::locked_parent::<S, L>(current) };
-
-            let Some(mut parent_lock) = parent_lock_opt else {
-                // No parent - we're at the layer root
-                drop(current_lock);
-                return;
-            };
-
-            // SAFETY: parent_ptr is a valid internode pointer returned by locked_parent.
-            // We hold parent_lock which guarantees exclusive access.
-            let parent: &L::Internode = unsafe { &*parent_ptr.cast::<L::Internode>() };
-
-            // Step 2: Mark parent as being modified
-            parent_lock.mark_insert();
-
-            debug_assert!(
-                !parent.version().is_deleted(),
-                "remove_from_parent: parent should not be deleted"
-            );
-
-            // Step 3: Find child position using upper_bound
-            let kp: usize = upper_bound_internode_generic(current_ikey, parent);
-
-            // Step 4: Validate child is at expected position
-            if parent.child(kp) != current {
-                // Child not at expected position - search for it
-                let nkeys: usize = parent.nkeys();
-                let mut found_kp: Option<usize> = None;
-                for i in 0..=nkeys {
-                    if parent.child(i) == current {
-                        found_kp = Some(i);
-                        break;
-                    }
-                }
-
-                if found_kp.is_some() {
-                    // Found at different position - restart needed
-                    drop(current_lock);
-                    drop(parent_lock);
-                    return;
-                }
-
-                // Not found - already removed by another thread
-                drop(current_lock);
-                drop(parent_lock);
-                return;
-            }
-
-            // Step 5: Update child pointer
-            let new_child: *mut u8 = current_replacement.unwrap_or(StdPtr::null_mut());
-            parent.set_child(kp, new_child);
-
-            // Step 6: Handle replacement or shift
-            if let Some(repl) = current_replacement {
-                if !repl.is_null() {
-                    // SAFETY: repl is a valid node pointer (the replacement child).
-                    // parent_ptr is valid and we hold parent_lock.
-                    unsafe {
-                        NodeCleaner::set_parent_erased::<S, L>(repl, parent_ptr);
-                    }
-                } else if kp > 0 {
-                    NodeCleaner::shift_internode_down_generic::<S, L::Internode>(parent, kp);
-                }
-            } else if kp > 0 {
-                NodeCleaner::shift_internode_down_generic::<S, L::Internode>(parent, kp);
-            }
-
-            // Step 7: Handle redirect if leftmost child removed
-            if (kp <= 1) && (parent.nkeys() > 0) && parent.child(0).is_null() {
-                let new_ikey: u64 = parent.ikey(0);
-                NodeCleaner::redirect_ikey_bounds_generic::<S, L>(
-                    parent_ptr,
-                    &mut parent_lock,
-                    current_ikey,
-                    new_ikey,
-                );
-                current_ikey = new_ikey;
-            }
-
-            // Step 8: Drop current lock AFTER parent update is complete
-            drop(current_lock);
-
-            // Step 9: Check if parent should be collapsed
-            if parent.nkeys() > 0 || parent.version().is_root() {
-                drop(parent_lock);
-                return;
-            }
-
-            let child0: *mut u8 = parent.child(0);
-            if child0.is_null() {
-                drop(parent_lock);
-                return;
-            }
-
-            // Step 10: Collapse empty parent
-            parent_lock.mark_deleted();
-
-            // SAFETY: parent_ptr is a valid internode that we hold locked (parent_lock).
-            // We just marked it deleted. Guard ensures deferred reclamation.
-            unsafe {
-                tree.allocator.retire_internode_erased(parent_ptr, guard);
-            }
-
-            parent.set_child(0, StdPtr::null_mut());
-
-            current = parent_ptr;
-            current_replacement = Some(child0);
-            current_lock = parent_lock; // Transfer lock ownership
-        }
-    }
-
-    /// Lock the parent of a node, handling concurrent modifications.
-    ///
-    /// Returns `(Some(lock), parent_ptr)` if parent exists, or `(None, null)` if at root.
-    ///
-    /// # Safety
-    ///
-    /// `current_ptr` must point to a valid, locked node.
-    #[allow(dead_code, reason = "Deferred: inline structural removal")]
-    unsafe fn locked_parent<SS, LL>(current_ptr: *mut u8) -> (Option<LockGuard<'static>>, *mut u8)
-    where
-        SS: ValueSlot,
-        SS::Value: Send + Sync + 'static,
-        SS::Output: Send + Sync,
-        LL: LayerCapableLeaf<SS>,
-    {
-        for _ in 0..MAX_PARENT_RETRIES {
-            // SAFETY: caller guarantees current_ptr is valid
-            let parent_ptr: *mut u8 =
-                unsafe { NodeCleaner::get_parent_erased::<SS, LL>(current_ptr) };
-
-            if parent_ptr.is_null() {
-                return (None, StdPtr::null_mut());
-            }
-
-            // SAFETY: parent_ptr is non-null and valid
-            let parent: &LL::Internode = unsafe { &*(parent_ptr.cast::<LL::Internode>()) };
-            let parent_lock: LockGuard<'static> = parent.version().lock();
-
-            // Verify parent hasn't changed
-            // SAFETY: current_ptr still valid
-            let current_parent: *mut u8 =
-                unsafe { NodeCleaner::get_parent_erased::<SS, LL>(current_ptr) };
-            if current_parent == parent_ptr {
-                return (Some(parent_lock), parent_ptr);
-            }
-
-            drop(parent_lock);
-            StdHint::spin_loop();
-        }
-
-        (None, StdPtr::null_mut())
     }
 }
 

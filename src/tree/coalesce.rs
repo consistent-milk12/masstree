@@ -41,6 +41,19 @@ use crate::leaf_trait::LayerCapableLeaf;
 use crate::slot::ValueSlot;
 use crate::tree::remove::NodeCleaner;
 
+/// Context for sublayer cleanup - tracks the parent leaf and slot.
+///
+/// When a sublayer's only leaf becomes empty, we need to clear the parent
+/// leaf's layer slot. This struct stores that information.
+#[derive(Debug, Clone, Copy)]
+pub struct SublayerContext {
+    /// Pointer to the parent leaf (as usize for Send/Sync safety).
+    pub parent_leaf: usize,
+
+    /// Physical slot index in the parent leaf containing the layer pointer.
+    pub parent_slot: usize,
+}
+
 /// Entry in the coalesce queue: pointer to empty leaf and its `ikey_bound`.
 #[derive(Debug, Clone, Copy)]
 struct CoalesceEntry<L> {
@@ -49,6 +62,10 @@ struct CoalesceEntry<L> {
 
     /// The `ikey_bound` of the leaf (for debugging/logging).
     ikey_bound: u64,
+
+    /// Optional context for sublayer cleanup.
+    /// Present when this leaf is inside a sublayer (descended via layer pointer).
+    layer_context: Option<SublayerContext>,
 }
 
 // SAFETY: CoalesceEntry contains raw pointers but is only accessed under
@@ -97,11 +114,18 @@ impl<L> CoalesceQueue<L> {
     ///
     /// * `leaf_ptr` - Pointer to the empty leaf
     /// * `ikey_bound` - The `ikey_bound` of the leaf (for correctness checks)
+    /// * `layer_context` - Optional sublayer context for `gc_layer` cleanup
     #[inline]
-    pub fn schedule(&self, leaf_ptr: *mut L, ikey_bound: u64) {
+    pub fn schedule(
+        &self,
+        leaf_ptr: *mut L,
+        ikey_bound: u64,
+        layer_context: Option<SublayerContext>,
+    ) {
         let entry = CoalesceEntry {
             leaf_ptr,
             ikey_bound,
+            layer_context,
         };
         self.pending.lock().push_back(entry);
     }
@@ -257,7 +281,7 @@ impl Coalesce {
         // Step 1: Try to lock the leaf
         let Some(mut lock) = leaf.version().try_lock() else {
             // Leaf is locked by another thread - re-queue for later
-            queue.schedule(leaf_ptr, entry_ikey_bound);
+            queue.schedule(leaf_ptr, entry_ikey_bound, entry.layer_context);
             return true;
         };
 
@@ -268,11 +292,27 @@ impl Coalesce {
             return true;
         }
 
-        // Step 3: Verify leaf is not leftmost
-        // The leftmost leaf must be preserved for B-link traversal invariants
+        // Step 3: Handle leftmost leaf cases
+        // The leftmost leaf (prev == null) requires special handling.
         if leaf.prev().is_null() {
-            // Leftmost leaf - cannot remove, re-queue
-            queue.schedule(leaf_ptr, entry_ikey_bound);
+            // Check if this is the only leaf in a sublayer (gc_layer case)
+            if leaf.safe_next().is_null() {
+                // Both prev and next are null - this might be the only leaf in a sublayer
+                if let Some(ctx) = entry.layer_context {
+                    // We have layer context - this IS a sublayer. Do gc_layer cleanup.
+                    return Self::gc_layer::<S, L, A>(
+                        allocator, guard, leaf_ptr, lock, ctx,
+                    );
+                }
+                // No layer context - this is the main tree root. Leave it empty.
+                drop(lock);
+                return true;
+            }
+
+            // Leftmost but not only leaf - cannot remove directly.
+            // Note: We do NOT re-queue because the leftmost status won't change
+            // (no key can be inserted before the leftmost leaf's ikey_bound).
+            // Re-queuing would cause infinite loops in process_all().
             drop(lock);
             return true;
         }
@@ -337,6 +377,89 @@ impl Coalesce {
 
         true
     }
+
+    /// Garbage collect an empty sublayer.
+    ///
+    /// Called when the only leaf in a sublayer becomes empty.
+    /// Clears the parent's layer slot and retires the sublayer leaf.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Mark sublayer leaf as `deleted_layer` (special version bit)
+    /// 2. Release sublayer lock BEFORE acquiring parent lock (deadlock prevention)
+    /// 3. Lock the parent leaf
+    /// 4. Verify the slot still points to this sublayer
+    /// 5. Clear the slot and update permutation
+    /// 6. Retire the sublayer leaf
+    ///
+    /// # C++ Reference
+    ///
+    /// `masstree_remove.hh:24-115` - `gc_layer()`
+    #[cold]
+    #[inline(never)]
+    fn gc_layer<S, L, A>(
+        allocator: &A,
+        guard: &LocalGuard<'_>,
+        leaf_ptr: *mut L,
+        mut lock: crate::nodeversion::LockGuard<'_>,
+        ctx: SublayerContext,
+    ) -> bool
+    where
+        S: ValueSlot,
+        S::Value: Send + Sync + 'static,
+        S::Output: Send + Sync,
+        L: LayerCapableLeaf<S>,
+        A: NodeAllocatorGeneric<S, L>,
+    {
+        use crate::leaf24::LAYER_KEYLENX;
+
+        // SAFETY: leaf_ptr is valid and locked (we hold `lock`).
+        let leaf: &L = unsafe { &*leaf_ptr };
+
+        // Step 1: Mark sublayer as deleted_layer BEFORE releasing lock
+        // This signals to readers that this sublayer is being cleaned up.
+        leaf.mark_deleted_layer();
+        lock.mark_deleted();
+
+        // Get sublayer pointer before releasing lock
+        let sublayer_ptr: *mut u8 = leaf_ptr.cast::<u8>();
+
+        // Step 2: Release sublayer lock BEFORE acquiring parent lock
+        // This prevents deadlock (always lock in parent -> child order)
+        drop(lock);
+
+        // Step 3: Lock the parent leaf
+        // SAFETY: ctx.parent_leaf was a valid leaf pointer obtained during traversal
+        // and protected by the guard. We released sublayer lock before acquiring parent.
+        let parent_leaf: &L = unsafe { &*(ctx.parent_leaf as *const L) };
+        let mut parent_lock = parent_leaf.version().lock();
+
+        // Step 4: Verify slot still points to sublayer (may have changed concurrently)
+        let current_slot_ptr: *mut u8 = parent_leaf.leaf_value_ptr(ctx.parent_slot);
+        let current_keylenx: u8 = parent_leaf.keylenx(ctx.parent_slot);
+
+        if current_slot_ptr != sublayer_ptr || current_keylenx < LAYER_KEYLENX {
+            // Slot has changed - just retire sublayer without parent update
+            drop(parent_lock);
+
+            // SAFETY: leaf_ptr is a valid leaf allocated via allocator. The leaf is
+            // marked deleted_layer and no longer reachable. Guard ensures safe reclamation.
+            unsafe { allocator.retire_leaf(leaf_ptr, guard) };
+            return true;
+        }
+
+        // Step 5: Clear the layer slot in the parent
+        parent_leaf.clear_slot_and_permutation(ctx.parent_slot);
+        parent_lock.mark_insert();
+        drop(parent_lock);
+
+        // Step 6: Schedule sublayer leaf for retirement
+        // SAFETY: leaf_ptr is valid, marked deleted_layer, and unlinked from parent.
+        // Guard ensures deferred reclamation after all readers finish.
+        unsafe { allocator.retire_leaf(leaf_ptr, guard) };
+
+        true
+    }
 }
 
 // ============================================================================
@@ -357,9 +480,9 @@ mod tests {
         assert!(queue.is_empty());
         assert_eq!(queue.len(), 0);
 
-        // Schedule some entries
-        queue.schedule(ptr::null_mut(), 100);
-        queue.schedule(ptr::null_mut(), 200);
+        // Schedule some entries (no layer context)
+        queue.schedule(ptr::null_mut(), 100, None);
+        queue.schedule(ptr::null_mut(), 200, None);
 
         assert!(!queue.is_empty());
         assert_eq!(queue.len(), 2);
@@ -372,9 +495,23 @@ mod tests {
     #[test]
     fn test_debug_impl() {
         let queue: CoalesceQueue<u8> = CoalesceQueue::new();
-        queue.schedule(ptr::null_mut(), 42);
+        queue.schedule(ptr::null_mut(), 42, None);
         let debug_str = format!("{queue:?}");
         assert!(debug_str.contains("CoalesceQueue"));
         assert!(debug_str.contains("pending_count"));
+    }
+
+    #[test]
+    fn test_schedule_with_layer_context() {
+        let queue: CoalesceQueue<u8> = CoalesceQueue::new();
+
+        // Schedule with sublayer context
+        let ctx = SublayerContext {
+            parent_leaf: 0x1234,
+            parent_slot: 5,
+        };
+        queue.schedule(ptr::null_mut(), 300, Some(ctx));
+
+        assert_eq!(queue.len(), 1);
     }
 }
