@@ -52,7 +52,7 @@ pub struct SeizeAllocator15<S: ValueSlot> {
     leaf_ptrs: Mutex<Vec<*mut LeafNode15<S>>>,
 
     /// Raw pointers to allocated internode nodes (WIDTH=15).
-    internode_ptrs: Mutex<Vec<*mut InternodeNode<S>>>,
+    internode_ptrs: Mutex<Vec<*mut InternodeNode>>,
 }
 
 // SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
@@ -167,9 +167,9 @@ where
 
     #[inline(always)]
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
-        // Caller passes a valid pointer to an allocated InternodeNode<S>.
+        // Caller passes a valid pointer to an allocated InternodeNode.
         // Just cast and track - no Box round-trip needed.
-        let ptr: *mut InternodeNode<S> = node_ptr.cast();
+        let ptr: *mut InternodeNode = node_ptr.cast();
         self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
@@ -181,7 +181,7 @@ where
 
     #[inline(always)]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        let typed_ptr: *mut InternodeNode<S> = ptr.cast();
+        let typed_ptr: *mut InternodeNode = ptr.cast();
 
         // Step 1: Remove from tracking to prevent double-free.
         let found = {
@@ -212,7 +212,7 @@ where
     fn teardown_tree(&self, _root_ptr: *mut u8) {
         // Free all tracked nodes using interior mutability
         let leaves: Vec<*mut LeafNode15<S>> = StdMem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode<S>> = StdMem::take(&mut *self.internode_ptrs.lock());
+        let internodes: Vec<*mut InternodeNode> = StdMem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
             // SAFETY: ptr came from Box::into_raw or alloc()
@@ -258,14 +258,14 @@ where
     fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<S>>();
+        let layout = Layout::new::<InternodeNode>();
         // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
         // The global allocator returns memory aligned to layout.align().
         #[expect(
             clippy::cast_ptr_alignment,
             reason = "Layout::new::<InternodeNode> guarantees alignment"
         )]
-        let ptr: *mut InternodeNode<S> = unsafe { alloc(layout).cast::<InternodeNode<S>>() };
+        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -286,14 +286,14 @@ where
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<S>>();
+        let layout = Layout::new::<InternodeNode>();
         // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
         // The global allocator returns memory aligned to layout.align().
         #[expect(
             clippy::cast_ptr_alignment,
             reason = "Layout::new::<InternodeNode> guarantees alignment"
         )]
-        let ptr: *mut InternodeNode<S> = unsafe { alloc(layout).cast::<InternodeNode<S>>() };
+        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -318,14 +318,14 @@ where
     ) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<S>>();
+        let layout = Layout::new::<InternodeNode>();
         // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
         // The global allocator returns memory aligned to layout.align().
         #[expect(
             clippy::cast_ptr_alignment,
             reason = "Layout::new::<InternodeNode> guarantees alignment"
         )]
-        let ptr: *mut InternodeNode<S> = unsafe { alloc(layout).cast::<InternodeNode<S>>() };
+        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -411,7 +411,7 @@ pub struct SeizeAllocator15TrueInline<V: InlineBits> {
     leaf_ptrs: Mutex<Vec<*mut LeafNode15TrueInline<V>>>,
 
     /// Raw pointers to allocated internode nodes.
-    internode_ptrs: Mutex<Vec<*mut InternodeNode<TrueInlineSlot<V>>>>,
+    internode_ptrs: Mutex<Vec<*mut InternodeNode>>,
 }
 
 // SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
@@ -517,7 +517,7 @@ impl<V: InlineBits + Send + Sync + 'static>
 
     #[inline(always)]
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
-        let ptr: *mut InternodeNode<TrueInlineSlot<V>> = node_ptr.cast();
+        let ptr: *mut InternodeNode = node_ptr.cast();
         self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
@@ -529,7 +529,7 @@ impl<V: InlineBits + Send + Sync + 'static>
 
     #[inline(always)]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        let typed_ptr: *mut InternodeNode<TrueInlineSlot<V>> = ptr.cast();
+        let typed_ptr: *mut InternodeNode = ptr.cast();
 
         let found = {
             let mut ptrs = self.internode_ptrs.lock();
@@ -557,7 +557,7 @@ impl<V: InlineBits + Send + Sync + 'static>
     #[inline(always)]
     fn teardown_tree(&self, _root_ptr: *mut u8) {
         let leaves: Vec<*mut LeafNode15TrueInline<V>> = StdMem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode<TrueInlineSlot<V>>> =
+        let internodes: Vec<*mut InternodeNode> =
             StdMem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
@@ -601,10 +601,10 @@ impl<V: InlineBits + Send + Sync + 'static>
     fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<TrueInlineSlot<V>>>();
+        let layout = Layout::new::<InternodeNode>();
         #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut InternodeNode<TrueInlineSlot<V>> =
-            unsafe { alloc(layout).cast::<InternodeNode<TrueInlineSlot<V>>>() };
+        let ptr: *mut InternodeNode =
+            unsafe { alloc(layout).cast::<InternodeNode>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -622,10 +622,10 @@ impl<V: InlineBits + Send + Sync + 'static>
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<TrueInlineSlot<V>>>();
+        let layout = Layout::new::<InternodeNode>();
         #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut InternodeNode<TrueInlineSlot<V>> =
-            unsafe { alloc(layout).cast::<InternodeNode<TrueInlineSlot<V>>>() };
+        let ptr: *mut InternodeNode =
+            unsafe { alloc(layout).cast::<InternodeNode>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -647,10 +647,10 @@ impl<V: InlineBits + Send + Sync + 'static>
     ) -> *mut u8 {
         use std::alloc::{Layout, alloc};
 
-        let layout = Layout::new::<InternodeNode<TrueInlineSlot<V>>>();
+        let layout = Layout::new::<InternodeNode>();
         #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut InternodeNode<TrueInlineSlot<V>> =
-            unsafe { alloc(layout).cast::<InternodeNode<TrueInlineSlot<V>>>() };
+        let ptr: *mut InternodeNode =
+            unsafe { alloc(layout).cast::<InternodeNode>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }

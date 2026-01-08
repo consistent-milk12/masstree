@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 // Type aliases for coalescing tests
 type TestLeaf = LeafNode24<LeafValue<u64>>;
-type TestInternode = InternodeNode<LeafValue<u64>>;
+type TestInternode = InternodeNode;
 type TestTree = MassTree24<u64>;
 
 #[test]
@@ -494,7 +494,7 @@ fn test_shift_internode_down_middle() {
     inode.set_child(2, std::ptr::null_mut());
 
     // Test: shift_internode_down(kp=2)
-    NodeCleaner::shift_internode_down_generic::<LeafValue<u64>, TestInternode>(&inode, 2);
+    NodeCleaner::shift_internode_down_generic::<TestInternode>(&inode, 2);
 
     // Verify keys: [10, 30, _]
     assert_eq!(inode.ikey(0), 10);
@@ -546,7 +546,7 @@ fn test_shift_internode_down_last() {
     inode.set_child(3, std::ptr::null_mut());
 
     // Test: shift_internode_down(kp=3)
-    NodeCleaner::shift_internode_down_generic::<LeafValue<u64>, TestInternode>(&inode, 3);
+    NodeCleaner::shift_internode_down_generic::<TestInternode>(&inode, 3);
 
     // Verify keys: [10, 20, _]
     assert_eq!(inode.ikey(0), 10);
@@ -595,7 +595,7 @@ fn test_shift_internode_down_second() {
     inode.set_child(1, std::ptr::null_mut());
 
     // Test
-    NodeCleaner::shift_internode_down_generic::<LeafValue<u64>, TestInternode>(&inode, 1);
+    NodeCleaner::shift_internode_down_generic::<TestInternode>(&inode, 1);
 
     // Verify keys: [20, _]
     assert_eq!(inode.ikey(0), 20);

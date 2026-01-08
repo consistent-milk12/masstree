@@ -57,16 +57,13 @@ use static_assertions::const_assert_eq;
 use std::array as StdArray;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
-use std::marker::PhantomData;
 use std::mem as StdMem;
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, fence};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8};
 
 use crate::leaf_trait::TreeInternode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{READ_ORD, RELAXED, WRITE_ORD};
-use crate::slot::ValueSlot;
-use crate::value::LeafValue;
 
 // ============================================================================
 //  Constants
@@ -88,8 +85,12 @@ const NUM_CHILDREN: usize = WIDTH + 1;
 /// Stores up to 15 keys and 16 child pointers. Keys are always
 /// in sorted physical order (no permutation needed).
 ///
-/// # Type Parameters
-/// * `S` - The slot type implementing [`ValueSlot`] (phantom, for type consistency)
+/// # Design Note
+///
+/// Unlike leaf nodes, internodes don't store values - only `u64` keys and
+/// `*mut u8` child pointers. This struct is therefore non-generic, reducing
+/// code monomorphization (one `InternodeNode` implementation regardless of
+/// the tree's slot type).
 ///
 /// # Invariants
 /// - `nkeys <= WIDTH` (max 15 keys)
@@ -100,9 +101,9 @@ const NUM_CHILDREN: usize = WIDTH + 1;
 ///
 /// # Memory Layout
 /// Uses `#[repr(C, align(64))]` for cache-line alignment.
-/// Total size is ~280 bytes (5 cache lines).
+/// Total size is ~264 bytes (5 cache lines).
 #[repr(C, align(64))]
-pub struct InternodeNode<S: ValueSlot> {
+pub struct InternodeNode {
     // ========================================================================
     // Cache Line 0 (64 bytes)
     // ========================================================================
@@ -135,12 +136,9 @@ pub struct InternodeNode<S: ValueSlot> {
     /// - child[i] contains keys < ikey0[i]
     /// - child[nkeys] is the rightmost child (keys >= ikey0[nkeys-1])
     child: [AtomicPtr<u8>; NUM_CHILDREN], // 128 bytes
-
-    /// Phantom data to hold S type parameter for tree type consistency.
-    _marker: PhantomData<S>,
 }
 
-impl<S: ValueSlot> StdFmt::Debug for InternodeNode<S> {
+impl StdFmt::Debug for InternodeNode {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("InternodeNode")
             .field("nkeys", &self.nkeys())
@@ -152,12 +150,9 @@ impl<S: ValueSlot> StdFmt::Debug for InternodeNode<S> {
 
 // Compile-time layout verification.
 // InternodeNode must be cache-line aligned (64 bytes) for optimal performance.
-const_assert_eq!(
-    std::mem::align_of::<InternodeNode<crate::LeafValue<u64>>>(),
-    64
-);
+const_assert_eq!(std::mem::align_of::<InternodeNode>(), 64);
 
-impl<S: ValueSlot> InternodeNode<S> {
+impl InternodeNode {
     // ========================================================================
     //  In-Place Initialization (for pool allocators)
     // ========================================================================
@@ -274,7 +269,6 @@ impl<S: ValueSlot> InternodeNode<S> {
             parent: AtomicPtr::new(StdPtr::null_mut()),
             ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-            _marker: PhantomData,
         })
     }
 
@@ -331,7 +325,6 @@ impl<S: ValueSlot> InternodeNode<S> {
             parent: AtomicPtr::new(StdPtr::null_mut()),
             ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-            _marker: PhantomData,
         })
     }
 
@@ -423,6 +416,13 @@ impl<S: ValueSlot> InternodeNode<S> {
     /// This method may be useful for other scenarios (e.g., serialization,
     /// debugging, or operations that need all keys).
     ///
+    /// # Memory Ordering
+    ///
+    /// Uses Relaxed loads for all 15 keys followed by a single Acquire fence.
+    /// This is more efficient than 15 individual Acquire loads while providing
+    /// the same ordering guarantee: all loads complete before the fence, and
+    /// the fence synchronizes with Release stores from writers.
+    ///
     /// # Returns
     ///
     /// An array of all WIDTH ikeys. Only the first `nkeys` are valid.
@@ -430,11 +430,13 @@ impl<S: ValueSlot> InternodeNode<S> {
     #[inline(always)]
     #[expect(clippy::indexing_slicing)]
     pub fn load_all_ikeys(&self) -> [u64; WIDTH] {
-        let mut ikeys = [0u64; WIDTH];
+        // Use Relaxed loads - ordering is established by the fence below
+        let ikeys: [u64; WIDTH] = std::array::from_fn(|i| self.ikey0[i].load(RELAXED));
 
-        (0..WIDTH).for_each(|i| {
-            ikeys[i] = self.ikey0[i].load(READ_ORD);
-        });
+        // Single Acquire fence ensures all loads above complete before we return,
+        // and synchronizes with Release stores from writers. This is equivalent to
+        // 15 individual Acquire loads but more efficient (1 fence vs 15 barriers).
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
 
         ikeys
     }
@@ -670,7 +672,10 @@ impl<S: ValueSlot> InternodeNode<S> {
         self.set_ikey_relaxed(p, new_ikey);
         self.set_child(p + 1, new_child);
 
-        fence(WRITE_ORD);
+        // Note: No standalone fence needed here. The Release store on nkeys below
+        // ensures all prior writes (keys, children) are visible to any reader that
+        // acquires the new nkeys value. A Release store acts as a release fence
+        // for all preceding writes.
 
         #[expect(clippy::cast_possible_truncation)]
         self.nkeys.store((n + 1) as u8, WRITE_ORD);
@@ -749,6 +754,7 @@ impl<S: ValueSlot> InternodeNode<S> {
     /// # Reference
     ///
     /// `reference/masstree_split.hh:123-175`
+    #[must_use = "popup_key must be inserted into parent node to complete the split"]
     #[expect(
         clippy::cast_possible_truncation,
         reason = "WIDTH <= 15, so mid and WIDTH-mid fit in u8"
@@ -829,10 +835,10 @@ impl<S: ValueSlot> InternodeNode<S> {
             for i in 0..=nr_nkeys {
                 let child: *mut u8 = new_right.child(i);
                 if !child.is_null() {
-                    // SAFETY: height > 0 means children are InternodeNode<S>
+                    // SAFETY: height > 0 means children are InternodeNode
                     #[expect(
                         clippy::cast_ptr_alignment,
-                        reason = "height > 0 means children are InternodeNode<S>"
+                        reason = "height > 0 means children are InternodeNode"
                     )]
                     unsafe {
                         (*child.cast::<Self>()).set_parent(new_right_ptr_u8);
@@ -850,7 +856,7 @@ impl<S: ValueSlot> InternodeNode<S> {
 
     /// Get the parent pointer (as `*mut u8`).
     ///
-    /// Cast to `*mut InternodeNode<S>` at usage sites.
+    /// Cast to `*mut InternodeNode` at usage sites.
     #[must_use]
     #[inline(always)]
     pub fn parent(&self) -> *mut u8 {
@@ -991,7 +997,7 @@ impl<S: ValueSlot> InternodeNode<S> {
     pub fn debug_assert_invariants(&self) {}
 }
 
-impl<S: ValueSlot> Default for InternodeNode<S> {
+impl Default for InternodeNode {
     fn default() -> Self {
         Self {
             version: NodeVersion::new(false),
@@ -1001,7 +1007,6 @@ impl<S: ValueSlot> Default for InternodeNode<S> {
             parent: AtomicPtr::new(StdPtr::null_mut()),
             ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-            _marker: PhantomData,
         }
     }
 }
@@ -1010,13 +1015,7 @@ impl<S: ValueSlot> Default for InternodeNode<S> {
 //  Send + Sync
 // ============================================================================
 
-// SAFETY: InternodeNode is safe to send/share between threads when S is.
-//
-// Note on the S: Send + Sync bound:
-// S is only stored in PhantomData<S> and is never actually accessed by
-// InternodeNode. The bound exists for type consistency with the tree's
-// generic parameters, ensuring that trees using InternodeNode<S> can be
-// Send + Sync when S is.
+// SAFETY: InternodeNode is safe to send/share between threads.
 //
 // Thread safety is provided by:
 // 1. Atomic fields (nkeys, ikey0, child, parent) use appropriate memory
@@ -1026,20 +1025,23 @@ impl<S: ValueSlot> Default for InternodeNode<S> {
 //    protocol:
 //    - Readers use version validation to detect concurrent modifications
 //    - Writers hold the node lock before modifying children
-unsafe impl<S: ValueSlot + Send + Sync> Send for InternodeNode<S> {}
-unsafe impl<S: ValueSlot + Send + Sync> Sync for InternodeNode<S> {}
+//
+// Unlike leaf nodes, internodes don't store values (only u64 keys and *mut u8
+// child pointers), so there's no generic parameter to propagate Send/Sync from.
+unsafe impl Send for InternodeNode {}
+unsafe impl Sync for InternodeNode {}
 
 // ============================================================================
 //  Size Assertions
 // ============================================================================
 
-/// Compile-time size check for `InternodeNode<LeafValue<u64>>`.
+/// Compile-time size check for `InternodeNode`.
 const _: () = {
-    const SIZE: usize = StdMem::size_of::<InternodeNode<LeafValue<u64>>>();
-    const ALIGN: usize = StdMem::align_of::<InternodeNode<LeafValue<u64>>>();
+    const SIZE: usize = StdMem::size_of::<InternodeNode>();
+    const ALIGN: usize = StdMem::align_of::<InternodeNode>();
 
     // Should fit in ~5 cache lines (320 bytes)
-    // Actual: 16 (header) + 120 (keys) + 128 (children) = 264 bytes + padding
+    // Actual: 16 (header) + 120 (keys) + 128 (children) = 264 bytes
     assert!(SIZE <= 320, "InternodeNode exceeds 5 cache lines");
 
     // Should be cache-line aligned
@@ -1050,10 +1052,7 @@ const _: () = {
 //  TreeInternode Implementation
 // ============================================================================
 
-impl<S> TreeInternode<S> for InternodeNode<S>
-where
-    S: ValueSlot + Send + Sync + 'static,
-{
+impl TreeInternode for InternodeNode {
     const WIDTH: usize = WIDTH;
 
     #[inline(always)]
@@ -1212,155 +1211,4 @@ mod unit_tests;
 ///
 /// Run with: `RUSTFLAGS="--cfg loom" cargo test --lib internode::loom_tests`
 #[cfg(loom)]
-mod loom_tests {
-    use loom::sync::Arc;
-    use loom::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
-    use loom::thread;
-    use std::array as StdArray;
-
-    use super::WIDTH;
-
-    /// Simplified internode for loom testing.
-    ///
-    /// Uses loom atomics to enable deterministic interleaving exploration.
-    struct LoomInternode {
-        nkeys: AtomicU8,
-        ikey0: [AtomicU64; WIDTH],
-    }
-
-    impl LoomInternode {
-        fn new() -> Self {
-            Self {
-                nkeys: AtomicU8::new(0),
-                ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
-            }
-        }
-
-        fn nkeys(&self) -> usize {
-            self.nkeys.load(Ordering::Acquire) as usize
-        }
-
-        fn set_nkeys(&self, n: u8) {
-            self.nkeys.store(n, Ordering::Release);
-        }
-
-        fn ikey(&self, idx: usize) -> u64 {
-            self.ikey0[idx].load(Ordering::Acquire)
-        }
-
-        fn set_ikey(&self, idx: usize, key: u64) {
-            self.ikey0[idx].store(key, Ordering::Release);
-        }
-
-        fn find_insert_position(&self, insert_ikey: u64) -> usize {
-            let n: usize = self.nkeys();
-
-            for i in 0..n {
-                if self.ikey(i) >= insert_ikey {
-                    return i;
-                }
-            }
-
-            n
-        }
-
-        fn insert_key(&self, pos: usize, key: u64) {
-            let n = self.nkeys();
-
-            for i in (pos..n).rev() {
-                let k = self.ikey(i);
-                self.set_ikey(i + 1, k);
-            }
-
-            self.set_ikey(pos, key);
-            self.set_nkeys((n + 1) as u8);
-        }
-    }
-
-    #[test]
-    fn test_loom_find_position_concurrent_reads() {
-        loom::model(|| {
-            let node = Arc::new(LoomInternode::new());
-
-            // Setup: insert keys 10, 20, 30
-            node.set_ikey(0, 10);
-            node.set_ikey(1, 20);
-            node.set_ikey(2, 30);
-            node.set_nkeys(3);
-
-            let n1 = Arc::clone(&node);
-            let t1 = thread::spawn(move || n1.find_insert_position(25));
-
-            let n2 = Arc::clone(&node);
-            let t2 = thread::spawn(move || n2.find_insert_position(15));
-
-            let pos1 = t1.join().unwrap();
-            let pos2 = t2.join().unwrap();
-
-            assert!(pos1 <= 3, "pos1={} should be <= 3", pos1);
-            assert!(pos2 <= 3, "pos2={} should be <= 3", pos2);
-        });
-    }
-
-    #[test]
-    fn test_loom_find_position_during_insert() {
-        loom::model(|| {
-            let node = Arc::new(LoomInternode::new());
-
-            node.set_ikey(0, 20);
-            node.set_nkeys(1);
-
-            let results = Arc::new(AtomicUsize::new(0));
-
-            let n1 = Arc::clone(&node);
-            let t1 = thread::spawn(move || {
-                n1.insert_key(0, 10);
-            });
-
-            let n2 = Arc::clone(&node);
-            let r2 = Arc::clone(&results);
-            let t2 = thread::spawn(move || {
-                let pos = n2.find_insert_position(15);
-                r2.store(pos, Ordering::Relaxed);
-            });
-
-            t1.join().unwrap();
-            t2.join().unwrap();
-
-            let pos = results.load(Ordering::Relaxed);
-            assert!(pos <= 2, "pos={} should be <= 2", pos);
-        });
-    }
-
-    #[test]
-    fn test_loom_concurrent_reads_different_keys() {
-        loom::model(|| {
-            let node = Arc::new(LoomInternode::new());
-
-            // Setup: insert keys 10, 20, 30, 40
-            node.set_ikey(0, 10);
-            node.set_ikey(1, 20);
-            node.set_ikey(2, 30);
-            node.set_ikey(3, 40);
-            node.set_nkeys(4);
-
-            let n1 = Arc::clone(&node);
-            let t1 = thread::spawn(move || n1.find_insert_position(5)); // Before all
-
-            let n2 = Arc::clone(&node);
-            let t2 = thread::spawn(move || n2.find_insert_position(25)); // Middle
-
-            let n3 = Arc::clone(&node);
-            let t3 = thread::spawn(move || n3.find_insert_position(50)); // After all
-
-            let pos1 = t1.join().unwrap();
-            let pos2 = t2.join().unwrap();
-            let pos3 = t3.join().unwrap();
-
-            // All should get deterministic results (no concurrent writes)
-            assert_eq!(pos1, 0, "5 should go at position 0");
-            assert_eq!(pos2, 2, "25 should go at position 2");
-            assert_eq!(pos3, 4, "50 should go at position 4");
-        });
-    }
-}
+mod loom_tests;

@@ -295,10 +295,7 @@ where
 /// // Follow child_ptr to continue traversal
 /// ```
 #[inline]
-pub fn upper_bound_internode<S: slot::ValueSlot>(
-    search_ikey: u64,
-    node: &InternodeNode<S>,
-) -> usize {
+pub fn upper_bound_internode(search_ikey: u64, node: &InternodeNode) -> usize {
     let size: usize = node.size();
 
     // Internodes don't use permutation, keys are in physical order
@@ -315,10 +312,7 @@ pub fn upper_bound_internode<S: slot::ValueSlot>(
 ///
 /// Optimized version that doesn't create a permutation.
 #[inline]
-pub fn upper_bound_internode_direct<S: slot::ValueSlot>(
-    search_ikey: u64,
-    node: &InternodeNode<S>,
-) -> usize {
+pub fn upper_bound_internode_direct(search_ikey: u64, node: &InternodeNode) -> usize {
     let size: usize = node.size();
     let mut l: usize = 0;
     let mut r: usize = size;
@@ -376,10 +370,7 @@ pub fn upper_bound_internode_direct<S: slot::ValueSlot>(
 /// Returns the child index to follow: the first position where `ikey[i] >= search_ikey`,
 /// or `nkeys` if the search key is greater than all keys.
 #[inline(always)]
-pub fn upper_bound_internode_generic<S: slot::ValueSlot, I: TreeInternode<S>>(
-    search_ikey: u64,
-    node: &I,
-) -> usize {
+pub fn upper_bound_internode_generic<I: TreeInternode>(search_ikey: u64, node: &I) -> usize {
     let size: usize = node.nkeys();
     let mut l: usize = 0;
 

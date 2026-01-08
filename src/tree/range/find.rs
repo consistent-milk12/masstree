@@ -1072,7 +1072,7 @@ where
         let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
 
         // Binary search for child
-        let child_idx: usize = upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
+        let child_idx: usize = upper_bound_internode_generic::<L::Internode>(target_ikey, inode);
         let child: *mut u8 = inode.child(child_idx);
 
         // Prefetch child node

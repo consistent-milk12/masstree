@@ -146,6 +146,21 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     ///
     /// For WIDTH=15: `0xEDCB_A987_6543_2100`
     const SORTED: u64 = PermuterUtils::compute_sorted_value::<WIDTH>();
+
+    /// Mask covering all valid bits (size + WIDTH positions).
+    ///
+    /// For WIDTH=15: `(WIDTH + 1) * 4 = 64`, so mask = `u64::MAX`.
+    /// For WIDTH<15: mask = `(1 << ((WIDTH + 1) * 4)) - 1`.
+    ///
+    /// Used by `remove_to_back()` and `rotate()` to clear unused upper bits.
+    const WIDTH_MASK: u64 = {
+        let width_shift: usize = (WIDTH + 1) * 4;
+        if width_shift >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width_shift) - 1
+        }
+    };
 }
 
 impl<const WIDTH: usize> Default for Permuter<WIDTH> {
@@ -509,20 +524,8 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let i_shift: usize = (i + 1) * 4;
         let mask: u64 = !((1u64 << i_shift) - 1);
 
-        // Clear unused bits above WIDTH positions (for 64-bit safety).
-        //
-        // For WIDTH=15: width_shift = 16 * 4 = 64, which would cause `1u64 << 64`
-        // to overflow (in Rust, this wraps to 1, not 0). We use u64::MAX instead.
-        // For WIDTH < 15: we compute the proper mask to clear upper bits.
-        let width_shift: usize = (WIDTH + 1) * 4;
-
-        let width_mask: u64 = if width_shift >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << width_shift) - 1
-        };
-
-        let x: u64 = self.value & width_mask;
+        // Use compile-time WIDTH_MASK to clear unused upper bits
+        let x: u64 = self.value & Self::WIDTH_MASK;
 
         // Bit manipulation matching C++ reference:
         // - Decrement size, keep positions < i unchanged
@@ -663,16 +666,8 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let i_shift: usize = (i + 1) * 4;
         let mask: u64 = (1u64 << i_shift) - 1;
 
-        // Clear unused bits above WIDTH positions (for 64-bit safety)
-        let width_shift: usize = (WIDTH + 1) * 4;
-
-        let width_mask: u64 = if width_shift >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << width_shift) - 1
-        };
-
-        let x: u64 = self.value & width_mask;
+        // Use compile-time WIDTH_MASK to clear unused upper bits
+        let x: u64 = self.value & Self::WIDTH_MASK;
 
         let rotate_amount: usize = (j - i) * 4;
         let rotate_back: usize = (WIDTH - j) * 4;

@@ -336,7 +336,7 @@ where
             // Convert layer context for coalesce queue
             let sublayer_ctx = self.layer_context.map(|ctx| {
                 crate::tree::coalesce::SublayerContext {
-                    parent_leaf: ctx.parent_leaf as usize,
+                    parent_leaf: ctx.parent_leaf.cast_const(),
                     parent_slot: ctx.parent_slot,
                 }
             });
@@ -473,10 +473,10 @@ impl NodeCleaner {
                         Self::set_parent_erased::<S, L>(repl, parent_ptr);
                     }
                 } else if kp > 0 {
-                    Self::shift_internode_down_generic::<S, L::Internode>(parent, kp);
+                    Self::shift_internode_down_generic::<L::Internode>(parent, kp);
                 }
             } else if kp > 0 {
-                Self::shift_internode_down_generic::<S, L::Internode>(parent, kp);
+                Self::shift_internode_down_generic::<L::Internode>(parent, kp);
             }
 
             // Step 7: Handle redirect if leftmost child removed
@@ -910,10 +910,9 @@ impl NodeCleaner {
     /// `masstree_remove.hh:231`: `p->shift_down(kp - 1, kp, p->nkeys_ - kp)`
     #[cold]
     #[inline(never)]
-    fn shift_internode_down_generic<S, I>(inode: &I, removed_pos: usize)
+    fn shift_internode_down_generic<I>(inode: &I, removed_pos: usize)
     where
-        S: ValueSlot,
-        I: TreeInternode<S>,
+        I: TreeInternode,
     {
         let nkeys: usize = inode.nkeys();
 

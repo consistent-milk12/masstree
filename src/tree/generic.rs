@@ -285,7 +285,7 @@ where
         loop {
             // Find child index using generic search
             let child_idx: usize =
-                upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
+                upper_bound_internode_generic::<L::Internode>(target_ikey, inode);
             let child_ptr: *mut u8 = inode.child(child_idx);
 
             // Prefetch child node (hides memory latency for next iteration)
@@ -352,7 +352,7 @@ where
 
             let ikey: u64 = key.ikey();
             let child_idx: usize =
-                upper_bound_internode_generic::<S, L::Internode>(ikey, internode);
+                upper_bound_internode_generic::<L::Internode>(ikey, internode);
             let start_ptr: *mut u8 = internode.child(child_idx);
 
             // Prefetch child node
@@ -386,7 +386,7 @@ where
             // SAFETY: current is a valid internode pointer from traversal
             let internode: &L::Internode = unsafe { &*(current.cast::<L::Internode>()) };
             let child_idx: usize =
-                upper_bound_internode_generic::<S, L::Internode>(ikey, internode);
+                upper_bound_internode_generic::<L::Internode>(ikey, internode);
             let child_ptr: *mut u8 = internode.child(child_idx);
 
             // Prefetch child node
@@ -574,7 +574,7 @@ where
 
                 // Binary/linear search for child pointer
                 let child_idx: usize =
-                    upper_bound_internode_generic::<S, L::Internode>(target_ikey, inode);
+                    upper_bound_internode_generic::<L::Internode>(target_ikey, inode);
 
                 // Read child into the OTHER buffer (sense ^ 1)
                 let other: usize = sense ^ 1;

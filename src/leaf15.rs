@@ -1617,8 +1617,8 @@ unsafe impl<S: ValueSlot + Send + Sync> Sync for LeafNode15<S> {}
 
 impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> for LeafNode15<S> {
     type Perm = Permuter15;
-    // Internodes use fixed WIDTH=15 (4-bit permutation slots)
-    type Internode = crate::internode::InternodeNode<S>;
+    // Internodes use fixed WIDTH=15 (non-generic, 4-bit permutation slots)
+    type Internode = crate::internode::InternodeNode;
     const WIDTH: usize = WIDTH_15;
     /// 80% of 15 = 12, trigger splits earlier to reduce contention
     const SPLIT_THRESHOLD: usize = 12;

@@ -185,17 +185,19 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
 
 /// Trait for internode types used in a `MassTree`.
 ///
-/// Abstracts over `InternodeNode<S>` for generic tree operations.
+/// Abstracts over `InternodeNode` for generic tree operations.
 /// Internode WIDTH is fixed at 15 (matching leaf WIDTH for optimal B+tree fanout).
 ///
-/// # Type Parameters
+/// # Note on Generic Parameter
 ///
-/// - `S`: The slot type implementing [`ValueSlot`]
+/// Unlike leaf nodes, internodes don't store values - only `u64` keys and `*mut u8`
+/// child pointers. The internode type is therefore non-generic, reducing code
+/// monomorphization (one `InternodeNode` implementation regardless of slot type).
 ///
 /// # Implementors
 ///
-/// - `InternodeNode<S>` (fixed WIDTH=15)
-pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
+/// - `InternodeNode` (fixed WIDTH=15)
+pub trait TreeInternode: Sized + Send + Sync + 'static {
     /// Node width (max number of children).
     const WIDTH: usize;
 
@@ -346,6 +348,7 @@ pub trait TreeInternode<S: ValueSlot>: Sized + Send + Sync + 'static {
     ///
     /// * `new_right_ptr` must point to `new_right`
     /// * The caller must hold the lock on `self`
+    #[must_use = "popup_key must be inserted into parent node to complete the split"]
     fn split_into(
         &self,
         new_right: &mut Self,
@@ -383,7 +386,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     type Perm: TreePermutation;
 
     /// The internode type for this tree variant.
-    type Internode: TreeInternode<S>;
+    type Internode: TreeInternode;
 
     /// Node width (number of slots).
     const WIDTH: usize;

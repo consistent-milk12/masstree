@@ -1644,7 +1644,8 @@ unsafe impl<V: InlineBits> Sync for LeafNode15TrueInline<V> {}
 
 impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafNode15TrueInline<V> {
     type Perm = Permuter15;
-    type Internode = crate::internode::InternodeNode<TrueInlineSlot<V>>;
+    // Internodes are non-generic (they don't store values, only keys and child pointers)
+    type Internode = crate::internode::InternodeNode;
     const WIDTH: usize = WIDTH_15;
     const SPLIT_THRESHOLD: usize = 12; // 80% of 15
 

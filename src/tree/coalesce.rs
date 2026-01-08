@@ -47,12 +47,19 @@ use crate::tree::remove::NodeCleaner;
 /// leaf's layer slot. This struct stores that information.
 #[derive(Debug, Clone, Copy)]
 pub struct SublayerContext {
-    /// Pointer to the parent leaf (as usize for Send/Sync safety).
-    pub parent_leaf: usize,
+    /// Pointer to the parent leaf (type-erased for generics).
+    pub parent_leaf: *const u8,
 
     /// Physical slot index in the parent leaf containing the layer pointer.
     pub parent_slot: usize,
 }
+
+// SAFETY: SublayerContext is Send/Sync because:
+// - parent_leaf is a raw pointer to a node protected by the tree's concurrency protocol
+// - The pointer is only dereferenced while holding proper locks
+// - The guard ensures the node is not deallocated during use
+unsafe impl Send for SublayerContext {}
+unsafe impl Sync for SublayerContext {}
 
 /// Entry in the coalesce queue: pointer to empty leaf and its `ikey_bound`.
 #[derive(Debug, Clone, Copy)]
@@ -431,7 +438,7 @@ impl Coalesce {
         // Step 3: Lock the parent leaf
         // SAFETY: ctx.parent_leaf was a valid leaf pointer obtained during traversal
         // and protected by the guard. We released sublayer lock before acquiring parent.
-        let parent_leaf: &L = unsafe { &*(ctx.parent_leaf as *const L) };
+        let parent_leaf: &L = unsafe { &*(ctx.parent_leaf.cast::<L>()) };
         let mut parent_lock = parent_leaf.version().lock();
 
         // Step 4: Verify slot still points to sublayer (may have changed concurrently)
@@ -507,7 +514,7 @@ mod tests {
 
         // Schedule with sublayer context
         let ctx = SublayerContext {
-            parent_leaf: 0x1234,
+            parent_leaf: ptr::without_provenance(0x1234),
             parent_slot: 5,
         };
         queue.schedule(ptr::null_mut(), 300, Some(ctx));

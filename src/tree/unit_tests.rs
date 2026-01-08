@@ -80,8 +80,7 @@ fn concurrent_insert_then_get_does_not_lose_key() {
             }
 
             // SAFETY: `!is_leaf()` means this is an internode.
-            let inode: &InternodeNode<LeafValue<u64>> =
-                unsafe { &*(node.cast::<InternodeNode<LeafValue<u64>>>()) };
+            let inode: &InternodeNode = unsafe { &*(node.cast::<InternodeNode>()) };
             node = inode.child(0);
         }
 
