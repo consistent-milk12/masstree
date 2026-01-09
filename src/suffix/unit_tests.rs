@@ -1,3 +1,7 @@
+use std::cmp::Ordering;
+use std::iter as StdIter;
+use std::mem as StdMem;
+
 use super::{INITIAL_CAPACITY, InlineSuffixBag, PermutationProvider, SuffixBag};
 use crate::permuter24::Permuter24;
 
@@ -142,7 +146,7 @@ fn test_compact_empty() {
     let mut bag: SuffixBag<15> = SuffixBag::new();
 
     // Compact with no active slots should work
-    let reclaimed: usize = bag.compact(std::iter::empty());
+    let reclaimed: usize = bag.compact(StdIter::empty());
 
     assert_eq!(reclaimed, 0);
     assert_eq!(bag.count(), 0);
@@ -284,18 +288,9 @@ fn test_suffix_compare() {
 
     bag.assign(0, b"hello");
 
-    assert_eq!(
-        bag.suffix_compare(0, b"hello"),
-        Some(std::cmp::Ordering::Equal)
-    );
-    assert_eq!(
-        bag.suffix_compare(0, b"hella"),
-        Some(std::cmp::Ordering::Greater)
-    );
-    assert_eq!(
-        bag.suffix_compare(0, b"hellz"),
-        Some(std::cmp::Ordering::Less)
-    );
+    assert_eq!(bag.suffix_compare(0, b"hello"), Some(Ordering::Equal));
+    assert_eq!(bag.suffix_compare(0, b"hella"), Some(Ordering::Greater));
+    assert_eq!(bag.suffix_compare(0, b"hellz"), Some(Ordering::Less));
     assert_eq!(bag.suffix_compare(1, b"hello"), None);
 }
 
@@ -589,14 +584,8 @@ fn test_inline_suffix_compare() {
 
     bag.try_assign(0, b"hello");
 
-    assert_eq!(
-        bag.suffix_compare(0, b"hello"),
-        Some(std::cmp::Ordering::Equal)
-    );
-    assert_eq!(
-        bag.suffix_compare(0, b"hella"),
-        Some(std::cmp::Ordering::Greater)
-    );
+    assert_eq!(bag.suffix_compare(0, b"hello"), Some(Ordering::Equal));
+    assert_eq!(bag.suffix_compare(0, b"hella"), Some(Ordering::Greater));
     assert_eq!(bag.suffix_compare(1, b"hello"), None);
 }
 
@@ -698,15 +687,239 @@ fn test_inline_various_widths() {
 #[test]
 fn test_inline_size_calculation() {
     // Verify the size calculation from the doc comment
-    // InlineSuffixBag<24, 256>: 24*4 + 2 + 256 = 354 bytes
-    assert_eq!(
-        std::mem::size_of::<InlineSuffixBag<24, 256>>(),
-        24 * 4 + 2 + 256
-    );
+    // InlineSuffixBag<24, 256> - 24 * 4 + 2 + 1 + 256 + 1 (padding) = 356 bytes
+    assert_eq!(StdMem::size_of::<InlineSuffixBag<24, 256>>(), 356);
 
-    // InlineSuffixBag<15, 128>: 15*4 + 2 + 128 = 190 bytes
-    assert_eq!(
-        std::mem::size_of::<InlineSuffixBag<15, 128>>(),
-        15 * 4 + 2 + 128
-    );
+    // InlineSuffixBag<15, 128> - 15 * 4 + 2 + 1 + 128 + 1 (padding) = 192 bytes
+    assert_eq!(StdMem::size_of::<InlineSuffixBag<15, 128>>(), 192);
+}
+
+// ============================================================================
+//  Tests for suffix_count maintenance
+// ============================================================================
+
+#[test]
+fn test_suffix_count_assign_clear() {
+    let mut bag: SuffixBag<15> = SuffixBag::new();
+    assert_eq!(bag.count(), 0);
+
+    bag.assign(0, b"hello");
+    assert_eq!(bag.count(), 1);
+
+    bag.assign(1, b"world");
+    assert_eq!(bag.count(), 2);
+
+    // Reassign to same slot, count should stay unchanged
+    bag.assign(0, b"hi");
+    assert_eq!(bag.count(), 2);
+
+    bag.clear(0);
+    assert_eq!(bag.count(), 1);
+
+    bag.clear(1);
+    assert_eq!(bag.count(), 0);
+
+    // Clear already empty slot - count stays 0
+    bag.clear(0);
+    assert_eq!(bag.count(), 0);
+}
+
+#[test]
+fn test_suffix_count_try_assign_in_place() {
+    let mut bag: SuffixBag<15> = SuffixBag::new();
+    assert_eq!(bag.count(), 0);
+
+    assert!(bag.try_assign_in_place(0, b"hello"));
+    assert_eq!(bag.count(), 1);
+
+    assert!(bag.try_assign_in_place(1, b"world"));
+    assert_eq!(bag.count(), 2);
+
+    // Reassign to same slot (shorter suffix reuses space) - count unchanged
+    assert!(bag.try_assign_in_place(0, b"hi"));
+    assert_eq!(bag.count(), 2);
+
+    // Reassign to same slot (longer suffix appends) - count unchanged
+    assert!(bag.try_assign_in_place(1, b"hello world"));
+    assert_eq!(bag.count(), 2);
+}
+
+#[test]
+fn test_suffix_count_after_compact() {
+    let mut bag: SuffixBag<15> = SuffixBag::new();
+    bag.assign(0, b"hello");
+    bag.assign(1, b"world");
+    bag.assign(2, b"test");
+    assert_eq!(bag.count(), 3);
+
+    bag.clear(1);
+    assert_eq!(bag.count(), 2);
+
+    // Compact keeping only slots 0 and 2
+    bag.compact([0, 2].into_iter());
+    assert_eq!(bag.count(), 2);
+
+    // Compact keeping only slot 0
+    bag.compact(StdIter::once(0));
+    assert_eq!(bag.count(), 1);
+
+    // Compact with empty iterator
+    bag.compact(StdIter::empty());
+    assert_eq!(bag.count(), 0);
+}
+
+#[test]
+fn test_suffix_count_clone() {
+    let mut bag: SuffixBag<15> = SuffixBag::new();
+    bag.assign(0, b"hello");
+    bag.assign(1, b"world");
+    bag.clear(1); // Clear but don't compact - garbage in data
+
+    let cloned = bag.clone();
+    assert_eq!(cloned.count(), 1);
+    assert_eq!(cloned.get(0), Some(b"hello".as_slice()));
+    assert_eq!(cloned.get(1), None);
+
+    // Clone should have compacted - used bytes should be minimal
+    assert_eq!(cloned.used(), 5); // Only "hello"
+}
+
+#[test]
+fn test_inline_suffix_count_try_assign() {
+    let mut bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    assert_eq!(bag.count(), 0);
+
+    assert!(bag.try_assign(0, b"hello"));
+    assert_eq!(bag.count(), 1);
+
+    assert!(bag.try_assign(1, b"world"));
+    assert_eq!(bag.count(), 2);
+
+    // Reassign shorter suffix (reuses space) - count unchanged
+    assert!(bag.try_assign(0, b"hi"));
+    assert_eq!(bag.count(), 2);
+}
+
+#[test]
+fn test_inline_suffix_count_clear() {
+    let mut bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+
+    bag.try_assign(0, b"hello");
+    bag.try_assign(1, b"world");
+    assert_eq!(bag.count(), 2);
+
+    bag.clear(0);
+    assert_eq!(bag.count(), 1);
+
+    bag.clear(1);
+    assert_eq!(bag.count(), 0);
+
+    // Clear already empty slot
+    bag.clear(0);
+    assert_eq!(bag.count(), 0);
+}
+
+#[test]
+fn test_inline_suffix_count_clear_all() {
+    let mut bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+
+    bag.try_assign(0, b"hello");
+    bag.try_assign(1, b"world");
+    assert_eq!(bag.count(), 2);
+
+    bag.clear_all();
+    assert_eq!(bag.count(), 0);
+}
+
+// ============================================================================
+//  Tests for try_assign with compaction
+// ============================================================================
+
+#[test]
+fn test_try_assign_compacts_before_grow() {
+    // Create a bag with INITIAL_CAPACITY to avoid capacity changes from compaction
+    let mut bag: SuffixBag<15> = SuffixBag::with_capacity(INITIAL_CAPACITY);
+
+    // Fill most of it
+    for i in 0..12 {
+        bag.assign(i, b"1234567890"); // 10 bytes each = 120 bytes
+    }
+
+    // Clear half the slots, creating 60 bytes of garbage
+    for i in (0..12).step_by(2) {
+        bag.clear(i);
+    }
+    // Now: 60 bytes active (slots 1,3,5,7,9,11), 60 bytes garbage
+
+    let old_used: usize = bag.used();
+    assert_eq!(old_used, 120); // All data still in buffer
+
+    // Try to assign - should compact first (reclaiming 60 bytes)
+    let result: Result<(), crate::AllocError> = bag.try_assign(12, b"newdata!!!");
+    assert!(result.is_ok());
+
+    // After compaction + new assignment: 60 + 10 = 70 bytes
+    assert!(bag.used() < old_used); // Compaction happened
+    assert_eq!(bag.count(), 7); // slots 1,3,5,7,9,11,12
+
+    // Verify data integrity
+    assert_eq!(bag.get(12), Some(b"newdata!!!".as_slice()));
+    assert_eq!(bag.get(1), Some(b"1234567890".as_slice()));
+}
+
+#[test]
+fn test_try_assign_grows_when_compact_insufficient() {
+    let mut bag: SuffixBag<15> = SuffixBag::with_capacity(16);
+
+    // Fill completely with no garbage
+    bag.assign(0, b"12345678"); // 8 bytes
+    bag.assign(1, b"12345678"); // 8 bytes = 16 total, no garbage
+
+    let old_capacity = bag.capacity();
+
+    // Try to assign - compaction won't help, must grow
+    let result: Result<(), crate::AllocError> = bag.try_assign(2, b"newdata!");
+    assert!(result.is_ok());
+
+    // Capacity should have grown
+    assert!(bag.capacity() > old_capacity);
+    assert_eq!(bag.count(), 3);
+}
+
+// ============================================================================
+//  Tests for compacting clone
+// ============================================================================
+
+#[test]
+fn test_clone_compacts_garbage() {
+    let mut bag: SuffixBag<15> = SuffixBag::new();
+
+    // Add and remove several suffixes to create garbage
+    bag.assign(0, b"aaaaaaaaaa"); // 10 bytes
+    bag.assign(1, b"bbbbbbbbbb"); // 10 bytes
+    bag.assign(2, b"cccccccccc"); // 10 bytes
+    bag.assign(0, b"ddddd"); // 5 bytes (old 10 bytes now garbage)
+    bag.clear(1); // 10 more bytes of garbage
+
+    // Original has garbage
+    let original_used: usize = bag.used();
+    assert!(original_used >= 35); // At least all the data written
+
+    let cloned: SuffixBag<15> = bag.clone();
+
+    // Clone should only have active data
+    assert_eq!(cloned.used(), 15); // 5 (slot 0) + 10 (slot 2)
+    assert_eq!(cloned.count(), 2);
+    assert_eq!(cloned.get(0), Some(b"ddddd".as_slice()));
+    assert_eq!(cloned.get(1), None);
+    assert_eq!(cloned.get(2), Some(b"cccccccccc".as_slice()));
+}
+
+#[test]
+fn test_clone_empty_bag() {
+    let bag: SuffixBag<15> = SuffixBag::new();
+    let cloned: SuffixBag<15> = bag;
+
+    assert_eq!(cloned.count(), 0);
+    assert_eq!(cloned.used(), 0);
 }

@@ -2453,7 +2453,7 @@ const _: () = {
     assert!(std::mem::size_of::<[AtomicU64; WIDTH_15]>() == 120);
     assert!(std::mem::size_of::<[AtomicU8; WIDTH_15]>() == 15);
     assert!(std::mem::size_of::<[AtomicPtr<u8>; WIDTH_15]>() == 120);
-    assert!(std::mem::size_of::<InlineSuffixBag<WIDTH_15, 256>>() == 318);
+    assert!(std::mem::size_of::<InlineSuffixBag<WIDTH_15, 256>>() == 320);
 };
 
 //

@@ -1,0 +1,65 @@
+use super::*;
+
+// impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
+//     #[inline(always)]
+//     fn clone(&self) -> Self {
+//         Self {
+//             slots: self.slots,
+//             data: self.data.clone(),
+//             suffix_count: self.suffix_count,
+//         }
+//     }
+// }
+
+impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
+    /// Clone with compaction, only copies active suffix data.
+    ///
+    /// This avoids copying dead/garbage data from the original buffer.
+    fn clone(&self) -> Self {
+        if self.suffix_count == 0 {
+            return Self::new();
+        }
+
+        // Calculate exact size needed for active suffixes
+        let needed: usize = self
+            .slots
+            .iter()
+            .filter(|s: &&SlotMeta| s.has_suffix())
+            .map(|s: &SlotMeta| s.len as usize)
+            .sum();
+
+        let capacity: usize = needed.next_power_of_two().max(INITIAL_CAPACITY);
+        let mut new_data: Vec<u8> = Vec::with_capacity(capacity);
+        let mut new_slots: [SlotMeta; WIDTH] = [SlotMeta::EMPTY; WIDTH];
+
+        #[expect(clippy::indexing_slicing)]
+        for slot in 0..WIDTH {
+            let meta: SlotMeta = self.slots[slot];
+
+            if !meta.has_suffix() {
+                continue;
+            }
+
+            let start: usize = meta.offset as usize;
+            let end: usize = start + meta.len as usize;
+
+            let new_offset: usize = new_data.len();
+            new_data.extend_from_slice(&self.data[start..end]);
+
+            #[expect(clippy::cast_possible_truncation)]
+            {
+                new_slots[slot] = SlotMeta {
+                    offset: new_offset as u32,
+                    len: meta.len,
+                    _pad: 0,
+                };
+            }
+        }
+
+        Self {
+            slots: new_slots,
+            data: new_data,
+            suffix_count: self.suffix_count,
+        }
+    }
+}
