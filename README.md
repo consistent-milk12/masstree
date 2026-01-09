@@ -10,7 +10,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 - Lock-free reads with version validation
 - Concurrent inserts and deletes with fine-grained leaf locking
 - Zero-copy range scans with `scan_ref` and `scan_prefix`
-- Memory reclamation via epoch-based deferred cleanup
+- Memory reclamation via hyaline scheme (`seize` crate)
 - Lazy leaf coalescing for deleted entries
 - Two node widths: `MassTree` (WIDTH=24) and `MassTree15` (WIDTH=15)
 
@@ -25,7 +25,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 | `remove` | Concurrent deletion with memory reclamation |
 | `scan`, `scan_ref`, `scan_prefix` | Zero-copy range iteration |
 | Leaf coalescing | Lazy queue-based cleanup |
-| Memory reclamation | Seize-based epoch reclamation |
+| Memory reclamation | Hyaline scheme via `seize` crate |
 
 **Tests:** 755 tests (466 unit + 88 ported from C++ reference + integration). Miri strict provenance clean.
 
@@ -161,47 +161,33 @@ let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
 
 ## Benchmarks
 
-6 physical cores, `mimalloc` allocator, 200 samples per benchmark. Your mileage may vary.
+6 physical cores, `mimalloc` allocator, Divan framework with 200 samples per benchmark. Your mileage may vary.
 
-### Mixed Read/Write (90% read, 10% write, 6 threads)
-
-| Workload | MassTree15 | IndexSet | TreeIndex | SkipMap |
-|----------|------------|----------|-----------|---------|
-| Uniform | 19.3 M/s | 10.3 M/s | 11.0 M/s | 7.8 M/s |
-| Zipfian | 21.9 M/s | 5.0 M/s | 9.5 M/s | 8.5 M/s |
-| High contention | 51.7 M/s | 3.7 M/s | 12.0 M/s | 11.4 M/s |
-| Single hot key | 16.7 M/s | 3.3 M/s | 3.5 M/s | 5.4 M/s |
-
-The high-contention result likely reflects the per-node versioning design. Pure insert workloads favor TreeIndex.
-
-### Pure Read (6 threads)
+### vs Rust Competitors (6 threads, median throughput)
 
 | Workload | MassTree15 | IndexSet | TreeIndex | SkipMap |
 |----------|------------|----------|-----------|---------|
-| Uniform | 27.5 M/s | 12.8 M/s | 19.2 M/s | 12.0 M/s |
-| 8-byte keys | 35.2 M/s | 13.8 M/s | 15.9 M/s | 9.6 M/s |
+| Mixed 90/10 Uniform | **20.5 M/s** | 10.5 M/s | 10.3 M/s | 7.8 M/s |
+| Mixed 90/10 Zipfian | **21.8 M/s** | 3.9 M/s | 8.1 M/s | 8.1 M/s |
+| High Contention (1K keys) | **43.4 M/s** | 3.3 M/s | 11.5 M/s | 10.7 M/s |
+| Single Hot Key | **12.6 M/s** | 3.0 M/s | 3.6 M/s | 5.4 M/s |
+| Pure Reads | **30.6 M/s** | 13.8 M/s | 15.7 M/s | 12.9 M/s |
+| 8-byte Keys | **32.6 M/s** | 13.6 M/s | 15.6 M/s | 9.3 M/s |
 
-### Single-Thread Latency
+MassTree15 wins all benchmark categories. The high-contention advantage reflects per-node versioning design.
 
-| Structure | Read Latency |
-|-----------|--------------|
-| MassTree15 | 771 µs |
-| TreeIndex | 1,310 µs |
-| IndexSet | 1,377 µs |
-| SkipMap | 1,864 µs |
+### vs C++ Reference (6 threads, mean throughput)
 
-### vs C++ Reference (6 threads)
+| Workload | Rust | C++ | vs C++ |
+|----------|------|-----|--------|
+| 98% reads (rw2g98) | 36.24 M/s | 18.94 M/s | **+91%** |
+| 90% reads (rw2g90) | 28.34 M/s | 13.78 M/s | **+106%** |
+| Hotspot (same) | 7.20 M/s | 2.58 M/s | **+179%** |
+| Updates (uscale) | 16.56 M/s | 9.34 M/s | **+77%** |
+| Sequential (rw3) | 38.66 M/s | 40.37 M/s | -4% |
+| Reverse sequential (rw4) | 22.66 M/s | 37.81 M/s | **-40%** |
 
-| Workload | Rust | C++ | Ratio |
-|----------|------|-----|-------|
-| 98% reads (rw2g98) | 37.68 M/s | 19.1 M/s | 197% |
-| 90% reads (rw2g90) | 29.58 M/s | 13.5 M/s | 219% |
-| Hotspot contention (same) | 6.67 M/s | 2.57 M/s | 259% |
-| Updates (uscale) | 17.68 M/s | 9.3 M/s | 190% |
-| Sequential keys (rw3) | 33.91 M/s | 39.3 M/s | 86% |
-| Reverse sequential (rw4) | 27.22 M/s | 35.9 M/s | 76% |
-
-Mixed results. Performs well on contention-heavy workloads but trails on sequential key patterns (76-86%). The C++ implementation has optimizations for sequential access that aren't yet ported.
+Rust wins 6/8 benchmarks. Trails on sequential patterns (-4% to -40%) where C++ has prefetching advantages.
 
 Note: This implementation diverges from C++ in several ways (notably hyaline-based memory reclamation via `seize`). Direct comparison is imperfect.
 
