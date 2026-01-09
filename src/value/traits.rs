@@ -1,7 +1,7 @@
 //! Leaf value operation traits for storage-agnostic value access.
 //!
 //! These traits enable the tree to manipulate values without knowing whether
-//! they're stored as pointers ([`Arc`]/[`Box`]) or inline bits.
+//! they're stored as pointers ([`std::sync::Arc`]/[`std::boxed::Box`]) or inline bits.
 //!
 //! # Design Principle
 //! The leaf owns representation, the tree owns concurrency. Value storage details
@@ -68,7 +68,7 @@ pub trait LeafValueUpdate<S: ValueSlot> {
     ///
     /// # Implementation
     ///
-    /// - Pointer-backed: swap pointers, retire old (if [`NEEDS_RETIREMENT`])
+    /// - Pointer-backed: swap pointers, retire old (if [`ValueSlot::NEEDS_RETIREMENT`])
     /// - True-inline: swap inline bits, no retirement
     fn replace_value_output(
         &self,
@@ -95,7 +95,7 @@ pub trait LeafValueClear<S: ValueSlot> {
     /// # Behavior
     ///
     /// - Sets slot to empty state (null pointer)
-    /// - Retires old value if pointer-backed (under [`NEEDS_RETIREMENT`] guard)
+    /// - Retires old value if pointer-backed (under [`ValueSlot::NEEDS_RETIREMENT`] guard)
     fn clear_value_output(&self, slot: usize, guard: &LocalGuard<'_>);
 }
 
@@ -119,7 +119,7 @@ pub trait LeafValueTake<S: ValueSlot> {
     ///
     /// - Returns the value that was in the slot
     /// - Sets slot to empty state (null pointer)
-    /// - Retires old value if pointer-backed (under [`NEEDS_RETIREMENT`] guard)
+    /// - Retires old value if pointer-backed (under [`ValueSlot::NEEDS_RETIREMENT`] guard)
     ///
     /// Note: The caller will install a layer pointer after this returns.
     fn take_value_output(&self, slot: usize, guard: &LocalGuard<'_>) -> Option<S::Output>;

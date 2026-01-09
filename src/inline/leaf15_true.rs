@@ -2019,7 +2019,7 @@ impl<V: InlineBits> crate::leaf_trait::LayerCapableLeaf<TrueInlineSlot<V>>
 
 impl<V: InlineBits> Drop for LeafNode15TrueInline<V> {
     /// FIXED: Drop the leaf node, cleaning up the external suffix bag.
-    /// This was leading to OOM's in benchmarks for [`MassTree15Inline`].
+    /// This was leading to OOM's in benchmarks for [`crate::MassTree15Inline`].
     ///
     /// # What's cleaned up
     /// - `external_ksuf`: Heap-allocated [`SuffixBag`] for overflow suffix storage

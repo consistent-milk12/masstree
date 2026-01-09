@@ -19,6 +19,365 @@
 //! guard.mark_insert();
 //! // Lock released when guard drops
 //! ```
+//!
+//! # Bit Layout
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                         NodeVersion u32 Layout                               │
+//!   ├──────────────────────────────────────────────────────────────────────────────┤
+//!   │                                                                              │
+//!   │    31    30    29    28      27 ──────────── 9      8 ──── 3   2   1   0     │
+//!   │   ┌────┬────┬────┬────┬─────────────────────┬────────────┬───┬───┬───┬───┐   │
+//!   │   │LEAF│ROOT│DEL │RSVD│   VSPLIT (19 bits)  │VINS(6bits) │SPL│INS│LCK│   │   │
+//!   │   │    │    │ETED│    │   split version     │insert ver  │IT │ERT│   │   │   │
+//!   │   └────┴────┴────┴────┴─────────────────────┴────────────┴───┴───┴───┴───┘   │
+//!   │                                                                              │
+//!   │   Bit  Name           Description                                            │
+//!   │   ───  ────           ───────────                                            │
+//!   │    0   LOCK_BIT       Node is locked for modification                        │
+//!   │    1   INSERTING_BIT  Insert operation in progress (dirty)                   │
+//!   │    2   SPLITTING_BIT  Split operation in progress (dirty)                    │
+//!   │   3-8  VINSERT        Insert version counter (6 bits, wraps at 64)           │
+//!   │   9-27 VSPLIT         Split version counter (19 bits, ~512K operations)      │
+//!   │   28   RESERVED       Reserved/unused bit                                    │
+//!   │   29   DELETED_BIT    Node is logically deleted                              │
+//!   │   30   ROOT_BIT       Node is a tree/layer root                              │
+//!   │   31   ISLEAF_BIT     Node is a leaf (vs internode)                          │
+//!   │                                                                              │
+//!   │   DIRTY_MASK = INSERTING_BIT | SPLITTING_BIT = bits 1-2                      │
+//!   │   - stable() spins while DIRTY_MASK != 0                                     │
+//!   │   - has_changed() uses (v1 ^ current) >= VSPLIT_LOWBIT                       │
+//!   │     (ignores bits 0-8: LOCK, INSERTING, SPLITTING, VINSERT)                  │
+//!   │                                                                              │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Optimistic Concurrency Control Protocol
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                    READER (Lock-Free, Optimistic)                            │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//!
+//!   ┌──────────────┐
+//!   │   stable()   │──── Spin while DIRTY_MASK set, return clean version v1
+//!   └──────┬───────┘     (Acquire fence on success)
+//!          │
+//!          ▼
+//!   ┌──────────────┐
+//!   │  Read data   │──── Access node fields (ikeys, values, permutation)
+//!   │  from node   │     No locks held, concurrent writes may occur
+//!   └──────┬───────┘
+//!          │
+//!          ▼
+//!   ┌──────────────┐     Compiler fence + Relaxed load
+//!   │ has_changed  │──── Compare (v1 ^ current) >= VSPLIT_LOWBIT (512)
+//!   │    (v1)?     │
+//!   └──────┬───────┘
+//!          │
+//!     ┌────┴────┐
+//!     │         │
+//!     ▼         ▼
+//!  ┌──────┐  ┌──────┐
+//!  │ true │  │false │
+//!  │      │  │      │
+//!  │RETRY │  │ USE  │
+//!  │      │  │RESULT│
+//!  └──────┘  └──────┘
+//!
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                    WRITER (Fine-Grained Lock)                                │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//!
+//!   ┌──────────────┐
+//!   │    lock()    │──── CAS: set LOCK_BIT | INSERTING_BIT atomically
+//!   │              │     (Acquire ordering on success)
+//!   └──────┬───────┘
+//!          │
+//!          ▼
+//!   ┌──────────────┐
+//!   │ LockGuard    │──── RAII guard proves lock is held
+//!   │  returned    │     Type-state pattern: compile-time verification
+//!   └──────┬───────┘
+//!          │
+//!          ▼
+//!   ┌──────────────┐
+//!   │ mark_split() │──── Optional: set SPLITTING_BIT if doing split
+//!   │ (optional)   │     Required before structural changes
+//!   └──────┬───────┘
+//!          │
+//!          ▼
+//!   ┌──────────────┐
+//!   │ Modify node  │──── Write ikeys, values, permutation, pointers
+//!   │   data       │     Protected by exclusive lock
+//!   └──────┬───────┘
+//!          │
+//!          ▼
+//!   ┌──────────────┐     Guard Drop:
+//!   │ drop(guard)  │──── - If SPLITTING: version += VSPLIT_LOWBIT, clear all
+//!   │   (unlock)   │     - Else: version += VINSERT_LOWBIT, clear dirty
+//!   └──────────────┘     (Release ordering)
+//! ```
+//!
+//! # Lock State Machine
+//!
+//! ```text
+//!                              ┌─────────────────────────────────────┐
+//!                              │                                     │
+//!                              ▼                                     │
+//!   ┌──────────────────────────────────────────────────────────────┐ │
+//!   │                     UNLOCKED (Clean)                         │ │
+//!   │                                                              │ │
+//!   │   LOCK=0, INSERTING=0, SPLITTING=0                           │ │
+//!   │   - Readers: stable() returns immediately                    │ │
+//!   │   - Writers: CAS to acquire lock                             │ │
+//!   └────────────────────────┬─────────────────────────────────────┘ │
+//!                            │                                       │
+//!                            │ lock() CAS: set LOCK|INSERTING        │
+//!                            │                                       │
+//!                            ▼                                       │
+//!   ┌──────────────────────────────────────────────────────────────┐ │
+//!   │                     LOCKED (Inserting)                       │ │
+//!   │                                                              │ │
+//!   │   LOCK=1, INSERTING=1, SPLITTING=0                           │ │
+//!   │   - Readers: stable() spins (DIRTY_MASK set)                 │ │
+//!   │   - Holder: can mark_split() if needed                       │ │
+//!   └──────────────┬───────────────────────────────────────────────┘ │
+//!                  │                                                 │
+//!           ┌──────┴──────┐                                          │
+//!           │             │                                          │
+//!           ▼             ▼                                          │
+//!   ┌────────────┐  ┌────────────┐                                   │
+//!   │ mark_split │  │ drop()     │                                   │
+//!   │ called     │  │ (unlock)   │                                   │
+//!   └─────┬──────┘  └─────┬──────┘                                   │
+//!         │               │                                          │
+//!         │               │ VINSERT += 1                             │
+//!         │               │ clear LOCK|INSERTING                     │
+//!         │               │                                          │
+//!         ▼               └──────────────────────────────────────────┘
+//!   ┌──────────────────────────────────────────────────────────────┐
+//!   │                     LOCKED (Splitting)                       │
+//!   │                                                              │
+//!   │   LOCK=1, INSERTING=1, SPLITTING=1                           │
+//!   │   - Readers: stable() spins                                  │
+//!   │   - Holder: structural modifications allowed                 │
+//!   └──────────────────────────┬───────────────────────────────────┘
+//!                              │
+//!                              │ drop() (unlock)
+//!                              │ VSPLIT += 1
+//!                              │ clear LOCK|INSERTING|SPLITTING|ROOT
+//!                              │
+//!                              └─────────────────────────────────────┐
+//!                                                                    │
+//!                              ┌─────────────────────────────────────┘
+//!                              │
+//!                              ▼
+//!                         UNLOCKED (Clean, version incremented)
+//! ```
+//!
+//! # [`LockGuard`] Type-State Pattern
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                    LockGuard<'a> TYPE-STATE PATTERN                          │
+//!   ├──────────────────────────────────────────────────────────────────────────────┤
+//!   │                                                                              │
+//!   │   The LockGuard uses Rust's type system to provide compile-time proof        │
+//!   │   that a lock is held. Operations requiring exclusive access take            │
+//!   │   `&mut LockGuard` as a capability token.                                    │
+//!   │                                                                              │
+//!   │   ┌────────────────────────────────────────────────────────────────────────┐ │
+//!   │   │                         STRUCT LAYOUT                                  │ │
+//!   │   │                                                                        │ │
+//!   │   │   struct LockGuard<'a> {                                               │ │
+//!   │   │       version: *const NodeVersion,  // Raw ptr to locked version       │ │
+//!   │   │       locked_value: u32,            // Snapshot at lock time           │ │
+//!   │   │       _lifetime: PhantomData<&'a NodeVersion>,  // Lifetime bound      │ │
+//!   │   │       _marker: PhantomData<*mut ()>,            // !Send + !Sync       │ │
+//!   │   │   }                                                                    │ │
+//!   │   │                                                                        │ │
+//!   │   │   Size: 16 bytes (ptr + u32 + padding)                                 │ │
+//!   │   │   Alignment: 8 bytes                                                   │ │
+//!   │   │                                                                        │ │
+//!   │   └────────────────────────────────────────────────────────────────────────┘ │
+//!   │                                                                              │
+//!   │   ┌────────────────────────────────────────────────────────────────────────┐ │
+//!   │   │                    COMPILE-TIME GUARANTEES                             │ │
+//!   │   │                                                                        │ │
+//!   │   │   1. LIFETIME BOUND ('a):                                              │ │
+//!   │   │      ├─ Guard cannot outlive the NodeVersion it locks                  │ │
+//!   │   │      ├─ Prevents use-after-free of version field                       │ │
+//!   │   │      └─ Enforced by: PhantomData<&'a NodeVersion>                      │ │
+//!   │   │                                                                        │ │
+//!   │   │   2. !Send (cannot transfer between threads):                          │ │
+//!   │   │      ├─ Lock acquired on thread T must be released on thread T         │ │
+//!   │   │      ├─ Prevents cross-thread lock ownership confusion                 │ │
+//!   │   │      └─ Enforced by: PhantomData<*mut ()>                              │ │
+//!   │   │                                                                        │ │
+//!   │   │   3. !Sync (cannot share references between threads):                  │ │
+//!   │   │      ├─ &LockGuard cannot be sent to another thread                    │ │
+//!   │   │      ├─ Prevents concurrent mutation through shared ref                │ │
+//!   │   │      └─ Enforced by: PhantomData<*mut ()>                              │ │
+//!   │   │                                                                        │ │
+//!   │   │   4. PANIC-SAFE DROP:                                                  │ │
+//!   │   │      ├─ Drop impl ALWAYS releases the lock                             │ │
+//!   │   │      ├─ Even if panic occurs while holding lock                        │ │
+//!   │   │      └─ Prevents deadlock on unwind                                    │ │
+//!   │   │                                                                        │ │
+//!   │   │   5. #[must_use] ATTRIBUTE:                                            │ │
+//!   │   │      ├─ Compiler warns if guard is not used                            │ │
+//!   │   │      ├─ Prevents: let _ = version.lock();  // immediate unlock!        │ │
+//!   │   │      └─ Forces explicit binding or explicit drop                       │ │
+//!   │   │                                                                        │ │
+//!   │   └────────────────────────────────────────────────────────────────────────┘ │
+//!   │                                                                              │
+//!   │   ┌────────────────────────────────────────────────────────────────────────┐ │
+//!   │   │                    AVAILABLE METHODS                                   │ │
+//!   │   │                                                                        │ │
+//!   │   │   All methods require &mut self (proof of exclusive access):           │ │
+//!   │   │                                                                        │ │
+//!   │   │   ┌────────────────┬────────────────────────────────────────────────┐  │ │
+//!   │   │   │ Method         │ Effect                                         │  │ │
+//!   │   │   ├────────────────┼────────────────────────────────────────────────┤  │ │
+//!   │   │   │ mark_insert()  │ No-op (INSERTING_BIT set by lock())            │  │ │
+//!   │   │   │                │ Exists for semantic clarity                    │  │ │
+//!   │   │   ├────────────────┼────────────────────────────────────────────────┤  │ │
+//!   │   │   │ mark_split()   │ Sets SPLITTING_BIT                             │  │ │
+//!   │   │   │                │ Required before structural changes             │  │ │
+//!   │   │   │                │ Causes VSPLIT bump on unlock                   │  │ │
+//!   │   │   ├────────────────┼────────────────────────────────────────────────┤  │ │
+//!   │   │   │ mark_deleted() │ Sets DELETED_BIT | SPLITTING_BIT               │  │ │
+//!   │   │   │                │ Marks node as logically deleted                │  │ │
+//!   │   │   │                │ Readers will see deleted and retry             │  │ │
+//!   │   │   ├────────────────┼────────────────────────────────────────────────┤  │ │
+//!   │   │   │ mark_nonroot() │ Clears ROOT_BIT                                │  │ │
+//!   │   │   │                │ Called when node is no longer layer root       │  │ │
+//!   │   │   └────────────────┴────────────────────────────────────────────────┘  │ │
+//!   │   │                                                                        │ │
+//!   │   └────────────────────────────────────────────────────────────────────────┘ │
+//!   │                                                                              │
+//!   │   ┌────────────────────────────────────────────────────────────────────────┐ │
+//!   │   │                    USAGE PATTERN                                       │ │
+//!   │   │                                                                        │ │
+//!   │   │   // Correct usage:                                                    │ │
+//!   │   │   let mut guard = node.version().lock();  // Acquire                   │ │
+//!   │   │   guard.mark_split();                     // Mark operation type       │ │
+//!   │   │   // ... modify node fields ...           // Protected region          │ │
+//!   │   │   drop(guard);                            // Release (or scope end)    │ │
+//!   │   │                                                                        │ │
+//!   │   │   // Compile error examples:                                           │ │
+//!   │   │   std::thread::spawn(|| guard.mark_split());  // ERROR: !Send          │ │
+//!   │   │   let r = &guard; another_fn(r);              // ERROR: !Sync          │ │
+//!   │   │   let _ = node.version().lock();              // Warning: #[must_use]  │ │
+//!   │   │                                                                        │ │
+//!   │   └────────────────────────────────────────────────────────────────────────┘ │
+//!   │                                                                              │
+//!   │   ┌────────────────────────────────────────────────────────────────────────┐ │
+//!   │   │                    DROP IMPLEMENTATION                                 │ │
+//!   │   │                                                                        │ │
+//!   │   │   impl Drop for LockGuard<'_> {                                        │ │
+//!   │   │       fn drop(&mut self) {                                             │ │
+//!   │   │           // Safety: We hold the lock, so we can modify version        │ │
+//!   │   │           let version = unsafe { &*self.version };                     │ │
+//!   │   │                                                                        │ │
+//!   │   │           if self.locked_value & SPLITTING_BIT != 0 {                  │ │
+//!   │   │               // Split occurred: bump VSPLIT, clear all dirty bits     │ │
+//!   │   │               let new = (self.locked_value + VSPLIT_LOWBIT)            │ │
+//!   │   │                         & !(LOCK_BIT | INSERTING_BIT |                 │ │
+//!   │   │                             SPLITTING_BIT | ROOT_BIT);                 │ │
+//!   │   │               version.0.store(new, Ordering::Release);                 │ │
+//!   │   │           } else {                                                     │ │
+//!   │   │               // Normal insert: bump VINSERT, clear LOCK|INSERTING     │ │
+//!   │   │               let new = (self.locked_value + VINSERT_LOWBIT)           │ │
+//!   │   │                         & !(LOCK_BIT | INSERTING_BIT);                 │ │
+//!   │   │               version.0.store(new, Ordering::Release);                 │ │
+//!   │   │           }                                                            │ │
+//!   │   │       }                                                                │ │
+//!   │   │   }                                                                    │ │
+//!   │   │                                                                        │ │
+//!   │   └────────────────────────────────────────────────────────────────────────┘ │
+//!   │                                                                              │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Version Comparison Semantics
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                    has_changed() vs has_split()                              │
+//!   ├──────────────────────────────────────────────────────────────────────────────┤
+//!   │                                                                              │
+//!   │   has_changed(old):                                                          │
+//!   │   ─────────────────                                                          │
+//!   │   Returns: (old ^ current) > (LOCK_BIT | INSERTING_BIT)                      │
+//!   │            = (old ^ current) > 3                                             │
+//!   │                                                                              │
+//!   │   Detects: Any change to VINSERT or VSPLIT or DELETED or other bits          │
+//!   │   Ignores: LOCK_BIT and INSERTING_BIT (bits 0-1)                             │
+//!   │                                                                              │
+//!   │   Use: Point reads - need to know if ANY modification occurred               │
+//!   │                                                                              │
+//!   │   ─────────────────────────────────────────────────────────────────────────  │
+//!   │                                                                              │
+//!   │   has_split(old):                                                            │
+//!   │   ────────────────                                                           │
+//!   │   Returns: (old ^ current) >= VSPLIT_LOWBIT                                  │
+//!   │            = (old ^ current) >= 512                                          │
+//!   │                                                                              │
+//!   │   Detects: Only structural changes (splits, deletes)                         │
+//!   │   Ignores: VINSERT changes, LOCK_BIT, INSERTING_BIT                          │
+//!   │                                                                              │
+//!   │   Use: Scans - only care if tree structure changed (need re-navigation)      │
+//!   │                                                                              │
+//!   │   ─────────────────────────────────────────────────────────────────────────  │
+//!   │                                                                              │
+//!   │   EXAMPLE:                                                                   │
+//!   │                                                                              │
+//!   │   old = 0x8000_0200  (ISLEAF | VSPLIT=1)                                     │
+//!   │   new = 0x8000_0208  (ISLEAF | VSPLIT=1 | VINSERT=1)                         │
+//!   │                                                                              │
+//!   │   has_changed: (0x8000_0200 ^ 0x8000_0208) = 0x08 > 3 → TRUE (insert)        │
+//!   │   has_split:   (0x8000_0200 ^ 0x8000_0208) = 0x08 >= 512 → FALSE (no split)  │
+//!   │                                                                              │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Always-Dirty-On-Lock Strategy
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                    Why INSERTING_BIT is Set by lock()                        │
+//!   ├──────────────────────────────────────────────────────────────────────────────┤
+//!   │                                                                              │
+//!   │   PROBLEM: Race between CAS insert and locked writers                        │
+//!   │                                                                              │
+//!   │     Thread A (CAS insert)          Thread B (locked writer)                  │
+//!   │     ────────────────────           ─────────────────────────                 │
+//!   │     v1 = stable()                                                            │
+//!   │                                    lock() ← sets LOCK_BIT only               │
+//!   │     ... prepare CAS ...                                                      │
+//!   │                                    mark_insert() ← sets INSERTING_BIT        │
+//!   │     has_changed(v1)? NO!           ... modifying node ...                    │
+//!   │     CAS proceeds ← RACE!                                                     │
+//!   │                                                                              │
+//!   │   ─────────────────────────────────────────────────────────────────────────  │
+//!   │                                                                              │
+//!   │   SOLUTION: lock() atomically sets LOCK_BIT | INSERTING_BIT                  │
+//!   │                                                                              │
+//!   │     Thread A (CAS insert)          Thread B (locked writer)                  │
+//!   │     ────────────────────           ─────────────────────────                 │
+//!   │     v1 = stable()                                                            │
+//!   │                                    lock() ← sets LOCK|INSERTING              │
+//!   │     ... prepare CAS ...                                                      │
+//!   │     has_changed(v1)? YES!          ... modifying node ...                    │
+//!   │     CAS aborts, retry ← SAFE!                                                │
+//!   │                                                                              │
+//!   │   The INSERTING_BIT in v1 ensures CAS sees the "dirty" state.                │
+//!   │                                                                              │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::hint as StdHint;
 use std::marker::PhantomData;
@@ -347,7 +706,7 @@ impl NodeVersion {
     /// Check if a version value indicates the node is deleted.
     ///
     /// This is a static check on an already-loaded version value, avoiding
-    /// an additional atomic load. Use after calling [`stable()`] when you
+    /// an additional atomic load. Use after calling [`NodeVersion::stable`] when you
     /// need to check both version stability and deleted status.
     ///
     /// # Example

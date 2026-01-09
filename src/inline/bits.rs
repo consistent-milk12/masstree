@@ -13,7 +13,7 @@ use std::mem as StdMem;
 /// Trait for values that can be stored inline as 64 bits.
 ///
 /// This trait enables true-inline value storage in leaf nodes, where values
-/// are stored in [`AtomicU64`] slots instead of behind heap pointers.
+/// are stored in [`std::sync::atomic::AtomicU64`] slots instead of behind heap pointers.
 ///
 /// # Safety
 /// Implementations must ensure:

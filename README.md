@@ -323,3 +323,5 @@ MIT. See `LICENSE`.
 It should be obvious that such a high number of tests, benchmarks and docs could not be written by hand this fast. Even though the full design and implementation was written by hand, there's still a a significant amount of AI generated code. I have gone through most of the docs,tests and benches to ensure correctness and also added the 'prompt' for the agent I used to analyze C++ codebase.
 
 Apart from writing the above mentioned things, it was also used to write prototype ideas to optimize the implementation (most of which (like 80-90%) didn't work out well, and I had to just revert or remove them entirely, this can be seen if you go through the commits). The CAS insert fast path and a direct port of leaf coalescing was something that the model (Opus 4.5) was pushing aggressively, even though it was fundamentally unsound for masstree and leads to EXTREMELY subtle data races and synchronization issues and transient stress test failures.
+
+In this commit, I am adding AI generated ASCII diagrams to provide top level overviews of the modules, core algorithms, operations and types.

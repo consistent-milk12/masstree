@@ -42,7 +42,7 @@ impl<V: InlineBits> Default for TrueInlineSlot<V> {
 impl<V: InlineBits> Copy for TrueInlineSlot<V> {}
 
 /// Magic constant for encoding values in pointer addresses.
-/// [`XORed`] with value bits to avoid null pointer (value 0 would otherwise be null).
+/// `XORed` with value bits to avoid null pointer (value 0 would otherwise be null).
 pub const ENCODING_MAGIC: u64 = 0x5555_5555_5555_5555;
 
 impl<V: InlineBits> ValueSlot for TrueInlineSlot<V> {
@@ -98,7 +98,7 @@ impl<V: InlineBits> ValueSlot for TrueInlineSlot<V> {
 
     /// Not used for true-inline.
     ///
-    /// Value retrieval goes through [`LeafValueLoad::try_load_output`] instead.
+    /// Value retrieval goes through [`crate::value::traits::LeafValueLoad::try_load_output`] instead.
     #[inline(always)]
     fn try_get(&self) -> Option<Self::Output> {
         // TrueInlineSlot is a marker type - use LeafValueLoad trait instead
@@ -129,7 +129,7 @@ impl<V: InlineBits> ValueSlot for TrueInlineSlot<V> {
 
     /// Not used for true-inline.
     ///
-    /// Value updates go through [`LeafValueUpdate::replace_value_output`] instead.
+    /// Value updates go through [`crate::value::traits::LeafValueUpdate::replace_value_output`] instead.
     #[inline(always)]
     fn swap_output(&mut self, new_output: Self::Output) -> Option<Self::Output> {
         // TrueInlineSlot is a marker type - use LeafValueUpdate trait instead

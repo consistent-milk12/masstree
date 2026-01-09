@@ -1,6 +1,6 @@
 //! Inline sentinel pointer for true-inline value storage.
 //!
-//! This module provides [`INLINE_SENTINEL_PTR`], a sentinel pointer value used
+//! This module provides `INLINE_SENTINEL_PTR`, a sentinel pointer value used
 //! to distinguish terminal inline values from empty slots in true-inline leaves.
 
 use std::ptr as StdPtr;

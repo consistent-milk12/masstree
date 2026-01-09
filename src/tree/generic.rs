@@ -392,8 +392,7 @@ where
             let internode: &L::Internode = unsafe { &*(root.cast::<L::Internode>()) };
 
             let ikey: u64 = key.ikey();
-            let child_idx: usize =
-                upper_bound_internode_generic::<L::Internode>(ikey, internode);
+            let child_idx: usize = upper_bound_internode_generic::<L::Internode>(ikey, internode);
             let start_ptr: *mut u8 = internode.child(child_idx);
 
             // Prefetch child node
@@ -426,8 +425,7 @@ where
         loop {
             // SAFETY: current is a valid internode pointer from traversal
             let internode: &L::Internode = unsafe { &*(current.cast::<L::Internode>()) };
-            let child_idx: usize =
-                upper_bound_internode_generic::<L::Internode>(ikey, internode);
+            let child_idx: usize = upper_bound_internode_generic::<L::Internode>(ikey, internode);
             let child_ptr: *mut u8 = internode.child(child_idx);
 
             // Prefetch child node

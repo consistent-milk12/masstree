@@ -52,7 +52,7 @@ impl StdFmt::Display for AllocKind {
 /// Error returned when memory allocation fails.
 ///
 /// This is an internal error type used by allocator implementations.
-/// It gets converted to [`InsertError::AllocationFailed`] at API boundaries.
+/// It gets converted to [`crate::InsertError::AllocationFailed`] at API boundaries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AllocError {
     /// Approximate size of the failed allocation in bytes.

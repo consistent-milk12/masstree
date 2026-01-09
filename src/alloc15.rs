@@ -557,8 +557,7 @@ impl<V: InlineBits + Send + Sync + 'static>
     #[inline(always)]
     fn teardown_tree(&self, _root_ptr: *mut u8) {
         let leaves: Vec<*mut LeafNode15TrueInline<V>> = StdMem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode> =
-            StdMem::take(&mut *self.internode_ptrs.lock());
+        let internodes: Vec<*mut InternodeNode> = StdMem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
             // SAFETY: ptr came from Box::into_raw or alloc()
@@ -603,8 +602,7 @@ impl<V: InlineBits + Send + Sync + 'static>
 
         let layout = Layout::new::<InternodeNode>();
         #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut InternodeNode =
-            unsafe { alloc(layout).cast::<InternodeNode>() };
+        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -624,8 +622,7 @@ impl<V: InlineBits + Send + Sync + 'static>
 
         let layout = Layout::new::<InternodeNode>();
         #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut InternodeNode =
-            unsafe { alloc(layout).cast::<InternodeNode>() };
+        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -649,8 +646,7 @@ impl<V: InlineBits + Send + Sync + 'static>
 
         let layout = Layout::new::<InternodeNode>();
         #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut InternodeNode =
-            unsafe { alloc(layout).cast::<InternodeNode>() };
+        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }

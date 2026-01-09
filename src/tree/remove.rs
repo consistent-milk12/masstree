@@ -333,12 +333,12 @@ where
             let ikey_bound: u64 = leaf.ikey_bound();
 
             // Convert layer context for coalesce queue
-            let sublayer_ctx = self.layer_context.map(|ctx| {
-                crate::tree::coalesce::SublayerContext {
-                    parent_leaf: ctx.parent_leaf.cast_const(),
-                    parent_slot: ctx.parent_slot,
-                }
-            });
+            let sublayer_ctx =
+                self.layer_context
+                    .map(|ctx| crate::tree::coalesce::SublayerContext {
+                        parent_leaf: ctx.parent_leaf.cast_const(),
+                        parent_slot: ctx.parent_slot,
+                    });
 
             // Schedule for cleanup (coalesce will handle leftmost and sublayer cases)
             self.tree

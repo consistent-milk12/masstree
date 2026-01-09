@@ -30,6 +30,384 @@
 //! - Cleanup is not on the hot path
 //! - Contention is low (many producers, one consumer)
 //! - Lock hold time is minimal (just push/pop)
+//!
+//! # Lazy Coalescing Flow
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                    COALESCE OVERVIEW                                         │
+//!   ├──────────────────────────────────────────────────────────────────────────────┤
+//!   │                                                                              │
+//!   │   PHASE 1: Key Removal (in remove.rs)                                        │
+//!   │                                                                              │
+//!   │   ┌────────────┐     ┌────────────┐     ┌────────────┐                       │
+//!   │   │ Leaf A     │◄───►│ Leaf B     │◄───►│ Leaf C     │                       │
+//!   │   │ [k1,k2,k3] │     │ [k4]       │     │ [k5,k6]    │                       │
+//!   │   └────────────┘     └────────────┘     └────────────┘                       │
+//!   │                            │                                                 │
+//!   │                            │ remove(k4)                                      │
+//!   │                            ▼                                                 │
+//!   │   ┌────────────┐     ┌────────────┐     ┌────────────┐                       │
+//!   │   │ Leaf A     │◄───►│ Leaf B     │◄───►│ Leaf C     │                       │
+//!   │   │ [k1,k2,k3] │     │ [] EMPTY   │     │ [k5,k6]    │                       │
+//!   │   └────────────┘     └────────────┘     └────────────┘                       │
+//!   │                            │                                                 │
+//!   │                            │ schedule(leaf_B)                                │
+//!   │                            ▼                                                 │
+//!   │                     ┌────────────────┐                                       │
+//!   │                     │ CoalesceQueue  │                                       │
+//!   │                     │ [leaf_B, ...]  │                                       │
+//!   │                     └────────────────┘                                       │
+//!   │                                                                              │
+//!   │   ─────────────────────────────────────────────────────────────────────────  │
+//!   │                                                                              │
+//!   │   PHASE 2: Deferred Cleanup (process_all)                                    │
+//!   │                                                                              │
+//!   │                     ┌────────────────┐                                       │
+//!   │                     │ CoalesceQueue  │                                       │
+//!   │                     │ [leaf_B]       │──────► pop leaf_B                     │
+//!   │                     └────────────────┘                                       │
+//!   │                            │                                                 │
+//!   │                            ▼                                                 │
+//!   │                     ┌────────────────┐                                       │
+//!   │                     │ Lock leaf_B    │                                       │
+//!   │                     │ Still empty?   │                                       │
+//!   │                     └───────┬────────┘                                       │
+//!   │                             │                                                │
+//!   │                        ┌────┴────┐                                           │
+//!   │                        │ YES     │ NO (reused by insert)                     │
+//!   │                        ▼         ▼                                           │
+//!   │                   ┌────────┐  ┌────────┐                                     │
+//!   │                   │ Delete │  │ Skip   │                                     │
+//!   │                   └────┬───┘  └────────┘                                     │
+//!   │                        │                                                     │
+//!   │                        ▼                                                     │
+//!   │   ┌────────────┐                      ┌────────────┐                         │
+//!   │   │ Leaf A     │◄────────────────────►│ Leaf C     │                         │
+//!   │   │ [k1,k2,k3] │   B-link bypasses B  │ [k5,k6]    │                         │
+//!   │   └────────────┘                      └────────────┘                         │
+//!   │                                                                              │
+//!   │        leaf_B unlinked and retired via seize                                 │
+//!   │                                                                              │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Coalesce State Machine
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                    PROCESS COALESCE STATE MACHINE                            │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//!
+//!   process_all(guard)
+//!          │
+//!          ▼
+//!   ┌──────────────┐
+//!   │ Pop from     │──────── Take next entry from CoalesceQueue
+//!   │ queue        │         Returns (leaf_ptr, ikey_bound, layer_context)
+//!   └──────┬───────┘
+//!          │
+//!     ┌────┴────┐
+//!     │         │
+//!     ▼         ▼
+//!  ┌──────┐  ┌──────┐
+//!  │Entry │  │Queue │
+//!  │found │  │empty │──────────────────────────────────────────► DONE
+//!  └──┬───┘  └──────┘
+//!     │
+//!     ▼
+//!   ┌──────────────┐
+//!   │ Lock leaf    │──────── Acquire exclusive lock
+//!   └──────┬───────┘
+//!          │
+//!          ▼
+//!   ┌──────────────┐
+//!   │ Check empty  │──────── permutation.size() == 0 ?
+//!   └──────┬───────┘
+//!          │
+//!     ┌────┴────┐
+//!     │         │
+//!     ▼         ▼
+//!  ┌──────┐  ┌──────────┐
+//!  │Empty │  │Not empty │──────► Unlock, skip (reused by concurrent insert)
+//!  └──┬───┘  └──────────┘
+//!     │
+//!     ▼
+//!   ┌──────────────┐
+//!   │ Leftmost?    │──────── prev == null?
+//!   │ (prev==null) │
+//!   └──────┬───────┘
+//!          │
+//!     ┌────┴────┐
+//!     │         │
+//!     ▼         ▼
+//!  ┌──────┐  ┌─────────────────────────────────────────────────────────────────┐
+//!  │ No   │  │ YES (leftmost leaf - special handling)                          │
+//!  │      │  │                                                                 │
+//!  │      │  │   ┌────────────┐                                                │
+//!  │      │  │   │ Only leaf? │───── next == null && has layer_context?        │
+//!  │      │  │   └─────┬──────┘                                                │
+//!  │      │  │         │                                                       │
+//!  │      │  │    ┌────┴────┐                                                  │
+//!  │      │  │    │         │                                                  │
+//!  │      │  │    ▼         ▼                                                  │
+//!  │      │  │  ┌────────┐ ┌─────────────────────────────────────────────────┐ │
+//!  │      │  │  │  YES   │ │ NO: Leftmost but not only leaf                  │ │
+//!  │      │  │  │        │ │     → Unlock, skip (cannot remove leftmost)     │ │
+//!  │      │  │  │gc_layer│ │     Note: No re-queue (would cause inf loop)    │ │
+//!  │      │  │  │(below) │ └─────────────────────────────────────────────────┘ │
+//!  │      │  │  └────┬───┘                                                     │
+//!  │      │  │       │                                                         │
+//!  │      │  └───────┼─────────────────────────────────────────────────────────┘
+//!  │      │          │
+//!  └──┬───┘          │
+//!     │              │
+//!     │              ▼
+//!     │       ┌──────────────┐
+//!     │       │ gc_layer()   │──────── Clean up sublayer:
+//!     │       │              │         - Mark deleted_layer
+//!     │       │              │         - Clear parent slot
+//!     │       │              │         - Unlock, retire leaf
+//!     │       └──────────────┘
+//!     │
+//!     ▼
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                         UNLINK LEAF                                          │
+//!   │                                                                              │
+//!   │   ┌──────────────┐                                                           │
+//!   │   │ mark_deleted │──────── Set DELETED_BIT in version                        │
+//!   │   └──────┬───────┘                                                           │
+//!   │          │                                                                   │
+//!   │          ▼                                                                   │
+//!   │   ┌──────────────┐                                                           │
+//!   │   │ Unlink from  │──────── prev.next = next; next.prev = prev                │
+//!   │   │ B-link chain │         (atomic pointer updates)                          │
+//!   │   └──────┬───────┘                                                           │
+//!   │          │                                                                   │
+//!   │          ▼                                                                   │
+//!   │   ┌──────────────┐                                                           │
+//!   │   │ Remove from  │──────── Lock parent, find child slot, remove              │
+//!   │   │ parent       │        (NodeCleaner::remove_leaf_from_parent_for_coalesce)│
+//!   │   └──────┬───────┘                                                           │
+//!   │          │                                                                   │
+//!   │          ▼                                                                   │
+//!   │   ┌──────────────┐                                                           │
+//!   │   │ Retire leaf  │──────── guard.defer_retire(leaf_ptr)                      │
+//!   │   │ via seize    │         Safe after unlinking                              │
+//!   │   └──────────────┘                                                           │
+//!   │                                                                              │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//!          │
+//!          │ loop back to pop next
+//!          │
+//!          └─────────────────────────────────────────────────────► process_all()
+//! ```
+//!
+//! # Why Lazy Coalescing?
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                    INLINE REMOVAL PROBLEMS                                   │
+//!   ├──────────────────────────────────────────────────────────────────────────────┤
+//!   │                                                                              │
+//!   │   PROBLEM 1: Lock Coupling Deadlock                                          │
+//!   │                                                                              │
+//!   │   If we try to remove parent reference inline during remove():               │
+//!   │                                                                              │
+//!   │     Thread A (remove)           Thread B (split)                             │
+//!   │     ─────────────────           ────────────────                             │
+//!   │     lock(leaf)                                                               │
+//!   │     lock(parent) ← wait         lock(leaf)                                   │
+//!   │                                 lock(parent) ← DEADLOCK                      │
+//!   │                                                                              │
+//!   │   Different lock ordering in remove vs split causes deadlock.                │
+//!   │                                                                              │
+//!   │   ─────────────────────────────────────────────────────────────────────────  │
+//!   │                                                                              │
+//!   │   PROBLEM 2: Livelock / Infinite Retry                                       │
+//!   │                                                                              │
+//!   │   If we try to remove parent reference and split happens:                    │
+//!   │                                                                              │
+//!   │     1. Thread A removes last key from leaf                                   │
+//!   │     2. Thread A tries to lock parent                                         │
+//!   │     3. Thread B splits parent, changes structure                             │
+//!   │     4. Thread A's parent pointer is stale                                    │
+//!   │     5. Thread A retries, but keeps getting stale pointers                    │
+//!   │     6. LIVELOCK                                                              │
+//!   │                                                                              │
+//!   │   ─────────────────────────────────────────────────────────────────────────  │
+//!   │                                                                              │
+//!   │   SOLUTION: Lazy Coalescing                                                  │
+//!   │                                                                              │
+//!   │   1. remove() only removes key from leaf permutation                         │
+//!   │   2. If leaf empty, queue for later cleanup                                  │
+//!   │   3. Cleanup runs at safe point (low contention)                             │
+//!   │   4. Empty leaves can be reused by insert (slot available)                   │
+//!   │   5. Traversal already handles deleted nodes via B-link retry                │
+//!   │                                                                              │
+//!   │   Benefits:                                                                  │
+//!   │   ✓ No lock ordering conflicts (cleanup uses different path)                 │
+//!   │   ✓ Remove is fast (no parent locking)                                       │
+//!   │   ✓ Reuse avoids unnecessary allocations                                     │
+//!   │   ✓ Cleanup can be batched for efficiency                                    │
+//!   │                                                                              │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Sublayer Cleanup (`gc_layer`)
+//!
+//! ```text
+//!   ┌──────────────────────────────────────────────────────────────────────────────┐
+//!   │                    SUBLAYER GARBAGE COLLECTION (gc_layer)                    │
+//!   ├──────────────────────────────────────────────────────────────────────────────┤
+//!   │                                                                              │
+//!   │   Sublayers are created when keys share an 8-byte prefix. When all keys      │
+//!   │   in a sublayer are removed, the sublayer itself must be cleaned up.         │
+//!   │                                                                              │
+//!   │   ┌────────────────────────────────────────────────────────────────────────┐ │
+//!   │   │                    MULTI-LAYER KEY EXAMPLE                             │ │
+//!   │   │                                                                        │ │
+//!   │   │   Key: "users/alice/profile"  (19 bytes)                               │ │
+//!   │   │                                                                        │ │
+//!   │   │   Layer 0: ikey = "users/al" (8 bytes)                                 │ │
+//!   │   │            └─► layer_ptr to Layer 1                                    │ │
+//!   │   │                                                                        │ │
+//!   │   │   Layer 1: ikey = "ice/prof" (8 bytes)                                 │ │
+//!   │   │            └─► layer_ptr to Layer 2                                    │ │
+//!   │   │                                                                        │ │
+//!   │   │   Layer 2: ikey = "ile" (3 bytes) + suffix                             │ │
+//!   │   │            └─► actual value                                            │ │
+//!   │   │                                                                        │ │
+//!   │   │   When "users/alice/profile" is removed and Layer 2 becomes empty,     │ │
+//!   │   │   gc_layer() cleans up Layer 2 AND updates Layer 1's layer_ptr slot.   │ │
+//!   │   │                                                                        │ │
+//!   │   └────────────────────────────────────────────────────────────────────────┘ │
+//!   │                                                                              │
+//!   │   ┌────────────────────────────────────────────────────────────────────────┐ │
+//!   │   │                    BEFORE gc_layer()                                   │ │
+//!   │   │                                                                        │ │
+//!   │   │   LAYER 0 (Parent Leaf):                                               │ │
+//!   │   │   ┌────────────────────────────────────────────────────────────────┐   │ │
+//!   │   │   │  slot 0: ikey="foo/bar1", value=v1                             │   │ │
+//!   │   │   │  slot 1: ikey="users/al", keylenx=LAYER, layer_ptr ──────┐     │   │ │
+//!   │   │   │  slot 2: ikey="foo/bar2", value=v2                       │     │   │ │
+//!   │   │   │                                                          │     │   │ │
+//!   │   │   │  permutation: [0, 1, 2], size=3                          │     │   │ │
+//!   │   │   └──────────────────────────────────────────────────────────┼─────┘   │ │
+//!   │   │                                                              │         │ │
+//!   │   │                                                              ▼         │ │
+//!   │   │   LAYER 1 (Sublayer Leaf - EMPTY):                                     │ │
+//!   │   │   ┌────────────────────────────────────────────────────────────────┐   │ │
+//!   │   │   │  version: ISLEAF | ROOT | (other bits)                         │   │ │
+//!   │   │   │  permutation: [], size=0   ← ALL KEYS REMOVED                  │   │ │
+//!   │   │   │  prev: null, next: null    ← Only leaf in sublayer             │   │ │
+//!   │   │   │                                                                │   │ │
+//!   │   │   │  SublayerContext: { parent_leaf, parent_slot=1 }               │   │ │
+//!   │   │   └────────────────────────────────────────────────────────────────┘   │ │
+//!   │   │                                                                        │ │
+//!   │   └────────────────────────────────────────────────────────────────────────┘ │
+//!   │                                                                              │
+//!   │   ┌────────────────────────────────────────────────────────────────────────┐ │
+//!   │   │                    gc_layer() EXECUTION                                │ │
+//!   │   │                                                                        │ │
+//!   │   │   gc_layer(allocator, guard, sublayer_ptr, sublayer_lock, ctx)         │ │
+//!   │   │          │                                                             │ │
+//!   │   │          ▼                                                             │ │
+//!   │   │   ┌──────────────┐                                                     │ │
+//!   │   │   │ STEP 1:      │                                                     │ │
+//!   │   │   │ Mark sublayer│──── sublayer_lock.mark_deleted_layer()              │ │
+//!   │   │   │ as deleted   │     Sets DELETED_BIT | SPLITTING_BIT                │ │
+//!   │   │   └──────┬───────┘     Readers will see deleted and retry              │ │
+//!   │   │          │                                                             │ │
+//!   │   │          ▼                                                             │ │
+//!   │   │   ┌──────────────┐                                                     │ │
+//!   │   │   │ STEP 2:      │                                                     │ │
+//!   │   │   │ RELEASE      │──── drop(sublayer_lock)                             │ │
+//!   │   │   │ sublayer lock│     CRITICAL: Prevents deadlock!                    │ │
+//!   │   │   └──────┬───────┘     (Cannot hold child lock while locking parent)   │ │
+//!   │   │          │                                                             │ │
+//!   │   │          ▼                                                             │ │
+//!   │   │   ┌──────────────┐                                                     │ │
+//!   │   │   │ STEP 3:      │                                                     │ │
+//!   │   │   │ Lock parent  │──── ctx.parent_leaf.version().lock()                │ │
+//!   │   │   │ leaf         │     Now safe to modify parent's slot                │ │
+//!   │   │   └──────┬───────┘                                                     │ │
+//!   │   │          │                                                             │ │
+//!   │   │          ▼                                                             │ │
+//!   │   │   ┌──────────────┐                                                     │ │
+//!   │   │   │ STEP 4:      │                                                     │ │
+//!   │   │   │ Verify still │──── Check parent's slot still points to sublayer    │ │
+//!   │   │   │ valid        │     (Could have been modified by concurrent op)     │ │
+//!   │   │   └──────┬───────┘                                                     │ │
+//!   │   │          │                                                             │ │
+//!   │   │     ┌────┴────┐                                                        │ │
+//!   │   │     │ Invalid │ Valid                                                  │ │
+//!   │   │     ▼         ▼                                                        │ │
+//!   │   │   Abort    ┌──────────────┐                                            │ │
+//!   │   │   (slot    │ STEP 5:      │                                            │ │
+//!   │   │   changed) │ Clear slot:  │                                            │ │
+//!   │   │            │              │                                            │ │
+//!   │   │            │ values[slot] │──── Store null pointer                     │ │
+//!   │   │            │   = null     │                                            │ │
+//!   │   │            │              │                                            │ │
+//!   │   │            │ keylenx[slot]│──── Mark as empty/unused                   │ │
+//!   │   │            │   = 0        │                                            │ │
+//!   │   │            │              │                                            │ │
+//!   │   │            │ permutation  │──── Remove slot from logical ordering      │ │
+//!   │   │            │   .remove(i) │     Atomic CAS update                      │ │
+//!   │   │            └──────┬───────┘                                            │ │
+//!   │   │                   │                                                    │ │
+//!   │   │                   ▼                                                    │ │
+//!   │   │            ┌──────────────┐                                            │ │
+//!   │   │            │ STEP 6:      │                                            │ │
+//!   │   │            │ Unlock parent│──── drop(parent_lock)                      │ │
+//!   │   │            └──────┬───────┘                                            │ │
+//!   │   │                   │                                                    │ │
+//!   │   │                   ▼                                                    │ │
+//!   │   │            ┌──────────────┐                                            │ │
+//!   │   │            │ STEP 7:      │                                            │ │
+//!   │   │            │ Retire       │──── guard.defer_retire(sublayer_ptr)       │ │
+//!   │   │            │ sublayer leaf│     Safe: marked deleted, slot cleared     │ │
+//!   │   │            └──────────────┘                                            │ │
+//!   │   │                                                                        │ │
+//!   │   └────────────────────────────────────────────────────────────────────────┘ │
+//!   │                                                                              │
+//!   │   ┌────────────────────────────────────────────────────────────────────────┐ │
+//!   │   │                    AFTER gc_layer()                                    │ │
+//!   │   │                                                                        │ │
+//!   │   │   LAYER 0 (Parent Leaf):                                               │ │
+//!   │   │   ┌────────────────────────────────────────────────────────────────┐   │ │
+//!   │   │   │  slot 0: ikey="foo/bar1", value=v1                             │   │ │
+//!   │   │   │  slot 1: (CLEARED - no longer in permutation)                  │   │ │
+//!   │   │   │  slot 2: ikey="foo/bar2", value=v2                             │   │ │
+//!   │   │   │                                                                │   │ │
+//!   │   │   │  permutation: [0, 2], size=2  ← slot 1 removed                 │   │ │
+//!   │   │   └────────────────────────────────────────────────────────────────┘   │ │
+//!   │   │                                                                        │ │
+//!   │   │   LAYER 1: Retired, will be freed when all guards drop                 │ │
+//!   │   │                                                                        │ │
+//!   │   └────────────────────────────────────────────────────────────────────────┘ │
+//!   │                                                                              │
+//!   │   DEADLOCK PREVENTION:                                                       │
+//!   │   ────────────────────                                                       │
+//!   │   The key insight is releasing the sublayer lock BEFORE locking the parent.  │
+//!   │   This prevents the following deadlock:                                      │
+//!   │                                                                              │
+//!   │     Thread A: lock(sublayer) → try_lock(parent)  ← wait                      │
+//!   │     Thread B: lock(parent) → try_lock(sublayer)  ← DEADLOCK                  │
+//!   │                                                                              │
+//!   │   By marking sublayer as deleted first, then releasing, then locking parent: │
+//!   │     Thread A: lock(sublayer) → mark_deleted → unlock(sublayer) → lock(parent)│
+//!   │     Thread B: sees deleted sublayer → follows retry path                     │
+//!   │                                                                              │
+//!   │   SAFETY GUARANTEES:                                                         │
+//!   │   ├─ Sublayer marked deleted → readers retry, won't use stale data           │
+//!   │   ├─ Parent slot cleared → new traversals won't find sublayer                │
+//!   │   ├─ Epoch guard protects existing references during retirement              │
+//!   │   └─ No dangling pointers: retirement deferred until safe                    │
+//!   │                                                                              │
+//!   └──────────────────────────────────────────────────────────────────────────────┘
+//! ```
 
 use std::collections::VecDeque;
 
@@ -307,9 +685,7 @@ impl Coalesce {
                 // Both prev and next are null - this might be the only leaf in a sublayer
                 if let Some(ctx) = entry.layer_context {
                     // We have layer context - this IS a sublayer. Do gc_layer cleanup.
-                    return Self::gc_layer::<S, L, A>(
-                        allocator, guard, leaf_ptr, lock, ctx,
-                    );
+                    return Self::gc_layer::<S, L, A>(allocator, guard, leaf_ptr, lock, ctx);
                 }
                 // No layer context - this is the main tree root. Leave it empty.
                 drop(lock);

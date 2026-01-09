@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use clap::{Parser, ValueEnum};
-use comfy_table::{presets::UTF8_FULL_CONDENSED, Cell, Color, Table};
+use comfy_table::{Cell, Color, Table, presets::UTF8_FULL_CONDENSED};
 use regex::Regex;
 use serde::Serialize;
 
@@ -26,20 +26,21 @@ static TIMING_RE: LazyLock<Regex> =
 static THROUGHPUT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\d+\.?\d*)\s*([KMG]?item/s)\b").unwrap());
 
-static NORMALIZE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"/masstree\d+[^/]*/").unwrap());
+static NORMALIZE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"/masstree\d+[^/]*/").unwrap());
 
 // Match a benchmark data line: extracts indent level and content
 // Groups: 1=indent chars, 2=branch marker, 3=rest of line
-static LINE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^([│ ]*)(├─|╰─)\s*(.*)$").unwrap());
+static LINE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([│ ]*)(├─|╰─)\s*(.*)$").unwrap());
 
 // ============================================================================
 // CLI
 // ============================================================================
 
 #[derive(Parser, Debug)]
-#[command(name = "divan_parser", about = "Parse and compare divan benchmark output")]
+#[command(
+    name = "divan_parser",
+    about = "Parse and compare divan benchmark output"
+)]
 struct Args {
     /// Input file (stdin if not provided)
     #[arg(short, long)]
@@ -162,9 +163,21 @@ fn run() -> Result<(), String> {
         let results2 = parse_divan(&input2, args.filter.as_deref())?;
 
         if args.json {
-            print_comparison_json(&results, &results2, &args.columns, args.fuzzy, args.throughput)?;
+            print_comparison_json(
+                &results,
+                &results2,
+                &args.columns,
+                args.fuzzy,
+                args.throughput,
+            )?;
         } else {
-            print_comparison_table(&results, &results2, &args.columns, args.fuzzy, args.throughput);
+            print_comparison_table(
+                &results,
+                &results2,
+                &args.columns,
+                args.fuzzy,
+                args.throughput,
+            );
         }
     } else if args.json {
         print_json(&results, &args.columns, args.throughput)?;
@@ -177,10 +190,14 @@ fn run() -> Result<(), String> {
 
 fn read_input(path: &Option<PathBuf>) -> Result<String, String> {
     match path {
-        Some(p) => fs::read_to_string(p).map_err(|e| format!("Failed to read {}: {e}", p.display())),
+        Some(p) => {
+            fs::read_to_string(p).map_err(|e| format!("Failed to read {}: {e}", p.display()))
+        }
         None => {
             let mut buf = String::new();
-            io::stdin().read_to_string(&mut buf).map_err(|e| format!("stdin: {e}"))?;
+            io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("stdin: {e}"))?;
             Ok(buf)
         }
     }
@@ -191,7 +208,10 @@ fn read_input(path: &Option<PathBuf>) -> Result<String, String> {
 // ============================================================================
 
 fn parse_divan(input: &str, filter: Option<&str>) -> Result<Vec<BenchResult>, String> {
-    let filter_re = filter.map(Regex::new).transpose().map_err(|e| format!("Bad filter: {e}"))?;
+    let filter_re = filter
+        .map(Regex::new)
+        .transpose()
+        .map_err(|e| format!("Bad filter: {e}"))?;
 
     // Strip markdown code blocks
     let input = input.trim();
@@ -209,8 +229,10 @@ fn parse_divan(input: &str, filter: Option<&str>) -> Result<Vec<BenchResult>, St
 
     for line in input.lines() {
         // Skip header/empty lines
-        if line.trim().is_empty() || line.contains("Timer precision") ||
-           (line.contains("fastest") && line.contains("slowest") && line.contains("median")) {
+        if line.trim().is_empty()
+            || line.contains("Timer precision")
+            || (line.contains("fastest") && line.contains("slowest") && line.contains("median"))
+        {
             continue;
         }
 
@@ -222,7 +244,11 @@ fn parse_divan(input: &str, filter: Option<&str>) -> Result<Vec<BenchResult>, St
             // Calculate depth: count │ or use space-based (3 chars per level)
             let depth = {
                 let pipes = indent.chars().filter(|&c| c == '│').count();
-                if pipes > 0 { pipes } else { indent.chars().filter(|&c| c == ' ').count() / 3 }
+                if pipes > 0 {
+                    pipes
+                } else {
+                    indent.chars().filter(|&c| c == ' ').count() / 3
+                }
             };
 
             // Split content by │ to separate name from data columns
@@ -230,7 +256,8 @@ fn parse_divan(input: &str, filter: Option<&str>) -> Result<Vec<BenchResult>, St
             let first_part = parts.first().map_or("", |s| s.trim());
 
             // Extract name (remove any trailing timing)
-            let name = TIMING_RE.find(first_part)
+            let name = TIMING_RE
+                .find(first_part)
                 .map_or(first_part, |m| first_part[..m.start()].trim());
 
             if name.is_empty() {
@@ -263,11 +290,26 @@ fn parse_divan(input: &str, filter: Option<&str>) -> Result<Vec<BenchResult>, St
             let result = BenchResult {
                 name: full_name.clone(),
                 fastest,
-                slowest: columns.first().filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                median: columns.get(1).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                mean: columns.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                samples: columns.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-                iters: columns.get(4).filter(|s| !s.is_empty()).map(|s| s.to_string()),
+                slowest: columns
+                    .first()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                median: columns
+                    .get(1)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                mean: columns
+                    .get(2)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                samples: columns
+                    .get(3)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                iters: columns
+                    .get(4)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
                 ..Default::default()
             };
 
@@ -283,10 +325,18 @@ fn parse_divan(input: &str, filter: Option<&str>) -> Result<Vec<BenchResult>, St
                         .map(|p| THROUGHPUT_RE.find(p.trim()).map(|m| m.as_str().to_string()))
                         .collect();
 
-                    if let Some(Some(t)) = tputs.first() { result.fastest_tput = Some(t.clone()); }
-                    if let Some(Some(t)) = tputs.get(1) { result.slowest_tput = Some(t.clone()); }
-                    if let Some(Some(t)) = tputs.get(2) { result.median_tput = Some(t.clone()); }
-                    if let Some(Some(t)) = tputs.get(3) { result.mean_tput = Some(t.clone()); }
+                    if let Some(Some(t)) = tputs.first() {
+                        result.fastest_tput = Some(t.clone());
+                    }
+                    if let Some(Some(t)) = tputs.get(1) {
+                        result.slowest_tput = Some(t.clone());
+                    }
+                    if let Some(Some(t)) = tputs.get(2) {
+                        result.median_tput = Some(t.clone());
+                    }
+                    if let Some(Some(t)) = tputs.get(3) {
+                        result.mean_tput = Some(t.clone());
+                    }
                 }
             }
         }
@@ -305,7 +355,11 @@ fn print_table(results: &[BenchResult], columns: &[Column], throughput: bool) {
 
     let mut header = vec![Cell::new("Benchmark").fg(Color::Cyan)];
     for col in columns {
-        let name = if throughput { format!("{} (tput)", col.name()) } else { col.name().to_string() };
+        let name = if throughput {
+            format!("{} (tput)", col.name())
+        } else {
+            col.name().to_string()
+        };
         header.push(Cell::new(name).fg(Color::Cyan));
     }
     table.set_header(header);
@@ -322,18 +376,24 @@ fn print_table(results: &[BenchResult], columns: &[Column], throughput: bool) {
 }
 
 fn print_json(results: &[BenchResult], columns: &[Column], throughput: bool) -> Result<(), String> {
-    let data: Vec<_> = results.iter().map(|r| {
-        let mut m = HashMap::new();
-        m.insert("name".to_string(), r.name.clone());
-        for col in columns {
-            if let Some(v) = r.get(*col, throughput) {
-                m.insert(col.name().to_string(), v.to_string());
+    let data: Vec<_> = results
+        .iter()
+        .map(|r| {
+            let mut m = HashMap::new();
+            m.insert("name".to_string(), r.name.clone());
+            for col in columns {
+                if let Some(v) = r.get(*col, throughput) {
+                    m.insert(col.name().to_string(), v.to_string());
+                }
             }
-        }
-        m
-    }).collect();
+            m
+        })
+        .collect();
 
-    println!("{}", serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?
+    );
     Ok(())
 }
 
@@ -373,7 +433,9 @@ fn parse_value(s: &str, is_throughput: bool) -> Option<f64> {
 fn calc_delta(old: &str, new: &str, is_throughput: bool) -> Option<f64> {
     let old_v = parse_value(old, is_throughput)?;
     let new_v = parse_value(new, is_throughput)?;
-    if old_v == 0.0 { return None; }
+    if old_v == 0.0 {
+        return None;
+    }
 
     let delta = (new_v - old_v) / old_v * 100.0;
     // For throughput, higher is better, so negate to make +% = regression
@@ -387,8 +449,18 @@ fn print_comparison_table(
     fuzzy: bool,
     throughput: bool,
 ) {
-    let b_map: HashMap<String, &BenchResult> = results_b.iter()
-        .map(|r| (if fuzzy { normalize_name(&r.name) } else { r.name.clone() }, r))
+    let b_map: HashMap<String, &BenchResult> = results_b
+        .iter()
+        .map(|r| {
+            (
+                if fuzzy {
+                    normalize_name(&r.name)
+                } else {
+                    r.name.clone()
+                },
+                r,
+            )
+        })
         .collect();
 
     let mut table = Table::new();
@@ -403,12 +475,20 @@ fn print_comparison_table(
     table.set_header(header);
 
     for ra in results_a {
-        let key = if fuzzy { normalize_name(&ra.name) } else { ra.name.clone() };
+        let key = if fuzzy {
+            normalize_name(&ra.name)
+        } else {
+            ra.name.clone()
+        };
         let Some(rb) = b_map.get(&key) else { continue };
 
         // Skip if no matching data
-        let has_match = columns.iter().any(|c| ra.get(*c, throughput).is_some() && rb.get(*c, throughput).is_some());
-        if !has_match { continue; }
+        let has_match = columns
+            .iter()
+            .any(|c| ra.get(*c, throughput).is_some() && rb.get(*c, throughput).is_some());
+        if !has_match {
+            continue;
+        }
 
         let mut row = vec![Cell::new(&ra.name)];
         for col in columns {
@@ -420,7 +500,11 @@ fn print_comparison_table(
 
             let delta_cell = match (va, vb) {
                 (Some(a), Some(b)) => {
-                    let is_tput = throughput && matches!(col, Column::Fastest | Column::Slowest | Column::Median | Column::Mean);
+                    let is_tput = throughput
+                        && matches!(
+                            col,
+                            Column::Fastest | Column::Slowest | Column::Median | Column::Mean
+                        );
                     match calc_delta(a, b, is_tput) {
                         Some(d) if d < -2.0 => Cell::new(format!("{d:+.1}%")).fg(Color::Green),
                         Some(d) if d > 2.0 => Cell::new(format!("{d:+.1}%")).fg(Color::Red),
@@ -446,30 +530,61 @@ fn print_comparison_json(
     fuzzy: bool,
     throughput: bool,
 ) -> Result<(), String> {
-    let b_map: HashMap<String, &BenchResult> = results_b.iter()
-        .map(|r| (if fuzzy { normalize_name(&r.name) } else { r.name.clone() }, r))
+    let b_map: HashMap<String, &BenchResult> = results_b
+        .iter()
+        .map(|r| {
+            (
+                if fuzzy {
+                    normalize_name(&r.name)
+                } else {
+                    r.name.clone()
+                },
+                r,
+            )
+        })
         .collect();
 
     let mut data = Vec::new();
     for ra in results_a {
-        let key = if fuzzy { normalize_name(&ra.name) } else { ra.name.clone() };
+        let key = if fuzzy {
+            normalize_name(&ra.name)
+        } else {
+            ra.name.clone()
+        };
         let Some(rb) = b_map.get(&key) else { continue };
 
-        let has_match = columns.iter().any(|c| ra.get(*c, throughput).is_some() && rb.get(*c, throughput).is_some());
-        if !has_match { continue; }
+        let has_match = columns
+            .iter()
+            .any(|c| ra.get(*c, throughput).is_some() && rb.get(*c, throughput).is_some());
+        if !has_match {
+            continue;
+        }
 
         let mut entry = serde_json::Map::new();
-        entry.insert("name".to_string(), serde_json::Value::String(ra.name.clone()));
+        entry.insert(
+            "name".to_string(),
+            serde_json::Value::String(ra.name.clone()),
+        );
 
         for col in columns {
             let va = ra.get(*col, throughput);
             let vb = rb.get(*col, throughput);
 
-            entry.insert(format!("{}_a", col.name()), serde_json::Value::String(va.unwrap_or("-").to_string()));
-            entry.insert(format!("{}_b", col.name()), serde_json::Value::String(vb.unwrap_or("-").to_string()));
+            entry.insert(
+                format!("{}_a", col.name()),
+                serde_json::Value::String(va.unwrap_or("-").to_string()),
+            );
+            entry.insert(
+                format!("{}_b", col.name()),
+                serde_json::Value::String(vb.unwrap_or("-").to_string()),
+            );
 
             if let (Some(a), Some(b)) = (va, vb) {
-                let is_tput = throughput && matches!(col, Column::Fastest | Column::Slowest | Column::Median | Column::Mean);
+                let is_tput = throughput
+                    && matches!(
+                        col,
+                        Column::Fastest | Column::Slowest | Column::Median | Column::Mean
+                    );
                 if let Some(d) = calc_delta(a, b, is_tput) {
                     entry.insert(format!("{}_delta", col.name()), serde_json::json!(d));
                 }
@@ -479,6 +594,9 @@ fn print_comparison_json(
         data.push(serde_json::Value::Object(entry));
     }
 
-    println!("{}", serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?
+    );
     Ok(())
 }

@@ -159,8 +159,7 @@ where
         // SAFETY: Caller passes a valid Box<InternodeNode> as *mut u8.
         // The pointer was originally created from Box::into_raw on an InternodeNode,
         // so alignment is guaranteed.
-        let node: Box<InternodeNode> =
-            unsafe { Box::from_raw(node_ptr.cast::<InternodeNode>()) };
+        let node: Box<InternodeNode> = unsafe { Box::from_raw(node_ptr.cast::<InternodeNode>()) };
         let ptr: *mut InternodeNode = Box::into_raw(node);
         self.internode_ptrs.lock().push(ptr);
         ptr.cast()
@@ -196,8 +195,7 @@ where
     fn teardown_tree(&self, _root_ptr: *mut u8) {
         // Free all tracked nodes using interior mutability
         let leaves: Vec<*mut LeafNode24<S>> = std::mem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode> =
-            std::mem::take(&mut *self.internode_ptrs.lock());
+        let internodes: Vec<*mut InternodeNode> = std::mem::take(&mut *self.internode_ptrs.lock());
 
         for ptr in leaves {
             // SAFETY: ptr came from Box::into_raw or alloc()

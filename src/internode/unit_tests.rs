@@ -1,3 +1,5 @@
+#![expect(clippy::indexing_slicing)]
+
 use super::{InternodeNode, Ordering};
 use std::ptr as StdPtr;
 
@@ -105,8 +107,7 @@ fn test_parent_accessors() {
     let node: Box<InternodeNode> = InternodeNode::new(0);
     let mut parent: Box<InternodeNode> = InternodeNode::new(1);
 
-    let parent_ptr: *mut InternodeNode =
-        parent.as_mut() as *mut InternodeNode;
+    let parent_ptr: *mut InternodeNode = parent.as_mut() as *mut InternodeNode;
 
     // set_parent takes *mut u8, so cast the pointer
     node.set_parent(parent_ptr.cast::<u8>());
@@ -367,9 +368,9 @@ fn test_load_all_ikeys_partial() {
     assert_eq!(ikeys[4], 500);
 
     // Remaining should be zero (uninitialized)
-    for i in 5..15 {
+    (5..15).for_each(|i| {
         assert_eq!(ikeys[i], 0);
-    }
+    });
 }
 
 #[test]
@@ -384,9 +385,9 @@ fn test_load_all_ikeys_full() {
 
     let ikeys = node.load_all_ikeys();
 
-    for i in 0..15 {
+    (0..15).for_each(|i| {
         assert_eq!(ikeys[i], (i as u64 + 1) * 1000);
-    }
+    });
 }
 
 // ========================================================================
