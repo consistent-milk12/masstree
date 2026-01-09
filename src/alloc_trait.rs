@@ -93,10 +93,11 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
         self.alloc_leaf(node)
     }
 
-    /// Track a leaf pointer for cleanup (concurrent-safe via `&self`).
+    /// Track a leaf pointer for cleanup (no-op for traversal-based allocators).
     ///
-    /// Used by concurrent code paths that allocate via `Box::into_raw()`.
-    /// For allocators without interior mutability, this is a no-op.
+    /// With tree traversal teardown, tracking is unnecessary - nodes are freed
+    /// by walking the tree structure. This method exists for API compatibility
+    /// but is typically a no-op.
     ///
     /// # Arguments
     ///
@@ -108,11 +109,13 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// Schedules the node for deferred reclamation via seize. The node will
     /// be freed once no readers can hold references to it.
     ///
+    /// This is O(1) - direct `guard.defer_retire()` call with no tracking overhead.
+    ///
     /// # Safety
     ///
-    /// - `ptr` must have been allocated by this allocator
-    /// - `ptr` must be unreachable from the tree by any new traversal
-    /// - In-flight traversals must detect deletion/retry via the OCC protocol
+    /// - `ptr` must point to a valid leaf allocated by this allocator
+    /// - `ptr` must be unreachable from the tree (unlinked)
+    /// - `ptr` must not be retired multiple times
     unsafe fn retire_leaf(&self, ptr: *mut L, guard: &LocalGuard<'_>);
 
     // ========================================================================
@@ -203,7 +206,11 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
         self.alloc_internode_erased(Box::into_raw(node).cast())
     }
 
-    /// Track an internode pointer for cleanup (concurrent-safe).
+    /// Track an internode pointer for cleanup (no-op for traversal-based allocators).
+    ///
+    /// With tree traversal teardown, tracking is unnecessary - nodes are freed
+    /// by walking the tree structure. This method exists for API compatibility
+    /// but is typically a no-op.
     ///
     /// # Arguments
     ///
@@ -212,10 +219,14 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
 
     /// Retire an internode for deferred reclamation.
     ///
+    /// The internode will be freed once all guards that might reference it are dropped.
+    /// This is O(1) - direct `guard.defer_retire()` call with no tracking overhead.
+    ///
     /// # Safety
     ///
-    /// - `ptr` must point to a valid `InternodeNode`
-    /// - `ptr` must be unreachable from the tree by any new traversal
+    /// - `ptr` must point to a valid internode allocated by this allocator
+    /// - `ptr` must be unreachable from the tree (unlinked)
+    /// - `ptr` must not be retired multiple times
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>);
 
     // ========================================================================
@@ -225,19 +236,19 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// Teardown all reachable nodes at tree drop.
     ///
     /// Called when the tree is destroyed and no concurrent access is possible.
-    /// This traverses and frees all nodes reachable from the root.
+    /// This traverses and frees all nodes reachable from the root, including
+    /// sublayer trees reached via layer pointers.
     ///
-    /// Arena allocators can no-op (they free via their own Drop).
-    /// Seize-based allocators must implement this to free nodes by traversal.
+    /// # Traversal
+    ///
+    /// - Uses `NodeVersion::is_leaf()` at offset 0 to distinguish node types
+    /// - For leaves: recurses into layer pointers (where `is_layer(slot)` is true)
+    /// - For internodes: recurses into all child pointers
+    /// - Properly handles true-inline leaves (checks `is_layer()` before interpreting pointers)
     ///
     /// # Arguments
     ///
     /// * `root_ptr` - Pointer to the tree root (leaf or internode)
-    ///
-    /// # Note
-    ///
-    /// Uses interior mutability (`parking_lot::Mutex`) so this can be called
-    /// from concurrent code paths with only `&self`.
     fn teardown_tree(&self, root_ptr: *mut u8);
 
     /// Retire an entire subtree rooted at `root_ptr`.
@@ -262,9 +273,8 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// code paths that need to handle OOM gracefully.
     ///
     /// Impl's must:
-    /// 1. Use fallible allocation (like, `std::alloc::alloc` + null check)
-    /// 2. Use `try_reserve(1)` before `push(ptr)` on tracking vecs
-    /// 3. Deallocate the node if tracking reservation fails.
+    /// 1. Use fallible allocation (e.g., `std::alloc::alloc` + null check)
+    /// 2. Initialize the node in-place using `L::init_at`
     ///
     /// # Errors
     /// Upon allocation failure

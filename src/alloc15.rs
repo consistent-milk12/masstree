@@ -1,95 +1,61 @@
-//! Node allocation for [`LeafNode15`] with WIDTH=24 leaves and WIDTH=15 internodes.
+//! Node allocation for [`LeafNode15`] with WIDTH=15 leaves and WIDTH=15 internodes.
 //!
-//! This module provides [`SeizeAllocator15`], a Miri-compliant allocator for
-//! masstree nodes using `seize` for memory reclamation.
+//! This module provides [`SeizeAllocator15`] and [`SeizeAllocator15TrueInline`],
+//! Miri-compliant allocators for masstree nodes using `seize` for memory reclamation.
 //!
-//! # Naming Convention
+//! # Design
 //!
-//! The "15" in [`SeizeAllocator15`] refers to the **internode width** (WIDTH=15),
-//! which uses the original Permuter (u64 with 4-bit slots). Despite the name,
-//! this allocator manages [`LeafNode15`] nodes which have **leaf width of 24**
-//! (via Permuter24 with u128).
-//!
-//! This asymmetry is intentional: internodes just hold child pointers, so WIDTH=15
-//! is sufficient. The benefit of WIDTH=24 comes from leaves holding more keys
-//! and splitting less often.
+//! These allocators use **direct retirement** without tracking lists, following
+//! papaya's seize integration pattern. Retirement is O(1) - just a seize call.
+//! Tree cleanup uses root-based traversal instead of list iteration.
 
 use std::alloc as StdAlloc;
 use std::alloc::Layout;
-use std::mem as StdMem;
+use std::marker::PhantomData;
 
-use parking_lot::lock_api::MutexGuard;
-use parking_lot::{Mutex, RawMutex};
 use seize::{Guard, LocalGuard};
 
 use crate::alloc_trait::NodeAllocatorGeneric;
 use crate::internode::InternodeNode;
-use crate::leaf15::LeafNode15;
+use crate::leaf15::{LeafNode15, WIDTH_15};
+use crate::nodeversion::NodeVersion;
 use crate::slot::ValueSlot;
 use crate::{AllocError, AllocResult};
 
-/// Miri-compliant allocator for masstree nodes (WIDTH=24 leaves, WIDTH=15 internodes).
+// =============================================================================
+// SeizeAllocator15 - For LeafNode15<S>
+// =============================================================================
+
+/// Node allocator using seize for safe memory reclamation (WIDTH=15).
 ///
-/// Uses `Box::into_raw()` for clean provenance and `Mutex` for concurrent tracking.
-/// Implements [`NodeAllocatorGeneric`] for use with [`crate::MassTreeGeneric`].
-///
-/// # Naming
-///
-/// The "15" suffix refers to internode width. See module docs for details.
+/// This allocator relies on tree traversal for teardown rather than
+/// maintaining tracking lists, eliminating O(n) overhead per retirement.
 ///
 /// # Design
 ///
-/// - Tracks all allocations in `Vec`s protected by `Mutex`
-/// - Supports deferred retirement via `seize` guards
-/// - Frees all tracked nodes on drop
+/// - **O(1) retirement**: Direct `guard.defer_retire()` calls
+/// - **No tracking overhead**: No mutex locks or linear scans during retirement
+/// - **Tree traversal teardown**: Frees all nodes by walking the tree structure
 ///
 /// # Thread Safety
 ///
-/// All methods use interior mutability via `parking_lot::Mutex`, allowing
-/// concurrent allocation from multiple threads with only `&self`.
+/// Stateless after construction - all operations are safe for concurrent use.
+#[derive(Debug)]
 pub struct SeizeAllocator15<S: ValueSlot> {
-    /// Raw pointers to allocated [`LeafNode15`] nodes.
-    leaf_ptrs: Mutex<Vec<*mut LeafNode15<S>>>,
-
-    /// Raw pointers to allocated internode nodes (WIDTH=15).
-    internode_ptrs: Mutex<Vec<*mut InternodeNode>>,
+    _marker: PhantomData<S>,
 }
 
-// SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
+// SAFETY: Allocator is stateless (just PhantomData), safe to send/share.
 unsafe impl<S: ValueSlot + Send + Sync> Send for SeizeAllocator15<S> {}
 unsafe impl<S: ValueSlot + Send + Sync> Sync for SeizeAllocator15<S> {}
-
-impl<S: ValueSlot> std::fmt::Debug for SeizeAllocator15<S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let leaf_count = self.leaf_ptrs.lock().len();
-        let internode_count = self.internode_ptrs.lock().len();
-        f.debug_struct("SeizeAllocator15")
-            .field("leaf_count", &leaf_count)
-            .field("internode_count", &internode_count)
-            .finish()
-    }
-}
 
 impl<S: ValueSlot> SeizeAllocator15<S> {
     /// Create a new allocator.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            leaf_ptrs: Mutex::new(Vec::new()),
-            internode_ptrs: Mutex::new(Vec::new()),
+            _marker: PhantomData,
         }
-    }
-
-    /// Return the number of tracked leaf nodes.
-    #[must_use]
-    pub fn leaf_count(&self) -> usize {
-        self.leaf_ptrs.lock().len()
-    }
-
-    /// Return the number of tracked internodes.
-    #[must_use]
-    pub fn internode_count(&self) -> usize {
-        self.internode_ptrs.lock().len()
     }
 }
 
@@ -99,27 +65,84 @@ impl<S: ValueSlot> Default for SeizeAllocator15<S> {
     }
 }
 
-impl<S: ValueSlot> Drop for SeizeAllocator15<S> {
-    fn drop(&mut self) {
-        // Free all tracked nodes on allocator drop
-        for ptr in self.leaf_ptrs.lock().drain(..) {
-            // SAFETY: ptr came from Box::into_raw or alloc()
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
+// =============================================================================
+// Tree Traversal for Teardown - SeizeAllocator15
+// =============================================================================
+
+impl<S: ValueSlot> SeizeAllocator15<S> {
+    /// Traverse tree structure and free all nodes.
+    ///
+    /// # Safety
+    ///
+    /// - `node_ptr` must point to a valid leaf or internode
+    /// - Caller must have exclusive access (no concurrent readers/writers)
+    /// - This is only safe to call during `Drop` when the tree is quiescent
+    ///
+    /// # Note on Drop Order
+    ///
+    /// When we encounter a leaf with layer pointers:
+    /// 1. We recurse into sublayers first and free them
+    /// 2. Then we drop the leaf via `Box::from_raw`
+    /// 3. `LeafNode::Drop` runs, but it correctly skips layer slots
+    ///    (it only cleans up slots where `keylenx < LAYER_KEYLENX`)
+    ///
+    /// This is safe because layer pointers are distinguished by keylenx >= 128,
+    /// and `LeafNode::Drop` explicitly checks this before cleanup.
+    #[expect(clippy::cast_ptr_alignment, reason = "Callers guarantee proper alignment")]
+    unsafe fn traverse_and_free(&self, node_ptr: *mut u8) {
+        if node_ptr.is_null() {
+            return;
         }
 
-        for ptr in self.internode_ptrs.lock().drain(..) {
-            // SAFETY: ptr came from Box::into_raw or alloc()
-            unsafe {
-                drop(Box::from_raw(ptr));
+        // Read version to determine node type.
+        // SAFETY: Both leaves and internodes have NodeVersion at offset 0.
+        let version_ptr = node_ptr.cast::<NodeVersion>();
+        let version = unsafe { &*version_ptr };
+
+        if version.is_leaf() {
+            // Handle leaf node
+            let leaf_ptr = node_ptr.cast::<LeafNode15<S>>();
+            let leaf = unsafe { &*leaf_ptr };
+
+            // Recurse into any layer pointers before freeing this leaf.
+            // Layer pointers are sublayer roots that need recursive traversal.
+            for slot in 0..WIDTH_15 {
+                if leaf.is_layer(slot) {
+                    let layer_ptr = leaf.leaf_value_ptr(slot);
+                    if !layer_ptr.is_null() {
+                        // Recursively free the sublayer
+                        unsafe { self.traverse_and_free(layer_ptr) };
+                    }
+                }
             }
+
+            // Free the leaf itself.
+            // LeafNode's Drop impl handles value cleanup (skips layer slots).
+            // SAFETY: We have exclusive access and leaf is valid.
+            unsafe { drop(Box::from_raw(leaf_ptr)) };
+        } else {
+            // Handle internode
+            let internode_ptr = node_ptr.cast::<InternodeNode>();
+            let internode = unsafe { &*internode_ptr };
+            let nkeys = internode.nkeys();
+
+            // Recurse into all children (nkeys + 1 children for nkeys keys)
+            for i in 0..=nkeys {
+                let child_ptr = internode.child(i);
+                if !child_ptr.is_null() {
+                    unsafe { self.traverse_and_free(child_ptr) };
+                }
+            }
+
+            // Free the internode.
+            // SAFETY: We have exclusive access and internode is valid.
+            unsafe { drop(Box::from_raw(internode_ptr)) };
         }
     }
 }
 
 // =============================================================================
-// NodeAllocatorGeneric Implementation
+// NodeAllocatorGeneric Implementation - SeizeAllocator15
 // =============================================================================
 
 impl<S> NodeAllocatorGeneric<S, LeafNode15<S>> for SeizeAllocator15<S>
@@ -128,122 +151,78 @@ where
 {
     #[inline(always)]
     fn alloc_leaf(&self, node: Box<LeafNode15<S>>) -> *mut LeafNode15<S> {
-        let ptr: *mut LeafNode15<S> = Box::into_raw(node);
-        self.leaf_ptrs.lock().push(ptr);
-        ptr
+        Box::into_raw(node)
     }
 
     #[inline(always)]
-    fn track_leaf(&self, ptr: *mut LeafNode15<S>) {
-        self.leaf_ptrs.lock().push(ptr);
+    fn track_leaf(&self, _ptr: *mut LeafNode15<S>) {
+        // No tracking - tree traversal handles cleanup
     }
 
     #[inline(always)]
     unsafe fn retire_leaf(&self, ptr: *mut LeafNode15<S>, guard: &LocalGuard<'_>) {
-        // Step 1: Remove from tracking to prevent double-free.
-        // The allocator's Drop iterates leaf_ptrs and frees everything,
-        // so we must remove the pointer before deferring retirement.
-        let found = {
-            let mut ptrs = self.leaf_ptrs.lock();
-            ptrs.iter().position(|&p| p == ptr).is_some_and(|pos| {
-                ptrs.swap_remove(pos);
-                true
-            })
-        };
-
-        debug_assert!(
-            found,
-            "retire_leaf: pointer {ptr:p} not found in tracking list - possible double-retire"
-        );
-
-        // Step 2: Defer retirement via seize.
+        // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
         unsafe {
-            guard.defer_retire(ptr, |p, _| {
-                drop(Box::from_raw(p));
-            });
+            guard.defer_retire(ptr, seize::reclaim::boxed);
         }
     }
 
     #[inline(always)]
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
-        // Caller passes a valid pointer to an allocated InternodeNode.
-        // Just cast and track - no Box round-trip needed.
-        let ptr: *mut InternodeNode = node_ptr.cast();
-        self.internode_ptrs.lock().push(ptr);
-        ptr.cast()
+        // No tracking needed - just return the pointer as-is
+        node_ptr
     }
 
     #[inline(always)]
-    fn track_internode_erased(&self, ptr: *mut u8) {
-        self.internode_ptrs.lock().push(ptr.cast());
+    fn track_internode_erased(&self, _ptr: *mut u8) {
+        // No tracking - tree traversal handles cleanup
     }
 
     #[inline(always)]
+    #[expect(clippy::cast_ptr_alignment, reason = "Caller guarantees InternodeNode alignment")]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        let typed_ptr: *mut InternodeNode = ptr.cast();
-
-        // Step 1: Remove from tracking to prevent double-free.
-        let found = {
-            let mut ptrs = self.internode_ptrs.lock();
-            ptrs.iter()
-                .position(|&p| p == typed_ptr)
-                .is_some_and(|pos| {
-                    ptrs.swap_remove(pos);
-                    true
-                })
-        };
-
-        debug_assert!(
-            found,
-            "retire_internode_erased: pointer {ptr:p} not found in tracking list - possible double-retire"
-        );
-
-        // Step 2: Defer retirement via seize.
+        // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
         unsafe {
-            guard.defer_retire(typed_ptr, |p, _| {
-                drop(Box::from_raw(p));
+            guard.defer_retire(ptr.cast::<InternodeNode>(), seize::reclaim::boxed);
+        }
+    }
+
+    #[expect(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "Trait contract requires valid pointer from tree root"
+    )]
+    fn teardown_tree(&self, root_ptr: *mut u8) {
+        if root_ptr.is_null() {
+            return;
+        }
+        // SAFETY: root_ptr is valid, we have exclusive access during Drop.
+        // Tree traversal frees all nodes including sublayers.
+        unsafe { self.traverse_and_free(root_ptr) };
+    }
+
+    #[inline(always)]
+    unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // Retire the subtree root with a reclaimer that traverses and frees.
+        // This defers the traversal until seize determines it's safe.
+        if root_ptr.is_null() {
+            return;
+        }
+
+        // SAFETY: Caller ensures subtree is fully unlinked.
+        // We defer the traversal to when seize says it's safe to reclaim.
+        unsafe {
+            guard.defer_retire(root_ptr, |ptr, _collector| {
+                // Create a temporary allocator instance for traversal
+                let alloc = Self::new();
+                // SAFETY: ptr is valid and we have exclusive access (seize guarantees this)
+                alloc.traverse_and_free(ptr);
             });
         }
     }
 
-    #[inline(always)]
-    fn teardown_tree(&self, _root_ptr: *mut u8) {
-        // Free all tracked nodes using interior mutability
-        let leaves: Vec<*mut LeafNode15<S>> = StdMem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode> = StdMem::take(&mut *self.internode_ptrs.lock());
-
-        for ptr in leaves {
-            // SAFETY: ptr came from Box::into_raw or alloc()
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
-
-        for ptr in internodes {
-            // SAFETY: ptr came from Box::into_raw or alloc()
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, _guard: &LocalGuard<'_>) {
-        // Subtree traversal not implemented - nodes remain tracked until allocator drop.
-        // This is safe but may delay memory reclamation for replaced layers.
-        debug_assert!(
-            !root_ptr.is_null(),
-            "retire_subtree_root: received null pointer"
-        );
-        // Nodes will be freed when the allocator is dropped.
-        // For eager reclamation, implement subtree traversal here.
-    }
-
     /// Allocate a leaf directly without Box intermediate.
-    ///
-    /// Uses raw allocation + `init_at` to avoid stack-to-heap copy.
     #[inline]
     fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode15<S> {
         self.try_alloc_leaf(is_root, is_layer_root)
@@ -260,7 +239,6 @@ where
 
         let layout = Layout::new::<InternodeNode>();
         // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
-        // The global allocator returns memory aligned to layout.align().
         #[expect(
             clippy::cast_ptr_alignment,
             reason = "Layout::new::<InternodeNode> guarantees alignment"
@@ -276,8 +254,6 @@ where
             InternodeNode::init_at(ptr, height);
         }
 
-        // Track for cleanup
-        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -287,8 +263,6 @@ where
         use std::alloc::{Layout, alloc};
 
         let layout = Layout::new::<InternodeNode>();
-        // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
-        // The global allocator returns memory aligned to layout.align().
         #[expect(
             clippy::cast_ptr_alignment,
             reason = "Layout::new::<InternodeNode> guarantees alignment"
@@ -304,8 +278,6 @@ where
             InternodeNode::init_at_root(ptr, height);
         }
 
-        // Track for cleanup
-        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -319,8 +291,6 @@ where
         use std::alloc::{Layout, alloc};
 
         let layout = Layout::new::<InternodeNode>();
-        // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
-        // The global allocator returns memory aligned to layout.align().
         #[expect(
             clippy::cast_ptr_alignment,
             reason = "Layout::new::<InternodeNode> guarantees alignment"
@@ -336,8 +306,6 @@ where
             InternodeNode::init_at_for_split(ptr, parent_version, height);
         }
 
-        // Track for cleanup
-        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -368,33 +336,12 @@ where
             LeafNode15::init_at(ptr, is_root || is_layer_root);
         }
 
-        // Step 3: Reserve space in tracking vector before push
-        //
-        // CRITICAL: [`Vec::push`] can reallocate and abort if capacity
-        // is exhausted. By calling `try_reserve` first, we make tracking fallible.
-        {
-            let mut ptrs: MutexGuard<'_, RawMutex, Vec<*mut LeafNode15<S>>> = self.leaf_ptrs.lock();
-
-            if ptrs.try_reserve(1).is_err() {
-                // Tracking failed, must deallocate the node
-                // SAFETY: ptr was just allocated with this layout
-                unsafe { StdAlloc::dealloc(raw_ptr, layout) };
-
-                return Err(AllocError::for_tracking(StdMem::size_of::<
-                    *mut LeafNode15<S>,
-                >()));
-            }
-
-            // Now push cannot fail (we just reserved space)
-            ptrs.push(ptr);
-        }
-
         Ok(ptr)
     }
 }
 
 // =============================================================================
-// True-Inline Allocator for LeafNode15TrueInline
+// SeizeAllocator15TrueInline - For LeafNode15TrueInline<V>
 // =============================================================================
 
 use crate::inline::bits::InlineBits;
@@ -406,49 +353,28 @@ use crate::slot::true_inline::TrueInlineSlot;
 /// Similar to [`SeizeAllocator15`] but manages [`LeafNode15TrueInline`] nodes
 /// instead of [`LeafNode15`]. Since `TrueInlineSlot::NEEDS_RETIREMENT = false`,
 /// no value retirement is needed.
+///
+/// # Layer Support
+///
+/// True-inline leaves CAN have layer pointers (via `set_layer_ptr()` and
+/// `is_layer(slot)`). The traversal must check `is_layer()` for each slot
+/// and recurse into sublayers, same as regular leaves.
+#[derive(Debug)]
 pub struct SeizeAllocator15TrueInline<V: InlineBits> {
-    /// Raw pointers to allocated [`LeafNode15TrueInline`] nodes.
-    leaf_ptrs: Mutex<Vec<*mut LeafNode15TrueInline<V>>>,
-
-    /// Raw pointers to allocated internode nodes.
-    internode_ptrs: Mutex<Vec<*mut InternodeNode>>,
+    _marker: PhantomData<V>,
 }
 
-// SAFETY: Raw pointers are owned by this allocator and protected by Mutex.
+// SAFETY: Allocator is stateless (just PhantomData), safe to send/share.
 unsafe impl<V: InlineBits> Send for SeizeAllocator15TrueInline<V> {}
 unsafe impl<V: InlineBits> Sync for SeizeAllocator15TrueInline<V> {}
-
-impl<V: InlineBits> std::fmt::Debug for SeizeAllocator15TrueInline<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let leaf_count = self.leaf_ptrs.lock().len();
-        let internode_count = self.internode_ptrs.lock().len();
-        f.debug_struct("SeizeAllocator15TrueInline")
-            .field("leaf_count", &leaf_count)
-            .field("internode_count", &internode_count)
-            .finish()
-    }
-}
 
 impl<V: InlineBits> SeizeAllocator15TrueInline<V> {
     /// Create a new allocator.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            leaf_ptrs: Mutex::new(Vec::new()),
-            internode_ptrs: Mutex::new(Vec::new()),
+            _marker: PhantomData,
         }
-    }
-
-    /// Return the number of tracked leaf nodes.
-    #[must_use]
-    pub fn leaf_count(&self) -> usize {
-        self.leaf_ptrs.lock().len()
-    }
-
-    /// Return the number of tracked internodes.
-    #[must_use]
-    pub fn internode_count(&self) -> usize {
-        self.internode_ptrs.lock().len()
     }
 }
 
@@ -458,23 +384,85 @@ impl<V: InlineBits> Default for SeizeAllocator15TrueInline<V> {
     }
 }
 
-impl<V: InlineBits> Drop for SeizeAllocator15TrueInline<V> {
-    fn drop(&mut self) {
-        for ptr in self.leaf_ptrs.lock().drain(..) {
-            // SAFETY: ptr came from Box::into_raw or alloc()
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
+// =============================================================================
+// Tree Traversal for Teardown - SeizeAllocator15TrueInline
+// =============================================================================
+
+impl<V: InlineBits> SeizeAllocator15TrueInline<V> {
+    /// Traverse tree structure and free all nodes.
+    ///
+    /// # Safety
+    ///
+    /// - `node_ptr` must point to a valid leaf or internode
+    /// - Caller must have exclusive access (no concurrent readers/writers)
+    /// - This is only safe to call during `Drop` when the tree is quiescent
+    ///
+    /// # Note on True-Inline Leaves
+    ///
+    /// True-inline leaves CAN have layer pointers (via `set_layer_ptr()` and
+    /// `is_layer(slot)`). We must check `is_layer()` for each slot and recurse
+    /// into sublayers, same as regular leaves.
+    ///
+    /// For non-layer slots, `leaf_value_ptr()` returns an encoded pointer
+    /// (not a real allocation), so we must NOT try to free it.
+    #[expect(clippy::cast_ptr_alignment, reason = "Callers guarantee proper alignment")]
+    unsafe fn traverse_and_free(&self, node_ptr: *mut u8) {
+        use crate::inline::leaf15_true::WIDTH_15;
+
+        if node_ptr.is_null() {
+            return;
         }
 
-        for ptr in self.internode_ptrs.lock().drain(..) {
-            // SAFETY: ptr came from Box::into_raw or alloc()
-            unsafe {
-                drop(Box::from_raw(ptr));
+        // Read version to determine node type.
+        // SAFETY: Both leaves and internodes have NodeVersion at offset 0.
+        let version_ptr = node_ptr.cast::<NodeVersion>();
+        let version = unsafe { &*version_ptr };
+
+        if version.is_leaf() {
+            // Handle leaf node
+            let leaf_ptr = node_ptr.cast::<LeafNode15TrueInline<V>>();
+            let leaf = unsafe { &*leaf_ptr };
+
+            // Recurse into any layer pointers before freeing this leaf.
+            // True-inline leaves CAN have layer pointers - check is_layer() first.
+            for slot in 0..WIDTH_15 {
+                if leaf.is_layer(slot) {
+                    let layer_ptr = leaf.leaf_value_ptr(slot);
+                    if !layer_ptr.is_null() {
+                        // Recursively free the sublayer
+                        unsafe { self.traverse_and_free(layer_ptr) };
+                    }
+                }
+                // Non-layer slots have encoded inline values, not real allocations
             }
+
+            // Free the leaf itself.
+            // SAFETY: We have exclusive access and leaf is valid.
+            unsafe { drop(Box::from_raw(leaf_ptr)) };
+        } else {
+            // Handle internode
+            let internode_ptr = node_ptr.cast::<InternodeNode>();
+            let internode = unsafe { &*internode_ptr };
+            let nkeys = internode.nkeys();
+
+            // Recurse into all children (nkeys + 1 children for nkeys keys)
+            for i in 0..=nkeys {
+                let child_ptr = internode.child(i);
+                if !child_ptr.is_null() {
+                    unsafe { self.traverse_and_free(child_ptr) };
+                }
+            }
+
+            // Free the internode.
+            // SAFETY: We have exclusive access and internode is valid.
+            unsafe { drop(Box::from_raw(internode_ptr)) };
         }
     }
 }
+
+// =============================================================================
+// NodeAllocatorGeneric Implementation - SeizeAllocator15TrueInline
+// =============================================================================
 
 impl<V: InlineBits + Send + Sync + 'static>
     NodeAllocatorGeneric<TrueInlineSlot<V>, LeafNode15TrueInline<V>>
@@ -482,104 +470,73 @@ impl<V: InlineBits + Send + Sync + 'static>
 {
     #[inline(always)]
     fn alloc_leaf(&self, node: Box<LeafNode15TrueInline<V>>) -> *mut LeafNode15TrueInline<V> {
-        let ptr: *mut LeafNode15TrueInline<V> = Box::into_raw(node);
-        self.leaf_ptrs.lock().push(ptr);
-        ptr
+        Box::into_raw(node)
     }
 
     #[inline(always)]
-    fn track_leaf(&self, ptr: *mut LeafNode15TrueInline<V>) {
-        self.leaf_ptrs.lock().push(ptr);
+    fn track_leaf(&self, _ptr: *mut LeafNode15TrueInline<V>) {
+        // No tracking - tree traversal handles cleanup
     }
 
     #[inline(always)]
     unsafe fn retire_leaf(&self, ptr: *mut LeafNode15TrueInline<V>, guard: &LocalGuard<'_>) {
-        let found = {
-            let mut ptrs = self.leaf_ptrs.lock();
-            ptrs.iter().position(|&p| p == ptr).is_some_and(|pos| {
-                ptrs.swap_remove(pos);
-                true
-            })
-        };
-
-        debug_assert!(
-            found,
-            "retire_leaf: pointer {ptr:p} not found in tracking list"
-        );
-
+        // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
         unsafe {
-            guard.defer_retire(ptr, |p, _| {
-                drop(Box::from_raw(p));
-            });
+            guard.defer_retire(ptr, seize::reclaim::boxed);
         }
     }
 
     #[inline(always)]
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8 {
-        let ptr: *mut InternodeNode = node_ptr.cast();
-        self.internode_ptrs.lock().push(ptr);
-        ptr.cast()
+        // No tracking needed - just return the pointer as-is
+        node_ptr
     }
 
     #[inline(always)]
-    fn track_internode_erased(&self, ptr: *mut u8) {
-        self.internode_ptrs.lock().push(ptr.cast());
+    fn track_internode_erased(&self, _ptr: *mut u8) {
+        // No tracking - tree traversal handles cleanup
     }
 
     #[inline(always)]
+    #[expect(clippy::cast_ptr_alignment, reason = "Caller guarantees InternodeNode alignment")]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        let typed_ptr: *mut InternodeNode = ptr.cast();
-
-        let found = {
-            let mut ptrs = self.internode_ptrs.lock();
-            ptrs.iter()
-                .position(|&p| p == typed_ptr)
-                .is_some_and(|pos| {
-                    ptrs.swap_remove(pos);
-                    true
-                })
-        };
-
-        debug_assert!(
-            found,
-            "retire_internode_erased: pointer {ptr:p} not found in tracking list"
-        );
-
+        // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
         unsafe {
-            guard.defer_retire(typed_ptr, |p, _| {
-                drop(Box::from_raw(p));
+            guard.defer_retire(ptr.cast::<InternodeNode>(), seize::reclaim::boxed);
+        }
+    }
+
+    #[expect(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "Trait contract requires valid pointer from tree root"
+    )]
+    fn teardown_tree(&self, root_ptr: *mut u8) {
+        if root_ptr.is_null() {
+            return;
+        }
+        // SAFETY: root_ptr is valid, we have exclusive access during Drop.
+        // Tree traversal frees all nodes including sublayers.
+        // True-inline leaves CAN have layer pointers - traversal handles them.
+        unsafe { self.traverse_and_free(root_ptr) };
+    }
+
+    #[inline(always)]
+    unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // Retire the subtree root with a reclaimer that traverses and frees.
+        if root_ptr.is_null() {
+            return;
+        }
+
+        // SAFETY: Caller ensures subtree is fully unlinked.
+        unsafe {
+            guard.defer_retire(root_ptr, |ptr, _collector| {
+                let alloc = Self::new();
+                // SAFETY: ptr is valid and we have exclusive access (seize guarantees this)
+                alloc.traverse_and_free(ptr);
             });
         }
-    }
-
-    #[inline(always)]
-    fn teardown_tree(&self, _root_ptr: *mut u8) {
-        let leaves: Vec<*mut LeafNode15TrueInline<V>> = StdMem::take(&mut *self.leaf_ptrs.lock());
-        let internodes: Vec<*mut InternodeNode> = StdMem::take(&mut *self.internode_ptrs.lock());
-
-        for ptr in leaves {
-            // SAFETY: ptr came from Box::into_raw or alloc()
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
-
-        for ptr in internodes {
-            // SAFETY: ptr came from Box::into_raw or alloc()
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, _guard: &LocalGuard<'_>) {
-        debug_assert!(
-            !root_ptr.is_null(),
-            "retire_subtree_root: received null pointer"
-        );
     }
 
     #[inline]
@@ -591,7 +548,6 @@ impl<V: InlineBits + Send + Sync + 'static>
         self.try_alloc_leaf(is_root, is_layer_root)
             .unwrap_or_else(|_| {
                 let layout = Layout::new::<LeafNode15TrueInline<V>>();
-
                 StdAlloc::handle_alloc_error(layout)
             })
     }
@@ -612,7 +568,6 @@ impl<V: InlineBits + Send + Sync + 'static>
             InternodeNode::init_at(ptr, height);
         }
 
-        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -632,7 +587,6 @@ impl<V: InlineBits + Send + Sync + 'static>
             InternodeNode::init_at_root(ptr, height);
         }
 
-        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -656,7 +610,6 @@ impl<V: InlineBits + Send + Sync + 'static>
             InternodeNode::init_at_for_split(ptr, parent_version, height);
         }
 
-        self.internode_ptrs.lock().push(ptr);
         ptr.cast()
     }
 
@@ -679,22 +632,6 @@ impl<V: InlineBits + Send + Sync + 'static>
         // SAFETY: ptr is valid, properly aligned, exclusive access
         unsafe {
             LeafNode15TrueInline::init_at(ptr, is_root || is_layer_root);
-        }
-
-        // Step 3: Fallible tracking
-        {
-            let mut ptrs: MutexGuard<'_, RawMutex, Vec<*mut LeafNode15TrueInline<V>>> =
-                self.leaf_ptrs.lock();
-
-            if ptrs.try_reserve(1).is_err() {
-                unsafe { StdAlloc::dealloc(raw_ptr, layout) };
-
-                return Err(AllocError::for_tracking(StdMem::size_of::<
-                    *mut LeafNode15TrueInline<V>,
-                >()));
-            }
-
-            ptrs.push(ptr);
         }
 
         Ok(ptr)
