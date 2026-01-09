@@ -271,6 +271,7 @@ pub mod permuter;
 pub mod permuter24;
 pub mod prefetch;
 pub mod ref_value_slot;
+mod retirement;
 mod shard_counter;
 pub mod slot;
 pub mod suffix;
@@ -278,6 +279,7 @@ pub mod tree;
 pub mod value;
 
 pub use error::{AllocError, AllocKind, AllocResult};
+pub use retirement::{BatchedRetire, FlushOnDrop};
 
 // Re-export leaf node traits for generic tree operations
 pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};

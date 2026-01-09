@@ -16,7 +16,7 @@ use std::hint as StdHint;
 use std::ptr as StdPtr;
 use std::sync::atomic::Ordering as AtomicOrdering;
 
-use seize::{Guard, LocalGuard};
+use seize::LocalGuard;
 
 use crate::ksearch::upper_bound_internode_generic;
 use crate::{
@@ -294,11 +294,10 @@ where
         // For true-inline nodes (NEEDS_RETIREMENT = false), this is a no-op
         // and the compiler will eliminate this entire block.
         if !value_ptr.is_null() && S::NEEDS_RETIREMENT {
-            // SAFETY: value_ptr is valid (from leaf.leaf_value_ptr()), guard proects reclamation.
+            // Use batched retirement to amortize coordination overhead
+            // SAFETY: value_ptr is valid (from leaf.leaf_value_ptr()), guard protects reclamation.
             unsafe {
-                self.guard.defer_retire(value_ptr, |ptr: *mut u8, _| {
-                    S::cleanup_value_ptr(ptr);
-                });
+                crate::BatchedRetire::defer_value::<S>(value_ptr, self.guard);
             }
         }
 

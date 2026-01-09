@@ -21,7 +21,7 @@
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 
-use seize::{Guard, LocalGuard};
+use seize::LocalGuard;
 
 use crate::{
     Linker, MassTreeGeneric, NodeAllocatorGeneric, key::Key, leaf_trait::LayerCapableLeaf,
@@ -912,11 +912,10 @@ where
 
         // Defer retirement of the old value
         if !old_ptr.is_null() && S::NEEDS_RETIREMENT {
+            // Use batched retirement to amortize coordination overhead
             // SAFETY: old_ptr came from output_to_raw
             unsafe {
-                guard.defer_retire(old_ptr, |ptr, _| {
-                    S::cleanup_value_ptr(ptr);
-                });
+                crate::BatchedRetire::defer_value::<S>(old_ptr, guard);
             }
         }
 

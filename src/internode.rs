@@ -59,7 +59,7 @@ use std::cmp::Ordering;
 use std::fmt as StdFmt;
 use std::mem as StdMem;
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
 use crate::leaf_trait::TreeInternode;
 use crate::nodeversion::NodeVersion;

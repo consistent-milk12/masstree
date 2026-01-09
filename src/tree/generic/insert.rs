@@ -8,7 +8,7 @@
 //! - Unified slot allocation and value update logic
 
 use super::{
-    Guard, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf, Linker,
+    InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf, Linker,
     LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
 };
 
@@ -112,9 +112,10 @@ where
 
         // Defer retirement of the old value (only for pointer-backed nodes).
         if S::NEEDS_RETIREMENT {
+            // Use batched retirement to amortize coordination overhead
             // SAFETY: old_ptr came from output_to_raw and is valid for cleanup
             unsafe {
-                guard.defer_retire(old_ptr, |ptr: *mut u8, _| S::cleanup_value_ptr(ptr));
+                crate::BatchedRetire::defer_value::<S>(old_ptr, guard);
             };
         }
 
@@ -318,11 +319,10 @@ where
         let old_ptr: *mut u8 = leaf.take_leaf_value_ptr(slot);
 
         if !old_ptr.is_null() && S::NEEDS_RETIREMENT {
+            // Use batched retirement to amortize coordination overhead
             // SAFETY: old_ptr came from take_leaf_value_ptr
             unsafe {
-                guard.defer_retire(old_ptr, |ptr: *mut u8, _| {
-                    S::cleanup_value_ptr(ptr);
-                });
+                crate::BatchedRetire::defer_value::<S>(old_ptr, guard);
             }
         }
 

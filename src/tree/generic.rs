@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicPtr, Ordering as AtomicOrdering},
 };
 
-use seize::{Collector, Guard, LocalGuard};
+use seize::{Collector, LocalGuard};
 
 use crate::{
     Linker, MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation,
@@ -46,13 +46,39 @@ where
     /// Create a new empty `MassTreeGeneric` with the given allocator.
     ///
     /// The tree starts with a single empty leaf as root.
+    /// Uses default batch size for memory reclamation (max(CPU count, 32)).
     #[must_use]
     pub fn with_allocator(allocator: A) -> Self {
+        Self::with_allocator_batch_size(allocator, None)
+    }
+
+    /// Create a new empty `MassTreeGeneric` with custom batch size.
+    ///
+    /// # Arguments
+    ///
+    /// * `allocator` - Node allocator for leaf and internode allocation
+    /// * `batch_size` - Number of retirements to batch before triggering reclamation.
+    ///   - `None` uses default (max(CPU count, 32))
+    ///   - Smaller values (16-32): Lower latency variance, more frequent barriers
+    ///   - Larger values (64-128): Better throughput, but latency spikes
+    ///
+    /// # Performance Tuning
+    ///
+    /// The batch size controls how many retired pointers accumulate before
+    /// seize issues a heavy memory barrier (`sys_membarrier` on Linux).
+    /// Each barrier costs ~1-5µs, so larger batches amortize this cost.
+    #[must_use]
+    pub fn with_allocator_batch_size(allocator: A, batch_size: Option<usize>) -> Self {
         // Create root leaf directly in allocator memory (bypasses Box for pool allocators).
         let root_ptr: *mut L = allocator.alloc_leaf_direct(true, false);
 
+        let collector: Collector = match batch_size {
+            Some(size) => Collector::new().batch_size(size),
+            None => Collector::new(),
+        };
+
         Self {
-            collector: Collector::new(),
+            collector,
             allocator,
             root_ptr: AtomicPtr::new(root_ptr.cast::<u8>()),
             count: ShardedCounter::new(),
@@ -69,6 +95,21 @@ where
     #[inline(always)]
     pub fn guard(&self) -> LocalGuard<'_> {
         self.collector.enter()
+    }
+
+    /// Flush pending retirements to accelerate memory reclamation.
+    ///
+    /// This triggers seize to process any accumulated retirements in the
+    /// thread-local batch. Call this at natural boundaries in your workload
+    /// to get more predictable reclamation timing.
+    ///
+    /// # Note
+    ///
+    /// Actual reclamation won't happen until all guards protecting the
+    /// retired pointers are dropped. This just starts the process.
+    #[inline(always)]
+    pub fn flush(&self, guard: &LocalGuard<'_>) {
+        crate::BatchedRetire::flush(guard);
     }
 
     /// Get the approximate number of keys in the tree.
