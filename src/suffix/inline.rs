@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use super::*;
+use super::{AllocResult, CompareSuffix, SuffixBag, TreePermutation};
 
 const U16_MAX: usize = u16::MAX as usize;
 
@@ -92,7 +92,7 @@ pub struct InlineSuffixBag<const WIDTH: usize, const CAPACITY: usize> {
 }
 
 impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY> {
-    /// Compile-time assertion that WIDTH fits in u8 for suffix_count.
+    /// Compile-time assertion that WIDTH fits in u8 for `suffix_count`.
     const ASSERT_WIDTH_FITS_U8: () = assert!(WIDTH <= 255, "WIDTH must be <= 255 to fit in u8");
 
     // ========================================================================
@@ -146,7 +146,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// This is now O(1), the count is cached and maintained incrementally.
     #[must_use]
     #[inline(always)]
-    pub fn count(&self) -> usize {
+    pub const fn count(&self) -> usize {
         self.suffix_count as usize
     }
 
@@ -211,8 +211,8 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         let mut external: SuffixBag<WIDTH> = SuffixBag::try_with_capacity(required_capacity)?;
 
         // Pass 2: Copy suffixes to external bag using collected data
-        #[expect(clippy::indexing_slicing)]
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
+            // SAFETY: start and len come from valid InlineSlotMeta entries
             let suffix: &[u8] = &self.data[start..(start + len)];
             external.assign(slot, suffix);
         }
@@ -395,7 +395,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     ///
     /// Used after draining to an external bag.
     #[inline(always)]
-    pub fn clear_all(&mut self) {
+    pub const fn clear_all(&mut self) {
         self.slots = [InlineSlotMeta::EMPTY; WIDTH];
         self.size = 0;
         self.suffix_count = 0;

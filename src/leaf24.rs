@@ -183,10 +183,11 @@ pub struct LeafNode24<S: ValueSlot> {
 
 impl<S: ValueSlot> StdFmt::Debug for LeafNode24<S> {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
+        // SAFETY: Debug impl - parent pointer is stable during formatting.
         f.debug_struct("LeafNode24")
             .field("size", &self.size())
             .field("is_root", &self.version.is_root())
-            .field("has_parent", &(!self.parent().is_null()))
+            .field("has_parent", &(!unsafe { self.parent_unguarded() }.is_null()))
             .finish_non_exhaustive()
     }
 }
@@ -1156,17 +1157,50 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Get the next leaf pointer, masking the mark bit.
+    ///
+    /// Uses guard protection to ensure the load participates in seize's
+    /// total order, making it safe on all architectures.
     #[must_use]
     #[inline(always)]
-    pub fn safe_next(&self) -> *mut Self {
+    pub fn safe_next(&self, guard: &impl Guard) -> *mut Self {
+        let ptr: *mut Self = guard.protect(&self.next, READ_ORD);
+        ptr.map_addr(|addr: usize| addr & !1)
+    }
+
+    /// Get the next leaf pointer without guard protection.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the next pointer's target won't be retired during use.
+    /// Valid when:
+    /// - Called during `Drop` (no concurrent access)
+    /// - Called in teardown after `reclaim_all()`
+    /// - Caller holds locks that prevent retirement
+    #[must_use]
+    #[inline(always)]
+    pub unsafe fn safe_next_unguarded(&self) -> *mut Self {
         let ptr: *mut Self = self.next.load(READ_ORD);
         ptr.map_addr(|addr: usize| addr & !1)
     }
 
     /// Get the raw next pointer (including mark bit).
+    ///
+    /// Uses guard protection to ensure the load participates in seize's
+    /// total order, making it safe on all architectures.
     #[must_use]
     #[inline(always)]
-    pub fn next_raw(&self) -> *mut Self {
+    pub fn next_raw(&self, guard: &impl Guard) -> *mut Self {
+        guard.protect(&self.next, READ_ORD)
+    }
+
+    /// Get the raw next pointer without guard protection.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the next pointer's target won't be retired during use.
+    #[must_use]
+    #[inline(always)]
+    pub unsafe fn next_raw_unguarded(&self) -> *mut Self {
         self.next.load(READ_ORD)
     }
 
@@ -1192,9 +1226,17 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Unmark the next pointer.
+    ///
+    /// # Safety Note
+    ///
+    /// Uses unguarded load internally since we're modifying our own field
+    /// during a locked operation, not traversing to a different node.
     #[inline(always)]
     pub fn unmark_next(&self) {
-        let ptr: *mut Self = self.safe_next();
+        // SAFETY: We hold the lock on this node during split/unlink operations,
+        // so we're not racing with retirement of the next pointer's target.
+        // We're just clearing the mark bit and storing back.
+        let ptr: *mut Self = unsafe { self.safe_next_unguarded() };
         self.next.store(ptr, WRITE_ORD);
     }
 
@@ -1328,7 +1370,8 @@ impl<S: ValueSlot> LeafNode24<S> {
         let final_prev: *mut Self;
         loop {
             // Re-read prev on each iteration (may change if prev splits)
-            let prev: *mut Self = self.prev();
+            // SAFETY: Called under exclusive lock - no concurrent retirement.
+            let prev: *mut Self = unsafe { self.prev_unguarded() };
             debug_assert!(!prev.is_null(), "unlink_from_chain: prev must be non-null");
 
             // SAFETY: prev is non-null (checked above) and points to a valid leaf
@@ -1372,9 +1415,23 @@ impl<S: ValueSlot> LeafNode24<S> {
     }
 
     /// Get the previous leaf pointer.
+    ///
+    /// Uses guard protection to ensure the load participates in seize's
+    /// total order, making it safe on all architectures.
     #[must_use]
     #[inline(always)]
-    pub fn prev(&self) -> *mut Self {
+    pub fn prev(&self, guard: &impl Guard) -> *mut Self {
+        guard.protect(&self.prev, READ_ORD)
+    }
+
+    /// Get the previous leaf pointer without guard protection.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the prev pointer's target won't be retired during use.
+    #[must_use]
+    #[inline(always)]
+    pub unsafe fn prev_unguarded(&self) -> *mut Self {
         self.prev.load(READ_ORD)
     }
 
@@ -1389,9 +1446,23 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Get the parent pointer.
+    ///
+    /// Uses guard protection to ensure the load participates in seize's
+    /// total order, making it safe on all architectures.
     #[must_use]
     #[inline(always)]
-    pub fn parent(&self) -> *mut u8 {
+    pub fn parent(&self, guard: &impl Guard) -> *mut u8 {
+        guard.protect(&self.parent, READ_ORD)
+    }
+
+    /// Get the parent pointer without guard protection.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the parent pointer's target won't be retired during use.
+    #[must_use]
+    #[inline(always)]
+    pub unsafe fn parent_unguarded(&self) -> *mut u8 {
         self.parent.load(READ_ORD)
     }
 
@@ -1516,10 +1587,15 @@ impl<S: ValueSlot> LeafNode24<S> {
     // ============================================================================
 
     /// Check if slot 0 can be reused for a new key.
+    ///
+    /// # Safety
+    ///
+    /// Called under exclusive lock - uses unguarded prev load.
     #[must_use]
     #[inline(always)]
     pub fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
-        if self.prev().is_null() {
+        // SAFETY: Called under exclusive lock - no concurrent retirement.
+        if unsafe { self.prev_unguarded() }.is_null() {
             return true;
         }
 
@@ -1717,9 +1793,13 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         Self::clear_slot_and_permutation(self, slot);
     }
 
+    /// # Safety
+    ///
+    /// Trait methods use unguarded loads - intended for locked operations.
     #[inline(always)]
     fn safe_next(&self) -> *mut Self {
-        Self::safe_next(self)
+        // SAFETY: Trait methods are called during locked operations.
+        unsafe { Self::safe_next_unguarded(self) }
     }
 
     #[inline(always)]
@@ -1742,9 +1822,13 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         Self::unmark_next(self);
     }
 
+    /// # Safety
+    ///
+    /// Trait methods use unguarded loads - intended for locked operations.
     #[inline(always)]
     fn prev(&self) -> *mut Self {
-        Self::prev(self)
+        // SAFETY: Trait methods are called during locked operations.
+        unsafe { Self::prev_unguarded(self) }
     }
 
     #[inline(always)]
@@ -1758,9 +1842,13 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         unsafe { Self::unlink_from_chain(self) };
     }
 
+    /// # Safety
+    ///
+    /// Trait methods use unguarded loads - intended for locked operations.
     #[inline(always)]
     fn parent(&self) -> *mut u8 {
-        Self::parent(self)
+        // SAFETY: Trait methods are called during locked operations.
+        unsafe { Self::parent_unguarded(self) }
     }
 
     #[inline(always)]
@@ -1784,9 +1872,13 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         Self::load_slot_value(self, slot)
     }
 
+    /// # Safety
+    ///
+    /// Trait methods use unguarded loads - intended for locked operations.
     #[inline(always)]
     fn next_raw(&self) -> *mut Self {
-        Self::next_raw(self)
+        // SAFETY: Trait methods are called during locked operations.
+        unsafe { Self::next_raw_unguarded(self) }
     }
 
     #[inline(always)]

@@ -14,7 +14,7 @@ fn test_new_internode() {
     assert!(node.is_empty());
     assert!(!node.is_full());
     assert!(node.children_are_leaves());
-    assert!(node.parent().is_null());
+    assert!(unsafe { node.parent_unguarded() }.is_null());
 }
 
 #[test]
@@ -54,9 +54,10 @@ fn test_child_accessors() {
     node.set_child(1, fake_child1);
     node.set_child(2, fake_child2);
 
-    assert_eq!(node.child(0), fake_child0);
-    assert_eq!(node.child(1), fake_child1);
-    assert_eq!(node.child(2), fake_child2);
+    // SAFETY: Single-threaded test context.
+    assert_eq!(unsafe { node.child_unguarded(0) }, fake_child0);
+    assert_eq!(unsafe { node.child_unguarded(1) }, fake_child1);
+    assert_eq!(unsafe { node.child_unguarded(2) }, fake_child2);
 }
 
 #[test]
@@ -74,8 +75,9 @@ fn test_assign() {
     node.set_nkeys(1);
 
     assert_eq!(node.ikey(0), 0xABCD_0000_0000_0000);
-    assert_eq!(node.child(0), left_child);
-    assert_eq!(node.child(1), right_child);
+    // SAFETY: Single-threaded test context.
+    assert_eq!(unsafe { node.child_unguarded(0) }, left_child);
+    assert_eq!(unsafe { node.child_unguarded(1) }, right_child);
     assert_eq!(node.size(), 1);
 }
 
@@ -111,7 +113,7 @@ fn test_parent_accessors() {
 
     // set_parent takes *mut u8, so cast the pointer
     node.set_parent(parent_ptr.cast::<u8>());
-    assert_eq!(node.parent(), parent_ptr.cast::<u8>());
+    assert_eq!(unsafe { node.parent_unguarded() }, parent_ptr.cast::<u8>());
 }
 
 #[test]
@@ -415,7 +417,8 @@ fn test_shift_from_basic() {
 
     // Shift 3 entries starting at src position 1 to dst position 0
     // This should copy: ikey[1], ikey[2], ikey[3] and child[2], child[3], child[4]
-    dst.shift_from(0, &src, 1, 3);
+    // SAFETY: Single-threaded test context.
+    unsafe { dst.shift_from(0, &src, 1, 3) };
     dst.set_nkeys(3);
 
     // Verify keys were copied
@@ -424,9 +427,10 @@ fn test_shift_from_basic() {
     assert_eq!(dst.ikey(2), 400);
 
     // Verify children were copied (shift_from copies child[src_pos + 1 + i])
-    assert_eq!(dst.child(1), StdPtr::without_provenance_mut(3 * 0x1000)); // src.child(2)
-    assert_eq!(dst.child(2), StdPtr::without_provenance_mut(4 * 0x1000)); // src.child(3)
-    assert_eq!(dst.child(3), StdPtr::without_provenance_mut(5 * 0x1000)); // src.child(4)
+    // SAFETY: Single-threaded test context.
+    assert_eq!(unsafe { dst.child_unguarded(1) }, StdPtr::without_provenance_mut(3 * 0x1000)); // src.child(2)
+    assert_eq!(unsafe { dst.child_unguarded(2) }, StdPtr::without_provenance_mut(4 * 0x1000)); // src.child(3)
+    assert_eq!(unsafe { dst.child_unguarded(3) }, StdPtr::without_provenance_mut(5 * 0x1000)); // src.child(4)
 }
 
 #[test]
@@ -451,18 +455,21 @@ fn test_shift_from_to_different_position() {
 
     // Shift 2 entries from src position 1 to dst position 1
     // This copies ikey[1], ikey[2] and child[2], child[3]
-    dst.shift_from(1, &src, 1, 2);
+    // SAFETY: Single-threaded test context.
+    unsafe { dst.shift_from(1, &src, 1, 2) };
     dst.set_nkeys(3);
 
     // Original data should be preserved
     assert_eq!(dst.ikey(0), 5);
-    assert_eq!(dst.child(0), StdPtr::without_provenance_mut(0x1));
+    // SAFETY: Single-threaded test context.
+    assert_eq!(unsafe { dst.child_unguarded(0) }, StdPtr::without_provenance_mut(0x1));
 
     // Shifted data should be at position 1+
     assert_eq!(dst.ikey(1), 20);
     assert_eq!(dst.ikey(2), 30);
-    assert_eq!(dst.child(2), StdPtr::without_provenance_mut(12 * 0x100)); // src.child(2)
-    assert_eq!(dst.child(3), StdPtr::without_provenance_mut(13 * 0x100)); // src.child(3)
+    // SAFETY: Single-threaded test context.
+    assert_eq!(unsafe { dst.child_unguarded(2) }, StdPtr::without_provenance_mut(12 * 0x100)); // src.child(2)
+    assert_eq!(unsafe { dst.child_unguarded(3) }, StdPtr::without_provenance_mut(13 * 0x100)); // src.child(3)
 }
 
 #[test]
@@ -478,7 +485,8 @@ fn test_shift_from_zero_count() {
     dst.set_nkeys(1);
 
     // Shift 0 entries - should be a no-op
-    dst.shift_from(0, &src, 0, 0);
+    // SAFETY: Single-threaded test context.
+    unsafe { dst.shift_from(0, &src, 0, 0) };
 
     // dst should be unchanged
     assert_eq!(dst.ikey(0), 999);

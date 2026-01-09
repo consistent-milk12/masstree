@@ -109,7 +109,7 @@ pub struct SuffixBag<const WIDTH: usize> {
 }
 
 impl<const WIDTH: usize> SuffixBag<WIDTH> {
-    /// Compile-time assert that WIDTH fits in u8 for suffix_count.
+    /// Compile-time assert that WIDTH fits in u8 for `suffix_count`.
     const ASSERT_WIDTH_FITS_U8: () = assert!(WIDTH <= 255, "WDITH mst be <= 255 to fit in u8");
 
     // ========================================================================
@@ -167,7 +167,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// This is now O(1) - the count is cached and maintained incrementally.
     #[must_use]
     #[inline(always)]
-    pub fn count(&self) -> usize {
+    pub const fn count(&self) -> usize {
         self.suffix_count as usize
     }
 
@@ -200,7 +200,25 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
 
     /// Try to assign a suffix, returning error if allocation fails.
     ///
+    /// Attempts to store `suffix` at the given `slot` index. Uses several
+    /// optimization strategies in order:
+    /// 1. Re-use existing slot if new suffix fits in allocated space
+    /// 2. Append to data buffer if capacity allows
+    /// 3. Compact in-place to reclaim fragmented space
+    /// 4. Grow the buffer if compaction is insufficient
     ///
+    /// # Arguments
+    ///
+    /// * `slot` - Slot index, must be `< WIDTH`
+    /// * `suffix` - Suffix bytes to store
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError`] if buffer growth fails due to memory exhaustion.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `suffix.len() > u16::MAX` (65535 bytes).
     #[expect(clippy::indexing_slicing, reason = "Checked access")]
     pub fn try_assign(&mut self, slot: usize, suffix: &[u8]) -> AllocResult<()> {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");

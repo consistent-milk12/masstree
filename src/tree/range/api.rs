@@ -61,6 +61,7 @@ where
         end: RangeBound<'a>,
         guard: &'g LocalGuard<'a>,
     ) -> RangeIter<'a, 'g, S, L, A> {
+        self.verify_guard(guard);
         RangeIter::new(self, start, end, guard)
     }
 

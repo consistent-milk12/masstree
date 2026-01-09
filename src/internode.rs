@@ -61,6 +61,8 @@ use std::mem as StdMem;
 use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
+use seize::Guard;
+
 use crate::leaf_trait::TreeInternode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{READ_ORD, RELAXED, WRITE_ORD};
@@ -140,10 +142,11 @@ pub struct InternodeNode {
 
 impl StdFmt::Debug for InternodeNode {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
+        // SAFETY: Debug impl - parent pointer is stable during formatting.
         f.debug_struct("InternodeNode")
             .field("nkeys", &self.nkeys())
             .field("height", &self.height)
-            .field("has_parent", &(!self.parent().is_null()))
+            .field("has_parent", &(!unsafe { self.parent_unguarded() }.is_null()))
             .finish_non_exhaustive()
     }
 }
@@ -485,6 +488,9 @@ impl InternodeNode {
     /// Valid indices are `0..=nkeys` (one more child than keys).
     /// Index 15 (WIDTH) returns the rightmost child.
     ///
+    /// Uses guard protection to ensure the load participates in seize's
+    /// total order, making it safe on all architectures.
+    ///
     /// # Panics
     /// Panics in debug mode if `i > WIDTH`.
     #[must_use]
@@ -493,8 +499,27 @@ impl InternodeNode {
         clippy::indexing_slicing,
         reason = "bounds checked via debug_assert; i <= WIDTH (16 children)"
     )]
-    pub fn child(&self, i: usize) -> *mut u8 {
+    pub fn child(&self, i: usize, guard: &impl Guard) -> *mut u8 {
         debug_assert!(i <= WIDTH, "child: index {i} out of bounds");
+        guard.protect(&self.child[i], READ_ORD)
+    }
+
+    /// Get the child pointer without guard protection.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the child pointer's target won't be retired during use.
+    /// Valid when:
+    /// - Called during `Drop` (no concurrent access)
+    /// - Called in teardown after `reclaim_all()`
+    #[must_use]
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "bounds checked via debug_assert; i <= WIDTH (16 children)"
+    )]
+    pub unsafe fn child_unguarded(&self, i: usize) -> *mut u8 {
+        debug_assert!(i <= WIDTH, "child_unguarded: index {i} out of bounds");
         self.child[i].load(READ_ORD)
     }
 
@@ -504,9 +529,13 @@ impl InternodeNode {
     /// Prefetches both the next child node (`child[i+1]`) and its key array
     /// (cache line 1 at offset 64) while returning `child[i]`.
     ///
+    /// Uses guard protection for the returned child pointer. The speculative
+    /// prefetch does NOT use protection (it's just a hint, never dereferenced).
+    ///
     /// # Arguments
     /// * `i` - Child index to return
     /// * `nkeys` - Current number of keys (to avoid prefetching beyond valid children)
+    /// * `guard` - Guard for protected load
     ///
     /// # Prefetch Strategy
     ///
@@ -518,12 +547,15 @@ impl InternodeNode {
     #[must_use]
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
-    pub fn child_with_prefetch(&self, i: usize, nkeys: usize) -> *mut u8 {
+    pub fn child_with_prefetch(&self, i: usize, nkeys: usize, guard: &impl Guard) -> *mut u8 {
         debug_assert!(i <= WIDTH, "child_with_prefetch: index out of bounds");
 
-        let ptr = self.child[i].load(READ_ORD);
+        // Protected load for the child we're actually returning
+        let ptr = guard.protect(&self.child[i], READ_ORD);
 
         // Speculatively prefetch next child's node header + ikey array
+        // Note: This prefetch is just a hint - we never dereference next_child_ptr
+        // directly, so it doesn't need protection.
         if i < nkeys {
             let next_child_ptr = self.child[i + 1].load(RELAXED);
 
@@ -660,11 +692,12 @@ impl InternodeNode {
         // Shift keys and children to the right
         // Keys: ikey[p..n] -> ikey[p+1..n+1]
         // Children: child[p+1..n+1] -> child[p+2..n+2]
+        // SAFETY: Called under exclusive lock - no concurrent retirement.
         for i in (p..n).rev() {
             let key: u64 = self.ikey_relaxed(i);
             self.set_ikey_relaxed(i + 1, key);
 
-            let child = self.child(i + 1);
+            let child = unsafe { self.child_unguarded(i + 1) };
             self.set_child(i + 2, child);
         }
 
@@ -698,12 +731,17 @@ impl InternodeNode {
     /// (pointers need visibility ordering). The caller is responsible for publishing
     /// via `nkeys.store(WRITE_ORD)` after this function returns, which acts as a
     /// release barrier making all prior writes visible.
+    /// # Safety
+    ///
+    /// Caller must ensure exclusive access (hold lock on both nodes).
     #[inline(always)]
-    pub fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize) {
+    pub unsafe fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize) {
+        // SAFETY: Caller guarantees exclusive access - no concurrent retirement.
         for i in 0..count {
             let key: u64 = src.ikey_relaxed(src_pos + i);
             self.set_ikey_relaxed(dst_pos + i, key);
-            self.set_child(dst_pos + 1 + i, src.child(src_pos + 1 + i));
+            // SAFETY: Caller guarantees exclusive access.
+            self.set_child(dst_pos + 1 + i, unsafe { src.child_unguarded(src_pos + 1 + i) });
         }
     }
 
@@ -775,11 +813,12 @@ impl InternodeNode {
         let mid: usize = WIDTH.div_ceil(2); // ceil(WIDTH / 2)
 
         // Determine where the insertion goes and compute popup key
+        // SAFETY: split_into is called under exclusive lock - no concurrent retirement.
         let (popup_key, insert_went_left) = match insert_pos.cmp(&mid) {
             Ordering::Less => {
                 // Case 1: Insert goes into left (self)
-                new_right.set_child(0, self.child(mid));
-                new_right.shift_from(0, self, mid, WIDTH - mid);
+                new_right.set_child(0, unsafe { self.child_unguarded(mid) });
+                unsafe { new_right.shift_from(0, self, mid, WIDTH - mid) };
                 new_right.nkeys.store((WIDTH - mid) as u8, WRITE_ORD);
 
                 let popup: u64 = self.ikey_relaxed(mid - 1);
@@ -794,7 +833,7 @@ impl InternodeNode {
             Ordering::Equal => {
                 // Case 2: Insert becomes the popup key
                 new_right.set_child(0, insert_child);
-                new_right.shift_from(0, self, mid, WIDTH - mid);
+                unsafe { new_right.shift_from(0, self, mid, WIDTH - mid) };
                 new_right.nkeys.store((WIDTH - mid) as u8, WRITE_ORD);
 
                 self.nkeys.store(mid as u8, WRITE_ORD);
@@ -806,14 +845,14 @@ impl InternodeNode {
                 // Case 3: Insert goes into right (new_right)
                 let right_insert_pos: usize = insert_pos - (mid + 1);
 
-                new_right.set_child(0, self.child(mid + 1));
-                new_right.shift_from(0, self, mid + 1, right_insert_pos);
+                new_right.set_child(0, unsafe { self.child_unguarded(mid + 1) });
+                unsafe { new_right.shift_from(0, self, mid + 1, right_insert_pos) };
 
                 new_right.set_ikey_relaxed(right_insert_pos, insert_ikey);
                 new_right.set_child(right_insert_pos + 1, insert_child);
 
                 let count_after: usize = WIDTH - insert_pos;
-                new_right.shift_from(right_insert_pos + 1, self, insert_pos, count_after);
+                unsafe { new_right.shift_from(right_insert_pos + 1, self, insert_pos, count_after) };
 
                 new_right.nkeys.store((WIDTH - mid) as u8, WRITE_ORD);
 
@@ -828,12 +867,13 @@ impl InternodeNode {
         new_right.height = self.height;
 
         // Update children's parent pointers (internode children only)
+        // SAFETY: We have exclusive access during split.
         if self.height > 0 {
             let nr_nkeys: usize = new_right.nkeys.load(RELAXED) as usize;
             let new_right_ptr_u8: *mut u8 = new_right_ptr.cast::<u8>();
 
             for i in 0..=nr_nkeys {
-                let child: *mut u8 = new_right.child(i);
+                let child: *mut u8 = unsafe { new_right.child_unguarded(i) };
                 if !child.is_null() {
                     // SAFETY: height > 0 means children are InternodeNode
                     #[expect(
@@ -854,12 +894,26 @@ impl InternodeNode {
     //  Parent Accessors
     // ========================================================================
 
-    /// Get the parent pointer (as `*mut u8`).
+    /// Get the parent pointer (as `*mut u8`) with guard protection.
     ///
     /// Cast to `*mut InternodeNode` at usage sites.
     #[must_use]
     #[inline(always)]
-    pub fn parent(&self) -> *mut u8 {
+    pub fn parent(&self, guard: &impl Guard) -> *mut u8 {
+        guard.protect(&self.parent, READ_ORD)
+    }
+
+    /// Get the parent pointer without guard protection.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the parent pointer won't be retired during use.
+    /// Valid when:
+    /// - Called during `Drop` (no concurrent access)
+    /// - Called while holding exclusive lock that prevents retirement
+    #[must_use]
+    #[inline(always)]
+    pub unsafe fn parent_unguarded(&self) -> *mut u8 {
         self.parent.load(READ_ORD)
     }
 
@@ -1128,14 +1182,26 @@ impl TreeInternode for InternodeNode {
         Self::find_insert_position(self, insert_ikey)
     }
 
+    /// # Safety
+    ///
+    /// This trait method is intended for use under exclusive lock.
+    /// Uses unguarded loads - caller must ensure no concurrent retirement.
     #[inline(always)]
     fn child(&self, idx: usize) -> *mut u8 {
-        Self::child(self, idx)
+        // SAFETY: BTreeNodeCommon trait methods are called during locked operations.
+        unsafe { Self::child_unguarded(self, idx) }
     }
 
+    /// # Safety
+    ///
+    /// This trait method is intended for use under exclusive lock.
+    /// Uses unguarded loads - caller must ensure no concurrent retirement.
     #[inline(always)]
     fn child_with_prefetch(&self, idx: usize, nkeys: usize) -> *mut u8 {
-        Self::child_with_prefetch(self, idx, nkeys)
+        // SAFETY: BTreeNodeCommon trait methods are called during locked operations.
+        // Note: We lose the prefetch behavior here, but trait usage is rare.
+        let _ = nkeys;
+        unsafe { Self::child_unguarded(self, idx) }
     }
 
     #[inline(always)]
@@ -1153,9 +1219,14 @@ impl TreeInternode for InternodeNode {
         Self::insert_key_and_child(self, p, new_ikey, new_child);
     }
 
+    /// # Safety
+    ///
+    /// This trait method is intended for use under exclusive lock.
+    /// Uses unguarded loads - caller must ensure no concurrent retirement.
     #[inline(always)]
     fn parent(&self) -> *mut u8 {
-        Self::parent(self)
+        // SAFETY: BTreeNodeCommon trait methods are called during locked operations.
+        unsafe { Self::parent_unguarded(self) }
     }
 
     #[inline(always)]
@@ -1168,9 +1239,13 @@ impl TreeInternode for InternodeNode {
         Self::is_root(self)
     }
 
+    /// # Safety
+    ///
+    /// Called under exclusive lock - uses unguarded child loads.
     #[inline(always)]
     fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize) {
-        Self::shift_from(self, dst_pos, src, src_pos, count);
+        // SAFETY: Trait method is called during locked operations.
+        unsafe { Self::shift_from(self, dst_pos, src, src_pos, count) };
     }
 
     #[inline(always)]

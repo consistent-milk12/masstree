@@ -47,12 +47,16 @@ impl CompareSuffix {
 
         // Compare remainder (0-7 bytes)
         let remainder_start: usize = chunks * 8;
-        a[remainder_start..] == b[remainder_start..]
+        // SAFETY: remainder_start = chunks * 8 <= len (both slices same length)
+        #[expect(clippy::indexing_slicing, reason = "remainder_start <= len")]
+        {
+            a[remainder_start..] == b[remainder_start..]
+        }
     }
 
     /// Lexicographic comparison of two byte slices.
     ///
-    /// - For slices where min_len < 8: uses native `.cmp()` (LLVM memcmp)
+    /// - For slices where `min_len` < 8: uses native `.cmp()` (LLVM memcmp)
     /// - For longer slices: compares 8 bytes at a time using word loads
     #[inline(always)]
     pub(super) fn fast_slice_cmp(a: &[u8], b: &[u8]) -> Ordering {
@@ -83,6 +87,8 @@ impl CompareSuffix {
 
         // Compare remainder, then by length
         let remainder_start: usize = chunks * 8;
+        // SAFETY: remainder_start <= min_len <= both lengths
+        #[expect(clippy::indexing_slicing, reason = "remainder_start <= min_len")]
         match a[remainder_start..min_len].cmp(&b[remainder_start..min_len]) {
             Ordering::Equal => a.len().cmp(&b.len()),
             other => other,

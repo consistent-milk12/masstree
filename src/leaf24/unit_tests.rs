@@ -70,12 +70,12 @@ fn test_leaf24_linking() {
     let leaf2_ptr: *mut LeafNode24<LeafValue<u64>> = Box::into_raw(leaf2);
 
     leaf1.set_next(leaf2_ptr);
-    assert_eq!(leaf1.safe_next(), leaf2_ptr);
+    assert_eq!(unsafe { leaf1.safe_next_unguarded() }, leaf2_ptr);
     assert!(!leaf1.next_is_marked());
 
     leaf1.mark_next();
     assert!(leaf1.next_is_marked());
-    assert_eq!(leaf1.safe_next(), leaf2_ptr);
+    assert_eq!(unsafe { leaf1.safe_next_unguarded() }, leaf2_ptr);
 
     leaf1.unmark_next();
     assert!(!leaf1.next_is_marked());
@@ -88,12 +88,12 @@ fn test_leaf24_linking() {
 #[test]
 fn test_leaf24_parent() {
     let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
-    assert!(leaf.parent().is_null());
+    assert!(unsafe { leaf.parent_unguarded() }.is_null());
 
     let dummy: u64 = 0xDEAD_BEEF;
     let dummy_ptr: *mut u8 = StdPtr::from_ref(&dummy).cast_mut().cast();
     leaf.set_parent(dummy_ptr);
-    assert_eq!(leaf.parent(), dummy_ptr);
+    assert_eq!(unsafe { leaf.parent_unguarded() }, dummy_ptr);
 }
 
 #[test]
@@ -102,13 +102,13 @@ fn test_lock_next_null() {
     // This prevents two concurrent splits both observing NULL and racing to publish
     // different siblings (orphaning one).
     let leaf: Box<LeafNode24<LeafValue<u64>>> = LeafNode24::new();
-    assert!(leaf.safe_next().is_null());
+    assert!(unsafe { leaf.safe_next_unguarded() }.is_null());
 
     let result = leaf.lock_next();
     assert!(result.is_null());
     // After lock_next with NULL, next is marked (but safe_next still reads as NULL)
     assert!(leaf.next_is_marked());
-    assert!(leaf.safe_next().is_null());
+    assert!(unsafe { leaf.safe_next_unguarded() }.is_null());
 
     // Unmark should restore a clean NULL next
     leaf.unmark_next();
@@ -135,7 +135,7 @@ fn test_lock_next_marks_and_unmarks() {
     // But the next pointer should now be marked
     assert!(leaf1.next_is_marked());
     // safe_next still returns the unmarked pointer
-    assert_eq!(leaf1.safe_next(), leaf2_ptr);
+    assert_eq!(unsafe { leaf1.safe_next_unguarded() }, leaf2_ptr);
 
     // "Unlock" by storing the unmarked pointer
     leaf1.set_next(leaf2_ptr);
@@ -175,10 +175,10 @@ fn test_link_sibling_preserves_existing_next() {
     unsafe { TreeLeafNode::<LeafValue<u64>>::link_sibling(leaf_a, leaf_c_ptr) };
 
     // Verify chain structure
-    assert_eq!(leaf_a.safe_next(), leaf_c_ptr, "A.next should be C");
-    assert_eq!(leaf_c.safe_next(), leaf_b_ptr, "C.next should be B");
-    assert_eq!(leaf_c.prev(), leaf_a_ptr, "C.prev should be A");
-    assert_eq!(leaf_b.prev(), leaf_c_ptr, "B.prev should be C");
+    assert_eq!(unsafe { leaf_a.safe_next_unguarded() }, leaf_c_ptr, "A.next should be C");
+    assert_eq!(unsafe { leaf_c.safe_next_unguarded() }, leaf_b_ptr, "C.next should be B");
+    assert_eq!(unsafe { leaf_c.prev_unguarded() }, leaf_a_ptr, "C.prev should be A");
+    assert_eq!(unsafe { leaf_b.prev_unguarded() }, leaf_c_ptr, "B.prev should be C");
 
     // Verify not marked after link
     assert!(!leaf_a.next_is_marked());
@@ -207,16 +207,16 @@ fn test_link_sibling_null_next() {
     let leaf_c: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_c_ptr };
 
     // A has no next
-    assert!(leaf_a.safe_next().is_null());
+    assert!(unsafe { leaf_a.safe_next_unguarded() }.is_null());
 
     // Link C after A
     // SAFETY: All pointers are valid and properly initialized
     unsafe { TreeLeafNode::<LeafValue<u64>>::link_sibling(leaf_a, leaf_c_ptr) };
 
     // Verify chain
-    assert_eq!(leaf_a.safe_next(), leaf_c_ptr, "A.next should be C");
-    assert!(leaf_c.safe_next().is_null(), "C.next should be NULL");
-    assert_eq!(leaf_c.prev(), leaf_a_ptr, "C.prev should be A");
+    assert_eq!(unsafe { leaf_a.safe_next_unguarded() }, leaf_c_ptr, "A.next should be C");
+    assert!(unsafe { leaf_c.safe_next_unguarded() }.is_null(), "C.next should be NULL");
+    assert_eq!(unsafe { leaf_c.prev_unguarded() }, leaf_a_ptr, "C.prev should be A");
     assert!(!leaf_a.next_is_marked());
 
     // Cleanup
@@ -236,7 +236,7 @@ fn test_cas_next() {
     // CAS from NULL to leaf2_ptr should succeed
     let result = leaf1.cas_next(StdPtr::null_mut(), leaf2_ptr);
     assert!(result.is_ok());
-    assert_eq!(leaf1.safe_next(), leaf2_ptr);
+    assert_eq!(unsafe { leaf1.safe_next_unguarded() }, leaf2_ptr);
 
     // CAS with wrong expected should fail
     let result = leaf1.cas_next(StdPtr::null_mut(), StdPtr::null_mut());

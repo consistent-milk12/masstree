@@ -88,7 +88,11 @@ impl<S: ValueSlot> SeizeAllocator15<S> {
     ///
     /// This is safe because layer pointers are distinguished by keylenx >= 128,
     /// and `LeafNode::Drop` explicitly checks this before cleanup.
-    #[expect(clippy::cast_ptr_alignment, reason = "Callers guarantee proper alignment")]
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "Callers guarantee proper alignment"
+    )]
+    #[expect(clippy::self_only_used_in_recursion)]
     unsafe fn traverse_and_free(&self, node_ptr: *mut u8) {
         if node_ptr.is_null() {
             return;
@@ -127,8 +131,9 @@ impl<S: ValueSlot> SeizeAllocator15<S> {
             let nkeys = internode.nkeys();
 
             // Recurse into all children (nkeys + 1 children for nkeys keys)
+            // SAFETY: During Drop, we have exclusive access - no concurrent retirement.
             for i in 0..=nkeys {
-                let child_ptr = internode.child(i);
+                let child_ptr = unsafe { internode.child_unguarded(i) };
                 if !child_ptr.is_null() {
                     unsafe { self.traverse_and_free(child_ptr) };
                 }
@@ -180,7 +185,10 @@ where
     }
 
     #[inline(always)]
-    #[expect(clippy::cast_ptr_alignment, reason = "Caller guarantees InternodeNode alignment")]
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "Caller guarantees InternodeNode alignment"
+    )]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
         // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
@@ -405,7 +413,11 @@ impl<V: InlineBits> SeizeAllocator15TrueInline<V> {
     ///
     /// For non-layer slots, `leaf_value_ptr()` returns an encoded pointer
     /// (not a real allocation), so we must NOT try to free it.
-    #[expect(clippy::cast_ptr_alignment, reason = "Callers guarantee proper alignment")]
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "Callers guarantee proper alignment"
+    )]
+    #[expect(clippy::self_only_used_in_recursion)]
     unsafe fn traverse_and_free(&self, node_ptr: *mut u8) {
         use crate::inline::leaf15_true::WIDTH_15;
 
@@ -446,8 +458,9 @@ impl<V: InlineBits> SeizeAllocator15TrueInline<V> {
             let nkeys = internode.nkeys();
 
             // Recurse into all children (nkeys + 1 children for nkeys keys)
+            // SAFETY: During Drop, we have exclusive access - no concurrent retirement.
             for i in 0..=nkeys {
-                let child_ptr = internode.child(i);
+                let child_ptr = unsafe { internode.child_unguarded(i) };
                 if !child_ptr.is_null() {
                     unsafe { self.traverse_and_free(child_ptr) };
                 }
@@ -499,7 +512,10 @@ impl<V: InlineBits + Send + Sync + 'static>
     }
 
     #[inline(always)]
-    #[expect(clippy::cast_ptr_alignment, reason = "Caller guarantees InternodeNode alignment")]
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "Caller guarantees InternodeNode alignment"
+    )]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
         // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.

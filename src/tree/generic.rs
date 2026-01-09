@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicPtr, Ordering as AtomicOrdering},
 };
 
-use seize::{Collector, LocalGuard};
+use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
     Linker, MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation,
@@ -72,10 +72,8 @@ where
         // Create root leaf directly in allocator memory (bypasses Box for pool allocators).
         let root_ptr: *mut L = allocator.alloc_leaf_direct(true, false);
 
-        let collector: Collector = match batch_size {
-            Some(size) => Collector::new().batch_size(size),
-            None => Collector::new(),
-        };
+        let collector: Collector =
+            batch_size.map_or_else(Collector::new, |size| Collector::new().batch_size(size));
 
         Self {
             collector,
@@ -109,6 +107,7 @@ where
     /// retired pointers are dropped. This just starts the process.
     #[inline(always)]
     pub fn flush(&self, guard: &LocalGuard<'_>) {
+        self.verify_guard(guard);
         crate::BatchedRetire::flush(guard);
     }
 
@@ -187,6 +186,7 @@ where
     /// ```
     #[inline]
     pub fn process_coalesce(&self, guard: &LocalGuard<'_>) -> usize {
+        self.verify_guard(guard);
         Coalesce::process_all::<S, L, A>(&self.coalesce_queue, &self.allocator, guard)
     }
 
@@ -201,6 +201,7 @@ where
     /// The number of entries processed.
     #[inline]
     pub fn process_coalesce_batch(&self, guard: &LocalGuard<'_>, limit: usize) -> usize {
+        self.verify_guard(guard);
         Coalesce::process_batch::<S, L, A>(&self.coalesce_queue, &self.allocator, guard, limit)
     }
 
@@ -259,6 +260,22 @@ where
     #[allow(dead_code, reason = "infrastructure for future deletion")]
     pub(crate) const fn collector(&self) -> &Collector {
         &self.collector
+    }
+
+    /// Verify that a guard was created from this tree's collector.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the guard's collector does not match this tree's collector.
+    /// This indicates the caller passed a guard from a different tree, which
+    /// is a bug that could lead to use-after-free.
+    #[inline(always)]
+    pub(crate) fn verify_guard(&self, guard: &LocalGuard<'_>) {
+        debug_assert!(
+            *guard.collector() == self.collector,
+            "Guard was created from a different collector. \
+             Use tree.guard() to create guards for this tree."
+        );
     }
 
     /// Increment the entry count.
@@ -968,6 +985,7 @@ where
         value: S::Value,
         guard: &LocalGuard<'_>,
     ) -> Result<Option<S::Output>, InsertError> {
+        self.verify_guard(guard);
         let mut key = Key::new(key);
         let output = S::into_output(value);
         self.insert_concurrent_generic(&mut key, output, guard)
@@ -1016,6 +1034,7 @@ where
         key: &[u8],
         guard: &LocalGuard<'_>,
     ) -> Result<Option<S::Output>, RemoveError> {
+        self.verify_guard(guard);
         NodeCleaner::remove_concurrent_generic(self, key, guard)
     }
 

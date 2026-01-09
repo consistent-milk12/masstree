@@ -296,7 +296,7 @@ fn test_set_parent_erased_leaf() {
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
     // Initially null
-    assert!(unsafe { (*leaf_ptr.cast::<TestLeaf>()).parent().is_null() });
+    assert!(unsafe { (*leaf_ptr.cast::<TestLeaf>()).parent_unguarded().is_null() });
 
     // Test: set_parent_erased should update leaf's parent
     unsafe {
@@ -304,7 +304,7 @@ fn test_set_parent_erased_leaf() {
     }
 
     // Verify
-    let actual_parent: *mut u8 = unsafe { (*leaf_ptr.cast::<TestLeaf>()).parent() };
+    let actual_parent: *mut u8 = unsafe { (*leaf_ptr.cast::<TestLeaf>()).parent_unguarded() };
     assert_eq!(actual_parent, new_parent);
 
     // Cleanup
@@ -322,7 +322,7 @@ fn test_set_parent_erased_internode() {
     let inode_ptr: *mut u8 = Box::into_raw(inode).cast();
 
     // Initially null
-    assert!(unsafe { (*inode_ptr.cast::<TestInternode>()).parent().is_null() });
+    assert!(unsafe { (*inode_ptr.cast::<TestInternode>()).parent_unguarded().is_null() });
 
     // Test: set_parent_erased should update internode's parent
     unsafe {
@@ -330,7 +330,7 @@ fn test_set_parent_erased_internode() {
     }
 
     // Verify
-    let actual_parent: *mut u8 = unsafe { (*inode_ptr.cast::<TestInternode>()).parent() };
+    let actual_parent: *mut u8 = unsafe { (*inode_ptr.cast::<TestInternode>()).parent_unguarded() };
     assert_eq!(actual_parent, new_parent);
 
     // Cleanup
@@ -501,9 +501,10 @@ fn test_shift_internode_down_middle() {
     assert_eq!(inode.ikey(1), 30);
 
     // Verify children: [c0, c1, c3, _]
-    assert_eq!(inode.child(0), c0);
-    assert_eq!(inode.child(1), c1);
-    assert_eq!(inode.child(2), c3);
+    // SAFETY: Single-threaded test context.
+    assert_eq!(unsafe { inode.child_unguarded(0) }, c0);
+    assert_eq!(unsafe { inode.child_unguarded(1) }, c1);
+    assert_eq!(unsafe { inode.child_unguarded(2) }, c3);
 
     // Verify nkeys decremented
     assert_eq!(inode.nkeys(), 2);
@@ -553,9 +554,10 @@ fn test_shift_internode_down_last() {
     assert_eq!(inode.ikey(1), 20);
 
     // Verify children: [c0, c1, c2, _]
-    assert_eq!(inode.child(0), c0);
-    assert_eq!(inode.child(1), c1);
-    assert_eq!(inode.child(2), c2);
+    // SAFETY: Single-threaded test context.
+    assert_eq!(unsafe { inode.child_unguarded(0) }, c0);
+    assert_eq!(unsafe { inode.child_unguarded(1) }, c1);
+    assert_eq!(unsafe { inode.child_unguarded(2) }, c2);
 
     assert_eq!(inode.nkeys(), 2);
 
@@ -601,8 +603,9 @@ fn test_shift_internode_down_second() {
     assert_eq!(inode.ikey(0), 20);
 
     // Verify children: [c0, c2, _]
-    assert_eq!(inode.child(0), c0);
-    assert_eq!(inode.child(1), c2);
+    // SAFETY: Single-threaded test context.
+    assert_eq!(unsafe { inode.child_unguarded(0) }, c0);
+    assert_eq!(unsafe { inode.child_unguarded(1) }, c2);
 
     assert_eq!(inode.nkeys(), 1);
 
@@ -645,8 +648,9 @@ fn test_unlink_from_chain_middle() {
     unsafe { b_ref.unlink_from_chain() };
 
     // Verify: A <-> C
-    assert_eq!(unsafe { (*a_ptr).safe_next() }, c_ptr);
-    assert_eq!(unsafe { (*c_ptr).prev() }, a_ptr);
+    // SAFETY: Single-threaded test context.
+    assert_eq!(unsafe { (*a_ptr).safe_next_unguarded() }, c_ptr);
+    assert_eq!(unsafe { (*c_ptr).prev_unguarded() }, a_ptr);
 
     // Cleanup
     drop(_lock);
@@ -680,7 +684,8 @@ fn test_unlink_from_chain_last() {
     unsafe { b_ref.unlink_from_chain() };
 
     // Verify: A.next == null
-    assert!(unsafe { (*a_ptr).safe_next().is_null() });
+    // SAFETY: Single-threaded test context.
+    assert!(unsafe { (*a_ptr).safe_next_unguarded().is_null() });
 
     // Cleanup
     drop(_lock);
@@ -1761,6 +1766,7 @@ fn test_gc_layer_concurrent_reads() {
 
     // Signal reader to stop
     done.store(true, Ordering::Release);
+    #[expect(clippy::expect_used, reason = "test code - panicking is appropriate")]
     reader.join().expect("Reader thread panicked");
 
     // Tree should be consistent

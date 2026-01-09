@@ -1,4 +1,4 @@
-use super::*;
+use super::{INITIAL_CAPACITY, SlotMeta, SuffixBag};
 
 // impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
 //     #[inline(always)]
@@ -32,10 +32,8 @@ impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
         let mut new_data: Vec<u8> = Vec::with_capacity(capacity);
         let mut new_slots: [SlotMeta; WIDTH] = [SlotMeta::EMPTY; WIDTH];
 
-        #[expect(clippy::indexing_slicing)]
-        for slot in 0..WIDTH {
-            let meta: SlotMeta = self.slots[slot];
-
+        #[expect(clippy::indexing_slicing, reason = "data bounds from meta")]
+        for (new_slot, meta) in new_slots.iter_mut().zip(self.slots.iter()) {
             if !meta.has_suffix() {
                 continue;
             }
@@ -48,7 +46,7 @@ impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
 
             #[expect(clippy::cast_possible_truncation)]
             {
-                new_slots[slot] = SlotMeta {
+                *new_slot = SlotMeta {
                     offset: new_offset as u32,
                     len: meta.len,
                     _pad: 0,

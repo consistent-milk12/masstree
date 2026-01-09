@@ -79,9 +79,9 @@ fn concurrent_insert_then_get_does_not_lose_key() {
                 break;
             }
 
-            // SAFETY: `!is_leaf()` means this is an internode.
+            // SAFETY: `!is_leaf()` means this is an internode. Single-threaded test context.
             let inode: &InternodeNode = unsafe { &*(node.cast::<InternodeNode>()) };
-            node = inode.child(0);
+            node = unsafe { inode.child_unguarded(0) };
         }
 
         if node.is_null() {
@@ -112,7 +112,8 @@ fn concurrent_insert_then_get_does_not_lose_key() {
                 }
             }
 
-            leaf_ptr = leaf.safe_next();
+            // SAFETY: Single-threaded test context.
+            leaf_ptr = unsafe { leaf.safe_next_unguarded() };
         }
 
         false
@@ -1708,4 +1709,51 @@ fn test_masstree15_concurrent() {
     }
 
     assert_eq!(tree.len(), 400);
+}
+
+// ========================================================================
+//  Guard Verification Tests
+// ========================================================================
+
+#[test]
+fn test_correct_guard_works() {
+    let tree = MassTree24::new();
+    let guard = tree.guard();
+    // Should not panic - guard is from the correct tree
+    tree.insert_with_guard(b"key", 42, &guard).unwrap();
+    assert_eq!(tree.get(b"key"), Some(Arc::new(42)));
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "different collector")]
+fn test_wrong_guard_panics_on_insert() {
+    let tree1: MassTree24<u64> = MassTree24::new();
+    let tree2: MassTree24<u64> = MassTree24::new();
+    let wrong_guard = tree2.guard();
+    // Should panic in debug builds - guard is from wrong tree
+    let _ = tree1.insert_with_guard(b"key", 42, &wrong_guard);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "different collector")]
+fn test_wrong_guard_panics_on_remove() {
+    let tree1: MassTree24<u64> = MassTree24::new();
+    let tree2: MassTree24<u64> = MassTree24::new();
+    tree1.insert(b"key", 42).unwrap();
+    let wrong_guard = tree2.guard();
+    // Should panic in debug builds - guard is from wrong tree
+    let _ = tree1.remove_with_guard(b"key", &wrong_guard);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "different collector")]
+fn test_wrong_guard_panics_on_iter() {
+    let tree1: MassTree24<u64> = MassTree24::new();
+    let tree2: MassTree24<u64> = MassTree24::new();
+    let wrong_guard = tree2.guard();
+    // Should panic in debug builds - guard is from wrong tree
+    let _ = tree1.iter(&wrong_guard).count();
 }
