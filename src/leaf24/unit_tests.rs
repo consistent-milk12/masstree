@@ -175,10 +175,26 @@ fn test_link_sibling_preserves_existing_next() {
     unsafe { TreeLeafNode::<LeafValue<u64>>::link_sibling(leaf_a, leaf_c_ptr) };
 
     // Verify chain structure
-    assert_eq!(unsafe { leaf_a.safe_next_unguarded() }, leaf_c_ptr, "A.next should be C");
-    assert_eq!(unsafe { leaf_c.safe_next_unguarded() }, leaf_b_ptr, "C.next should be B");
-    assert_eq!(unsafe { leaf_c.prev_unguarded() }, leaf_a_ptr, "C.prev should be A");
-    assert_eq!(unsafe { leaf_b.prev_unguarded() }, leaf_c_ptr, "B.prev should be C");
+    assert_eq!(
+        unsafe { leaf_a.safe_next_unguarded() },
+        leaf_c_ptr,
+        "A.next should be C"
+    );
+    assert_eq!(
+        unsafe { leaf_c.safe_next_unguarded() },
+        leaf_b_ptr,
+        "C.next should be B"
+    );
+    assert_eq!(
+        unsafe { leaf_c.prev_unguarded() },
+        leaf_a_ptr,
+        "C.prev should be A"
+    );
+    assert_eq!(
+        unsafe { leaf_b.prev_unguarded() },
+        leaf_c_ptr,
+        "B.prev should be C"
+    );
 
     // Verify not marked after link
     assert!(!leaf_a.next_is_marked());
@@ -214,9 +230,20 @@ fn test_link_sibling_null_next() {
     unsafe { TreeLeafNode::<LeafValue<u64>>::link_sibling(leaf_a, leaf_c_ptr) };
 
     // Verify chain
-    assert_eq!(unsafe { leaf_a.safe_next_unguarded() }, leaf_c_ptr, "A.next should be C");
-    assert!(unsafe { leaf_c.safe_next_unguarded() }.is_null(), "C.next should be NULL");
-    assert_eq!(unsafe { leaf_c.prev_unguarded() }, leaf_a_ptr, "C.prev should be A");
+    assert_eq!(
+        unsafe { leaf_a.safe_next_unguarded() },
+        leaf_c_ptr,
+        "A.next should be C"
+    );
+    assert!(
+        unsafe { leaf_c.safe_next_unguarded() }.is_null(),
+        "C.next should be NULL"
+    );
+    assert_eq!(
+        unsafe { leaf_c.prev_unguarded() },
+        leaf_a_ptr,
+        "C.prev should be A"
+    );
     assert!(!leaf_a.next_is_marked());
 
     // Cleanup

@@ -57,7 +57,6 @@ use static_assertions::const_assert_eq;
 use std::array as StdArray;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
-use std::mem as StdMem;
 use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
@@ -66,6 +65,9 @@ use seize::Guard;
 use crate::leaf_trait::TreeInternode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{READ_ORD, RELAXED, WRITE_ORD};
+use crate::prefetch::prefetch_read;
+
+mod layout;
 
 // ============================================================================
 //  Constants
@@ -146,7 +148,10 @@ impl StdFmt::Debug for InternodeNode {
         f.debug_struct("InternodeNode")
             .field("nkeys", &self.nkeys())
             .field("height", &self.height)
-            .field("has_parent", &(!unsafe { self.parent_unguarded() }.is_null()))
+            .field(
+                "has_parent",
+                &(!unsafe { self.parent_unguarded() }.is_null()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -598,6 +603,102 @@ impl InternodeNode {
         ptr
     }
 
+    /// Get the child pointer with depth-first prefetch for tree descent.
+    ///
+    /// Unlike [`Self::child_with_prefetch`] which prefetches the next sibling,
+    /// this method prefetches the target child's internal data (header + keys).
+    /// Use this variant in descent paths where you're going down the tree,
+    /// not sideways through siblings.
+    ///
+    /// # Prefetch Strategy
+    ///
+    /// Prefetches two cache lines of the target child node:
+    /// - CL 0 (offset 0): Header (16B) + ikey0[0..=5] (48B)
+    /// - CL 1 (offset 64): ikey0[6..=13] (64B)
+    ///
+    /// This covers 14 of 15 keys, hiding memory latency for the next level's search.
+    ///
+    /// # When to Use
+    ///
+    /// - **Descent (point lookup)**: Use `child_with_depth_prefetch`
+    /// - **Scan (sibling traversal)**: Use `child_with_prefetch`
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - Child index to return
+    /// * `guard` - Guard for protected load
+    #[must_use]
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
+    pub fn child_with_depth_prefetch(&self, i: usize, guard: &impl Guard) -> *mut u8 {
+        debug_assert!(i <= WIDTH, "child_with_depth_prefetch: index out of bounds");
+
+        // Protected load for the child we're actually returning
+        let ptr: *mut u8 = guard.protect(&self.child[i], READ_ORD);
+
+        // Prefetch the target child's header and key array
+        Self::prefetch_child_internal(ptr);
+
+        ptr
+    }
+
+    /// Get the child pointer with full prefetch for tree descent.
+    ///
+    /// Prefetches all three cache lines containing keys (CL 0, 1, 2).
+    /// Use when nodes are expected to be full or nearly full.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - Child index to return
+    /// * `guard` - Guard for protected load
+    #[must_use]
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
+    pub fn child_with_full_prefetch(&self, i: usize, guard: &impl Guard) -> *mut u8 {
+        debug_assert!(i <= WIDTH, "child_with_full_prefetch: index out of bounds");
+
+        let ptr: *mut u8 = guard.protect(&self.child[i], READ_ORD);
+
+        Self::prefetch_child_full(ptr);
+
+        ptr
+    }
+
+    /// Prefetch a child node's header and first two key cache lines.
+    ///
+    /// This is a static helper that can be called without a guard,
+    /// enabling use in trait implementations.
+    ///
+    /// # Safety Note
+    ///
+    /// Prefetch is a performance hint only; it must not be relied upon for
+    /// correctness. This helper is safe and cheap on all targets.
+    #[inline(always)]
+    fn prefetch_child_internal(ptr: *mut u8) {
+        if ptr.is_null() {
+            return;
+        }
+
+        // Prefetch CL 0 (offset 0) and CL 1 (offset 64) of the child node.
+        //
+        // Note: use `wrapping_add` so this remains purely "address arithmetic"
+        // (no in-bounds requirement), and avoid integer casts for provenance.
+        prefetch_read(ptr);
+        prefetch_read(ptr.wrapping_add(64));
+    }
+
+    /// Prefetch a child node's header and all three key cache lines.
+    #[inline(always)]
+    fn prefetch_child_full(ptr: *mut u8) {
+        if ptr.is_null() {
+            return;
+        }
+
+        prefetch_read(ptr);
+        prefetch_read(ptr.wrapping_add(64));
+        prefetch_read(ptr.wrapping_add(128));
+    }
+
     /// Set the child pointer at the given index.
     ///
     /// Valid indices are `0..=WIDTH` (16 children for 15 keys).
@@ -741,7 +842,9 @@ impl InternodeNode {
             let key: u64 = src.ikey_relaxed(src_pos + i);
             self.set_ikey_relaxed(dst_pos + i, key);
             // SAFETY: Caller guarantees exclusive access.
-            self.set_child(dst_pos + 1 + i, unsafe { src.child_unguarded(src_pos + 1 + i) });
+            self.set_child(dst_pos + 1 + i, unsafe {
+                src.child_unguarded(src_pos + 1 + i)
+            });
         }
     }
 
@@ -852,7 +955,9 @@ impl InternodeNode {
                 new_right.set_child(right_insert_pos + 1, insert_child);
 
                 let count_after: usize = WIDTH - insert_pos;
-                unsafe { new_right.shift_from(right_insert_pos + 1, self, insert_pos, count_after) };
+                unsafe {
+                    new_right.shift_from(right_insert_pos + 1, self, insert_pos, count_after);
+                };
 
                 new_right.nkeys.store((WIDTH - mid) as u8, WRITE_ORD);
 
@@ -1086,21 +1191,17 @@ unsafe impl Send for InternodeNode {}
 unsafe impl Sync for InternodeNode {}
 
 // ============================================================================
-//  Size Assertions
+//  Compile-Time Layout Assertions
 // ============================================================================
-
-/// Compile-time size check for `InternodeNode`.
-const _: () = {
-    const SIZE: usize = StdMem::size_of::<InternodeNode>();
-    const ALIGN: usize = StdMem::align_of::<InternodeNode>();
-
-    // Should fit in ~5 cache lines (320 bytes)
-    // Actual: 16 (header) + 120 (keys) + 128 (children) = 264 bytes
-    assert!(SIZE <= 320, "InternodeNode exceeds 5 cache lines");
-
-    // Should be cache-line aligned
-    assert!(ALIGN == 64, "InternodeNode not cache-line aligned");
-};
+//
+// See `layout` submodule for comprehensive compile-time assertions that verify:
+// - Exact size (320 bytes, 5 cache lines)
+// - Cache-line alignment (64 bytes)
+// - Field offsets for hot-path optimization
+// - Cache line boundary constraints (ikey0[6] at CL1, child[7] at CL3)
+//
+// The layout module ensures any refactoring that changes field positions
+// will fail at compile time with clear error messages.
 
 // ============================================================================
 //  TreeInternode Implementation
@@ -1202,6 +1303,32 @@ impl TreeInternode for InternodeNode {
         // Note: We lose the prefetch behavior here, but trait usage is rare.
         let _ = nkeys;
         unsafe { Self::child_unguarded(self, idx) }
+    }
+
+    /// # Safety
+    ///
+    /// This trait method is intended for use under exclusive lock.
+    /// Uses unguarded loads - caller must ensure no concurrent retirement.
+    #[inline(always)]
+    fn child_with_depth_prefetch(&self, idx: usize) -> *mut u8 {
+        // SAFETY: Trait methods called during locked operations where
+        // the caller holds a guard at a higher scope level.
+        let ptr: *mut u8 = unsafe { Self::child_unguarded(self, idx) };
+        Self::prefetch_child_internal(ptr);
+        ptr
+    }
+
+    /// # Safety
+    ///
+    /// This trait method is intended for use under exclusive lock.
+    /// Uses unguarded loads - caller must ensure no concurrent retirement.
+    #[inline(always)]
+    fn child_with_full_prefetch(&self, idx: usize) -> *mut u8 {
+        // SAFETY: Trait methods called during locked operations where
+        // the caller holds a guard at a higher scope level.
+        let ptr: *mut u8 = unsafe { Self::child_unguarded(self, idx) };
+        Self::prefetch_child_full(ptr);
+        ptr
     }
 
     #[inline(always)]

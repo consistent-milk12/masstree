@@ -428,9 +428,18 @@ fn test_shift_from_basic() {
 
     // Verify children were copied (shift_from copies child[src_pos + 1 + i])
     // SAFETY: Single-threaded test context.
-    assert_eq!(unsafe { dst.child_unguarded(1) }, StdPtr::without_provenance_mut(3 * 0x1000)); // src.child(2)
-    assert_eq!(unsafe { dst.child_unguarded(2) }, StdPtr::without_provenance_mut(4 * 0x1000)); // src.child(3)
-    assert_eq!(unsafe { dst.child_unguarded(3) }, StdPtr::without_provenance_mut(5 * 0x1000)); // src.child(4)
+    assert_eq!(
+        unsafe { dst.child_unguarded(1) },
+        StdPtr::without_provenance_mut(3 * 0x1000)
+    ); // src.child(2)
+    assert_eq!(
+        unsafe { dst.child_unguarded(2) },
+        StdPtr::without_provenance_mut(4 * 0x1000)
+    ); // src.child(3)
+    assert_eq!(
+        unsafe { dst.child_unguarded(3) },
+        StdPtr::without_provenance_mut(5 * 0x1000)
+    ); // src.child(4)
 }
 
 #[test]
@@ -462,14 +471,23 @@ fn test_shift_from_to_different_position() {
     // Original data should be preserved
     assert_eq!(dst.ikey(0), 5);
     // SAFETY: Single-threaded test context.
-    assert_eq!(unsafe { dst.child_unguarded(0) }, StdPtr::without_provenance_mut(0x1));
+    assert_eq!(
+        unsafe { dst.child_unguarded(0) },
+        StdPtr::without_provenance_mut(0x1)
+    );
 
     // Shifted data should be at position 1+
     assert_eq!(dst.ikey(1), 20);
     assert_eq!(dst.ikey(2), 30);
     // SAFETY: Single-threaded test context.
-    assert_eq!(unsafe { dst.child_unguarded(2) }, StdPtr::without_provenance_mut(12 * 0x100)); // src.child(2)
-    assert_eq!(unsafe { dst.child_unguarded(3) }, StdPtr::without_provenance_mut(13 * 0x100)); // src.child(3)
+    assert_eq!(
+        unsafe { dst.child_unguarded(2) },
+        StdPtr::without_provenance_mut(12 * 0x100)
+    ); // src.child(2)
+    assert_eq!(
+        unsafe { dst.child_unguarded(3) },
+        StdPtr::without_provenance_mut(13 * 0x100)
+    ); // src.child(3)
 }
 
 #[test]
@@ -491,4 +509,49 @@ fn test_shift_from_zero_count() {
     // dst should be unchanged
     assert_eq!(dst.ikey(0), 999);
     assert_eq!(dst.nkeys(), 1);
+}
+
+// ========================================================================
+//  Depth Prefetch Tests
+// ========================================================================
+
+#[test]
+fn test_depth_prefetch_methods() {
+    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let collector = seize::Collector::new();
+    let guard = collector.enter();
+
+    // Set up a child pointer
+    let child_box: Box<InternodeNode> = InternodeNode::new(0);
+    let child: *mut InternodeNode = Box::into_raw(child_box);
+    node.set_child(0, child.cast());
+
+    // Test all prefetch variants return same pointer
+    let ptr1: *mut u8 = node.child(0, &guard);
+    let ptr2: *mut u8 = node.child_with_prefetch(0, 5, &guard);
+    let ptr3: *mut u8 = node.child_with_depth_prefetch(0, &guard);
+    let ptr4: *mut u8 = node.child_with_full_prefetch(0, &guard);
+
+    assert_eq!(ptr1, ptr2);
+    assert_eq!(ptr2, ptr3);
+    assert_eq!(ptr3, ptr4);
+
+    // Cleanup: reclaim the boxed node
+    unsafe {
+        let _ = Box::from_raw(child);
+    }
+}
+
+#[test]
+fn test_prefetch_null_child() {
+    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let collector = seize::Collector::new();
+    let guard = collector.enter();
+
+    // Prefetch of null pointer should not crash
+    let ptr: *mut u8 = node.child_with_depth_prefetch(0, &guard);
+    assert!(ptr.is_null());
+
+    let ptr2: *mut u8 = node.child_with_full_prefetch(0, &guard);
+    assert!(ptr2.is_null());
 }

@@ -322,7 +322,11 @@ fn test_set_parent_erased_internode() {
     let inode_ptr: *mut u8 = Box::into_raw(inode).cast();
 
     // Initially null
-    assert!(unsafe { (*inode_ptr.cast::<TestInternode>()).parent_unguarded().is_null() });
+    assert!(unsafe {
+        (*inode_ptr.cast::<TestInternode>())
+            .parent_unguarded()
+            .is_null()
+    });
 
     // Test: set_parent_erased should update internode's parent
     unsafe {

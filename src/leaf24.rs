@@ -187,7 +187,10 @@ impl<S: ValueSlot> StdFmt::Debug for LeafNode24<S> {
         f.debug_struct("LeafNode24")
             .field("size", &self.size())
             .field("is_root", &self.version.is_root())
-            .field("has_parent", &(!unsafe { self.parent_unguarded() }.is_null()))
+            .field(
+                "has_parent",
+                &(!unsafe { self.parent_unguarded() }.is_null()),
+            )
             .finish_non_exhaustive()
     }
 }

@@ -294,6 +294,32 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
         self.child(idx)
     }
 
+    /// Get child pointer with depth-first prefetch for descent.
+    ///
+    /// Prefetches the target child's header and keys, optimizing
+    /// for tree descent (going down) rather than sibling traversal.
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to [`Self::child`] without prefetch.
+    #[inline(always)]
+    fn child_with_depth_prefetch(&self, idx: usize) -> *mut u8 {
+        self.child(idx)
+    }
+
+    /// Get child pointer with full prefetch (all key cache lines).
+    ///
+    /// Prefetches all cache lines containing keys. Use when nodes
+    /// are expected to be full.
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to [`Self::child`] without prefetch.
+    #[inline(always)]
+    fn child_with_full_prefetch(&self, idx: usize) -> *mut u8 {
+        self.child(idx)
+    }
+
     /// Set child pointer at index.
     fn set_child(&self, idx: usize, child: *mut u8);
 
@@ -923,6 +949,24 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     #[inline(always)]
     fn prefetch_for_search(&self) {
         // Default no-op; implementations may override
+    }
+
+    /// Prefetch for search, adapting to node size.
+    ///
+    /// Avoids unnecessary prefetch instructions for small nodes by
+    /// only prefetching cache lines that contain valid keys.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Number of keys in the node
+    ///
+    /// # Default Implementation
+    ///
+    /// Falls back to unconditional [`Self::prefetch_for_search`].
+    #[inline(always)]
+    fn prefetch_for_search_adaptive(&self, size: usize) {
+        let _ = size;
+        self.prefetch_for_search();
     }
 
     // ========================================================================

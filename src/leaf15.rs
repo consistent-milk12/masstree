@@ -21,12 +21,12 @@ use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
+use std::mem as StdMem;
 use std::ptr as StdPtr;
 use std::sync::Arc;
 use std::sync::atomic::{self as StdAtomic, Ordering as AtomicOrdering};
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
-use crate::Linker;
 use crate::alloc_common::BoxAllocator;
 use crate::error::{AllocKind, AllocResult};
 use crate::key::IKEY_SIZE;
@@ -36,9 +36,14 @@ use crate::permuter::{AtomicPermuter15, Permuter15};
 use crate::prefetch::prefetch_read;
 use crate::slot::ValueSlot;
 use crate::suffix::{InlineSuffixBag, SuffixBag};
+use crate::{Linker, Permuter};
 use seize::{Guard, LocalGuard};
 
+mod layout;
 mod value_traits;
+
+#[cfg(test)]
+mod unit_tests;
 
 /// Default capacity for inline suffix storage (bytes).
 /// Matches C++ Masstree's typical iksuf size.
@@ -190,17 +195,17 @@ impl<S: ValueSlot> StdFmt::Debug for LeafNode15<S> {
         f.debug_struct("LeafNode15")
             .field("size", &self.size())
             .field("is_root", &self.version.is_root())
-            .field("has_parent", &(!unsafe { self.parent_unguarded() }.is_null()))
+            .field(
+                "has_parent",
+                &(!unsafe { self.parent_unguarded() }.is_null()),
+            )
             .finish_non_exhaustive()
     }
 }
 
 // Compile-time layout verification.
 // LeafNode15 must be cache-line aligned (64 bytes) for optimal performance.
-const_assert_eq!(
-    std::mem::align_of::<LeafNode15<crate::LeafValue<u64>>>(),
-    64
-);
+const_assert_eq!(StdMem::align_of::<LeafNode15<crate::LeafValue<u64>>>(), 64);
 
 impl<S: ValueSlot> LeafNode15<S> {
     // ============================================================================
@@ -487,6 +492,49 @@ impl<S: ValueSlot> LeafNode15<S> {
             prefetch_read(self_ptr.add(64)); // CL1: permutation
             prefetch_read(self_ptr.add(128)); // CL2: ikey0[0..7]
             prefetch_read(self_ptr.add(192)); // CL3: ikey0[8..14]
+        }
+    }
+
+    /// Prefetch ikey0 and permutation adaptively based on node size.
+    ///
+    /// This is a size-aware variant of [`Self::prefetch_for_search`] that
+    /// avoids unnecessary prefetch instructions for small nodes.
+    ///
+    /// # When to Use
+    ///
+    /// - Use `prefetch_for_search()` in tight loops where branch overhead matters
+    /// - Use `prefetch_for_search_adaptive()` when node sizes vary widely
+    ///
+    /// # Memory Layout (WIDTH=15)
+    ///
+    /// ```text
+    /// Cache Line 1 (64-127):   permutation (8B) + padding
+    /// Cache Line 2 (128-191):  ikey0[0..=7] (8 keys, 64B)
+    /// Cache Line 3 (192-255):  ikey0[8..=14] (7 keys, 56B)
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Number of keys in the node (from permutation)
+    #[inline(always)]
+    pub fn prefetch_for_search_adaptive(&self, size: usize) {
+        let self_ptr: *const u8 = StdPtr::from_ref(self).cast::<u8>();
+
+        // SAFETY: Offsets are within LeafNode15 bounds (768 bytes total).
+        // Prefetch is a hint - invalid addresses cause no fault.
+        unsafe {
+            // CL 1: permutation - always needed for slot ordering
+            prefetch_read(self_ptr.add(64));
+
+            // CL 2: ikey0[0..=7] - needed if we have any keys
+            if size > 0 {
+                prefetch_read(self_ptr.add(128));
+            }
+
+            // CL 3: ikey0[8..=14] - only needed if size > 8
+            if size > 8 {
+                prefetch_read(self_ptr.add(192));
+            }
         }
     }
 
@@ -990,6 +1038,7 @@ impl<S: ValueSlot> LeafNode15<S> {
             if stored_keylenx == keylenx && suffix.is_empty() {
                 return MATCH_RESULT_EXACT;
             }
+
             return MATCH_RESULT_MISMATCH;
         }
 
@@ -1023,10 +1072,11 @@ impl<S: ValueSlot> LeafNode15<S> {
             return 0;
         }
 
-        let perm = self.permutation();
+        let perm: Permuter = self.permutation();
+
         // SAFETY: old_ptr is non-null
         let mut new_bag: SuffixBag<WIDTH_15> = unsafe { (*old_ptr).clone() };
-        let reclaimed = new_bag.compact_with_permuter(&perm, exclude_slot);
+        let reclaimed: usize = new_bag.compact_with_permuter(&perm, exclude_slot);
         let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
 
         self.external_ksuf.store(new_ptr, WRITE_ORD);
@@ -2214,6 +2264,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         Self::prefetch_for_search(self);
     }
 
+    #[inline(always)]
+    fn prefetch_for_search_adaptive(&self, size: usize) {
+        Self::prefetch_for_search_adaptive(self, size);
+    }
+
     // ========================================================================
     // Modification State (modstate) Operations
     // ========================================================================
@@ -2489,60 +2544,14 @@ impl<V: Copy + Send + Sync + 'static>
 }
 
 // ============================================================================
-//  Compile-Time Size Assertions
+//  Compile-Time Layout Assertions
 // ============================================================================
 //
-// LeafNode15 memory layout (768 bytes, 12 cache lines):
+// See `layout` submodule for comprehensive compile-time assertions that verify:
+// - Exact size (768 bytes, 12 cache lines)
+// - Cache-line alignment (64 bytes)
+// - Field offsets for hot-path optimization
+// - Cache line boundary constraints
 //
-// CL 0  (0-63):     version (4B) + modstate (1B) + _pad0 (55B)
-// CL 1  (64-127):   permutation (8B) + _pad1 (56B)
-// CL 2  (128-191):  ikey0[0..7] (64B)
-// CL 3  (192-255):  ikey0[8..14] (56B) + keylenx[0..7] (8B)
-// CL 4  (256-319):  keylenx[8..14] (7B) + pad (1B) + leaf_values[0..6] (56B)
-// CL 5  (320-383):  leaf_values[7..14] (64B)
-// CL 6  (384-447):  inline_ksuf[0..63] (64B)
-// CL 7  (448-511):  inline_ksuf[64..127] (64B)
-// CL 8  (512-575):  inline_ksuf[128..191] (64B)
-// CL 9  (576-639):  inline_ksuf[192..255] (64B)
-// CL 10 (640-703):  inline_ksuf[256..317] (62B) + pad (2B)
-// CL 11 (704-767):  external_ksuf (8B) + next (8B) + prev (8B) + parent (8B) + tail pad (32B)
-//
-// Hot path (get) touches 3-5 cache lines:
-//   CL 0: version (OCC validation)
-//   CL 1: permutation (slot ordering)
-//   CL 2-3: ikey0 (key comparison)
-//   CL 4-5: leaf_values (on match)
-
-/// Verify [`LeafNode15`] size is exactly 768 bytes (12 cache lines).
-/// This ensures the hot path layout is cache-optimal.
-///
-/// Note: Uses `LeafValue<u64>` as the concrete slot type for size checks.
-/// [`PhantomData<S>`] is zero-sized, so [`LeafNode15`] size is S-independent.
-const _: () = {
-    use crate::value::LeafValue;
-
-    // LeafNode15 should be exactly 768 bytes
-    assert!(std::mem::size_of::<LeafNode15<LeafValue<u64>>>() == 768);
-
-    // Alignment should be 64 bytes (cache line)
-    assert!(std::mem::align_of::<LeafNode15<LeafValue<u64>>>() == 64);
-};
-
-/// Verify component sizes match expected values.
-const _: () = {
-    use crate::nodeversion::NodeVersion;
-    use crate::permuter::AtomicPermuter15;
-    use crate::suffix::InlineSuffixBag;
-    use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
-
-    assert!(std::mem::size_of::<NodeVersion>() == 4);
-    assert!(std::mem::size_of::<AtomicPermuter15>() == 8);
-    assert!(std::mem::size_of::<[AtomicU64; WIDTH_15]>() == 120);
-    assert!(std::mem::size_of::<[AtomicU8; WIDTH_15]>() == 15);
-    assert!(std::mem::size_of::<[AtomicPtr<u8>; WIDTH_15]>() == 120);
-    assert!(std::mem::size_of::<InlineSuffixBag<WIDTH_15, 256>>() == 320);
-};
-
-//
-// #[cfg(test)]
-// mod unit_tests;
+// The layout module ensures any refactoring that changes field positions
+// will fail at compile time with clear error messages.
