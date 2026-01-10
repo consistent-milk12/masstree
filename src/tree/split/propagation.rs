@@ -167,6 +167,11 @@ impl Propagation {
         // let mut iterations: usize = 0;
         // let mut stale_parent_retries: usize = 0;
 
+        // Exponential backoff state for contention reduction
+        // Starts at 1, doubles on each retry, caps at 64 spins
+        const BACKOFF_CAP: u32 = 64;
+        let mut backoff: u32 = 1;
+
         loop {
             // CRITICAL: Uncomment to detect runaway propagation (tree corruption)
             // iterations += 1;
@@ -236,8 +241,9 @@ impl Propagation {
             let parent: &L::Internode = unsafe { &*left_parent.cast::<L::Internode>() };
 
             // SAFETY: parent is valid (reclamation guard protects for 'op)
+            // Use lock_node_yielding to reduce contention under high thread counts
             let mut parent_lock: LockGuard<'op> =
-                unsafe { ctx.lock_node(parent.version().as_ptr()) };
+                unsafe { ctx.lock_node_yielding(parent.version().as_ptr()) };
 
             // =========================================================
             // STEP 3: Revalidate parent pointer after locking
@@ -250,10 +256,15 @@ impl Propagation {
             let current_left_parent: *mut u8 = Self::get_parent::<S, L>(left_ptr, at_leaf_level);
 
             if current_left_parent != left_parent {
-                // Parent pointer changed - release parent lock and retry
+                // Parent pointer changed - release parent lock and retry with backoff
                 drop(parent_lock); // RAII: auto-unlock
                 // CRITICAL: stale_parent_retries = 0; // Reset: parent changed, not stale
-                std::hint::spin_loop();
+
+                // Exponential backoff: spin `backoff` times, then double (up to cap)
+                for _ in 0..backoff {
+                    std::hint::spin_loop();
+                }
+                backoff = (backoff * 2).min(BACKOFF_CAP);
                 continue;
             }
 
@@ -263,7 +274,8 @@ impl Propagation {
 
             let child_idx: usize =
                 if let Some(idx) = ParentLocking::validate_membership::<S, L>(parent, left_ptr) {
-                    // CRITICAL: stale_parent_retries = 0; // Reset on success
+                    // Success: reset backoff for next potential retry
+                    backoff = 1;
                     idx
                 } else {
                     // CRITICAL: Uncomment to prevent livelock on persistent stale parent
@@ -276,9 +288,14 @@ impl Propagation {
                     // }
 
                     // Child not found - parent may have been split concurrently
-                    // Release parent lock and retry (left_lock still held)
+                    // Release parent lock and retry with backoff (left_lock still held)
                     drop(parent_lock); // RAII: auto-unlock
-                    std::hint::spin_loop();
+
+                    // Exponential backoff: spin `backoff` times, then double (up to cap)
+                    for _ in 0..backoff {
+                        std::hint::spin_loop();
+                    }
+                    backoff = (backoff * 2).min(BACKOFF_CAP);
                     continue;
                 };
 

@@ -198,7 +198,15 @@ name = "concurrent_read_write"
 harness = false
 
 [[bench]]
+name = "concurrent_read_write_scaled"
+harness = false
+
+[[bench]]
 name = "concurrent_read_write_masstree"
+harness = false
+
+[[bench]]
+name = "concurrent_read_write_masstree_scaled"
 harness = false
 
 [[bench]]

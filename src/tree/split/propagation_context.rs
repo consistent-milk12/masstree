@@ -71,10 +71,14 @@ impl<'op> PropagationContext<'op> {
 
     /// Lock a [`NodeVersion`] and return a [`LockGuard`] with unified lifetime `'op`.
     ///
+    /// Note: For high-contention scenarios (like split propagation), prefer
+    /// [`Self::lock_node_yielding`] which reduces CPU waste.
+    ///
     /// # Safety
     /// `version_ptr` must point to a valid [`NodeVersion`] that remains valid
     /// for the duration of `'op`. This is guaranteed by the reclamation guard.
     #[inline(always)]
+    #[allow(dead_code, reason = "API for low-contention scenarios; prefer lock_node_yielding")]
     #[expect(clippy::unused_self, reason = "API Consistency")]
     pub unsafe fn lock_node(&self, version_ptr: *const NodeVersion) -> LockGuard<'op> {
         // Create a reference with the unified lifetime.
@@ -86,10 +90,11 @@ impl<'op> PropagationContext<'op> {
 
     /// Lock a [`NodeVersion`] using [`NodeVersion::lock_with_yield`] for high contention.
     ///
+    /// Used in split propagation to reduce CPU waste under high thread counts.
+    ///
     /// # Safety
     /// Same requirements as `lock_node`.
     #[inline(always)]
-    #[allow(dead_code, reason = "API provided for high-contention scenarios")]
     #[expect(clippy::unused_self, reason = "API Consistency")]
     pub unsafe fn lock_node_yielding(&self, version_ptr: *const NodeVersion) -> LockGuard<'op> {
         // SAFETY: Caller guarantees version_ptr is valid for 'op.
