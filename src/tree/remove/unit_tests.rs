@@ -1,6 +1,6 @@
 #![allow(clippy::pedantic, clippy::needless_collect, clippy::indexing_slicing)]
 
-use super::NodeCleaner;
+use super::{LockedParentResult, NodeCleaner};
 use crate::internode::InternodeNode;
 use crate::leaf24::LeafNode24;
 use crate::nodeversion::{LockGuard, NodeVersion};
@@ -371,12 +371,11 @@ fn test_locked_parent_null_parent() {
     let leaf_ref: &TestLeaf = unsafe { &*leaf_ptr.cast::<TestLeaf>() };
     let _leaf_lock: LockGuard<'_> = leaf_ref.version().lock();
 
-    // Test: locked_parent_generic should return (None, null)
-    let (lock_opt, parent_ptr): (Option<LockGuard<'_>>, *mut u8) =
+    // Test: locked_parent_generic should return NoParent for root leaf
+    let result: LockedParentResult<'_> =
         unsafe { NodeCleaner::locked_parent_generic::<LeafValue<u64>, TestLeaf>(leaf_ptr) };
 
-    assert!(lock_opt.is_none());
-    assert!(parent_ptr.is_null());
+    assert!(matches!(result, LockedParentResult::NoParent));
 
     // Cleanup
     drop(_leaf_lock);
@@ -401,10 +400,14 @@ fn test_locked_parent_basic() {
     let _leaf_lock: LockGuard<'_> = leaf_ref.version().lock();
 
     // Test: locked_parent_generic should return locked parent
-    let (lock_opt, returned_parent): (Option<LockGuard<'_>>, *mut u8) =
+    let result: LockedParentResult<'_> =
         unsafe { NodeCleaner::locked_parent_generic::<LeafValue<u64>, TestLeaf>(leaf_ptr) };
 
-    assert!(lock_opt.is_some());
+    let (lock, returned_parent) = match result {
+        LockedParentResult::Locked(l, p) => (l, p),
+        _ => panic!("Expected Locked result"),
+    };
+
     assert_eq!(returned_parent, parent_ptr.cast::<u8>());
 
     // Parent should be locked
@@ -412,7 +415,7 @@ fn test_locked_parent_basic() {
     assert!(parent_ref.version().is_locked());
 
     // Cleanup
-    drop(lock_opt);
+    drop(lock);
     drop(_leaf_lock);
     let _: Box<TestLeaf> = unsafe { Box::from_raw(leaf_ptr.cast::<TestLeaf>()) };
     let _: Box<TestInternode> = unsafe { Box::from_raw(parent_ptr) };
@@ -442,10 +445,14 @@ fn test_locked_parent_returns_internode() {
     let _leaf_lock: LockGuard<'_> = leaf_ref.version().lock();
 
     // Test: locked_parent should return parent (not grandparent)
-    let (lock_opt, returned_parent): (Option<LockGuard<'_>>, *mut u8) =
+    let result: LockedParentResult<'_> =
         unsafe { NodeCleaner::locked_parent_generic::<LeafValue<u64>, TestLeaf>(leaf_ptr) };
 
-    assert!(lock_opt.is_some());
+    let (lock, returned_parent) = match result {
+        LockedParentResult::Locked(l, p) => (l, p),
+        _ => panic!("Expected Locked result"),
+    };
+
     assert_eq!(returned_parent, parent_ptr.cast::<u8>());
 
     // Verify it's not a leaf
@@ -453,7 +460,7 @@ fn test_locked_parent_returns_internode() {
     assert!(!parent_version.is_leaf());
 
     // Cleanup
-    drop(lock_opt);
+    drop(lock);
     drop(_leaf_lock);
     let _: Box<TestLeaf> = unsafe { Box::from_raw(leaf_ptr.cast::<TestLeaf>()) };
     let _: Box<TestInternode> = unsafe { Box::from_raw(parent_ptr) };

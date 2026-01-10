@@ -266,8 +266,23 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     //  Keys
     // ========================================================================
 
-    /// Get key at index.
+    /// Get key at index (Acquire ordering).
     fn ikey(&self, idx: usize) -> u64;
+
+    /// Get key at index using Relaxed ordering.
+    ///
+    /// # Safety Justification
+    ///
+    /// Callers must have already established ordering via `version.stable()`
+    /// or equivalent fence. The Acquire fence from `stable()` synchronizes
+    /// with writer's Release stores, making Relaxed loads safe.
+    ///
+    /// This is safe because:
+    /// 1. Call sites do `stable()` which spins until DIRTY_MASK == 0
+    /// 2. `stable()` issues `fence(Acquire)` before returning
+    /// 3. The fence synchronizes with writer's `Release` stores
+    /// 4. Therefore, Relaxed loads see fully-published values
+    fn ikey_relaxed(&self, idx: usize) -> u64;
 
     /// Set key at index.
     fn set_ikey(&self, idx: usize, key: u64);

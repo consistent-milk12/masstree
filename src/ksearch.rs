@@ -354,29 +354,35 @@ pub fn upper_bound_internode_direct(search_ikey: u64, node: &InternodeNode) -> u
 /// Optimizations:
 /// - Loop unrolling (4 at a time)
 /// - Early exit on match
+/// - **Relaxed atomic loads** (caller provides ordering via `stable()`)
+///
+/// # Memory Ordering
+///
+/// Uses `ikey_relaxed()` (Relaxed ordering) instead of `ikey()` (Acquire).
+/// This is safe because callers are required to establish ordering before search:
+/// 1. `reach_leaf_concurrent_generic` calls `version.stable()` on each internode
+/// 2. `stable()` issues `fence(Acquire)` after confirming node is not being modified
+/// 3. The Acquire fence synchronizes with writers' Release stores
+/// 4. Therefore, Relaxed loads see fully-published ikey values
+///
+/// This optimization is meaningful on ARM (fewer barrier instructions) and
+/// reduces compiler constraints on x86 (allows more reordering freedom).
 ///
 /// # Arguments
 /// * `search_ikey` - The 8-byte key to route
-/// * `node` - The internode to search (any type implementing [`TreeInternode`] )
+/// * `node` - The internode to search (any type implementing [`TreeInternode`])
 ///
 /// # Returns
 /// Child index (0 to nkeys). Use `node.child(result)` to get the child pointer.
-/// Find the upper bound position for a search key in an internode.
-///
-/// Uses optimized linear search with loop unrolling. Linear search outperforms
-/// binary search for small nodes (WIDTH ≤ 16) due to predictable branches and
-/// cache-friendly sequential access.
-///
-/// Returns the child index to follow: the first position where `ikey[i] >= search_ikey`,
-/// or `nkeys` if the search key is greater than all keys.
 #[inline(always)]
 pub fn upper_bound_internode_generic<I: TreeInternode>(search_ikey: u64, node: &I) -> usize {
     let size: usize = node.nkeys();
     let mut l: usize = 0;
 
     // Unrolled loop: process 4 keys per iteration
+    // Uses ikey_relaxed() - caller must have called stable() first
     while l + 4 <= size {
-        let k0: u64 = node.ikey(l);
+        let k0: u64 = node.ikey_relaxed(l);
         if search_ikey < k0 {
             return l;
         }
@@ -384,7 +390,7 @@ pub fn upper_bound_internode_generic<I: TreeInternode>(search_ikey: u64, node: &
             return l + 1;
         }
 
-        let k1: u64 = node.ikey(l + 1);
+        let k1: u64 = node.ikey_relaxed(l + 1);
         if search_ikey < k1 {
             return l + 1;
         }
@@ -392,7 +398,7 @@ pub fn upper_bound_internode_generic<I: TreeInternode>(search_ikey: u64, node: &
             return l + 2;
         }
 
-        let k2: u64 = node.ikey(l + 2);
+        let k2: u64 = node.ikey_relaxed(l + 2);
         if search_ikey < k2 {
             return l + 2;
         }
@@ -400,7 +406,7 @@ pub fn upper_bound_internode_generic<I: TreeInternode>(search_ikey: u64, node: &
             return l + 3;
         }
 
-        let k3: u64 = node.ikey(l + 3);
+        let k3: u64 = node.ikey_relaxed(l + 3);
         if search_ikey < k3 {
             return l + 3;
         }
@@ -413,7 +419,7 @@ pub fn upper_bound_internode_generic<I: TreeInternode>(search_ikey: u64, node: &
 
     // Handle remainder (0-3 keys)
     while l < size {
-        let node_ikey: u64 = node.ikey(l);
+        let node_ikey: u64 = node.ikey_relaxed(l);
         if search_ikey < node_ikey {
             return l;
         }

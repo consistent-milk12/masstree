@@ -1269,6 +1269,11 @@ impl TreeInternode for InternodeNode {
     }
 
     #[inline(always)]
+    fn ikey_relaxed(&self, idx: usize) -> u64 {
+        Self::ikey_relaxed(self, idx)
+    }
+
+    #[inline(always)]
     fn set_ikey(&self, idx: usize, key: u64) {
         Self::set_ikey(self, idx, key);
     }

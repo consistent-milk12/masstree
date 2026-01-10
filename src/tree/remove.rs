@@ -163,6 +163,29 @@ const MAX_RETRIES: usize = 1000;
 const MAX_PARENT_RETRIES: usize = 100;
 
 // ============================================================================
+//  Locked Parent Result
+// ============================================================================
+
+/// Result of attempting to lock a node's parent.
+///
+/// Distinguishes between "no parent exists" (safe) and "retry exhaustion" (unsafe).
+enum LockedParentResult<'a> {
+    /// Successfully locked the parent. Contains guard and pointer.
+    Locked(LockGuard<'a>, *mut u8),
+
+    /// Node has no parent (it's a layer root). This is a valid success case.
+    NoParent,
+
+    /// Failed to lock parent after MAX_PARENT_RETRIES attempts.
+    ///
+    /// # Safety Implication
+    ///
+    /// Callers MUST NOT proceed with operations that assume the parent doesn't exist.
+    /// The parent likely DOES exist but is under extreme contention.
+    RetryExhausted,
+}
+
+// ============================================================================
 //  RemoveCursor — Stateful cursor matching C++ tcursor pattern
 // ============================================================================
 
@@ -408,15 +431,32 @@ impl NodeCleaner {
         loop {
             // Step 1: Lock parent while current is locked
             // SAFETY: current is valid and locked; we hold current_lock.
-            let (parent_lock_opt, parent_ptr): (Option<LockGuard<'_>>, *mut u8) =
+            let parent_result: LockedParentResult<'_> =
                 unsafe { Self::locked_parent_generic::<S, L>(current) };
 
-            let Some(mut parent_lock) = parent_lock_opt else {
-                // No parent - we're at the layer root
-                // The leaf is the only node in this layer (root leaf), nothing to remove from.
-                // This is a valid success case - the leaf has no parent pointer to clean up.
-                drop(current_lock);
-                return true;
+            let (mut parent_lock, parent_ptr) = match parent_result {
+                LockedParentResult::Locked(lock, ptr) => (lock, ptr),
+
+                LockedParentResult::NoParent => {
+                    // No parent - we're at the layer root
+                    // The leaf is the only node in this layer (root leaf), nothing to remove from.
+                    // This is a valid success case - the leaf has no parent pointer to clean up.
+                    drop(current_lock);
+                    return true;
+                }
+
+                LockedParentResult::RetryExhausted => {
+                    // SAFETY: Retry exhaustion means the parent LIKELY EXISTS but is under
+                    // extreme contention. We MUST NOT proceed as if there's no parent,
+                    // because that would allow retiring a node that's still reachable.
+                    //
+                    // Return false to signal that the cleanup failed. The leaf remains
+                    // marked as deleted but is NOT retired. It will be:
+                    // - Skipped by readers (deleted bit set)
+                    // - Eventually cleaned up when contention subsides
+                    drop(current_lock);
+                    return false;
+                }
             };
 
             // SAFETY: parent_ptr is a valid internode pointer returned by locked_parent.
@@ -1007,15 +1047,28 @@ impl NodeCleaner {
         loop {
             // Step 1: Lock parent (current is still locked)
             // SAFETY: current is a valid internode pointer
-            let (parent_lock_opt, parent_ptr) =
+            let parent_result: LockedParentResult<'_> =
                 unsafe { Self::locked_parent_generic::<S, L>(current) };
 
-            // Check if we reached root
-            let Some(parent_lock) = parent_lock_opt else {
-                // No parent, we're at layer root
-                // Drop our owned lock if we have one (but not the caller's lock)
-                drop(owned_lock);
-                return;
+            // Check if we reached root or hit retry exhaustion
+            let (parent_lock, parent_ptr) = match parent_result {
+                LockedParentResult::Locked(lock, ptr) => (lock, ptr),
+
+                LockedParentResult::NoParent => {
+                    // No parent, we're at layer root
+                    // Drop our owned lock if we have one (but not the caller's lock)
+                    drop(owned_lock);
+                    return;
+                }
+
+                LockedParentResult::RetryExhausted => {
+                    // Retry exhaustion during separator key update is not as critical
+                    // as during node retirement. The separator keys may be stale but
+                    // the tree is still consistent (B-link traversal will still work).
+                    // Just abort the redirect and return.
+                    drop(owned_lock);
+                    return;
+                }
             };
 
             // Step 2: unlock previous node if this isn't the first iteration
@@ -1139,7 +1192,7 @@ impl NodeCleaner {
     /// ```
     unsafe fn locked_parent_generic<'a, S, L>(
         current_ptr: *mut u8,
-    ) -> (Option<LockGuard<'a>>, *mut u8)
+    ) -> LockedParentResult<'a>
     where
         S: ValueSlot,
         S::Value: Send + Sync + 'static,
@@ -1153,7 +1206,7 @@ impl NodeCleaner {
 
             // Step 2: Check if we've reached root
             if parent_ptr.is_null() {
-                return (None, StdPtr::null_mut());
+                return LockedParentResult::NoParent;
             }
 
             // Step 3: Lock the parent (must be an internode)
@@ -1171,7 +1224,7 @@ impl NodeCleaner {
                     !parent.version().is_leaf(),
                     "locked_parent: parent must be an internode"
                 );
-                return (Some(parent_lock), parent_ptr);
+                return LockedParentResult::Locked(parent_lock, parent_ptr);
             }
 
             // Step 5: Parent changed - unlock and retry
@@ -1181,8 +1234,10 @@ impl NodeCleaner {
             StdHint::spin_loop();
         }
 
-        // Retry limit exceeded - return as if no parent (caller handles gracefully)
-        (None, StdPtr::null_mut())
+        // Retry limit exceeded - DO NOT treat this as "no parent".
+        // The parent likely exists but is under extreme contention.
+        // Caller must handle this case safely (do not retire the node).
+        LockedParentResult::RetryExhausted
     }
 
     /// Set the parent pointer on a node (leaf or internode).
