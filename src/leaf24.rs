@@ -390,6 +390,20 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.ikey0[slot].store(ikey, WRITE_ORD);
     }
 
+    /// Set the ikey at the given physical slot using Relaxed ordering.
+    ///
+    /// See `LeafNode15::set_ikey_relaxed` for safety preconditions.
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter24, valid by construction"
+    )]
+    pub(crate) fn set_ikey_relaxed(&self, slot: usize, ikey: u64) {
+        debug_assert!(slot < WIDTH_24, "set_ikey_relaxed: slot out of bounds");
+
+        self.ikey0[slot].store(ikey, RELAXED);
+    }
+
     /// Load all ikeys into a contiguous buffer for SIMD search.
     #[must_use]
     #[inline(always)]
@@ -476,6 +490,21 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.keylenx[slot].load(READ_ORD)
     }
 
+    /// Get the keylenx at the given physical slot using Relaxed ordering.
+    ///
+    /// See `LeafNode15::keylenx_relaxed` for safety preconditions.
+    #[must_use]
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter24, valid by construction"
+    )]
+    pub(crate) fn keylenx_relaxed(&self, slot: usize) -> u8 {
+        debug_assert!(slot < WIDTH_24, "keylenx_relaxed: slot out of bounds");
+
+        self.keylenx[slot].load(RELAXED)
+    }
+
     /// Set the keylenx at the given physical slot.
     #[inline(always)]
     #[expect(
@@ -486,6 +515,20 @@ impl<S: ValueSlot> LeafNode24<S> {
         debug_assert!(slot < WIDTH_24, "set_keylenx: slot out of bounds");
 
         self.keylenx[slot].store(keylenx, WRITE_ORD);
+    }
+
+    /// Set the keylenx at the given physical slot using Relaxed ordering.
+    ///
+    /// See `LeafNode15::set_keylenx_relaxed` for safety preconditions.
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter24, valid by construction"
+    )]
+    pub(crate) fn set_keylenx_relaxed(&self, slot: usize, keylenx: u8) {
+        debug_assert!(slot < WIDTH_24, "set_keylenx_relaxed: slot out of bounds");
+
+        self.keylenx[slot].store(keylenx, RELAXED);
     }
 
     /// Get the ikey bound (ikey at slot 0, used for B-link tree routing).
@@ -1042,6 +1085,20 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.leaf_values[slot].store(ptr, WRITE_ORD);
     }
 
+    /// Store leaf value pointer at the given slot using Relaxed ordering.
+    ///
+    /// See `LeafNode15::set_leaf_value_ptr_relaxed` for safety preconditions.
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter24; valid by construction"
+    )]
+    pub(crate) fn set_leaf_value_ptr_relaxed(&self, slot: usize, ptr: *mut u8) {
+        debug_assert!(slot < WIDTH_24, "set_leaf_value_ptr_relaxed: slot out of bounds");
+
+        self.leaf_values[slot].store(ptr, RELAXED);
+    }
+
     /// Take the leaf value pointer, leaving null in the slot.
     #[inline(always)]
     #[expect(
@@ -1218,6 +1275,14 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline(always)]
     pub fn set_next(&self, next: *mut Self) {
         self.next.store(next, WRITE_ORD);
+    }
+
+    /// Set the next leaf pointer using Relaxed ordering.
+    ///
+    /// See `LeafNode15::set_next_relaxed` for safety preconditions.
+    #[inline(always)]
+    pub(crate) fn set_next_relaxed(&self, next: *mut Self) {
+        self.next.store(next, RELAXED);
     }
 
     /// Mark the next pointer (during split).
@@ -1442,6 +1507,14 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[inline(always)]
     pub fn set_prev(&self, prev: *mut Self) {
         self.prev.store(prev, WRITE_ORD);
+    }
+
+    /// Set the previous leaf pointer using Relaxed ordering.
+    ///
+    /// See `LeafNode15::set_prev_relaxed` for safety preconditions.
+    #[inline(always)]
+    pub(crate) fn set_prev_relaxed(&self, prev: *mut Self) {
+        self.prev.store(prev, RELAXED);
     }
 
     // ============================================================================
@@ -1962,23 +2035,6 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_leaf_ptr: *mut Self,
         guard: &seize::LocalGuard<'_>,
     ) -> (u64, crate::value::InsertTarget) {
-        // CRITICAL (Help-Along Protocol): Initialize new leaf's version for split
-        // BEFORE any data is written. This creates a locked version with SPLITTING_BIT set.
-        // The new leaf will remain locked until propagate_split sets its parent.
-        //
-        // # Why This Works
-        //
-        // 1. new_leaf is allocated but not yet linked into the tree
-        // 2. We replace its default NodeVersion with a split-locked version
-        // 3. After link_sibling(), other threads see new_leaf via B-link chain
-        // 4. Those threads call stable() on new_leaf.version, which spins because dirty
-        // 5. propagate_split sets parent pointer and calls unlock_for_split
-        // 6. Now stable() returns and threads can proceed
-        //
-        // # Safety
-        //
-        // We're writing to a freshly allocated leaf that is not yet visible.
-        // Using ptr::write because NodeVersion doesn't implement Copy.
         unsafe {
             let new_leaf: &Self = &*new_leaf_ptr;
             let split_version = crate::nodeversion::NodeVersion::new_for_split(&self.version);
@@ -1988,7 +2044,6 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
                 split_version,
             );
 
-            // Load current permutation (caller holds lock)
             let old_perm: Permuter24 = self.permutation();
             let old_size = old_perm.size();
 
@@ -1999,46 +2054,37 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 
             let entries_to_move = old_size - split_pos;
 
-            // Move entries to new leaf
+            // Move entries using RELAXED ordering (see leaf15.rs for justification)
             for i in 0..entries_to_move {
                 let old_logical_pos = split_pos + i;
                 let old_slot = old_perm.get(old_logical_pos);
                 let new_slot = i;
 
-                let ikey = self.ikey(old_slot);
-                let keylenx = self.keylenx(old_slot);
+                let ikey = self.ikey_relaxed(old_slot);
+                let keylenx = self.keylenx_relaxed(old_slot);
 
-                new_leaf.set_ikey(new_slot, ikey);
-                new_leaf.set_keylenx(new_slot, keylenx);
+                new_leaf.set_ikey_relaxed(new_slot, ikey);
+                new_leaf.set_keylenx_relaxed(new_slot, keylenx);
 
-                // Move value pointer
                 let old_ptr = self.take_leaf_value_ptr(old_slot);
-                new_leaf.set_leaf_value_ptr(new_slot, old_ptr);
+                new_leaf.set_leaf_value_ptr_relaxed(new_slot, old_ptr);
 
-                // Migrate suffix if present
                 if keylenx == KSUF_KEYLENX {
                     if let Some(suffix) = self.ksuf(old_slot) {
-                        // SAFETY: new_leaf is freshly allocated and caller holds lock
                         new_leaf.assign_ksuf(new_slot, suffix, guard);
                     }
-                    // SAFETY: caller holds lock
                     self.clear_ksuf(old_slot, guard);
                 }
             }
 
-            // Build new leaf's permutation
             let new_perm = Permuter24::make_sorted(entries_to_move);
             new_leaf.set_permutation(new_perm);
 
-            // Update old leaf's permutation
             let mut old_perm_updated = old_perm;
             old_perm_updated.set_size(split_pos);
-
-            // Publish truncated permutation
             self.set_permutation(old_perm_updated);
 
-            // Get split key from new leaf's first entry
-            let split_ikey = new_leaf.ikey(new_perm.get(0));
+            let split_ikey = new_leaf.ikey_relaxed(new_perm.get(0));
 
             (split_ikey, crate::value::InsertTarget::Left)
         }
@@ -2049,10 +2095,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_leaf_ptr: *mut Self,
         guard: &seize::LocalGuard<'_>,
     ) -> (u64, crate::value::InsertTarget) {
-        // CRITICAL (Help-Along Protocol): Initialize new leaf's version for split
-        // (same as split_into_preallocated)
         let split_version = crate::nodeversion::NodeVersion::new_for_split(&self.version);
-        // SAFETY: new_leaf is not yet visible to other threads.
         unsafe {
             StdPtr::write(
                 StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
@@ -2061,46 +2104,38 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         }
 
         let new_leaf: &Self = unsafe { &*new_leaf_ptr };
-
-        // Load current permutation (caller holds lock)
         let old_perm: Permuter24 = self.permutation();
         let old_size = old_perm.size();
 
         debug_assert!(old_size > 0, "Cannot split empty leaf");
 
-        // Move all entries to new leaf
+        // Move all entries using RELAXED ordering
         for i in 0..old_size {
             let old_slot = old_perm.get(i);
             let new_slot = i;
 
-            let ikey = self.ikey(old_slot);
-            let keylenx = self.keylenx(old_slot);
+            let ikey = self.ikey_relaxed(old_slot);
+            let keylenx = self.keylenx_relaxed(old_slot);
 
-            new_leaf.set_ikey(new_slot, ikey);
-            new_leaf.set_keylenx(new_slot, keylenx);
+            new_leaf.set_ikey_relaxed(new_slot, ikey);
+            new_leaf.set_keylenx_relaxed(new_slot, keylenx);
 
             let old_ptr = self.take_leaf_value_ptr(old_slot);
-            new_leaf.set_leaf_value_ptr(new_slot, old_ptr);
+            new_leaf.set_leaf_value_ptr_relaxed(new_slot, old_ptr);
 
             if keylenx == KSUF_KEYLENX {
                 if let Some(suffix) = self.ksuf(old_slot) {
-                    // SAFETY: new_leaf is freshly allocated and caller holds lock
                     unsafe { new_leaf.assign_ksuf(new_slot, suffix, guard) };
                 }
-                // SAFETY: caller holds lock
                 unsafe { self.clear_ksuf(old_slot, guard) };
             }
         }
 
-        // New leaf gets all entries
         let new_perm = Permuter24::make_sorted(old_size);
         new_leaf.set_permutation(new_perm);
-
-        // Old leaf becomes empty
         self.set_permutation(Permuter24::empty());
 
-        // Split key is first key of new leaf
-        let split_ikey = new_leaf.ikey(new_perm.get(0));
+        let split_ikey = new_leaf.ikey_relaxed(new_perm.get(0));
 
         (split_ikey, crate::value::InsertTarget::Right)
     }
@@ -2109,38 +2144,27 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     unsafe fn link_sibling(&self, new_sibling: *mut Self) {
         // CAS-based link_sibling matching C++ btree_leaflink.hh:56-69 (link_split).
         //
-        // The key insight is that we must use CAS to "lock" the next pointer before
-        // modifying it. This prevents concurrent splits from clobbering each other's
-        // next pointer updates. The mark bit (LSB) signals a split is in progress.
-        //
         // Sequence:
         // 1. CAS to mark self.next (lock_next)
-        // 2. Set up new_sibling's prev/next pointers
-        // 3. Update old_next.prev if non-null
-        // 4. Release fence for visibility
-        // 5. Store new_sibling into self.next (unmarked), completing the link
+        // 2. Set up new_sibling's prev/next pointers (RELAXED - not yet visible)
+        // 3. Update old_next.prev if non-null (Release - old_next IS visible)
+        // 4. Store new_sibling into self.next (Release), completing the link
 
-        // Step 1: Lock the next pointer via CAS mark
-        // This returns the unmarked old_next pointer
         let old_next: *mut Self = self.lock_next();
 
-        // SAFETY: Caller guarantees new_sibling is valid
         unsafe {
-            // Step 2: Set up new_sibling's pointers
-            (*new_sibling).set_prev(StdPtr::from_ref(self).cast_mut());
-            (*new_sibling).set_next(old_next);
+            // Use RELAXED for not-yet-visible new_sibling
+            (*new_sibling).set_prev_relaxed(StdPtr::from_ref(self).cast_mut());
+            (*new_sibling).set_next_relaxed(old_next);
 
-            // Step 3: Update old_next.prev if non-null
+            // old_next IS visible, so use Release
             if !old_next.is_null() {
                 (*old_next).set_prev(new_sibling);
             }
         }
 
-        // Step 4: Release fence ensures new_sibling is fully visible before publishing
-        StdAtomic::fence(AtomicOrdering::Release);
-
-        // Step 5: Store new_sibling (unmarked) - atomically publishes the link
-        // This also "unlocks" the next pointer by clearing the mark bit
+        // Release store publishes new_sibling.
+        // No explicit fence needed - see leaf15.rs link_sibling for explanation.
         <Self as crate::leaf_trait::TreeLeafNode<S>>::set_next(self, new_sibling);
     }
 
