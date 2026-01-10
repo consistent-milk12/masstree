@@ -39,6 +39,7 @@
 //!
 
 mod api;
+mod api_ref;
 #[allow(
     dead_code,
     reason = "scaffolding for future features (reverse iteration, layer optimization)"

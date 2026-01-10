@@ -952,11 +952,38 @@ impl NodeVersion {
 
     /// Check if the version has changed since `old`.
     ///
-    /// Returns true if any version relevant bits changed (ignoring lock bit).
+    /// Returns true if any version counter bits changed (ignoring lock/inserting bits).
     ///
-    /// # Implementation Note
-    /// Uses `> LOCK_BIT` (i.e., `> 1`) because XOR of only the lock bit equals 1,
-    /// which is NOT > 1, so lock-only changes return false.
+    /// # C++ Divergence (INTENTIONAL)
+    ///
+    /// The C++ reference uses `(x.v_ ^ v_) > lock_bit` (ignores only bit 0).
+    /// Our Rust implementation uses `> (LOCK_BIT | INSERTING_BIT)` (ignores bits 0-1).
+    ///
+    /// ## Why This Is Safe
+    ///
+    /// This divergence is safe due to the "always-dirty-on-lock" strategy:
+    ///
+    /// 1. **Version counters are the source of truth**: `VINSERT` (bits 3-8) and
+    ///    `VSPLIT` (bits 9-27) are the actual change indicators. They are incremented
+    ///    atomically when the lock is released, AFTER all modifications are complete.
+    ///
+    /// 2. **`INSERTING_BIT` is a progress indicator, not a change indicator**:
+    ///    - Set atomically with `LOCK_BIT` by `lock()`
+    ///    - Cleared when lock releases (version counter increments)
+    ///    - If `INSERTING_BIT` is set, modification is in-progress but NOT YET VISIBLE
+    ///
+    /// 3. **Reader's snapshot is consistent**:
+    ///    - Reader got `old` from `stable()` which spins until `DIRTY_MASK == 0`
+    ///    - If writer acquires lock AFTER `stable()` but BEFORE `has_changed()`:
+    ///      - Writer hasn't modified data yet (just acquired lock)
+    ///      - Reader's prior reads are valid (taken before modification)
+    ///      - Returning `false` is correct — no actual change to validate
+    ///    - If writer releases lock BEFORE `has_changed()`:
+    ///      - `VINSERT` or `VSPLIT` incremented → XOR detects it → returns `true`
+    ///
+    /// 4. **CAS operations use `has_changed_or_locked()` instead**: Operations that
+    ///    race with writers (not just read) use the stricter check that detects
+    ///    `DIRTY_MASK` being set.
     ///
     /// # Compiler Fence Requirement
     ///
@@ -992,10 +1019,12 @@ impl NodeVersion {
         StdAtomic::compiler_fence(Ordering::Acquire);
 
         // Relaxed load like C++ - the compiler fence above prevents reordering.
-        // C++ uses plain read after fence(): `return (x.v_ ^ v_) > lock_bit;`
         //
-        // XOR the versions, change = differing bits above LOCK_BIT | INSERTING_BIT.
-        // LOCK_BIT = 1, INSERTING_BIT = 2, so LOCK_BIT | INSERTING_BIT = 3.
+        // SAFETY (C++ Divergence): We use `> (LOCK_BIT | INSERTING_BIT)` instead of
+        // C++'s `> lock_bit`. This ignores both bits 0 and 1. See doc comment above
+        // for the full safety argument. TL;DR: version COUNTERS (VINSERT/VSPLIT) are
+        // the source of truth; INSERTING_BIT is a progress indicator that's only set
+        // while modifications are in-flight (not yet visible to readers).
         (old ^ self.value.load(Ordering::Relaxed)) > (LOCK_BIT | INSERTING_BIT)
     }
 
