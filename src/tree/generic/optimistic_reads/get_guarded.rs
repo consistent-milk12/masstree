@@ -39,22 +39,23 @@ where
             // SAFETY: leaf_ptr is valid (from reach_leaf_concurrent_generic)
             let leaf: &L = unsafe { &*leaf_ptr };
 
+            // P1-1: Prefetch ikeys/permutation while waiting for stable version
+            leaf.prefetch_for_search();
+
             let v0: u32 = leaf.version().stable();
             let result: LookupResult = search_leaf_multi_layer::<S, L>(leaf, &key);
-
-            // Version changed, retry (handles splits via B-link)
-            if leaf.version().has_changed(v0) {
-                let (new_ptr, _, _) = self.handle_version_change(leaf, &key, v0, guard);
-                leaf_ptr = new_ptr;
-                continue;
-            }
 
             match result {
                 LookupResult::ValueSlot(slot) => {
                     let output: Option<S::Output> = leaf.try_load_output(slot);
 
-                    // Final version check after load
                     if leaf.version().has_changed(v0) {
+                        // Only do full B-link handling if split occurred
+                        // For update-only, simple retry is faster
+                        if leaf.version().has_split_no_compiler_fence(v0) {
+                            let (new_ptr, _, _) = self.handle_version_change(leaf, &key, v0, guard);
+                            leaf_ptr = new_ptr;
+                        }
                         continue;
                     }
 
@@ -62,6 +63,14 @@ where
                 }
 
                 LookupResult::Layer(layer_ptr) => {
+                    if leaf.version().has_changed(v0) {
+                        if leaf.version().has_split_no_compiler_fence(v0) {
+                            let (new_ptr, _, _) = self.handle_version_change(leaf, &key, v0, guard);
+                            leaf_ptr = new_ptr;
+                        }
+                        continue;
+                    }
+
                     key.shift();
 
                     // Descend into sublayer - need to reach leaf again
