@@ -454,16 +454,23 @@ where
 
                 // Version validation after all reads
                 if leaf.version().has_changed(version) {
-                    let (advanced, new_version) =
-                        self.advance_to_key_generic(leaf, key, version, guard);
+                    // Only do full B-link handling if split occurred
+                    // For update-only, simple retry is faster
+                    if leaf.version().has_split_no_compiler_fence(version) {
+                        let (advanced, new_version) =
+                            self.advance_to_key_generic(leaf, key, version, guard);
 
-                    if !StdPtr::eq(advanced, leaf) {
-                        leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
+                        if !StdPtr::eq(advanced, leaf) {
+                            leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
 
-                        continue 'leaf_loop;
+                            continue 'leaf_loop;
+                        }
+
+                        version = new_version;
+                    } else {
+                        // Update only - re-stabilize without B-link check
+                        version = leaf.version().stable();
                     }
-
-                    version = new_version;
 
                     continue 'search_loop;
                 }
@@ -555,16 +562,22 @@ where
                     let result: LookupResult = search_leaf_multi_layer::<S, L>(leaf, key);
 
                     if leaf.version().has_changed(version) {
-                        let (new_ptr, new_version, changed_leaf) =
-                            self.handle_version_change(leaf, key, version, guard);
+                        // Only do full B-link handling if split occurred
+                        if leaf.version().has_split_no_compiler_fence(version) {
+                            let (new_ptr, new_version, changed_leaf) =
+                                self.handle_version_change(leaf, key, version, guard);
 
-                        if changed_leaf {
-                            leaf_ptr = new_ptr;
+                            if changed_leaf {
+                                leaf_ptr = new_ptr;
 
-                            continue 'leaf_loop;
+                                continue 'leaf_loop;
+                            }
+
+                            version = new_version;
+                        } else {
+                            // Update only - re-stabilize without B-link check
+                            version = leaf.version().stable();
                         }
-
-                        version = new_version;
 
                         continue 'search_loop;
                     }
