@@ -102,6 +102,7 @@ mod mixed_uniform {
                         let indices = Arc::clone(&indices);
                         let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
+
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * OPS_PER_THREAD;
@@ -112,12 +113,15 @@ mod mixed_uniform {
                                 let idx = indices[base + (i % OPS_PER_THREAD)];
                                 black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
+
                             warmup_done.wait();
 
                             // === MEASUREMENT PHASE ===
                             pre_measurement_barrier();
+
                             let mut sum = 0u64;
                             start.wait();
+
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if i % 100 < WRITE_RATIO {
@@ -126,6 +130,7 @@ mod mixed_uniform {
                                     sum = sum.wrapping_add(v);
                                 }
                             }
+
                             post_measurement_barrier();
                             black_box(sum);
                         })
@@ -166,19 +171,23 @@ mod mixed_zipfian {
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
                         let start = Arc::clone(&start);
+
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
                             start.wait();
+
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
+
                                 if i % 100 < WRITE_RATIO {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
                             }
+
                             black_box(sum);
                         })
                     })
@@ -224,19 +233,23 @@ mod mixed_shared_prefix {
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
                         let start = Arc::clone(&start);
+
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
                             start.wait();
+
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
+
                                 if i % 100 < WRITE_RATIO {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
                             }
+
                             black_box(sum);
                         })
                     })
@@ -276,19 +289,23 @@ mod mixed_high_contention {
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
                         let start = Arc::clone(&start);
+
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let mut sum = 0u64;
                             let base = t * OPS_PER_THREAD;
                             start.wait();
+
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
+
                                 if i % 100 < WRITE_RATIO {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
                             }
+
                             black_box(sum);
                         })
                     })
@@ -334,6 +351,7 @@ mod mixed_large_dataset {
                         let indices = Arc::clone(&indices);
                         let warmup_done = Arc::clone(&warmup_done);
                         let start = Arc::clone(&start);
+
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * OPS_PER_THREAD;
