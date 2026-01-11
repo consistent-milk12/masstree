@@ -300,14 +300,17 @@ mod concurrent_writes_contention {
                         let keys = Arc::clone(&keys);
                         let counter = Arc::clone(&counter);
                         let start = Arc::clone(&start);
+
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
                             start.wait();
+
                             for _ in 0..OPS_PER_THREAD {
                                 state = state
                                     .wrapping_mul(6_364_136_223_846_793_005)
                                     .wrapping_add(1);
+
                                 let idx = (state as usize) % keys.len();
                                 let val = counter.fetch_add(1, Ordering::Relaxed) as u64;
                                 let _ = tree.insert_with_guard(&keys[idx], val, &guard);
@@ -319,6 +322,7 @@ mod concurrent_writes_contention {
                 for h in handles {
                     h.join().unwrap();
                 }
+
                 tree
             });
     }
@@ -338,15 +342,18 @@ mod concurrent_writes_contention {
                         let keys = Arc::clone(&keys);
                         let counter = Arc::clone(&counter);
                         let start = Arc::clone(&start);
+
                         thread::spawn(move || {
                             let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
                             start.wait();
+
                             for _ in 0..OPS_PER_THREAD {
                                 state = state
                                     .wrapping_mul(6_364_136_223_846_793_005)
                                     .wrapping_add(1);
                                 let idx = (state as usize) % keys.len();
                                 let val = counter.fetch_add(1, Ordering::Relaxed) as u64;
+
                                 map.insert(keys[idx], val);
                             }
                         })
@@ -356,6 +363,7 @@ mod concurrent_writes_contention {
                 for h in handles {
                     h.join().unwrap();
                 }
+
                 map
             });
     }
@@ -375,13 +383,16 @@ mod concurrent_writes_contention {
                         let keys = Arc::clone(&keys);
                         let counter = Arc::clone(&counter);
                         let start = Arc::clone(&start);
+
                         thread::spawn(move || {
                             let mut state = (t as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
                             start.wait();
+
                             for _ in 0..OPS_PER_THREAD {
                                 state = state
                                     .wrapping_mul(6_364_136_223_846_793_005)
                                     .wrapping_add(1);
+
                                 let idx = (state as usize) % keys.len();
                                 let val = counter.fetch_add(1, Ordering::Relaxed) as u64;
                                 map.insert(keys[idx], val);
@@ -393,6 +404,7 @@ mod concurrent_writes_contention {
                 for h in handles {
                     h.join().unwrap();
                 }
+
                 map
             });
     }

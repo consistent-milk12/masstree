@@ -5,6 +5,7 @@
 //! ```bash
 //! cargo bench --bench mttest --features mimalloc
 //! cargo bench --bench mttest --features mimalloc -- rw3 -j6
+//! cargo bench --bench mttest --features mimalloc -- all -j6 -d10 --save
 //! ```
 
 #![allow(clippy::cast_possible_truncation)]
@@ -15,10 +16,14 @@
 use clap::Parser;
 use core_affinity::CoreId;
 use masstree::MassTree15Inline;
+use serde::Serialize;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // =============================================================================
 // Thread Pinning
@@ -72,9 +77,17 @@ struct Args {
     #[arg(long = "check")]
     check: bool,
 
-    /// Output JSON results (C++ notebook format)
+    /// Output JSON results (C++ notebook format) to stdout
     #[arg(long = "json")]
     json: bool,
+
+    /// Save results to JSON file in runs/ directory
+    #[arg(long = "save", short = 's')]
+    save: bool,
+
+    /// Custom output file path (overrides --save default)
+    #[arg(long = "output", short = 'o')]
+    output: Option<PathBuf>,
 
     /// Tests to run (rw1, rw2, rw2g90, rw2g98, rw3, rw4, same, uscale, wscale, all)
     #[arg(default_value = "all")]
@@ -185,12 +198,122 @@ impl KvRandom {
 // Result reporting (matches C++ JSON output format)
 // =============================================================================
 
-#[derive(Default)]
+#[derive(Default, Clone, Serialize)]
 struct ThreadResult {
     puts: u64,
     gets: u64,
     put_time: f64,
     get_time: f64,
+}
+
+/// Results for a single benchmark test
+#[derive(Clone, Serialize)]
+struct BenchmarkResult {
+    name: String,
+    threads: usize,
+    duration_secs: u64,
+    thread_results: Vec<ThreadResult>,
+    total_puts: u64,
+    total_gets: u64,
+    total_ops: u64,
+    puts_per_sec: f64,
+    gets_per_sec: f64,
+    ops_per_sec: f64,
+}
+
+/// All results from a benchmark run
+#[derive(Serialize)]
+struct RunResults {
+    timestamp: String,
+    rust_version: String,
+    threads: usize,
+    duration_secs: u64,
+    pinned: bool,
+    check_enabled: bool,
+    benchmarks: Vec<BenchmarkResult>,
+}
+
+impl RunResults {
+    fn new(threads: usize, duration_secs: u64, pinned: bool, check: bool) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| {
+                // Format as ISO 8601
+                let secs = d.as_secs();
+                let days_since_epoch = secs / 86400;
+                let secs_today = secs % 86400;
+                let hours = secs_today / 3600;
+                let mins = (secs_today % 3600) / 60;
+                let secs = secs_today % 60;
+                // Approximate date calculation (not accounting for leap years perfectly)
+                let years = 1970 + days_since_epoch / 365;
+                let remaining_days = days_since_epoch % 365;
+                let month = remaining_days / 30 + 1;
+                let day = remaining_days % 30 + 1;
+                format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                    years, month, day, hours, mins, secs
+                )
+            })
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        Self {
+            timestamp,
+            rust_version: env!("CARGO_PKG_VERSION").to_string(),
+            threads,
+            duration_secs,
+            pinned,
+            check_enabled: check,
+            benchmarks: Vec::new(),
+        }
+    }
+
+    fn add_benchmark(&mut self, name: &str, thread_results: Vec<ThreadResult>) {
+        let mut total_puts = 0u64;
+        let mut total_gets = 0u64;
+        let mut total_put_rate = 0.0;
+        let mut total_get_rate = 0.0;
+        let mut total_ops_rate = 0.0;
+
+        for r in &thread_results {
+            let put_rate = if r.put_time > 0.0 {
+                r.puts as f64 / r.put_time
+            } else {
+                0.0
+            };
+            let get_rate = if r.get_time > 0.0 {
+                r.gets as f64 / r.get_time
+            } else {
+                0.0
+            };
+            let ops = r.puts + r.gets;
+            let total_time = r.put_time + r.get_time;
+            let ops_rate = if total_time > 0.0 {
+                ops as f64 / total_time
+            } else {
+                0.0
+            };
+
+            total_puts += r.puts;
+            total_gets += r.gets;
+            total_put_rate += put_rate;
+            total_get_rate += get_rate;
+            total_ops_rate += ops_rate;
+        }
+
+        self.benchmarks.push(BenchmarkResult {
+            name: name.to_string(),
+            threads: self.threads,
+            duration_secs: self.duration_secs,
+            thread_results,
+            total_puts,
+            total_gets,
+            total_ops: total_puts + total_gets,
+            puts_per_sec: total_put_rate,
+            gets_per_sec: total_get_rate,
+            ops_per_sec: total_ops_rate,
+        });
+    }
 }
 
 /// Output mode for results
@@ -298,7 +421,7 @@ fn bench_rw1(
     limit: u64,
     check: bool,
     core_ids: Arc<Vec<CoreId>>,
-) {
+) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let start_barrier = Arc::new(Barrier::new(threads));
     let get_barrier = Arc::new(Barrier::new(threads)); // Barrier between put and get phases (C++ wait_all)
@@ -408,6 +531,7 @@ fn bench_rw1(
         .collect();
 
     print_results("rw1", threads, &thread_results);
+    thread_results
 }
 
 fn bench_rw2(
@@ -418,7 +542,7 @@ fn bench_rw2(
     limit: u64,
     check: bool,
     core_ids: Arc<Vec<CoreId>>,
-) {
+) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
     let results: Arc<Vec<_>> = Arc::new(
@@ -495,17 +619,30 @@ fn bench_rw2(
     let thread_results: Vec<_> = results
         .iter()
         .map(|(p, g, t)| {
-            let time = t.load(Ordering::Relaxed) as f64 / 1e9;
+            let total_time = t.load(Ordering::Relaxed) as f64 / 1e9;
+            let puts = p.load(Ordering::Relaxed);
+            let gets = g.load(Ordering::Relaxed);
+            let total_ops = puts + gets;
+            // Proportionally split time based on operation counts
+            // This is an approximation since puts/gets have different costs,
+            // but it's better than reporting 0.0 for get_time
+            let (put_time, get_time) = if total_ops > 0 {
+                let put_frac = puts as f64 / total_ops as f64;
+                (total_time * put_frac, total_time * (1.0 - put_frac))
+            } else {
+                (total_time, 0.0)
+            };
             ThreadResult {
-                puts: p.load(Ordering::Relaxed),
-                gets: g.load(Ordering::Relaxed),
-                put_time: time,
-                get_time: 0.0, // Combined timing
+                puts,
+                gets,
+                put_time,
+                get_time,
             }
         })
         .collect();
 
     print_results(name, threads, &thread_results);
+    thread_results
 }
 
 fn bench_rw3(
@@ -514,7 +651,7 @@ fn bench_rw3(
     limit: u64,
     check: bool,
     core_ids: Arc<Vec<CoreId>>,
-) {
+) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
     let results: Arc<Vec<_>> = Arc::new(
@@ -597,6 +734,7 @@ fn bench_rw3(
         .collect();
 
     print_results("rw3", threads, &thread_results);
+    thread_results
 }
 
 fn bench_rw4(
@@ -605,7 +743,7 @@ fn bench_rw4(
     limit: u64,
     check: bool,
     core_ids: Arc<Vec<CoreId>>,
-) {
+) -> Vec<ThreadResult> {
     const TOP: u64 = 2_147_483_647;
 
     let tree = Arc::new(MassTree15Inline::<u64>::new());
@@ -690,9 +828,10 @@ fn bench_rw4(
         .collect();
 
     print_results("rw4", threads, &thread_results);
+    thread_results
 }
 
-fn bench_same(threads: usize, duration: Duration, limit: u64, core_ids: Arc<Vec<CoreId>>) {
+fn bench_same(threads: usize, duration: Duration, limit: u64, core_ids: Arc<Vec<CoreId>>) -> Vec<ThreadResult> {
     const NUM_KEYS: u32 = 10;
 
     let tree = Arc::new(MassTree15Inline::<u64>::new());
@@ -752,13 +891,14 @@ fn bench_same(threads: usize, duration: Duration, limit: u64, core_ids: Arc<Vec<
         .collect();
 
     print_results("same", threads, &thread_results);
+    thread_results
 }
 
 /// C++ kvtest_uscale semantics:
 /// - seed = kvtest_first_seed + tid (NOT tid % 48)
 /// - nseqkeys = 16 * ruscale_partsz = 140,000,000
 /// - NO pre-population - writes to empty tree
-fn bench_uscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) {
+fn bench_uscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) -> Vec<ThreadResult> {
     // C++ constants: ruscale_partsz = (140 * 1000000) / 16, nseqkeys = 16 * ruscale_partsz
     const NSEQKEYS: u64 = 140_000_000;
 
@@ -820,9 +960,10 @@ fn bench_uscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) 
         .collect();
 
     print_results("uscale", threads, &thread_results);
+    thread_results
 }
 
-fn bench_wscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) {
+fn bench_wscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
     let results: Arc<Vec<_>> = Arc::new(
@@ -880,6 +1021,7 @@ fn bench_wscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) 
         .collect();
 
     print_results("wscale", threads, &thread_results);
+    thread_results
 }
 
 // =============================================================================
@@ -900,6 +1042,7 @@ fn main() {
     let limit = args.limit.unwrap_or(u64::MAX);
     let check = args.check;
     let trials = args.trials;
+    let should_save = args.save || args.output.is_some();
 
     // SAFETY: Single-threaded main context, before any worker threads
     unsafe {
@@ -945,6 +1088,9 @@ fn main() {
         );
     }
 
+    // Collect results for JSON output
+    let mut run_results = RunResults::new(threads, args.duration, args.pin, check);
+
     for trial in 0..trials {
         // SAFETY: Single-threaded main context, between test runs
         unsafe {
@@ -957,43 +1103,43 @@ fn main() {
 
         for test in &tests {
             match *test {
-                "rw1" => bench_rw1(threads, duration, limit, check, Arc::clone(&core_ids)),
+                "rw1" => {
+                    let results = bench_rw1(threads, duration, limit, check, Arc::clone(&core_ids));
+                    if should_save {
+                        run_results.add_benchmark("rw1", results);
+                    }
+                }
                 // C++ naming: rw2 = 50% get fraction
-                "rw2" => bench_rw2(
-                    threads,
-                    duration,
-                    0.5,
-                    "rw2",
-                    limit,
-                    check,
-                    Arc::clone(&core_ids),
-                ),
-                "rw2g90" => bench_rw2(
-                    threads,
-                    duration,
-                    0.9,
-                    "rw2g90",
-                    limit,
-                    check,
-                    Arc::clone(&core_ids),
-                ),
-                "rw2g98" => bench_rw2(
-                    threads,
-                    duration,
-                    0.98,
-                    "rw2g98",
-                    limit,
-                    check,
-                    Arc::clone(&core_ids),
-                ),
-                "rw3" => bench_rw3(threads, duration, limit, check, Arc::clone(&core_ids)),
-                "rw4" => bench_rw4(threads, duration, limit, check, Arc::clone(&core_ids)),
-                "same" => bench_same(threads, duration, limit, Arc::clone(&core_ids)),
-                "uscale" => bench_uscale(threads, duration, Arc::clone(&core_ids)),
-                "wscale" => bench_wscale(threads, duration, Arc::clone(&core_ids)),
-                "all" => {
-                    bench_rw1(threads, duration, limit, check, Arc::clone(&core_ids));
-                    bench_rw2(
+                "rw2" => {
+                    let results = bench_rw2(
+                        threads,
+                        duration,
+                        0.5,
+                        "rw2",
+                        limit,
+                        check,
+                        Arc::clone(&core_ids),
+                    );
+                    if should_save {
+                        run_results.add_benchmark("rw2", results);
+                    }
+                }
+                "rw2g90" => {
+                    let results = bench_rw2(
+                        threads,
+                        duration,
+                        0.9,
+                        "rw2g90",
+                        limit,
+                        check,
+                        Arc::clone(&core_ids),
+                    );
+                    if should_save {
+                        run_results.add_benchmark("rw2g90", results);
+                    }
+                }
+                "rw2g98" => {
+                    let results = bench_rw2(
                         threads,
                         duration,
                         0.98,
@@ -1002,14 +1148,107 @@ fn main() {
                         check,
                         Arc::clone(&core_ids),
                     );
-                    bench_rw3(threads, duration, limit, check, Arc::clone(&core_ids));
-                    bench_rw4(threads, duration, limit, check, Arc::clone(&core_ids));
-                    bench_same(threads, duration, limit, Arc::clone(&core_ids));
-                    bench_uscale(threads, duration, Arc::clone(&core_ids));
-                    bench_wscale(threads, duration, Arc::clone(&core_ids));
+                    if should_save {
+                        run_results.add_benchmark("rw2g98", results);
+                    }
+                }
+                "rw3" => {
+                    let results = bench_rw3(threads, duration, limit, check, Arc::clone(&core_ids));
+                    if should_save {
+                        run_results.add_benchmark("rw3", results);
+                    }
+                }
+                "rw4" => {
+                    let results = bench_rw4(threads, duration, limit, check, Arc::clone(&core_ids));
+                    if should_save {
+                        run_results.add_benchmark("rw4", results);
+                    }
+                }
+                "same" => {
+                    let results = bench_same(threads, duration, limit, Arc::clone(&core_ids));
+                    if should_save {
+                        run_results.add_benchmark("same", results);
+                    }
+                }
+                "uscale" => {
+                    let results = bench_uscale(threads, duration, Arc::clone(&core_ids));
+                    if should_save {
+                        run_results.add_benchmark("uscale", results);
+                    }
+                }
+                "wscale" => {
+                    let results = bench_wscale(threads, duration, Arc::clone(&core_ids));
+                    if should_save {
+                        run_results.add_benchmark("wscale", results);
+                    }
+                }
+                "all" => {
+                    let r1 = bench_rw1(threads, duration, limit, check, Arc::clone(&core_ids));
+                    let r2 = bench_rw2(
+                        threads,
+                        duration,
+                        0.98,
+                        "rw2g98",
+                        limit,
+                        check,
+                        Arc::clone(&core_ids),
+                    );
+                    let r3 = bench_rw3(threads, duration, limit, check, Arc::clone(&core_ids));
+                    let r4 = bench_rw4(threads, duration, limit, check, Arc::clone(&core_ids));
+                    let r5 = bench_same(threads, duration, limit, Arc::clone(&core_ids));
+                    let r6 = bench_uscale(threads, duration, Arc::clone(&core_ids));
+                    let r7 = bench_wscale(threads, duration, Arc::clone(&core_ids));
+                    if should_save {
+                        run_results.add_benchmark("rw1", r1);
+                        run_results.add_benchmark("rw2g98", r2);
+                        run_results.add_benchmark("rw3", r3);
+                        run_results.add_benchmark("rw4", r4);
+                        run_results.add_benchmark("same", r5);
+                        run_results.add_benchmark("uscale", r6);
+                        run_results.add_benchmark("wscale", r7);
+                    }
                 }
                 _ => eprintln!("Unknown test: {}", test),
             }
+        }
+    }
+
+    // Save results to JSON file if requested
+    if should_save {
+        let output_path = args.output.unwrap_or_else(|| {
+            // Generate default filename: runs/mttest_<threads>t_<duration>s_<timestamp>.json
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            PathBuf::from(format!(
+                "runs/mttest_{}t_{}s_{}.json",
+                threads, args.duration, timestamp
+            ))
+        });
+
+        // Ensure runs/ directory exists
+        if let Some(parent) = output_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    eprintln!("Warning: Failed to create directory {:?}: {}", parent, e);
+                }
+            }
+        }
+
+        // Write JSON file
+        match serde_json::to_string_pretty(&run_results) {
+            Ok(json) => match fs::File::create(&output_path) {
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(json.as_bytes()) {
+                        eprintln!("Error writing to {:?}: {}", output_path, e);
+                    } else if !args.quiet {
+                        eprintln!("\nResults saved to: {}", output_path.display());
+                    }
+                }
+                Err(e) => eprintln!("Error creating file {:?}: {}", output_path, e),
+            },
+            Err(e) => eprintln!("Error serializing results: {}", e),
         }
     }
 }
