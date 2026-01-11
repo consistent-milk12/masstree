@@ -1190,9 +1190,7 @@ impl NodeCleaner {
     ///     return static_cast<internode<P>*>(p);
     /// }
     /// ```
-    unsafe fn locked_parent_generic<'a, S, L>(
-        current_ptr: *mut u8,
-    ) -> LockedParentResult<'a>
+    unsafe fn locked_parent_generic<'a, S, L>(current_ptr: *mut u8) -> LockedParentResult<'a>
     where
         S: ValueSlot,
         S::Value: Send + Sync + 'static,

@@ -16,7 +16,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 ## Status
 
-**v0.3.0** — Core feature complete. It has been heavily tested but I am not sure about whether it should be usd in actual projects. Such low-level cncurrent data structures usually need a lot of stress testing and have a lot of edge cases that are not easily noticeable. The unsafe code passes miri with strict-provenance flag, but that doesn't really ensure correctness.
+**v0.4.0** — Core feature complete. It has been heavily tested but I am not sure about whether it should be used in actual projects. Such low-level cncurrent data structures usually need a lot of stress testing and have a lot of edge cases that are not easily noticeable. The unsafe code passes miri with strict-provenance flag, but that doesn't really ensure correctness.
 
 | Feature | Status |
 |---------|--------|
@@ -159,60 +159,6 @@ let inline: MassTree24Inline<u64> = MassTree24Inline::new();
 let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
 ```
 
-## Benchmarks
-
-6 physical cores, `mimalloc` allocator, Divan framework with 200 samples per benchmark. Your mileage may vary.
-
-### vs Rust Competitors (6 threads, median throughput)
-
-| Workload | MassTree15 | IndexSet | TreeIndex | SkipMap |
-|----------|------------|----------|-----------|---------|
-| Mixed 90/10 Uniform | **20.5 M/s** | 10.5 M/s | 10.3 M/s | 7.8 M/s |
-| Mixed 90/10 Zipfian | **21.8 M/s** | 3.9 M/s | 8.1 M/s | 8.1 M/s |
-| High Contention (1K keys) | **43.4 M/s** | 3.3 M/s | 11.5 M/s | 10.7 M/s |
-| Single Hot Key | **12.6 M/s** | 3.0 M/s | 3.6 M/s | 5.4 M/s |
-| Pure Reads | **30.6 M/s** | 13.8 M/s | 15.7 M/s | 12.9 M/s |
-| 8-byte Keys | **32.6 M/s** | 13.6 M/s | 15.6 M/s | 9.3 M/s |
-
-MassTree15 wins all benchmark categories. The high-contention advantage reflects per-node versioning design.
-
-### vs C++ Reference (6 threads, mean throughput)
-
-| Workload | Rust | C++ | vs C++ |
-|----------|------|-----|--------|
-| 98% reads (rw2g98) | 36.24 M/s | 18.94 M/s | **+91%** |
-| 90% reads (rw2g90) | 28.34 M/s | 13.78 M/s | **+106%** |
-| Hotspot (same) | 7.20 M/s | 2.58 M/s | **+179%** |
-| Updates (uscale) | 16.56 M/s | 9.34 M/s | **+77%** |
-| Sequential (rw3) | 38.66 M/s | 40.37 M/s | -4% |
-| Reverse sequential (rw4) | 22.66 M/s | 37.81 M/s | **-40%** |
-
-Rust wins 6/8 benchmarks. Trails on sequential patterns (-4% to -40%) where C++ has prefetching advantages.
-
-Note: This implementation diverges from C++ in several ways (notably hyaline-based memory reclamation via `seize`). Direct comparison is imperfect.
-
-### vs RwLock\<BTreeMap\> (6 threads)
-
-The main question: when does a complex lock-free structure beat a simple `RwLock<BTreeMap>`?
-
-**Mixed read/write workloads (where MassTree is designed to help):**
-
-| Workload | MassTree15 | std::RwLock | parking_lot |
-|----------|------------|-------------|-------------|
-| 90/10 uniform | 13.6 M/s | 3.2 M/s | 5.2 M/s |
-| 95/5 zipfian (hot keys) | 36.5 M/s | 6.8 M/s | 10.8 M/s |
-
-MassTree's lock-free reads and per-node versioning help when writers need to make progress. The 2-5x advantage shows up when there's actual contention.
-
-**Pure read workloads (where RwLock naturally wins):**
-
-| Workload | MassTree15 | RwLock (batched) |
-|----------|------------|------------------|
-| Point reads | 13.2 M/s | 13.0 M/s |
-| Range scans | 125 M/s | 1.2 G/s |
-
-For read-only workloads, RwLock has minimal overhead (one atomic to acquire) while MassTree pays for version validation on every access. Range scans are particularly lopsided because RwLock holds the lock for the entire scan. This is expected - lock-free structures pay complexity costs that only matter under contention.
-
 ## How It Works
 
 Masstree splits keys into 8-byte chunks, creating a trie where each node is a B+tree:
@@ -317,11 +263,3 @@ MIT. See `LICENSE`.
 
 - [Masstree Paper (EuroSys 2012)](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf)
 - [C++ Reference Implementation](https://github.com/kohler/masstree-beta)
-
-## AI Assist Disclaimer
-
-It should be obvious that such a high number of tests, benchmarks and docs could not be written by hand this fast. Even though the full design and implementation was written by hand, there's still a a significant amount of AI generated code. I have gone through most of the docs,tests and benches to ensure correctness and also added the 'prompt' for the agent I used to analyze C++ codebase.
-
-Apart from writing the above mentioned things, it was also used to write prototype ideas to optimize the implementation (most of which (like 80-90%) didn't work out well, and I had to just revert or remove them entirely, this can be seen if you go through the commits). The CAS insert fast path and a direct port of leaf coalescing was something that the model (Opus 4.5) was pushing aggressively, even though it was fundamentally unsound for masstree and leads to EXTREMELY subtle data races and synchronization issues and transient stress test failures.
-
-In this commit, I am adding AI generated ASCII diagrams to provide top level overviews of the modules, core algorithms, operations and types.

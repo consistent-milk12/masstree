@@ -374,7 +374,18 @@ where
     /// - Skips layer descent tracking
     ///
     /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
-    #[expect(clippy::too_many_lines, reason = "Complex concurrency logic")]
+
+    /// Concurrent insert with B-link local retry optimization.
+    ///
+    /// Uses two loops:
+    /// - `'retry`: Full traversal from layer root (for initial entry, layer changes, hop limit)
+    /// - `'forward`: Local retry with B-link advance (for version mismatch, membership failure, splits)
+    ///
+    /// This matches C++ `goto retry` vs `goto forward` semantics from `masstree_get.hh`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Complex concurrency logic with dual-loop structure"
+    )]
     pub(super) fn insert_concurrent_generic(
         &self,
         key: &mut Key<'_>,
@@ -390,7 +401,8 @@ where
         // Track whether we're in a sublayer (for layer traversal)
         let mut in_sublayer: bool = false;
 
-        loop {
+        // Outer loop: full traversal from layer_root
+        'retry: loop {
             // Find the actual layer root (handles layer root promotion for sublayers)
             layer_root = self.maybe_parent_generic(layer_root);
 
@@ -398,69 +410,175 @@ where
             let leaf_ptr: *mut L =
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
-            let leaf: &L = unsafe { &*leaf_ptr };
+            let mut leaf: &L = unsafe { &*leaf_ptr };
 
             // B-link advance if needed
-            let (leaf, exceeded_hop_limit) = self.advance_to_key_by_bound_generic(leaf, key, guard);
+            let (advanced_leaf, exceeded_hop_limit) =
+                self.advance_to_key_by_bound_generic(leaf, key, guard);
 
             // If we exceeded the hop limit, re-traverse from root
             if exceeded_hop_limit {
                 layer_root = self.load_root_ptr_generic(guard);
-                continue;
+                continue 'retry;
             }
 
-            // ================================================================
-            // OPTIMISTIC LOCKING: Capture STABLE version + permutation
-            // ================================================================
-            let pre_lock_version: u32 = leaf.version().stable();
-            let pre_lock_perm_raw = leaf.permutation_raw();
+            leaf = advanced_leaf;
 
-            // Lock the leaf (with yield to reduce lock convoy under contention)
-            let mut lock = leaf.version().lock_with_yield();
+            // Inner loop: local retry with B-link advance (no full traversal)
+            'forward: loop {
+                // ================================================================
+                // OPTIMISTIC LOCKING: Capture STABLE version + permutation
+                // ================================================================
+                let pre_lock_version: u32 = leaf.version().stable();
+                let pre_lock_perm_raw = leaf.permutation_raw();
 
-            // ================================================================
-            // POST-LOCK VALIDATION
-            // ================================================================
-            if !self.validate_post_lock(leaf, pre_lock_version, pre_lock_perm_raw) {
-                drop(lock);
-                continue;
-            }
+                // Lock the leaf (with yield to reduce lock convoy under contention)
+                let mut lock = leaf.version().lock_with_yield();
 
-            // Check for gc'd sublayer - must restart from main tree root
-            // C++ masstree_get.hh:111-115
-            if leaf.deleted_layer() {
-                drop(lock);
-                key.unshift_all();
-                layer_root = self.load_root_ptr_generic(guard);
-                in_sublayer = false;
-                continue;
-            }
+                // ================================================================
+                // POST-LOCK VALIDATION (B-link local retry on failure)
+                // ================================================================
+                if !self.validate_post_lock(leaf, pre_lock_version, pre_lock_perm_raw) {
+                    drop(lock);
 
-            // Post-lock membership check
-            if self.validate_membership(leaf, key).is_err() {
-                drop(lock);
-                continue;
-            }
+                    // LOCAL RETRY: B-link advance instead of full re-traversal
+                    // This is the key optimization matching C++ masstree_get.hh:104
+                    let (advanced_leaf, exceeded) =
+                        self.advance_to_key_by_bound_generic(leaf, key, guard);
 
-            // ================================================================
-            // EMPTY LEAF REUSE (Lazy Coalescing Optimization)
-            // ================================================================
-            // Check if this is an empty leaf that can be reused.
-            // This is a fast path for insert-remove-reinsert workloads.
-            if leaf.is_empty() && self.can_reuse_empty_leaf(leaf, key) {
-                let result = self.insert_into_empty_leaf(leaf, &mut lock, key, &value, guard);
-                drop(lock);
-                return result;
-            }
+                    if exceeded {
+                        // Too many hops, fall back to full re-traversal
+                        layer_root = self.load_root_ptr_generic(guard);
+                        continue 'retry;
+                    }
 
-            // Get permutation (must not be frozen since we hold lock)
-            let perm = leaf.permutation();
+                    leaf = advanced_leaf;
+                    continue 'forward;
+                }
 
-            // ================================================================
-            // Single-layer fast path (keys ≤ 8 bytes)
-            // ================================================================
-            if single_layer_mode {
-                let search_result = self.search_for_insert_single_layer(leaf, key, &perm);
+                // Check for gc'd sublayer - must restart from main tree root
+                // C++ masstree_get.hh:111-115
+                if leaf.deleted_layer() {
+                    drop(lock);
+                    key.unshift_all();
+                    layer_root = self.load_root_ptr_generic(guard);
+                    in_sublayer = false;
+                    continue 'retry;
+                }
+
+                // Post-lock membership check
+                if self.validate_membership(leaf, key).is_err() {
+                    drop(lock);
+
+                    // LOCAL RETRY: B-link advance
+                    let (advanced_leaf, exceeded) =
+                        self.advance_to_key_by_bound_generic(leaf, key, guard);
+
+                    if exceeded {
+                        layer_root = self.load_root_ptr_generic(guard);
+                        continue 'retry;
+                    }
+
+                    leaf = advanced_leaf;
+                    continue 'forward;
+                }
+
+                // ================================================================
+                // EMPTY LEAF REUSE (Lazy Coalescing Optimization)
+                // ================================================================
+                // Check if this is an empty leaf that can be reused.
+                // This is a fast path for insert-remove-reinsert workloads.
+                if leaf.is_empty() && self.can_reuse_empty_leaf(leaf, key) {
+                    let result = self.insert_into_empty_leaf(leaf, &mut lock, key, &value, guard);
+                    drop(lock);
+                    return result;
+                }
+
+                // Get permutation (must not be frozen since we hold lock)
+                let perm = leaf.permutation();
+
+                // ================================================================
+                // Single-layer fast path (keys ≤ 8 bytes)
+                // ================================================================
+                if single_layer_mode {
+                    let search_result = self.search_for_insert_single_layer(leaf, key, &perm);
+
+                    match search_result {
+                        InsertSearchResultGeneric::Found { slot } => {
+                            let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+                            if old_ptr.is_null() {
+                                drop(lock);
+                                continue 'forward;
+                            }
+
+                            let old_value =
+                                self.update_existing_value(leaf, &mut lock, slot, value, guard);
+                            drop(lock);
+                            return Ok(Some(old_value));
+                        }
+
+                        InsertSearchResultGeneric::NotFound { logical_pos } => {
+                            let ikey: u64 = key.ikey();
+
+                            match self.find_usable_slot(leaf, &perm, ikey) {
+                                FindSlotResult::Found { slot, back_offset } => {
+                                    self.insert_new_value(
+                                        leaf,
+                                        &mut lock,
+                                        slot,
+                                        back_offset,
+                                        logical_pos,
+                                        perm,
+                                        key,
+                                        &value,
+                                        guard,
+                                    );
+
+                                    drop(lock);
+                                    self.count.increment();
+
+                                    return Ok(None);
+                                }
+
+                                FindSlotResult::NeedsSplit => {
+                                    // Split the leaf (FALLIBLE allocation for sibling)
+                                    self.handle_leaf_split_generic(
+                                        StdPtr::from_ref::<L>(leaf).cast_mut(),
+                                        lock,
+                                        logical_pos,
+                                        key.ikey(),
+                                        guard,
+                                    )?;
+
+                                    // After split, use LOCAL retry (B-link advance)
+                                    // The key likely moved to the new right sibling
+                                    let (advanced_leaf, exceeded) =
+                                        self.advance_to_key_by_bound_generic(leaf, key, guard);
+
+                                    if exceeded {
+                                        layer_root = self.load_root_ptr_generic(guard);
+                                        continue 'retry;
+                                    }
+
+                                    leaf = advanced_leaf;
+                                    continue 'forward;
+                                }
+                            }
+                        }
+
+                        // These can't happen in single-layer mode
+                        InsertSearchResultGeneric::Layer { .. }
+                        | InsertSearchResultGeneric::Conflict { .. } => {
+                            unreachable!("single-layer search never returns Layer or Conflict")
+                        }
+                    }
+                }
+
+                // ================================================================
+                // Multi-layer path (handles layer descent and conflicts)
+                // ================================================================
+                let search_result = self.search_for_insert_generic(leaf, key, &perm);
 
                 match search_result {
                     InsertSearchResultGeneric::Found { slot } => {
@@ -468,7 +586,7 @@ where
 
                         if old_ptr.is_null() {
                             drop(lock);
-                            continue;
+                            continue 'forward;
                         }
 
                         let old_value =
@@ -493,107 +611,54 @@ where
                                     &value,
                                     guard,
                                 );
-
                                 drop(lock);
                                 self.count.increment();
-
                                 return Ok(None);
                             }
 
-                            // In the match arm for NeedsSplit:
                             FindSlotResult::NeedsSplit => {
-                                // Split the leaf (FALLIBLE allocation for sibling)
+                                let leaf_ptr_current: *mut L = StdPtr::from_ref(leaf).cast_mut();
                                 self.handle_leaf_split_generic(
-                                    StdPtr::from_ref::<L>(leaf).cast_mut(),
+                                    leaf_ptr_current,
                                     lock,
                                     logical_pos,
-                                    key.ikey(),
+                                    ikey,
                                     guard,
                                 )?;
 
-                                // Retry from beginning
-                                continue;
+                                // After split, use LOCAL retry (B-link advance)
+                                let (advanced_leaf, exceeded) =
+                                    self.advance_to_key_by_bound_generic(leaf, key, guard);
+
+                                if exceeded {
+                                    layer_root = self.load_root_ptr_generic(guard);
+                                    continue 'retry;
+                                }
+
+                                leaf = advanced_leaf;
+                                continue 'forward;
                             }
                         }
                     }
 
-                    // These can't happen in single-layer mode
-                    InsertSearchResultGeneric::Layer { .. }
-                    | InsertSearchResultGeneric::Conflict { .. } => {
-                        unreachable!("single-layer search never returns Layer or Conflict")
-                    }
-                }
-            }
-
-            // ================================================================
-            // Multi-layer path (handles layer descent and conflicts)
-            // ================================================================
-            let search_result = self.search_for_insert_generic(leaf, key, &perm);
-
-            match search_result {
-                InsertSearchResultGeneric::Found { slot } => {
-                    let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                    if old_ptr.is_null() {
+                    InsertSearchResultGeneric::Layer { slot, .. } => {
+                        // Descend into sublayer - requires full traversal
+                        let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
                         drop(lock);
-                        continue;
+
+                        key.shift();
+                        layer_root = layer_ptr;
+                        in_sublayer = true;
+                        continue 'retry;
                     }
 
-                    let old_value = self.update_existing_value(leaf, &mut lock, slot, value, guard);
-                    drop(lock);
-                    return Ok(Some(old_value));
-                }
-
-                InsertSearchResultGeneric::NotFound { logical_pos } => {
-                    let ikey: u64 = key.ikey();
-
-                    match self.find_usable_slot(leaf, &perm, ikey) {
-                        FindSlotResult::Found { slot, back_offset } => {
-                            self.insert_new_value(
-                                leaf,
-                                &mut lock,
-                                slot,
-                                back_offset,
-                                logical_pos,
-                                perm,
-                                key,
-                                &value,
-                                guard,
-                            );
-                            drop(lock);
-                            self.count.increment();
-                            return Ok(None);
-                        }
-
-                        FindSlotResult::NeedsSplit => {
-                            let leaf_ptr_current: *mut L = StdPtr::from_ref(leaf).cast_mut();
-                            self.handle_leaf_split_generic(
-                                leaf_ptr_current,
-                                lock,
-                                logical_pos,
-                                ikey,
-                                guard,
-                            )?;
-                        }
+                    InsertSearchResultGeneric::Conflict { slot } => {
+                        // Handle suffix conflict by creating a new layer (FALLIBLE)
+                        self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard)?;
+                        return Ok(None);
                     }
                 }
-
-                InsertSearchResultGeneric::Layer { slot, .. } => {
-                    // Descend into sublayer
-                    let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-                    drop(lock);
-
-                    key.shift();
-                    layer_root = layer_ptr;
-                    in_sublayer = true;
-                }
-
-                InsertSearchResultGeneric::Conflict { slot } => {
-                    // Handle suffix conflict by creating a new layer (FALLIBLE)
-                    self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard)?;
-                    return Ok(None);
-                }
-            }
-        }
+            } // end 'forward
+        } // end 'retry
     }
 }

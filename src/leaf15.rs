@@ -1198,7 +1198,10 @@ impl<S: ValueSlot> LeafNode15<S> {
         reason = "Slot from Permuter15; valid by construction"
     )]
     pub(crate) fn set_leaf_value_ptr_relaxed(&self, slot: usize, ptr: *mut u8) {
-        debug_assert!(slot < WIDTH_15, "set_leaf_value_ptr_relaxed: slot out of bounds");
+        debug_assert!(
+            slot < WIDTH_15,
+            "set_leaf_value_ptr_relaxed: slot out of bounds"
+        );
 
         self.leaf_values[slot].store(ptr, RELAXED);
     }
@@ -2076,7 +2079,18 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         }
 
         // Adjust for equal ikeys: if keys at split boundary are equal,
-        // move split point to keep equal keys together
+        // move split point to keep equal keys together.
+        //
+        // CRITICAL INVARIANT: All entries with the same ikey MUST end up in
+        // the same leaf. Otherwise, routing (which uses ikey comparison) will
+        // send lookups to the wrong leaf.
+        //
+        // The split_ikey becomes the separator in the parent internode:
+        // - Keys with ikey < split_ikey route to left leaf
+        // - Keys with ikey >= split_ikey route to right leaf
+        //
+        // So if we have entries with equal ikeys at the boundary, they must
+        // ALL go to the right leaf (since routing uses >=).
         while split_pos > 0 && split_pos < size {
             let left_slot = perm.get(split_pos - 1);
             let right_slot = perm.get(split_pos);
@@ -2084,21 +2098,27 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
             let right_ikey = self.ikey(right_slot);
 
             if left_ikey == right_ikey {
-                // Equal keys - check if insert_ikey matches
+                // Equal ikeys at boundary - must keep them together!
+                // Check where insert_ikey falls relative to this group.
                 match insert_ikey.cmp(&left_ikey) {
                     Ordering::Equal => {
-                        // Insert goes with this group - move split right
+                        // Insert has same ikey as this group - move split right
+                        // to include more of the group (insert will join them)
                         split_pos += 1;
                     }
 
                     Ordering::Less => {
-                        // Insert goes left - move split left
+                        // Insert goes before this group - move split left
                         split_pos -= 1;
                     }
 
                     Ordering::Greater => {
-                        // Insert goes right - done
-                        break;
+                        // Insert goes after this group.
+                        // BUG FIX: We must CONTINUE moving split_pos LEFT until
+                        // we exit the equal-ikey group. This ensures all entries
+                        // with ikey == left_ikey end up in the RIGHT leaf,
+                        // matching the routing semantics (ikey >= split_ikey -> right).
+                        split_pos -= 1;
                     }
                 }
             } else {

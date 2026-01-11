@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -37,6 +37,7 @@ bins = [
 	"dep:regex",
 ]
 true-inline = [] # Enable true-inline value storage
+debug-routing = [] # Enable routing debug output for bug investigation
 
 [dependencies]
 seize = "0.5.1"
@@ -68,6 +69,7 @@ comfy-table = { version = "7.2.1", optional = true }
 regex = { version = "1.12.2", optional = true }
 
 [dev-dependencies]
+clap = { version = "4.5.54", features = ["derive"] }
 divan = "0.1.21"
 proptest = "1.9.0"
 loom = "0.7.2"
@@ -101,6 +103,7 @@ iai-callgrind = "0.16.1"
 
 # Examples dependencies
 rayon = "1.11.0"
+core_affinity = "0.8.1"
 tokio = { version = "1.49.0", features = ["full"] }
 
 [lints.rust]
@@ -219,6 +222,10 @@ harness = false
 
 [[bench]]
 name = "cpp_comp"
+harness = false
+
+[[bench]]
+name = "mttest"
 harness = false
 
 [[bench]]

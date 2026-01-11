@@ -632,6 +632,29 @@ where
                 let child_idx: usize =
                     upper_bound_internode_generic::<L::Internode>(target_ikey, inode);
 
+                // DEBUG: Trace routing path
+                #[cfg(feature = "debug-routing")]
+                {
+                    let nkeys = inode.nkeys();
+                    eprintln!(
+                        "[ROUTE] inode={:p} height={} nkeys={} target_ikey={:016x} -> child_idx={}",
+                        inode,
+                        inode.height(),
+                        nkeys,
+                        target_ikey,
+                        child_idx
+                    );
+                    // Print separator keys around the chosen child
+                    if child_idx > 0 && child_idx <= nkeys {
+                        let left_sep = inode.ikey(child_idx - 1);
+                        eprintln!("        left_sep[{}]={:016x}", child_idx - 1, left_sep);
+                    }
+                    if child_idx < nkeys {
+                        let right_sep = inode.ikey(child_idx);
+                        eprintln!("        right_sep[{}]={:016x}", child_idx, right_sep);
+                    }
+                }
+
                 // Read child into the OTHER buffer (sense ^ 1)
                 let other: usize = sense ^ 1;
                 let child: *mut u8 = inode.child(child_idx);

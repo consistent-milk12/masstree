@@ -1398,7 +1398,19 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             return None;
         }
 
-        // Adjust for equal ikeys
+        // Adjust for equal ikeys: if keys at split boundary are equal,
+        // move split point to keep equal keys together.
+        //
+        // CRITICAL INVARIANT: All entries with the same ikey MUST end up in
+        // the same leaf. Otherwise, routing (which uses ikey comparison) will
+        // send lookups to the wrong leaf.
+        //
+        // The split_ikey becomes the separator in the parent internode:
+        // - Keys with ikey < split_ikey route to left leaf
+        // - Keys with ikey >= split_ikey route to right leaf
+        //
+        // So if we have entries with equal ikeys at the boundary, they must
+        // ALL go to the right leaf (since routing uses >=).
         while split_pos > 0 && split_pos < size {
             let left_slot = perm.get(split_pos - 1);
             let right_slot = perm.get(split_pos);
@@ -1406,10 +1418,15 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             let right_ikey = self.ikey(right_slot);
 
             if left_ikey == right_ikey {
+                // Equal ikeys at boundary - must keep them together!
                 match insert_ikey.cmp(&left_ikey) {
+                    // Insert has same ikey - move split right
                     Ordering::Equal => split_pos += 1,
+                    // Insert goes before this group - move split left
                     Ordering::Less => split_pos -= 1,
-                    Ordering::Greater => break,
+                    // BUG FIX: Continue moving split_pos LEFT until we exit
+                    // the equal-ikey group, keeping all equal ikeys in RIGHT leaf.
+                    Ordering::Greater => split_pos -= 1,
                 }
             } else {
                 break;

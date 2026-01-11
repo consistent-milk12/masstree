@@ -78,7 +78,10 @@ impl<'op> PropagationContext<'op> {
     /// `version_ptr` must point to a valid [`NodeVersion`] that remains valid
     /// for the duration of `'op`. This is guaranteed by the reclamation guard.
     #[inline(always)]
-    #[allow(dead_code, reason = "API for low-contention scenarios; prefer lock_node_yielding")]
+    #[allow(
+        dead_code,
+        reason = "API for low-contention scenarios; prefer lock_node_yielding"
+    )]
     #[expect(clippy::unused_self, reason = "API Consistency")]
     pub unsafe fn lock_node(&self, version_ptr: *const NodeVersion) -> LockGuard<'op> {
         // Create a reference with the unified lifetime.

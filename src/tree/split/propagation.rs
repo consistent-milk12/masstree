@@ -115,6 +115,13 @@ impl Propagation {
         L: LayerCapableLeaf<S>,
         A: NodeAllocatorGeneric<S, L>,
     {
+        // DEBUG: Trace leaf split
+        #[cfg(feature = "debug-routing")]
+        eprintln!(
+            "[LEAF_SPLIT] left={:p} right={:p} split_ikey={:016x} is_main_root={} is_layer_root={}",
+            left_leaf_ptr, right_leaf_ptr, split_ikey, is_main_root, is_layer_root
+        );
+
         // Create PropagationContext with unified lifetime tied to reclamation guard
         let ctx: PropagationContext<'op> = PropagationContext::new(guard);
 
@@ -306,8 +313,32 @@ impl Propagation {
             if !parent.is_full() {
                 parent_lock.mark_insert();
 
+                // DEBUG: Trace parent insert (no split)
+                #[cfg(feature = "debug-routing")]
+                {
+                    eprintln!(
+                        "[PARENT_INSERT] parent={:p} height={} child_idx={} split_ikey={:016x} nkeys_before={}",
+                        left_parent,
+                        parent.height(),
+                        child_idx,
+                        split_ikey,
+                        parent.nkeys()
+                    );
+                }
+
                 // Insert at child_idx (pointer-based, NOT key-based)
                 parent.insert_key_and_child(child_idx, split_ikey, right_ptr);
+
+                // DEBUG: Show parent keys after insert
+                #[cfg(feature = "debug-routing")]
+                {
+                    let nkeys = parent.nkeys();
+                    eprint!("        parent_keys_after[{}]: ", nkeys);
+                    for i in 0..nkeys {
+                        eprint!("{:016x} ", parent.ikey(i));
+                    }
+                    eprintln!();
+                }
 
                 // Set right sibling's parent pointer
                 Self::set_parent::<S, L>(right_ptr, left_parent, at_leaf_level);
@@ -350,6 +381,36 @@ impl Propagation {
                     right_ptr,
                 )
             };
+
+            // DEBUG: Trace internode split
+            #[cfg(feature = "debug-routing")]
+            {
+                eprintln!(
+                    "[INTERNODE_SPLIT] parent={:p} sibling={:p} height={} child_idx={} split_ikey={:016x} popup_key={:016x} child_went_left={}",
+                    left_parent,
+                    parent_sibling_ptr,
+                    parent.height(),
+                    child_idx,
+                    split_ikey,
+                    popup_key,
+                    child_went_left
+                );
+                // Dump keys in parent after split
+                let parent_nkeys = parent.nkeys();
+                eprint!("        parent_keys[{}]: ", parent_nkeys);
+                for i in 0..parent_nkeys {
+                    eprint!("{:016x} ", parent.ikey(i));
+                }
+                eprintln!();
+                // Dump keys in sibling after split
+                let sibling = unsafe { &*parent_sibling_ptr };
+                let sibling_nkeys = sibling.nkeys();
+                eprint!("        sibling_keys[{}]: ", sibling_nkeys);
+                for i in 0..sibling_nkeys {
+                    eprint!("{:016x} ", sibling.ikey(i));
+                }
+                eprintln!();
+            }
 
             // Update children's parent pointers in sibling
             Self::update_sibling_children_parents::<S, L>(parent, parent_sibling_ptr);
