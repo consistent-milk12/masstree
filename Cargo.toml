@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -281,11 +281,6 @@ path = "examples/session_store.rs"
 # =========================================================================
 # Internal Binaries (not part of the library)
 # =========================================================================
-
-[[bin]]
-name = "analyze_runs"
-path = "bin/analyze_runs.rs"
-required-features = ["bins"]
 
 [[bin]]
 name = "divan_parser"

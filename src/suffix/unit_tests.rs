@@ -602,13 +602,12 @@ fn test_inline_drain_to_external() {
     let perm = Permuter24::make_sorted(3);
 
     // Drain to external with a new suffix for slot 3
-    // Pass None for filled_slots since we're simulating a normal operation with permutation
     #[expect(
         clippy::expect_used,
         reason = "test code - panic on failure is intended"
     )]
     let external = bag
-        .drain_to_external(&perm, 3, b"new_suffix", None)
+        .drain_to_external(&perm, 3, b"new_suffix")
         .expect("drain_to_external should succeed");
 
     // Inline bag slots should be cleared (count = 0)
@@ -633,18 +632,62 @@ fn test_inline_drain_replaces_slot() {
     let perm = Permuter24::make_sorted(2);
 
     // Replace slot 0's suffix during drain
-    // Pass None for filled_slots since we're simulating a normal operation with permutation
     #[expect(
         clippy::expect_used,
         reason = "test code - panic on failure is intended"
     )]
     let external = bag
-        .drain_to_external(&perm, 0, b"new_suffix", None)
+        .drain_to_external(&perm, 0, b"new_suffix")
         .expect("drain_to_external should succeed");
 
     // External should have new suffix for slot 0
     assert_eq!(external.get(0), Some(b"new_suffix".as_slice()));
     assert_eq!(external.get(1), Some(b"keep_this".as_slice()));
+}
+
+#[test]
+fn test_inline_drain_to_external_init() {
+    let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+
+    // Simulate split initialization: slots 0, 1, 2 filled sequentially
+    bag.try_assign(0, b"suffix_0");
+    bag.try_assign(1, b"suffix_1");
+    bag.try_assign(2, b"suffix_2");
+
+    // Drain to external for slot 3 (slots 0..3 are filled)
+    #[expect(clippy::expect_used, reason = "test code")]
+    let external = bag
+        .drain_to_external_init(3, b"new_suffix_3")
+        .expect("drain_to_external_init should succeed");
+
+    // Inline bag should be cleared
+    assert_eq!(bag.count(), 0);
+
+    // External should have all suffixes
+    assert_eq!(external.get(0), Some(b"suffix_0".as_slice()));
+    assert_eq!(external.get(1), Some(b"suffix_1".as_slice()));
+    assert_eq!(external.get(2), Some(b"suffix_2".as_slice()));
+    assert_eq!(external.get(3), Some(b"new_suffix_3".as_slice()));
+}
+
+#[test]
+fn test_inline_drain_to_external_init_replaces_slot() {
+    let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+
+    // Simulate: slots 0, 1 filled, now replacing slot 1
+    bag.try_assign(0, b"keep_this");
+    bag.try_assign(1, b"old_suffix");
+
+    // Drain with new_slot=1 means slots 0..1 are "filled" (just slot 0)
+    // and we're assigning to slot 1
+    #[expect(clippy::expect_used, reason = "test code")]
+    let external = bag
+        .drain_to_external_init(1, b"new_suffix")
+        .expect("drain_to_external_init should succeed");
+
+    // External should have slot 0 preserved and slot 1 with new suffix
+    assert_eq!(external.get(0), Some(b"keep_this".as_slice()));
+    assert_eq!(external.get(1), Some(b"new_suffix".as_slice()));
 }
 
 #[test]

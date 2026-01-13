@@ -810,29 +810,32 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Returns `None` if no suffix is stored at this slot.
     fn ksuf(&self, slot: usize) -> Option<&[u8]>;
 
-    /// Assign a suffix to a slot.
+    /// Assign a suffix to a slot (normal operation).
     ///
-    /// # Arguments
-    ///
-    /// * `slot` - The slot to assign the suffix to
-    /// * `suffix` - The suffix bytes
-    /// * `guard` - Memory reclamation guard
-    /// * `initializing` - When true, this is part of node initialization (e.g., during split)
-    ///   and slots 0..slot are already filled sequentially. When false, uses permutation to
-    ///   determine which slots are active. This matches C++ `assign_ksuf`'s `initializing`
-    ///   parameter in masstree_struct.hh:728.
+    /// Uses the permutation to determine which slots are active.
+    /// This is the hot path for normal inserts/updates.
     ///
     /// # Safety
     ///
     /// - Caller must hold the leaf lock
     /// - Slot must be valid
-    unsafe fn assign_ksuf(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &seize::LocalGuard<'_>,
-        initializing: bool,
-    );
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>);
+
+    /// Assign a suffix to a slot during node initialization (e.g., splits).
+    ///
+    /// Unlike `assign_ksuf`, this assumes slots `0..slot` are already filled
+    /// sequentially and doesn't rely on the permutation. Used during split
+    /// operations when the new node's permutation hasn't been set up yet.
+    ///
+    /// This matches C++ `assign_ksuf`'s `initializing=true` path in
+    /// masstree_struct.hh:728.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the leaf lock
+    /// - Slot must be valid
+    /// - Slots 0..slot must already be filled sequentially
+    unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>);
 
     /// Clear suffix at slot.
     ///

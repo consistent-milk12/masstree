@@ -28,7 +28,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 | Leaf coalescing | Lazy queue-based cleanup |
 | Memory reclamation | Hyaline scheme via `seize` crate |
 
-**Tests:** 900 tests (unit + 88 ported from C++ reference + proptests + stress tests). Miri strict provenance clean.
+**Tests:** 939 tests (unit + 88 ported from C++ reference + proptests + stress tests). Miri strict provenance clean.
 
 **Not yet implemented:** `Entry` API, `Extend`/`FromIterator`.
 

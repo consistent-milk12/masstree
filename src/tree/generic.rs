@@ -1102,7 +1102,7 @@ where
             leaf.set_keylenx(slot, KSUF_KEYLENX);
             // SAFETY: We hold the lock, guard is from this tree's collector
             // Pass initializing=false: this is a normal insert, not split initialization
-            unsafe { leaf.assign_ksuf(slot, key.suffix(), guard, false) };
+            unsafe { leaf.assign_ksuf(slot, key.suffix(), guard) };
         } else {
             // Inline key (0-8 bytes total, no suffix)
             #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]

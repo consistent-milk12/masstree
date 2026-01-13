@@ -154,93 +154,115 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     //  Fallible Operations
     // ========================================================================
 
-    /// Try to drain inline suffixes to a new external bag.
+    /// Drain inline suffixes to external bag (normal operation).
     ///
-    /// Called when inline storage is full and we need to create an external bag.
-    /// Uses only 2 iterations over the permutation (down from 3).
-    ///
-    /// # Argument
-    ///
-    /// * `perm` - Current permutation (to iterate active slots)
-    /// * `new_slot` - Slot for the new suffix being added
-    /// * `new_suffix` - The new suffix that triggered this drain
+    /// Uses the permutation to find active slots. This is the common case
+    /// for suffix overflow during normal inserts.
     ///
     /// # Returns
-    ///
     /// * `Ok(bag)` - New external bag with drained suffixes plus new one
     ///
     /// # Errors
-    ///
     /// Returns `Err(AllocError)` if the external bag allocation fails.
-    ///
-    /// # Arguments
-    ///
-    /// * `perm` - Permutation for mapping positions to slots (used when `filled_slots` is `None`)
-    /// * `new_slot` - The slot being assigned the new suffix
-    /// * `new_suffix` - The suffix data to assign
-    /// * `filled_slots` - When `Some(n)`, slots `0..n` are already filled (used during split
-    ///   initialization when the permutation isn't set up yet). When `None`, uses `perm.size()`
-    ///   to iterate over active slots. This matches C++ masstree's `initializing` parameter.
     pub fn drain_to_external(
         &mut self,
         perm: &impl TreePermutation,
         new_slot: usize,
         new_suffix: &[u8],
-        filled_slots: Option<usize>,
+    ) -> AllocResult<SuffixBag<WIDTH>> {
+        // Pass 1: Calculate required capacity and collect slot data
+        let mut required_capacity: usize = new_suffix.len();
+        let perm_size: usize = perm.size();
+
+        // Stack-allocated storage for slots to copy
+        let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
+        let mut copy_count: usize = 0;
+
+        #[expect(clippy::indexing_slicing)]
+        for i in 0..perm_size {
+            let slot: usize = perm.get(i);
+
+            if (slot != new_slot) && (slot < WIDTH) {
+                let meta: InlineSlotMeta = self.slots[slot];
+
+                if meta.has_suffix() {
+                    let start: usize = meta.offset as usize;
+                    let len: usize = meta.len as usize;
+                    required_capacity += len;
+
+                    if copy_count < WIDTH {
+                        slots_to_copy[copy_count] = (slot, start, len);
+                        copy_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Try to allocate external bag with capacity
+        let mut external: SuffixBag<WIDTH> = SuffixBag::try_with_capacity(required_capacity)?;
+
+        // Pass 2: Copy suffixes to external bag using collected data
+        for &(slot, start, len) in &slots_to_copy[..copy_count] {
+            // SAFETY: start and len come from valid InlineSlotMeta entries
+            let suffix: &[u8] = &self.data[start..(start + len)];
+            external.assign(slot, suffix);
+        }
+
+        // Assign new suffix
+        external.assign(new_slot, new_suffix);
+
+        // Reset inline state completely
+        self.slots = [InlineSlotMeta::EMPTY; WIDTH];
+        self.size = 0;
+        self.suffix_count = 0;
+
+        Ok(external)
+    }
+
+    /// Drain inline suffixes to external bag during node initialization.
+    ///
+    /// Unlike `drain_to_external`, this assumes slots `0..new_slot` are
+    /// already filled sequentially and doesn't rely on the permutation.
+    /// Used during split operations when the new node's permutation hasn't
+    /// been set up yet.
+    ///
+    /// # Arguments
+    /// * `new_slot` - The slot being assigned; also indicates that slots
+    ///   `0..new_slot` are already filled sequentially.
+    /// * `new_suffix` - The suffix data to assign
+    ///
+    /// # Returns
+    /// * `Ok(bag)` - New external bag with drained suffixes plus new one
+    ///
+    /// # Errors
+    /// Returns `Err(AllocError)` if the external bag allocation fails.
+    #[cold]
+    pub fn drain_to_external_init(
+        &mut self,
+        new_slot: usize,
+        new_suffix: &[u8],
     ) -> AllocResult<SuffixBag<WIDTH>> {
         // Pass 1: Calculate required capacity and collect slot data
         let mut required_capacity: usize = new_suffix.len();
 
         // Stack-allocated storage for slots to copy
-        //                       (slot, start, len)
         let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
         let mut copy_count: usize = 0;
 
-        // When initializing (filled_slots is Some), iterate slots 0..n directly.
-        // When operating on a live node, use the permutation to find active slots.
-        // This matches C++ masstree_struct.hh:736: `int n = initializing ? p : perm.size();`
-        match filled_slots {
-            Some(n) => {
-                // Initializing mode: slots 0..n are already filled sequentially
-                #[expect(clippy::indexing_slicing)]
-                for slot in 0..n {
-                    if slot != new_slot && slot < WIDTH {
-                        let meta: InlineSlotMeta = self.slots[slot];
+        // Initializing mode: slots 0..new_slot are filled sequentially
+        #[expect(clippy::indexing_slicing)]
+        for slot in 0..new_slot {
+            if slot < WIDTH {
+                let meta: InlineSlotMeta = self.slots[slot];
 
-                        if meta.has_suffix() {
-                            let start: usize = meta.offset as usize;
-                            let len: usize = meta.len as usize;
-                            required_capacity += len;
+                if meta.has_suffix() {
+                    let start: usize = meta.offset as usize;
+                    let len: usize = meta.len as usize;
+                    required_capacity += len;
 
-                            if copy_count < WIDTH {
-                                slots_to_copy[copy_count] = (slot, start, len);
-                                copy_count += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            None => {
-                // Live node mode: use permutation to find active slots
-                let perm_size: usize = perm.size();
-
-                #[expect(clippy::indexing_slicing)]
-                for i in 0..perm_size {
-                    let slot: usize = perm.get(i);
-
-                    if (slot != new_slot) && (slot < WIDTH) {
-                        let meta: InlineSlotMeta = self.slots[slot];
-
-                        if meta.has_suffix() {
-                            let start: usize = meta.offset as usize;
-                            let len: usize = meta.len as usize;
-                            required_capacity += len;
-
-                            if copy_count < WIDTH {
-                                slots_to_copy[copy_count] = (slot, start, len);
-                                copy_count += 1;
-                            }
-                        }
+                    if copy_count < WIDTH {
+                        slots_to_copy[copy_count] = (slot, start, len);
+                        copy_count += 1;
                     }
                 }
             }
