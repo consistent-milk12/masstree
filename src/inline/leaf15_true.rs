@@ -1423,10 +1423,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
                     // Insert has same ikey - move split right
                     Ordering::Equal => split_pos += 1,
                     // Insert goes before this group - move split left
-                    Ordering::Less => split_pos -= 1,
-                    // BUG FIX: Continue moving split_pos LEFT until we exit
-                    // the equal-ikey group, keeping all equal ikeys in RIGHT leaf.
-                    Ordering::Greater => split_pos -= 1,
+                    Ordering::Less | Ordering::Greater => split_pos -= 1,
                 }
             } else {
                 break;

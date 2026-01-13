@@ -5,6 +5,10 @@
 //!   `cargo run --features bins --bin divan_parser -- -f run1.txt --compare run2.txt -c median`
 //!   `cargo run --features bins --bin divan_parser -- -f run1.txt --compare run2.txt -c mean --throughput`
 
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::ref_option)]
+#![allow(clippy::too_many_lines)]
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
@@ -189,17 +193,14 @@ fn run() -> Result<(), String> {
 }
 
 fn read_input(path: &Option<PathBuf>) -> Result<String, String> {
-    match path {
-        Some(p) => {
-            fs::read_to_string(p).map_err(|e| format!("Failed to read {}: {e}", p.display()))
-        }
-        None => {
-            let mut buf = String::new();
-            io::stdin()
-                .read_to_string(&mut buf)
-                .map_err(|e| format!("stdin: {e}"))?;
-            Ok(buf)
-        }
+    if let Some(p) = path {
+        fs::read_to_string(p).map_err(|e| format!("Failed to read {}: {e}", p.display()))
+    } else {
+        let mut buf = String::new();
+        io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("stdin: {e}"))?;
+        Ok(buf)
     }
 }
 
@@ -278,10 +279,10 @@ fn parse_divan(input: &str, filter: Option<&str>) -> Result<Vec<BenchResult>, St
             }
 
             // Apply filter
-            if let Some(ref re) = filter_re {
-                if !re.is_match(&full_name) {
-                    continue;
-                }
+            if let Some(ref re) = filter_re
+                && !re.is_match(&full_name)
+            {
+                continue;
             }
 
             // Extract timing from first part (fastest is inline with name)
@@ -293,23 +294,23 @@ fn parse_divan(input: &str, filter: Option<&str>) -> Result<Vec<BenchResult>, St
                 slowest: columns
                     .first()
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string()),
+                    .map(ToString::to_string),
                 median: columns
                     .get(1)
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string()),
+                    .map(ToString::to_string),
                 mean: columns
                     .get(2)
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string()),
+                    .map(ToString::to_string),
                 samples: columns
                     .get(3)
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string()),
+                    .map(ToString::to_string),
                 iters: columns
                     .get(4)
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string()),
+                    .map(ToString::to_string),
                 ..Default::default()
             };
 
@@ -317,27 +318,26 @@ fn parse_divan(input: &str, filter: Option<&str>) -> Result<Vec<BenchResult>, St
             results.push(result);
         }
         // Check for throughput continuation line (no branch marker, has item/s)
-        else if THROUGHPUT_RE.is_match(line) {
-            if let Some(ref name) = last_bench_name {
-                if let Some(result) = results.iter_mut().find(|r| &r.name == name) {
-                    let tputs: Vec<Option<String>> = line
-                        .split('│')
-                        .map(|p| THROUGHPUT_RE.find(p.trim()).map(|m| m.as_str().to_string()))
-                        .collect();
+        else if THROUGHPUT_RE.is_match(line)
+            && let Some(ref name) = last_bench_name
+            && let Some(result) = results.iter_mut().find(|r| &r.name == name)
+        {
+            let tputs: Vec<Option<String>> = line
+                .split('│')
+                .map(|p| THROUGHPUT_RE.find(p.trim()).map(|m| m.as_str().to_string()))
+                .collect();
 
-                    if let Some(Some(t)) = tputs.first() {
-                        result.fastest_tput = Some(t.clone());
-                    }
-                    if let Some(Some(t)) = tputs.get(1) {
-                        result.slowest_tput = Some(t.clone());
-                    }
-                    if let Some(Some(t)) = tputs.get(2) {
-                        result.median_tput = Some(t.clone());
-                    }
-                    if let Some(Some(t)) = tputs.get(3) {
-                        result.mean_tput = Some(t.clone());
-                    }
-                }
+            if let Some(Some(t)) = tputs.first() {
+                result.fastest_tput = Some(t.clone());
+            }
+            if let Some(Some(t)) = tputs.get(1) {
+                result.slowest_tput = Some(t.clone());
+            }
+            if let Some(Some(t)) = tputs.get(2) {
+                result.median_tput = Some(t.clone());
+            }
+            if let Some(Some(t)) = tputs.get(3) {
+                result.mean_tput = Some(t.clone());
             }
         }
     }

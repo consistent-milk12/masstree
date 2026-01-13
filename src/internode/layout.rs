@@ -22,6 +22,11 @@
 //! - CL 2: ikey0[14] (if n > 13) + child[0..=6]
 //! - CL 3: child[7..=14] (if `child_idx` >= 7)
 
+#![expect(
+    clippy::items_after_statements,
+    reason = "Looks alright for compilation time checks."
+)]
+
 use std::mem as StdMem;
 
 use super::{InternodeNode, NUM_CHILDREN, WIDTH};

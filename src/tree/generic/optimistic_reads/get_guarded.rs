@@ -137,7 +137,7 @@ where
                     Some(unsafe { S::output_from_raw(found_ptr) })
                 };
 
-                // Version validation after all reads
+                // Version validation after all reads (common case: unchanged)
                 if leaf.version().has_changed(version) {
                     if leaf.version().has_split_no_compiler_fence(version) {
                         let (advanced, new_version) =

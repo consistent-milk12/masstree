@@ -16,7 +16,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 ## Status
 
-**v0.4.0** — Core feature complete. It has been heavily tested but I am not sure about whether it should be used in actual projects. Such low-level cncurrent data structures usually need a lot of stress testing and have a lot of edge cases that are not easily noticeable. The unsafe code passes miri with strict-provenance flag, but that doesn't really ensure correctness.
+**v0.5.0** — Core feature complete. Heavily tested but concurrent data structures require extensive stress testing beyond what unit tests provide. The unsafe code passes Miri with strict-provenance flag.
 
 | Feature | Status |
 |---------|--------|
@@ -24,12 +24,13 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 | `insert` | Fine-grained leaf locking |
 | `remove` | Concurrent deletion with memory reclamation |
 | `scan`, `scan_ref`, `scan_prefix` | Zero-copy range iteration |
+| `DoubleEndedIterator` | Reverse iteration support |
 | Leaf coalescing | Lazy queue-based cleanup |
 | Memory reclamation | Hyaline scheme via `seize` crate |
 
-**Tests:** 755 tests (466 unit + 88 ported from C++ reference + integration). Miri strict provenance clean.
+**Tests:** 900 tests (unit + 88 ported from C++ reference + proptests + stress tests). Miri strict provenance clean.
 
-**Not yet implemented:** `Entry` API, `DoubleEndedIterator`, `Extend`/`FromIterator`.
+**Not yet implemented:** `Entry` API, `Extend`/`FromIterator`.
 
 ## Install
 

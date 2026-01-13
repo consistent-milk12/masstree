@@ -47,6 +47,7 @@ mod api_ref;
 mod cursor_key;
 #[allow(dead_code, reason = "scaffolding for future features")]
 mod find;
+mod find_rev;
 #[allow(
     dead_code,
     reason = "scaffolding for future features (reverse iteration)"
@@ -58,3 +59,5 @@ mod scan_state;
 
 // Re-export public types
 pub use iterator::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
+
+pub use find_rev::ReverseScan;

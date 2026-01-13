@@ -14,6 +14,8 @@
 
 use std::cmp::Ordering;
 
+use seize::LocalGuard;
+
 use crate::key::IKEY_SIZE;
 use crate::leaf_trait::{TreeLeafNode, TreePermutation};
 use crate::leaf24::{KSUF_KEYLENX, LAYER_KEYLENX};
@@ -508,6 +510,174 @@ pub const fn inline_key_len(keylenx: u8) -> usize {
         keylenx as usize
     } else {
         IKEY_SIZE
+    }
+}
+
+// ============================================================================
+//  ReverseScanHelper
+// ============================================================================
+
+/// Helper for reverse (descending) range scans.
+///
+/// Provides direction-specific operations for backward iteration.
+///
+/// # Critical Implementation notes (from C++ comments)
+/// > We run ki backwards, referring to perm.size() each time through,
+/// > because inserting elements into a node need not bump its version.
+/// > Therefore, if we decremented ki, starting from a node's original
+/// > size(), we might miss some concurrently inserted keys.
+#[derive(Clone, Copy, Debug)]
+pub struct ReverseScanHelper {
+    /// Tracks whether we're at an upper bound position.
+    ///
+    /// When true:
+    /// - `lower()` returns `size - 1` (start from last slot)
+    /// - `is_duplicate()` returns false (no filtering needed)
+    ///
+    /// Set true by `shift_clear_reverse()`, cleared by `mark_key_complete()`.
+    pub upper_bound: bool,
+}
+
+impl ReverseScanHelper {
+    /// Create a new reverse scan helper.
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self { upper_bound: false }
+    }
+
+    /// Create helper starting at upper bound (used after layer descent).
+    #[inline(always)]
+    pub const fn at_upper_bound() -> Self {
+        Self { upper_bound: true }
+    }
+
+    /// Retreat to the previous logical position.
+    ///
+    /// For rev scans: `ki - 1`. Returns -1 when `ki == 0`.
+    ///
+    /// # Note
+    /// We use `isize` to represent -1 as a valid "before first" sentinel.
+    #[inline(always)]
+    pub const fn prev(ki: isize) -> isize {
+        ki - 1
+    }
+
+    /// Retreat to the previous leaf in the B-link chain.
+    ///
+    /// # Safety
+    /// The returned pointer is only valid while the guard is held and
+    /// version validation has not failed.
+    #[inline(always)]
+    pub fn retreat<L, S>(leaf: &L) -> *mut L
+    where
+        L: TreeLeafNode<S>,
+        S: ValueSlot,
+    {
+        leaf.prev()
+    }
+
+    pub fn stable_reverse<L, S>(
+        leaf: &mut *mut L,
+        cursor_key: &CursorKey,
+        _guard: &LocalGuard<'_>,
+    ) -> u32
+    where
+        L: TreeLeafNode<S>,
+        S: ValueSlot,
+    {
+        loop {
+            // SAFETY: leaf pointer is valid, protected by guard
+            let current: &L = unsafe { &**leaf };
+            let v: u32 = current.version().stable();
+
+            // Check if we need to advance forward due to concurrent insert
+            let next_ptr: *mut L = current.safe_next();
+
+            if next_ptr.is_null() {
+                return v;
+            }
+
+            // SAFETY: next_ptr is non-null, protected by guard
+            let next_bound_ikey: u64 = unsafe { &*next_ptr }.ikey_bound();
+
+            // Compare cursor key against next leaf's bound
+            match cursor_key.current_ikey().cmp(&next_bound_ikey) {
+                // We right in the right leaf
+                Ordering::Less => return v,
+
+                Ordering::Equal if cursor_key.current_len() == 0 => {
+                    return v;
+                }
+
+                _ => {
+                    // Key moved to next leaf due to concurrent insert
+                    *leaf = next_ptr;
+                }
+            }
+        }
+    }
+
+    /// Check if suffix comparison result allows emit for initial position (reverse).
+    ///
+    /// For reverse: emit if stored < search, or stored == search and emit
+    #[inline(always)]
+    pub const fn initial_ksuf_match_reverse(ksuf_compare: Ordering, emit_equal: bool) -> bool {
+        match ksuf_compare {
+            Ordering::Less => true,
+
+            Ordering::Equal => emit_equal,
+
+            Ordering::Greater => false,
+        }
+    }
+
+    /// Check if a slot is a duplicate of the last emitted key (reverse scan).
+    ///
+    /// For reverse: duplicate if cursor <= slot (already emitted or after cursor).
+    #[inline(always)]
+    pub fn is_duplicate_reverse(
+        cursor_key: &CursorKey,
+        ikey: u64,
+        keylenx: u8,
+        upper_bound: bool,
+    ) -> bool {
+        if upper_bound {
+            return false;
+        }
+
+        // For reverse scan: duplicate if cursor <= slot
+        cursor_key.compare(ikey, keylenx as usize) != Ordering::Greater
+    }
+
+    /// Find lower bound position for reverse scan.
+    ///
+    /// # Returns
+    ///
+    /// Position as `isize` which can be -1 (before first slot).
+    #[inline]
+    pub fn lower_reverse<L, S>(self, cursor_key: &CursorKey, leaf: &L, perm: &L::Perm) -> isize
+    where
+        L: TreeLeafNode<S>,
+        S: ValueSlot,
+    {
+        if self.upper_bound {
+            return perm.size().cast_signed() - 1;
+        }
+
+        let kx: KeyIndexedPosition = lower_with_position(cursor_key, leaf, perm);
+
+        // C++ pattern: kx.i - (kx.p < 0)
+        if kx.p.is_some() {
+            kx.i.cast_signed() - 1
+        } else {
+            kx.i.cast_signed()
+        }
+    }
+
+    /// Mark key as complete (clear `upper_bound` flag).
+    #[inline(always)]
+    pub const fn mark_key_complete(&mut self) {
+        self.upper_bound = false;
     }
 }
 

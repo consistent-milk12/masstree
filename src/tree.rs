@@ -36,6 +36,7 @@ pub mod test_hooks;
 
 pub use generic::{BatchEntry, BatchInsertResult};
 pub use index::MassTreeIndex;
+pub use range::ReverseScan;
 pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use remove::RemoveError;
 

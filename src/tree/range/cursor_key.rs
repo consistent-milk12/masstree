@@ -166,6 +166,39 @@ impl CursorKey {
         }
     }
 
+    /// Create a cursor for reverse scan from an end bound.
+    ///
+    /// For reverse iteration:
+    /// - `Unbounded`: Start at maximum (ikey = MAX, len = 9 sentinel)
+    /// - `Included(k)`: Start at key k
+    /// - `Excluded(k)`: Start at key k (filtering handled by `emit_equal`)
+    ///
+    /// # Note
+    ///
+    /// For unbounded end, we use `len = UNSHIFT_SENTINEL_LEN` (9) as a sentinel
+    /// that signals "start from maximum" to `lower_reverse`.
+    #[must_use]
+    pub fn for_reverse_scan(end: &super::iterator::RangeBound<'_>) -> Self {
+        use super::iterator::RangeBound;
+
+        match end {
+            RangeBound::Unbounded => {
+                // Maximum key cursor: ikey = MAX, len = 9 (sentinel)
+                // This makes lower_reverse return size - 1 (last slot)
+                Self {
+                    buf: [0xFF; MAX_KEY_LENGTH],
+                    offset: 0,
+                    len: UNSHIFT_SENTINEL_LEN,
+                    ikey: u64::MAX,
+                }
+            }
+            RangeBound::Included(k) | RangeBound::Excluded(k) => {
+                // Start at the specified key
+                Self::from_slice(k)
+            }
+        }
+    }
+
     // ========================================================================
     //  Accessors
     // ========================================================================
@@ -278,6 +311,43 @@ impl CursorKey {
         self.ikey = Self::read_ikey_from_buf(&self.buf, self.offset, self.len);
     }
 
+    /// Shift to sublayer for reverse scan (clear and set to max).
+    ///
+    /// Unlike `shift_clear()` which sets `ikey = 0, len = 0` for forward scan min,
+    /// this sets `ikey = MAX, len = 9` for reverse scan max.
+    ///
+    /// # C++ Ref
+    ///
+    /// ```cpp
+    /// void shift_clear_reverse() {
+    ///     ikey0_ = ~ikey_type(0);
+    ///     len_ = ikey_size + 1;
+    ///     s_ += ikey_size;
+    /// }
+    /// ```
+    ///
+    /// The `len = 9` is critical: it makes the cursor behave like it has a suffix,
+    /// which affects comparisons with layer pointers and duplicate filtering.
+    #[inline(always)]
+    pub fn shift_clear_reverse(&mut self) {
+        debug_assert!(
+            self.offset + IKEY_SIZE <= MAX_KEY_LENGTH,
+            "shift_clear_reverse: would exceed MAX_KEY_LENGTH"
+        );
+
+        // Move offset to next layer
+        self.offset += IKEY_SIZE;
+
+        // Set to maximum for this layer
+        self.ikey = u64::MAX;
+
+        // Write MAX ikey to buffer
+        self.buf[self.offset..self.offset + IKEY_SIZE].copy_from_slice(&u64::MAX.to_be_bytes());
+
+        // CRITICAL: len = 9, not 8. This matches C++ and affects comparisons.
+        self.len = UNSHIFT_SENTINEL_LEN;
+    }
+
     /// Shift to next layer and clear (for layer pointer descent during scan).
     ///
     /// Unlike `shift()`, this does NOT use the existing buffer bytes. Instead,
@@ -343,6 +413,28 @@ impl CursorKey {
 
         // Set sentinel length to skip layer pointer (see UNSHIFT_SENTINEL_LEN docs)
         self.len = UNSHIFT_SENTINEL_LEN;
+    }
+
+    /// Check if cursor is effectively empty after unshift.
+    ///
+    /// This occurs when:
+    /// - offset is 0 (at root layer)
+    /// - len is 0 (no key content)
+    ///
+    /// Used by `handle_up_back` to detect multi-level ascent needs.
+    /// This is the Rust equivalent of C++ `ka.empty()` check.
+    ///
+    /// # C++ Reference
+    ///
+    /// ```cpp
+    /// // masstree_scan.hh:359-372
+    /// do {
+    ///     ka.unshift();
+    /// } while (unlikely(ka.empty()));
+    /// ```
+    #[inline(always)]
+    pub const fn is_empty_after_unshift(&self) -> bool {
+        self.offset == 0 && self.len == 0
     }
 
     /// Reset to root layer (undo all shifts).

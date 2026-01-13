@@ -176,7 +176,7 @@ enum LockedParentResult<'a> {
     /// Node has no parent (it's a layer root). This is a valid success case.
     NoParent,
 
-    /// Failed to lock parent after MAX_PARENT_RETRIES attempts.
+    /// Failed to lock parent after `MAX_PARENT_RETRIES` attempts.
     ///
     /// # Safety Implication
     ///

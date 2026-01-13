@@ -113,6 +113,7 @@ impl Default for KeyIndexPosition {
 ///
 /// # Returns
 /// `KeyIndexPosition` with logical position and physical slot (if found).
+#[inline(always)]
 pub fn lower_bound_by<const WIDTH: usize, F>(
     size: usize,
     perm: Permuter<WIDTH>,
@@ -164,7 +165,7 @@ where
 ///
 /// # Returns
 /// Child index (0 to size).
-#[inline]
+#[inline(always)]
 pub fn upper_bound_by<const WIDTH: usize, F>(
     size: usize,
     perm: Permuter<WIDTH>,
@@ -207,7 +208,7 @@ where
 ///
 /// Simpler than binary search, potentially faster for very small nodes.
 /// Same semantics as `lower_bound_by`.
-#[inline]
+#[inline(always)]
 pub fn lower_bound_linear_by<const WIDTH: usize, F>(
     size: usize,
     perm: Permuter<WIDTH>,
@@ -243,7 +244,7 @@ where
 /// Linear search upper bound with custom comparator.
 ///
 /// Same semantics as `upper_bound_by`.
-#[inline]
+#[inline(always)]
 pub fn upper_bound_linear_by<const WIDTH: usize, F>(
     size: usize,
     perm: Permuter<WIDTH>,
@@ -446,7 +447,7 @@ pub fn upper_bound_internode_generic<I: TreeInternode>(search_ikey: u64, node: &
 ///
 /// # Returns
 /// A `u32` bitmask with bits set for matching slots (0-23 for WIDTH=24).
-#[inline]
+#[inline(always)]
 #[must_use]
 pub fn find_ikey_matches_leaf24<S: slot::ValueSlot>(target_ikey: u64, leaf: &LeafNode24<S>) -> u32 {
     use crate::leaf24::WIDTH_24;

@@ -97,39 +97,67 @@ impl KvRandom {
 // Key generation (ASCII decimal like C++ quick_istr)
 // =============================================================================
 
-#[inline]
-fn quick_istr<const N: usize>(mut n: u64) -> [u8; N] {
-    let mut buf = [b'0'; N];
-    let mut i = N;
-    if n == 0 {
-        return buf;
-    }
-    while n > 0 && i > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    buf
+/// Stack-allocated variable-length decimal key (matches C++ quick_istr).
+/// Avoids heap allocation in hot benchmark loops.
+struct QuickIstr {
+    buf: [u8; 32],
+    start: usize,
 }
 
-#[inline]
-fn key8(n: u64) -> [u8; 8] {
-    quick_istr::<8>(n)
+impl QuickIstr {
+    /// Create a decimal string key from a number (variable length, no padding).
+    #[inline]
+    const fn new(mut x: u64) -> Self {
+        let mut buf = [0u8; 32];
+        let mut pos = 31;
+        loop {
+            buf[pos] = b'0' + (x % 10) as u8;
+            x /= 10;
+            if x == 0 {
+                break;
+            }
+            pos -= 1;
+        }
+        Self { buf, start: pos }
+    }
+
+    /// Create a decimal string key with minimum length (zero-padded if needed).
+    #[inline]
+    #[allow(dead_code)]
+    const fn with_minlen(mut x: u64, minlen: usize) -> Self {
+        let mut buf = [0u8; 32];
+        let mut pos = 31;
+        let mut len = 0;
+        loop {
+            buf[pos] = b'0' + (x % 10) as u8;
+            x /= 10;
+            len += 1;
+            if x == 0 && len >= minlen {
+                break;
+            }
+            pos -= 1;
+        }
+        Self { buf, start: pos }
+    }
+
+    /// Get the key as a byte slice.
+    #[inline]
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[self.start..32]
+    }
 }
 
+/// Returns a key with minimum 8 decimal digits (grows for n >= 100000000).
+/// This matches C++ `quick_istr(n, 8)` which uses min-width, not fixed-width.
 #[inline]
-fn key_var(n: u64) -> Vec<u8> {
-    if n == 0 {
-        return vec![b'0'];
-    }
-    let mut buf = Vec::with_capacity(20);
-    let mut m = n;
-    while m > 0 {
-        buf.push(b'0' + (m % 10) as u8);
-        m /= 10;
-    }
-    buf.reverse();
-    buf
+const fn key8(n: u64) -> QuickIstr {
+    QuickIstr::with_minlen(n, 8)
+}
+
+/// Variable-length decimal key (stack-allocated via QuickIstr).
+#[inline]
+const fn key_var(n: u64) -> QuickIstr {
+    QuickIstr::new(n)
 }
 
 // =============================================================================
@@ -166,7 +194,7 @@ mod rw1 {
                             for _ in 0..WARMUP_OPS {
                                 let x = rng.rand();
                                 let key = key_var(u64::from(x));
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -182,7 +210,11 @@ mod rw1 {
                             for _ in 0..OPS_PER_THREAD {
                                 let x = rng.rand();
                                 let key = key_var(u64::from(x));
-                                let _ = tree.insert_with_guard(&key, u64::from(x + 1), &guard);
+                                let _ = tree.insert_with_guard(
+                                    key.as_bytes(),
+                                    u64::from(x + 1),
+                                    &guard,
+                                );
                                 keys_inserted.push(x);
                             }
 
@@ -196,7 +228,7 @@ mod rw1 {
                             let mut sum = 0u64;
                             for x in keys_inserted {
                                 let key = key_var(u64::from(x));
-                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
                             }
@@ -246,7 +278,7 @@ mod rw2 {
                             for _ in 0..WARMUP_OPS {
                                 let x = rng.rand();
                                 let key = key_var(u64::from(x));
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -265,13 +297,17 @@ mod rw2 {
                                 if puts == 0 || !rng.bernoulli(get_frac) {
                                     let x = (offset.wrapping_add(puts as u32)).wrapping_mul(C);
                                     let key = key_var(u64::from(x));
-                                    let _ = tree.insert_with_guard(&key, u64::from(x + 1), &guard);
+                                    let _ = tree.insert_with_guard(
+                                        key.as_bytes(),
+                                        u64::from(x + 1),
+                                        &guard,
+                                    );
                                     puts += 1;
                                 } else {
                                     let idx = rng.uniform(puts as u32);
                                     let x = (offset.wrapping_add(idx)).wrapping_mul(C);
                                     let key = key_var(u64::from(x));
-                                    if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                    if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
                                         sum = sum.wrapping_add(v);
                                     }
                                 }
@@ -337,7 +373,7 @@ mod rw3 {
                             // === WARMUP PHASE ===
                             for n in 0..WARMUP_OPS {
                                 let key = key8(n as u64);
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -348,14 +384,15 @@ mod rw3 {
                             // Put phase
                             for n in 0..OPS_PER_THREAD {
                                 let key = key8(n as u64);
-                                let _ = tree.insert_with_guard(&key, n as u64 + 1, &guard);
+                                let _ =
+                                    tree.insert_with_guard(key.as_bytes(), n as u64 + 1, &guard);
                             }
 
                             // Get phase
                             let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
                                 let key = key8(i as u64);
-                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
                             }
@@ -395,7 +432,7 @@ mod rw3 {
                             // === WARMUP PHASE ===
                             for n in 0..WARMUP_OPS {
                                 let key = key8(base + n as u64);
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -406,14 +443,15 @@ mod rw3 {
                             // Put phase
                             for n in 0..OPS_PER_THREAD {
                                 let key = key8(base + n as u64);
-                                let _ = tree.insert_with_guard(&key, n as u64 + 1, &guard);
+                                let _ =
+                                    tree.insert_with_guard(key.as_bytes(), n as u64 + 1, &guard);
                             }
 
                             // Get phase
                             let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
                                 let key = key8(base + i as u64);
-                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
                             }
@@ -521,7 +559,7 @@ mod rw4 {
                             // === WARMUP PHASE ===
                             for n in 0..WARMUP_OPS {
                                 let key = key8(TOP - n as u64);
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -532,14 +570,15 @@ mod rw4 {
                             // Put phase
                             for n in 0..OPS_PER_THREAD {
                                 let key = key8(TOP - n as u64);
-                                let _ = tree.insert_with_guard(&key, n as u64 + 1, &guard);
+                                let _ =
+                                    tree.insert_with_guard(key.as_bytes(), n as u64 + 1, &guard);
                             }
 
                             // Get phase
                             let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
                                 let key = key8(TOP - i as u64);
-                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
                             }
@@ -591,7 +630,7 @@ mod same {
                             for _ in 0..WARMUP_OPS {
                                 let x = rng.uniform(NUM_KEYS);
                                 let key = key_var(u64::from(x));
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -605,7 +644,11 @@ mod same {
                             for _ in 0..OPS_PER_THREAD {
                                 let x = rng.uniform(NUM_KEYS);
                                 let key = key_var(u64::from(x));
-                                let _ = tree.insert_with_guard(&key, u64::from(x + 1), &guard);
+                                let _ = tree.insert_with_guard(
+                                    key.as_bytes(),
+                                    u64::from(x + 1),
+                                    &guard,
+                                );
                             }
 
                             post_measurement_barrier();
@@ -653,7 +696,7 @@ mod wscale {
                             for _ in 0..WARMUP_OPS {
                                 let x = u64::from(rng.rand());
                                 let key = key_var(x);
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -667,7 +710,7 @@ mod wscale {
                             for _ in 0..OPS_PER_THREAD {
                                 let x = u64::from(rng.rand());
                                 let key = key_var(x);
-                                let _ = tree.insert_with_guard(&key, x + 1, &guard);
+                                let _ = tree.insert_with_guard(key.as_bytes(), x + 1, &guard);
                             }
 
                             post_measurement_barrier();
@@ -715,7 +758,7 @@ mod rscale {
 
                 for &k in &keys {
                     let key = key_var(k as u64);
-                    let _ = tree.insert_with_guard(&key, k as u64 + 1, &guard);
+                    let _ = tree.insert_with_guard(key.as_bytes(), k as u64 + 1, &guard);
                 }
             }
         }
@@ -739,7 +782,7 @@ mod rscale {
                             for _ in 0..WARMUP_OPS {
                                 let x = u64::from(rng.rand()) % nseqkeys;
                                 let key = key_var(x);
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -754,7 +797,7 @@ mod rscale {
                             for _ in 0..OPS_PER_THREAD {
                                 let x = u64::from(rng.rand()) % nseqkeys;
                                 let key = key_var(x);
-                                if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
                                     sum += v;
                                 }
                             }
@@ -773,33 +816,26 @@ mod rscale {
 }
 
 // =============================================================================
-// USCALE: Pure random updates on pre-populated tree
+// USCALE: Random writes to empty tree (C++ kvtest_uscale semantics)
 // =============================================================================
 
-#[divan::bench_group(name = "uscale", sample_count = 200)]
+#[divan::bench_group(name = "uscale", sample_count = 20)]
 mod uscale {
     use super::*;
 
-    const KEYS_PER_THREAD: usize = 100_000;
-    const OPS_PER_THREAD: usize = 100_000;
+    /// C++ kvtest_uscale: nseqkeys = 16 * ruscale_partsz = 140,000,000
+    /// Keys are random within this range, starting from empty tree
+    const NSEQKEYS: u64 = 140_000_000;
+    /// Match mttest scale: ~7M ops/thread in 5s run
+    const OPS_PER_THREAD: usize = 5_000_000;
 
     #[divan::bench(args = [1, 2, 4, 6])]
-    fn random_updates(bencher: Bencher, threads: usize) {
-        // Pre-populate tree
-        let tree = Arc::new(MassTree15Inline::<u64>::new());
-        let nseqkeys = (KEYS_PER_THREAD * threads) as u64;
-
-        {
-            let guard = tree.guard();
-            for i in 0..nseqkeys {
-                let key = key_var(i);
-                let _ = tree.insert_with_guard(&key, i + 1, &guard);
-            }
-        }
-
+    fn random_writes_empty_tree(bencher: Bencher, threads: usize) {
+        // NO pre-population - matches C++ kvtest_uscale semantics
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
+            .with_inputs(|| Arc::new(MassTree15Inline::<u64>::new()))
+            .bench_local_values(|tree| {
                 let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
@@ -809,14 +845,15 @@ mod uscale {
                         let start = Arc::clone(&start);
                         thread::spawn(move || {
                             let guard = tree.guard();
+                            // C++: seed = kvtest_first_seed + client.id() (NOT % 48)
                             let seed = KvRandom::FIRST_SEED + tid as u64;
                             let mut rng = KvRandom::new(seed);
 
                             // === WARMUP PHASE ===
                             for _ in 0..WARMUP_OPS {
-                                let x = u64::from(rng.rand()) % nseqkeys;
+                                let x = u64::from(rng.rand()) % NSEQKEYS;
                                 let key = key_var(x);
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -828,9 +865,9 @@ mod uscale {
                             start.wait();
 
                             for _ in 0..OPS_PER_THREAD {
-                                let x = u64::from(rng.rand()) % nseqkeys;
+                                let x = u64::from(rng.rand()) % NSEQKEYS;
                                 let key = key_var(x);
-                                let _ = tree.insert_with_guard(&key, x + 1, &guard);
+                                let _ = tree.insert_with_guard(key.as_bytes(), x + 1, &guard);
                             }
 
                             post_measurement_barrier();
@@ -841,6 +878,7 @@ mod uscale {
                 for h in handles {
                     h.join().unwrap();
                 }
+                tree
             });
     }
 }
@@ -965,7 +1003,7 @@ mod rwsmall24 {
                                 let x = rng.uniform(NKEYS << 3);
                                 let key_idx = x >> 3;
                                 let key = key_var(u64::from(key_idx));
-                                black_box(tree.get_with_guard(&key, &guard));
+                                black_box(tree.get_with_guard(key.as_bytes(), &guard));
                             }
                             warmup_done.wait();
 
@@ -984,12 +1022,13 @@ mod rwsmall24 {
 
                                 if (x & 7) != 0 {
                                     // 87.5% reads
-                                    if let Some(v) = tree.get_with_guard(&key, &guard) {
+                                    if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
                                         sum = sum.wrapping_add(v);
                                     }
                                 } else {
                                     // 12.5% writes
-                                    let _ = tree.insert_with_guard(&key, n as u64, &guard);
+                                    let _ =
+                                        tree.insert_with_guard(key.as_bytes(), n as u64, &guard);
                                 }
                             }
 

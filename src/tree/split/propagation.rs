@@ -33,6 +33,8 @@
 //! re-descent from root to find the correct parent. This is bounded fallback
 //! rather than infinite retry.
 
+use std::hint as StdHint;
+use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use seize::LocalGuard;
@@ -269,7 +271,7 @@ impl Propagation {
 
                 // Exponential backoff: spin `backoff` times, then double (up to cap)
                 for _ in 0..backoff {
-                    std::hint::spin_loop();
+                    StdHint::spin_loop();
                 }
                 backoff = (backoff * 2).min(BACKOFF_CAP);
                 continue;
@@ -300,7 +302,7 @@ impl Propagation {
 
                     // Exponential backoff: spin `backoff` times, then double (up to cap)
                     for _ in 0..backoff {
-                        std::hint::spin_loop();
+                        StdHint::spin_loop();
                     }
                     backoff = (backoff * 2).min(BACKOFF_CAP);
                     continue;
@@ -333,7 +335,7 @@ impl Propagation {
                 #[cfg(feature = "debug-routing")]
                 {
                     let nkeys = parent.nkeys();
-                    eprint!("        parent_keys_after[{}]: ", nkeys);
+                    eprint!("        parent_keys_after[{nkeys}]: ");
                     for i in 0..nkeys {
                         eprint!("{:016x} ", parent.ikey(i));
                     }
@@ -361,7 +363,7 @@ impl Propagation {
             // `parent.parent().is_null() && parent.is_root()` matches both
             let parent_is_main_root: bool = {
                 let current_root: *mut u8 = root_ptr.load(AtomicOrdering::Acquire);
-                std::ptr::eq(current_root, left_parent)
+                StdPtr::eq(current_root, left_parent)
             };
             let parent_is_layer_root: bool =
                 !parent_is_main_root && parent.parent().is_null() && parent.is_root();
@@ -397,7 +399,7 @@ impl Propagation {
                 );
                 // Dump keys in parent after split
                 let parent_nkeys = parent.nkeys();
-                eprint!("        parent_keys[{}]: ", parent_nkeys);
+                eprint!("        parent_keys[{parent_nkeys}]: ");
                 for i in 0..parent_nkeys {
                     eprint!("{:016x} ", parent.ikey(i));
                 }
@@ -405,7 +407,7 @@ impl Propagation {
                 // Dump keys in sibling after split
                 let sibling = unsafe { &*parent_sibling_ptr };
                 let sibling_nkeys = sibling.nkeys();
-                eprint!("        sibling_keys[{}]: ", sibling_nkeys);
+                eprint!("        sibling_keys[{sibling_nkeys}]: ");
                 for i in 0..sibling_nkeys {
                     eprint!("{:016x} ", sibling.ikey(i));
                 }

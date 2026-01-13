@@ -651,7 +651,7 @@ where
                     }
                     if child_idx < nkeys {
                         let right_sep = inode.ikey(child_idx);
-                        eprintln!("        right_sep[{}]={:016x}", child_idx, right_sep);
+                        eprintln!("        right_sep[{child_idx}]={right_sep:016x}");
                     }
                 }
 
@@ -711,6 +711,7 @@ where
                 v[other] = child_version.stable();
 
                 // Now validate parent - did it change during our read?
+                // Common case: unchanged (no concurrent modification)
                 if !inode.version().has_changed(v[sense]) {
                     // Success! Parent unchanged, child read is valid
                     // Swap sense to "move" to child
@@ -788,7 +789,7 @@ where
                 key.compare(slot_ikey, slot_keylenx as usize)
             };
 
-            // Check if version is still valid
+            // Check if version is still valid (common case: unchanged)
             if !leaf.version().has_changed(version) {
                 return cmp;
             }

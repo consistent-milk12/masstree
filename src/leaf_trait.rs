@@ -278,7 +278,7 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     /// with writer's Release stores, making Relaxed loads safe.
     ///
     /// This is safe because:
-    /// 1. Call sites do `stable()` which spins until DIRTY_MASK == 0
+    /// 1. Call sites do `stable()` which spins until `DIRTY_MASK == 0`
     /// 2. `stable()` issues `fence(Acquire)` before returning
     /// 3. The fence synchronizes with writer's `Release` stores
     /// 4. Therefore, Relaxed loads see fully-published values

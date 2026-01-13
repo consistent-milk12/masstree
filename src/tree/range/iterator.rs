@@ -103,7 +103,12 @@ use super::find::{
     find_next_with_duplicate_check, find_next_with_duplicate_check_ptr, find_retry, handle_down,
     handle_up,
 };
-use super::scan_state::{LayerContext, LayerStack, ScanSnapshot, ScanStackElement, ScanState};
+use super::find_rev::ReverseScan;
+use super::helper::ReverseScanHelper;
+use super::scan_state::{
+    BackStackElement, LayerContext, LayerStack, ScanSnapshot, ScanStackElement, ScanState,
+    ScanStateBack,
+};
 
 // ============================================================================
 //  RangeBound
@@ -208,6 +213,24 @@ impl<'a> RangeBound<'a> {
             RangeBound::Included(k) | RangeBound::Excluded(k) => Some(*k),
         }
     }
+
+    /// Check if a key is within this bound for reverse iteration (start bound).
+    ///
+    /// For start bounds used in reverse iteration:
+    /// - `Unbounded`: all keys are within
+    /// - `Included(k)`: keys >= k are within
+    /// - `Excluded(k)`: keys > k are within
+    ///
+    /// This is the reverse of `contains()` which is for end bounds.
+    #[must_use]
+    #[inline(always)]
+    pub fn contains_reverse(&self, key: &[u8]) -> bool {
+        match self {
+            RangeBound::Unbounded => true,
+            RangeBound::Included(bound) => key >= *bound,
+            RangeBound::Excluded(bound) => key > *bound,
+        }
+    }
 }
 
 // Conversion from std::ops::Bound
@@ -284,12 +307,16 @@ pub struct IterFlags(u8);
 
 #[allow(dead_code, reason = "API Completeness")]
 impl IterFlags {
-    // Bit Positions
+    // Bit Positions (forward iteration)
     const EXHAUSTED: u8 = 1 << 0;
     const INITIALIZED: u8 = 1 << 1;
     const EMIT_EQUAL: u8 = 1 << 2;
     const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
     const SINGLE_LAYER_MODE: u8 = 1 << 4;
+    // Bit Positions (reverse iteration for DoubleEndedIterator)
+    const BACK_EXHAUSTED: u8 = 1 << 5;
+    const BACK_INITIALIZED: u8 = 1 << 6;
+    const BACK_EMIT_EQUAL: u8 = 1 << 7;
 
     /// Create new flags with all bits cleared.
     #[inline(always)]
@@ -297,7 +324,7 @@ impl IterFlags {
         Self(0)
     }
 
-    /// Create flags with initial values.
+    /// Create flags with initial values for forward iteration.
     #[inline(always)]
     pub const fn with_values(emit_equal: bool, single_layer_mode: bool) -> Self {
         let mut bits: u8 = 0;
@@ -308,6 +335,30 @@ impl IterFlags {
 
         if single_layer_mode {
             bits |= Self::SINGLE_LAYER_MODE;
+        }
+
+        Self(bits)
+    }
+
+    /// Create flags with initial values for both forward and backward iteration.
+    #[inline(always)]
+    pub const fn with_both_bounds(
+        emit_equal: bool,
+        single_layer_mode: bool,
+        back_emit_equal: bool,
+    ) -> Self {
+        let mut bits: u8 = 0;
+
+        if emit_equal {
+            bits |= Self::EMIT_EQUAL;
+        }
+
+        if single_layer_mode {
+            bits |= Self::SINGLE_LAYER_MODE;
+        }
+
+        if back_emit_equal {
+            bits |= Self::BACK_EMIT_EQUAL;
         }
 
         Self(bits)
@@ -340,6 +391,22 @@ impl IterFlags {
     #[inline(always)]
     pub const fn single_layer_mode(self) -> bool {
         self.0 & Self::SINGLE_LAYER_MODE != 0
+    }
+
+    // Back iteration getters
+    #[inline(always)]
+    pub const fn back_exhausted(self) -> bool {
+        self.0 & Self::BACK_EXHAUSTED != 0
+    }
+
+    #[inline(always)]
+    pub const fn back_initialized(self) -> bool {
+        self.0 & Self::BACK_INITIALIZED != 0
+    }
+
+    #[inline(always)]
+    pub const fn back_emit_equal(self) -> bool {
+        self.0 & Self::BACK_EMIT_EQUAL != 0
     }
 
     // ========================================================================
@@ -424,6 +491,28 @@ impl IterFlags {
     pub const fn disable_single_layer_mode(&mut self) {
         self.0 &= !Self::SINGLE_LAYER_MODE;
     }
+
+    // ========================================================================
+    //  Back iteration convenience methods
+    // ========================================================================
+
+    /// Mark back iterator as exhausted.
+    #[inline(always)]
+    pub const fn mark_back_exhausted(&mut self) {
+        self.0 |= Self::BACK_EXHAUSTED;
+    }
+
+    /// Mark back iterator as initialized.
+    #[inline(always)]
+    pub const fn mark_back_initialized(&mut self) {
+        self.0 |= Self::BACK_INITIALIZED;
+    }
+
+    /// Check if both front and back are exhausted (completely consumed).
+    #[inline(always)]
+    pub const fn fully_exhausted(self) -> bool {
+        (self.0 & Self::EXHAUSTED != 0) && (self.0 & Self::BACK_EXHAUSTED != 0)
+    }
 }
 
 // ============================================================================
@@ -479,31 +568,26 @@ where
     L: TreeLeafNode<S>,
     A: NodeAllocatorGeneric<S, L>,
 {
+    // ========================================================================
+    //  Forward iteration state
+    // ========================================================================
     /// Memory reclamation guard.
     guard: &'g LocalGuard<'a>,
 
-    /// Current scan position.
+    /// Current scan position (forward).
     stack: ScanStackElement<L, S>,
 
-    /// Parent layer stack for sublayer navigation.
+    /// Parent layer stack for sublayer navigation (forward).
     layer_stack: LayerStack<L>,
 
-    /// Cursor tracking current key position.
+    /// Cursor tracking current key position (forward).
     cursor_key: CursorKey,
 
-    /// End bound for the range.
-    end_bound: RangeBound<'a>,
-
-    /// Current state machine state.
+    /// Current state machine state (forward).
     state: ScanState,
 
-    /// Captured snapshot for current entry (if in Emit state).
+    /// Captured snapshot for current entry (forward, if in Emit state).
     snapshot: Option<ScanSnapshot<S>>,
-
-    /// Packed boolean flags.
-    ///
-    /// Contains: exhausted, initialized, `emit_equal`, `needs_duplicate_check`, `single_layer_mode`
-    flags: IterFlags,
 
     /// Tracks the output pointer from `initialize()`'s snapshot.
     ///
@@ -527,6 +611,45 @@ where
     /// requires allocation tracking because it converts `S::Output` → raw pointer.
     last_output_ptr: Option<*mut u8>,
 
+    // ========================================================================
+    //  Reverse iteration state (for DoubleEndedIterator)
+    // ========================================================================
+    /// Current scan position (backward).
+    back_stack: BackStackElement<L, S>,
+
+    /// Parent layer stack for sublayer navigation (backward).
+    back_layer_stack: LayerStack<L>,
+
+    /// Cursor tracking current key position (backward).
+    back_cursor_key: CursorKey,
+
+    /// Reverse scan helper (tracks `upper_bound` state).
+    back_helper: ReverseScanHelper,
+
+    /// Current state machine state (backward).
+    back_state: ScanStateBack,
+
+    /// Captured snapshot for current entry (backward, if in Emit state).
+    back_snapshot: Option<ScanSnapshot<S>>,
+
+    // ========================================================================
+    //  Shared state
+    // ========================================================================
+    /// Tree root pointer (needed for back initialization).
+    tree_root: *const u8,
+
+    /// Start bound for the range (needed for back bound checking).
+    start_bound: RangeBound<'a>,
+
+    /// End bound for the range (needed for forward bound checking).
+    end_bound: RangeBound<'a>,
+
+    /// Packed boolean flags.
+    ///
+    /// Contains: exhausted, initialized, `emit_equal`, `needs_duplicate_check`, `single_layer_mode`,
+    /// `back_initialized`, `back_exhausted`, `back_emit_equal`
+    flags: IterFlags,
+
     /// Marker for lifetime and type parameter covariance.
     _marker: PhantomData<&'a A>,
 }
@@ -542,6 +665,9 @@ where
             .field("exhausted", &self.flags.exhausted())
             .field("initialized", &self.flags.initialized())
             .field("state", &self.state)
+            .field("back_exhausted", &self.flags.back_exhausted())
+            .field("back_initialized", &self.flags.back_initialized())
+            .field("back_state", &self.back_state)
             .finish_non_exhaustive()
     }
 }
@@ -612,16 +738,40 @@ where
             start_ok && end_ok
         };
 
+        // Determine back_emit_equal from end bound
+        // For reverse iteration starting at end bound:
+        // - Included: emit_equal = true (include the boundary key)
+        // - Excluded: emit_equal = false (exclude the boundary key)
+        // - Unbounded: emit_equal = true (start from max, emit everything)
+        let back_emit_equal = match &end {
+            RangeBound::Unbounded | RangeBound::Included(_) => true,
+            RangeBound::Excluded(_) => false,
+        };
+
         Self {
+            // Forward iteration state
             guard,
             stack,
             layer_stack: ArrayVec::new(),
             cursor_key,
-            end_bound: end,
             state: ScanState::FindNext, // Will be set properly in first iteration
             snapshot: None,
-            flags: IterFlags::with_values(emit_equal, single_layer_mode),
             last_output_ptr: None,
+
+            // Reverse iteration state (lazily initialized)
+            back_stack: BackStackElement::new(root),
+            back_layer_stack: ArrayVec::new(),
+            back_cursor_key: CursorKey::for_reverse_scan(&end),
+            back_helper: ReverseScanHelper::new(),
+            back_state: ScanStateBack::FindPrev,
+            back_snapshot: None,
+
+            // Shared state
+            tree_root: root,
+            start_bound: start,
+            end_bound: end,
+            flags: IterFlags::with_both_bounds(emit_equal, single_layer_mode, back_emit_equal),
+
             _marker: PhantomData,
         }
     }
@@ -715,6 +865,16 @@ where
                         return None;
                     }
 
+                    // Check meeting condition: front caught up to back
+                    if self.flags.back_initialized() && !self.flags.back_exhausted() {
+                        let back_key = self.back_cursor_key.full_key();
+                        if key >= back_key {
+                            self.flags.mark_exhausted();
+                            self.flags.mark_back_exhausted();
+                            return None;
+                        }
+                    }
+
                     // Take snapshot
                     let snapshot = self.snapshot.take()?;
 
@@ -782,6 +942,167 @@ where
             }
         }
     }
+
+    // ========================================================================
+    //  Reverse Iteration (DoubleEndedIterator support)
+    // ========================================================================
+
+    /// Initialize the back cursor for reverse iteration.
+    ///
+    /// Called lazily on the first `next_back()` call.
+    fn initialize_back(&mut self) {
+        if self.flags.back_initialized() {
+            return;
+        }
+        self.flags.mark_back_initialized();
+
+        // Handle empty tree
+        if self.tree_root.is_null() {
+            self.flags.mark_back_exhausted();
+            return;
+        }
+
+        // For unbounded end, set upper_bound so lower_reverse returns last slot
+        if self.end_bound.is_unbounded() {
+            self.back_helper.upper_bound = true;
+        }
+
+        // Run initial reverse descent loop
+        loop {
+            let (state, snapshot) = ReverseScan::find_initial_reverse(
+                self.back_stack.get_root(),
+                &mut self.back_stack,
+                &mut self.back_cursor_key,
+                &mut self.back_layer_stack,
+                self.flags.back_emit_equal(),
+                &mut self.back_helper,
+                self.guard,
+            );
+
+            match state {
+                ScanStateBack::Down => {
+                    // Descend into sublayer
+                    ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
+                    // Continue loop to call find_initial_reverse with new layer root
+                }
+
+                ScanStateBack::Retry => {
+                    // Version conflict, retry
+                }
+
+                _ => {
+                    // Ready to iterate (Emit, FindPrev, Up)
+                    self.back_state = state;
+                    self.back_snapshot = snapshot;
+
+                    // Clear upper_bound after first successful positioning
+                    if self.back_state.is_emit() {
+                        self.back_helper.mark_key_complete();
+                    }
+
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Advance the back iterator state machine.
+    #[inline]
+    fn advance_back(&mut self) -> Option<ScanEntry<S::Output>> {
+        loop {
+            match self.back_state {
+                ScanStateBack::Emit => {
+                    // Check start bound (reverse of end bound check)
+                    let key = self.back_cursor_key.full_key();
+                    if !self.start_bound.contains_reverse(key) {
+                        self.flags.mark_back_exhausted();
+                        return None;
+                    }
+
+                    // Check meeting condition: back caught up to front
+                    if self.flags.initialized() && !self.flags.exhausted() {
+                        let front_key = self.cursor_key.full_key();
+                        if key <= front_key {
+                            self.flags.mark_back_exhausted();
+                            self.flags.mark_exhausted();
+                            return None;
+                        }
+                    }
+
+                    // Take snapshot
+                    let snapshot = self.back_snapshot.take()?;
+
+                    // Build entry
+                    let entry = ScanEntry::new(key.to_vec(), snapshot.value);
+
+                    // CRITICAL: Clear upper_bound on every emission (DeepReview §3.3)
+                    self.back_helper.mark_key_complete();
+
+                    // Transition to FindPrev
+                    self.back_state = ScanStateBack::FindPrev;
+
+                    return Some(entry);
+                }
+
+                ScanStateBack::FindPrev => {
+                    let (new_state, snapshot) = ReverseScan::find_prev(
+                        &mut self.back_stack,
+                        &mut self.back_cursor_key,
+                        &mut self.back_layer_stack,
+                        &mut self.back_helper,
+                        self.guard,
+                    );
+
+                    self.back_state = new_state;
+                    self.back_snapshot = snapshot;
+                }
+
+                ScanStateBack::Down => {
+                    // Handle sublayer descent
+                    ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
+
+                    // Call find_initial_reverse for the sublayer
+                    let (state, snapshot) = ReverseScan::find_initial_reverse(
+                        self.back_stack.get_root(),
+                        &mut self.back_stack,
+                        &mut self.back_cursor_key,
+                        &mut self.back_layer_stack,
+                        false, // emit_equal: false for scan-discovered descent
+                        &mut self.back_helper,
+                        self.guard,
+                    );
+
+                    self.back_state = state;
+                    self.back_snapshot = snapshot;
+                }
+
+                ScanStateBack::Up => {
+                    if !ReverseScan::handle_up_back(
+                        &mut self.back_stack,
+                        &mut self.back_cursor_key,
+                        &mut self.back_layer_stack,
+                        &mut self.back_helper,
+                        self.guard,
+                    ) {
+                        // No parent layer, scan complete
+                        self.flags.mark_back_exhausted();
+                        return None;
+                    }
+                    self.back_state = ScanStateBack::FindPrev;
+                }
+
+                ScanStateBack::Retry => {
+                    let (new_state, _) = ReverseScan::reposition_back(
+                        &mut self.back_stack,
+                        &mut self.back_cursor_key,
+                        &mut self.back_helper,
+                        self.guard,
+                    );
+                    self.back_state = new_state;
+                }
+            }
+        }
+    }
 }
 
 impl<S, L, A> Iterator for RangeIter<'_, '_, S, L, A>
@@ -808,6 +1129,18 @@ where
             }
         }
 
+        // Meeting detection: if back is initialized, check if we've crossed
+        if self.flags.back_initialized() && !self.flags.back_exhausted() {
+            let front_key = self.cursor_key.full_key();
+            let back_key = self.back_cursor_key.full_key();
+            if front_key >= back_key {
+                // Mark both as exhausted when they meet
+                self.flags.mark_exhausted();
+                self.flags.mark_back_exhausted();
+                return None;
+            }
+        }
+
         self.advance()
     }
 
@@ -819,6 +1152,45 @@ where
             // We can't know the exact count without iterating
             (0, None)
         }
+    }
+}
+
+impl<S, L, A> DoubleEndedIterator for RangeIter<'_, '_, S, L, A>
+where
+    S: ValueSlot,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync + Clone,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
+{
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        // Check if back cursor is exhausted
+        if self.flags.back_exhausted() {
+            return None;
+        }
+
+        // Lazy initialization of back cursor
+        if !self.flags.back_initialized() {
+            self.initialize_back();
+            if self.flags.back_exhausted() {
+                return None;
+            }
+        }
+
+        // Check meeting condition: if front has advanced past where back would be
+        if self.flags.initialized() && !self.flags.exhausted() {
+            let front_key = self.cursor_key.full_key();
+            let back_key = self.back_cursor_key.full_key();
+            if back_key <= front_key {
+                // Mark both as exhausted when they meet
+                self.flags.mark_back_exhausted();
+                self.flags.mark_exhausted();
+                return None;
+            }
+        }
+
+        self.advance_back()
     }
 }
 
@@ -1698,6 +2070,185 @@ where
 
             // All non-Emit states (Up, Down, Retry, FindNext) continue the loop.
             // Exhaustion is detected by stack.is_null() or handle_up() returning false.
+        }
+    }
+
+    // ========================================================================
+    //  Reverse Iteration with Batch Processing
+    // ========================================================================
+
+    /// High-performance reverse iteration with zero-copy references.
+    ///
+    /// This is the fastest reverse iteration method. It processes entire
+    /// leaves in tight loops, minimizing per-entry overhead.
+    ///
+    /// # Performance Characteristics
+    ///
+    /// - Processes all entries in a leaf before moving to previous leaf
+    /// - Single OCC validation per leaf
+    /// - No function call overhead per entry within a leaf
+    /// - Falls back to state machine for layer transitions
+    ///
+    /// Expected 2-3x improvement over standard `next_back()` iteration.
+    ///
+    /// # Arguments
+    ///
+    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue.
+    ///
+    /// # Returns
+    ///
+    /// Number of entries visited.
+    #[inline]
+    #[expect(clippy::too_many_lines)]
+    pub fn rev_for_each_ref<F>(mut self, mut visitor: F) -> usize
+    where
+        F: FnMut(&[u8], &S::Value) -> bool,
+    {
+        use super::find_rev::{
+            LeafBatchResultBack, ReverseScan, advance_prev_leaf_ptr, process_prev_leaf_batch_ptr,
+        };
+
+        if self.flags.back_exhausted() {
+            return 0;
+        }
+
+        // Lazy initialization of back cursor
+        if !self.flags.back_initialized() {
+            self.initialize_back();
+            if self.flags.back_exhausted() {
+                return 0;
+            }
+        }
+
+        let mut count: usize = 0;
+
+        // Handle initial Emit state from initialize_back() if present
+        if self.back_state == ScanStateBack::Emit {
+            if let Some(snapshot) = self.back_snapshot.take() {
+                let key: &[u8] = self.back_cursor_key.full_key();
+
+                if !self.start_bound.contains_reverse(key) {
+                    self.flags.mark_back_exhausted();
+                    return 0;
+                }
+
+                let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
+                let guard = CleanupGuard::<S> {
+                    ptr,
+                    _marker: PhantomData,
+                };
+                let value_ref: &S::Value = unsafe { &*ptr.cast::<S::Value>() };
+
+                count += 1;
+                let should_continue = visitor(key, value_ref);
+                drop(guard);
+
+                if !should_continue {
+                    return count;
+                }
+            }
+            self.back_state = ScanStateBack::FindPrev;
+        }
+
+        loop {
+            // Handle rare states (layer transitions, retries)
+            match self.back_state {
+                ScanStateBack::Down => {
+                    ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
+                    self.back_state = ScanStateBack::Retry;
+                    continue;
+                }
+
+                ScanStateBack::Up => {
+                    if !ReverseScan::handle_up_back(
+                        &mut self.back_stack,
+                        &mut self.back_cursor_key,
+                        &mut self.back_layer_stack,
+                        &mut self.back_helper,
+                        self.guard,
+                    ) {
+                        self.flags.mark_back_exhausted();
+                        return count;
+                    }
+                    self.back_state = ScanStateBack::FindPrev;
+                    continue;
+                }
+
+                ScanStateBack::Retry => {
+                    let (new_state, _) = ReverseScan::reposition_back(
+                        &mut self.back_stack,
+                        &mut self.back_cursor_key,
+                        &mut self.back_helper,
+                        self.guard,
+                    );
+                    self.back_state = new_state;
+                    continue;
+                }
+
+                ScanStateBack::Emit | ScanStateBack::FindPrev => {}
+            }
+
+            // Check for null stack (layer exhausted)
+            if self.back_stack.get_leaf_ptr().is_null() {
+                if self.back_layer_stack.is_empty() {
+                    self.flags.mark_back_exhausted();
+                    return count;
+                }
+                self.back_state = ScanStateBack::Up;
+                continue;
+            }
+
+            // Check leaf deletion
+            let leaf: &L = unsafe { &*self.back_stack.get_leaf_ptr() };
+            if leaf.version().is_deleted() {
+                self.back_state = ScanStateBack::Retry;
+                continue;
+            }
+
+            // ================================================================
+            // INTRA-LEAF BATCH: Process all remaining entries in this leaf
+            // ================================================================
+
+            let result = process_prev_leaf_batch_ptr(
+                &mut self.back_stack,
+                &mut self.back_cursor_key,
+                &mut self.back_layer_stack,
+                &self.start_bound,
+                &mut self.back_helper,
+                &mut visitor,
+                &mut count,
+            );
+
+            match result {
+                LeafBatchResultBack::LeafExhausted => {
+                    // Advance to previous leaf
+                    if !advance_prev_leaf_ptr(
+                        &mut self.back_stack,
+                        &mut self.back_cursor_key,
+                        self.guard,
+                    ) {
+                        // No previous leaf - check if we need to go up
+                        if self.back_layer_stack.is_empty() {
+                            self.flags.mark_back_exhausted();
+                            return count;
+                        }
+                        self.back_state = ScanStateBack::Up;
+                    }
+                }
+                LeafBatchResultBack::LayerEncountered => {
+                    self.back_state = ScanStateBack::Down;
+                }
+                LeafBatchResultBack::VersionChanged => {
+                    self.back_state = ScanStateBack::Retry;
+                }
+                LeafBatchResultBack::Stopped => {
+                    return count;
+                }
+                LeafBatchResultBack::StartBoundExceeded => {
+                    self.flags.mark_back_exhausted();
+                    return count;
+                }
+            }
         }
     }
 }

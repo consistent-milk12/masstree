@@ -1,6 +1,8 @@
 //! Benchmark raw lock performance to isolate contention overhead
 //!
-//! Run with: cargo run --example lock_benchmark --release
+//! Run with: `cargo run --example lock_benchmark --release`
+
+#![allow(clippy::unwrap_used, clippy::cast_precision_loss)]
 
 use std::hint::spin_loop;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -16,7 +18,7 @@ struct SimpleSpinlock {
 }
 
 impl SimpleSpinlock {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             value: AtomicU32::new(0),
         }
@@ -26,14 +28,13 @@ impl SimpleSpinlock {
     fn lock(&self) {
         loop {
             let v = self.value.load(Ordering::Relaxed);
-            if (v & LOCK_BIT) == 0 {
-                if self
+            if (v & LOCK_BIT) == 0
+                && self
                     .value
                     .compare_exchange_weak(v, v | LOCK_BIT, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
-                {
-                    return;
-                }
+            {
+                return;
             }
             spin_loop();
         }
@@ -44,14 +45,14 @@ impl SimpleSpinlock {
         let mut spins = 0u32;
         loop {
             let v = self.value.load(Ordering::Relaxed);
-            if (v & LOCK_BIT) == 0 {
-                if self
+
+            if (v & LOCK_BIT) == 0
+                && self
                     .value
                     .compare_exchange_weak(v, v | LOCK_BIT, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
-                {
-                    return;
-                }
+            {
+                return;
             }
             spins += 1;
             if spins < 4 {
@@ -87,7 +88,7 @@ fn bench_lock(name: &str, threads: usize, use_yield: bool) {
                 let start = Instant::now();
                 let mut local = 0u64;
 
-                while Instant::now() - start < duration {
+                while start.elapsed() < duration {
                     if use_yield {
                         lock.lock_with_yield();
                     } else {

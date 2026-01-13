@@ -374,7 +374,6 @@ where
     /// - Skips layer descent tracking
     ///
     /// Falls back to multi-layer path if a layer pointer is unexpectedly encountered.
-
     /// Concurrent insert with B-link local retry optimization.
     ///
     /// Uses two loops:
@@ -636,7 +635,6 @@ where
                                 }
 
                                 leaf = advanced_leaf;
-                                continue 'forward;
                             }
                         }
                     }

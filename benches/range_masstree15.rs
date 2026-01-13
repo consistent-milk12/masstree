@@ -1101,3 +1101,313 @@ mod split_inducing_scan {
             });
     }
 }
+
+// =============================================================================
+// 19: REVERSE SCAN - Batch-optimized reverse traversal (end to start)
+// =============================================================================
+
+#[divan::bench_group(name = "19_reverse_scan_sequential")]
+mod reverse_scan_sequential {
+    use super::*;
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys_sequential::<8>(N));
+        let tree = Arc::new(setup_masstree15(&keys));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let tree = Arc::clone(&tree);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+                            let mut total = 0usize;
+                            for _ in 0..OPS_PER_THREAD {
+                                let mut count = 0usize;
+                                tree.scan_rev_batch_ref(
+                                    RangeBound::Unbounded,
+                                    RangeBound::Unbounded,
+                                    |_, _| {
+                                        count += 1;
+                                        count < SCAN_LIMIT
+                                    },
+                                    &guard,
+                                );
+                                total += count;
+                            }
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 20: REVERSE SCAN RANDOM - Batch-optimized reverse traversal with random keys
+// =============================================================================
+
+#[divan::bench_group(name = "20_reverse_scan_random")]
+mod reverse_scan_random {
+    use super::*;
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<8>(N));
+        let tree = Arc::new(setup_masstree15(&keys));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let tree = Arc::clone(&tree);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+                            let mut total = 0usize;
+                            for _ in 0..OPS_PER_THREAD {
+                                let mut count = 0usize;
+                                tree.scan_rev_batch_ref(
+                                    RangeBound::Unbounded,
+                                    RangeBound::Unbounded,
+                                    |_, _| {
+                                        count += 1;
+                                        count < SCAN_LIMIT
+                                    },
+                                    &guard,
+                                );
+                                total += count;
+                            }
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 21: REVERSE SCAN LONG KEYS - Multi-layer batch reverse traversal (64B keys)
+// =============================================================================
+
+#[divan::bench_group(name = "21_reverse_scan_long_keys")]
+mod reverse_scan_long_keys {
+    use super::*;
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys::<64>(N));
+        let tree = Arc::new(setup_masstree15(&keys));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let tree = Arc::clone(&tree);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+                            let mut total = 0usize;
+                            for _ in 0..OPS_PER_THREAD {
+                                let mut count = 0usize;
+                                tree.scan_rev_batch_ref(
+                                    RangeBound::Unbounded,
+                                    RangeBound::Unbounded,
+                                    |_, _| {
+                                        count += 1;
+                                        count < SCAN_LIMIT
+                                    },
+                                    &guard,
+                                );
+                                total += count;
+                            }
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 22: BIDIRECTIONAL SCAN - Alternating forward/reverse (meeting in middle)
+// =============================================================================
+
+#[divan::bench_group(name = "22_bidirectional_scan")]
+mod bidirectional_scan {
+    use super::*;
+
+    const BIDIR_LIMIT: usize = 50; // Take 50 from each end
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys_sequential::<8>(N));
+        let tree = Arc::new(setup_masstree15(&keys));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let tree = Arc::clone(&tree);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+                            let mut total = 0usize;
+                            for _ in 0..OPS_PER_THREAD {
+                                let mut iter = tree.iter(&guard);
+                                let mut count = 0usize;
+                                // Alternate: take from front, then back
+                                for _ in 0..BIDIR_LIMIT {
+                                    if iter.next().is_some() {
+                                        count += 1;
+                                    }
+                                    if iter.next_back().is_some() {
+                                        count += 1;
+                                    }
+                                }
+                                total += count;
+                            }
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 23: REVERSE FULL SCAN AGGREGATE - Batch sum values in reverse order
+// =============================================================================
+
+#[divan::bench_group(name = "23_reverse_full_aggregate")]
+mod reverse_full_aggregate {
+    use super::*;
+
+    const SCAN_N: usize = 50_000;
+    const FULL_SCAN_OPS: usize = 100;
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys_sequential::<8>(SCAN_N));
+        let tree = Arc::new(setup_masstree15(&keys));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * FULL_SCAN_OPS))
+            .bench_local(|| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let tree = Arc::clone(&tree);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+                            let mut grand_total = 0u64;
+                            for _ in 0..FULL_SCAN_OPS {
+                                let mut sum = 0u64;
+                                tree.scan_rev_batch_ref(
+                                    RangeBound::Unbounded,
+                                    RangeBound::Unbounded,
+                                    |_, v| {
+                                        sum += *v;
+                                        true
+                                    },
+                                    &guard,
+                                );
+                                grand_total += sum;
+                            }
+                            black_box(grand_total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 24: REVERSE SCAN HIERARCHICAL - Batch multi-layer keys with prefix structure
+// =============================================================================
+
+#[divan::bench_group(name = "24_reverse_hierarchical")]
+mod reverse_hierarchical {
+    use super::*;
+
+    const NAMESPACES: usize = 100;
+    const CATEGORIES: usize = 100;
+    const ITEMS: usize = 100;
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys_hierarchical::<32>(NAMESPACES, CATEGORIES, ITEMS));
+        let tree = Arc::new(setup_masstree15(&keys));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .bench_local(|| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let tree = Arc::clone(&tree);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+                            let mut total = 0usize;
+                            for _ in 0..OPS_PER_THREAD {
+                                let mut count = 0usize;
+                                tree.scan_rev_batch_ref(
+                                    RangeBound::Unbounded,
+                                    RangeBound::Unbounded,
+                                    |_, _| {
+                                        count += 1;
+                                        count < SCAN_LIMIT
+                                    },
+                                    &guard,
+                                );
+                                total += count;
+                            }
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}

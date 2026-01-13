@@ -1,4 +1,9 @@
-#![allow(clippy::pedantic, clippy::needless_collect, clippy::indexing_slicing)]
+#![allow(
+    clippy::panic,
+    clippy::pedantic,
+    clippy::needless_collect,
+    clippy::indexing_slicing
+)]
 
 use super::{LockedParentResult, NodeCleaner};
 use crate::internode::InternodeNode;

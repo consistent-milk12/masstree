@@ -12,6 +12,11 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::indexing_slicing)]
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::inline_always)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#![expect(clippy::struct_excessive_bools)]
 
 use clap::Parser;
 use core_affinity::CoreId;
@@ -20,10 +25,52 @@ use serde::Serialize;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// =============================================================================
+// Global Timeout Flag (matches C++ volatile bool timeout[2])
+// =============================================================================
+
+const C: u32 = 2_654_435_761;
+
+/// Global timeout flag, set by timer thread (matches C++ SIGALRM approach).
+/// Using a single flag since most benchmarks only need put-phase timeout.
+static TIMEOUT: AtomicBool = AtomicBool::new(false);
+
+/// Generation counter to prevent stale timer threads from affecting later benchmarks.
+/// Each new benchmark increments this; timer threads only set TIMEOUT if their
+/// generation matches the current one.
+static TIMEOUT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Reset timeout flag and increment generation before each benchmark.
+/// This invalidates any timer threads from previous benchmarks.
+fn reset_timeout() {
+    TIMEOUT.store(false, Ordering::Relaxed);
+    TIMEOUT_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Check if benchmark should stop (near-zero overhead - single atomic load)
+#[inline(always)]
+fn timed_out() -> bool {
+    TIMEOUT.load(Ordering::Relaxed)
+}
+
+/// Spawn a timer thread that sets the timeout flag after `duration`.
+/// Uses generation-based invalidation to prevent stale timers from affecting
+/// later benchmarks if the current one finishes early.
+fn start_timeout_timer(duration: Duration) {
+    let generation = TIMEOUT_GENERATION.load(Ordering::Relaxed);
+    thread::spawn(move || {
+        thread::sleep(duration);
+        // Only set timeout if this timer's generation is still current
+        if TIMEOUT_GENERATION.load(Ordering::Relaxed) == generation {
+            TIMEOUT.store(true, Ordering::Relaxed);
+        }
+    });
+}
 
 // =============================================================================
 // Thread Pinning
@@ -72,7 +119,7 @@ struct Args {
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
 
-    /// Enable validation mode (report read mismatches, like C++ get_check)
+    /// Enable validation mode (report read mismatches, like C++ `get_check`)
     /// Note: May report errors due to known tree bugs at high scale
     #[arg(long = "check")]
     check: bool,
@@ -106,7 +153,7 @@ struct QuickIstr {
 
 impl QuickIstr {
     #[inline]
-    fn new(mut x: u64) -> Self {
+    const fn new(mut x: u64) -> Self {
         let mut buf = [0u8; 32];
         let mut pos = 31;
         loop {
@@ -121,7 +168,7 @@ impl QuickIstr {
     }
 
     #[inline]
-    fn with_minlen(mut x: u64, minlen: usize) -> Self {
+    const fn with_minlen(mut x: u64, minlen: usize) -> Self {
         let mut buf = [0u8; 32];
         let mut pos = 31;
         let mut len = 0;
@@ -146,7 +193,7 @@ impl QuickIstr {
 /// Returns a key with minimum 8 decimal digits (grows for n >= 100000000).
 /// This matches C++ `quick_istr(n, 8)` which uses min-width, not fixed-width.
 #[inline]
-fn key8(n: u64) -> QuickIstr {
+const fn key8(n: u64) -> QuickIstr {
     QuickIstr::with_minlen(n, 8)
 }
 
@@ -169,13 +216,13 @@ impl KvRandom {
     }
 
     #[inline]
-    fn lcg_step(&mut self) -> u32 {
+    const fn lcg_step(&mut self) -> u32 {
         self.seed = self.seed.wrapping_mul(Self::A).wrapping_add(Self::C);
         self.seed
     }
 
     #[inline]
-    fn rand(&mut self) -> u32 {
+    const fn rand(&mut self) -> u32 {
         self.lcg_step();
         let x0 = self.lcg_step();
         self.lcg_step();
@@ -189,7 +236,7 @@ impl KvRandom {
     }
 
     #[inline]
-    fn uniform(&mut self, max: u32) -> u32 {
+    const fn uniform(&mut self, max: u32) -> u32 {
         self.rand() % max
     }
 }
@@ -250,10 +297,7 @@ impl RunResults {
                 let remaining_days = days_since_epoch % 365;
                 let month = remaining_days / 30 + 1;
                 let day = remaining_days % 30 + 1;
-                format!(
-                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                    years, month, day, hours, mins, secs
-                )
+                format!("{years:04}-{month:02}-{day:02}T{hours:02}:{mins:02}:{secs:02}Z")
             })
             .unwrap_or_else(|_| "unknown".to_string());
 
@@ -353,7 +397,7 @@ fn print_results(test: &str, threads: usize, results: &[ThreadResult]) {
         }
     } else {
         // Human-readable table format
-        println!("\n{} with {} threads:", test, threads);
+        println!("\n{test} with {threads} threads:");
         println!(
             "{:>8} {:>12} {:>14} {:>12} {:>14} {:>12} {:>14}",
             "thread", "puts", "puts/sec", "gets", "gets/sec", "ops", "ops/sec"
@@ -420,7 +464,7 @@ fn bench_rw1(
     duration: Duration,
     limit: u64,
     check: bool,
-    core_ids: Arc<Vec<CoreId>>,
+    core_ids: &Arc<Vec<CoreId>>,
 ) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let start_barrier = Arc::new(Barrier::new(threads));
@@ -438,13 +482,17 @@ fn bench_rw1(
             .collect(),
     );
 
+    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    reset_timeout();
+    start_timeout_timer(duration);
+
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let start_barrier = Arc::clone(&start_barrier);
             let get_barrier = Arc::clone(&get_barrier);
             let results = Arc::clone(&results);
-            let core_ids = Arc::clone(&core_ids);
+            let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
                 let guard = tree.guard();
@@ -453,12 +501,11 @@ fn bench_rw1(
 
                 start_barrier.wait();
 
-                // Put phase
+                // Put phase - use atomic timeout flag instead of Instant::now()
                 let put_start = Instant::now();
-                let deadline = put_start + duration;
                 let mut keys = Vec::with_capacity(1_000_000);
 
-                while Instant::now() < deadline && (keys.len() as u64) <= limit {
+                while !timed_out() && (keys.len() as u64) <= limit {
                     let x = rng.rand();
                     let key = QuickIstr::new(u64::from(x));
                     let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
@@ -482,7 +529,7 @@ fn bench_rw1(
                     keys.swap(i, j);
                 }
 
-                // Get phase
+                // Get phase - exactly `puts` iterations, no timeout (matches C++)
                 let get_start = Instant::now();
                 let mut sum = 0u64;
                 let mut check_errors = 0u64;
@@ -499,7 +546,7 @@ fn bench_rw1(
                     }
                 }
                 if check && check_errors > 0 {
-                    eprintln!("rw1 thread {}: {} check errors", tid, check_errors);
+                    eprintln!("rw1 thread {tid}: {check_errors} check errors");
                 }
                 let get_time = get_start.elapsed().as_secs_f64();
                 std::hint::black_box(sum);
@@ -541,7 +588,7 @@ fn bench_rw2(
     name: &str,
     limit: u64,
     check: bool,
-    core_ids: Arc<Vec<CoreId>>,
+    core_ids: &Arc<Vec<CoreId>>,
 ) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
@@ -551,31 +598,33 @@ fn bench_rw2(
             .collect(),
     );
 
+    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    reset_timeout();
+    start_timeout_timer(duration);
+
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
             let results = Arc::clone(&results);
             let name = name.to_string();
-            let core_ids = Arc::clone(&core_ids);
+            let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
                 let guard = tree.guard();
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
                 let offset = rng.rand();
-                const C: u32 = 2_654_435_761;
 
                 barrier.wait();
 
                 let start = Instant::now();
-                let deadline = start + duration;
                 let mut puts = 0u64;
                 let mut gets = 0u64;
                 let mut sum = 0u64;
 
                 let mut check_errors = 0u64;
-                while Instant::now() < deadline && (puts + gets) <= limit {
+                while !timed_out() && (puts + gets) <= limit {
                     if puts == 0 || !rng.bernoulli(get_frac) {
                         let x = (offset.wrapping_add(puts as u32)).wrapping_mul(C);
                         let key = QuickIstr::new(u64::from(x));
@@ -598,7 +647,7 @@ fn bench_rw2(
                     }
                 }
                 if check && check_errors > 0 {
-                    eprintln!("{} thread {}: {} check errors", name, tid, check_errors);
+                    eprintln!("{name} thread {tid}: {check_errors} check errors");
                 }
                 let elapsed = start.elapsed().as_secs_f64();
                 std::hint::black_box(sum);
@@ -650,48 +699,59 @@ fn bench_rw3(
     duration: Duration,
     limit: u64,
     check: bool,
-    core_ids: Arc<Vec<CoreId>>,
+    core_ids: &Arc<Vec<CoreId>>,
 ) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
+    let get_barrier = Arc::new(Barrier::new(threads)); // Barrier between put and get phases
     let results: Arc<Vec<_>> = Arc::new(
         (0..threads)
             .map(|_| (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)))
             .collect(),
     );
 
+    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    reset_timeout();
+    start_timeout_timer(duration);
+
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
+            let get_barrier = Arc::clone(&get_barrier);
             let results = Arc::clone(&results);
-            let core_ids = Arc::clone(&core_ids);
+            let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
                 let guard = tree.guard();
 
                 barrier.wait();
 
-                // Put phase
+                // Put phase - sequential keys, duration-bounded via timeout flag
                 let put_start = Instant::now();
-                let deadline = put_start + duration;
                 let mut n = 0u64;
 
-                while Instant::now() < deadline && n <= limit {
+                while !timed_out() && n <= limit {
                     let key = key8(n);
                     let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
                     n += 1;
                 }
                 let put_time = put_start.elapsed().as_secs_f64();
 
-                // Get phase
+                // Sync point (matches C++ wait_all between phases)
+                get_barrier.wait();
+
+                // Get phase - POINT LOOKUPS, exactly n iterations (matches C++ exactly)
+                // C++ does: for (unsigned i = 0; i < n; ++i) { client.get_check_key8(i, i + 1); }
                 let get_start = Instant::now();
                 let mut sum = 0u64;
                 let mut check_errors = 0u64;
+
                 for i in 0..n {
                     let key = key8(i);
+                    let expected = i + 1;
                     if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                        if check && v != i + 1 {
+                        if check && v != expected {
                             check_errors += 1;
                         }
                         sum = sum.wrapping_add(v);
@@ -700,7 +760,7 @@ fn bench_rw3(
                     }
                 }
                 if check && check_errors > 0 {
-                    eprintln!("rw3 thread {}: {} check errors", tid, check_errors);
+                    eprintln!("rw3 thread {tid}: {check_errors} check errors");
                 }
                 let get_time = get_start.elapsed().as_secs_f64();
                 std::hint::black_box(sum);
@@ -742,50 +802,61 @@ fn bench_rw4(
     duration: Duration,
     limit: u64,
     check: bool,
-    core_ids: Arc<Vec<CoreId>>,
+    core_ids: &Arc<Vec<CoreId>>,
 ) -> Vec<ThreadResult> {
     const TOP: u64 = 2_147_483_647;
 
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
+    let get_barrier = Arc::new(Barrier::new(threads)); // Barrier between put and get phases
     let results: Arc<Vec<_>> = Arc::new(
         (0..threads)
             .map(|_| (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)))
             .collect(),
     );
 
+    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    reset_timeout();
+    start_timeout_timer(duration);
+
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
+            let get_barrier = Arc::clone(&get_barrier);
             let results = Arc::clone(&results);
-            let core_ids = Arc::clone(&core_ids);
+            let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
                 let guard = tree.guard();
 
                 barrier.wait();
 
-                // Put phase
+                // Put phase - reverse sequential keys, duration-bounded via timeout flag
                 let put_start = Instant::now();
-                let deadline = put_start + duration;
                 let mut n = 0u64;
 
-                while Instant::now() < deadline && n <= limit {
+                while !timed_out() && n <= limit {
                     let key = key8(TOP - n);
                     let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
                     n += 1;
                 }
                 let put_time = put_start.elapsed().as_secs_f64();
 
-                // Get phase
+                // Sync point (matches C++ wait_all between phases)
+                get_barrier.wait();
+
+                // Get phase - POINT LOOKUPS in reverse order, exactly n iterations
+                // C++ does: for (unsigned i = 0; i < n; ++i) { client.get_check_key8(top - i, i + 1); }
                 let get_start = Instant::now();
                 let mut sum = 0u64;
                 let mut check_errors = 0u64;
+
                 for i in 0..n {
                     let key = key8(TOP - i);
+                    let expected = i + 1;
                     if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                        if check && v != i + 1 {
+                        if check && v != expected {
                             check_errors += 1;
                         }
                         sum = sum.wrapping_add(v);
@@ -794,7 +865,7 @@ fn bench_rw4(
                     }
                 }
                 if check && check_errors > 0 {
-                    eprintln!("rw4 thread {}: {} check errors", tid, check_errors);
+                    eprintln!("rw4 thread {tid}: {check_errors} check errors");
                 }
                 let get_time = get_start.elapsed().as_secs_f64();
                 std::hint::black_box(sum);
@@ -831,7 +902,12 @@ fn bench_rw4(
     thread_results
 }
 
-fn bench_same(threads: usize, duration: Duration, limit: u64, core_ids: Arc<Vec<CoreId>>) -> Vec<ThreadResult> {
+fn bench_same(
+    threads: usize,
+    duration: Duration,
+    limit: u64,
+    core_ids: &Arc<Vec<CoreId>>,
+) -> Vec<ThreadResult> {
     const NUM_KEYS: u32 = 10;
 
     let tree = Arc::new(MassTree15Inline::<u64>::new());
@@ -842,12 +918,16 @@ fn bench_same(threads: usize, duration: Duration, limit: u64, core_ids: Arc<Vec<
             .collect(),
     );
 
+    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    reset_timeout();
+    start_timeout_timer(duration);
+
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
             let results = Arc::clone(&results);
-            let core_ids = Arc::clone(&core_ids);
+            let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
                 let guard = tree.guard();
@@ -857,10 +937,9 @@ fn bench_same(threads: usize, duration: Duration, limit: u64, core_ids: Arc<Vec<
                 barrier.wait();
 
                 let start = Instant::now();
-                let deadline = start + duration;
                 let mut n = 0u64;
 
-                while Instant::now() < deadline && n <= limit {
+                while !timed_out() && n <= limit {
                     let x = rng.uniform(NUM_KEYS);
                     let key = QuickIstr::new(u64::from(x));
                     let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
@@ -894,11 +973,15 @@ fn bench_same(threads: usize, duration: Duration, limit: u64, core_ids: Arc<Vec<
     thread_results
 }
 
-/// C++ kvtest_uscale semantics:
-/// - seed = kvtest_first_seed + tid (NOT tid % 48)
-/// - nseqkeys = 16 * ruscale_partsz = 140,000,000
+/// C++ `kvtest_uscale` semantics:
+/// - seed = `kvtest_first_seed + tid` (NOT tid % 48)
+/// - `nseqkeys = 16 * ruscale_partsz = 140,000,000`
 /// - NO pre-population - writes to empty tree
-fn bench_uscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) -> Vec<ThreadResult> {
+fn bench_uscale(
+    threads: usize,
+    duration: Duration,
+    core_ids: &Arc<Vec<CoreId>>,
+) -> Vec<ThreadResult> {
     // C++ constants: ruscale_partsz = (140 * 1000000) / 16, nseqkeys = 16 * ruscale_partsz
     const NSEQKEYS: u64 = 140_000_000;
 
@@ -910,12 +993,16 @@ fn bench_uscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) 
             .collect(),
     );
 
+    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    reset_timeout();
+    start_timeout_timer(duration);
+
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
             let results = Arc::clone(&results);
-            let core_ids = Arc::clone(&core_ids);
+            let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
                 let guard = tree.guard();
@@ -926,10 +1013,9 @@ fn bench_uscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) 
                 barrier.wait();
 
                 let start = Instant::now();
-                let deadline = start + duration;
                 let mut n = 0u64;
 
-                while Instant::now() < deadline {
+                while !timed_out() {
                     let x = u64::from(rng.rand()) % NSEQKEYS;
                     let key = QuickIstr::new(x);
                     let _ = tree.insert_with_guard(key.as_bytes(), x + 1, &guard);
@@ -963,7 +1049,11 @@ fn bench_uscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) 
     thread_results
 }
 
-fn bench_wscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) -> Vec<ThreadResult> {
+fn bench_wscale(
+    threads: usize,
+    duration: Duration,
+    core_ids: &Arc<Vec<CoreId>>,
+) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
     let results: Arc<Vec<_>> = Arc::new(
@@ -972,12 +1062,16 @@ fn bench_wscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) 
             .collect(),
     );
 
+    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    reset_timeout();
+    start_timeout_timer(duration);
+
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
             let results = Arc::clone(&results);
-            let core_ids = Arc::clone(&core_ids);
+            let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
                 let guard = tree.guard();
@@ -987,10 +1081,9 @@ fn bench_wscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) 
                 barrier.wait();
 
                 let start = Instant::now();
-                let deadline = start + duration;
                 let mut n = 0u64;
 
-                while Instant::now() < deadline {
+                while !timed_out() {
                     let x = u64::from(rng.rand());
                     let key = QuickIstr::new(x);
                     let _ = tree.insert_with_guard(key.as_bytes(), x + 1, &guard);
@@ -1030,7 +1123,7 @@ fn bench_wscale(threads: usize, duration: Duration, core_ids: Arc<Vec<CoreId>>) 
 
 fn get_num_cpus() -> usize {
     std::thread::available_parallelism()
-        .map(|p| p.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(1)
 }
 
@@ -1054,7 +1147,7 @@ fn main() {
         // Default test set matching C++ convention
         vec!["rw1", "rw2g98", "rw3", "rw4", "same", "uscale", "wscale"]
     } else {
-        args.tests.iter().map(|s| s.as_str()).collect()
+        args.tests.iter().map(String::as_str).collect()
     };
 
     // Get core IDs for thread pinning (empty vec if not pinning)
@@ -1079,7 +1172,7 @@ fn main() {
             threads,
             duration.as_secs(),
             if limit < u64::MAX {
-                format!(", limit={}", limit)
+                format!(", limit={limit}")
             } else {
                 String::new()
             },
@@ -1104,7 +1197,8 @@ fn main() {
         for test in &tests {
             match *test {
                 "rw1" => {
-                    let results = bench_rw1(threads, duration, limit, check, Arc::clone(&core_ids));
+                    let results =
+                        bench_rw1(threads, duration, limit, check, &Arc::clone(&core_ids));
                     if should_save {
                         run_results.add_benchmark("rw1", results);
                     }
@@ -1118,7 +1212,7 @@ fn main() {
                         "rw2",
                         limit,
                         check,
-                        Arc::clone(&core_ids),
+                        &Arc::clone(&core_ids),
                     );
                     if should_save {
                         run_results.add_benchmark("rw2", results);
@@ -1132,7 +1226,7 @@ fn main() {
                         "rw2g90",
                         limit,
                         check,
-                        Arc::clone(&core_ids),
+                        &Arc::clone(&core_ids),
                     );
                     if should_save {
                         run_results.add_benchmark("rw2g90", results);
@@ -1146,44 +1240,46 @@ fn main() {
                         "rw2g98",
                         limit,
                         check,
-                        Arc::clone(&core_ids),
+                        &Arc::clone(&core_ids),
                     );
                     if should_save {
                         run_results.add_benchmark("rw2g98", results);
                     }
                 }
                 "rw3" => {
-                    let results = bench_rw3(threads, duration, limit, check, Arc::clone(&core_ids));
+                    let results =
+                        bench_rw3(threads, duration, limit, check, &Arc::clone(&core_ids));
                     if should_save {
                         run_results.add_benchmark("rw3", results);
                     }
                 }
                 "rw4" => {
-                    let results = bench_rw4(threads, duration, limit, check, Arc::clone(&core_ids));
+                    let results =
+                        bench_rw4(threads, duration, limit, check, &Arc::clone(&core_ids));
                     if should_save {
                         run_results.add_benchmark("rw4", results);
                     }
                 }
                 "same" => {
-                    let results = bench_same(threads, duration, limit, Arc::clone(&core_ids));
+                    let results = bench_same(threads, duration, limit, &Arc::clone(&core_ids));
                     if should_save {
                         run_results.add_benchmark("same", results);
                     }
                 }
                 "uscale" => {
-                    let results = bench_uscale(threads, duration, Arc::clone(&core_ids));
+                    let results = bench_uscale(threads, duration, &Arc::clone(&core_ids));
                     if should_save {
                         run_results.add_benchmark("uscale", results);
                     }
                 }
                 "wscale" => {
-                    let results = bench_wscale(threads, duration, Arc::clone(&core_ids));
+                    let results = bench_wscale(threads, duration, &Arc::clone(&core_ids));
                     if should_save {
                         run_results.add_benchmark("wscale", results);
                     }
                 }
                 "all" => {
-                    let r1 = bench_rw1(threads, duration, limit, check, Arc::clone(&core_ids));
+                    let r1 = bench_rw1(threads, duration, limit, check, &Arc::clone(&core_ids));
                     let r2 = bench_rw2(
                         threads,
                         duration,
@@ -1191,13 +1287,13 @@ fn main() {
                         "rw2g98",
                         limit,
                         check,
-                        Arc::clone(&core_ids),
+                        &Arc::clone(&core_ids),
                     );
-                    let r3 = bench_rw3(threads, duration, limit, check, Arc::clone(&core_ids));
-                    let r4 = bench_rw4(threads, duration, limit, check, Arc::clone(&core_ids));
-                    let r5 = bench_same(threads, duration, limit, Arc::clone(&core_ids));
-                    let r6 = bench_uscale(threads, duration, Arc::clone(&core_ids));
-                    let r7 = bench_wscale(threads, duration, Arc::clone(&core_ids));
+                    let r3 = bench_rw3(threads, duration, limit, check, &Arc::clone(&core_ids));
+                    let r4 = bench_rw4(threads, duration, limit, check, &Arc::clone(&core_ids));
+                    let r5 = bench_same(threads, duration, limit, &Arc::clone(&core_ids));
+                    let r6 = bench_uscale(threads, duration, &Arc::clone(&core_ids));
+                    let r7 = bench_wscale(threads, duration, &Arc::clone(&core_ids));
                     if should_save {
                         run_results.add_benchmark("rw1", r1);
                         run_results.add_benchmark("rw2g98", r2);
@@ -1208,7 +1304,7 @@ fn main() {
                         run_results.add_benchmark("wscale", r7);
                     }
                 }
-                _ => eprintln!("Unknown test: {}", test),
+                _ => eprintln!("Unknown test: {test}"),
             }
         }
     }
@@ -1228,12 +1324,14 @@ fn main() {
         });
 
         // Ensure runs/ directory exists
-        if let Some(parent) = output_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    eprintln!("Warning: Failed to create directory {:?}: {}", parent, e);
-                }
-            }
+        if let Some(parent) = output_path.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "Warning: Failed to create directory {:?}: {e}",
+                parent.display()
+            );
         }
 
         // Write JSON file
@@ -1241,14 +1339,14 @@ fn main() {
             Ok(json) => match fs::File::create(&output_path) {
                 Ok(mut file) => {
                     if let Err(e) = file.write_all(json.as_bytes()) {
-                        eprintln!("Error writing to {:?}: {}", output_path, e);
+                        eprintln!("Error writing to {:?}: {}", output_path.display(), e);
                     } else if !args.quiet {
                         eprintln!("\nResults saved to: {}", output_path.display());
                     }
                 }
-                Err(e) => eprintln!("Error creating file {:?}: {}", output_path, e),
+                Err(e) => eprintln!("Error creating file {:?}: {}", output_path.display(), e),
             },
-            Err(e) => eprintln!("Error serializing results: {}", e),
+            Err(e) => eprintln!("Error serializing results: {e}"),
         }
     }
 }

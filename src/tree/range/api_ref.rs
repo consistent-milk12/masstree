@@ -1,4 +1,4 @@
-//! Filepath: src/tree/range/api_ref.rs
+//! Filepath: `src/tree/range/api_ref.rs`
 //!
 //! Reference-based range scan methods for [`crate::MassTreeGeneric`].
 //!
@@ -228,5 +228,60 @@ where
     {
         self.range(start, end, guard)
             .for_each_intra_leaf_batch_ref(visitor)
+    }
+
+    /// Highest-performance reverse iteration with zero-copy value references.
+    ///
+    /// This is the batch-optimized reverse scan method, equivalent to
+    /// [`Self::scan_intra_leaf_batch_ref`] but iterating in descending key order.
+    ///
+    /// # Performance Characteristics
+    ///
+    /// - Processes all entries in a leaf before moving to previous leaf
+    /// - Single OCC validation per leaf
+    /// - No function call overhead per entry within a leaf
+    /// - Falls back to state machine for layer transitions
+    ///
+    /// Expected 2-3x improvement over standard `iter().rev()` iteration.
+    ///
+    /// # Arguments
+    ///
+    /// - `start`: Start bound (lower bound for reverse = stopping point)
+    /// - `end`: End bound (upper bound for reverse = starting point)
+    /// - `visitor`: Callback function `fn(&[u8], &V) -> bool`
+    /// - `guard`: Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// Number of entries visited.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let guard = tree.guard();
+    /// let mut sum = 0u64;
+    ///
+    /// // Fastest reverse scan for large ranges
+    /// tree.scan_rev_batch_ref(
+    ///     RangeBound::Unbounded,
+    ///     RangeBound::Unbounded,
+    ///     |_key, value| {
+    ///         sum += *value;
+    ///         true
+    ///     },
+    ///     &guard
+    /// );
+    /// ```
+    pub fn scan_rev_batch_ref<F>(
+        &self,
+        start: RangeBound<'_>,
+        end: RangeBound<'_>,
+        visitor: F,
+        guard: &LocalGuard<'_>,
+    ) -> usize
+    where
+        F: FnMut(&[u8], &S::Value) -> bool,
+    {
+        self.range(start, end, guard).rev_for_each_ref(visitor)
     }
 }

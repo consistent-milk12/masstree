@@ -6,7 +6,18 @@
 //! - Keys verify immediately after insertion but are missing later
 //! - Suggests a bug in split handling or suffix management
 
+#![allow(dead_code)]
+#![expect(clippy::unwrap_used, reason = "Fail fast in tests")]
+#![expect(clippy::similar_names)]
+#![expect(clippy::indexing_slicing)]
+#![expect(clippy::too_many_lines)]
+#![expect(clippy::cast_possible_wrap, clippy::cast_precision_loss)]
+
+use std::str as StdStr;
+
 use masstree::MassTree15;
+
+static mut AFTER_COUNT: usize = 0;
 
 fn main() {
     println!("=== Tree Bug Investigation (MassTree15 - non-inline) ===\n");
@@ -30,7 +41,7 @@ fn test_routing_trace() {
     let guard = tree.guard();
     let mut seed: u32 = 31949;
 
-    println!("Target key: {:?}", std::str::from_utf8(target).unwrap());
+    println!("Target key: {:?}", StdStr::from_utf8(target).unwrap());
     println!("Target ikey: {target_ikey:016x}");
     println!();
 
@@ -139,7 +150,7 @@ fn test_range_scan_check() {
     let count_before: usize = tree.iter(&guard).count();
     let target_in_iter_before = tree.iter(&guard).any(|e| e.key == target);
     println!("    Total keys via iter: {count_before}");
-    println!("    Target in iter: {}", target_in_iter_before);
+    println!("    Target in iter: {target_in_iter_before}");
 
     // Now insert the corrupting key
     let x = kv_rand(&mut seed);
@@ -156,8 +167,8 @@ fn test_range_scan_check() {
         x,
         std::str::from_utf8(&key).unwrap()
     );
-    println!("    Target ikey:  {:016x}", target_ikey);
-    println!("    Trigger ikey: {:016x}", trigger_ikey);
+    println!("    Target ikey:  {target_ikey:016x}");
+    println!("    Trigger ikey: {trigger_ikey:016x}");
     println!("    Target < Trigger: {}", target_ikey < trigger_ikey);
     let _ = tree.insert_with_guard(&key, u64::from(x) + 1, &guard);
 
@@ -176,12 +187,9 @@ fn test_range_scan_check() {
         count_before + 1,
         count_after as i64 - (count_before + 1) as i64
     );
-    println!("    Target in iter: {}", target_in_iter_after);
+    println!("    Target in iter: {target_in_iter_after}");
 
-    if !target_in_iter_after {
-        println!("\n  *** KEY IS COMPLETELY UNREACHABLE (not even in full iteration) ***");
-        println!("      This confirms the leaf containing the key is orphaned.");
-    } else {
+    if target_in_iter_after {
         println!("\n  *** KEY IS IN ITERATION BUT NOT IN DIRECT GET ***");
         println!("      Internode routing is incorrect. The separator key from a");
         println!("      split is causing the lookup to go to the wrong subtree.");
@@ -196,13 +204,12 @@ fn test_range_scan_check() {
                 found_target = true;
                 println!("    Previous 3:");
                 for pk in prev_keys.iter().rev().take(3).rev() {
-                    println!("      {}", pk);
+                    println!("      {pk}");
                 }
-                println!("    >>> {} <<< TARGET", k);
+                println!("    >>> {k} <<< TARGET");
             } else if found_target {
-                println!("      {}", k);
+                println!("      {k}");
                 // Print 3 keys after
-                static mut AFTER_COUNT: usize = 0;
                 unsafe {
                     AFTER_COUNT += 1;
                     if AFTER_COUNT >= 3 {
@@ -215,6 +222,9 @@ fn test_range_scan_check() {
                 prev_keys.remove(0);
             }
         }
+    } else {
+        println!("\n  *** KEY IS COMPLETELY UNREACHABLE (not even in full iteration) ***");
+        println!("      This confirms the leaf containing the key is orphaned.");
     }
 }
 
@@ -229,7 +239,7 @@ fn test_exact_repro() {
     let mut seed: u32 = 31949;
 
     // Insert up to 132395 keys first (5 before trigger)
-    for _ in 0..132395 {
+    for _ in 0..132_395 {
         let x = kv_rand(&mut seed);
         let key = to_decimal_bytes(x);
         let _ = tree.insert_with_guard(&key, u64::from(x) + 1, &guard);
@@ -241,7 +251,7 @@ fn test_exact_repro() {
     );
 
     // Now insert one at a time and check after each
-    for i in 132395..132402 {
+    for i in 132_395..132_402 {
         let x = kv_rand(&mut seed);
         let key = to_decimal_bytes(x);
         let target_before = tree.get_with_guard(target, &guard).is_some();
@@ -264,10 +274,7 @@ fn test_exact_repro() {
                 key_str,
                 key.len()
             );
-            println!(
-                "      Target before: {}, after: {}",
-                target_before, target_after
-            );
+            println!("      Target before: {target_before}, after: {target_after}");
 
             // Print ikey values for analysis
             let target_ikey = u64::from_be_bytes(*target);
@@ -278,14 +285,14 @@ fn test_exact_repro() {
                 buf[..key.len()].copy_from_slice(&key);
                 u64::from_be_bytes(buf)
             };
-            println!("      Target ikey:   {:016x}", target_ikey);
-            println!("      Inserted ikey: {:016x}", inserted_ikey);
+            println!("      Target ikey:   {target_ikey:016x}");
+            println!("      Inserted ikey: {inserted_ikey:016x}");
         }
     }
 
     // Reset seed to get the triggering key info
     let mut check_seed: u32 = 31949;
-    for _ in 0..132400 {
+    for _ in 0..132_400 {
         kv_rand(&mut check_seed);
     }
     let trigger_x = kv_rand(&mut check_seed);
@@ -299,7 +306,7 @@ fn test_exact_repro() {
     // Check some nearby keys before the trigger
     let nearby_8byte: Vec<u32> = {
         let mut s: u32 = 31949;
-        (0..132400)
+        (0..132_400)
             .map(|_| kv_rand(&mut s))
             .filter(|k| to_decimal_bytes(*k).len() == 8)
             .collect()
@@ -372,7 +379,7 @@ fn test_exact_repro() {
                 .zip(trigger_bytes.iter())
                 .take_while(|(a, b)| a == b)
                 .count();
-            println!("    {} shares {} prefix bytes with trigger", k, common);
+            println!("    {k} shares {common} prefix bytes with trigger");
         }
     }
 }
@@ -399,13 +406,13 @@ fn test_8byte_keys() {
     ];
 
     for (i, key) in keys.iter().enumerate() {
-        let _ = tree.insert_with_guard(*key, i as u64, &guard);
+        let _ = tree.insert_with_guard(key, i as u64, &guard);
     }
 
     let mut found = 0;
     let mut missing = 0;
     for (i, key) in keys.iter().enumerate() {
-        match tree.get_with_guard(*key, &guard) {
+        match tree.get_with_guard(key, &guard) {
             Some(v) if *v == i as u64 => found += 1,
             Some(v) => println!(
                 "  Wrong value for {:?}: got {}, expected {}",
@@ -419,7 +426,7 @@ fn test_8byte_keys() {
             }
         }
     }
-    println!("  Result: {} found, {} missing\n", found, missing);
+    println!("  Result: {found} found, {missing} missing\n");
 }
 
 fn test_minimal_repro() {
@@ -454,7 +461,7 @@ fn test_minimal_repro() {
             "  Scale {}: {} missing ({:.4}%)",
             scale,
             missing,
-            (missing as f64 / scale as f64) * 100.0
+            (f64::from(missing) / scale as f64) * 100.0
         );
 
         if missing > 0 && scale <= 100_000 {
@@ -469,11 +476,8 @@ fn test_key_disappearance() {
     println!("--- Test 3: Track when keys disappear ---");
 
     // First, find a key that will go missing using deterministic RNG
-    let target_key: u32 = 28631012; // Key that disappears - inserted at 101417, last seen ~130000
-    println!(
-        "  Tracking key {} to find exact disappearance point",
-        target_key
-    );
+    let target_key: u32 = 28_631_012; // Key that disappears - inserted at 101417, last seen ~130000
+    println!("  Tracking key {target_key} to find exact disappearance point");
 
     let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
@@ -493,7 +497,7 @@ fn test_key_disappearance() {
 
         if x == target_key {
             target_inserted = true;
-            println!("    Target key inserted at index {}", i);
+            println!("    Target key inserted at index {i}");
         }
 
         // After target is inserted, check periodically if it's still there
@@ -536,7 +540,7 @@ fn test_key_disappearance() {
 fn test_precise_disappearance() {
     println!("\n--- Test 4: Binary search for exact disappearance ---");
 
-    let target_key: u32 = 28631012;
+    let target_key: u32 = 28_631_012;
     let target_key_bytes = to_decimal_bytes(target_key);
 
     // From test 3: disappeared between ~130000 and ~140000
@@ -546,7 +550,7 @@ fn test_precise_disappearance() {
     let mut high = 140_000usize;
 
     while low < high {
-        let mid = (low + high) / 2;
+        let mid = usize::midpoint(low, high);
 
         // Rebuild tree up to mid
         let tree: MassTree15<u64> = MassTree15::new();
@@ -589,9 +593,9 @@ fn test_precise_disappearance() {
                 .zip(corrupt_str.chars())
                 .take_while(|(a, b)| a == b)
                 .count();
-            println!("  Common prefix length: {} chars", common_prefix);
-            println!("  Target:    {}", target_str);
-            println!("  Corrupting: {}", corrupt_str);
+            println!("  Common prefix length: {common_prefix} chars");
+            println!("  Target:    {target_str}");
+            println!("  Corrupting: {corrupt_str}");
         }
     }
 }
@@ -638,11 +642,11 @@ fn test_minimal_case() {
         println!("  Direct case doesn't reproduce - narrowing down the trigger");
 
         // Binary search to find minimum number of inserts needed
-        let mut low = 101417usize; // After target is inserted
-        let mut high = 132401usize;
+        let mut low = 101_417_usize; // After target is inserted
+        let mut high = 132_401_usize;
 
         while high - low > 1 {
-            let mid = (low + high) / 2;
+            let mid = usize::midpoint(low, high);
 
             let tree: MassTree15<u64> = MassTree15::new();
             let guard = tree.guard();
@@ -661,7 +665,7 @@ fn test_minimal_case() {
             }
         }
 
-        println!("  Bug triggers at insert #{}", high);
+        println!("  Bug triggers at insert #{high}");
 
         // Now replay to that exact point and check neighbors
         let tree: MassTree15<u64> = MassTree15::new();

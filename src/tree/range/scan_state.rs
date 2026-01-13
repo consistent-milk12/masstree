@@ -49,7 +49,7 @@
 //!         └────┴─────────────────┴────────────────────────────────┘
 //!
 use std::marker::PhantomData;
-use std::ptr::NonNull;
+use std::ptr::{self as StdPtr, NonNull};
 
 use arrayvec::ArrayVec;
 
@@ -300,7 +300,8 @@ where
     pub const fn leaf_ptr(&self) -> *mut L {
         match self.leaf {
             Some(nn) => nn.as_ptr(),
-            None => std::ptr::null_mut(),
+
+            None => StdPtr::null_mut(),
         }
     }
 
@@ -664,6 +665,216 @@ impl<S: ValueSlot> ScanSnapshot<S> {
     #[inline(always)]
     pub const fn new(value: S::Output, key_len: usize) -> Self {
         Self { value, key_len }
+    }
+}
+
+// ============================================================================
+//  ScanStateBack Enum (for DoubleEndedIterator)
+// ============================================================================
+
+/// State machine states for reverse range scan operations.
+///
+/// Similar to [`ScanState`] but for backward iteration via `next_back()`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ScanStateBack {
+    /// Ready to emit the current entry via `next_back()`.
+    Emit = 0,
+
+    /// Searching for the previous entry within the current leaf.
+    #[default]
+    FindPrev = 1,
+
+    /// Descending into a sublayer (encountered a layer pointer).
+    ///
+    /// For reverse scan, we descend to the MAXIMUJM of the sublayer.
+    Down = 2,
+
+    /// Ascending to parent layer (current layer exhausted a layer pointer).
+    Up = 3,
+
+    /// Repositioning after version conflict or layer transition.
+    Retry = 4,
+}
+
+impl ScanStateBack {
+    /// Check if this state will yield an entry.
+    #[inline(always)]
+    pub const fn is_emit(self) -> bool {
+        matches!(self, Self::Emit)
+    }
+}
+
+// ============================================================================
+//  BackStackElement (for DoubleEndedIterator)
+// ============================================================================
+
+pub struct BackStackElement<L, S>
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    /// Current layer root (may be leaf or internode).
+    root: *const u8,
+
+    /// Current leaf in this layer.
+    leaf: Option<NonNull<L>>,
+
+    /// Version snapshot for optimisitic validation.
+    version: u32,
+
+    /// Cached permutation snapshot.
+    perm: L::Perm,
+
+    /// Current logical position in permutation.
+    ///
+    /// Range: `-1..=perm.size() - 1` for reverse iteration.
+    /// - `ki >= 0 && ki < size`: Valid position
+    /// - `ki == -1`: Before first slot (exhausted, need to retreat)
+    ki: isize,
+
+    /// Marker for the slot type.
+    _marker: PhantomData<S>,
+}
+
+impl<L, S> BackStackElement<L, S>
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    /// Create a new back stack element for a layer.
+    ///
+    /// Matches [`ScanStackElement::new`] signature for consistency.
+    #[inline(always)]
+    pub fn new(root: *const u8) -> Self {
+        Self {
+            root,
+            leaf: None,
+            version: 0,
+            perm: L::Perm::empty(),
+            ki: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    pub const fn get_root(&self) -> *const u8 {
+        self.root
+    }
+
+    /// Set the layer root.
+    #[inline(always)]
+    pub const fn set_root(&mut self, root: *const u8) {
+        self.root = root;
+    }
+
+    /// Get the current leaf pointer.
+    #[inline(always)]
+    pub fn get_leaf_ptr(&self) -> *mut L {
+        self.leaf.map_or(StdPtr::null_mut(), NonNull::as_ptr)
+    }
+
+    #[inline(always)]
+    pub const fn set_leaf(&mut self, leaf: *mut L) {
+        self.leaf = NonNull::new(leaf);
+    }
+
+    /// Check if leaf is null (uninitialized or exhausted).
+    #[inline(always)]
+    pub const fn is_null(&self) -> bool {
+        self.leaf.is_none()
+    }
+
+    /// Update state after version validation.
+    #[inline(always)]
+    pub const fn update_state(&mut self, version: u32, perm: L::Perm, ki: isize) {
+        self.version = version;
+        self.perm = perm;
+        self.ki = ki;
+    }
+
+    /// Get current version.
+    #[inline(always)]
+    pub const fn get_version(&self) -> u32 {
+        self.version
+    }
+
+    /// Get current position (signed).
+    #[inline(always)]
+    pub const fn get_perm_ref(&self) -> &L::Perm {
+        &self.perm
+    }
+
+    /// Get current position (signed).
+    #[inline(always)]
+    pub const fn get_ki(&self) -> isize {
+        self.ki
+    }
+
+    /// Set current position.
+    #[inline(always)]
+    pub const fn set_ki(&mut self, ki: isize) {
+        self.ki = ki;
+    }
+
+    /// Check if current position is valid (not exhausted).
+    ///
+    /// Valid when `0 <= ki < perm.size()`.
+    #[inline(always)]
+    pub fn has_valid_position(&self) -> bool {
+        (self.ki >= 0) && (self.ki.cast_unsigned() < self.perm.size())
+    }
+
+    #[inline(always)]
+    pub fn get_kp_opt(&self) -> Option<usize> {
+        if self.has_valid_position() {
+            Some(self.perm.get(self.ki.cast_unsigned()))
+        } else {
+            None
+        }
+    }
+}
+
+impl<L, S> Default for BackStackElement<L, S>
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    fn default() -> Self {
+        Self::new(StdPtr::null())
+    }
+}
+
+impl<L, S> Clone for BackStackElement<L, S>
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            leaf: self.leaf,
+            version: self.version,
+            perm: self.perm,
+            ki: self.ki,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<L, S> std::fmt::Debug for BackStackElement<L, S>
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackStackElement")
+            .field("root", &self.root)
+            .field("leaf", &self.leaf)
+            .field("version", &self.version)
+            .field("ki", &self.ki)
+            .field("perm_size", &self.perm.size())
+            .finish()
     }
 }
 

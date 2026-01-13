@@ -28,6 +28,8 @@
 //! - CL 2-3: ikey0 (key comparison)
 //! - CL 4-5: `leaf_values` (on match)
 
+#![expect(clippy::items_after_statements, reason = "Compile time checks")]
+
 use std::mem as StdMem;
 
 use super::{LeafNode15, WIDTH_15};
