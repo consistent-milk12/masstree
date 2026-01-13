@@ -602,12 +602,13 @@ fn test_inline_drain_to_external() {
     let perm = Permuter24::make_sorted(3);
 
     // Drain to external with a new suffix for slot 3
+    // Pass None for filled_slots since we're simulating a normal operation with permutation
     #[expect(
         clippy::expect_used,
         reason = "test code - panic on failure is intended"
     )]
     let external = bag
-        .drain_to_external(&perm, 3, b"new_suffix")
+        .drain_to_external(&perm, 3, b"new_suffix", None)
         .expect("drain_to_external should succeed");
 
     // Inline bag slots should be cleared (count = 0)
@@ -632,12 +633,13 @@ fn test_inline_drain_replaces_slot() {
     let perm = Permuter24::make_sorted(2);
 
     // Replace slot 0's suffix during drain
+    // Pass None for filled_slots since we're simulating a normal operation with permutation
     #[expect(
         clippy::expect_used,
         reason = "test code - panic on failure is intended"
     )]
     let external = bag
-        .drain_to_external(&perm, 0, b"new_suffix")
+        .drain_to_external(&perm, 0, b"new_suffix", None)
         .expect("drain_to_external should succeed");
 
     // External should have new suffix for slot 0

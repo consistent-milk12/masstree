@@ -25,7 +25,7 @@
 //!
 //! # Implementation Details
 //! - Uses 16 shards
-//! - Each shard is explictly aligned to 128 bytes via `#[repr(C, align(128))]`
+//! - Each shard is explicitly aligned to 128 bytes via `#[repr(C, align(128))]`
 //! - Thread shard index is cached in thread-local storage for fast access
 //! - Relaxed ordering is sufficient since the counter is used for approximate counts
 
@@ -54,7 +54,7 @@ const CACHE_LINE_SIZE: usize = 128;
 /// eliminating false sharing between threads updating different shards.
 ///
 /// `#[repr(C)]` alone does not guarantee alignment of array elements,
-/// `align(128)` is equired to ensure each [`PaddedCounter`] in the array
+/// `align(128)` is required to ensure each [`PaddedCounter`] in the array
 /// starts at a 128-byte boundary.
 #[derive(Debug)]
 #[repr(C, align(128))]
@@ -84,7 +84,7 @@ thread_local! {
     ///
     /// Using [`Cell<Option<usize>>`] to cache the shard index after first computation.
     /// This avoids calling thread::current().id() on every increment/decrement.
-    static CACHED_SHARD: Cell<Option<usize>> = const { const { Cell::new(None) } };
+    static CACHED_SHARD: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 /// A sharded counter optimized for concurrent increment/decrement operations.
@@ -152,7 +152,7 @@ impl ShardedCounter {
         })
     }
 
-    /// Get a reference to the shard for the current thraed.
+    /// Get a reference to the shard for the current thread.
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "INVARIANT: index < SHARDS")]
     fn get_shard(&self) -> &AtomicIsize {
@@ -164,7 +164,7 @@ impl ShardedCounter {
 
     /// Increment the counter by 1.
     ///
-    /// This operation is lock-free and optimzied for concurrent access.
+    /// This operation is lock-free and optimized for concurrent access.
     /// Different threads will typically hit different shards, minimizing contention.
     ///
     /// # Ordering
@@ -202,8 +202,8 @@ impl ShardedCounter {
     /// # Consistency
     /// This operation reads all shards sequentially and is not linearizable.
     /// During concurrent mutations, the result may be:
-    /// - Slightly state (mising recent increments)
-    /// - Temporarily inconsistent (seeing some but not all concurrent chages)
+    /// - Slightly stale (missing recent increments)
+    /// - Temporarily inconsistent (seeing some but not all concurrent changes)
     ///
     /// After all mutating have joined/quiesced, this returns the exact count.
     ///
@@ -215,7 +215,7 @@ impl ShardedCounter {
     /// decrements exceeded increments). Release builds return 0 in this case.
     ///
     /// # Performance
-    /// `O(SHARDS) = O(16)` reads. This is more expensive than a signle atomic load.
+    /// `O(SHARDS) = O(16)` reads. This is more expensive than a single atomic load.
     pub fn load(&self) -> usize {
         let mut total: isize = 0;
 

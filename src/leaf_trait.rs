@@ -812,11 +812,27 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Assign a suffix to a slot.
     ///
+    /// # Arguments
+    ///
+    /// * `slot` - The slot to assign the suffix to
+    /// * `suffix` - The suffix bytes
+    /// * `guard` - Memory reclamation guard
+    /// * `initializing` - When true, this is part of node initialization (e.g., during split)
+    ///   and slots 0..slot are already filled sequentially. When false, uses permutation to
+    ///   determine which slots are active. This matches C++ `assign_ksuf`'s `initializing`
+    ///   parameter in masstree_struct.hh:728.
+    ///
     /// # Safety
     ///
     /// - Caller must hold the leaf lock
     /// - Slot must be valid
-    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>);
+    unsafe fn assign_ksuf(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &seize::LocalGuard<'_>,
+        initializing: bool,
+    );
 
     /// Clear suffix at slot.
     ///

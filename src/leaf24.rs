@@ -642,11 +642,35 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// # Safety
     /// - Caller must hold lock and have called `mark_insert()`
     /// - `guard` must come from this tree's collector
+    /// Assign a suffix to a slot (two-tier: inline first, then external).
+    ///
+    /// This uses the C++ Masstree optimization: try inline storage first,
+    /// only allocate external storage when inline is full.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - The slot to assign the suffix to
+    /// * `suffix` - The suffix bytes
+    /// * `guard` - Memory reclamation guard
+    /// * `initializing` - When true, this is part of node initialization (e.g., during split)
+    ///   and slots 0..slot are already filled sequentially. When false, uses permutation to
+    ///   determine which slots are active. This matches C++ `assign_ksuf`'s `initializing`
+    ///   parameter in masstree_struct.hh:728.
+    ///
+    /// # Safety
+    /// - Caller must hold lock and have called `mark_insert()`
+    /// - `guard` must come from this tree's collector
     #[expect(
         clippy::indexing_slicing,
         reason = "Slot bounds checked via debug_assert"
     )]
-    pub unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    pub unsafe fn assign_ksuf(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &LocalGuard<'_>,
+        initializing: bool,
+    ) {
         debug_assert!(
             slot < WIDTH_24,
             "assign_ksuf: slot {slot} >= WIDTH_24 {WIDTH_24}"
@@ -681,7 +705,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         // SLOW PATH: Drain inline to external and allocate new external bag
         // SAFETY: Same preconditions as this function (caller holds lock, guard is valid).
-        unsafe { self.assign_ksuf_slow(slot, suffix, guard) };
+        unsafe { self.assign_ksuf_slow(slot, suffix, guard, initializing) };
     }
 
     /// Slow path for suffix assignment: allocate/reallocate external bag.
@@ -691,10 +715,16 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    unsafe fn assign_ksuf_slow(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &LocalGuard<'_>,
+        initializing: bool,
+    ) {
         debug_assert!(
-            self.version.is_locked(),
-            "assign_ksuf_slow: caller must hold lock"
+            self.version.is_locked() || self.version.is_unpublished(),
+            "assign_ksuf_slow: caller must hold lock or node must be unpublished"
         );
 
         let perm = self.permutation();
@@ -702,11 +732,16 @@ impl<S: ValueSlot> LeafNode24<S> {
         let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
 
+        // When initializing, pass Some(slot) so drain_to_external knows to iterate
+        // slots 0..slot directly instead of using the (empty) permutation.
+        // This matches C++ masstree_struct.hh:736: `int n = initializing ? p : perm.size();`
+        let filled_slots: Option<usize> = if initializing { Some(slot) } else { None };
+
         // Drain inline to a new external bag with the new suffix.
         // This infallible path aborts on OOM. Use `try_assign_ksuf` for fallible version.
         #[expect(clippy::expect_used)]
         let mut new_bag: SuffixBag<WIDTH_24> = inline
-            .drain_to_external(&perm, slot, suffix)
+            .drain_to_external(&perm, slot, suffix, filled_slots)
             .expect("OOM: suffix bag allocation failed");
 
         // Merge with existing external suffixes (if any)
@@ -715,13 +750,22 @@ impl<S: ValueSlot> LeafNode24<S> {
             // SAFETY: old_ext is non-null
             let old_bag: &SuffixBag<WIDTH_24> = unsafe { &*old_ext };
 
-            for i in 0..perm.size() {
-                let s: usize = perm.get(i);
+            // When initializing, iterate slots 0..slot directly; otherwise use permutation
+            if initializing {
+                for s in 0..slot {
+                    if let Some(ext_suffix) = old_bag.get(s) {
+                        new_bag.assign(s, ext_suffix);
+                    }
+                }
+            } else {
+                for i in 0..perm.size() {
+                    let s: usize = perm.get(i);
 
-                if s != slot
-                    && let Some(ext_suffix) = old_bag.get(s)
-                {
-                    new_bag.assign(s, ext_suffix);
+                    if s != slot
+                        && let Some(ext_suffix) = old_bag.get(s)
+                    {
+                        new_bag.assign(s, ext_suffix);
+                    }
                 }
             }
         }
@@ -764,6 +808,7 @@ impl<S: ValueSlot> LeafNode24<S> {
         slot: usize,
         suffix: &[u8],
         guard: &LocalGuard<'_>,
+        initializing: bool,
     ) -> AllocResult<()> {
         debug_assert!(
             slot < WIDTH_24,
@@ -795,7 +840,7 @@ impl<S: ValueSlot> LeafNode24<S> {
         }
 
         // SLOW PATH: Drain inline to external and allocate new external bag (fallible)
-        unsafe { self.try_assign_ksuf_slow(slot, suffix, guard) }
+        unsafe { self.try_assign_ksuf_slow(slot, suffix, guard, initializing) }
     }
 
     /// Slow path for fallible suffix assignment: allocate/reallocate external bag.
@@ -813,31 +858,46 @@ impl<S: ValueSlot> LeafNode24<S> {
         slot: usize,
         suffix: &[u8],
         guard: &LocalGuard<'_>,
+        initializing: bool,
     ) -> AllocResult<()> {
         debug_assert!(
-            self.version.is_locked(),
-            "try_assign_ksuf_slow: caller must hold lock"
+            self.version.is_locked() || self.version.is_unpublished(),
+            "try_assign_ksuf_slow: caller must hold lock or node must be unpublished"
         );
 
         let perm = self.permutation();
         let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
 
+        // When initializing, pass Some(slot) so drain_to_external knows to iterate
+        // slots 0..slot directly instead of using the (empty) permutation.
+        let filled_slots: Option<usize> = if initializing { Some(slot) } else { None };
+
         // Drain inline to a new external bag with the new suffix (FALLIBLE)
-        let mut new_bag: SuffixBag<WIDTH_24> = inline.drain_to_external(&perm, slot, suffix)?;
+        let mut new_bag: SuffixBag<WIDTH_24> =
+            inline.drain_to_external(&perm, slot, suffix, filled_slots)?;
 
         // Merge with existing external suffixes (if any)
         let old_ext: *mut SuffixBag<WIDTH_24> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             let old_bag: &SuffixBag<WIDTH_24> = unsafe { &*old_ext };
 
-            for i in 0..perm.size() {
-                let s: usize = perm.get(i);
+            // When initializing, iterate slots 0..slot directly; otherwise use permutation
+            if initializing {
+                for s in 0..slot {
+                    if let Some(ext_suffix) = old_bag.get(s) {
+                        new_bag.assign(s, ext_suffix);
+                    }
+                }
+            } else {
+                for i in 0..perm.size() {
+                    let s: usize = perm.get(i);
 
-                if s != slot
-                    && let Some(ext_suffix) = old_bag.get(s)
-                {
-                    new_bag.assign(s, ext_suffix);
+                    if s != slot
+                        && let Some(ext_suffix) = old_bag.get(s)
+                    {
+                        new_bag.assign(s, ext_suffix);
+                    }
                 }
             }
         }
@@ -2074,6 +2134,14 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 
             let entries_to_move = old_size - split_pos;
 
+            #[cfg(feature = "debug-routing")]
+            eprintln!("=== SPLIT DEBUG ===");
+            #[cfg(feature = "debug-routing")]
+            eprintln!(
+                "split_pos={} entries_to_move={}",
+                split_pos, entries_to_move
+            );
+
             // Move entries using RELAXED ordering (see leaf15.rs for justification)
             for i in 0..entries_to_move {
                 let old_logical_pos = split_pos + i;
@@ -2083,15 +2151,34 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
                 let ikey = self.ikey_relaxed(old_slot);
                 let keylenx = self.keylenx_relaxed(old_slot);
 
+                #[cfg(feature = "debug-routing")]
+                eprintln!(
+                    "  i={:2} old_pos={:2} old_slot={:2} new_slot={:2} ikey={:016X} keylenx={:3}",
+                    i, old_logical_pos, old_slot, new_slot, ikey, keylenx
+                );
+
                 new_leaf.set_ikey_relaxed(new_slot, ikey);
                 new_leaf.set_keylenx_relaxed(new_slot, keylenx);
+
+                // Verify immediately after store
+                #[cfg(feature = "debug-routing")]
+                {
+                    let verify_keylenx = new_leaf.keylenx_relaxed(new_slot);
+                    if verify_keylenx != keylenx {
+                        eprintln!(
+                            "    MISMATCH! wrote {} but read back {}",
+                            keylenx, verify_keylenx
+                        );
+                    }
+                }
 
                 let old_ptr = self.take_leaf_value_ptr(old_slot);
                 new_leaf.set_leaf_value_ptr_relaxed(new_slot, old_ptr);
 
                 if keylenx == KSUF_KEYLENX {
                     if let Some(suffix) = self.ksuf(old_slot) {
-                        new_leaf.assign_ksuf(new_slot, suffix, guard);
+                        // Pass initializing=true: slots 0..new_slot are filled sequentially
+                        new_leaf.assign_ksuf(new_slot, suffix, guard, true);
                     }
                     self.clear_ksuf(old_slot, guard);
                 }
@@ -2145,7 +2232,8 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 
             if keylenx == KSUF_KEYLENX {
                 if let Some(suffix) = self.ksuf(old_slot) {
-                    unsafe { new_leaf.assign_ksuf(new_slot, suffix, guard) };
+                    // Pass initializing=true: slots 0..new_slot are filled sequentially
+                    unsafe { new_leaf.assign_ksuf(new_slot, suffix, guard, true) };
                 }
                 unsafe { self.clear_ksuf(old_slot, guard) };
             }
@@ -2194,9 +2282,15 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     }
 
     #[inline(always)]
-    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>) {
+    unsafe fn assign_ksuf(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &seize::LocalGuard<'_>,
+        initializing: bool,
+    ) {
         // SAFETY: Caller guarantees preconditions
-        unsafe { Self::assign_ksuf(self, slot, suffix, guard) }
+        unsafe { Self::assign_ksuf(self, slot, suffix, guard, initializing) }
     }
 
     #[inline(always)]
@@ -2427,7 +2521,8 @@ impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value:
 
             // Store suffix in suffix bag
             // SAFETY: Caller guarantees guard is from this tree's collector
-            unsafe { self.assign_ksuf(slot, key.suffix(), guard) };
+            // Pass initializing=false: this is a normal insert, not split initialization
+            unsafe { self.assign_ksuf(slot, key.suffix(), guard, false) };
         } else {
             // Inline key (0-8 bytes total, no suffix)
             self.set_keylenx(slot, inline_len);
@@ -2515,7 +2610,8 @@ impl<V: Copy + Send + Sync + 'static>
 
             // Store suffix in suffix bag
             // SAFETY: Caller guarantees guard is from this tree's collector
-            unsafe { self.assign_ksuf(slot, key.suffix(), guard) };
+            // Pass initializing=false: this is a normal insert, not split initialization
+            unsafe { self.assign_ksuf(slot, key.suffix(), guard, false) };
         } else {
             // Inline key (0-8 bytes total, no suffix)
             self.set_keylenx(slot, inline_len);
