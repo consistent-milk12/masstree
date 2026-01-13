@@ -18,6 +18,7 @@ use seize::{Guard, LocalGuard};
 use crate::alloc_trait::NodeAllocatorGeneric;
 use crate::internode::InternodeNode;
 use crate::leaf15::{LeafNode15, WIDTH_15};
+use crate::node_pool;
 use crate::nodeversion::NodeVersion;
 use crate::slot::ValueSlot;
 use crate::{AllocError, AllocResult};
@@ -166,10 +167,10 @@ where
 
     #[inline(always)]
     unsafe fn retire_leaf(&self, ptr: *mut LeafNode15<S>, guard: &LocalGuard<'_>) {
-        // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
+        // Use capture-free reclaimer to return to thread-local pool.
         unsafe {
-            guard.defer_retire(ptr, seize::reclaim::boxed);
+            guard.defer_retire(ptr, node_pool::reclaim_leaf15::<S>);
         }
     }
 
@@ -190,10 +191,13 @@ where
         reason = "Caller guarantees InternodeNode alignment"
     )]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
+        // Use capture-free reclaimer to return to thread-local pool.
         unsafe {
-            guard.defer_retire(ptr.cast::<InternodeNode>(), seize::reclaim::boxed);
+            guard.defer_retire(
+                ptr.cast::<InternodeNode>(),
+                node_pool::reclaim_internode,
+            );
         }
     }
 
@@ -240,81 +244,59 @@ where
             })
     }
 
-    /// Allocate an internode directly without Box intermediate.
+    /// Allocate an internode directly using thread-local pool.
     #[inline]
     fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
-        use std::alloc::{Layout, alloc};
-
         let layout = Layout::new::<InternodeNode>();
-        // SAFETY: Layout::new::<T>() guarantees proper alignment for T.
-        #[expect(
-            clippy::cast_ptr_alignment,
-            reason = "Layout::new::<InternodeNode> guarantees alignment"
-        )]
-        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
+        let ptr = node_pool::pool_alloc(layout);
         if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            StdAlloc::handle_alloc_error(layout);
         }
 
-        // Initialize in-place
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
-            InternodeNode::init_at(ptr, height);
+            InternodeNode::init_at(ptr.cast::<InternodeNode>(), height);
         }
 
-        ptr.cast()
+        ptr
     }
 
-    /// Allocate an internode as root directly without Box intermediate.
+    /// Allocate an internode as root directly using thread-local pool.
     #[inline]
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
-        use std::alloc::{Layout, alloc};
-
         let layout = Layout::new::<InternodeNode>();
-        #[expect(
-            clippy::cast_ptr_alignment,
-            reason = "Layout::new::<InternodeNode> guarantees alignment"
-        )]
-        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
+        let ptr = node_pool::pool_alloc(layout);
         if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            StdAlloc::handle_alloc_error(layout);
         }
 
-        // Initialize in-place as root
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
-            InternodeNode::init_at_root(ptr, height);
+            InternodeNode::init_at_root(ptr.cast::<InternodeNode>(), height);
         }
 
-        ptr.cast()
+        ptr
     }
 
-    /// Allocate an internode for split directly without Box intermediate.
+    /// Allocate an internode for split directly using thread-local pool.
     #[inline]
     fn alloc_internode_direct_for_split(
         &self,
         parent_version: &crate::nodeversion::NodeVersion,
         height: u32,
     ) -> *mut u8 {
-        use std::alloc::{Layout, alloc};
-
         let layout = Layout::new::<InternodeNode>();
-        #[expect(
-            clippy::cast_ptr_alignment,
-            reason = "Layout::new::<InternodeNode> guarantees alignment"
-        )]
-        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
+        let ptr = node_pool::pool_alloc(layout);
         if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            StdAlloc::handle_alloc_error(layout);
         }
 
-        // Initialize in-place with split-locked version
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
-            InternodeNode::init_at_for_split(ptr, parent_version, height);
+            InternodeNode::init_at_for_split(ptr.cast::<InternodeNode>(), parent_version, height);
         }
 
-        ptr.cast()
+        ptr
     }
 
     fn try_alloc_leaf(
@@ -322,11 +304,8 @@ where
         is_root: bool,
         is_layer_root: bool,
     ) -> AllocResult<*mut LeafNode15<S>> {
-        // Step 1: Allocate raw memory
-        let layout: Layout = Layout::new::<LeafNode15<S>>();
-
-        // SAFETY: Layout is valid (derived from type)
-        let raw_ptr: *mut u8 = unsafe { StdAlloc::alloc(layout) };
+        let layout = Layout::new::<LeafNode15<S>>();
+        let raw_ptr = node_pool::pool_alloc(layout);
 
         if raw_ptr.is_null() {
             return Err(AllocError::for_leaf::<LeafNode15<S>>());
@@ -334,11 +313,6 @@ where
 
         let ptr: *mut LeafNode15<S> = raw_ptr.cast();
 
-        // Step 2: Initialize in-place using init_at
-        //
-        // This is_layer_root flag is passed to init_at as is_root because
-        // layer roots also have ROOT_BIT (they're roots of sublayers).
-        //
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
             LeafNode15::init_at(ptr, is_root || is_layer_root);
@@ -493,10 +467,10 @@ impl<V: InlineBits + Send + Sync + 'static>
 
     #[inline(always)]
     unsafe fn retire_leaf(&self, ptr: *mut LeafNode15TrueInline<V>, guard: &LocalGuard<'_>) {
-        // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
+        // Use capture-free reclaimer to return to thread-local pool.
         unsafe {
-            guard.defer_retire(ptr, seize::reclaim::boxed);
+            guard.defer_retire(ptr, node_pool::reclaim_leaf15_true_inline::<V>);
         }
     }
 
@@ -517,10 +491,13 @@ impl<V: InlineBits + Send + Sync + 'static>
         reason = "Caller guarantees InternodeNode alignment"
     )]
     unsafe fn retire_internode_erased(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        // Direct retirement - O(1), no tracking overhead.
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
+        // Use capture-free reclaimer to return to thread-local pool.
         unsafe {
-            guard.defer_retire(ptr.cast::<InternodeNode>(), seize::reclaim::boxed);
+            guard.defer_retire(
+                ptr.cast::<InternodeNode>(),
+                node_pool::reclaim_internode,
+            );
         }
     }
 
@@ -570,40 +547,34 @@ impl<V: InlineBits + Send + Sync + 'static>
 
     #[inline]
     fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
-        use std::alloc::{Layout, alloc};
-
         let layout = Layout::new::<InternodeNode>();
-        #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
+        let ptr = node_pool::pool_alloc(layout);
         if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            StdAlloc::handle_alloc_error(layout);
         }
 
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
-            InternodeNode::init_at(ptr, height);
+            InternodeNode::init_at(ptr.cast::<InternodeNode>(), height);
         }
 
-        ptr.cast()
+        ptr
     }
 
     #[inline]
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
-        use std::alloc::{Layout, alloc};
-
         let layout = Layout::new::<InternodeNode>();
-        #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
+        let ptr = node_pool::pool_alloc(layout);
         if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            StdAlloc::handle_alloc_error(layout);
         }
 
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
-            InternodeNode::init_at_root(ptr, height);
+            InternodeNode::init_at_root(ptr.cast::<InternodeNode>(), height);
         }
 
-        ptr.cast()
+        ptr
     }
 
     #[inline]
@@ -612,21 +583,18 @@ impl<V: InlineBits + Send + Sync + 'static>
         parent_version: &crate::nodeversion::NodeVersion,
         height: u32,
     ) -> *mut u8 {
-        use std::alloc::{Layout, alloc};
-
         let layout = Layout::new::<InternodeNode>();
-        #[expect(clippy::cast_ptr_alignment, reason = "Layout guarantees alignment")]
-        let ptr: *mut InternodeNode = unsafe { alloc(layout).cast::<InternodeNode>() };
+        let ptr = node_pool::pool_alloc(layout);
         if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            StdAlloc::handle_alloc_error(layout);
         }
 
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
-            InternodeNode::init_at_for_split(ptr, parent_version, height);
+            InternodeNode::init_at_for_split(ptr.cast::<InternodeNode>(), parent_version, height);
         }
 
-        ptr.cast()
+        ptr
     }
 
     fn try_alloc_leaf(
@@ -634,9 +602,8 @@ impl<V: InlineBits + Send + Sync + 'static>
         is_root: bool,
         is_layer_root: bool,
     ) -> AllocResult<*mut LeafNode15TrueInline<V>> {
-        // Step 1: Allocate raw memory
         let layout = Layout::new::<LeafNode15TrueInline<V>>();
-        let raw_ptr: *mut u8 = unsafe { StdAlloc::alloc(layout) };
+        let raw_ptr = node_pool::pool_alloc(layout);
 
         if raw_ptr.is_null() {
             return Err(AllocError::for_leaf::<LeafNode15TrueInline<V>>());
@@ -644,7 +611,6 @@ impl<V: InlineBits + Send + Sync + 'static>
 
         let ptr: *mut LeafNode15TrueInline<V> = raw_ptr.cast();
 
-        // Step 2: Initialize in-place
         // SAFETY: ptr is valid, properly aligned, exclusive access
         unsafe {
             LeafNode15TrueInline::init_at(ptr, is_root || is_layer_root);

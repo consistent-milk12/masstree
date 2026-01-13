@@ -1257,6 +1257,7 @@ pub mod leaf15;
 pub mod leaf24;
 pub mod leaf_trait;
 pub mod link;
+pub mod node_pool;
 pub mod nodeversion;
 pub mod ordering;
 pub mod permuter;
