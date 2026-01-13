@@ -199,10 +199,7 @@ where
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
         // Use capture-free reclaimer to return to thread-local pool.
         unsafe {
-            guard.defer_retire(
-                ptr.cast::<InternodeNode>(),
-                node_pool::reclaim_internode,
-            );
+            guard.defer_retire(ptr.cast::<InternodeNode>(), node_pool::reclaim_internode);
         }
     }
 
@@ -505,10 +502,7 @@ impl<V: InlineBits + Send + Sync + 'static>
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
         // Use capture-free reclaimer to return to thread-local pool.
         unsafe {
-            guard.defer_retire(
-                ptr.cast::<InternodeNode>(),
-                node_pool::reclaim_internode,
-            );
+            guard.defer_retire(ptr.cast::<InternodeNode>(), node_pool::reclaim_internode);
         }
     }
 

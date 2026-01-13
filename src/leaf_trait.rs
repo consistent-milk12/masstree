@@ -574,6 +574,18 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Store value pointer at slot.
     fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8);
 
+    /// Update an existing value in place.
+    ///
+    /// This is an optimization for updates where the slot already contains
+    /// a value. For inline storage, this skips the sentinel store since
+    /// the sentinel is already in place.
+    ///
+    /// Default implementation calls `set_leaf_value_ptr`.
+    #[inline(always)]
+    fn update_leaf_value_in_place(&self, slot: usize, ptr: *mut u8) {
+        self.set_leaf_value_ptr(slot, ptr);
+    }
+
     /// CAS value pointer at slot.
     ///
     /// Used in CAS insert path to atomically claim a slot.

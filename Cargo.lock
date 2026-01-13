@@ -827,6 +827,7 @@ dependencies = [
  "divan",
  "iai-callgrind",
  "indexset",
+ "libc",
  "loom",
  "mimalloc",
  "papaya",

@@ -5,7 +5,7 @@
 //! - Suffix overflow from inline to external storage during split initialization
 //! - Various edge cases for suffix handling across splits
 
-#![allow(clippy::unwrap_used, )]
+#![allow(clippy::unwrap_used)]
 
 use masstree::MassTree;
 

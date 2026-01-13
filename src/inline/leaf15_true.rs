@@ -512,6 +512,30 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         self.leaf_values[slot].store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
     }
 
+    /// Update an existing inline value in place.
+    ///
+    /// This is an optimization for updates where the slot already contains
+    /// an inline value. Since the sentinel is already in `leaf_values[slot]`,
+    /// we only need to update `inline_values[slot]` - saving one atomic store.
+    ///
+    /// # Panics
+    ///
+    /// Debug-asserts that `slot < WIDTH_15` and `ptr` is non-null.
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "slot bounds checked by debug_assert; valid slots from Permuter15"
+    )]
+    pub fn update_leaf_value_in_place(&self, slot: usize, ptr: *mut u8) {
+        debug_assert!(slot < WIDTH_15);
+        debug_assert!(!ptr.is_null(), "update_leaf_value_in_place: ptr is null");
+
+        let encoded: u64 = ptr.addr() as u64;
+        let bits: u64 = encoded ^ ENCODING_MAGIC;
+        // Only update inline_values - sentinel is already in leaf_values
+        self.inline_values[slot].store(bits, WRITE_ORD);
+    }
+
     /// Set a layer pointer at the given slot.
     ///
     /// This stores the pointer directly without decoding.
@@ -1983,6 +2007,11 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
     #[inline(always)]
     fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
         Self::set_leaf_value_ptr(self, slot, ptr);
+    }
+
+    #[inline(always)]
+    fn update_leaf_value_in_place(&self, slot: usize, ptr: *mut u8) {
+        Self::update_leaf_value_in_place(self, slot, ptr);
     }
 
     #[inline(always)]

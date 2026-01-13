@@ -38,6 +38,7 @@ bins = [
 ]
 true-inline = [] # Enable true-inline value storage
 debug-routing = [] # Enable routing debug output for bug investigation
+insert-stats = [] # Enable insert retry statistics collection
 
 [dependencies]
 seize = "0.5.1"
@@ -49,6 +50,10 @@ rustc-hash = "2.1.1"
 
 # Optional allocators (enabled via features)
 mimalloc = { version = "0.1.48", optional = true }
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 # Optional tracing (enabled via features) - zero overhead when disabled
 # "attributes" enables #[instrument] for function-level tracing

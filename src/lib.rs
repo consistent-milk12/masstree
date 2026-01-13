@@ -13,35 +13,6 @@
 //! - Lazy leaf coalescing for deleted entries
 //! - Two node widths: [`MassTree`] (WIDTH=24) and [`MassTree15`] (WIDTH=15)
 //!
-//! ## Status: v0.3.0 (Core Feature Complete)
-//!
-//! All core operations implemented and tested. Not yet production-ready—concurrent
-//! data structures require extensive stress testing beyond what Miri and proptests provide.
-//!
-//! | Feature | Status |
-//! |---------|--------|
-//! | Concurrent get | Lock-free, version-validated |
-//! | Concurrent insert | Fine-grained leaf locking |
-//! | Concurrent remove | Fine-grained locking + lazy coalescing |
-//! | Range scans | `scan`, `scan_ref`, `scan_prefix`, iterator |
-//! | Memory reclamation | Seize-based epoch reclamation |
-//!
-//! **Not yet implemented:** `Entry` API, `DoubleEndedIterator`, `Extend`/`FromIterator`.
-//!
-//! ## When to Use
-//!
-//! **May work well for:**
-//! - Long keys with shared prefixes (URLs, file paths, UUIDs)
-//! - Range scans over ordered data
-//! - Mixed read/write workloads
-//! - High-contention scenarios (the trie structure helps here)
-//!
-//! **Consider alternatives for:**
-//! - Unordered point lookups → `dashmap`
-//! - Pure insert-only workloads → `scc::TreeIndex`
-//! - Integer keys only → `congee` (ART-based)
-//! - Read-heavy with rare writes → `RwLock<BTreeMap>`
-//!
 //! ## Variant Selection
 //!
 //! | Variant | Best For |
@@ -1270,6 +1241,9 @@ pub mod slot;
 pub mod suffix;
 pub mod tree;
 pub mod value;
+
+#[cfg(feature = "insert-stats")]
+pub mod insert_stats;
 
 pub use error::{AllocError, AllocKind, AllocResult};
 pub use retirement::{BatchedRetire, FlushOnDrop};

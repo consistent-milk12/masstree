@@ -16,6 +16,51 @@ use std::ptr as StdPtr;
 
 use crate::nodeversion::LockGuard;
 
+// Conditional instrumentation macros - compile to no-ops when feature disabled
+#[cfg(feature = "insert-stats")]
+macro_rules! stat {
+    (attempt) => {
+        crate::insert_stats::record_attempt()
+    };
+
+    (validation_failure) => {
+        crate::insert_stats::record_validation_failure()
+    };
+
+    (membership_failure) => {
+        crate::insert_stats::record_membership_failure()
+    };
+
+    (null_ptr_retry) => {
+        crate::insert_stats::record_null_ptr_retry()
+    };
+
+    (split_retry) => {
+        crate::insert_stats::record_split_retry()
+    };
+
+    (successful_insert) => {
+        crate::insert_stats::record_successful_insert()
+    };
+
+    (successful_update) => {
+        crate::insert_stats::record_successful_update()
+    };
+
+    (hop_limit_exceeded) => {
+        crate::insert_stats::record_hop_limit_exceeded()
+    };
+
+    (deleted_layer_retry) => {
+        crate::insert_stats::record_deleted_layer_retry()
+    };
+}
+
+#[cfg(not(feature = "insert-stats"))]
+macro_rules! stat {
+    ($name:ident) => {};
+}
+
 // ============================================================================
 //  FindSlotResult - Slot allocation outcome
 // ============================================================================
@@ -107,8 +152,10 @@ where
         let new_ptr: *mut u8 = S::output_consume_to_raw(new_value);
 
         // Mark insert, store value
+        // Use update_leaf_value_in_place for updates - this is an optimization
+        // that skips the sentinel store for inline values (sentinel already exists).
         lock.mark_insert();
-        leaf.set_leaf_value_ptr(slot, new_ptr);
+        leaf.update_leaf_value_in_place(slot, new_ptr);
 
         // Defer retirement of the old value (only for pointer-backed nodes).
         if S::NEEDS_RETIREMENT {
@@ -417,6 +464,7 @@ where
 
             // If we exceeded the hop limit, re-traverse from root
             if exceeded_hop_limit {
+                stat!(hop_limit_exceeded);
                 layer_root = self.load_root_ptr_generic(guard);
                 continue 'retry;
             }
@@ -425,6 +473,8 @@ where
 
             // Inner loop: local retry with B-link advance (no full traversal)
             'forward: loop {
+                stat!(attempt);
+
                 // ================================================================
                 // OPTIMISTIC SEARCH (C++ pattern: search BEFORE locking)
                 // ================================================================
@@ -449,6 +499,7 @@ where
                 // POST-LOCK VALIDATION (B-link local retry on failure)
                 // ================================================================
                 if !self.validate_post_lock(leaf, pre_lock_version, pre_lock_perm_raw) {
+                    stat!(validation_failure);
                     drop(lock);
 
                     // LOCAL RETRY: B-link advance instead of full re-traversal
@@ -458,6 +509,7 @@ where
 
                     if exceeded {
                         // Too many hops, fall back to full re-traversal
+                        stat!(hop_limit_exceeded);
                         layer_root = self.load_root_ptr_generic(guard);
                         continue 'retry;
                     }
@@ -469,6 +521,7 @@ where
                 // Check for gc'd sublayer - must restart from main tree root
                 // C++ masstree_get.hh:111-115
                 if leaf.deleted_layer() {
+                    stat!(deleted_layer_retry);
                     drop(lock);
                     key.unshift_all();
                     layer_root = self.load_root_ptr_generic(guard);
@@ -478,6 +531,7 @@ where
 
                 // Post-lock membership check
                 if self.validate_membership(leaf, key).is_err() {
+                    stat!(membership_failure);
                     drop(lock);
 
                     // LOCAL RETRY: B-link advance
@@ -485,6 +539,7 @@ where
                         self.advance_to_key_by_bound_generic(leaf, key, guard);
 
                     if exceeded {
+                        stat!(hop_limit_exceeded);
                         layer_root = self.load_root_ptr_generic(guard);
                         continue 'retry;
                     }
@@ -517,18 +572,19 @@ where
                 // Single-layer fast path (keys ≤ 8 bytes)
                 // ================================================================
                 if single_layer_mode {
-
                     match search_result {
                         InsertSearchResultGeneric::Found { slot } => {
                             let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
                             if old_ptr.is_null() {
+                                stat!(null_ptr_retry);
                                 drop(lock);
                                 continue 'forward;
                             }
 
                             let old_value =
                                 self.update_existing_value(leaf, &mut lock, slot, value, guard);
+                            stat!(successful_update);
                             drop(lock);
                             return Ok(Some(old_value));
                         }
@@ -550,6 +606,7 @@ where
                                         guard,
                                     );
 
+                                    stat!(successful_insert);
                                     drop(lock);
                                     self.count.increment();
 
@@ -557,6 +614,7 @@ where
                                 }
 
                                 FindSlotResult::NeedsSplit => {
+                                    stat!(split_retry);
                                     // Split the leaf (FALLIBLE allocation for sibling)
                                     self.handle_leaf_split_generic(
                                         StdPtr::from_ref::<L>(leaf).cast_mut(),
@@ -572,6 +630,7 @@ where
                                         self.advance_to_key_by_bound_generic(leaf, key, guard);
 
                                     if exceeded {
+                                        stat!(hop_limit_exceeded);
                                         layer_root = self.load_root_ptr_generic(guard);
                                         continue 'retry;
                                     }
@@ -600,12 +659,14 @@ where
                         let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
                         if old_ptr.is_null() {
+                            stat!(null_ptr_retry);
                             drop(lock);
                             continue 'forward;
                         }
 
                         let old_value =
                             self.update_existing_value(leaf, &mut lock, slot, value, guard);
+                        stat!(successful_update);
                         drop(lock);
                         return Ok(Some(old_value));
                     }
@@ -626,12 +687,14 @@ where
                                     &value,
                                     guard,
                                 );
+                                stat!(successful_insert);
                                 drop(lock);
                                 self.count.increment();
                                 return Ok(None);
                             }
 
                             FindSlotResult::NeedsSplit => {
+                                stat!(split_retry);
                                 let leaf_ptr_current: *mut L = StdPtr::from_ref(leaf).cast_mut();
                                 self.handle_leaf_split_generic(
                                     leaf_ptr_current,
@@ -646,6 +709,7 @@ where
                                     self.advance_to_key_by_bound_generic(leaf, key, guard);
 
                                 if exceeded {
+                                    stat!(hop_limit_exceeded);
                                     layer_root = self.load_root_ptr_generic(guard);
                                     continue 'retry;
                                 }
@@ -669,6 +733,7 @@ where
                     InsertSearchResultGeneric::Conflict { slot } => {
                         // Handle suffix conflict by creating a new layer (FALLIBLE)
                         self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard)?;
+                        stat!(successful_insert);
                         return Ok(None);
                     }
                 }

@@ -20,8 +20,8 @@
 
 use clap::Parser;
 use core_affinity::CoreId;
-use masstree::node_pool;
 use masstree::MassTree15Inline;
+use masstree::node_pool;
 use serde::Serialize;
 use std::fs;
 use std::io::Write;
@@ -1444,5 +1444,12 @@ fn main() {
             },
             Err(e) => eprintln!("Error serializing results: {e}"),
         }
+    }
+
+    // Print insert retry statistics if feature is enabled
+    #[cfg(feature = "insert-stats")]
+    {
+        eprintln!();
+        masstree::insert_stats::print_stats();
     }
 }
