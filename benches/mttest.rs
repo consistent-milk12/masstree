@@ -128,6 +128,10 @@ struct Args {
     #[arg(long = "json")]
     json: bool,
 
+    /// Only show totals, skip per-thread breakdown
+    #[arg(long = "totals-only", short = 't')]
+    totals_only: bool,
+
     /// Save results to JSON file in runs/ directory
     #[arg(long = "save", short = 's')]
     save: bool,
@@ -362,11 +366,13 @@ impl RunResults {
 
 /// Output mode for results
 static mut OUTPUT_JSON: bool = false;
+static mut TOTALS_ONLY: bool = false;
 static mut CURRENT_TRIAL: usize = 0;
 
 fn print_results(test: &str, threads: usize, results: &[ThreadResult]) {
     // SAFETY: Only accessed from single-threaded main context
     let json_mode = unsafe { OUTPUT_JSON };
+    let totals_only = unsafe { TOTALS_ONLY };
     let trial = unsafe { CURRENT_TRIAL };
 
     if json_mode {
@@ -397,20 +403,13 @@ fn print_results(test: &str, threads: usize, results: &[ThreadResult]) {
         }
     } else {
         // Human-readable table format
-        println!("\n{test} with {threads} threads:");
-        println!(
-            "{:>8} {:>12} {:>14} {:>12} {:>14} {:>12} {:>14}",
-            "thread", "puts", "puts/sec", "gets", "gets/sec", "ops", "ops/sec"
-        );
-        println!("{}", "-".repeat(90));
-
         let mut total_puts = 0u64;
         let mut total_gets = 0u64;
         let mut total_put_rate = 0.0;
         let mut total_get_rate = 0.0;
         let mut total_ops_rate = 0.0;
 
-        for (tid, r) in results.iter().enumerate() {
+        for r in results.iter() {
             let put_rate = if r.put_time > 0.0 {
                 r.puts as f64 / r.put_time
             } else {
@@ -429,11 +428,6 @@ fn print_results(test: &str, threads: usize, results: &[ThreadResult]) {
                 0.0
             };
 
-            println!(
-                "{:>8} {:>12} {:>14.0} {:>12} {:>14.0} {:>12} {:>14.0}",
-                tid, r.puts, put_rate, r.gets, get_rate, ops, ops_rate
-            );
-
             total_puts += r.puts;
             total_gets += r.gets;
             total_put_rate += put_rate;
@@ -441,17 +435,55 @@ fn print_results(test: &str, threads: usize, results: &[ThreadResult]) {
             total_ops_rate += ops_rate;
         }
 
-        println!("{}", "-".repeat(90));
-        println!(
-            "{:>8} {:>12} {:>14.0} {:>12} {:>14.0} {:>12} {:>14.0}",
-            "TOTAL",
-            total_puts,
-            total_put_rate,
-            total_gets,
-            total_get_rate,
-            total_puts + total_gets,
-            total_ops_rate
-        );
+        if totals_only {
+            // Compact single-line format: test_name: X.XX Mops/s
+            let mops = total_ops_rate / 1_000_000.0;
+            println!("{:<8} {:>6.2} Mops/s", format!("{test}:"), mops);
+        } else {
+            println!("\n{test} with {threads} threads:");
+            println!(
+                "{:>8} {:>12} {:>14} {:>12} {:>14} {:>12} {:>14}",
+                "thread", "puts", "puts/sec", "gets", "gets/sec", "ops", "ops/sec"
+            );
+            println!("{}", "-".repeat(90));
+
+            for (tid, r) in results.iter().enumerate() {
+                let put_rate = if r.put_time > 0.0 {
+                    r.puts as f64 / r.put_time
+                } else {
+                    0.0
+                };
+                let get_rate = if r.get_time > 0.0 {
+                    r.gets as f64 / r.get_time
+                } else {
+                    0.0
+                };
+                let ops = r.puts + r.gets;
+                let total_time = r.put_time + r.get_time;
+                let ops_rate = if total_time > 0.0 {
+                    ops as f64 / total_time
+                } else {
+                    0.0
+                };
+
+                println!(
+                    "{:>8} {:>12} {:>14.0} {:>12} {:>14.0} {:>12} {:>14.0}",
+                    tid, r.puts, put_rate, r.gets, get_rate, ops, ops_rate
+                );
+            }
+
+            println!("{}", "-".repeat(90));
+            println!(
+                "{:>8} {:>12} {:>14.0} {:>12} {:>14.0} {:>12} {:>14.0}",
+                "TOTAL",
+                total_puts,
+                total_put_rate,
+                total_gets,
+                total_get_rate,
+                total_puts + total_gets,
+                total_ops_rate
+            );
+        }
     }
 }
 
@@ -1140,6 +1172,7 @@ fn main() {
     // SAFETY: Single-threaded main context, before any worker threads
     unsafe {
         OUTPUT_JSON = args.json;
+        TOTALS_ONLY = args.totals_only;
     }
 
     // Parse tests - use C++ naming conventions

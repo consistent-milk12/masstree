@@ -1021,12 +1021,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     /// - Caller must hold lock
     /// - `guard` must come from this tree's collector
     #[expect(clippy::indexing_slicing)]
-    pub unsafe fn assign_ksuf(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    pub unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         debug_assert!(slot < WIDTH_15, "assign_ksuf: slot out of bounds");
         debug_assert!(
             self.version.is_locked() || self.version.is_unpublished(),
@@ -1061,12 +1056,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing)]
-    unsafe fn assign_ksuf_slow(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         let perm = self.permutation();
         // SAFETY: Caller holds lock
         let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
@@ -1118,12 +1108,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     /// - `guard` must come from this tree's collector
     /// - Slots 0..slot must already be filled sequentially
     #[expect(clippy::indexing_slicing)]
-    pub unsafe fn assign_ksuf_init(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    pub unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         debug_assert!(slot < WIDTH_15, "assign_ksuf_init: slot out of bounds");
         debug_assert!(
             self.version.is_locked() || self.version.is_unpublished(),
@@ -1157,12 +1142,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing)]
-    unsafe fn assign_ksuf_init_slow(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    unsafe fn assign_ksuf_init_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         // SAFETY: Caller holds lock
         let inline: &mut InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
             unsafe { &mut *self.inline_ksuf.get() };
@@ -2156,22 +2136,12 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
         Self::ksuf(self, slot)
     }
 
-    unsafe fn assign_ksuf(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         // SAFETY: Same preconditions
         unsafe { Self::assign_ksuf(self, slot, suffix, guard) };
     }
 
-    unsafe fn assign_ksuf_init(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         // SAFETY: Same preconditions
         unsafe { Self::assign_ksuf_init(self, slot, suffix, guard) };
     }

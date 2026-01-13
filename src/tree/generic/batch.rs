@@ -460,8 +460,8 @@ where
                 let pre_lock_version = leaf.version().stable();
                 let pre_lock_perm_raw = leaf.permutation_raw();
 
-                // Lock the leaf (with yield to reduce lock convoy under contention)
-                let mut lock = leaf.version().lock_with_yield();
+                // Lock the leaf (pure spin - yields cause syscall overhead under contention)
+                let mut lock = leaf.version().lock();
 
                 // Validate post-lock state
                 if !self.validate_post_lock_batch(leaf, pre_lock_version, pre_lock_perm_raw) {

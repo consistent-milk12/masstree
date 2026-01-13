@@ -646,12 +646,7 @@ impl<S: ValueSlot> LeafNode24<S> {
         clippy::indexing_slicing,
         reason = "Slot bounds checked via debug_assert"
     )]
-    pub unsafe fn assign_ksuf(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    pub unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         debug_assert!(
             slot < WIDTH_24,
             "assign_ksuf: slot {slot} >= WIDTH_24 {WIDTH_24}"
@@ -696,12 +691,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    unsafe fn assign_ksuf_slow(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         debug_assert!(
             self.version.is_locked() || self.version.is_unpublished(),
             "assign_ksuf_slow: caller must hold lock or node must be unpublished"
@@ -762,13 +752,11 @@ impl<S: ValueSlot> LeafNode24<S> {
     /// - Caller must hold lock or node must be unpublished
     /// - `guard` must come from this tree's collector
     /// - Slots 0..slot must already be filled sequentially
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked via debug_assert")]
-    pub unsafe fn assign_ksuf_init(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot bounds checked via debug_assert"
+    )]
+    pub unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         debug_assert!(
             slot < WIDTH_24,
             "assign_ksuf_init: slot {slot} >= WIDTH_24 {WIDTH_24}"
@@ -806,12 +794,7 @@ impl<S: ValueSlot> LeafNode24<S> {
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    unsafe fn assign_ksuf_init_slow(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) {
+    unsafe fn assign_ksuf_init_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         debug_assert!(
             self.version.is_locked() || self.version.is_unpublished(),
             "assign_ksuf_init_slow: caller must hold lock or node must be unpublished"
@@ -975,7 +958,10 @@ impl<S: ValueSlot> LeafNode24<S> {
     ///
     /// # Safety
     /// Same as `assign_ksuf_init`.
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked via debug_assert")]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot bounds checked via debug_assert"
+    )]
     pub unsafe fn try_assign_ksuf_init(
         &self,
         slot: usize,
@@ -2428,23 +2414,13 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     }
 
     #[inline(always)]
-    unsafe fn assign_ksuf(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &seize::LocalGuard<'_>,
-    ) {
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>) {
         // SAFETY: Caller guarantees preconditions
         unsafe { Self::assign_ksuf(self, slot, suffix, guard) }
     }
 
     #[inline(always)]
-    unsafe fn assign_ksuf_init(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &seize::LocalGuard<'_>,
-    ) {
+    unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>) {
         // SAFETY: Caller guarantees preconditions
         unsafe { Self::assign_ksuf_init(self, slot, suffix, guard) }
     }
