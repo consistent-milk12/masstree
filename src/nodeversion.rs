@@ -571,21 +571,38 @@ impl LockGuard<'_> {
 
     /// Mark the node as being inserted into.
     ///
-    /// NOTE: With the always-dirty-on-lock strategy, `INSERTING_BIT` is already set
-    /// by `lock()`. This method is now a no-op kept for:
-    /// 1. Explicit documentation of intent in calling code
-    /// 2. Backward compatibility with code that calls this explicitly
+    /// Sets the inserting dirty bit. Version counter will increment on unlock.
+    /// This must be called before modifying node contents during insert.
     ///
-    /// This method is idempotent.
+    /// # C++ Reference
+    /// Matches `nodeversion.hh:143-147` - `mark_insert()` method.
+    ///
+    /// # Memory Ordering
+    /// Uses [`Ordering::Release`] followed by [`Ordering::Acquire`] fence.
+    /// This ensures readers calling `stable()` will wait for our modifications.
+    ///
+    /// # Idempotent
+    /// Multiple calls have no additional effect.
     #[inline]
     pub fn mark_insert(&mut self) {
-        // With always-dirty-on-lock strategy, INSERTING_BIT should always be set.
-        // Debug-assert to catch any regression if lock() behavior changes.
-        debug_assert!(
-            (self.locked_value & INSERTING_BIT) != 0,
-            "mark_insert: INSERTING_BIT should already be set by lock()"
-        );
-        // No-op: INSERTING_BIT is already set
+        // Skip if already set (idempotent)
+        if (self.locked_value & INSERTING_BIT) != 0 {
+            return;
+        }
+
+        // INVARIANT: lock is held, so no concurrent modifications possible.
+        let value: u32 = self.version().value.load(Ordering::Relaxed);
+
+        self.version()
+            .value
+            .store(value | INSERTING_BIT, Ordering::Release);
+
+        // Acquire fence ensures subsequent modifications cannot be reordered
+        // before the dirty bit becomes visible to readers.
+        fence(Ordering::Acquire);
+
+        // Update tracked value for unlock logic
+        self.locked_value |= INSERTING_BIT;
     }
 
     /// Mark the node as being split.
@@ -824,6 +841,9 @@ impl NodeVersion {
                 return value;
             }
 
+            // Exponential backoff reduces cache line contention under heavy load.
+            // While C++ uses single PAUSE by default, our testing shows exponential
+            // backoff performs better on modern multi-core systems.
             backoff.spin();
         }
     }
@@ -1134,7 +1154,7 @@ impl NodeVersion {
     /// C++ `nodeversion.hh:87-109` - `lock()` template method
     #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock(&self) -> LockGuard<'_> {
-        let mut backoff: Backoff = Backoff::new();
+        let mut backoff = Backoff::new();
 
         loop {
             let value: u32 = self.value.load(Ordering::Relaxed);
@@ -1144,14 +1164,17 @@ impl NodeVersion {
             // After acquiring, caller must validate version hasn't changed.
             // This matches C++ nodeversion.hh:96 which only checks lock_bit.
             if (value & LOCK_BIT) == 0 {
-                // STRATEGY: Set LOCK_BIT and INSERTING_BIT atomically.
-                // This ensures CAS insert threads (which call stable()) will wait for us.
+                // Only set LOCK_BIT here. INSERTING_BIT is set later via mark_insert().
+                // This matches C++ nodeversion.hh:97-98 which only sets lock_bit in lock().
                 //
-                // The INSERTING_BIT is set here rather than in a seprate mark_insert() call.
-                // This eliminates the race window between lock acquisition and dirty marking.
-                let locked: u32 = value | LOCK_BIT | INSERTING_BIT;
+                // Critical for performance: stable() waits for dirty_mask (inserting|splitting).
+                // If we set INSERTING_BIT here, other threads calling stable() would spin
+                // for the entire lock duration, causing convoy effects under contention.
+                // By deferring INSERTING_BIT to mark_insert(), threads can race for lock()
+                // without waiting in stable().
+                let locked: u32 = value | LOCK_BIT;
 
-                // CAS to acquire lock with auto-dirty.
+                // CAS to acquire lock.
                 // Acquire on success ensures we see all prior writes from previous holder.
                 // Relaxed on failure is fine, we'll retry.
                 if self
@@ -1161,7 +1184,7 @@ impl NodeVersion {
                 {
                     return LockGuard {
                         version: StdPtr::from_ref(self),
-                        // locked_value now includes INSERTING_BIT
+                        // locked_value tracks current state; mark_insert() will update it
                         locked_value: locked,
                         _lifetime: PhantomData,
                         _marker: PhantomData,
@@ -1169,6 +1192,7 @@ impl NodeVersion {
                 }
             }
 
+            // Exponential backoff reduces cache line contention under heavy load.
             backoff.spin();
         }
     }
@@ -1193,8 +1217,9 @@ impl NodeVersion {
             return None;
         }
 
-        // Set both LOCK_BIT and INSERTING_BIT atomically (same as lock()).
-        let locked: u32 = value | LOCK_BIT | INSERTING_BIT;
+        // Only set LOCK_BIT here. INSERTING_BIT is set later via mark_insert().
+        // Same rationale as lock() - avoids convoy effects in stable().
+        let locked: u32 = value | LOCK_BIT;
 
         // Single CAS attempt (use strong CAS for single-shot).
         match self

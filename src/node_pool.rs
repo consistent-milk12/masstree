@@ -36,7 +36,7 @@ use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
 
 // ============================================================================
-//  Constants (matching C++)
+//  Constants (CODE_066 optimized)
 // ============================================================================
 
 /// Cache line size for alignment and bucketing.
@@ -47,10 +47,12 @@ const CACHE_LINE: usize = 64;
 const MAX_SIZE_CLASSES: usize = 20;
 
 /// Maximum nodes to cache per size class per thread.
-const POOL_CAPACITY: usize = 64;
+/// Increased from 64 to 256 to reduce fallback to global allocator.
+const POOL_CAPACITY: usize = 256;
 
 /// Batch size when refilling from global allocator.
-const REFILL_BATCH: usize = 16;
+/// Increased from 16 to 64 to amortize allocation overhead.
+const REFILL_BATCH: usize = 64;
 
 // ============================================================================
 //  Size Class Computation
@@ -125,6 +127,10 @@ impl Freelist {
         self.count += 1;
     }
 
+    /// Refill freelist from global allocator.
+    ///
+    /// Marked cold since this is the slow path - the hot path is pop().
+    #[cold]
     fn refill(&mut self, layout: Layout) {
         for _ in 0..REFILL_BATCH {
             // SAFETY: layout is valid bucket layout
@@ -262,6 +268,45 @@ pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
         let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
         unsafe { pool.dealloc(ptr, layout) };
     });
+}
+
+/// Pre-allocate freelist entries for common node size classes.
+///
+/// Call this on each worker thread before benchmarking to eliminate
+/// first-allocation overhead. This fills the freelist so the hot path
+/// never needs to call the allocator.
+///
+/// # Common size classes for Masstree
+///
+/// - 8 cache lines (512 bytes): `InternodeNode`
+/// - 12 cache lines (768 bytes): `LeafNode15`
+/// - 16 cache lines (1024 bytes): `LeafNode24`
+pub fn warmup_pool() {
+    // Size classes commonly used by Masstree nodes
+    const WARMUP_SIZES: &[usize] = &[
+        8 * CACHE_LINE,  // 512 bytes - InternodeNode
+        12 * CACHE_LINE, // 768 bytes - LeafNode15
+        16 * CACHE_LINE, // 1024 bytes - LeafNode24
+    ];
+
+    for &size in WARMUP_SIZES {
+        // SAFETY: size is non-zero and alignment is power of 2
+        let layout = unsafe { Layout::from_size_align_unchecked(size, CACHE_LINE) };
+
+        // Allocate REFILL_BATCH nodes to trigger refill, then return all
+        let mut ptrs = Vec::with_capacity(REFILL_BATCH);
+        for _ in 0..REFILL_BATCH {
+            let ptr = pool_alloc(layout);
+            if !ptr.is_null() {
+                ptrs.push(ptr);
+            }
+        }
+        // Return all to freelist
+        for ptr in ptrs {
+            // SAFETY: ptr was just allocated with this layout
+            unsafe { pool_dealloc(ptr, layout) };
+        }
+    }
 }
 
 // ============================================================================

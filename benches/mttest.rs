@@ -20,6 +20,7 @@
 
 use clap::Parser;
 use core_affinity::CoreId;
+use masstree::node_pool;
 use masstree::MassTree15Inline;
 use serde::Serialize;
 use std::fs;
@@ -527,31 +528,38 @@ fn bench_rw1(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                let guard = tree.guard();
+                node_pool::warmup_pool();
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
                 start_barrier.wait();
 
-                // Put phase - use atomic timeout flag instead of Instant::now()
+                // Put phase - just count ops, don't store keys (saves ~80MB/thread)
+                // Keys are regenerated deterministically from seed after barrier
                 let put_start = Instant::now();
-                let mut keys = Vec::with_capacity(1_000_000);
+                let mut puts = 0u64;
 
-                while !timed_out() && (keys.len() as u64) <= limit {
-                    let x = rng.rand();
-                    let key = QuickIstr::new(u64::from(x));
-                    let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
-                    keys.push(x);
-                }
+                {
+                    // Scoped guard for put phase - allows epoch advancement between phases
+                    // This enables seize to reclaim retired nodes, reducing memory from
+                    // ~16GB to ~2-3GB by not blocking reclamation for entire benchmark
+                    let guard = tree.guard();
+                    while !timed_out() && puts <= limit {
+                        let x = rng.rand();
+                        let key = QuickIstr::new(u64::from(x));
+                        let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
+                        puts += 1;
+                    }
+                } // guard dropped here - allows reclamation of retired nodes
                 let put_time = put_start.elapsed().as_secs_f64();
-                let puts = keys.len() as u64;
 
                 // C++ wait_all() - barrier between put and get phases
                 get_barrier.wait();
 
-                // Re-seed and regenerate keys, then shuffle (matching C++ exactly)
+                // Regenerate keys from seed (deterministic RNG), then shuffle
+                // Allocate exact size needed - no growth during timed phase
                 let mut rng = KvRandom::new(seed);
-                keys.clear();
+                let mut keys = Vec::with_capacity(puts as usize);
                 for _ in 0..puts {
                     keys.push(rng.rand());
                 }
@@ -561,20 +569,23 @@ fn bench_rw1(
                     keys.swap(i, j);
                 }
 
-                // Get phase - exactly `puts` iterations, no timeout (matches C++)
+                // Get phase - fresh guard, exactly `puts` iterations, no timeout (matches C++)
                 let get_start = Instant::now();
                 let mut sum = 0u64;
                 let mut check_errors = 0u64;
-                for x in &keys {
-                    let key = QuickIstr::new(u64::from(*x));
-                    let expected = u64::from(*x + 1);
-                    if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                        if check && v != expected {
+                {
+                    let guard = tree.guard();
+                    for x in &keys {
+                        let key = QuickIstr::new(u64::from(*x));
+                        let expected = u64::from(*x + 1);
+                        if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
+                            if check && v != expected {
+                                check_errors += 1;
+                            }
+                            sum = sum.wrapping_add(v);
+                        } else if check {
                             check_errors += 1;
                         }
-                        sum = sum.wrapping_add(v);
-                    } else if check {
-                        check_errors += 1;
                     }
                 }
                 if check && check_errors > 0 {
@@ -643,7 +654,7 @@ fn bench_rw2(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                let guard = tree.guard();
+                node_pool::warmup_pool();
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
                 let offset = rng.rand();
@@ -654,9 +665,19 @@ fn bench_rw2(
                 let mut puts = 0u64;
                 let mut gets = 0u64;
                 let mut sum = 0u64;
+                let mut guard = tree.guard();
+
+                // Refresh guard every N ops to allow epoch advancement and memory reclamation
+                const GUARD_REFRESH_INTERVAL: u64 = 100_000;
 
                 let mut check_errors = 0u64;
                 while !timed_out() && (puts + gets) <= limit {
+                    // Periodic guard refresh to allow seize to reclaim retired nodes
+                    if (puts + gets) % GUARD_REFRESH_INTERVAL == 0 && (puts + gets) > 0 {
+                        drop(guard);
+                        guard = tree.guard();
+                    }
+
                     if puts == 0 || !rng.bernoulli(get_frac) {
                         let x = (offset.wrapping_add(puts as u32)).wrapping_mul(C);
                         let key = QuickIstr::new(u64::from(x));
@@ -678,6 +699,7 @@ fn bench_rw2(
                         gets += 1;
                     }
                 }
+                drop(guard);
                 if check && check_errors > 0 {
                     eprintln!("{name} thread {tid}: {check_errors} check errors");
                 }
@@ -755,7 +777,7 @@ fn bench_rw3(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                let guard = tree.guard();
+                node_pool::warmup_pool();
 
                 barrier.wait();
 
@@ -763,11 +785,15 @@ fn bench_rw3(
                 let put_start = Instant::now();
                 let mut n = 0u64;
 
-                while !timed_out() && n <= limit {
-                    let key = key8(n);
-                    let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
-                    n += 1;
-                }
+                {
+                    // Scoped guard for put phase - allows epoch advancement between phases
+                    let guard = tree.guard();
+                    while !timed_out() && n <= limit {
+                        let key = key8(n);
+                        let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
+                        n += 1;
+                    }
+                } // guard dropped - allows reclamation
                 let put_time = put_start.elapsed().as_secs_f64();
 
                 // Sync point (matches C++ wait_all between phases)
@@ -779,16 +805,19 @@ fn bench_rw3(
                 let mut sum = 0u64;
                 let mut check_errors = 0u64;
 
-                for i in 0..n {
-                    let key = key8(i);
-                    let expected = i + 1;
-                    if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                        if check && v != expected {
+                {
+                    let guard = tree.guard();
+                    for i in 0..n {
+                        let key = key8(i);
+                        let expected = i + 1;
+                        if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
+                            if check && v != expected {
+                                check_errors += 1;
+                            }
+                            sum = sum.wrapping_add(v);
+                        } else if check {
                             check_errors += 1;
                         }
-                        sum = sum.wrapping_add(v);
-                    } else if check {
-                        check_errors += 1;
                     }
                 }
                 if check && check_errors > 0 {
@@ -860,7 +889,7 @@ fn bench_rw4(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                let guard = tree.guard();
+                node_pool::warmup_pool();
 
                 barrier.wait();
 
@@ -868,11 +897,15 @@ fn bench_rw4(
                 let put_start = Instant::now();
                 let mut n = 0u64;
 
-                while !timed_out() && n <= limit {
-                    let key = key8(TOP - n);
-                    let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
-                    n += 1;
-                }
+                {
+                    // Scoped guard for put phase - allows epoch advancement between phases
+                    let guard = tree.guard();
+                    while !timed_out() && n <= limit {
+                        let key = key8(TOP - n);
+                        let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
+                        n += 1;
+                    }
+                } // guard dropped - allows reclamation
                 let put_time = put_start.elapsed().as_secs_f64();
 
                 // Sync point (matches C++ wait_all between phases)
@@ -884,16 +917,19 @@ fn bench_rw4(
                 let mut sum = 0u64;
                 let mut check_errors = 0u64;
 
-                for i in 0..n {
-                    let key = key8(TOP - i);
-                    let expected = i + 1;
-                    if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                        if check && v != expected {
+                {
+                    let guard = tree.guard();
+                    for i in 0..n {
+                        let key = key8(TOP - i);
+                        let expected = i + 1;
+                        if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
+                            if check && v != expected {
+                                check_errors += 1;
+                            }
+                            sum = sum.wrapping_add(v);
+                        } else if check {
                             check_errors += 1;
                         }
-                        sum = sum.wrapping_add(v);
-                    } else if check {
-                        check_errors += 1;
                     }
                 }
                 if check && check_errors > 0 {
@@ -962,7 +998,7 @@ fn bench_same(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                let guard = tree.guard();
+                node_pool::warmup_pool();
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
@@ -970,13 +1006,22 @@ fn bench_same(
 
                 let start = Instant::now();
                 let mut n = 0u64;
+                let mut guard = tree.guard();
+
+                // Refresh guard every N ops to allow epoch advancement and memory reclamation
+                const GUARD_REFRESH_INTERVAL: u64 = 100_000;
 
                 while !timed_out() && n <= limit {
+                    if n % GUARD_REFRESH_INTERVAL == 0 && n > 0 {
+                        drop(guard);
+                        guard = tree.guard();
+                    }
                     let x = rng.uniform(NUM_KEYS);
                     let key = QuickIstr::new(u64::from(x));
                     let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
                     n += 1;
                 }
+                drop(guard);
                 let elapsed = start.elapsed().as_secs_f64();
 
                 results[tid].0.store(n, Ordering::Relaxed);
@@ -1037,7 +1082,7 @@ fn bench_uscale(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                let guard = tree.guard();
+                node_pool::warmup_pool();
                 // C++: seed = kvtest_first_seed + client.id() (NOT % 48)
                 let seed = KvRandom::FIRST_SEED + tid as u64;
                 let mut rng = KvRandom::new(seed);
@@ -1046,13 +1091,22 @@ fn bench_uscale(
 
                 let start = Instant::now();
                 let mut n = 0u64;
+                let mut guard = tree.guard();
+
+                // Refresh guard every N ops to allow epoch advancement and memory reclamation
+                const GUARD_REFRESH_INTERVAL: u64 = 100_000;
 
                 while !timed_out() {
+                    if n % GUARD_REFRESH_INTERVAL == 0 && n > 0 {
+                        drop(guard);
+                        guard = tree.guard();
+                    }
                     let x = u64::from(rng.rand()) % NSEQKEYS;
                     let key = QuickIstr::new(x);
                     let _ = tree.insert_with_guard(key.as_bytes(), x + 1, &guard);
                     n += 1;
                 }
+                drop(guard);
                 let elapsed = start.elapsed().as_secs_f64();
 
                 results[tid].0.store(n, Ordering::Relaxed);
@@ -1106,7 +1160,7 @@ fn bench_wscale(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                let guard = tree.guard();
+                node_pool::warmup_pool();
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
@@ -1114,13 +1168,22 @@ fn bench_wscale(
 
                 let start = Instant::now();
                 let mut n = 0u64;
+                let mut guard = tree.guard();
+
+                // Refresh guard every N ops to allow epoch advancement and memory reclamation
+                const GUARD_REFRESH_INTERVAL: u64 = 100_000;
 
                 while !timed_out() {
+                    if n % GUARD_REFRESH_INTERVAL == 0 && n > 0 {
+                        drop(guard);
+                        guard = tree.guard();
+                    }
                     let x = u64::from(rng.rand());
                     let key = QuickIstr::new(x);
                     let _ = tree.insert_with_guard(key.as_bytes(), x + 1, &guard);
                     n += 1;
                 }
+                drop(guard);
                 let elapsed = start.elapsed().as_secs_f64();
 
                 results[tid].0.store(n, Ordering::Relaxed);

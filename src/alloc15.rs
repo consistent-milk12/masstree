@@ -122,9 +122,12 @@ impl<S: ValueSlot> SeizeAllocator15<S> {
             }
 
             // Free the leaf itself.
-            // LeafNode's Drop impl handles value cleanup (skips layer slots).
+            // First drop in place to run destructor (handles value cleanup).
             // SAFETY: We have exclusive access and leaf is valid.
-            unsafe { drop(Box::from_raw(leaf_ptr)) };
+            unsafe { std::ptr::drop_in_place(leaf_ptr) };
+            // Then return memory to pool.
+            let layout = Layout::new::<LeafNode15<S>>();
+            unsafe { node_pool::pool_dealloc(leaf_ptr.cast(), layout) };
         } else {
             // Handle internode
             let internode_ptr = node_ptr.cast::<InternodeNode>();
@@ -142,7 +145,9 @@ impl<S: ValueSlot> SeizeAllocator15<S> {
 
             // Free the internode.
             // SAFETY: We have exclusive access and internode is valid.
-            unsafe { drop(Box::from_raw(internode_ptr)) };
+            unsafe { std::ptr::drop_in_place(internode_ptr) };
+            let layout = Layout::new::<InternodeNode>();
+            unsafe { node_pool::pool_dealloc(internode_ptr.cast(), layout) };
         }
     }
 }
@@ -423,8 +428,12 @@ impl<V: InlineBits> SeizeAllocator15TrueInline<V> {
             }
 
             // Free the leaf itself.
+            // First drop in place to run destructor.
             // SAFETY: We have exclusive access and leaf is valid.
-            unsafe { drop(Box::from_raw(leaf_ptr)) };
+            unsafe { std::ptr::drop_in_place(leaf_ptr) };
+            // Then return memory to pool.
+            let layout = Layout::new::<LeafNode15TrueInline<V>>();
+            unsafe { node_pool::pool_dealloc(leaf_ptr.cast(), layout) };
         } else {
             // Handle internode
             let internode_ptr = node_ptr.cast::<InternodeNode>();
@@ -442,7 +451,9 @@ impl<V: InlineBits> SeizeAllocator15TrueInline<V> {
 
             // Free the internode.
             // SAFETY: We have exclusive access and internode is valid.
-            unsafe { drop(Box::from_raw(internode_ptr)) };
+            unsafe { std::ptr::drop_in_place(internode_ptr) };
+            let layout = Layout::new::<InternodeNode>();
+            unsafe { node_pool::pool_dealloc(internode_ptr.cast(), layout) };
         }
     }
 }

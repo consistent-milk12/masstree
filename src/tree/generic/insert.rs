@@ -426,10 +426,21 @@ where
             // Inner loop: local retry with B-link advance (no full traversal)
             'forward: loop {
                 // ================================================================
-                // OPTIMISTIC LOCKING: Capture STABLE version + permutation
+                // OPTIMISTIC SEARCH (C++ pattern: search BEFORE locking)
                 // ================================================================
+                // This reduces critical section time by doing search work
+                // while other threads can still access the leaf.
+                // C++ masstree_get.hh:85-87 does this before lock().
                 let pre_lock_version: u32 = leaf.version().stable();
                 let pre_lock_perm_raw = leaf.permutation_raw();
+                let pre_lock_perm = leaf.permutation();
+
+                // Do optimistic search BEFORE locking
+                let optimistic_search = if single_layer_mode {
+                    self.search_for_insert_single_layer(leaf, key, &pre_lock_perm)
+                } else {
+                    self.search_for_insert_generic(leaf, key, &pre_lock_perm)
+                };
 
                 // Lock the leaf (pure spin - yields cause syscall overhead under contention)
                 let mut lock = leaf.version().lock();
@@ -493,14 +504,19 @@ where
                     return result;
                 }
 
-                // Get permutation (must not be frozen since we hold lock)
-                let perm = leaf.permutation();
+                // ================================================================
+                // USE OPTIMISTIC SEARCH RESULT
+                // ================================================================
+                // Since validation passed (version and perm unchanged),
+                // our optimistic search result is valid. No re-search needed!
+                // This matches C++ masstree_get.hh which searches before lock().
+                let perm = pre_lock_perm;
+                let search_result = optimistic_search;
 
                 // ================================================================
                 // Single-layer fast path (keys ≤ 8 bytes)
                 // ================================================================
                 if single_layer_mode {
-                    let search_result = self.search_for_insert_single_layer(leaf, key, &perm);
 
                     match search_result {
                         InsertSearchResultGeneric::Found { slot } => {
@@ -577,7 +593,7 @@ where
                 // ================================================================
                 // Multi-layer path (handles layer descent and conflicts)
                 // ================================================================
-                let search_result = self.search_for_insert_generic(leaf, key, &perm);
+                // Note: search_result is already set from optimistic search above
 
                 match search_result {
                     InsertSearchResultGeneric::Found { slot } => {

@@ -51,18 +51,19 @@ fn test_lock_unlock_roundtrip() {
     {
         let guard: LockGuard<'_> = v.lock();
         assert!(v.is_locked());
-        // With "always dirty on lock" strategy, INSERTING_BIT is set automatically
+        // C++ semantics: lock() only sets LOCK_BIT, not INSERTING_BIT
+        // INSERTING_BIT is set later via mark_insert()
         assert_eq!(guard.locked_value() & LOCK_BIT, LOCK_BIT);
-        assert_eq!(guard.locked_value() & INSERTING_BIT, INSERTING_BIT);
+        assert_eq!(guard.locked_value() & INSERTING_BIT, 0);
 
         // Guard drops here, releasing lock
     }
 
     assert!(!v.is_locked());
 
-    // With "always dirty on lock" strategy, version ALWAYS increments on unlock
-    // because INSERTING_BIT is set automatically.
-    assert!(v.has_changed(stable_before));
+    // C++ semantics: lock/unlock without mark_insert() does NOT increment version
+    // This is important for performance - readers don't need to wait for pure locks
+    assert!(!v.has_changed(stable_before));
 }
 
 #[test]
@@ -122,20 +123,20 @@ fn test_version_increment_on_split() {
 }
 
 #[test]
-fn test_version_always_increments_with_auto_dirty() {
-    // With "always dirty on lock" strategy, version ALWAYS increments
-    // because INSERTING_BIT is set automatically on lock().
+fn test_version_does_not_increment_without_mark_insert() {
+    // C++ semantics: lock/unlock without mark_insert() does NOT increment version
+    // This allows threads to race for lock() without waiting in stable()
     let v: NodeVersion = NodeVersion::new(true);
     let stable_before: u32 = v.stable();
 
     {
-        // Lock sets INSERTING_BIT automatically
+        // Lock does NOT set INSERTING_BIT
         let _guard: LockGuard<'_> = v.lock();
-        // INSERTING_BIT is set, so version will increment on drop
+        // No mark_insert() called, so version should NOT increment on drop
     }
 
-    // Version SHOULD have changed (auto-dirty strategy)
-    assert!(v.has_changed(stable_before));
+    // Version should NOT have changed (C++ semantics)
+    assert!(!v.has_changed(stable_before));
 }
 
 #[test]
@@ -270,26 +271,43 @@ fn test_guard_locked_value() {
     let initial: u32 = v.value();
 
     let guard: LockGuard<'_> = v.lock();
-    // With "always dirty on lock" strategy, INSERTING_BIT is set automatically
-    assert_eq!(guard.locked_value(), initial | LOCK_BIT | INSERTING_BIT);
+    // C++ semantics: lock() only sets LOCK_BIT, not INSERTING_BIT
+    assert_eq!(guard.locked_value(), initial | LOCK_BIT);
 }
 
 #[test]
-fn test_guard_mark_insert_is_idempotent() {
-    // With "always dirty on lock" strategy, INSERTING_BIT is already set.
-    // mark_insert() should be idempotent (no-op if already set).
+fn test_guard_mark_insert_sets_bit() {
+    // C++ semantics: INSERTING_BIT is NOT set by lock(), only by mark_insert()
     let v: NodeVersion = NodeVersion::new(true);
 
     let mut guard: LockGuard<'_> = v.lock();
     let initial_locked: u32 = guard.locked_value();
 
-    // INSERTING_BIT is already set by lock()
-    assert_ne!(initial_locked & INSERTING_BIT, 0);
+    // INSERTING_BIT is NOT set by lock()
+    assert_eq!(initial_locked & INSERTING_BIT, 0);
 
     guard.mark_insert();
 
-    // Guard's locked_value should be unchanged (idempotent)
-    assert_eq!(guard.locked_value(), initial_locked);
+    // Now INSERTING_BIT should be set
+    assert_ne!(guard.locked_value() & INSERTING_BIT, 0);
+    assert!(v.is_inserting());
+}
+
+#[test]
+fn test_guard_mark_insert_is_idempotent() {
+    // Calling mark_insert() multiple times should be idempotent
+    let v: NodeVersion = NodeVersion::new(true);
+
+    let mut guard: LockGuard<'_> = v.lock();
+
+    guard.mark_insert();
+    let after_first: u32 = guard.locked_value();
+
+    guard.mark_insert();
+    let after_second: u32 = guard.locked_value();
+
+    // Should be unchanged after second call
+    assert_eq!(after_first, after_second);
 }
 
 // =======================================================================
@@ -308,11 +326,12 @@ fn test_insert_counter_wraparound_stress() {
         let stable_before = v.stable();
 
         {
-            let _guard = v.lock();
-            // INSERTING_BIT set automatically, version increments on drop
+            let mut guard = v.lock();
+            // C++ semantics: must call mark_insert() for version to increment
+            guard.mark_insert();
         }
 
-        // Version should always change after unlock
+        // Version should always change after unlock with mark_insert()
         assert!(
             v.has_changed(stable_before),
             "Version should change after unlock (iteration {i})"

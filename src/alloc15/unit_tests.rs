@@ -1,4 +1,7 @@
+use std::alloc::Layout;
+
 use super::{LeafNode15, NodeAllocatorGeneric, SeizeAllocator15};
+use crate::node_pool;
 use crate::value::LeafValue;
 
 #[test]
@@ -20,8 +23,7 @@ fn test_seize_allocator15_alloc_leaf() {
         assert!((*ptr).is_empty());
     }
 
-    // Clean up - with traversal-based teardown, we need to manually free
-    // or use teardown_tree. For a single leaf, just free directly.
+    // Clean up - alloc_leaf uses Box, so Box::from_raw is correct
     unsafe {
         drop(Box::from_raw(ptr));
     }
@@ -36,7 +38,7 @@ fn test_seize_allocator15_track_leaf_is_noop() {
     // track_leaf is now a no-op (traversal handles cleanup)
     alloc.track_leaf(ptr);
 
-    // Clean up manually
+    // Clean up manually - this was Box-allocated
     unsafe {
         drop(Box::from_raw(ptr));
     }
@@ -54,9 +56,11 @@ fn test_seize_allocator15_alloc_leaf_direct() {
         assert!((*ptr).is_empty());
     }
 
-    // Clean up
+    // Clean up - alloc_leaf_direct uses pool, so use pool_dealloc
     unsafe {
-        drop(Box::from_raw(ptr));
+        std::ptr::drop_in_place(ptr);
+        let layout = Layout::new::<LeafNode15<LeafValue<u64>>>();
+        node_pool::pool_dealloc(ptr.cast(), layout);
     }
 }
 

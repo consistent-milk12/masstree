@@ -153,23 +153,25 @@ proptest! {
 // ============================================================================
 
 proptest! {
-    /// Lock then unlock increments version (auto-dirty strategy sets INSERTING_BIT).
+    /// Lock then unlock does NOT increment version without mark_insert().
     ///
-    /// With the "auto dirty on lock" strategy, lock() automatically sets INSERTING_BIT.
-    /// This means unlock() will increment the version counter, so has_changed() returns true.
+    /// C++ semantics: lock() only sets LOCK_BIT, not INSERTING_BIT.
+    /// Without mark_insert(), unlock() does not increment version counter.
+    /// This allows threads to race for lock() without waiting in stable().
     #[test]
-    fn lock_unlock_increments_version_due_to_auto_dirty(is_leaf in any::<bool>()) {
+    fn lock_unlock_does_not_increment_version_without_mark_insert(is_leaf in any::<bool>()) {
         let v = NodeVersion::new(is_leaf);
         let before = v.stable();
 
         {
             let _guard = v.lock();
             prop_assert!(v.is_locked());
+            // No mark_insert() called
         }
 
         prop_assert!(!v.is_locked());
-        // With auto-dirty strategy, version changes due to INSERTING_BIT
-        prop_assert!(v.has_changed(before));
+        // C++ semantics: version does NOT change without mark_insert()
+        prop_assert!(!v.has_changed(before));
     }
 
     /// Lock sets the lock bit.
@@ -605,27 +607,42 @@ proptest! {
         prop_assert!(v.has_changed(before));
     }
 
-    /// Guard locked_value has INSERTING_BIT set from auto-dirty strategy.
+    /// Guard locked_value does NOT have INSERTING_BIT until mark_insert().
     ///
-    /// With "auto dirty on lock" strategy, lock() sets INSERTING_BIT automatically.
-    /// mark_insert() is now idempotent - calling it doesn't change anything.
+    /// C++ semantics: lock() only sets LOCK_BIT, not INSERTING_BIT.
+    /// mark_insert() must be called explicitly to set INSERTING_BIT.
     #[test]
-    fn guard_has_inserting_bit_from_auto_dirty(is_leaf in any::<bool>()) {
+    fn guard_inserting_bit_set_by_mark_insert(is_leaf in any::<bool>()) {
         let v = NodeVersion::new(is_leaf);
 
         let mut guard = v.lock();
         let initial = guard.locked_value();
 
-        // With auto-dirty strategy, INSERTING_BIT is already set by lock()
-        prop_assert_ne!(initial & INSERTING_BIT, 0);
+        // C++ semantics: INSERTING_BIT is NOT set by lock()
+        prop_assert_eq!(initial & INSERTING_BIT, 0);
 
         guard.mark_insert();
         let after_insert = guard.locked_value();
 
-        // mark_insert is idempotent, still set
+        // Now INSERTING_BIT should be set
         prop_assert_ne!(after_insert & INSERTING_BIT, 0);
-        // Value unchanged since it was already set
-        prop_assert_eq!(initial, after_insert);
+    }
+
+    /// mark_insert() is idempotent - calling it multiple times has same effect.
+    #[test]
+    fn mark_insert_is_idempotent(is_leaf in any::<bool>()) {
+        let v = NodeVersion::new(is_leaf);
+
+        let mut guard = v.lock();
+
+        guard.mark_insert();
+        let after_first = guard.locked_value();
+
+        guard.mark_insert();
+        let after_second = guard.locked_value();
+
+        // Should be unchanged after second call
+        prop_assert_eq!(after_first, after_second);
     }
 }
 

@@ -1,13 +1,15 @@
 //! Regression tests for split-related suffix handling bugs.
 //!
 //! These tests specifically cover:
-//! - BugHunt2: Multi-layer key suffix corruption during split
+//! - `BugHunt2`: Multi-layer key suffix corruption during split
 //! - Suffix overflow from inline to external storage during split initialization
 //! - Various edge cases for suffix handling across splits
 
+#![allow(clippy::unwrap_used, )]
+
 use masstree::MassTree;
 
-/// Regression test for BugHunt2: Multi-layer key suffix corruption during split.
+/// Regression test for `BugHunt2`: Multi-layer key suffix corruption during split.
 ///
 /// This bug was caused by the `assign_ksuf` function not handling the case where
 /// the permutation isn't set up yet during split initialization. When inline suffix
@@ -17,7 +19,7 @@ use masstree::MassTree;
 /// The fix adds an `initializing` parameter to `assign_ksuf` that, when true,
 /// iterates over slots 0..N directly instead of using the permutation.
 ///
-/// Reference: C++ masstree_struct.hh:736 `int n = initializing ? p : perm.size();`
+/// Reference: C++ `masstree_struct.hh:736` `int n = initializing ? p : perm.size();`
 #[test]
 fn test_bughunt2_multilayer_keys_after_split() {
     // These are the exact keys from the bug reproduction
@@ -51,7 +53,7 @@ fn test_bughunt2_multilayer_keys_after_split() {
 
     // Insert all keys
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key, i);
+        let _ = tree.insert(key, i);
     }
 
     // Verify all keys are retrievable
@@ -66,8 +68,7 @@ fn test_bughunt2_multilayer_keys_after_split() {
         assert_eq!(
             *result.unwrap(),
             i,
-            "Key {} returned wrong value after split",
-            i
+            "Key {i} returned wrong value after split"
         );
     }
 
@@ -79,8 +80,7 @@ fn test_bughunt2_multilayer_keys_after_split() {
         let value = *entry.value;
         assert!(
             value < keys.len(),
-            "Iteration returned invalid value {}",
-            value
+            "Iteration returned invalid value {value}"
         );
     }
     assert_eq!(
@@ -117,7 +117,7 @@ fn test_varying_suffix_lengths_across_split() {
 
     // Insert all keys
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key, i);
+        let _ = tree.insert(key, i);
     }
 
     // Verify all keys are retrievable
