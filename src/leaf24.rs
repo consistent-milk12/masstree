@@ -2272,10 +2272,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
             #[cfg(feature = "debug-routing")]
             eprintln!("=== SPLIT DEBUG ===");
             #[cfg(feature = "debug-routing")]
-            eprintln!(
-                "split_pos={} entries_to_move={}",
-                split_pos, entries_to_move
-            );
+            eprintln!("split_pos={split_pos} entries_to_move={entries_to_move}");
 
             // Move entries using RELAXED ordering (see leaf15.rs for justification)
             for i in 0..entries_to_move {
@@ -2288,8 +2285,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 
                 #[cfg(feature = "debug-routing")]
                 eprintln!(
-                    "  i={:2} old_pos={:2} old_slot={:2} new_slot={:2} ikey={:016X} keylenx={:3}",
-                    i, old_logical_pos, old_slot, new_slot, ikey, keylenx
+                    "  i={i:2} old_pos={old_logical_pos:2} old_slot={old_slot:2} new_slot={new_slot:2} ikey={ikey:016X} keylenx={keylenx:3}"
                 );
 
                 new_leaf.set_ikey_relaxed(new_slot, ikey);
@@ -2300,10 +2296,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
                 {
                     let verify_keylenx = new_leaf.keylenx_relaxed(new_slot);
                     if verify_keylenx != keylenx {
-                        eprintln!(
-                            "    MISMATCH! wrote {} but read back {}",
-                            keylenx, verify_keylenx
-                        );
+                        eprintln!("    MISMATCH! wrote {keylenx} but read back {verify_keylenx}");
                     }
                 }
 

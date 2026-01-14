@@ -1,5 +1,7 @@
 //! Print sizes of main Masstree data structures.
 
+#![expect(clippy::cast_precision_loss)]
+
 use std::mem::size_of;
 
 fn main() {
@@ -65,9 +67,9 @@ fn main() {
     let internodes = leaves / 15 + leaves / 225 + leaves / 3375;
     let internode_mem = internodes * internode_size as u64;
 
-    println!("  Estimated leaves: {}", leaves);
+    println!("  Estimated leaves: {leaves}");
     println!("  Leaf memory: {:.2} GB", leaf_mem as f64 / 1e9);
-    println!("  Estimated internodes: {}", internodes);
+    println!("  Estimated internodes: {internodes}");
     println!("  Internode memory: {:.2} GB", internode_mem as f64 / 1e9);
     println!(
         "  Total tree memory: {:.2} GB",

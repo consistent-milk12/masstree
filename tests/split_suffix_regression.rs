@@ -6,6 +6,7 @@
 //! - Various edge cases for suffix handling across splits
 
 #![allow(clippy::unwrap_used)]
+#![expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use masstree::MassTree;
 
@@ -129,7 +130,7 @@ fn test_varying_suffix_lengths_across_split() {
             i,
             key.len() - 8
         );
-        assert_eq!(*result.unwrap(), i, "Key {} returned wrong value", i);
+        assert_eq!(*result.unwrap(), i, "Key {i} returned wrong value");
     }
 }
 
@@ -159,7 +160,7 @@ fn test_inline_suffix_overflow_during_split() {
 
     // Insert all keys
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key, i);
+        let _ = tree.insert(key, i);
     }
 
     // Verify all keys are retrievable
@@ -171,7 +172,7 @@ fn test_inline_suffix_overflow_during_split() {
             i,
             key.len()
         );
-        assert_eq!(*result.unwrap(), i, "Key {} returned wrong value", i);
+        assert_eq!(*result.unwrap(), i, "Key {i} returned wrong value");
     }
 
     // Additional check: verify tree length
@@ -213,7 +214,7 @@ fn test_mixed_inline_and_suffix_keys_across_split() {
 
     // Insert all keys
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key, i);
+        let _ = tree.insert(key, i);
     }
 
     // Verify all keys are retrievable
@@ -227,7 +228,7 @@ fn test_mixed_inline_and_suffix_keys_across_split() {
             key_type,
             key.len()
         );
-        assert_eq!(*result.unwrap(), i, "Key {} returned wrong value", i);
+        assert_eq!(*result.unwrap(), i, "Key {i} returned wrong value");
     }
 }
 
@@ -255,7 +256,7 @@ fn test_multiple_splits_preserve_suffixes() {
 
     // Insert all keys
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key, i);
+        let _ = tree.insert(key, i);
     }
 
     // Verify all keys are retrievable
@@ -275,7 +276,7 @@ fn test_multiple_splits_preserve_suffixes() {
 
     // Verify values
     for (i, key) in keys.iter().enumerate() {
-        assert_eq!(*tree.get(key).unwrap(), i, "Key {} returned wrong value", i);
+        assert_eq!(*tree.get(key).unwrap(), i, "Key {i} returned wrong value");
     }
 }
 
@@ -302,7 +303,7 @@ fn test_layer_keys_across_split() {
 
     // Insert all keys
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key, i);
+        let _ = tree.insert(key, i);
     }
 
     // Verify all keys are retrievable
@@ -314,6 +315,6 @@ fn test_layer_keys_across_split() {
             i,
             key.len()
         );
-        assert_eq!(*result.unwrap(), i, "Key {} returned wrong value", i);
+        assert_eq!(*result.unwrap(), i, "Key {i} returned wrong value");
     }
 }

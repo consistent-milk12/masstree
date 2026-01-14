@@ -3,6 +3,7 @@
 // ============================================================================
 
 use std::cmp::Ordering;
+use std::ptr as StdPtr;
 
 /// Threshold below which XOR-based comparison is used.
 const WORD_COMPARE_THRESHOLD: usize = 8;
@@ -25,13 +26,13 @@ impl CompareSuffix {
         }
 
         // Load both as padded u64 values
-        let mut a_buf = [0u8; 8];
-        let mut b_buf = [0u8; 8];
+        let mut a_buf: [u8; 8] = [0u8; 8];
+        let mut b_buf: [u8; 8] = [0u8; 8];
 
         // SAFETY: len <= 8, so we're within bounds of both buffers
         unsafe {
-            std::ptr::copy_nonoverlapping(a.as_ptr(), a_buf.as_mut_ptr(), len);
-            std::ptr::copy_nonoverlapping(b.as_ptr(), b_buf.as_mut_ptr(), len);
+            StdPtr::copy_nonoverlapping(a.as_ptr(), a_buf.as_mut_ptr(), len);
+            StdPtr::copy_nonoverlapping(b.as_ptr(), b_buf.as_mut_ptr(), len);
         }
 
         let a_word = u64::from_ne_bytes(a_buf);
@@ -112,12 +113,14 @@ impl CompareSuffix {
                 // Convert to big-endian for correct lexicographic order
                 let a_be: u64 = a_word.to_be();
                 let b_be: u64 = b_word.to_be();
+
                 return a_be.cmp(&b_be);
             }
         }
 
         // Compare remainder, then by length
         let remainder_start: usize = chunks * 8;
+
         // SAFETY: remainder_start <= min_len <= both lengths
         #[expect(clippy::indexing_slicing, reason = "remainder_start <= min_len")]
         match a[remainder_start..min_len].cmp(&b[remainder_start..min_len]) {

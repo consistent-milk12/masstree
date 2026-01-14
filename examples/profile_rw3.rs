@@ -18,7 +18,14 @@
 //! perf script | stackcollapse-perf.pl | flamegraph.pl > rw3_put.svg
 //! ```
 
-use core_affinity::CoreId;
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "fail fast in tests"
+)]
+#![expect(clippy::needless_collect, reason = "necessary for handles")]
+#![expect(clippy::cast_precision_loss)]
+
 use masstree::MassTree15Inline;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +33,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// C++ compatible quick_istr: decimal string with minimum length
+/// C++ compatible `quick_istr`: decimal string with minimum length
 struct QuickIstr {
     buf: [u8; 24],
     len: usize,
@@ -132,11 +139,11 @@ fn run_fixed_ops(threads: usize, ops_per_thread: u64) {
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 // Pin to core if possible
-                if let Some(core_ids) = core_affinity::get_core_ids() {
-                    if !core_ids.is_empty() {
-                        let core = core_ids[tid % core_ids.len()];
-                        core_affinity::set_for_current(core);
-                    }
+                if let Some(core_ids) = core_affinity::get_core_ids()
+                    && !core_ids.is_empty()
+                {
+                    let core = core_ids[tid % core_ids.len()];
+                    core_affinity::set_for_current(core);
                 }
 
                 let guard = tree.guard();
@@ -185,11 +192,11 @@ fn run_duration_based(threads: usize, duration: Duration) {
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 // Pin to core if possible
-                if let Some(core_ids) = core_affinity::get_core_ids() {
-                    if !core_ids.is_empty() {
-                        let core = core_ids[tid % core_ids.len()];
-                        core_affinity::set_for_current(core);
-                    }
+                if let Some(core_ids) = core_affinity::get_core_ids()
+                    && !core_ids.is_empty()
+                {
+                    let core = core_ids[tid % core_ids.len()];
+                    core_affinity::set_for_current(core);
                 }
 
                 let guard = tree.guard();

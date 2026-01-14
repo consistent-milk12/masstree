@@ -3,7 +3,12 @@
 //! These tests verify invariants and properties that should hold for all inputs.
 //! Uses differential testing against `BTreeMap` as an oracle.
 
-#![expect(clippy::unwrap_used, reason = "fail fast in tests")]
+#![expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "fail fast in tests"
+)]
 
 use masstree::RangeBound;
 use masstree::key::MAX_KEY_LENGTH;
@@ -1069,7 +1074,7 @@ proptest! {
         prop_assert_eq!(tree.len(), oracle.len());
 
         for (key, expected) in &oracle {
-            let actual = tree.get(&key);
+            let actual = tree.get(key);
             prop_assert_eq!(actual, Some(*expected));
         }
     }
@@ -1092,7 +1097,7 @@ proptest! {
         prop_assert_eq!(tree.len(), oracle.len());
 
         for (key, expected) in &oracle {
-            let actual = tree.get(&key);
+            let actual = tree.get(key);
             prop_assert_eq!(actual, Some(*expected));
         }
     }

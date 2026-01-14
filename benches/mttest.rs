@@ -37,6 +37,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const C: u32 = 2_654_435_761;
 
+// Refresh guard every N ops to allow epoch advancement and memory reclamation
+const GUARD_REFRESH_INTERVAL: u64 = 100_000;
+
 /// Global timeout flag, set by timer thread (matches C++ SIGALRM approach).
 /// Using a single flag since most benchmarks only need put-phase timeout.
 static TIMEOUT: AtomicBool = AtomicBool::new(false);
@@ -410,7 +413,7 @@ fn print_results(test: &str, threads: usize, results: &[ThreadResult]) {
         let mut total_get_rate = 0.0;
         let mut total_ops_rate = 0.0;
 
-        for r in results.iter() {
+        for r in results {
             let put_rate = if r.put_time > 0.0 {
                 r.puts as f64 / r.put_time
             } else {
@@ -667,13 +670,10 @@ fn bench_rw2(
                 let mut sum = 0u64;
                 let mut guard = tree.guard();
 
-                // Refresh guard every N ops to allow epoch advancement and memory reclamation
-                const GUARD_REFRESH_INTERVAL: u64 = 100_000;
-
                 let mut check_errors = 0u64;
                 while !timed_out() && (puts + gets) <= limit {
                     // Periodic guard refresh to allow seize to reclaim retired nodes
-                    if (puts + gets) % GUARD_REFRESH_INTERVAL == 0 && (puts + gets) > 0 {
+                    if (puts + gets).is_multiple_of(GUARD_REFRESH_INTERVAL) && (puts + gets) > 0 {
                         drop(guard);
                         guard = tree.guard();
                     }
@@ -1008,11 +1008,8 @@ fn bench_same(
                 let mut n = 0u64;
                 let mut guard = tree.guard();
 
-                // Refresh guard every N ops to allow epoch advancement and memory reclamation
-                const GUARD_REFRESH_INTERVAL: u64 = 100_000;
-
                 while !timed_out() && n <= limit {
-                    if n % GUARD_REFRESH_INTERVAL == 0 && n > 0 {
+                    if n.is_multiple_of(GUARD_REFRESH_INTERVAL) && n > 0 {
                         drop(guard);
                         guard = tree.guard();
                     }
@@ -1093,11 +1090,8 @@ fn bench_uscale(
                 let mut n = 0u64;
                 let mut guard = tree.guard();
 
-                // Refresh guard every N ops to allow epoch advancement and memory reclamation
-                const GUARD_REFRESH_INTERVAL: u64 = 100_000;
-
                 while !timed_out() {
-                    if n % GUARD_REFRESH_INTERVAL == 0 && n > 0 {
+                    if n.is_multiple_of(GUARD_REFRESH_INTERVAL) && n > 0 {
                         drop(guard);
                         guard = tree.guard();
                     }
@@ -1170,11 +1164,8 @@ fn bench_wscale(
                 let mut n = 0u64;
                 let mut guard = tree.guard();
 
-                // Refresh guard every N ops to allow epoch advancement and memory reclamation
-                const GUARD_REFRESH_INTERVAL: u64 = 100_000;
-
                 while !timed_out() {
-                    if n % GUARD_REFRESH_INTERVAL == 0 && n > 0 {
+                    if n.is_multiple_of(GUARD_REFRESH_INTERVAL) && n > 0 {
                         drop(guard);
                         guard = tree.guard();
                     }

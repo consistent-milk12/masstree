@@ -1,10 +1,13 @@
 //! Minimal reproduction of the multi-layer key split bug (BugHunt2.md)
 //!
-//! Run with: cargo run --example bug_repro --features mimalloc
-//! Debug:    cargo run --example bug_repro --features "mimalloc debug-routing"
+//! Run with: `cargo run --example bug_repro --features mimalloc`
+//! Debug:    `cargo run --example bug_repro --features "mimalloc debug-routing"`
+
+#![allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "fail fast")]
 
 use masstree::tree::MassTree24;
 
+#[expect(clippy::too_many_lines, reason = "main func")]
 fn main() {
     println!("=== BugHunt2: Multi-Layer Key Split Bug ===\n");
 
@@ -174,8 +177,8 @@ fn main() {
     }
 
     println!("\n=== SUMMARY ===");
-    println!("Keys lost via get(): {}", lost_count);
-    println!("Keys with wrong len in iteration: {}", wrong_len_count);
+    println!("Keys lost via get(): {lost_count}");
+    println!("Keys with wrong len in iteration: {wrong_len_count}");
     println!(
         "Total via iteration: {} (tree.len()={})",
         iter_count,

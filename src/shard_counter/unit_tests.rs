@@ -1,3 +1,5 @@
+#![expect(clippy::unwrap_used)]
+
 use super::{CACHE_LINE_SIZE, PaddedCounter, SHARDS, ShardedCounter};
 use std::{sync::Arc, thread::Scope};
 
@@ -272,7 +274,7 @@ fn test_debug_output() {
     counter.increment();
     counter.increment();
 
-    let debug_str: String = format!("{:?}", counter);
+    let debug_str: String = format!("{counter:?}");
 
     assert!(
         debug_str.contains("ShardedCounter"),
@@ -282,5 +284,5 @@ fn test_debug_output() {
         debug_str.contains("total"),
         "Debug output should contain 'total'"
     );
-    assert!(debug_str.contains("3"), "Debug output should contain count");
+    assert!(debug_str.contains('3'), "Debug output should contain count");
 }
