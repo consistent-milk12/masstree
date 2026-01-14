@@ -303,20 +303,21 @@ impl<O> ScanEntry<O> {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct IterFlags(u8);
+pub struct IterFlags(u16);
 
 #[allow(dead_code, reason = "API Completeness")]
 impl IterFlags {
     // Bit Positions (forward iteration)
-    const EXHAUSTED: u8 = 1 << 0;
-    const INITIALIZED: u8 = 1 << 1;
-    const EMIT_EQUAL: u8 = 1 << 2;
-    const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
-    const SINGLE_LAYER_MODE: u8 = 1 << 4;
+    const EXHAUSTED: u16 = 1 << 0;
+    const INITIALIZED: u16 = 1 << 1;
+    const EMIT_EQUAL: u16 = 1 << 2;
+    const NEEDS_DUPLICATE_CHECK: u16 = 1 << 3;
+    const SINGLE_LAYER_MODE: u16 = 1 << 4;
     // Bit Positions (reverse iteration for DoubleEndedIterator)
-    const BACK_EXHAUSTED: u8 = 1 << 5;
-    const BACK_INITIALIZED: u8 = 1 << 6;
-    const BACK_EMIT_EQUAL: u8 = 1 << 7;
+    const BACK_EXHAUSTED: u16 = 1 << 5;
+    const BACK_INITIALIZED: u16 = 1 << 6;
+    const BACK_EMIT_EQUAL: u16 = 1 << 7;
+    const BACK_NEEDS_DUPLICATE_CHECK: u16 = 1 << 8;
 
     /// Create new flags with all bits cleared.
     #[inline(always)]
@@ -327,7 +328,7 @@ impl IterFlags {
     /// Create flags with initial values for forward iteration.
     #[inline(always)]
     pub const fn with_values(emit_equal: bool, single_layer_mode: bool) -> Self {
-        let mut bits: u8 = 0;
+        let mut bits: u16 = 0;
 
         if emit_equal {
             bits |= Self::EMIT_EQUAL;
@@ -347,7 +348,7 @@ impl IterFlags {
         single_layer_mode: bool,
         back_emit_equal: bool,
     ) -> Self {
-        let mut bits: u8 = 0;
+        let mut bits: u16 = 0;
 
         if emit_equal {
             bits |= Self::EMIT_EQUAL;
@@ -407,6 +408,11 @@ impl IterFlags {
     #[inline(always)]
     pub const fn back_emit_equal(self) -> bool {
         self.0 & Self::BACK_EMIT_EQUAL != 0
+    }
+
+    #[inline(always)]
+    pub const fn back_needs_duplicate_check(self) -> bool {
+        self.0 & Self::BACK_NEEDS_DUPLICATE_CHECK != 0
     }
 
     // ========================================================================
@@ -512,6 +518,18 @@ impl IterFlags {
     #[inline(always)]
     pub const fn fully_exhausted(self) -> bool {
         (self.0 & Self::EXHAUSTED != 0) && (self.0 & Self::BACK_EXHAUSTED != 0)
+    }
+
+    /// Clear `back_needs_duplicate_check` flag.
+    #[inline(always)]
+    pub const fn clear_back_duplicate_check(&mut self) {
+        self.0 &= !Self::BACK_NEEDS_DUPLICATE_CHECK;
+    }
+
+    /// Set `back_needs_duplicate_check` flag.
+    #[inline(always)]
+    pub const fn require_back_duplicate_check(&mut self) {
+        self.0 |= Self::BACK_NEEDS_DUPLICATE_CHECK;
     }
 }
 
@@ -1045,13 +1063,26 @@ where
                 }
 
                 ScanStateBack::FindPrev => {
-                    let (new_state, snapshot) = ReverseScan::find_prev(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_layer_stack,
-                        &mut self.back_helper,
-                        self.guard,
-                    );
+                    // OPTIMIZATION: Only check for duplicates after a Retry,
+                    // not in normal reverse iteration
+                    let (new_state, snapshot) = if self.flags.back_needs_duplicate_check() {
+                        self.flags.clear_back_duplicate_check();
+                        ReverseScan::find_prev_with_duplicate_check(
+                            &mut self.back_stack,
+                            &mut self.back_cursor_key,
+                            &mut self.back_layer_stack,
+                            &mut self.back_helper,
+                            self.guard,
+                        )
+                    } else {
+                        ReverseScan::find_prev(
+                            &mut self.back_stack,
+                            &mut self.back_cursor_key,
+                            &mut self.back_layer_stack,
+                            &mut self.back_helper,
+                            self.guard,
+                        )
+                    };
 
                     self.back_state = new_state;
                     self.back_snapshot = snapshot;
@@ -1074,6 +1105,8 @@ where
 
                     self.back_state = state;
                     self.back_snapshot = snapshot;
+                    // After layer descent, we need duplicate check
+                    self.flags.require_back_duplicate_check();
                 }
 
                 ScanStateBack::Up => {
@@ -1089,6 +1122,8 @@ where
                         return None;
                     }
                     self.back_state = ScanStateBack::FindPrev;
+                    // After layer ascent, we need duplicate check
+                    self.flags.require_back_duplicate_check();
                 }
 
                 ScanStateBack::Retry => {
@@ -1099,6 +1134,8 @@ where
                         self.guard,
                     );
                     self.back_state = new_state;
+                    // After retry, we need duplicate check on next FindPrev
+                    self.flags.require_back_duplicate_check();
                 }
             }
         }
@@ -2156,6 +2193,7 @@ where
                 ScanStateBack::Down => {
                     ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
                     self.back_state = ScanStateBack::Retry;
+                    self.flags.require_back_duplicate_check();
                     continue;
                 }
 
@@ -2171,6 +2209,7 @@ where
                         return count;
                     }
                     self.back_state = ScanStateBack::FindPrev;
+                    self.flags.require_back_duplicate_check();
                     continue;
                 }
 
@@ -2182,6 +2221,7 @@ where
                         self.guard,
                     );
                     self.back_state = new_state;
+                    self.flags.require_back_duplicate_check();
                     continue;
                 }
 

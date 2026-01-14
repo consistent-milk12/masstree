@@ -51,25 +51,6 @@ enum EmitResult<S: ValueSlot> {
     VersionChanged,
 }
 
-// ============================================================================
-//  find_prev Result Types
-// ============================================================================
-
-/// Result of attempting to emit a value during `find_prev`.
-///
-/// Three-way result matching the `EmitResult` pattern but for the main
-/// reverse scan workhorse loop.
-enum ValueResult<S: ValueSlot> {
-    /// Value ready for emission.
-    Ready(ScanSnapshot<S>),
-
-    /// Null value pointer - skip this slot.
-    NullValue,
-
-    /// Version changed during read.
-    VersionChanged,
-}
-
 /// Reverse scan operations for Masstree range iteration.
 ///
 /// This struct provides static methods for reverse-direction traversal
@@ -215,7 +196,6 @@ impl ReverseScan {
     /// - `FindPrev`: No match, caller should retreat
     /// - `Up`: Layer exhausted
     /// - `Retry`: Version conflict
-    #[inline]
     #[expect(clippy::too_many_arguments, reason = "Internal helper")]
     fn try_initial_position_reverse<L, S>(
         leaf: &L,
@@ -296,7 +276,6 @@ impl ReverseScan {
     ///
     /// - If cursor has suffix: use `shift()` to follow user's end bound
     /// - If no suffix: use `shift_clear_reverse()` to scan entire sublayer from max
-    #[inline]
     #[expect(clippy::too_many_arguments, reason = "Internal helper")]
     fn handle_layer_descent_reverse<L, S>(
         current_root: *const u8,
@@ -571,17 +550,58 @@ impl ReverseScan {
     /// - O(1) per slot processed
     /// - Early exits ordered by cost (cheapest first)
     /// - Prefetch optimization for sequential access
+    /// - Duplicate check skipped in normal iteration (only after Retry)
     ///
     /// # C++ Reference
     ///
     /// Corresponds to `scanstackelt::find_next` with `reverse_scan_helper`
     /// in `masstree_scan.hh:230-280`.
+    #[inline]
     pub fn find_prev<L, S>(
         stack: &mut BackStackElement<L, S>,
         cursor_key: &mut CursorKey,
         layer_stack: &mut LayerStack<L>,
         helper: &mut ReverseScanHelper,
         guard: &LocalGuard<'_>,
+    ) -> (ScanStateBack, Option<ScanSnapshot<S>>)
+    where
+        L: TreeLeafNode<S>,
+        S: ValueSlot,
+        S::Output: Clone,
+    {
+        // OPTIMIZATION: Skip duplicate check in normal reverse iteration.
+        // Duplicates can only occur after Retry states (version conflict).
+        Self::find_prev_inner(stack, cursor_key, layer_stack, helper, guard, false)
+    }
+
+    /// Find the previous entry with duplicate checking enabled.
+    ///
+    /// Called after a Retry state to skip already-emitted entries.
+    #[inline]
+    pub fn find_prev_with_duplicate_check<L, S>(
+        stack: &mut BackStackElement<L, S>,
+        cursor_key: &mut CursorKey,
+        layer_stack: &mut LayerStack<L>,
+        helper: &mut ReverseScanHelper,
+        guard: &LocalGuard<'_>,
+    ) -> (ScanStateBack, Option<ScanSnapshot<S>>)
+    where
+        L: TreeLeafNode<S>,
+        S: ValueSlot,
+        S::Output: Clone,
+    {
+        Self::find_prev_inner(stack, cursor_key, layer_stack, helper, guard, true)
+    }
+
+    /// Inner implementation of `find_prev` with configurable duplicate checking.
+    #[inline]
+    fn find_prev_inner<L, S>(
+        stack: &mut BackStackElement<L, S>,
+        cursor_key: &mut CursorKey,
+        layer_stack: &mut LayerStack<L>,
+        helper: &mut ReverseScanHelper,
+        guard: &LocalGuard<'_>,
+        needs_duplicate_check: bool,
     ) -> (ScanStateBack, Option<ScanSnapshot<S>>)
     where
         L: TreeLeafNode<S>,
@@ -631,6 +651,7 @@ impl ReverseScan {
             cursor_key,
             layer_stack,
             helper,
+            needs_duplicate_check,
         )
     }
 
@@ -651,6 +672,7 @@ impl ReverseScan {
         cursor_key: &mut CursorKey,
         layer_stack: &mut LayerStack<L>,
         helper: &mut ReverseScanHelper,
+        needs_duplicate_check: bool,
     ) -> (ScanStateBack, Option<ScanSnapshot<S>>)
     where
         L: TreeLeafNode<S>,
@@ -669,14 +691,17 @@ impl ReverseScan {
             prefetch_read(leaf.leaf_value_ptr(next_slot));
         }
 
-        // Check for duplicate BEFORE processing
-        // This is critical for correctness after version retries
-        if ReverseScanHelper::is_duplicate_reverse(
-            cursor_key,
-            slot_ikey,
-            keylenx,
-            helper.upper_bound,
-        ) {
+        // Check for duplicate only when needed (after Retry)
+        // OPTIMIZATION: In normal reverse iteration, stack.prev() already advances
+        // past the previous entry, so duplicates can't occur
+        if needs_duplicate_check
+            && ReverseScanHelper::is_duplicate_reverse(
+                cursor_key,
+                slot_ikey,
+                keylenx,
+                helper.upper_bound,
+            )
+        {
             stack.set_ki(ReverseScanHelper::prev(ki));
             return (ScanStateBack::FindPrev, None);
         }
@@ -697,23 +722,10 @@ impl ReverseScan {
             );
         }
 
-        // Try to emit this slot's value
-        match Self::try_emit_value_reverse(
+        // Try to emit this slot's value (returns tuple directly, no intermediate enum)
+        Self::try_emit_value_reverse(
             leaf, slot, slot_ikey, keylenx, version, &perm, ki, cursor_key, stack, helper,
-        ) {
-            ValueResult::Ready(snapshot) => (ScanStateBack::Emit, Some(snapshot)),
-
-            ValueResult::NullValue => {
-                // Null value pointer - skip to previous slot
-                stack.set_ki(ReverseScanHelper::prev(ki));
-                (ScanStateBack::FindPrev, None)
-            }
-
-            ValueResult::VersionChanged => {
-                // Version changed during read - need reposition
-                (ScanStateBack::Retry, None)
-            }
-        }
+        )
     }
 
     /// Handle a layer pointer during reverse scan (`find_prev` path).
@@ -761,8 +773,7 @@ impl ReverseScan {
     /// Try to emit a value slot during reverse scan (`find_prev` path).
     ///
     /// Handles both suffix keys and inline keys with proper version validation.
-    /// Unlike `try_emit_slot_reverse`, this doesn't need `emit_equal` since
-    /// that's only for initial positioning.
+    /// Returns the state tuple directly to avoid intermediate enum allocation.
     ///
     /// # Critical: Calls `mark_key_complete()`
     ///
@@ -782,7 +793,7 @@ impl ReverseScan {
         cursor_key: &mut CursorKey,
         stack: &mut BackStackElement<L, S>,
         helper: &mut ReverseScanHelper,
-    ) -> ValueResult<S>
+    ) -> (ScanStateBack, Option<ScanSnapshot<S>>)
     where
         L: TreeLeafNode<S>,
         S: ValueSlot,
@@ -792,12 +803,14 @@ impl ReverseScan {
         let value_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
         if value_ptr.is_null() {
-            return ValueResult::NullValue;
+            // Null value pointer - skip to previous slot
+            stack.set_ki(ReverseScanHelper::prev(ki));
+            return (ScanStateBack::FindPrev, None);
         }
 
         // Version check BEFORE reading value
         if leaf.version().has_changed(version) {
-            return ValueResult::VersionChanged;
+            return (ScanStateBack::Retry, None);
         }
 
         // Build key from slot data
@@ -826,10 +839,13 @@ impl ReverseScan {
         // Update position for next iteration
         stack.update_state(version, *perm, ReverseScanHelper::prev(ki));
 
-        ValueResult::Ready(ScanSnapshot {
-            value: output,
-            key_len,
-        })
+        (
+            ScanStateBack::Emit,
+            Some(ScanSnapshot {
+                value: output,
+                key_len,
+            }),
+        )
     }
 
     // ========================================================================
@@ -1462,7 +1478,6 @@ use super::scan_state::ScanSnapshotPtr;
 /// ~20% faster than standard `find_prev` for single-layer data by eliminating
 /// branch mispredictions from layer pointer checks.
 #[inline]
-#[expect(dead_code)]
 pub fn find_prev_single_layer_ptr<L, S>(
     stack: &mut BackStackElement<L, S>,
     cursor_key: &mut CursorKey,
