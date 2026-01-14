@@ -53,7 +53,7 @@ mimalloc = { version = "0.1.48", optional = true }
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+libc = "0.2.180"
 
 # Optional tracing (enabled via features) - zero overhead when disabled
 # "attributes" enables #[instrument] for function-level tracing
@@ -70,7 +70,7 @@ serde_json = { version = "1.0.149", optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 chrono = { version = "0.4.42", optional = true }
 clap = { version = "4.5.54", features = ["derive"], optional = true }
-comfy-table = { version = "7.2.1", optional = true }
+comfy-table = { version = "7.2.2", optional = true }
 regex = { version = "1.12.2", optional = true }
 
 [dev-dependencies]
@@ -110,7 +110,7 @@ iai-callgrind = "0.16.1"
 
 # Examples dependencies
 rayon = "1.11.0"
-core_affinity = "0.8.1"
+core_affinity = "0.8.3"
 tokio = { version = "1.49.0", features = ["full"] }
 
 [lints.rust]
