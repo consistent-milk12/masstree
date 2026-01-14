@@ -956,6 +956,9 @@ impl<S: ValueSlot> LeafNode24<S> {
 
     /// Fallible version of `assign_ksuf_init` for node initialization.
     ///
+    /// # Errors
+    /// Returns `AllocResult::Err` if memory allocation fails.
+    ///
     /// # Safety
     /// Same as `assign_ksuf_init`.
     #[expect(
@@ -2380,7 +2383,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         (split_ikey, crate::value::InsertTarget::Right)
     }
 
-    #[inline(always)]
+    #[inline]
     unsafe fn link_sibling(&self, new_sibling: *mut Self) {
         // CAS-based link_sibling matching C++ btree_leaflink.hh:56-69 (link_split).
         //

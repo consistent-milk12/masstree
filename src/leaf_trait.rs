@@ -840,7 +840,7 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// operations when the new node's permutation hasn't been set up yet.
     ///
     /// This matches C++ `assign_ksuf`'s `initializing=true` path in
-    /// masstree_struct.hh:728.
+    /// `masstree_struct.hh:728`.
     ///
     /// # Safety
     ///

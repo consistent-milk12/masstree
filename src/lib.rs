@@ -125,6 +125,9 @@
 // We use extensive benchmarking to verify #[inline(always)] placement is correct.
 #![allow(clippy::inline_always)]
 #![allow(clippy::multiple_crate_versions)]
+// Allocation code casts *mut u8 to node pointers after allocating with correct Layout.
+// The memory is always properly aligned before casting.
+#![allow(clippy::cast_ptr_alignment)]
 
 // Global allocator selection (enabled via features)
 #[cfg(feature = "mimalloc")]

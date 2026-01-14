@@ -1315,6 +1315,9 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
 
     /// Fallible version of `assign_ksuf_init` for node initialization.
     ///
+    /// # Errors
+    /// Returns `AllocResult::Err` if memory allocation fails.
+    ///
     /// # Safety
     /// Same as `assign_ksuf_init`.
     #[expect(clippy::indexing_slicing)]

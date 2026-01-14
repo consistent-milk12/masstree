@@ -1026,6 +1026,10 @@ where
 
     /// Advance the back iterator state machine.
     #[inline]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "State machine benefits from unified logic"
+    )]
     fn advance_back(&mut self) -> Option<ScanEntry<S::Output>> {
         loop {
             match self.back_state {

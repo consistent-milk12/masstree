@@ -129,7 +129,7 @@ impl Freelist {
 
     /// Refill freelist from global allocator.
     ///
-    /// Marked cold since this is the slow path - the hot path is pop().
+    /// Marked cold since this is the slow path - the hot path is `pop()`.
     #[cold]
     fn refill(&mut self, layout: Layout) {
         for _ in 0..REFILL_BATCH {
@@ -187,7 +187,8 @@ impl ThreadPool {
             return unsafe { alloc(layout) };
         };
 
-        let bucket = &mut self.buckets[nl - 1];
+        // SAFETY: size_class() returns nl in [1, MAX_SIZE_CLASSES], so nl-1 is in [0, 19]
+        let bucket = unsafe { self.buckets.get_unchecked_mut(nl - 1) };
         let bucket_layout = bucket_layout(nl);
 
         if let Some(ptr) = bucket.pop() {
@@ -215,7 +216,8 @@ impl ThreadPool {
             return;
         };
 
-        let bucket: &mut Freelist = &mut self.buckets[nl - 1];
+        // SAFETY: size_class() returns nl in [1, MAX_SIZE_CLASSES], so nl-1 is in [0, 19]
+        let bucket: &mut Freelist = unsafe { self.buckets.get_unchecked_mut(nl - 1) };
 
         if bucket.has_capacity() {
             unsafe { bucket.push(ptr) };
@@ -351,7 +353,7 @@ pub unsafe fn reclaim_internode(ptr: *mut InternodeNode, _collector: &Collector)
     unsafe { pool_dealloc(ptr.cast(), layout) };
 }
 
-/// Reclaim a LeafNode15TrueInline to the thread-local pool.
+/// Reclaim a `LeafNode15TrueInline` to the thread-local pool.
 ///
 /// # Safety
 /// - `ptr` must point to a valid `LeafNode15TrueInline<V>`

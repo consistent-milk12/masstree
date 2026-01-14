@@ -1478,6 +1478,7 @@ use super::scan_state::ScanSnapshotPtr;
 /// ~20% faster than standard `find_prev` for single-layer data by eliminating
 /// branch mispredictions from layer pointer checks.
 #[inline]
+#[allow(dead_code)] // Kept for future single-layer optimization path
 pub fn find_prev_single_layer_ptr<L, S>(
     stack: &mut BackStackElement<L, S>,
     cursor_key: &mut CursorKey,
@@ -1574,6 +1575,7 @@ where
 ///
 /// Simplified version that doesn't handle Up transitions (no layer stack).
 #[inline(always)]
+#[allow(dead_code)] // Called by find_prev_single_layer_ptr (also dead)
 fn advance_prev_leaf_single_layer<L, S>(
     stack: &mut BackStackElement<L, S>,
     cursor_key: &mut CursorKey,
