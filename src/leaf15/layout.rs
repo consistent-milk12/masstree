@@ -4,7 +4,7 @@
 //! layout at compile time. Any refactoring that changes field offsets will
 //! cause a build failure with a clear error message.
 //!
-//! # Cache Line Strategy
+//! # Cache Line Strategy (Suffix Sidecar)
 //!
 //! ```text
 //! CL 0  (0-63):     version (4B) + modstate (1B) + _pad0 (55B) + 4B implicit padding
@@ -13,13 +13,14 @@
 //! CL 3  (192-255):  ikey0[8..=14] (7 keys, 56B) + keylenx[0..=7] (8B)
 //! CL 4  (256-319):  keylenx[8..=14] (7B) + 1B pad + leaf_values[0..=6] (7 ptrs, 56B)
 //! CL 5  (320-383):  leaf_values[7..=14] (8 ptrs, 64B)
-//! CL 6  (384-447):  inline_ksuf[0..63] (64B)
-//! CL 7  (448-511):  inline_ksuf[64..127] (64B)
-//! CL 8  (512-575):  inline_ksuf[128..191] (64B)
-//! CL 9  (576-639):  inline_ksuf[192..255] (64B)
-//! CL 10 (640-703):  inline_ksuf[256..319] (64B)
-//! CL 11 (704-767):  external_ksuf (8B) + next (8B) + prev (8B) + parent (8B) + 32B tail pad
+//! CL 6  (384-447):  suffix_sidecar (8B) + next (8B) + prev (8B) + parent (8B) + 32B tail pad
 //! ```
+//!
+//! # Memory Savings
+//!
+//! - Before (with `inline_ksuf` + `external_ksuf`): 768 bytes (12 cache lines)
+//! - After (with `suffix_sidecar`): 448 bytes (7 cache lines)
+//! - Savings: 320 bytes (42% reduction)
 //!
 //! # Hot Path (get) Cache Lines
 //!
@@ -33,10 +34,10 @@
 use std::mem as StdMem;
 
 use super::{LeafNode15, WIDTH_15};
-use crate::LeafValue;
 use crate::nodeversion::NodeVersion;
 use crate::permuter::AtomicPermuter15;
-use crate::suffix::InlineSuffixBag;
+use crate::suffix::SuffixSidecar;
+use crate::LeafValue;
 
 // ============================================================================
 //  Size and Alignment Assertions
@@ -47,10 +48,10 @@ use crate::suffix::InlineSuffixBag;
 /// Note: These assertions assume `target_pointer_width = 64`.
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
+    use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8};
 
-    // LeafNode15 should be exactly 768 bytes (12 cache lines)
-    assert!(StdMem::size_of::<LeafNode15<LeafValue<u64>>>() == 768);
+    // LeafNode15 should be exactly 448 bytes (7 cache lines) with sidecar design
+    assert!(StdMem::size_of::<LeafNode15<LeafValue<u64>>>() == 448);
 
     // Alignment should be 64 bytes (cache line)
     assert!(StdMem::align_of::<LeafNode15<LeafValue<u64>>>() == 64);
@@ -61,7 +62,7 @@ const _: () = {
     assert!(StdMem::size_of::<[AtomicU64; WIDTH_15]>() == 120);
     assert!(StdMem::size_of::<[AtomicU8; WIDTH_15]>() == 15);
     assert!(StdMem::size_of::<[AtomicPtr<u8>; WIDTH_15]>() == 120);
-    assert!(StdMem::size_of::<InlineSuffixBag<WIDTH_15, 256>>() == 320);
+    assert!(StdMem::size_of::<AtomicPtr<SuffixSidecar<WIDTH_15>>>() == 8);
 };
 
 // ============================================================================
@@ -97,16 +98,13 @@ const _: () = {
     // leaf_values follows keylenx: 248 + 15 + 1 (padding) = 264
     assert!(offset_of!(LeafNode15<LeafValue<u64>>, leaf_values) == 264);
 
-    // inline_ksuf follows leaf_values: 264 + 120 = 384 (cache line 6)
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, inline_ksuf) == 384);
+    // suffix_sidecar follows leaf_values: 264 + 120 = 384 (cache line 6)
+    assert!(offset_of!(LeafNode15<LeafValue<u64>>, suffix_sidecar) == 384);
 
-    // external_ksuf follows inline_ksuf: 384 + 320 = 704 (cache line 11)
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, external_ksuf) == 704);
-
-    // Linking pointers in cache line 11
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, next) == 712);
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, prev) == 720);
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, parent) == 728);
+    // Linking pointers in cache line 6
+    assert!(offset_of!(LeafNode15<LeafValue<u64>>, next) == 392);
+    assert!(offset_of!(LeafNode15<LeafValue<u64>>, prev) == 400);
+    assert!(offset_of!(LeafNode15<LeafValue<u64>>, parent) == 408);
 };
 
 // ============================================================================

@@ -36,7 +36,7 @@ use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
 
 // ============================================================================
-//  Constants (CODE_066 optimized)
+//  Constants
 // ============================================================================
 
 /// Cache line size for alignment and bucketing.
@@ -64,8 +64,8 @@ const REFILL_BATCH: usize = 64;
 #[inline]
 const fn size_class(layout: Layout) -> Option<usize> {
     // Round up to cache line boundary
-    let size = layout.size();
-    let nl = size.div_ceil(CACHE_LINE);
+    let size: usize = layout.size();
+    let nl: usize = size.div_ceil(CACHE_LINE);
 
     if nl == 0 || nl > MAX_SIZE_CLASSES {
         None
@@ -80,6 +80,7 @@ const fn size_class(layout: Layout) -> Option<usize> {
 #[inline]
 fn bucket_layout(nl: usize) -> Layout {
     debug_assert!(nl > 0 && nl <= MAX_SIZE_CLASSES);
+
     // SAFETY: size is non-zero and alignment is valid power of 2
     unsafe { Layout::from_size_align_unchecked(nl * CACHE_LINE, CACHE_LINE) }
 }
@@ -111,9 +112,11 @@ impl Freelist {
         }
 
         let ptr: *mut u8 = self.head;
+
         // SAFETY: ptr is valid (from our freelist), first 8 bytes are next ptr
         self.head = unsafe { StdPtr::read(ptr.cast::<*mut u8>()) };
         self.count -= 1;
+
         Some(ptr)
     }
 
@@ -134,10 +137,12 @@ impl Freelist {
     fn refill(&mut self, layout: Layout) {
         for _ in 0..REFILL_BATCH {
             // SAFETY: layout is valid bucket layout
-            let ptr = unsafe { alloc(layout) };
+            let ptr: *mut u8 = unsafe { alloc(layout) };
+
             if ptr.is_null() {
                 break; // OOM
             }
+
             // SAFETY: freshly allocated with correct layout
             unsafe { self.push(ptr) };
         }
@@ -188,8 +193,8 @@ impl ThreadPool {
         };
 
         // SAFETY: size_class() returns nl in [1, MAX_SIZE_CLASSES], so nl-1 is in [0, 19]
-        let bucket = unsafe { self.buckets.get_unchecked_mut(nl - 1) };
-        let bucket_layout = bucket_layout(nl);
+        let bucket: &mut Freelist = unsafe { self.buckets.get_unchecked_mut(nl - 1) };
+        let bucket_layout: Layout = bucket_layout(nl);
 
         if let Some(ptr) = bucket.pop() {
             return ptr;
@@ -252,9 +257,9 @@ thread_local! {
 #[inline]
 #[must_use]
 pub fn pool_alloc(layout: Layout) -> *mut u8 {
-    POOL.with(|cell| {
+    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
         // SAFETY: thread_local access is single-threaded
-        let pool = unsafe { &mut *cell.get() };
+        let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
         pool.alloc(layout)
     })
 }
@@ -293,12 +298,14 @@ pub fn warmup_pool() {
 
     for &size in WARMUP_SIZES {
         // SAFETY: size is non-zero and alignment is power of 2
-        let layout = unsafe { Layout::from_size_align_unchecked(size, CACHE_LINE) };
+        let layout: Layout = unsafe { Layout::from_size_align_unchecked(size, CACHE_LINE) };
 
         // Allocate REFILL_BATCH nodes to trigger refill, then return all
-        let mut ptrs = Vec::with_capacity(REFILL_BATCH);
+        let mut ptrs: Vec<*mut u8> = Vec::with_capacity(REFILL_BATCH);
+
         for _ in 0..REFILL_BATCH {
-            let ptr = pool_alloc(layout);
+            let ptr: *mut u8 = pool_alloc(layout);
+
             if !ptr.is_null() {
                 ptrs.push(ptr);
             }

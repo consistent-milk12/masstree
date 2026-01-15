@@ -11,9 +11,12 @@ mod clone;
 mod cmp;
 mod compact;
 mod inline;
+mod sidecar;
 
 use cmp::CompareSuffix;
 pub use inline::InlineSuffixBag;
+
+pub use sidecar::{SideCarUtils, SuffixSidecar};
 
 /// Initial capacity for suffix storage (matches C++ `INITIAL_KSUF_CAPACITY`).
 const INITIAL_CAPACITY: usize = 128;
