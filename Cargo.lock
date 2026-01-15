@@ -833,7 +833,6 @@ dependencies = [
  "crossbeam-epoch",
  "crossbeam-queue",
  "crossbeam-skiplist",
- "crossbeam-utils",
  "dashmap",
  "divan",
  "iai-callgrind",
