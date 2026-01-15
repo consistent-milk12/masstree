@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -47,6 +47,8 @@ portable-atomic = "1.13.0"
 arrayvec = "0.7.6"
 static_assertions = "1.1.0"
 rustc-hash = "2.1.1"
+crossbeam-queue = "0.3.12"
+crossbeam-utils = "0.8.21"
 
 # Optional allocators (enabled via features)
 mimalloc = { version = "0.1.48", optional = true }
