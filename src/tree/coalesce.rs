@@ -25,11 +25,11 @@
 //!
 //! # Thread Safety
 //!
-//! The queue uses `parking_lot::Mutex` for interior mutability. This is
-//! acceptable because:
-//! - Cleanup is not on the hot path
-//! - Contention is low (many producers, one consumer)
-//! - Lock hold time is minimal (just push/pop)
+//! The queue uses `crossbeam_queue::SegQueue` for lock-free operations.
+//! This provides:
+//! - Zero contention on push (producers never block)
+//! - Lock-free pop for consumers
+//! - Excellent scalability under high remove rates
 //!
 //! # Lazy Coalescing Flow
 //!
@@ -409,9 +409,7 @@
 //!   └──────────────────────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::collections::VecDeque;
-
-use parking_lot::Mutex;
+use crossbeam_queue::SegQueue;
 use seize::LocalGuard;
 
 use crate::alloc_trait::NodeAllocatorGeneric;
@@ -458,8 +456,9 @@ struct CoalesceEntry<L> {
 unsafe impl<L: Send> Send for CoalesceEntry<L> {}
 unsafe impl<L: Sync> Sync for CoalesceEntry<L> {}
 
-/// Queue of empty leaves pending cleanup.
+/// Lock-free queue of empty leaves pending cleanup.
 ///
+/// Uses `crossbeam_queue::SegQueue` for wait-free push operations.
 /// Leaves are added when they become empty after key removal. The queue
 /// is processed during low-contention periods via `process_all()`.
 ///
@@ -470,9 +469,16 @@ unsafe impl<L: Sync> Sync for CoalesceEntry<L> {}
 /// 2. Verifying it's still empty (not reused by insert)
 /// 3. Unlinking from the B-link chain
 /// 4. Marking as deleted
+///
+/// # Performance
+///
+/// - `schedule()`: Lock-free push, never blocks
+/// - `is_empty()`: Lock-free read
+/// - `len()`: O(n) - walks segments (use sparingly)
+/// - `clear()`: O(n) - pops all entries
 pub struct CoalesceQueue<L> {
-    /// Pending cleanup entries.
-    pending: Mutex<VecDeque<CoalesceEntry<L>>>,
+    /// Lock-free pending cleanup entries.
+    pending: SegQueue<CoalesceEntry<L>>,
 }
 
 impl<L> Default for CoalesceQueue<L> {
@@ -486,13 +492,14 @@ impl<L> CoalesceQueue<L> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            pending: Mutex::new(VecDeque::new()),
+            pending: SegQueue::new(),
         }
     }
 
     /// Schedule an empty leaf for cleanup.
     ///
-    /// This is called from `finish_remove()` when a leaf becomes empty.
+    /// **Lock-free**: This never blocks, even under heavy contention.
+    /// Called from `finish_remove()` when a leaf becomes empty.
     /// The leaf must already be marked with `mark_empty()`.
     ///
     /// # Arguments
@@ -500,7 +507,7 @@ impl<L> CoalesceQueue<L> {
     /// * `leaf_ptr` - Pointer to the empty leaf
     /// * `ikey_bound` - The `ikey_bound` of the leaf (for correctness checks)
     /// * `layer_context` - Optional sublayer context for `gc_layer` cleanup
-    #[inline]
+    #[inline(always)]
     pub fn schedule(
         &self,
         leaf_ptr: *mut L,
@@ -512,41 +519,64 @@ impl<L> CoalesceQueue<L> {
             ikey_bound,
             layer_context,
         };
-        self.pending.lock().push_back(entry);
+        // Lock-free push - never blocks!
+        self.pending.push(entry);
     }
 
     /// Check if the queue is empty.
+    ///
+    /// **Lock-free**: This is a fast, non-blocking check.
     #[must_use]
-    #[inline] // Not #[inline(always)] - takes mutex lock, not hot path
-    #[allow(dead_code)]
+    #[inline]
+    #[allow(dead_code)] // Public API, may be used by external code
     pub fn is_empty(&self) -> bool {
-        self.pending.lock().is_empty()
+        self.pending.is_empty()
     }
 
-    /// Get the number of pending entries.
+    /// Get approximate queue length.
+    ///
+    /// # Performance Warning
+    ///
+    /// **O(n) complexity** - This walks all segments to count entries.
+    /// Do NOT use on hot paths or in tight loops.
+    /// Prefer `is_empty()` for emptiness checks.
     #[must_use]
     #[inline]
     pub fn len(&self) -> usize {
-        self.pending.lock().len()
+        self.pending.len()
     }
 
-    /// Clear the queue without processing.
+    /// Clear all pending entries without processing.
     ///
     /// Used during tree teardown when leaves will be freed anyway.
-    #[inline]
+    ///
+    /// # Performance Note
+    ///
+    /// **O(n) complexity** - `SegQueue` doesn't have a fast clear, so this
+    /// pops entries one by one. Acceptable for teardown (infrequent).
     pub fn clear(&self) {
-        self.pending.lock().clear();
+        while self.pending.pop().is_some() {}
     }
 }
 
 impl<L> std::fmt::Debug for CoalesceQueue<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let len = self.pending.lock().len();
         f.debug_struct("CoalesceQueue")
-            .field("pending_count", &len)
+            .field("pending_count", &self.pending.len())
             .finish()
     }
 }
+
+// SAFETY: CoalesceQueue is Send if L is Send because:
+// - SegQueue<T> is Send when T: Send
+// - CoalesceEntry<L> contains *mut L, but L: Send means the pointer can cross threads
+unsafe impl<L: Send> Send for CoalesceQueue<L> {}
+
+// SAFETY: CoalesceQueue is Sync if L is Send because:
+// - SegQueue<T> is Sync when T: Send (allows shared access that moves T between threads)
+// - Leaf pointers are only dereferenced under proper synchronization (seize guard)
+// - Note: L: Send (not L: Sync) because SegQueue may move entries between threads
+unsafe impl<L: Send> Sync for CoalesceQueue<L> {}
 
 pub struct Coalesce;
 
@@ -628,7 +658,7 @@ impl Coalesce {
     ///
     /// # Algorithm
     ///
-    /// 1. Pop an entry from the queue
+    /// 1. Pop an entry from the queue (lock-free)
     /// 2. Try to lock the leaf
     /// 3. Verify still empty
     /// 4. Verify not leftmost (cannot remove leftmost)
@@ -648,12 +678,9 @@ impl Coalesce {
         L: LayerCapableLeaf<S>,
         A: NodeAllocatorGeneric<S, L>,
     {
-        let entry: CoalesceEntry<L> = {
-            let mut pending = queue.pending.lock();
-            match pending.pop_front() {
-                Some(e) => e,
-                None => return false,
-            }
+        // Lock-free pop from the queue
+        let Some(entry) = queue.pending.pop() else {
+            return false;
         };
 
         let leaf_ptr: *mut L = entry.leaf_ptr;
