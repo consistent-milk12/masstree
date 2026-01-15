@@ -777,15 +777,11 @@ impl NodeVersion {
 
     /// Acquire the lock and return a guard.
     ///
-    /// Strategy: Always-Dirty-On-Lock
-    /// This implementation automatically sets the `INSERTING_BIT` when acquiring the lock.
-    /// This eliminates the race window between lock acquisition and explicit dirty marking,
-    /// ensuring that CAS insert threads always wait for locked writers to complete.
+    /// Strategy: Exponential Backoff
     ///
-    /// 1. `stable()` spins until `DIRTY_MASK == 0` (includes `INSERTING_BIT`)
-    /// 2. `lock()` atomically sets `LOCK_BIT | INSERTING_BIT`
-    /// 3. Therefore, any thread calling `stable()` will wait for the lock holder
-    /// 4. This eliminates the window where a locked writer hasn't called `mark_insert()` yet
+    /// Uses exponential backoff to reduce cache line contention under high
+    /// contention scenarios. This is critical for workloads like `same` where
+    /// multiple threads compete for the same keys.
     ///
     /// # Memory Ordering
     /// Uses `Acquire` ordering on successful CAS to synchronize with the
