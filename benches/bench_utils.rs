@@ -20,8 +20,8 @@
 //!
 //! | Function | Pattern | Why `MassTree` Wins |
 //! |----------|---------|-------------------|
-//! | `keys_shared_prefix` | First 8B identical | Trie shares prefix traversal |
-//! | `keys_shared_prefix_chunks` | Multiple 8B chunks identical | Multi-layer prefix sharing |
+//! | `keys_shared_prefix` | First 8B from small bucket space | Smaller buckets = deeper trie stress |
+//! | `keys_shared_prefix_chunks` | Multiple 8B chunks from buckets | Multi-layer prefix sharing |
 //! | `keys_suffix_only_differ` | Only last chunk differs | Suffix mechanism optimized |
 //! | `keys_hierarchical` | Nested namespace keys | Trie naturally handles hierarchy |
 //! | `keys_variable_length` | Mix of 8B, 16B, 24B, 32B | `MassTree` handles any length |
@@ -54,6 +54,8 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
+
+use arrayvec::ArrayVec;
 
 /// Multipliers for deterministic key chunk generation.
 /// Each chunk uses a different multiplier to ensure variation across chunks.
@@ -114,7 +116,10 @@ pub fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
 /// layers.
 ///
 /// - `K` must be a multiple of 8, between 16 and 128 (inclusive).
-/// - `prefix_buckets` must be > 0. Smaller values increase collisions.
+/// - `prefix_buckets` must be > 0. **Smaller values = harder test for Masstree**:
+///   - `prefix_buckets=1`: All keys share the SAME prefix (maximum trie depth stress)
+///   - `prefix_buckets=10`: ~n/10 keys per prefix bucket (moderate collision)
+///   - `prefix_buckets=n`: Each key has unique prefix (no benefit vs standard keys)
 #[must_use]
 pub fn keys_shared_prefix<const K: usize>(n: usize, prefix_buckets: u64) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -215,6 +220,8 @@ pub fn zipfian_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
 }
 
 /// Uniform random indices.
+///
+/// Note: Uses high bits of LCG state for better randomness quality.
 #[must_use]
 pub fn uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
     let mut indices = Vec::with_capacity(count);
@@ -224,13 +231,15 @@ pub fn uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1);
-        indices.push((state as usize) % n);
+        // Use high bits for better quality
+        indices.push(((state >> 32) as usize) % n);
     }
     indices
 }
 
 /// Shuffle a slice in-place using Fisher-Yates algorithm.
-/// Matches the C++ Masstree benchmark pattern.
+///
+/// Note: Uses high bits of LCG state for better randomness quality.
 pub fn shuffle<T>(slice: &mut [T], seed: u64) {
     let n = slice.len();
     if n <= 1 {
@@ -238,11 +247,12 @@ pub fn shuffle<T>(slice: &mut [T], seed: u64) {
     }
 
     let mut state = seed;
-    for i in 0..n {
+    for i in 0..(n - 1) {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1);
-        let j = (state as usize) % n;
+        // Use high bits for better quality, select j in [i, n) for unbiased shuffle
+        let j = i + (((state >> 32) as usize) % (n - i));
         slice.swap(i, j);
     }
 }
@@ -467,11 +477,14 @@ pub fn keys_hierarchical<const K: usize>(
     out
 }
 
-/// Container for variable-length keys (as `Vec<u8>`).
+/// Container for variable-length keys using inline storage.
+///
+/// Uses `ArrayVec<u8, 32>` to store keys inline (up to 32 bytes) without
+/// heap allocation per key, eliminating millions of small allocations.
 #[expect(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct VariableLengthKeys {
-    pub keys: Vec<Vec<u8>>,
+    pub keys: Vec<ArrayVec<u8, 32>>,
     pub length_distribution: [usize; 4], // Count of 8B, 16B, 24B, 32B keys
 }
 
@@ -481,6 +494,7 @@ pub struct VariableLengthKeys {
 /// the trie structure without padding overhead.
 ///
 /// Distribution can be uniform or weighted toward certain sizes.
+/// Keys are stored inline using `ArrayVec` to avoid per-key heap allocations.
 #[must_use]
 pub fn keys_variable_length(n: usize, seed: u64) -> VariableLengthKeys {
     let mut keys = Vec::with_capacity(n);
@@ -498,7 +512,9 @@ pub fn keys_variable_length(n: usize, seed: u64) -> VariableLengthKeys {
         let size = sizes[size_idx];
         distribution[size_idx] += 1;
 
-        let mut key = vec![0u8; size];
+        let mut key = ArrayVec::<u8, 32>::new();
+        // Pre-fill with zeros to the target size
+        key.extend(std::iter::repeat(0u8).take(size));
         let chunks = size / 8;
 
         for c in 0..chunks {
@@ -694,6 +710,16 @@ pub fn keys_blink_stress<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=128).contains(&K), "key size must be 8..=128");
 
+    // Early return for trivial cases (avoids log2(0) = -inf issue)
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        let mut key = [0u8; K];
+        key[K - 8..].copy_from_slice(&0u64.to_be_bytes());
+        return vec![key];
+    }
+
     // Generate sequential keys
     let mut keys: Vec<[u8; K]> = Vec::with_capacity(n);
     for i in 0..n {
@@ -745,6 +771,10 @@ pub fn scan_ranges<const K: usize>(
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=128).contains(&K), "key size must be 8..=128");
     assert!(num_ranges > 0, "num_ranges must be > 0");
+    assert!(
+        total_keys >= num_ranges,
+        "total_keys must be >= num_ranges to have non-empty ranges"
+    );
 
     let range_size = total_keys / num_ranges;
 
@@ -782,10 +812,10 @@ pub fn scan_ranges<const K: usize>(
 /// Generate prefix ranges for prefix scan benchmarks.
 ///
 /// Returns prefixes that match different numbers of keys.
-/// Includes some prefixes that won't match anything (for miss testing).
+/// Includes 4 additional prefixes that won't match anything (for miss testing).
 #[must_use]
 pub fn scan_prefixes(prefix_buckets: u64) -> Vec<Vec<u8>> {
-    let mut prefixes = Vec::with_capacity(prefix_buckets as usize);
+    let mut prefixes = Vec::with_capacity(prefix_buckets as usize + 4);
 
     for bucket in 0..prefix_buckets {
         let prefix = bucket.to_be_bytes().to_vec();
@@ -857,6 +887,7 @@ pub fn warmup_with_indices<F: FnMut(usize)>(
 ///
 /// Call this right before starting the timed portion to ensure
 /// all prior memory operations are complete.
+#[inline]
 pub fn pre_measurement_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     // Also try to prevent instruction reordering
@@ -867,6 +898,7 @@ pub fn pre_measurement_barrier() {
 ///
 /// Call this right after the timed portion to ensure the compiler
 /// doesn't move measured work outside the timing window.
+#[inline]
 pub fn post_measurement_barrier() {
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
