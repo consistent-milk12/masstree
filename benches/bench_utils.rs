@@ -514,7 +514,7 @@ pub fn keys_variable_length(n: usize, seed: u64) -> VariableLengthKeys {
 
         let mut key = ArrayVec::<u8, 32>::new();
         // Pre-fill with zeros to the target size
-        key.extend(std::iter::repeat(0u8).take(size));
+        key.extend(std::iter::repeat_n(0u8, size));
         let chunks = size / 8;
 
         for c in 0..chunks {

@@ -41,7 +41,7 @@ use crate::nodeversion::NodeVersion;
 /// Note: These assertions assume `target_pointer_width = 64`.
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
+    use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8};
 
     const SIZE: usize = StdMem::size_of::<InternodeNode>();
     const ALIGN: usize = StdMem::align_of::<InternodeNode>();
