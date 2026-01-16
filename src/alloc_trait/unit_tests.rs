@@ -23,6 +23,11 @@ where
         let leaf_ref: &L = &*ptr;
         assert!(leaf_ref.is_empty());
     }
+
+    // Clean up: the allocator doesn't track standalone allocations,
+    // so we must manually deallocate.
+    // SAFETY: ptr came from alloc_leaf which uses Box::into_raw
+    unsafe { drop(Box::from_raw(ptr)) };
 }
 
 /// Test that tracking a leaf works via the generic trait.
@@ -35,7 +40,10 @@ where
     let leaf: Box<L> = L::new_boxed();
     let ptr: *mut L = Box::into_raw(leaf);
     alloc.track_leaf(ptr);
-    // Just verify it doesn't panic - actual cleanup happens at drop
+    // track_leaf is a no-op for seize allocator (tree traversal handles cleanup).
+    // For standalone allocations in tests, we must manually deallocate.
+    // SAFETY: ptr came from Box::into_raw
+    unsafe { drop(Box::from_raw(ptr)) };
 }
 
 // ========================================================================

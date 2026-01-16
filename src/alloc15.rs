@@ -71,6 +71,45 @@ impl<S: ValueSlot> Default for SeizeAllocator15<S> {
 // =============================================================================
 
 impl<S: ValueSlot> SeizeAllocator15<S> {
+    /// Follow parent pointers to find the actual root of a sublayer.
+    ///
+    /// When a sublayer leaf splits, a new internode becomes the sublayer root,
+    /// but the parent layer's slot still points to the OLD leaf. This function
+    /// follows parent pointers to find the current root.
+    ///
+    /// # Safety
+    ///
+    /// - `node_ptr` must point to a valid leaf or internode
+    /// - Caller must have exclusive access (no concurrent readers/writers)
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "Callers guarantee proper alignment"
+    )]
+    unsafe fn find_layer_root(&self, mut node_ptr: *mut u8) -> *mut u8 {
+        loop {
+            // SAFETY: Both leaves and internodes have NodeVersion at offset 0
+            let version_ptr = node_ptr.cast::<NodeVersion>();
+            let version: &NodeVersion = unsafe { &*version_ptr };
+
+            // SAFETY: Called during teardown with exclusive access - no concurrent retirement.
+            let parent: *mut u8 = if version.is_leaf() {
+                // SAFETY: version.is_leaf() confirmed
+                let leaf: &LeafNode15<S> = unsafe { &*node_ptr.cast::<LeafNode15<S>>() };
+                unsafe { leaf.parent_unguarded() }
+            } else {
+                // SAFETY: !version.is_leaf() confirmed
+                let inode: &InternodeNode = unsafe { &*node_ptr.cast::<InternodeNode>() };
+                unsafe { inode.parent_unguarded() }
+            };
+
+            if parent.is_null() {
+                return node_ptr;
+            }
+
+            node_ptr = parent;
+        }
+    }
+
     /// Traverse tree structure and free all nodes.
     ///
     /// # Safety
@@ -111,12 +150,19 @@ impl<S: ValueSlot> SeizeAllocator15<S> {
 
             // Recurse into any layer pointers before freeing this leaf.
             // Layer pointers are sublayer roots that need recursive traversal.
+            //
+            // IMPORTANT: The layer pointer may point to the ORIGINAL sublayer root
+            // leaf, but after sublayer splits, a new internode may be the actual root.
+            // We must follow parent pointers to find the current root.
             for slot in 0..WIDTH_15 {
                 if leaf.is_layer(slot) {
                     let layer_ptr = leaf.leaf_value_ptr(slot);
                     if !layer_ptr.is_null() {
-                        // Recursively free the sublayer
-                        unsafe { self.traverse_and_free(layer_ptr) };
+                        // Find the actual sublayer root (may have changed due to splits)
+                        // SAFETY: layer_ptr is valid, we have exclusive access
+                        let layer_root = unsafe { self.find_layer_root(layer_ptr) };
+                        // Recursively free the sublayer from its current root
+                        unsafe { self.traverse_and_free(layer_root) };
                     }
                 }
             }
@@ -373,6 +419,48 @@ impl<V: InlineBits> Default for SeizeAllocator15TrueInline<V> {
 // =============================================================================
 
 impl<V: InlineBits> SeizeAllocator15TrueInline<V> {
+    /// Follow parent pointers to find the actual root of a sublayer.
+    ///
+    /// When a sublayer leaf splits, a new internode becomes the sublayer root,
+    /// but the parent layer's slot still points to the OLD leaf. This function
+    /// follows parent pointers to find the current root.
+    ///
+    /// # Safety
+    ///
+    /// - `node_ptr` must point to a valid leaf or internode
+    /// - Caller must have exclusive access (no concurrent readers/writers)
+    #[expect(
+        clippy::cast_ptr_alignment,
+        reason = "Callers guarantee proper alignment"
+    )]
+    unsafe fn find_layer_root(&self, mut node_ptr: *mut u8) -> *mut u8 {
+        use crate::inline::leaf15_true::LeafNode15TrueInline;
+
+        loop {
+            // SAFETY: Both leaves and internodes have NodeVersion at offset 0
+            let version_ptr = node_ptr.cast::<NodeVersion>();
+            let version: &NodeVersion = unsafe { &*version_ptr };
+
+            // SAFETY: Called during teardown with exclusive access - no concurrent retirement.
+            let parent: *mut u8 = if version.is_leaf() {
+                // SAFETY: version.is_leaf() confirmed
+                let leaf: &LeafNode15TrueInline<V> =
+                    unsafe { &*node_ptr.cast::<LeafNode15TrueInline<V>>() };
+                unsafe { leaf.parent_unguarded() }
+            } else {
+                // SAFETY: !version.is_leaf() confirmed
+                let inode: &InternodeNode = unsafe { &*node_ptr.cast::<InternodeNode>() };
+                unsafe { inode.parent_unguarded() }
+            };
+
+            if parent.is_null() {
+                return node_ptr;
+            }
+
+            node_ptr = parent;
+        }
+    }
+
     /// Traverse tree structure and free all nodes.
     ///
     /// # Safety
@@ -413,12 +501,19 @@ impl<V: InlineBits> SeizeAllocator15TrueInline<V> {
 
             // Recurse into any layer pointers before freeing this leaf.
             // True-inline leaves CAN have layer pointers - check is_layer() first.
+            //
+            // IMPORTANT: The layer pointer may point to the ORIGINAL sublayer root
+            // leaf, but after sublayer splits, a new internode may be the actual root.
+            // We must follow parent pointers to find the current root.
             for slot in 0..WIDTH_15 {
                 if leaf.is_layer(slot) {
                     let layer_ptr = leaf.leaf_value_ptr(slot);
                     if !layer_ptr.is_null() {
-                        // Recursively free the sublayer
-                        unsafe { self.traverse_and_free(layer_ptr) };
+                        // Find the actual sublayer root (may have changed due to splits)
+                        // SAFETY: layer_ptr is valid, we have exclusive access
+                        let layer_root = unsafe { self.find_layer_root(layer_ptr) };
+                        // Recursively free the sublayer from its current root
+                        unsafe { self.traverse_and_free(layer_root) };
                     }
                 }
                 // Non-layer slots have encoded inline values, not real allocations

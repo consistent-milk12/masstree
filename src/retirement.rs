@@ -171,8 +171,10 @@ mod tests {
 
     static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-    unsafe fn test_cleanup(_ptr: *mut u64, _: &Collector) {
+    unsafe fn test_cleanup(ptr: *mut u64, _: &Collector) {
         DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: ptr came from Box::into_raw and is valid
+        unsafe { drop(Box::from_raw(ptr)) };
     }
 
     #[test]
