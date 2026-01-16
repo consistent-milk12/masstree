@@ -85,6 +85,7 @@ impl<S: ValueSlot> SeizeAllocator24<S> {
     /// - Caller must have exclusive access (no concurrent readers/writers)
     #[expect(
         clippy::cast_ptr_alignment,
+        clippy::unused_self,
         reason = "Callers guarantee proper alignment"
     )]
     unsafe fn find_layer_root(&self, mut node_ptr: *mut u8) -> *mut u8 {
@@ -134,7 +135,6 @@ impl<S: ValueSlot> SeizeAllocator24<S> {
         clippy::cast_ptr_alignment,
         reason = "Callers guarantee proper alignment"
     )]
-    #[expect(clippy::self_only_used_in_recursion)]
     unsafe fn traverse_and_free(&self, node_ptr: *mut u8) {
         if node_ptr.is_null() {
             return;
@@ -325,7 +325,7 @@ where
     /// Allocate an internode directly without Box intermediate.
     #[inline]
     fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
-        use std::alloc::{alloc, Layout};
+        use std::alloc::{Layout, alloc};
 
         let layout = Layout::new::<InternodeNode>();
         // SAFETY: Layout is valid
@@ -347,7 +347,7 @@ where
     /// Allocate an internode as root directly without Box intermediate.
     #[inline]
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
-        use std::alloc::{alloc, Layout};
+        use std::alloc::{Layout, alloc};
 
         let layout = Layout::new::<InternodeNode>();
         // SAFETY: Layout is valid
@@ -373,7 +373,7 @@ where
         parent_version: &crate::nodeversion::NodeVersion,
         height: u32,
     ) -> *mut u8 {
-        use std::alloc::{alloc, Layout};
+        use std::alloc::{Layout, alloc};
 
         let layout = Layout::new::<InternodeNode>();
         // SAFETY: Layout is valid

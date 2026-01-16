@@ -8,8 +8,8 @@
 //! - Unified slot allocation and value update logic
 
 use super::{
-    InsertError, InsertSearchResultGeneric, Key, LayerCapableLeaf, Linker, LocalGuard,
-    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot, LAYER_KEYLENX,
+    InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf, Linker,
+    LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
 };
 
 use crate::nodeversion::LockGuard;

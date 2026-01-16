@@ -1,8 +1,8 @@
 #![expect(clippy::unwrap_used, reason = "Fail fast in tests")]
 
 use super::{
-    LockGuard, NodeVersion, SingleThreadedNodeVersion, DIRTY_MASK, INSERTING_BIT, ISLEAF_BIT,
-    LOCK_BIT, SPLITTING_BIT, VINSERT_LOWBIT, VSPLIT_LOWBIT,
+    DIRTY_MASK, INSERTING_BIT, ISLEAF_BIT, LOCK_BIT, LockGuard, NodeVersion, SPLITTING_BIT,
+    SingleThreadedNodeVersion, VINSERT_LOWBIT, VSPLIT_LOWBIT,
 };
 
 // ========================================================================
@@ -158,7 +158,7 @@ fn test_mark_deleted() {
 
         assert!(v.is_deleted());
         assert!(v.is_splitting()); // Deleted also sets splitting
-                                   // Guard drops here
+        // Guard drops here
     }
 
     assert!(v.is_deleted()); // Deleted bit persists
@@ -246,7 +246,7 @@ fn test_flag_combinations() {
         assert!(v.is_deleted());
         assert!(v.is_locked());
         assert!(v.is_splitting()); // Set by mark_deleted
-                                   // Guard drops here
+        // Guard drops here
     }
 }
 

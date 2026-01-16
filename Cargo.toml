@@ -69,7 +69,7 @@ tracing-appender = { version = "0.2.4", optional = true }
 # Optional CLI tool dependencies (enabled via `bins` feature)
 serde_json = { version = "1.0.149", optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
-chrono = { version = "0.4.42", optional = true }
+chrono = { version = "0.4.43", optional = true }
 clap = { version = "4.5.54", features = ["derive"], optional = true }
 comfy-table = { version = "7.2.2", optional = true }
 regex = { version = "1.12.2", optional = true }
@@ -99,9 +99,6 @@ tracing-subscriber = { version = "0.3.22", features = [
 	"json",
 	"parking_lot",
 ] }
-# Simple #[traced_test] macro for asserting on log output in unit tests
-# Note: integration tests need "no-env-filter" feature
-tracing-test = { version = "0.2.5", features = ["no-env-filter"] }
 criterion = { version = "0.8.1", features = [
 	"html_reports",
 	"csv_output",

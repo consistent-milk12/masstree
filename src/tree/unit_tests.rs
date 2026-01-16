@@ -6,7 +6,6 @@ use crate::value::LeafValue;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
-use tracing_test::traced_test;
 
 // ========================================================================
 // Send/Sync Verification
@@ -49,7 +48,6 @@ fn test_get_on_empty_tree() {
 }
 
 #[test]
-#[traced_test]
 #[expect(clippy::panic)]
 #[expect(clippy::too_many_lines)]
 #[cfg_attr(miri, ignore)] // Miri struggles with multi-threaded tests

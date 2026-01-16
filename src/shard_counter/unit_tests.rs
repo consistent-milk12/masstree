@@ -1,6 +1,6 @@
 #![expect(clippy::unwrap_used)]
 
-use super::{PaddedCounter, ShardedCounter, CACHE_LINE_SIZE, SHARDS};
+use super::{CACHE_LINE_SIZE, PaddedCounter, SHARDS, ShardedCounter};
 use std::{sync::Arc, thread::Scope};
 
 #[test]
