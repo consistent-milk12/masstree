@@ -14,9 +14,9 @@ use super::{
     ValueSlot,
 };
 
-use crate::leaf_trait::TreePermutation;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
+use crate::leaf_trait::TreePermutation;
 use crate::link::Linker;
 use crate::ref_value_slot::RefValueSlot;
 use crate::value::traits::LeafValueLoad;
@@ -322,6 +322,52 @@ where
     pub fn get(&self, key: &[u8]) -> Option<S::Output> {
         let guard = self.guard();
         self.get_with_guard(key, &guard)
+    }
+
+    /// Check if a key exists in the tree.
+    ///
+    /// Creates a guard internally. For bulk operations, prefer
+    /// [`contains_key_with_guard`](Self::contains_key_with_guard) to amortize
+    /// guard creation cost.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tree = MassTree::<u64>::new();
+    /// tree.insert(b"hello", 42).unwrap();
+    ///
+    /// assert!(tree.contains_key(b"hello"));
+    /// assert!(!tree.contains_key(b"world"));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn contains_key(&self, key: &[u8]) -> bool {
+        let guard = self.guard();
+        self.contains_key_with_guard(key, &guard)
+    }
+
+    /// Check if a key exists using an existing guard.
+    ///
+    /// Use this when performing multiple lookups under the same guard
+    /// to amortize guard creation overhead.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tree = MassTree::<u64>::new();
+    /// let guard = tree.guard();
+    ///
+    /// tree.insert_with_guard(b"a", 1, &guard).unwrap();
+    /// tree.insert_with_guard(b"b", 2, &guard).unwrap();
+    ///
+    /// assert!(tree.contains_key_with_guard(b"a", &guard));
+    /// assert!(tree.contains_key_with_guard(b"b", &guard));
+    /// assert!(!tree.contains_key_with_guard(b"c", &guard));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn contains_key_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> bool {
+        self.get_with_guard(key, guard).is_some()
     }
 
     /// Unified get implementation.

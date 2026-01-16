@@ -3,8 +3,8 @@ use super::{
 };
 use crate::nodeversion::NodeVersion;
 use crate::value::LeafValue;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 // ========================================================================
@@ -45,6 +45,150 @@ fn test_get_on_empty_tree() {
     assert!(tree.get(b"hello").is_none());
     assert!(tree.get(b"").is_none());
     assert!(tree.get(b"any key").is_none());
+}
+
+#[test]
+fn test_contains_key() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    // Empty tree
+    assert!(!tree.contains_key(b"hello"));
+    assert!(!tree.contains_key(b""));
+
+    // Insert and check
+    tree.insert(b"hello", 42).unwrap();
+    assert!(tree.contains_key(b"hello"));
+    assert!(!tree.contains_key(b"world"));
+
+    // Multiple keys
+    tree.insert(b"world", 123).unwrap();
+    tree.insert(b"foo", 456).unwrap();
+    assert!(tree.contains_key(b"hello"));
+    assert!(tree.contains_key(b"world"));
+    assert!(tree.contains_key(b"foo"));
+    assert!(!tree.contains_key(b"bar"));
+
+    // With guard
+    let guard = tree.guard();
+    assert!(tree.contains_key_with_guard(b"hello", &guard));
+    assert!(!tree.contains_key_with_guard(b"missing", &guard));
+
+    // After remove
+    tree.remove(b"hello").unwrap();
+    assert!(!tree.contains_key(b"hello"));
+    assert!(tree.contains_key(b"world"));
+}
+
+#[test]
+fn test_contains_key_long_keys() {
+    let tree: MassTree15<u64> = MassTree15::new();
+
+    // Keys > 8 bytes (multi-layer)
+    let long_key = b"this is a very long key that spans multiple layers";
+    let another_long = b"this is a very long key that spans multiple layers but different";
+
+    assert!(!tree.contains_key(long_key));
+
+    tree.insert(long_key, 1).unwrap();
+    assert!(tree.contains_key(long_key));
+    assert!(!tree.contains_key(another_long));
+
+    tree.insert(another_long, 2).unwrap();
+    assert!(tree.contains_key(long_key));
+    assert!(tree.contains_key(another_long));
+}
+
+#[test]
+fn test_first_last_empty() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    assert!(tree.first().is_none());
+    assert!(tree.last().is_none());
+}
+
+#[test]
+fn test_first_last_single_element() {
+    let tree: MassTree<u64> = MassTree::new();
+    tree.insert(b"only", 42).unwrap();
+
+    let first = tree.first().unwrap();
+    let last = tree.last().unwrap();
+
+    assert_eq!(first.key(), b"only");
+    assert_eq!(*first.value, 42);
+    assert_eq!(last.key(), b"only");
+    assert_eq!(*last.value, 42);
+}
+
+#[test]
+fn test_first_last_multiple_elements() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    // Insert in non-sorted order
+    tree.insert(b"banana", 2).unwrap();
+    tree.insert(b"apple", 1).unwrap();
+    tree.insert(b"cherry", 3).unwrap();
+    tree.insert(b"date", 4).unwrap();
+
+    let first = tree.first().unwrap();
+    let last = tree.last().unwrap();
+
+    assert_eq!(first.key(), b"apple");
+    assert_eq!(*first.value, 1);
+    assert_eq!(last.key(), b"date");
+    assert_eq!(*last.value, 4);
+
+    // With guard
+    let guard = tree.guard();
+    let first_g = tree.first_with_guard(&guard).unwrap();
+    let last_g = tree.last_with_guard(&guard).unwrap();
+    assert_eq!(first_g.key(), b"apple");
+    assert_eq!(last_g.key(), b"date");
+}
+
+#[test]
+fn test_first_last_long_keys() {
+    let tree: MassTree15<u64> = MassTree15::new();
+
+    // Keys > 8 bytes to test multi-layer behavior
+    tree.insert(b"zzz_long_key_that_spans_layers", 3).unwrap();
+    tree.insert(b"aaa_long_key_that_spans_layers", 1).unwrap();
+    tree.insert(b"mmm_long_key_that_spans_layers", 2).unwrap();
+
+    let first = tree.first().unwrap();
+    let last = tree.last().unwrap();
+
+    assert_eq!(first.key(), b"aaa_long_key_that_spans_layers");
+    assert_eq!(*first.value, 1);
+    assert_eq!(last.key(), b"zzz_long_key_that_spans_layers");
+    assert_eq!(*last.value, 3);
+}
+
+#[test]
+fn test_first_last_after_remove() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    tree.insert(b"a", 1).unwrap();
+    tree.insert(b"b", 2).unwrap();
+    tree.insert(b"c", 3).unwrap();
+
+    assert_eq!(tree.first().unwrap().key(), b"a");
+    assert_eq!(tree.last().unwrap().key(), b"c");
+
+    // Remove first
+    tree.remove(b"a").unwrap();
+    assert_eq!(tree.first().unwrap().key(), b"b");
+    assert_eq!(tree.last().unwrap().key(), b"c");
+
+    // Remove last
+    tree.remove(b"c").unwrap();
+    assert_eq!(tree.first().unwrap().key(), b"b");
+    assert_eq!(tree.last().unwrap().key(), b"b");
+
+    // Remove remaining
+    tree.remove(b"b").unwrap();
+    assert!(tree.first().is_none());
+    assert!(tree.last().is_none());
 }
 
 #[test]

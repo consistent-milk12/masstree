@@ -133,6 +133,80 @@ where
     }
 
     // ========================================================================
+    //  First / Last Access
+    // ========================================================================
+
+    /// Get the first (smallest) key-value pair in the tree.
+    ///
+    /// Creates a guard internally. For repeated access, prefer
+    /// [`first_with_guard`](Self::first_with_guard).
+    ///
+    /// # Returns
+    ///
+    /// * `Some(ScanEntry)` - The entry with the lexicographically smallest key
+    /// * `None` - If the tree is empty
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tree = MassTree::<u64>::new();
+    /// tree.insert(b"banana", 2).unwrap();
+    /// tree.insert(b"apple", 1).unwrap();
+    /// tree.insert(b"cherry", 3).unwrap();
+    ///
+    /// let first = tree.first().unwrap();
+    /// assert_eq!(first.key(), b"apple");
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn first(&self) -> Option<ScanEntry<S::Output>> {
+        let guard = self.guard();
+        self.first_with_guard(&guard)
+    }
+
+    /// Get the first (smallest) key-value pair using an existing guard.
+    #[must_use]
+    #[inline]
+    pub fn first_with_guard<'a>(&'a self, guard: &LocalGuard<'a>) -> Option<ScanEntry<S::Output>> {
+        self.iter(guard).next()
+    }
+
+    /// Get the last (largest) key-value pair in the tree.
+    ///
+    /// Creates a guard internally. For repeated access, prefer
+    /// [`last_with_guard`](Self::last_with_guard).
+    ///
+    /// # Returns
+    ///
+    /// * `Some(ScanEntry)` - The entry with the lexicographically largest key
+    /// * `None` - If the tree is empty
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let tree = MassTree::<u64>::new();
+    /// tree.insert(b"banana", 2).unwrap();
+    /// tree.insert(b"apple", 1).unwrap();
+    /// tree.insert(b"cherry", 3).unwrap();
+    ///
+    /// let last = tree.last().unwrap();
+    /// assert_eq!(last.key(), b"cherry");
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn last(&self) -> Option<ScanEntry<S::Output>> {
+        let guard = self.guard();
+        self.last_with_guard(&guard)
+    }
+
+    /// Get the last (largest) key-value pair using an existing guard.
+    #[must_use]
+    #[inline]
+    pub fn last_with_guard<'a>(&'a self, guard: &LocalGuard<'a>) -> Option<ScanEntry<S::Output>> {
+        self.iter(guard).next_back()
+    }
+
+    // ========================================================================
     //  Visitor API
     // ========================================================================
 
