@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -9,11 +9,11 @@ license = "MIT"
 repository = "https://github.com/consistent-milk12/masstree"
 documentation = "https://docs.rs/masstree"
 keywords = [
-  "data-structures",
-  "concurrent",
-  "ordered-map",
-  "range-scans",
-  "trie",
+	"data-structures",
+	"concurrent",
+	"ordered-map",
+	"range-scans",
+	"trie",
 ]
 categories = ["data-structures", "concurrency", "database-implementations"]
 readme = "README.md"
@@ -29,12 +29,12 @@ mimalloc = ["dep:mimalloc"]
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
 # Enable CLI tools (divan_parser, criterion_summary). Not needed for library usage.
 bins = [
-  "dep:serde_json",
-  "dep:serde",
-  "dep:chrono",
-  "dep:clap",
-  "dep:comfy-table",
-  "dep:regex",
+	"dep:serde_json",
+	"dep:serde",
+	"dep:chrono",
+	"dep:clap",
+	"dep:comfy-table",
+	"dep:regex",
 ]
 true-inline = [] # Enable true-inline value storage
 debug-routing = [] # Enable routing debug output for bug investigation
@@ -60,9 +60,9 @@ libc = "0.2.180"
 # "attributes" enables #[instrument] for function-level tracing
 tracing = { version = "0.1.44", features = ["attributes"], optional = true }
 tracing-subscriber = { version = "0.3.22", features = [
-  "env-filter",
-  "fmt",
-  "json",
+	"env-filter",
+	"fmt",
+	"json",
 ], optional = true }
 tracing-appender = { version = "0.2.4", optional = true }
 
@@ -94,18 +94,18 @@ scc = "3.4.10"
 sdd = "4.5.3"
 tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.22", features = [
-  "env-filter",
-  "fmt",
-  "json",
-  "parking_lot",
+	"env-filter",
+	"fmt",
+	"json",
+	"parking_lot",
 ] }
 # Simple #[traced_test] macro for asserting on log output in unit tests
 # Note: integration tests need "no-env-filter" feature
 tracing-test = { version = "0.2.5", features = ["no-env-filter"] }
 criterion = { version = "0.8.1", features = [
-  "html_reports",
-  "csv_output",
-  "real_blackbox",
+	"html_reports",
+	"csv_output",
+	"real_blackbox",
 ] }
 iai-callgrind = "0.16.1"
 
@@ -256,6 +256,10 @@ harness = false
 
 [[bench]]
 name = "rwlock_btreemap_vs_masstree15"
+harness = false
+
+[[bench]]
+name = "rwlock_btreemap_vs_masstree15_inline"
 harness = false
 
 # =========================================================================

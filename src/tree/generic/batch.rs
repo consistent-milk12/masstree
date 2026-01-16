@@ -443,18 +443,21 @@ where
                 layer_root = self.maybe_parent_generic(layer_root);
 
                 // Traverse to leaf
-                let leaf_ptr: *mut L =
+                // NOTE: We track leaf_ptr (*mut L) to preserve mutable provenance
+                let mut leaf_ptr: *mut L =
                     self.reach_leaf_concurrent_generic(layer_root, &key, false, guard);
-                let leaf: &L = unsafe { &*leaf_ptr };
 
-                // B-link advance if needed
-                let (leaf, exceeded_hop_limit) =
-                    self.advance_to_key_by_bound_generic(leaf, &key, guard);
+                // B-link advance if needed (returns *mut L to preserve provenance)
+                let (advanced_ptr, exceeded_hop_limit) =
+                    self.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
 
                 if exceeded_hop_limit {
                     layer_root = self.root_ptr.load(AtomicOrdering::Acquire);
                     continue 'retry;
                 }
+
+                leaf_ptr = advanced_ptr;
+                let leaf: &L = unsafe { &*leaf_ptr };
 
                 // Capture pre-lock state for OCC validation
                 let pre_lock_version = leaf.version().stable();

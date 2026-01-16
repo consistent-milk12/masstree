@@ -1,7 +1,10 @@
-//! Benchmarks: `RwLock<BTreeMap>` vs `MassTree15`
+//! Benchmarks: `RwLock<BTreeMap>` vs `MassTree15Inline`
 //!
-//! This is meant to answer: “Can `MassTree15` replace `RwLock<BTreeMap>` for
-//! concurrent point ops?”
+//! This is meant to answer: "Can `MassTree15Inline` replace `RwLock<BTreeMap>` for
+//! concurrent point ops?"
+//!
+//! This variant uses `MassTree15Inline<u64>` which stores values directly inline
+//! (no Arc heap allocation), providing a fairer comparison against BTreeMap.
 //!
 //! Notes:
 //! - This file benchmarks *single-operation* patterns (`get`/`insert`/range scan).
@@ -10,8 +13,8 @@
 //!
 //! Running:
 //! ```bash
-//! cargo bench --bench rwlock_btreemap_vs_masstree15
-//! cargo bench --bench rwlock_btreemap_vs_masstree15 --features mimalloc
+//! cargo bench --bench rwlock_btreemap_vs_masstree15_inline
+//! cargo bench --bench rwlock_btreemap_vs_masstree15_inline --features mimalloc
 //! ```
 
 #![expect(clippy::unwrap_used)]
@@ -25,7 +28,7 @@ use bench_utils::{
     uniform_indices, zipfian_indices,
 };
 use divan::{black_box, Bencher};
-use masstree::{MassTree15, RangeBound};
+use masstree::{MassTree15Inline, RangeBound};
 use parking_lot::RwLock as ParkingRwLock;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,8 +44,8 @@ fn main() {
 // Setup helpers
 // =============================================================================
 
-fn setup_masstree15<const K: usize>(keys: &[[u8; K]]) -> MassTree15<u64> {
-    let tree = MassTree15::new();
+fn setup_masstree15<const K: usize>(keys: &[[u8; K]]) -> MassTree15Inline<u64> {
+    let tree = MassTree15Inline::new();
     {
         let guard = tree.guard();
         for (i, key) in keys.iter().enumerate() {
@@ -114,7 +117,7 @@ mod point_get_uniform_64b {
                             // === WARMUP PHASE ===
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + (i % OPS_PER_THREAD)];
-                                black_box(tree.get_ref(&keys[idx], &guard));
+                                black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
 
@@ -124,8 +127,8 @@ mod point_get_uniform_64b {
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(*v);
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum = sum.wrapping_add(v);
                                 }
                             }
                             post_measurement_barrier();
@@ -394,7 +397,7 @@ mod point_get_zipf_64b {
                             // === WARMUP PHASE ===
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + (i % OPS_PER_THREAD)];
-                                black_box(tree.get_ref(&keys[idx], &guard));
+                                black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
 
@@ -404,8 +407,8 @@ mod point_get_zipf_64b {
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(*v);
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum = sum.wrapping_add(v);
                                 }
                             }
                             post_measurement_barrier();
@@ -670,7 +673,7 @@ mod mixed_uniform_90_10_64b {
                             // === WARMUP PHASE ===
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[(i + offset) % indices.len()];
-                                black_box(tree.get_ref(&keys[idx], &guard));
+                                black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
 
@@ -682,8 +685,8 @@ mod mixed_uniform_90_10_64b {
                                 let idx = indices[(i + offset) % indices.len()];
                                 if i % WRITE_RATIO == 0 {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(*v);
+                                } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum = sum.wrapping_add(v);
                                 }
                             }
                             post_measurement_barrier();
@@ -868,7 +871,7 @@ mod mixed_zipf_hotset_95_5_64b {
                             // === WARMUP PHASE ===
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + (i % OPS_PER_THREAD)];
-                                black_box(tree.get_ref(&keys[idx], &guard));
+                                black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
 
@@ -880,8 +883,8 @@ mod mixed_zipf_hotset_95_5_64b {
                                 let idx = indices[base + i];
                                 if i % WRITE_EVERY == 0 {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
-                                } else if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(*v);
+                                } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum = sum.wrapping_add(v);
                                 }
                             }
                             post_measurement_barrier();
@@ -1202,7 +1205,7 @@ mod range_scan_window_64b {
                             // === WARMUP PHASE ===
                             for i in 0..WARMUP_OPS.min(SCANS_PER_THREAD) {
                                 let start_idx = starts[base + i];
-                                black_box(tree.get_ref(&keys[start_idx], &guard));
+                                black_box(tree.get_with_guard(&keys[start_idx], &guard));
                             }
                             warmup_done.wait();
 
@@ -1214,11 +1217,11 @@ mod range_scan_window_64b {
                                 let start_idx = starts[base + i];
                                 let end_idx = start_idx + SCAN_LEN - 1;
                                 let mut seen = 0usize;
-                                tree.scan_ref(
+                                tree.scan(
                                     RangeBound::Included(&keys[start_idx]),
                                     RangeBound::Included(&keys[end_idx]),
                                     |_, v| {
-                                        sum = sum.wrapping_add(*v);
+                                        sum = sum.wrapping_add(v);
                                         seen += 1;
                                         seen < SCAN_LEN
                                     },
@@ -1404,7 +1407,7 @@ mod range_scan_window_with_writes_64b {
                             // === WARMUP PHASE ===
                             for i in 0..WARMUP_OPS {
                                 let idx = writer_idxs[(i + offset) % writer_idxs.len()];
-                                black_box(tree.get_ref(&keys[idx], &guard));
+                                black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
 
@@ -1434,7 +1437,7 @@ mod range_scan_window_with_writes_64b {
                             // === WARMUP PHASE ===
                             for i in 0..WARMUP_OPS.min(SCANS_PER_THREAD) {
                                 let start_idx = starts[base + i];
-                                black_box(tree.get_ref(&keys[start_idx], &guard));
+                                black_box(tree.get_with_guard(&keys[start_idx], &guard));
                             }
                             warmup_done.wait();
 
@@ -1446,11 +1449,11 @@ mod range_scan_window_with_writes_64b {
                                 let start_idx = starts[base + i];
                                 let end_idx = start_idx + SCAN_LEN - 1;
                                 let mut seen = 0usize;
-                                tree.scan_ref(
+                                tree.scan(
                                     RangeBound::Included(&keys[start_idx]),
                                     RangeBound::Included(&keys[end_idx]),
                                     |_, v| {
-                                        sum = sum.wrapping_add(*v);
+                                        sum = sum.wrapping_add(v);
                                         seen += 1;
                                         seen < SCAN_LEN
                                     },
@@ -1709,7 +1712,7 @@ mod point_get_uniform_shared_prefix_64b {
                             // === WARMUP PHASE ===
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + (i % OPS_PER_THREAD)];
-                                black_box(tree.get_ref(&keys[idx], &guard));
+                                black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
 
@@ -1719,8 +1722,8 @@ mod point_get_uniform_shared_prefix_64b {
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
-                                if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(*v);
+                                if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                    sum = sum.wrapping_add(v);
                                 }
                             }
                             post_measurement_barrier();
@@ -1883,7 +1886,7 @@ mod mixed_90_10_shared_prefix_64b {
                             // === WARMUP PHASE ===
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + (i % OPS_PER_THREAD)];
-                                black_box(tree.get_ref(&keys[idx], &guard));
+                                black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
 
@@ -1898,8 +1901,8 @@ mod mixed_90_10_shared_prefix_64b {
                                     let _ = tree.insert_with_guard(&keys[idx], idx as u64, &guard);
                                 } else {
                                     // 90% reads
-                                    if let Some(v) = tree.get_ref(&keys[idx], &guard) {
-                                        sum = sum.wrapping_add(*v);
+                                    if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                        sum = sum.wrapping_add(v);
                                     }
                                 }
                             }

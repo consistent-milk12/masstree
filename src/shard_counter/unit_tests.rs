@@ -1,6 +1,6 @@
 #![expect(clippy::unwrap_used)]
 
-use super::{CACHE_LINE_SIZE, PaddedCounter, SHARDS, ShardedCounter};
+use super::{PaddedCounter, ShardedCounter, CACHE_LINE_SIZE, SHARDS};
 use std::{sync::Arc, thread::Scope};
 
 #[test]
@@ -10,6 +10,7 @@ fn test_new_counter_is_zero() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // 1000 iterations too slow under Miri
 fn test_single_thread_increment() {
     let counter = ShardedCounter::new();
 
@@ -21,6 +22,7 @@ fn test_single_thread_increment() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // 1300 iterations too slow under Miri
 fn test_single_thread_decrement() {
     let counter = ShardedCounter::new();
 
@@ -36,6 +38,7 @@ fn test_single_thread_decrement() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // Multi-threaded, Miri doesn't support well
 fn test_concurrent_increments() {
     let counter = Arc::new(ShardedCounter::new());
     let threads: usize = 8;
@@ -57,6 +60,7 @@ fn test_concurrent_increments() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // Multi-threaded, Miri doesn't support well
 fn test_concurrent_mixed() {
     let counter: Arc<ShardedCounter> = Arc::new(ShardedCounter::new());
 
@@ -92,6 +96,7 @@ fn test_concurrent_mixed() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // 1000 iterations too slow under Miri
 fn test_reset() {
     let counter = ShardedCounter::new();
 
@@ -161,6 +166,7 @@ fn test_add_positive_and_negative() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // Multi-threaded stress test, Miri doesn't support well
 fn test_stress_large_scale() {
     // Stress test with 1 million operations across many threads
     let counter: Arc<ShardedCounter> = Arc::new(ShardedCounter::new());
@@ -183,6 +189,7 @@ fn test_stress_large_scale() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // Multi-threaded stress test, Miri doesn't support well
 fn test_stress_mixed_operations() {
     // Stress test with mixed increment/decrement across many threads
     let counter: Arc<ShardedCounter> = Arc::new(ShardedCounter::new());
@@ -219,6 +226,7 @@ fn test_stress_mixed_operations() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // Multi-threaded, Miri doesn't support well
 fn test_shard_distribution_across_threads() {
     // Verify that different threads get distributed across shards
     use std::collections::HashSet;

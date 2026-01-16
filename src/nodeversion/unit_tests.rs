@@ -1,8 +1,8 @@
 #![expect(clippy::unwrap_used, reason = "Fail fast in tests")]
 
 use super::{
-    DIRTY_MASK, INSERTING_BIT, ISLEAF_BIT, LOCK_BIT, LockGuard, NodeVersion, SPLITTING_BIT,
-    SingleThreadedNodeVersion, VINSERT_LOWBIT, VSPLIT_LOWBIT,
+    LockGuard, NodeVersion, SingleThreadedNodeVersion, DIRTY_MASK, INSERTING_BIT, ISLEAF_BIT,
+    LOCK_BIT, SPLITTING_BIT, VINSERT_LOWBIT, VSPLIT_LOWBIT,
 };
 
 // ========================================================================
@@ -158,7 +158,7 @@ fn test_mark_deleted() {
 
         assert!(v.is_deleted());
         assert!(v.is_splitting()); // Deleted also sets splitting
-        // Guard drops here
+                                   // Guard drops here
     }
 
     assert!(v.is_deleted()); // Deleted bit persists
@@ -246,7 +246,7 @@ fn test_flag_combinations() {
         assert!(v.is_deleted());
         assert!(v.is_locked());
         assert!(v.is_splitting()); // Set by mark_deleted
-        // Guard drops here
+                                   // Guard drops here
     }
 }
 
@@ -315,6 +315,7 @@ fn test_guard_mark_insert_is_idempotent() {
 // =======================================================================
 
 #[test]
+#[cfg_attr(miri, ignore)] // 100 iterations too slow under Miri
 fn test_insert_counter_wraparound_stress() {
     // The insert counter is 6 bits (bits 3-8), so it wraps after 64 increments.
     // This test verifies the counter wraps correctly without corrupting other bits.
@@ -345,6 +346,7 @@ fn test_insert_counter_wraparound_stress() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // Iteration loop too slow under Miri
 fn test_split_counter_wraparound() {
     // The split counter is 19 bits (bits 9-27), wrapping after ~500K splits.
     // We can't test full wraparound, but we can verify it increments correctly.

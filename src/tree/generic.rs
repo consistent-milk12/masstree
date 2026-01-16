@@ -895,14 +895,30 @@ where
         tracing::instrument(level = "trace", skip_all, fields(ikey = %format_args!("{:016x}", key.ikey())))
     )]
     #[expect(clippy::unused_self, reason = "API Consistency")]
-    fn advance_to_key_by_bound_generic<'a>(
-        &'a self,
-        mut leaf: &'a L,
+    /// Advance along B-links to find the leaf containing the key.
+    ///
+    /// # Provenance
+    ///
+    /// This function takes and returns `*mut L` to preserve mutable provenance
+    /// throughout the B-link walk. This is required for Miri/Stacked Borrows
+    /// compliance: pointers that will eventually be freed via `Box::from_raw`
+    /// must maintain their mutable provenance.
+    ///
+    /// # Returns
+    ///
+    /// - `(*mut L, false)` - Found the correct leaf
+    /// - `(*mut L, true)` - Exceeded hop limit, caller should retry from root
+    fn advance_to_key_by_bound_generic(
+        &self,
+        mut leaf_ptr: *mut L,
         key: &Key<'_>,
         _guard: &LocalGuard<'_>,
-    ) -> (&'a L, bool) {
+    ) -> (*mut L, bool) {
         let key_ikey: u64 = key.ikey();
         let mut hops: usize = 0;
+
+        // SAFETY: leaf_ptr is valid, protected by guard
+        let mut leaf: &L = unsafe { &*leaf_ptr };
 
         // Wait for any in-progress split to complete
         if leaf.version().is_splitting() {
@@ -912,7 +928,7 @@ where
         loop {
             // Check hop limit to prevent unbounded B-link walks
             if hops >= Self::MAX_BLINK_HOPS {
-                return (leaf, true);
+                return (leaf_ptr, true);
             }
 
             // Check if current leaf was deleted (e.g., by coalescing)
@@ -926,7 +942,8 @@ where
                     break;
                 }
                 // SAFETY: next_ptr is valid, protected by guard
-                leaf = unsafe { &*next_ptr };
+                leaf_ptr = next_ptr;
+                leaf = unsafe { &*leaf_ptr };
                 hops += 1;
                 continue;
             }
@@ -951,6 +968,7 @@ where
 
             if key_ikey >= next_bound {
                 // Key belongs in next leaf or further
+                leaf_ptr = next_ptr;
                 leaf = next;
                 hops += 1;
                 continue;
@@ -959,7 +977,7 @@ where
             break;
         }
 
-        (leaf, false)
+        (leaf_ptr, false)
     }
 
     // ========================================================================

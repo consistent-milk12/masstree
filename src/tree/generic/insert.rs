@@ -8,11 +8,9 @@
 //! - Unified slot allocation and value update logic
 
 use super::{
-    InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf, Linker,
-    LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
+    InsertError, InsertSearchResultGeneric, Key, LayerCapableLeaf, Linker, LocalGuard,
+    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot, LAYER_KEYLENX,
 };
-
-use std::ptr as StdPtr;
 
 use crate::nodeversion::LockGuard;
 
@@ -453,14 +451,15 @@ where
             layer_root = self.maybe_parent_generic(layer_root);
 
             // Traverse to leaf
-            let leaf_ptr: *mut L =
+            // NOTE: We track leaf_ptr (*mut L) separately to preserve mutable provenance
+            // for Miri/Stacked Borrows compliance. Pointers passed to handle_leaf_split_generic
+            // must have mutable provenance since they're eventually freed via Box::from_raw.
+            let mut leaf_ptr: *mut L =
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
-            let mut leaf: &L = unsafe { &*leaf_ptr };
-
-            // B-link advance if needed
-            let (advanced_leaf, exceeded_hop_limit) =
-                self.advance_to_key_by_bound_generic(leaf, key, guard);
+            // B-link advance if needed (returns *mut L to preserve provenance)
+            let (advanced_ptr, exceeded_hop_limit) =
+                self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
 
             // If we exceeded the hop limit, re-traverse from root
             if exceeded_hop_limit {
@@ -469,7 +468,9 @@ where
                 continue 'retry;
             }
 
-            leaf = advanced_leaf;
+            leaf_ptr = advanced_ptr;
+            // SAFETY: leaf_ptr is valid, protected by guard
+            let mut leaf: &L = unsafe { &*leaf_ptr };
 
             // Inner loop: local retry with B-link advance (no full traversal)
             'forward: loop {
@@ -504,8 +505,8 @@ where
 
                     // LOCAL RETRY: B-link advance instead of full re-traversal
                     // This is the key optimization matching C++ masstree_get.hh:104
-                    let (advanced_leaf, exceeded) =
-                        self.advance_to_key_by_bound_generic(leaf, key, guard);
+                    let (advanced_ptr, exceeded) =
+                        self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
 
                     if exceeded {
                         // Too many hops, fall back to full re-traversal
@@ -514,7 +515,8 @@ where
                         continue 'retry;
                     }
 
-                    leaf = advanced_leaf;
+                    leaf_ptr = advanced_ptr;
+                    leaf = unsafe { &*leaf_ptr };
                     continue 'forward;
                 }
 
@@ -535,8 +537,8 @@ where
                     drop(lock);
 
                     // LOCAL RETRY: B-link advance
-                    let (advanced_leaf, exceeded) =
-                        self.advance_to_key_by_bound_generic(leaf, key, guard);
+                    let (advanced_ptr, exceeded) =
+                        self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
 
                     if exceeded {
                         stat!(hop_limit_exceeded);
@@ -544,7 +546,8 @@ where
                         continue 'retry;
                     }
 
-                    leaf = advanced_leaf;
+                    leaf_ptr = advanced_ptr;
+                    leaf = unsafe { &*leaf_ptr };
                     continue 'forward;
                 }
 
@@ -616,8 +619,9 @@ where
                                 FindSlotResult::NeedsSplit => {
                                     stat!(split_retry);
                                     // Split the leaf (FALLIBLE allocation for sibling)
+                                    // Use leaf_ptr directly to preserve mutable provenance
                                     self.handle_leaf_split_generic(
-                                        StdPtr::from_ref::<L>(leaf).cast_mut(),
+                                        leaf_ptr,
                                         lock,
                                         logical_pos,
                                         key.ikey(),
@@ -626,8 +630,8 @@ where
 
                                     // After split, use LOCAL retry (B-link advance)
                                     // The key likely moved to the new right sibling
-                                    let (advanced_leaf, exceeded) =
-                                        self.advance_to_key_by_bound_generic(leaf, key, guard);
+                                    let (advanced_ptr, exceeded) =
+                                        self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
 
                                     if exceeded {
                                         stat!(hop_limit_exceeded);
@@ -635,7 +639,8 @@ where
                                         continue 'retry;
                                     }
 
-                                    leaf = advanced_leaf;
+                                    leaf_ptr = advanced_ptr;
+                                    leaf = unsafe { &*leaf_ptr };
                                     continue 'forward;
                                 }
                             }
@@ -695,9 +700,9 @@ where
 
                             FindSlotResult::NeedsSplit => {
                                 stat!(split_retry);
-                                let leaf_ptr_current: *mut L = StdPtr::from_ref(leaf).cast_mut();
+                                // Use leaf_ptr directly to preserve mutable provenance
                                 self.handle_leaf_split_generic(
-                                    leaf_ptr_current,
+                                    leaf_ptr,
                                     lock,
                                     logical_pos,
                                     ikey,
@@ -705,8 +710,8 @@ where
                                 )?;
 
                                 // After split, use LOCAL retry (B-link advance)
-                                let (advanced_leaf, exceeded) =
-                                    self.advance_to_key_by_bound_generic(leaf, key, guard);
+                                let (advanced_ptr, exceeded) =
+                                    self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
 
                                 if exceeded {
                                     stat!(hop_limit_exceeded);
@@ -714,7 +719,8 @@ where
                                     continue 'retry;
                                 }
 
-                                leaf = advanced_leaf;
+                                leaf_ptr = advanced_ptr;
+                                leaf = unsafe { &*leaf_ptr };
                             }
                         }
                     }

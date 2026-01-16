@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::iter as StdIter;
 use std::mem as StdMem;
 
-use super::{INITIAL_CAPACITY, InlineSuffixBag, PermutationProvider, SuffixBag};
+use super::{InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar, INITIAL_CAPACITY};
 use crate::permuter24::Permuter24;
 
 // ========================================================================
@@ -967,4 +967,132 @@ fn test_clone_empty_bag() {
 
     assert_eq!(cloned.count(), 0);
     assert_eq!(cloned.used(), 0);
+}
+
+// ============================================================================
+//  SuffixSidecar Tests (Miri-friendly - no iterations, tests Drop correctness)
+// ============================================================================
+
+/// Test sidecar creation and drop with only inline suffixes.
+/// Miri will detect any memory leaks or invalid drops.
+#[test]
+fn test_sidecar_drop_inline_only() {
+    let mut sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+
+    // Add a few inline suffixes
+    sidecar.inline.try_assign(0, b"hello");
+    sidecar.inline.try_assign(1, b"world");
+    sidecar.inline.try_assign(2, b"test");
+
+    assert!(sidecar.has_suffix(0));
+    assert!(sidecar.has_suffix(1));
+    assert!(sidecar.has_suffix(2));
+    assert!(!sidecar.has_suffix(3));
+
+    // Verify data before drop
+    assert_eq!(sidecar.get(0), Some(b"hello".as_slice()));
+    assert_eq!(sidecar.get(1), Some(b"world".as_slice()));
+
+    // Drop happens here - Miri verifies no leaks
+}
+
+/// Test sidecar creation and drop with external overflow allocation.
+/// This exercises the Drop implementation that frees the external SuffixBag.
+/// Miri will detect any memory leaks or double-frees.
+#[test]
+fn test_sidecar_drop_with_external() {
+    let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+
+    // Force external allocation
+    // SAFETY: Test-only, no concurrent access
+    let external_ptr = unsafe { sidecar.ensure_external() }.expect("allocation should succeed");
+
+    // Write to external bag
+    // SAFETY: We have exclusive access in this test
+    unsafe {
+        (*external_ptr).assign(0, b"external_suffix_0");
+        (*external_ptr).assign(1, b"external_suffix_1");
+    }
+
+    // Verify external is allocated
+    assert!(!sidecar
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
+
+    // Verify we can read from external
+    assert_eq!(sidecar.get(0), Some(b"external_suffix_0".as_slice()));
+    assert_eq!(sidecar.get(1), Some(b"external_suffix_1".as_slice()));
+
+    // Drop happens here - Miri verifies external bag is freed without leaks
+}
+
+/// Test sidecar with both inline and external data.
+/// Exercises the full Drop path.
+#[test]
+fn test_sidecar_drop_mixed_inline_external() {
+    let mut sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+
+    // Add inline suffixes
+    sidecar.inline.try_assign(0, b"inline_0");
+    sidecar.inline.try_assign(1, b"inline_1");
+
+    // Force external allocation
+    // SAFETY: Test-only, no concurrent access
+    let external_ptr = unsafe { sidecar.ensure_external() }.expect("allocation should succeed");
+
+    // Write to external bag for different slots
+    // SAFETY: We have exclusive access in this test
+    unsafe {
+        (*external_ptr).assign(5, b"external_5");
+        (*external_ptr).assign(10, b"external_10");
+    }
+
+    // Verify inline takes precedence for slots 0, 1
+    assert_eq!(sidecar.get(0), Some(b"inline_0".as_slice()));
+    assert_eq!(sidecar.get(1), Some(b"inline_1".as_slice()));
+
+    // Verify external is used for slots 5, 10
+    assert_eq!(sidecar.get(5), Some(b"external_5".as_slice()));
+    assert_eq!(sidecar.get(10), Some(b"external_10".as_slice()));
+
+    // Drop happens here - Miri verifies both inline and external cleanup
+}
+
+/// Test sidecar default and new are equivalent.
+#[test]
+fn test_sidecar_default() {
+    let s1: SuffixSidecar<15> = SuffixSidecar::new();
+    let s2: SuffixSidecar<15> = SuffixSidecar::default();
+
+    assert!(s1
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
+    assert!(s2
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
+    assert_eq!(s1.inline.count(), 0);
+    assert_eq!(s2.inline.count(), 0);
+}
+
+/// Test ensure_external is idempotent (returns same pointer on repeated calls).
+#[test]
+fn test_sidecar_ensure_external_idempotent() {
+    let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+
+    // SAFETY: Test-only, no concurrent access
+    let ptr1 = unsafe { sidecar.ensure_external() }.expect("first allocation");
+    let ptr2 = unsafe { sidecar.ensure_external() }.expect("second call");
+    let ptr3 = unsafe { sidecar.ensure_external() }.expect("third call");
+
+    // All calls should return the same pointer
+    assert_eq!(ptr1, ptr2);
+    assert_eq!(ptr2, ptr3);
+
+    // Only one allocation happened
+    assert!(!ptr1.is_null());
+
+    // Drop frees exactly one allocation - Miri verifies no double-free
 }
