@@ -404,6 +404,27 @@ impl<S: ValueSlot> LeafNode15<S> {
         self.ikey0[slot].store(ikey, RELAXED);
     }
 
+    /// Get raw pointer to the ikey array for SIMD operations.
+    ///
+    /// Returns pointer to `self.ikey0[0]`, valid for `WIDTH_15` (15) contiguous u64 reads.
+    ///
+    /// # Layout
+    ///
+    /// `ikey0` starts at offset 128 in `LeafNode15`:
+    /// - Offset 128-247: ikey0[0..15] (120 bytes, 15 × 8B)
+    ///
+    /// # Safety Contract
+    ///
+    /// Caller must ensure:
+    /// 1. Memory ordering established via `stable()` before reading
+    /// 2. No concurrent writes to the ikey array (ensured by OCC protocol)
+    #[inline(always)]
+    pub const fn ikey_ptr(&self) -> *const u64 {
+        // SAFETY: AtomicU64 has identical layout to u64.
+        // Pointer arithmetic is valid within the ikey0 array bounds.
+        self.ikey0.as_ptr().cast::<u64>()
+    }
+
     /// Load all ikeys into a contiguous buffer for SIMD search.
     #[must_use]
     #[inline(always)]
@@ -2091,11 +2112,63 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     }
 
     #[inline(always)]
+    fn set_ikey_relaxed(&self, slot: usize, ikey: u64) {
+        Self::set_ikey_relaxed(self, slot, ikey);
+    }
+
+    #[inline(always)]
     fn ikey_bound(&self) -> u64 {
         Self::ikey_bound(self)
     }
 
-    // Uses default trait implementation for find_ikey_matches (scalar loop)
+    /// Find all slots where `ikey == target_ikey`, returns bitmask.
+    ///
+    /// Uses SIMD acceleration on `x86_64` with AVX2 support.
+    ///
+    /// # Memory Ordering
+    ///
+    /// Caller must have called `stable()` on the node's version before calling
+    /// this function. The compiler fence prevents SIMD loads from being reordered
+    /// before that Acquire fence.
+    #[inline]
+    fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
+        // // Compile-time AVX2: use SIMD directly
+        // #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        // {
+        //     use crate::ksearch::simd::SIMD;
+        //     use std::sync::atomic::{compiler_fence, Ordering};
+        //
+        //     // Compiler fence prevents SIMD loads from being reordered before
+        //     // the caller's stable() Acquire fence.
+        //     compiler_fence(Ordering::Acquire);
+        //
+        //     // SAFETY:
+        //     // 1. AVX2 available (compile-time target_feature check)
+        //     // 2. Caller called stable() which issued Acquire fence
+        //     // 3. Compiler fence above prevents load reordering
+        //     // 4. ikey_ptr() returns valid pointer to 15 contiguous u64s
+        //     return unsafe { SIMD::find_ikey_matches_leaf15(target_ikey, self.ikey_ptr()) };
+        // }
+        //
+        // // Runtime AVX2 detection
+        // #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+        // {
+        //     use crate::ksearch::simd::SIMD;
+        //     use std::sync::atomic::{compiler_fence, Ordering};
+        //
+        //     if SIMD::is_avx2_available() {
+        //         compiler_fence(Ordering::Acquire);
+        //
+        //         // SAFETY: Same as above, plus runtime AVX2 check passed
+        //         return unsafe {
+        //             SIMD::find_ikey_matches_leaf15_dynamic(target_ikey, self.ikey_ptr())
+        //         };
+        //     }
+        // }
+        //
+        // Scalar fallback
+        crate::ksearch::scalar::Scalar::find_ikey_matches_leaf15(target_ikey, self)
+    }
 
     #[inline(always)]
     fn keylenx(&self, slot: usize) -> u8 {
@@ -2105,6 +2178,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn set_keylenx(&self, slot: usize, keylenx: u8) {
         Self::set_keylenx(self, slot, keylenx);
+    }
+
+    #[inline(always)]
+    fn set_keylenx_relaxed(&self, slot: usize, keylenx: u8) {
+        Self::set_keylenx_relaxed(self, slot, keylenx);
     }
 
     #[inline(always)]
@@ -2125,6 +2203,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
         Self::set_leaf_value_ptr(self, slot, ptr);
+    }
+
+    #[inline(always)]
+    fn set_leaf_value_ptr_relaxed(&self, slot: usize, ptr: *mut u8) {
+        Self::set_leaf_value_ptr_relaxed(self, slot, ptr);
     }
 
     #[inline(always)]

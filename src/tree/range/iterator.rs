@@ -94,6 +94,7 @@ use seize::LocalGuard;
 use crate::alloc_trait::NodeAllocatorGeneric;
 use crate::key::IKEY_SIZE;
 use crate::leaf_trait::{LayerCapableLeaf, TreeLeafNode};
+use crate::ref_value_slot::RefValueSlot;
 use crate::slot::ValueSlot;
 use crate::tree::MassTreeGeneric;
 
@@ -1424,6 +1425,7 @@ where
     #[inline]
     pub fn for_each_ref<F>(mut self, mut visitor: F) -> usize
     where
+        S: RefValueSlot,
         F: FnMut(&[u8], &S::Value) -> bool,
     {
         if self.flags.exhausted() {
@@ -1483,6 +1485,7 @@ where
     #[expect(clippy::too_many_lines, reason = "Complex state management logic")]
     pub fn for_each_batch_ref<F>(mut self, mut visitor: F) -> usize
     where
+        S: RefValueSlot,
         F: FnMut(&[u8], &S::Value) -> bool,
     {
         if self.flags.exhausted() {
@@ -1675,6 +1678,7 @@ where
     #[expect(clippy::too_many_lines)]
     pub fn for_each_intra_leaf_batch_ref<F>(mut self, mut visitor: F) -> usize
     where
+        S: RefValueSlot,
         F: FnMut(&[u8], &S::Value) -> bool,
     {
         use super::find::{
@@ -1852,6 +1856,7 @@ where
     #[inline]
     pub fn try_for_each_ref<F, E>(mut self, mut visitor: F) -> Result<usize, E>
     where
+        S: RefValueSlot,
         F: FnMut(&[u8], &S::Value) -> Result<bool, E>,
     {
         if self.flags.exhausted() {
@@ -1904,7 +1909,10 @@ where
     /// 2. Version validation ensures the slot hasn't been modified
     #[inline(always)]
     #[expect(clippy::too_many_lines, reason = "Complex allocation logic")]
-    fn advance_no_alloc_ref(&mut self) -> Option<(&[u8], &S::Value)> {
+    fn advance_no_alloc_ref(&mut self) -> Option<(&[u8], &S::Value)>
+    where
+        S: RefValueSlot,
+    {
         // Handle pending emit from initialize() - first entry case
         if self.state == ScanState::Emit && self.snapshot.is_some() {
             let key = self.cursor_key.full_key();
@@ -2143,6 +2151,7 @@ where
     #[expect(clippy::too_many_lines)]
     pub fn rev_for_each_ref<F>(mut self, mut visitor: F) -> usize
     where
+        S: RefValueSlot,
         F: FnMut(&[u8], &S::Value) -> bool,
     {
         use super::find_rev::{

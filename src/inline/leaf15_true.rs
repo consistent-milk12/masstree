@@ -412,6 +412,17 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         self.ikey0[slot].store(ikey, WRITE_ORD);
     }
 
+    /// Set ikey with Relaxed ordering (use when permutation update is linearization point).
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "slot bounds checked by debug_assert"
+    )]
+    pub fn set_ikey_relaxed(&self, slot: usize, ikey: u64) {
+        debug_assert!(slot < WIDTH_15);
+        self.ikey0[slot].store(ikey, RELAXED);
+    }
+
     /// Get the `ikey_bound` (slot 0's ikey).
     #[inline(always)]
     pub fn ikey_bound(&self) -> u64 {
@@ -446,6 +457,17 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     pub fn set_keylenx(&self, slot: usize, keylenx: u8) {
         debug_assert!(slot < WIDTH_15);
         self.keylenx[slot].store(keylenx, WRITE_ORD);
+    }
+
+    /// Set keylenx with Relaxed ordering (use when permutation update is linearization point).
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "slot bounds checked by debug_assert"
+    )]
+    pub fn set_keylenx_relaxed(&self, slot: usize, keylenx: u8) {
+        debug_assert!(slot < WIDTH_15);
+        self.keylenx[slot].store(keylenx, RELAXED);
     }
 
     /// Get the leaf value pointer at the given slot.
@@ -510,6 +532,28 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         let bits: u64 = encoded ^ ENCODING_MAGIC;
         self.inline_values[slot].store(bits, WRITE_ORD);
         self.leaf_values[slot].store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
+    }
+
+    /// Set leaf value pointer with Relaxed ordering.
+    ///
+    /// Use when permutation update will serve as the linearization point.
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "slot bounds checked by debug_assert"
+    )]
+    pub fn set_leaf_value_ptr_relaxed(&self, slot: usize, ptr: *mut u8) {
+        debug_assert!(slot < WIDTH_15);
+
+        if ptr.is_null() {
+            self.leaf_values[slot].store(ptr, RELAXED);
+            return;
+        }
+
+        let encoded: u64 = ptr.addr() as u64;
+        let bits: u64 = encoded ^ ENCODING_MAGIC;
+        self.inline_values[slot].store(bits, RELAXED);
+        self.leaf_values[slot].store(InlineSentinel::inline_sentinel_ptr(), RELAXED);
     }
 
     /// Update an existing inline value in place.
@@ -1977,6 +2021,11 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
     }
 
     #[inline(always)]
+    fn set_ikey_relaxed(&self, slot: usize, ikey: u64) {
+        Self::set_ikey_relaxed(self, slot, ikey);
+    }
+
+    #[inline(always)]
     fn ikey_bound(&self) -> u64 {
         Self::ikey_bound(self)
     }
@@ -1989,6 +2038,11 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
     #[inline(always)]
     fn set_keylenx(&self, slot: usize, keylenx: u8) {
         Self::set_keylenx(self, slot, keylenx);
+    }
+
+    #[inline(always)]
+    fn set_keylenx_relaxed(&self, slot: usize, keylenx: u8) {
+        Self::set_keylenx_relaxed(self, slot, keylenx);
     }
 
     #[inline(always)]
@@ -2010,6 +2064,11 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
     #[inline(always)]
     fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
         Self::set_leaf_value_ptr(self, slot, ptr);
+    }
+
+    #[inline(always)]
+    fn set_leaf_value_ptr_relaxed(&self, slot: usize, ptr: *mut u8) {
+        Self::set_leaf_value_ptr_relaxed(self, slot, ptr);
     }
 
     #[inline(always)]

@@ -14,9 +14,9 @@ use super::{
     ValueSlot,
 };
 
+use crate::leaf_trait::TreePermutation;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
-use crate::leaf_trait::TreePermutation;
 use crate::link::Linker;
 use crate::ref_value_slot::RefValueSlot;
 use crate::value::traits::LeafValueLoad;
@@ -694,11 +694,12 @@ where
     /// # Note
     ///
     /// This method is only available for pointer-backed storage modes
-    /// (`MassTree24`, `MassTree15`, `MassTree24Inline`, `MassTree15Inline`).
-    /// It is not available for true-inline storage (`MassTree24TrueInline`, etc.)
-    /// because values are stored as bits, not at stable addresses.
+    /// (`MassTree24`, `MassTree15`, `MassTree24Inline`).
     ///
-    /// For true-inline trees, use `get` or `get_copy` instead.
+    /// It is not available for true-inline storage (`MassTree15Inline`) because
+    /// values are stored as atomic bits, not at stable addresses.
+    ///
+    /// For true-inline trees, use `get`/`get_with_guard` instead (returns by copy).
     ///
     /// # Arguments
     ///

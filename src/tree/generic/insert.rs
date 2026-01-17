@@ -483,8 +483,8 @@ where
                 // while other threads can still access the leaf.
                 // C++ masstree_get.hh:85-87 does this before lock().
                 let pre_lock_version: u32 = leaf.version().stable();
-                let pre_lock_perm_raw = leaf.permutation_raw();
                 let pre_lock_perm = leaf.permutation();
+                let pre_lock_perm_raw = pre_lock_perm.value(); // Avoid second atomic load
 
                 // Do optimistic search BEFORE locking
                 let optimistic_search = if single_layer_mode {
@@ -493,8 +493,12 @@ where
                     self.search_for_insert_generic(leaf, key, &pre_lock_perm)
                 };
 
-                // Lock the leaf (pure spin - yields cause syscall overhead under contention)
-                let mut lock = leaf.version().lock();
+                // Lock the leaf with yield-on-contention to reduce lock convoy effects.
+                // Under high contention (e.g., `same` benchmark), pure spin causes:
+                // - CPU burning while waiting for lock holder
+                // - Thermal throttling on sustained loads
+                // - Tail latency spikes when threads queue on same leaf
+                let mut lock = leaf.version().lock_with_yield();
 
                 // ================================================================
                 // POST-LOCK VALIDATION (B-link local retry on failure)

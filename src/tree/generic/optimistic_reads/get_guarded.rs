@@ -2,11 +2,11 @@ use seize::LocalGuard;
 use std::ptr as StdPtr;
 
 use crate::{
+    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
     key::Key,
     leaf_trait::LayerCapableLeaf,
-    tree::generic::optimistic_reads::{search_leaf_multi_layer, LookupResult},
+    tree::generic::optimistic_reads::{LookupResult, search_leaf_multi_layer},
     value::traits::LeafValueLoad,
-    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
 };
 
 impl<S, L, A> MassTreeGeneric<S, L, A>

@@ -325,12 +325,12 @@ where
         perm: &L::Perm,
         search_keylenx: u8,
     ) -> InsertSearchResultGeneric {
-        let target_ikey = key.ikey();
-        let size = perm.size();
+        let target_ikey: u64 = key.ikey();
+        let size: usize = perm.size();
 
         for i in 0..size {
-            let slot = perm.get(i);
-            let slot_ikey = leaf.ikey(slot);
+            let slot: usize = perm.get(i);
+            let slot_ikey: u64 = leaf.ikey(slot);
 
             if slot_ikey == target_ikey {
                 // Check this slot; continue if it doesn't provide a definitive answer

@@ -28,6 +28,7 @@ use crate::Linker;
 use crate::alloc_common::BoxAllocator;
 use crate::error::{AllocKind, AllocResult};
 use crate::key::IKEY_SIZE;
+use crate::ksearch::scalar::Scalar;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use crate::permuter24::{AtomicPermuter24, Permuter24};
@@ -2005,6 +2006,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     }
 
     #[inline(always)]
+    fn set_ikey_relaxed(&self, slot: usize, ikey: u64) {
+        Self::set_ikey_relaxed(self, slot, ikey);
+    }
+
+    #[inline(always)]
     fn ikey_bound(&self) -> u64 {
         Self::ikey_bound(self)
     }
@@ -2015,7 +2021,7 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     /// sequential per-slot atomic loads.
     #[inline]
     fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
-        crate::ksearch::find_ikey_matches_leaf24(target_ikey, self)
+        Scalar::find_ikey_matches_leaf24(target_ikey, self)
     }
 
     #[inline(always)]
@@ -2026,6 +2032,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn set_keylenx(&self, slot: usize, keylenx: u8) {
         Self::set_keylenx(self, slot, keylenx);
+    }
+
+    #[inline(always)]
+    fn set_keylenx_relaxed(&self, slot: usize, keylenx: u8) {
+        Self::set_keylenx_relaxed(self, slot, keylenx);
     }
 
     #[inline(always)]
@@ -2046,6 +2057,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
         Self::set_leaf_value_ptr(self, slot, ptr);
+    }
+
+    #[inline(always)]
+    fn set_leaf_value_ptr_relaxed(&self, slot: usize, ptr: *mut u8) {
+        Self::set_leaf_value_ptr_relaxed(self, slot, ptr);
     }
 
     #[inline(always)]

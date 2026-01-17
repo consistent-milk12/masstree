@@ -882,6 +882,22 @@ impl TreeInternode for InternodeNode {
         self.ikey0[i].load(RELAXED)
     }
 
+    /// Get raw pointer to the ikey array for SIMD operations.
+    ///
+    /// Returns pointer to `self.ikey0[0]`, valid for `WIDTH` (15) contiguous u64 reads.
+    ///
+    /// # Layout
+    ///
+    /// `ikey0` starts at offset 16 in [`InternodeNode`]:
+    /// - Offset 0-15: version (4B) + nkeys (1B) + height (1B) + pad (2B) + parent (8B)
+    /// - Offset 16-135: ikey0[0..15] (120 bytes, 15 x 8B)
+    #[inline(always)]
+    fn ikey_ptr(&self) -> *const u64 {
+        // SAFETY: AtomicU64 has identical layout to u64.
+        // Pointer arithmetic is valid within the ikey0 array bounds.
+        self.ikey0.as_ptr().cast::<u64>()
+    }
+
     #[inline(always)]
     fn set_ikey(&self, idx: usize, key: u64) {
         Self::set_ikey(self, idx, key);

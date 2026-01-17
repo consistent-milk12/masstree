@@ -964,6 +964,16 @@ where
 
             // SAFETY: next_ptr is valid
             let next: &L = unsafe { &*next_ptr };
+
+            // OPTIMIZATION: Prefetch next->next while we compare ikey_bound.
+            // This hides memory latency for the next B-link hop (~50-100ns L3 hit).
+            // Prefetch both the version (first cache line) and the next pointer.
+            let next_next_raw: *mut L = next.next_raw();
+            let next_next_ptr: *mut L = Linker::unmark_ptr(next_next_raw);
+            if !next_next_ptr.is_null() {
+                crate::prefetch::prefetch_read(next_next_ptr.cast::<u8>());
+            }
+
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
@@ -1110,14 +1120,16 @@ where
         // Mark insert dirty
         lock.mark_insert();
 
-        // Store key data and value
-        leaf.set_ikey(slot, ikey);
-        leaf.set_leaf_value_ptr(slot, value_ptr);
+        // Store key data and value with Relaxed ordering.
+        // The permutation update (Release) is the linearization point,
+        // so these intermediate stores don't need memory barriers.
+        leaf.set_ikey_relaxed(slot, ikey);
+        leaf.set_leaf_value_ptr_relaxed(slot, value_ptr);
 
         // Handle suffix keys correctly
         if key.has_suffix() {
             // Key has suffix bytes beyond the 8-byte ikey
-            leaf.set_keylenx(slot, KSUF_KEYLENX);
+            leaf.set_keylenx_relaxed(slot, KSUF_KEYLENX);
             // SAFETY: We hold the lock, guard is from this tree's collector
             // Pass initializing=false: this is a normal insert, not split initialization
             unsafe { leaf.assign_ksuf(slot, key.suffix(), guard) };
@@ -1125,7 +1137,7 @@ where
             // Inline key (0-8 bytes total, no suffix)
             #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
             let keylenx: u8 = key.current_len() as u8;
-            leaf.set_keylenx(slot, keylenx);
+            leaf.set_keylenx_relaxed(slot, keylenx);
         }
     }
 }

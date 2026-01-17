@@ -284,6 +284,27 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     /// 4. Therefore, Relaxed loads see fully-published values
     fn ikey_relaxed(&self, idx: usize) -> u64;
 
+    /// Get raw pointer to the ikey array for SIMD operations.
+    ///
+    /// Returns a pointer to the first element of the contiguous ikey array.
+    /// The pointer is valid for reading `Self::WIDTH` `u64` values.
+    ///
+    /// # Safety Context
+    ///
+    /// Caller must ensure:
+    /// 1. Memory ordering established via `stable()` before reading
+    /// 2. No concurrent writes to the ikey array (ensured by OCC protocol)
+    ///
+    /// # Implementation Notes
+    /// The pointer targets [`AtomicU64`](std::sync::atomic::AtomicU64) storage, but SIMD treats it as plain
+    /// `u64`.
+    ///
+    /// This is safe because:
+    /// - [`AtomicU64`](std::sync::atomic::AtomicU64) has identical layout to `u64` (guaranted by Rust)
+    /// - Aligned 64-bit loads are atomic on `x86_64`
+    /// - Caller has established ordering via `stable()` fence
+    fn ikey_ptr(&self) -> *const u64;
+
     /// Set key at index.
     fn set_ikey(&self, idx: usize, key: u64);
 
@@ -517,6 +538,12 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Debug-panics if `slot >= WIDTH`.
     fn set_ikey(&self, slot: usize, ikey: u64);
 
+    /// Set ikey at physical slot with Relaxed ordering.
+    ///
+    /// Use when a subsequent Release store (e.g., permutation update)
+    /// will serve as the linearization point.
+    fn set_ikey_relaxed(&self, slot: usize, ikey: u64);
+
     /// Get ikey bound (slot 0's ikey for B-link navigation).
     ///
     /// The `ikey_bound` is the smallest ikey in this leaf and is used
@@ -552,6 +579,11 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Set keylenx at physical slot.
     fn set_keylenx(&self, slot: usize, keylenx: u8);
 
+    /// Set keylenx at physical slot with Relaxed ordering.
+    ///
+    /// Use when a subsequent Release store will serve as the linearization point.
+    fn set_keylenx_relaxed(&self, slot: usize, keylenx: u8);
+
     /// Check if slot contains a layer pointer.
     ///
     /// A layer pointer indicates this slot descends into a sublayer
@@ -573,6 +605,11 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Store value pointer at slot.
     fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8);
+
+    /// Store value pointer at slot with Relaxed ordering.
+    ///
+    /// Use when a subsequent Release store will serve as the linearization point.
+    fn set_leaf_value_ptr_relaxed(&self, slot: usize, ptr: *mut u8);
 
     /// Update an existing value in place.
     ///

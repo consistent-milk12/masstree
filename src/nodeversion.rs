@@ -100,8 +100,9 @@ impl Backoff {
             StdHint::spin_loop();
         }
 
-        // Double count, cap at 15: 0 -> 1 -> 3 -> 7 -> 15 -> 15
-        self.count = ((self.count << 1) | 1) & 15;
+        // Double count, cap at 31: 0 -> 1 -> 3 -> 7 -> 15 -> 31 -> 31
+        // Higher cap reduces cache line thrashing under heavy contention.
+        self.count = ((self.count << 1) | 1) & 31;
     }
 }
 
@@ -454,6 +455,15 @@ impl NodeVersion {
     /// a version with no dirty bits. Use with [`Self::has_changed`] after reading
     /// to detect concurrent modifications.
     ///
+    /// # Algorithm (Hybrid Spin+Yield)
+    ///
+    /// Uses a two-phase approach to reduce spin convoy effects:
+    /// 1. **Spin phase**: Brief exponential backoff (up to `SPINS_BEFORE_YIELD` iterations)
+    /// 2. **Yield phase**: Yields CPU to other threads, then resets spin count
+    ///
+    /// This prevents the convoy effect where 11 reader threads spin-wait on a
+    /// single writer, burning CPU and causing tail latency spikes.
+    ///
     /// # Memory Ordering
     /// Uses `Relaxed` loads during spinning for efficiency (especially on ARM),
     /// then issues an `Acquire` fence only on success. This is equivalent to
@@ -466,7 +476,12 @@ impl NodeVersion {
     /// A version value with no dirty bits set.
     #[must_use]
     pub fn stable(&self) -> u32 {
+        // Number of backoff iterations before yielding the CPU.
+        // Tuned for ~1-2µs spin time before yield on modern CPUs.
+        const SPINS_BEFORE_YIELD: u32 = 4;
+
         let mut backoff = Backoff::new();
+        let mut spin_count: u32 = 0;
 
         loop {
             // Relaxed load like C++ - only need compiler barrier at the end.
@@ -482,10 +497,19 @@ impl NodeVersion {
                 return value;
             }
 
-            // Exponential backoff reduces cache line contention under heavy load.
-            // While C++ uses single PAUSE by default, our testing shows exponential
-            // backoff performs better on modern multi-core systems.
-            backoff.spin();
+            spin_count += 1;
+
+            if spin_count < SPINS_BEFORE_YIELD {
+                // Phase 1: Exponential backoff with PAUSE instructions
+                backoff.spin();
+            } else {
+                // Phase 2: Yield CPU to reduce convoy effect
+                // This allows the lock holder to make progress instead of
+                // having 11 threads spin-waiting and burning CPU.
+                StdThread::yield_now();
+                spin_count = 0;
+                backoff = Backoff::new(); // Reset backoff for next spin phase
+            }
         }
     }
 

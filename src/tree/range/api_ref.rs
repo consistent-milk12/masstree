@@ -4,14 +4,31 @@
 //!
 //! These methods require [`RefValueSlot`] because they return `&V` references.
 //! True-inline storage (`TrueInlineSlot<V>`) does NOT implement [`RefValueSlot`],
-//! so these methods are compile-time unavailable for `MassTree15Inline`/`MassTree24Inline`.
+//! so these methods are compile-time unavailable for `MassTree15Inline`.
 //!
 //! # Why This Separation?
 //!
-//! True-inline storage encodes values as bits in pointer addresses (XOR with magic constant).
+//! `MassTree15Inline` encodes values as bits in pointer addresses (XOR with a magic constant).
 //! The "pointer" returned by `output_to_raw()` is NOT a valid memory address.
-//! Dereferencing it causes SIGSEGV. By gating `_ref` methods behind `RefValueSlot`,
+//! Dereferencing it is undefined behavior. By gating `_ref` methods behind `RefValueSlot`,
 //! we get compile-time prevention of this unsoundness.
+//!
+//! # Compile-Time Safety
+//!
+//! ```compile_fail
+//! use masstree::{MassTree15Inline, RangeBound};
+//!
+//! let tree: MassTree15Inline<u64> = MassTree15Inline::new();
+//! let guard = tree.guard();
+//!
+//! // Not available for true-inline storage.
+//! tree.scan_ref(
+//!     RangeBound::Unbounded,
+//!     RangeBound::Unbounded,
+//!     |_k, _v| true,
+//!     &guard,
+//! );
+//! ```
 //!
 //! # Safe Alternatives for Inline Storage
 //!
