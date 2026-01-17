@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "masstree"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "arrayvec",
  "chrono",

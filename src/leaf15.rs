@@ -404,41 +404,6 @@ impl<S: ValueSlot> LeafNode15<S> {
         self.ikey0[slot].store(ikey, RELAXED);
     }
 
-    /// Get raw pointer to the ikey array for SIMD operations.
-    ///
-    /// Returns pointer to `self.ikey0[0]`, valid for `WIDTH_15` (15) contiguous u64 reads.
-    ///
-    /// # Layout
-    ///
-    /// `ikey0` starts at offset 128 in `LeafNode15`:
-    /// - Offset 128-247: ikey0[0..15] (120 bytes, 15 × 8B)
-    ///
-    /// # Safety Contract
-    ///
-    /// Caller must ensure:
-    /// 1. Memory ordering established via `stable()` before reading
-    /// 2. No concurrent writes to the ikey array (ensured by OCC protocol)
-    #[inline(always)]
-    pub const fn ikey_ptr(&self) -> *const u64 {
-        // SAFETY: AtomicU64 has identical layout to u64.
-        // Pointer arithmetic is valid within the ikey0 array bounds.
-        self.ikey0.as_ptr().cast::<u64>()
-    }
-
-    /// Load all ikeys into a contiguous buffer for SIMD search.
-    #[must_use]
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing)]
-    pub fn load_all_ikeys(&self) -> [u64; WIDTH_15] {
-        let mut ikeys = [0u64; WIDTH_15];
-
-        (0..WIDTH_15).for_each(|i| {
-            ikeys[i] = self.ikey0[i].load(READ_ORD);
-        });
-
-        ikeys
-    }
-
     /// Prefetch the ikey at the given slot into CPU cache.
     ///
     /// This is used during linear search to hide memory latency by
@@ -1307,18 +1272,27 @@ impl<S: ValueSlot> LeafNode15<S> {
         i32::from(self.ksuf_equals(slot, suffix))
     }
 
-    /// Compact external suffix storage.
+    /// Compact external suffix storage in-place.
     ///
     /// Note: Inline storage doesn't need compaction (fixed size, no fragmentation).
     /// This only compacts the external bag if it exists.
     ///
+    /// # Algorithm
+    ///
+    /// Uses true in-place compaction via `copy_within` (memmove):
+    /// - No cloning of the SuffixBag
+    /// - No heap allocation during compaction
+    /// - Stack-allocated ArrayVec for bookkeeping
+    ///
     /// # Safety
-    /// - Caller must hold lock
-    /// - The `guard` must be valid and from the same collector as the tree.
+    ///
+    /// - Caller must hold lock (ensures exclusive access)
+    /// - The `_guard` parameter is kept for API compatibility but unused
+    ///   since we no longer need to retire the old bag
     pub unsafe fn compact_ksuf(
         &self,
         exclude_slot: Option<usize>,
-        guard: &LocalGuard<'_>,
+        _guard: &LocalGuard<'_>,
     ) -> usize {
         debug_assert!(
             self.version.is_locked(),
@@ -1335,28 +1309,17 @@ impl<S: ValueSlot> LeafNode15<S> {
         // SAFETY: sidecar_ptr is non-null, we hold the lock
         let sidecar: &mut SuffixSidecar<WIDTH_15> = unsafe { &mut *sidecar_ptr };
 
-        let old_ptr: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
-        if old_ptr.is_null() {
+        let bag_ptr: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
+        if bag_ptr.is_null() {
             return 0;
         }
 
+        // SAFETY: bag_ptr is non-null, we hold the lock (exclusive access)
+        let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *bag_ptr };
         let perm: Permuter = self.permutation();
 
-        // SAFETY: old_ptr is non-null
-        let mut new_bag: SuffixBag<WIDTH_15> = unsafe { (*old_ptr).clone() };
-        let reclaimed: usize = new_bag.compact_with_permuter(&perm, exclude_slot);
-        let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
-
-        sidecar.external.store(new_ptr, WRITE_ORD);
-
-        // SAFETY: old_ptr is non-null
-        unsafe {
-            guard.defer_retire(old_ptr, |ptr, _| {
-                drop(Box::from_raw(ptr));
-            });
-        }
-
-        reclaimed
+        // In-place compaction: no clone, no allocation, no retirement needed
+        bag.compact_with_permuter(&perm, exclude_slot)
     }
 
     // ============================================================================
@@ -2010,10 +1973,10 @@ impl<S: ValueSlot> LeafNode15<S> {
         debug_assert!(slot < WIDTH_15, "clear_slot: slot out of bounds");
 
         // Clear keylenx to 0 (marks slot as empty for searches)
-        self.keylenx[slot].store(0, AtomicOrdering::Release);
+        self.keylenx[slot].store(0, WRITE_ORD);
 
         // Clear the value pointer
-        self.leaf_values[slot].store(StdPtr::null_mut(), AtomicOrdering::Release);
+        self.leaf_values[slot].store(StdPtr::null_mut(), WRITE_ORD);
 
         // Note: ikey is NOT cleared - it's only meaningful when keylenx > 0
         // Note: suffix is NOT cleared - it's only meaningful when keylenx indicates suffix
@@ -2122,51 +2085,8 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     }
 
     /// Find all slots where `ikey == target_ikey`, returns bitmask.
-    ///
-    /// Uses SIMD acceleration on `x86_64` with AVX2 support.
-    ///
-    /// # Memory Ordering
-    ///
-    /// Caller must have called `stable()` on the node's version before calling
-    /// this function. The compiler fence prevents SIMD loads from being reordered
-    /// before that Acquire fence.
     #[inline]
     fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
-        // // Compile-time AVX2: use SIMD directly
-        // #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        // {
-        //     use crate::ksearch::simd::SIMD;
-        //     use std::sync::atomic::{compiler_fence, Ordering};
-        //
-        //     // Compiler fence prevents SIMD loads from being reordered before
-        //     // the caller's stable() Acquire fence.
-        //     compiler_fence(Ordering::Acquire);
-        //
-        //     // SAFETY:
-        //     // 1. AVX2 available (compile-time target_feature check)
-        //     // 2. Caller called stable() which issued Acquire fence
-        //     // 3. Compiler fence above prevents load reordering
-        //     // 4. ikey_ptr() returns valid pointer to 15 contiguous u64s
-        //     return unsafe { SIMD::find_ikey_matches_leaf15(target_ikey, self.ikey_ptr()) };
-        // }
-        //
-        // // Runtime AVX2 detection
-        // #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
-        // {
-        //     use crate::ksearch::simd::SIMD;
-        //     use std::sync::atomic::{compiler_fence, Ordering};
-        //
-        //     if SIMD::is_avx2_available() {
-        //         compiler_fence(Ordering::Acquire);
-        //
-        //         // SAFETY: Same as above, plus runtime AVX2 check passed
-        //         return unsafe {
-        //             SIMD::find_ikey_matches_leaf15_dynamic(target_ikey, self.ikey_ptr())
-        //         };
-        //     }
-        // }
-        //
-        // Scalar fallback
         crate::ksearch::scalar::Scalar::find_ikey_matches_leaf15(target_ikey, self)
     }
 

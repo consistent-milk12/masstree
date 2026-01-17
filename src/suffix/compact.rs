@@ -2,15 +2,33 @@
 //  Compaction
 // ========================================================================
 
-use super::{INITIAL_CAPACITY, PermutationProvider, SlotMeta, SuffixBag};
+use arrayvec::ArrayVec;
+
+use super::{PermutationProvider, SlotMeta, SuffixBag};
+
+/// Entry for tracking suffix during compaction.
+/// Stores (slot_index, original_offset, length).
+#[derive(Clone, Copy)]
+struct CompactEntry {
+    slot: usize,
+    offset: u32,
+    len: u16,
+}
 
 impl<const WIDTH: usize> SuffixBag<WIDTH> {
-    /// Compact in-pace by rebuilding the data buffer with only active suffixes.
+    /// Compact in-place by moving data within the existing buffer.
     ///
-    /// This is more efficient than `compact()` when we don't have an external
-    /// list of active slots, it just uses the slot metadata directly.
+    /// This is a true in-place compaction that:
+    /// 1. Uses stack-allocated ArrayVec for bookkeeping (no heap allocation)
+    /// 2. Moves data using `copy_within` (memmove, no allocation)
+    /// 3. Truncates the buffer (no allocation)
     ///
-    /// Uses existing capacity when possible to avoid allocation.
+    /// # Algorithm
+    ///
+    /// 1. Collect active suffixes into ArrayVec, sorted by offset
+    /// 2. Move each suffix to its new position using copy_within
+    /// 3. Update slot metadata with new offsets
+    /// 4. Truncate buffer to new size
     #[expect(clippy::indexing_slicing, reason = "Bounds checked via slot iteration")]
     pub(super) fn compact_in_place(&mut self) {
         if self.suffix_count == 0 {
@@ -18,55 +36,65 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
             return;
         }
 
-        // Calculate total size of active suffixes
-        let new_size: usize = self
-            .slots
-            .iter()
-            .filter(|s: &&SlotMeta| s.has_suffix())
-            .map(|s: &SlotMeta| s.len as usize)
-            .sum();
+        // Collect active suffixes into stack-allocated array
+        let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
 
-        // Allocate new buffer (reuse capacity if sufficient)
-        let new_capacity: usize = new_size.next_power_of_two().max(INITIAL_CAPACITY);
-        let mut new_data: Vec<u8> = Vec::with_capacity(new_capacity);
-
-        // Copy active suffixes in slot order
         for slot in 0..WIDTH {
             let meta: SlotMeta = self.slots[slot];
-
-            if !meta.has_suffix() {
-                continue;
-            }
-
-            let start: usize = meta.offset as usize;
-            let end: usize = start + meta.len as usize;
-            let suffix: &[u8] = &self.data[start..end];
-
-            let new_offset: usize = new_data.len();
-            new_data.extend_from_slice(suffix);
-
-            #[expect(clippy::cast_possible_truncation)]
-            {
-                self.slots[slot] = SlotMeta {
-                    offset: new_offset as u32,
+            if meta.has_suffix() {
+                entries.push(CompactEntry {
+                    slot,
+                    offset: meta.offset,
                     len: meta.len,
-                    _pad: 0,
-                };
+                });
             }
         }
 
-        self.data = new_data;
-        // suffix_count unchanged, we kept all slots that had suffixes
+        if entries.is_empty() {
+            self.data.clear();
+            self.suffix_count = 0;
+            return;
+        }
+
+        // Sort by offset so we can move data in-order without overwriting
+        entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
+
+        // Move each suffix to its compacted position
+        let mut write_pos: usize = 0;
+
+        for entry in &entries {
+            let src_start: usize = entry.offset as usize;
+            let src_end: usize = src_start + entry.len as usize;
+
+            // Only copy if source and dest differ (avoid no-op copies)
+            if write_pos != src_start {
+                self.data.copy_within(src_start..src_end, write_pos);
+            }
+
+            // Update slot metadata with new offset
+            #[expect(clippy::cast_possible_truncation)]
+            {
+                self.slots[entry.slot] = SlotMeta {
+                    offset: write_pos as u32,
+                    len: entry.len,
+                    _pad: 0,
+                };
+            }
+
+            write_pos += entry.len as usize;
+        }
+
+        // Truncate buffer to new size (no allocation!)
+        self.data.truncate(write_pos);
+        // suffix_count unchanged - we kept all slots that had suffixes
     }
 
-    /// Compact the suffix bag, keeping only the specified active slots.
+    /// Compact keeping only specified active slots, using in-place moves.
     ///
-    /// This creates a new data buffer containing only the suffixes for
-    /// slots that are both marked active AND have suffixes stored.
-    /// This effectively garbage-collects unused suffix data.
-    ///
-    /// Uses stack-allocated scratch space instead of heap allocation for
-    /// the active slot list (WIDTH is always small, typically 15 or 24).
+    /// This is a zero-allocation compaction that:
+    /// 1. Uses stack-allocated scratch space for bookkeeping
+    /// 2. Moves data using `copy_within` (memmove)
+    /// 3. Truncates the buffer
     ///
     /// # Arguments
     ///
@@ -79,69 +107,70 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     pub fn compact(&mut self, active_slots: impl Iterator<Item = usize>) -> usize {
         let old_used: usize = self.data.len();
 
-        // Stack-allocated scratch space for active slots
-        let mut active: [usize; WIDTH] = [0; WIDTH];
-        let mut active_count: usize = 0;
-        let mut new_size: usize = 0;
+        // Collect active entries into stack-allocated array
+        let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
 
-        // Single pass: collect active slots and calculate new size
         for slot in active_slots {
             if slot >= WIDTH {
                 continue;
             }
 
             let meta: SlotMeta = self.slots[slot];
-
-            if meta.has_suffix() && (active_count < WIDTH) {
-                active[active_count] = slot;
-                active_count += 1;
-                new_size += meta.len as usize;
+            if meta.has_suffix() {
+                entries.push(CompactEntry {
+                    slot,
+                    offset: meta.offset,
+                    len: meta.len,
+                });
             }
         }
 
-        if active_count == 0 {
+        if entries.is_empty() {
             self.data.clear();
             self.slots = [SlotMeta::EMPTY; WIDTH];
             self.suffix_count = 0;
             return old_used;
         }
 
-        // Allocate new buffer with power-of-2 capacity
-        let new_capacity: usize = new_size.next_power_of_two().max(INITIAL_CAPACITY);
-        let mut new_data: Vec<u8> = Vec::with_capacity(new_capacity);
+        // Sort by offset for in-order movement
+        entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
 
-        // Reset all slots, then populate with only active ones
+        // Reset slots that will become inactive
         let mut new_slots: [SlotMeta; WIDTH] = [SlotMeta::EMPTY; WIDTH];
 
-        for &slot in &active[..active_count] {
-            let meta: SlotMeta = self.slots[slot];
+        // Move each suffix to its compacted position
+        let mut write_pos: usize = 0;
 
-            let start: usize = meta.offset as usize;
-            let end: usize = start + meta.len as usize;
-            let suffix: &[u8] = &self.data[start..end];
+        for entry in &entries {
+            let src_start: usize = entry.offset as usize;
+            let src_end: usize = src_start + entry.len as usize;
 
-            let new_offset: usize = new_data.len();
-            new_data.extend_from_slice(suffix);
+            if write_pos != src_start {
+                self.data.copy_within(src_start..src_end, write_pos);
+            }
 
             #[expect(clippy::cast_possible_truncation)]
             {
-                new_slots[slot] = SlotMeta {
-                    offset: new_offset as u32,
-                    len: meta.len,
+                new_slots[entry.slot] = SlotMeta {
+                    offset: write_pos as u32,
+                    len: entry.len,
                     _pad: 0,
                 };
             }
+
+            write_pos += entry.len as usize;
         }
 
-        self.data = new_data;
+        // Truncate and update state
+        self.data.truncate(write_pos);
         self.slots = new_slots;
 
         #[expect(clippy::cast_possible_truncation)]
         {
-            self.suffix_count = active_count as u8;
+            self.suffix_count = entries.len() as u8;
         }
 
-        old_used.saturating_sub(self.data.len())
+        old_used.saturating_sub(write_pos)
     }
 
     /// Compact using a permutation to determine active slots.
