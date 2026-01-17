@@ -1,0 +1,313 @@
+Timer precision: 20 ns
+btreemap_light                     fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ 01_mixed_90_10_uniform                        │               │               │               │         │
+│  ├─ masstree15                                 │               │               │               │         │
+│  │  ├─ 2                         1.488 ms      │ 2.533 ms      │ 2.09 ms       │ 2.11 ms       │ 20      │ 20
+│  │  │                            8.397 Mitem/s │ 4.934 Mitem/s │ 5.978 Mitem/s │ 5.923 Mitem/s │         │
+│  │  ├─ 4                         1.607 ms      │ 2.592 ms      │ 1.998 ms      │ 1.989 ms      │ 20      │ 20
+│  │  │                            15.55 Mitem/s │ 9.644 Mitem/s │ 12.5 Mitem/s  │ 12.56 Mitem/s │         │
+│  │  ├─ 6                         1.57 ms       │ 2.071 ms      │ 1.78 ms       │ 1.823 ms      │ 20      │ 20
+│  │  │                            23.87 Mitem/s │ 18.1 Mitem/s  │ 21.06 Mitem/s │ 20.55 Mitem/s │         │
+│  │  ├─ 8                         1.65 ms       │ 3.275 ms      │ 1.947 ms      │ 2.006 ms      │ 20      │ 20
+│  │  │                            30.28 Mitem/s │ 15.26 Mitem/s │ 25.66 Mitem/s │ 24.91 Mitem/s │         │
+│  │  ╰─ 12                        1.96 ms       │ 3.278 ms      │ 2.725 ms      │ 2.674 ms      │ 20      │ 20
+│  │                               38.26 Mitem/s │ 22.87 Mitem/s │ 27.52 Mitem/s │ 28.04 Mitem/s │         │
+│  ├─ parking_rwlock_btreemap                    │               │               │               │         │
+│  │  ├─ 2                         1.577 ms      │ 2.545 ms      │ 2.104 ms      │ 2.097 ms      │ 20      │ 20
+│  │  │                            7.924 Mitem/s │ 4.909 Mitem/s │ 5.938 Mitem/s │ 5.959 Mitem/s │         │
+│  │  ├─ 4                         2.192 ms      │ 3.218 ms      │ 2.667 ms      │ 2.685 ms      │ 20      │ 20
+│  │  │                            11.4 Mitem/s  │ 7.768 Mitem/s │ 9.371 Mitem/s │ 9.308 Mitem/s │         │
+│  │  ├─ 6                         3.456 ms      │ 4.529 ms      │ 3.602 ms      │ 3.684 ms      │ 20      │ 20
+│  │  │                            10.85 Mitem/s │ 8.279 Mitem/s │ 10.4 Mitem/s  │ 10.17 Mitem/s │         │
+│  │  ├─ 8                         4.428 ms      │ 5.258 ms      │ 4.753 ms      │ 4.772 ms      │ 20      │ 20
+│  │  │                            11.29 Mitem/s │ 9.508 Mitem/s │ 10.51 Mitem/s │ 10.47 Mitem/s │         │
+│  │  ╰─ 12                        6.952 ms      │ 9.811 ms      │ 7.729 ms      │ 8.013 ms      │ 20      │ 20
+│  │                               10.78 Mitem/s │ 7.643 Mitem/s │ 9.702 Mitem/s │ 9.359 Mitem/s │         │
+│  ╰─ std_rwlock_btreemap                        │               │               │               │         │
+│     ├─ 2                         2.073 ms      │ 3.687 ms      │ 3.297 ms      │ 3.241 ms      │ 20      │ 20
+│     │                            6.029 Mitem/s │ 3.389 Mitem/s │ 3.79 Mitem/s  │ 3.856 Mitem/s │         │
+│     ├─ 4                         4.322 ms      │ 6.42 ms       │ 5.148 ms      │ 5.241 ms      │ 20      │ 20
+│     │                            5.784 Mitem/s │ 3.893 Mitem/s │ 4.855 Mitem/s │ 4.769 Mitem/s │         │
+│     ├─ 6                         6.973 ms      │ 8.662 ms      │ 7.517 ms      │ 7.592 ms      │ 20      │ 20
+│     │                            5.377 Mitem/s │ 4.328 Mitem/s │ 4.988 Mitem/s │ 4.938 Mitem/s │         │
+│     ├─ 8                         9.468 ms      │ 10.65 ms      │ 9.963 ms      │ 9.971 ms      │ 20      │ 20
+│     │                            5.28 Mitem/s  │ 4.693 Mitem/s │ 5.018 Mitem/s │ 5.014 Mitem/s │         │
+│     ╰─ 12                        14.25 ms      │ 15.88 ms      │ 15.06 ms      │ 15.08 ms      │ 20      │ 20
+│                                  5.259 Mitem/s │ 4.721 Mitem/s │ 4.976 Mitem/s │ 4.972 Mitem/s │         │
+├─ 02_mixed_90_10_zipfian                        │               │               │               │         │
+│  ├─ masstree15                                 │               │               │               │         │
+│  │  ├─ 2                         1.327 ms      │ 2.47 ms       │ 1.509 ms      │ 1.596 ms      │ 20      │ 20
+│  │  │                            9.414 Mitem/s │ 5.06 Mitem/s  │ 8.282 Mitem/s │ 7.831 Mitem/s │         │
+│  │  ├─ 4                         1.367 ms      │ 1.86 ms       │ 1.637 ms      │ 1.618 ms      │ 20      │ 20
+│  │  │                            18.28 Mitem/s │ 13.43 Mitem/s │ 15.26 Mitem/s │ 15.45 Mitem/s │         │
+│  │  ├─ 6                         1.455 ms      │ 2.493 ms      │ 1.643 ms      │ 1.752 ms      │ 20      │ 20
+│  │  │                            25.77 Mitem/s │ 15.03 Mitem/s │ 22.82 Mitem/s │ 21.4 Mitem/s  │         │
+│  │  ├─ 8                         1.548 ms      │ 2.517 ms      │ 1.679 ms      │ 1.842 ms      │ 20      │ 20
+│  │  │                            32.29 Mitem/s │ 19.86 Mitem/s │ 29.76 Mitem/s │ 27.12 Mitem/s │         │
+│  │  ╰─ 12                        1.808 ms      │ 3.148 ms      │ 2.275 ms      │ 2.356 ms      │ 20      │ 20
+│  │                               41.46 Mitem/s │ 23.82 Mitem/s │ 32.95 Mitem/s │ 31.82 Mitem/s │         │
+│  ├─ parking_rwlock_btreemap                    │               │               │               │         │
+│  │  ├─ 2                         1.114 ms      │ 2.087 ms      │ 1.657 ms      │ 1.672 ms      │ 20      │ 20
+│  │  │                            11.21 Mitem/s │ 5.986 Mitem/s │ 7.54 Mitem/s  │ 7.475 Mitem/s │         │
+│  │  ├─ 4                         1.545 ms      │ 2.739 ms      │ 2.289 ms      │ 2.285 ms      │ 20      │ 20
+│  │  │                            16.17 Mitem/s │ 9.125 Mitem/s │ 10.91 Mitem/s │ 10.93 Mitem/s │         │
+│  │  ├─ 6                         2.386 ms      │ 3.734 ms      │ 3.261 ms      │ 3.175 ms      │ 20      │ 20
+│  │  │                            15.71 Mitem/s │ 10.04 Mitem/s │ 11.49 Mitem/s │ 11.81 Mitem/s │         │
+│  │  ├─ 8                         3.583 ms      │ 4.724 ms      │ 4.011 ms      │ 4.027 ms      │ 20      │ 20
+│  │  │                            13.95 Mitem/s │ 10.58 Mitem/s │ 12.46 Mitem/s │ 12.41 Mitem/s │         │
+│  │  ╰─ 12                        5.819 ms      │ 7.837 ms      │ 6.474 ms      │ 6.548 ms      │ 20      │ 20
+│  │                               12.88 Mitem/s │ 9.569 Mitem/s │ 11.58 Mitem/s │ 11.45 Mitem/s │         │
+│  ╰─ std_rwlock_btreemap                        │               │               │               │         │
+│     ├─ 2                         1.742 ms      │ 3.089 ms      │ 2.414 ms      │ 2.461 ms      │ 20      │ 20
+│     │                            7.174 Mitem/s │ 4.045 Mitem/s │ 5.176 Mitem/s │ 5.077 Mitem/s │         │
+│     ├─ 4                         3.361 ms      │ 5.2 ms        │ 4.475 ms      │ 4.432 ms      │ 20      │ 20
+│     │                            7.436 Mitem/s │ 4.807 Mitem/s │ 5.586 Mitem/s │ 5.639 Mitem/s │         │
+│     ├─ 6                         6.019 ms      │ 7.874 ms      │ 6.462 ms      │ 6.512 ms      │ 20      │ 20
+│     │                            6.229 Mitem/s │ 4.762 Mitem/s │ 5.802 Mitem/s │ 5.758 Mitem/s │         │
+│     ├─ 8                         8.092 ms      │ 9.294 ms      │ 8.732 ms      │ 8.598 ms      │ 20      │ 20
+│     │                            6.178 Mitem/s │ 5.379 Mitem/s │ 5.726 Mitem/s │ 5.815 Mitem/s │         │
+│     ╰─ 12                        11.67 ms      │ 13.54 ms      │ 12.4 ms       │ 12.56 ms      │ 20      │ 20
+│                                  6.421 Mitem/s │ 5.537 Mitem/s │ 6.046 Mitem/s │ 5.97 Mitem/s  │         │
+├─ 03_mixed_90_10_shared_prefix                  │               │               │               │         │
+│  ├─ masstree15                                 │               │               │               │         │
+│  │  ├─ 2                         2.195 ms      │ 2.928 ms      │ 2.454 ms      │ 2.482 ms      │ 20      │ 20
+│  │  │                            5.694 Mitem/s │ 4.268 Mitem/s │ 5.093 Mitem/s │ 5.034 Mitem/s │         │
+│  │  ├─ 4                         2.103 ms      │ 3.44 ms       │ 2.605 ms      │ 2.607 ms      │ 20      │ 20
+│  │  │                            11.88 Mitem/s │ 7.267 Mitem/s │ 9.593 Mitem/s │ 9.588 Mitem/s │         │
+│  │  ├─ 6                         2.118 ms      │ 3.258 ms      │ 2.537 ms      │ 2.569 ms      │ 20      │ 20
+│  │  │                            17.69 Mitem/s │ 11.5 Mitem/s  │ 14.78 Mitem/s │ 14.59 Mitem/s │         │
+│  │  ├─ 8                         2.496 ms      │ 4.066 ms      │ 2.703 ms      │ 3.012 ms      │ 20      │ 20
+│  │  │                            20.03 Mitem/s │ 12.29 Mitem/s │ 18.49 Mitem/s │ 16.59 Mitem/s │         │
+│  │  ╰─ 12                        2.671 ms      │ 4.898 ms      │ 3.813 ms      │ 3.69 ms       │ 20      │ 20
+│  │                               28.07 Mitem/s │ 15.31 Mitem/s │ 19.66 Mitem/s │ 20.32 Mitem/s │         │
+│  ├─ parking_rwlock_btreemap                    │               │               │               │         │
+│  │  ├─ 2                         1.732 ms      │ 2.56 ms       │ 1.989 ms      │ 2.096 ms      │ 20      │ 20
+│  │  │                            7.212 Mitem/s │ 4.882 Mitem/s │ 6.281 Mitem/s │ 5.962 Mitem/s │         │
+│  │  ├─ 4                         2.479 ms      │ 3.245 ms      │ 2.606 ms      │ 2.702 ms      │ 20      │ 20
+│  │  │                            10.08 Mitem/s │ 7.703 Mitem/s │ 9.589 Mitem/s │ 9.251 Mitem/s │         │
+│  │  ├─ 6                         3.049 ms      │ 4.295 ms      │ 3.657 ms      │ 3.626 ms      │ 20      │ 20
+│  │  │                            12.29 Mitem/s │ 8.729 Mitem/s │ 10.25 Mitem/s │ 10.33 Mitem/s │         │
+│  │  ├─ 8                         4.241 ms      │ 5.43 ms       │ 4.759 ms      │ 4.795 ms      │ 20      │ 20
+│  │  │                            11.78 Mitem/s │ 9.206 Mitem/s │ 10.5 Mitem/s  │ 10.42 Mitem/s │         │
+│  │  ╰─ 12                        6.915 ms      │ 9.054 ms      │ 7.619 ms      │ 7.757 ms      │ 20      │ 20
+│  │                               10.84 Mitem/s │ 8.283 Mitem/s │ 9.842 Mitem/s │ 9.667 Mitem/s │         │
+│  ╰─ std_rwlock_btreemap                        │               │               │               │         │
+│     ├─ 2                         2.476 ms      │ 4.051 ms      │ 3.152 ms      │ 3.191 ms      │ 20      │ 20
+│     │                            5.048 Mitem/s │ 3.085 Mitem/s │ 3.965 Mitem/s │ 3.916 Mitem/s │         │
+│     ├─ 4                         4.73 ms       │ 7.11 ms       │ 5.62 ms       │ 5.727 ms      │ 20      │ 20
+│     │                            5.285 Mitem/s │ 3.515 Mitem/s │ 4.448 Mitem/s │ 4.365 Mitem/s │         │
+│     ├─ 6                         7.142 ms      │ 8.656 ms      │ 7.695 ms      │ 7.796 ms      │ 20      │ 20
+│     │                            5.249 Mitem/s │ 4.332 Mitem/s │ 4.872 Mitem/s │ 4.809 Mitem/s │         │
+│     ├─ 8                         9.546 ms      │ 11.81 ms      │ 10.54 ms      │ 10.55 ms      │ 20      │ 20
+│     │                            5.237 Mitem/s │ 4.23 Mitem/s  │ 4.74 Mitem/s  │ 4.739 Mitem/s │         │
+│     ╰─ 12                        14.1 ms       │ 17.42 ms      │ 15.16 ms      │ 15.25 ms      │ 20      │ 20
+│                                  5.318 Mitem/s │ 4.304 Mitem/s │ 4.946 Mitem/s │ 4.917 Mitem/s │         │
+├─ 04_mixed_90_10_high_contention                │               │               │               │         │
+│  ├─ masstree15                                 │               │               │               │         │
+│  │  ├─ 2                         516.8 µs      │ 647.3 µs      │ 543.5 µs      │ 565.8 µs      │ 20      │ 20
+│  │  │                            24.18 Mitem/s │ 19.31 Mitem/s │ 22.99 Mitem/s │ 22.08 Mitem/s │         │
+│  │  ├─ 4                         628.9 µs      │ 857.7 µs      │ 683.8 µs      │ 700.8 µs      │ 20      │ 20
+│  │  │                            39.74 Mitem/s │ 29.14 Mitem/s │ 36.55 Mitem/s │ 35.67 Mitem/s │         │
+│  │  ├─ 6                         706.5 µs      │ 1.277 ms      │ 773.4 µs      │ 808.9 µs      │ 20      │ 20
+│  │  │                            53.07 Mitem/s │ 29.35 Mitem/s │ 48.48 Mitem/s │ 46.35 Mitem/s │         │
+│  │  ├─ 8                         910 µs        │ 1.48 ms       │ 1.2 ms        │ 1.14 ms       │ 20      │ 20
+│  │  │                            54.94 Mitem/s │ 33.76 Mitem/s │ 41.65 Mitem/s │ 43.82 Mitem/s │         │
+│  │  ╰─ 12                        1.062 ms      │ 1.715 ms      │ 1.316 ms      │ 1.32 ms       │ 20      │ 20
+│  │                               70.55 Mitem/s │ 43.72 Mitem/s │ 56.95 Mitem/s │ 56.8 Mitem/s  │         │
+│  ├─ parking_rwlock_btreemap                    │               │               │               │         │
+│  │  ├─ 2                         774.6 µs      │ 1.353 ms      │ 1.275 ms      │ 1.18 ms       │ 20      │ 20
+│  │  │                            16.13 Mitem/s │ 9.234 Mitem/s │ 9.799 Mitem/s │ 10.58 Mitem/s │         │
+│  │  ├─ 4                         1.796 ms      │ 2.24 ms       │ 1.927 ms      │ 1.947 ms      │ 20      │ 20
+│  │  │                            13.91 Mitem/s │ 11.15 Mitem/s │ 12.96 Mitem/s │ 12.83 Mitem/s │         │
+│  │  ├─ 6                         1.793 ms      │ 3.21 ms       │ 2.805 ms      │ 2.718 ms      │ 20      │ 20
+│  │  │                            20.91 Mitem/s │ 11.68 Mitem/s │ 13.36 Mitem/s │ 13.79 Mitem/s │         │
+│  │  ├─ 8                         2.716 ms      │ 4.253 ms      │ 3.764 ms      │ 3.704 ms      │ 20      │ 20
+│  │  │                            18.4 Mitem/s  │ 11.75 Mitem/s │ 13.28 Mitem/s │ 13.49 Mitem/s │         │
+│  │  ╰─ 12                        3.94 ms       │ 6.204 ms      │ 5.678 ms      │ 5.534 ms      │ 20      │ 20
+│  │                               19.03 Mitem/s │ 12.08 Mitem/s │ 13.2 Mitem/s  │ 13.55 Mitem/s │         │
+│  ╰─ std_rwlock_btreemap                        │               │               │               │         │
+│     ├─ 2                         1.221 ms      │ 2.131 ms      │ 1.627 ms      │ 1.621 ms      │ 20      │ 20
+│     │                            10.23 Mitem/s │ 5.865 Mitem/s │ 7.682 Mitem/s │ 7.71 Mitem/s  │         │
+│     ├─ 4                         2.431 ms      │ 4.035 ms      │ 3.422 ms      │ 3.134 ms      │ 20      │ 20
+│     │                            10.28 Mitem/s │ 6.195 Mitem/s │ 7.305 Mitem/s │ 7.975 Mitem/s │         │
+│     ├─ 6                         4.03 ms       │ 6.313 ms      │ 5.733 ms      │ 5.686 ms      │ 20      │ 20
+│     │                            9.304 Mitem/s │ 5.939 Mitem/s │ 6.54 Mitem/s  │ 6.595 Mitem/s │         │
+│     ├─ 8                         5.614 ms      │ 8.57 ms       │ 7.418 ms      │ 7.277 ms      │ 20      │ 20
+│     │                            8.905 Mitem/s │ 5.833 Mitem/s │ 6.74 Mitem/s  │ 6.87 Mitem/s  │         │
+│     ╰─ 12                        10.52 ms      │ 12.24 ms      │ 11.23 ms      │ 11.29 ms      │ 20      │ 20
+│                                  7.125 Mitem/s │ 6.127 Mitem/s │ 6.677 Mitem/s │ 6.64 Mitem/s  │         │
+├─ 05_mixed_90_10_large_dataset                  │               │               │               │         │
+│  ├─ masstree15                                 │               │               │               │         │
+│  │  ├─ 2                         11.56 ms      │ 14.26 ms      │ 12.29 ms      │ 12.49 ms      │ 20      │ 20
+│  │  │                            1.08 Mitem/s  │ 876.3 Kitem/s │ 1.016 Mitem/s │ 1 Mitem/s     │         │
+│  │  ├─ 4                         11.41 ms      │ 13.79 ms      │ 12.7 ms       │ 12.65 ms      │ 20      │ 20
+│  │  │                            2.19 Mitem/s  │ 1.812 Mitem/s │ 1.967 Mitem/s │ 1.976 Mitem/s │         │
+│  │  ├─ 6                         12.57 ms      │ 13.94 ms      │ 13.31 ms      │ 13.28 ms      │ 20      │ 20
+│  │  │                            2.982 Mitem/s │ 2.689 Mitem/s │ 2.817 Mitem/s │ 2.822 Mitem/s │         │
+│  │  ├─ 8                         12.85 ms      │ 15.96 ms      │ 13.61 ms      │ 13.75 ms      │ 20      │ 20
+│  │  │                            3.89 Mitem/s  │ 3.132 Mitem/s │ 3.672 Mitem/s │ 3.634 Mitem/s │         │
+│  │  ╰─ 12                        14.43 ms      │ 18.76 ms      │ 15.89 ms      │ 15.83 ms      │ 20      │ 20
+│  │                               5.196 Mitem/s │ 3.995 Mitem/s │ 4.717 Mitem/s │ 4.736 Mitem/s │         │
+│  ├─ parking_rwlock_btreemap                    │               │               │               │         │
+│  │  ├─ 2                         7.057 ms      │ 9.352 ms      │ 7.457 ms      │ 7.62 ms       │ 20      │ 20
+│  │  │                            1.771 Mitem/s │ 1.336 Mitem/s │ 1.676 Mitem/s │ 1.64 Mitem/s  │         │
+│  │  ├─ 4                         8.371 ms      │ 9.35 ms       │ 8.879 ms      │ 8.858 ms      │ 20      │ 20
+│  │  │                            2.986 Mitem/s │ 2.673 Mitem/s │ 2.815 Mitem/s │ 2.822 Mitem/s │         │
+│  │  ├─ 6                         9.838 ms      │ 12.26 ms      │ 10.52 ms      │ 10.63 ms      │ 20      │ 20
+│  │  │                            3.811 Mitem/s │ 3.058 Mitem/s │ 3.563 Mitem/s │ 3.525 Mitem/s │         │
+│  │  ├─ 8                         11.25 ms      │ 16.55 ms      │ 12.87 ms      │ 13.16 ms      │ 20      │ 20
+│  │  │                            4.442 Mitem/s │ 3.02 Mitem/s  │ 3.884 Mitem/s │ 3.799 Mitem/s │         │
+│  │  ╰─ 12                        15.12 ms      │ 20.94 ms      │ 17.4 ms       │ 17.39 ms      │ 20      │ 20
+│  │                               4.958 Mitem/s │ 3.58 Mitem/s  │ 4.309 Mitem/s │ 4.311 Mitem/s │         │
+│  ╰─ std_rwlock_btreemap                        │               │               │               │         │
+│     ├─ 2                         8.251 ms      │ 10.06 ms      │ 8.977 ms      │ 8.976 ms      │ 20      │ 20
+│     │                            1.514 Mitem/s │ 1.241 Mitem/s │ 1.392 Mitem/s │ 1.392 Mitem/s │         │
+│     ├─ 4                         10.81 ms      │ 13.64 ms      │ 12.38 ms      │ 12.3 ms       │ 20      │ 20
+│     │                            2.311 Mitem/s │ 1.831 Mitem/s │ 2.018 Mitem/s │ 2.03 Mitem/s  │         │
+│     ├─ 6                         15.21 ms      │ 20.12 ms      │ 16.29 ms      │ 16.71 ms      │ 20      │ 20
+│     │                            2.464 Mitem/s │ 1.863 Mitem/s │ 2.301 Mitem/s │ 2.243 Mitem/s │         │
+│     ├─ 8                         20.6 ms       │ 23.75 ms      │ 21.82 ms      │ 21.89 ms      │ 20      │ 20
+│     │                            2.426 Mitem/s │ 2.104 Mitem/s │ 2.29 Mitem/s  │ 2.283 Mitem/s │         │
+│     ╰─ 12                        30.66 ms      │ 33.41 ms      │ 32.04 ms      │ 32.09 ms      │ 20      │ 20
+│                                  2.445 Mitem/s │ 2.244 Mitem/s │ 2.34 Mitem/s  │ 2.336 Mitem/s │         │
+├─ 06_single_hot_key                             │               │               │               │         │
+│  ├─ masstree15                                 │               │               │               │         │
+│  │  ├─ 2                         410.8 µs      │ 702.9 µs      │ 541.9 µs      │ 558.2 µs      │ 20      │ 20
+│  │  │                            12.16 Mitem/s │ 7.113 Mitem/s │ 9.226 Mitem/s │ 8.955 Mitem/s │         │
+│  │  ├─ 4                         701.1 µs      │ 1.41 ms       │ 788.3 µs      │ 848.8 µs      │ 20      │ 20
+│  │  │                            14.26 Mitem/s │ 7.091 Mitem/s │ 12.68 Mitem/s │ 11.78 Mitem/s │         │
+│  │  ├─ 6                         957.2 µs      │ 1.631 ms      │ 1.159 ms      │ 1.176 ms      │ 20      │ 20
+│  │  │                            15.66 Mitem/s │ 9.193 Mitem/s │ 12.93 Mitem/s │ 12.75 Mitem/s │         │
+│  │  ├─ 8                         1.051 ms      │ 2.303 ms      │ 1.396 ms      │ 1.412 ms      │ 20      │ 20
+│  │  │                            19.01 Mitem/s │ 8.682 Mitem/s │ 14.32 Mitem/s │ 14.15 Mitem/s │         │
+│  │  ╰─ 12                        1.519 ms      │ 2.568 ms      │ 1.928 ms      │ 1.988 ms      │ 20      │ 20
+│  │                               19.74 Mitem/s │ 11.68 Mitem/s │ 15.55 Mitem/s │ 15.08 Mitem/s │         │
+│  ├─ parking_rwlock_btreemap                    │               │               │               │         │
+│  │  ├─ 2                         340.6 µs      │ 516.9 µs      │ 392.8 µs      │ 405.7 µs      │ 20      │ 20
+│  │  │                            14.67 Mitem/s │ 9.672 Mitem/s │ 12.72 Mitem/s │ 12.32 Mitem/s │         │
+│  │  ├─ 4                         514.2 µs      │ 865.4 µs      │ 697.7 µs      │ 696.1 µs      │ 20      │ 20
+│  │  │                            19.44 Mitem/s │ 11.55 Mitem/s │ 14.33 Mitem/s │ 14.36 Mitem/s │         │
+│  │  ├─ 6                         767.5 µs      │ 1.251 ms      │ 919.9 µs      │ 938.5 µs      │ 20      │ 20
+│  │  │                            19.54 Mitem/s │ 11.98 Mitem/s │ 16.3 Mitem/s  │ 15.98 Mitem/s │         │
+│  │  ├─ 8                         962.3 µs      │ 1.607 ms      │ 1.168 ms      │ 1.186 ms      │ 20      │ 20
+│  │  │                            20.78 Mitem/s │ 12.44 Mitem/s │ 17.1 Mitem/s  │ 16.85 Mitem/s │         │
+│  │  ╰─ 12                        1.428 ms      │ 2.54 ms       │ 1.732 ms      │ 1.766 ms      │ 20      │ 20
+│  │                               20.99 Mitem/s │ 11.81 Mitem/s │ 17.32 Mitem/s │ 16.98 Mitem/s │         │
+│  ╰─ std_rwlock_btreemap                        │               │               │               │         │
+│     ├─ 2                         472.2 µs      │ 873.8 µs      │ 604.4 µs      │ 610.6 µs      │ 20      │ 20
+│     │                            10.58 Mitem/s │ 5.721 Mitem/s │ 8.272 Mitem/s │ 8.188 Mitem/s │         │
+│     ├─ 4                         868.5 µs      │ 1.227 ms      │ 1.079 ms      │ 1.071 ms      │ 20      │ 20
+│     │                            11.51 Mitem/s │ 8.149 Mitem/s │ 9.26 Mitem/s  │ 9.328 Mitem/s │         │
+│     ├─ 6                         1.189 ms      │ 2.038 ms      │ 1.59 ms       │ 1.609 ms      │ 20      │ 20
+│     │                            12.61 Mitem/s │ 7.358 Mitem/s │ 9.429 Mitem/s │ 9.32 Mitem/s  │         │
+│     ├─ 8                         1.61 ms       │ 2.502 ms      │ 2.25 ms       │ 2.142 ms      │ 20      │ 20
+│     │                            12.41 Mitem/s │ 7.991 Mitem/s │ 8.887 Mitem/s │ 9.336 Mitem/s │         │
+│     ╰─ 12                        3.156 ms      │ 3.494 ms      │ 3.323 ms      │ 3.324 ms      │ 20      │ 20
+│                                  9.505 Mitem/s │ 8.584 Mitem/s │ 9.025 Mitem/s │ 9.024 Mitem/s │         │
+├─ 07_mixed_50_50                                │               │               │               │         │
+│  ├─ masstree15                                 │               │               │               │         │
+│  │  ├─ 2                         1.216 ms      │ 2.957 ms      │ 2.163 ms      │ 2.269 ms      │ 20      │ 20
+│  │  │                            10.27 Mitem/s │ 4.226 Mitem/s │ 5.777 Mitem/s │ 5.508 Mitem/s │         │
+│  │  ├─ 4                         1.834 ms      │ 2.582 ms      │ 2.098 ms      │ 2.168 ms      │ 20      │ 20
+│  │  │                            13.62 Mitem/s │ 9.68 Mitem/s  │ 11.91 Mitem/s │ 11.53 Mitem/s │         │
+│  │  ├─ 6                         2.057 ms      │ 2.981 ms      │ 2.417 ms      │ 2.383 ms      │ 20      │ 20
+│  │  │                            18.22 Mitem/s │ 12.57 Mitem/s │ 15.51 Mitem/s │ 15.73 Mitem/s │         │
+│  │  ├─ 8                         2.266 ms      │ 3.92 ms       │ 2.526 ms      │ 2.65 ms       │ 20      │ 20
+│  │  │                            22.06 Mitem/s │ 12.75 Mitem/s │ 19.78 Mitem/s │ 18.86 Mitem/s │         │
+│  │  ╰─ 12                        3.062 ms      │ 4.543 ms      │ 3.48 ms       │ 3.569 ms      │ 20      │ 20
+│  │                               24.49 Mitem/s │ 16.5 Mitem/s  │ 21.54 Mitem/s │ 21.01 Mitem/s │         │
+│  ├─ parking_rwlock_btreemap                    │               │               │               │         │
+│  │  ├─ 2                         2.767 ms      │ 3.947 ms      │ 3.355 ms      │ 3.413 ms      │ 20      │ 20
+│  │  │                            4.517 Mitem/s │ 3.166 Mitem/s │ 3.724 Mitem/s │ 3.661 Mitem/s │         │
+│  │  ├─ 4                         6.981 ms      │ 12.22 ms      │ 9.091 ms      │ 9.079 ms      │ 20      │ 20
+│  │  │                            3.58 Mitem/s  │ 2.045 Mitem/s │ 2.749 Mitem/s │ 2.753 Mitem/s │         │
+│  │  ├─ 6                         13.48 ms      │ 17.37 ms      │ 15.77 ms      │ 15.64 ms      │ 20      │ 20
+│  │  │                            2.781 Mitem/s │ 2.157 Mitem/s │ 2.377 Mitem/s │ 2.397 Mitem/s │         │
+│  │  ├─ 8                         17.27 ms      │ 24.5 ms       │ 22.81 ms      │ 22.56 ms      │ 20      │ 20
+│  │  │                            2.894 Mitem/s │ 2.04 Mitem/s  │ 2.191 Mitem/s │ 2.215 Mitem/s │         │
+│  │  ╰─ 12                        41.96 ms      │ 48.12 ms      │ 45.06 ms      │ 45.3 ms       │ 20      │ 20
+│  │                               1.787 Mitem/s │ 1.558 Mitem/s │ 1.664 Mitem/s │ 1.655 Mitem/s │         │
+│  ╰─ std_rwlock_btreemap                        │               │               │               │         │
+│     ├─ 2                         3.008 ms      │ 6.215 ms      │ 4.971 ms      │ 4.783 ms      │ 20      │ 20
+│     │                            4.155 Mitem/s │ 2.011 Mitem/s │ 2.514 Mitem/s │ 2.613 Mitem/s │         │
+│     ├─ 4                         7.952 ms      │ 11.31 ms      │ 9.718 ms      │ 9.681 ms      │ 20      │ 20
+│     │                            3.143 Mitem/s │ 2.209 Mitem/s │ 2.572 Mitem/s │ 2.582 Mitem/s │         │
+│     ├─ 6                         14.9 ms       │ 17.34 ms      │ 15.9 ms       │ 15.92 ms      │ 20      │ 20
+│     │                            2.515 Mitem/s │ 2.161 Mitem/s │ 2.357 Mitem/s │ 2.354 Mitem/s │         │
+│     ├─ 8                         21.5 ms       │ 25.28 ms      │ 23.28 ms      │ 23.2 ms       │ 20      │ 20
+│     │                            2.325 Mitem/s │ 1.977 Mitem/s │ 2.147 Mitem/s │ 2.155 Mitem/s │         │
+│     ╰─ 12                        36.39 ms      │ 45.27 ms      │ 37.43 ms      │ 37.8 ms       │ 20      │ 20
+│                                  2.06 Mitem/s  │ 1.656 Mitem/s │ 2.003 Mitem/s │ 1.984 Mitem/s │         │
+├─ 08_pure_read_uniform                          │               │               │               │         │
+│  ├─ masstree15                                 │               │               │               │         │
+│  │  ├─ 2                         1.611 ms      │ 3.435 ms      │ 2.122 ms      │ 2.156 ms      │ 20      │ 20
+│  │  │                            15.51 Mitem/s │ 7.277 Mitem/s │ 11.77 Mitem/s │ 11.59 Mitem/s │         │
+│  │  ├─ 4                         1.748 ms      │ 3.137 ms      │ 2.162 ms      │ 2.216 ms      │ 20      │ 20
+│  │  │                            28.59 Mitem/s │ 15.93 Mitem/s │ 23.11 Mitem/s │ 22.55 Mitem/s │         │
+│  │  ├─ 6                         1.952 ms      │ 2.945 ms      │ 2.617 ms      │ 2.545 ms      │ 20      │ 20
+│  │  │                            38.41 Mitem/s │ 25.46 Mitem/s │ 28.65 Mitem/s │ 29.45 Mitem/s │         │
+│  │  ├─ 8                         2.48 ms       │ 4.353 ms      │ 2.961 ms      │ 3.147 ms      │ 20      │ 20
+│  │  │                            40.3 Mitem/s  │ 22.96 Mitem/s │ 33.76 Mitem/s │ 31.77 Mitem/s │         │
+│  │  ╰─ 12                        3.014 ms      │ 5.802 ms      │ 4.154 ms      │ 4.26 ms       │ 20      │ 20
+│  │                               49.75 Mitem/s │ 25.85 Mitem/s │ 36.1 Mitem/s  │ 35.2 Mitem/s  │         │
+│  ├─ parking_rwlock_btreemap                    │               │               │               │         │
+│  │  ├─ 2                         2.067 ms      │ 3.346 ms      │ 2.737 ms      │ 2.633 ms      │ 20      │ 20
+│  │  │                            12.09 Mitem/s │ 7.47 Mitem/s  │ 9.132 Mitem/s │ 9.493 Mitem/s │         │
+│  │  ├─ 4                         2.955 ms      │ 3.957 ms      │ 3.198 ms      │ 3.253 ms      │ 20      │ 20
+│  │  │                            16.91 Mitem/s │ 12.63 Mitem/s │ 15.63 Mitem/s │ 15.36 Mitem/s │         │
+│  │  ├─ 6                         3.093 ms      │ 5.192 ms      │ 3.791 ms      │ 3.921 ms      │ 20      │ 20
+│  │  │                            24.24 Mitem/s │ 14.44 Mitem/s │ 19.77 Mitem/s │ 19.12 Mitem/s │         │
+│  │  ├─ 8                         3.954 ms      │ 5.051 ms      │ 4.295 ms      │ 4.322 ms      │ 20      │ 20
+│  │  │                            25.28 Mitem/s │ 19.79 Mitem/s │ 23.28 Mitem/s │ 23.13 Mitem/s │         │
+│  │  ╰─ 12                        5.112 ms      │ 7.59 ms       │ 6.478 ms      │ 6.397 ms      │ 20      │ 20
+│  │                               29.34 Mitem/s │ 19.76 Mitem/s │ 23.15 Mitem/s │ 23.44 Mitem/s │         │
+│  ╰─ std_rwlock_btreemap                        │               │               │               │         │
+│     ├─ 2                         2.114 ms      │ 4.017 ms      │ 3.025 ms      │ 2.958 ms      │ 20      │ 20
+│     │                            11.82 Mitem/s │ 6.223 Mitem/s │ 8.262 Mitem/s │ 8.45 Mitem/s  │         │
+│     ├─ 4                         2.953 ms      │ 5.013 ms      │ 3.553 ms      │ 3.608 ms      │ 20      │ 20
+│     │                            16.92 Mitem/s │ 9.973 Mitem/s │ 14.06 Mitem/s │ 13.85 Mitem/s │         │
+│     ├─ 6                         3.138 ms      │ 5.488 ms      │ 4.18 ms       │ 4.265 ms      │ 20      │ 20
+│     │                            23.89 Mitem/s │ 13.66 Mitem/s │ 17.94 Mitem/s │ 17.58 Mitem/s │         │
+│     ├─ 8                         3.916 ms      │ 4.843 ms      │ 4.227 ms      │ 4.273 ms      │ 20      │ 20
+│     │                            25.53 Mitem/s │ 20.64 Mitem/s │ 23.65 Mitem/s │ 23.39 Mitem/s │         │
+│     ╰─ 12                        5.258 ms      │ 6.896 ms      │ 6.184 ms      │ 6.06 ms       │ 20      │ 20
+│                                  28.52 Mitem/s │ 21.75 Mitem/s │ 24.25 Mitem/s │ 24.75 Mitem/s │         │
+├─ 09_pure_insert                                │               │               │               │         │
+│  ├─ masstree15                                 │               │               │               │         │
+│  │  ├─ 2                         846 µs        │ 1.103 ms      │ 932.3 µs      │ 941.2 µs      │ 20      │ 20
+│  │  │                            5.91 Mitem/s  │ 4.529 Mitem/s │ 5.362 Mitem/s │ 5.311 Mitem/s │         │
+│  │  ├─ 4                         1.161 ms      │ 1.569 ms      │ 1.311 ms      │ 1.355 ms      │ 20      │ 20
+│  │  │                            8.606 Mitem/s │ 6.373 Mitem/s │ 7.623 Mitem/s │ 7.379 Mitem/s │         │
+│  │  ├─ 6                         1.493 ms      │ 2.227 ms      │ 1.765 ms      │ 1.812 ms      │ 20      │ 20
+│  │  │                            10.04 Mitem/s │ 6.733 Mitem/s │ 8.495 Mitem/s │ 8.274 Mitem/s │         │
+│  │  ├─ 8                         1.99 ms       │ 2.672 ms      │ 2.259 ms      │ 2.281 ms      │ 20      │ 20
+│  │  │                            10.04 Mitem/s │ 7.482 Mitem/s │ 8.851 Mitem/s │ 8.766 Mitem/s │         │
+│  │  ╰─ 12                        3.161 ms      │ 5.353 ms      │ 3.423 ms      │ 3.681 ms      │ 20      │ 20
+│  │                               9.489 Mitem/s │ 5.603 Mitem/s │ 8.764 Mitem/s │ 8.148 Mitem/s │         │
+│  ├─ parking_rwlock_btreemap                    │               │               │               │         │
+│  │  ├─ 2                         954.4 µs      │ 1.234 ms      │ 1.038 ms      │ 1.044 ms      │ 20      │ 20
+│  │  │                            5.238 Mitem/s │ 4.051 Mitem/s │ 4.814 Mitem/s │ 4.785 Mitem/s │         │
+│  │  ├─ 4                         1.986 ms      │ 2.766 ms      │ 2.309 ms      │ 2.338 ms      │ 20      │ 20
+│  │  │                            5.033 Mitem/s │ 3.614 Mitem/s │ 4.329 Mitem/s │ 4.275 Mitem/s │         │
+│  │  ├─ 6                         4.253 ms      │ 5.17 ms       │ 4.534 ms      │ 4.614 ms      │ 20      │ 20
+│  │  │                            3.526 Mitem/s │ 2.901 Mitem/s │ 3.308 Mitem/s │ 3.25 Mitem/s  │         │
+│  │  ├─ 8                         5.703 ms      │ 8.046 ms      │ 7.414 ms      │ 7.329 ms      │ 20      │ 20
+│  │  │                            3.506 Mitem/s │ 2.485 Mitem/s │ 2.697 Mitem/s │ 2.728 Mitem/s │         │
+│  │  ╰─ 12                        14.65 ms      │ 18.42 ms      │ 16.96 ms      │ 16.85 ms      │ 20      │ 20
+│  │                               2.047 Mitem/s │ 1.628 Mitem/s │ 1.768 Mitem/s │ 1.779 Mitem/s │         │
+│  ╰─ std_rwlock_btreemap                        │               │               │               │         │
+│     ├─ 2                         1.206 ms      │ 1.499 ms      │ 1.285 ms      │ 1.32 ms       │ 20      │ 20
+│     │                            4.143 Mitem/s │ 3.334 Mitem/s │ 3.89 Mitem/s  │ 3.785 Mitem/s │         │
+│     ├─ 4                         2.75 ms       │ 3.758 ms      │ 3.146 ms      │ 3.117 ms      │ 20      │ 20
+│     │                            3.635 Mitem/s │ 2.66 Mitem/s  │ 3.177 Mitem/s │ 3.207 Mitem/s │         │
+│     ├─ 6                         4.853 ms      │ 5.691 ms      │ 5.069 ms      │ 5.128 ms      │ 20      │ 20
+│     │                            3.09 Mitem/s  │ 2.635 Mitem/s │ 2.958 Mitem/s │ 2.924 Mitem/s │         │
+│     ├─ 8                         6.269 ms      │ 8.823 ms      │ 7.841 ms      │ 7.652 ms      │ 20      │ 20
+│     │                            3.189 Mitem/s │ 2.266 Mitem/s │ 2.55 Mitem/s  │ 2.613 Mitem/s │         │
+│     ╰─ 12                        12.33 ms      │ 13.75 ms      │ 13.04 ms      │ 13.05 ms      │ 20      │ 20
+│                                  2.431 Mitem/s │ 2.181 Mitem/s │ 2.3 Mitem/s   │ 2.297 Mitem/s │         │
+╰─ 10_build_time                                 │               │               │               │         │
+   ├─ masstree15                   2.221 ms      │ 5.075 ms      │ 3.098 ms      │ 3.279 ms      │ 20      │ 20
+   │                               5.626 Mitem/s │ 2.462 Mitem/s │ 4.034 Mitem/s │ 3.811 Mitem/s │         │
+   ╰─ std_rwlock_btreemap          1.572 ms      │ 2.794 ms      │ 1.736 ms      │ 2.007 ms      │ 20      │ 20
+                                   7.948 Mitem/s │ 4.472 Mitem/s │ 7.199 Mitem/s │ 6.225 Mitem/s │         │

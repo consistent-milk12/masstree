@@ -1049,6 +1049,53 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         !self.external_ksuf_ptr().is_null()
     }
 
+    /// Pre-allocate external suffix storage (fallible).
+    ///
+    /// Used during splits to move allocation outside the hot loop.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold leaf lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError`](crate::AllocError) if allocation fails.
+    #[inline]
+    pub unsafe fn ensure_external_ksuf(&self) -> AllocResult<*mut SuffixBag<WIDTH_15>> {
+        let ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(READ_ORD);
+
+        if !ptr.is_null() {
+            return Ok(ptr);
+        }
+
+        // Caller holds lock, no race possible
+        let new_bag: Box<SuffixBag<WIDTH_15>> =
+            BoxAllocator::try_box_with_kind(SuffixBag::new(), AllocKind::Suffix)?;
+
+        let ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(new_bag);
+        self.external_ksuf.store(ptr, WRITE_ORD);
+
+        Ok(ptr)
+    }
+
+    /// Pre-allocate external suffix storage (infallible, panics on OOM).
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold leaf lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if allocation fails.
+    #[inline]
+    #[expect(clippy::expect_used, reason = "Intentional panic on OOM")]
+    pub unsafe fn ensure_external_ksuf_infallible(&self) -> *mut SuffixBag<WIDTH_15> {
+        unsafe {
+            self.ensure_external_ksuf()
+                .expect("external suffix bag allocation failed (OOM)")
+        }
+    }
+
     /// Get the suffix for a slot (checks inline first, then external).
     #[must_use]
     #[inline]
@@ -1722,6 +1769,12 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         // SAFETY: new_leaf_ptr is valid
         let new_leaf = unsafe { &*new_leaf_ptr };
 
+        // Pre-allocate external suffix storage if source has it.
+        // SAFETY: We hold the lock on new_leaf (via split version).
+        if self.has_external_ksuf() {
+            let _ = unsafe { new_leaf.ensure_external_ksuf_infallible() };
+        }
+
         // Copy entries from old leaf to new leaf
         for i in 0..entries_to_move {
             let old_logical = split_pos + i;
@@ -1805,6 +1858,12 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
 
         // SAFETY: new_leaf_ptr is valid
         let new_leaf = unsafe { &*new_leaf_ptr };
+
+        // Pre-allocate external suffix storage if source has it.
+        // SAFETY: We hold the lock on new_leaf (via split version).
+        if self.has_external_ksuf() {
+            let _ = unsafe { new_leaf.ensure_external_ksuf_infallible() };
+        }
 
         // Copy all entries to new leaf
         for i in 0..size {

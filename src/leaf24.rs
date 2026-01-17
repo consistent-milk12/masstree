@@ -595,6 +595,53 @@ impl<S: ValueSlot> LeafNode24<S> {
         !self.external_ksuf_ptr().is_null()
     }
 
+    /// Pre-allocate external suffix storage (fallible).
+    ///
+    /// Used during splits to move allocation outside the hot loop.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold leaf lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError`](crate::AllocError) if allocation fails.
+    #[inline]
+    pub unsafe fn ensure_external_ksuf(&self) -> AllocResult<*mut SuffixBag<WIDTH_24>> {
+        let ptr: *mut SuffixBag<WIDTH_24> = self.external_ksuf.load(READ_ORD);
+
+        if !ptr.is_null() {
+            return Ok(ptr);
+        }
+
+        // Caller holds lock, no race possible
+        let new_bag: Box<SuffixBag<WIDTH_24>> =
+            BoxAllocator::try_box_with_kind(SuffixBag::new(), AllocKind::Suffix)?;
+
+        let ptr: *mut SuffixBag<WIDTH_24> = Box::into_raw(new_bag);
+        self.external_ksuf.store(ptr, WRITE_ORD);
+
+        Ok(ptr)
+    }
+
+    /// Pre-allocate external suffix storage (infallible, panics on OOM).
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold leaf lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if allocation fails.
+    #[inline]
+    #[expect(clippy::expect_used, reason = "Intentional panic on OOM")]
+    pub unsafe fn ensure_external_ksuf_infallible(&self) -> *mut SuffixBag<WIDTH_24> {
+        unsafe {
+            self.ensure_external_ksuf()
+                .expect("external suffix bag allocation failed (OOM)")
+        }
+    }
+
     /// Get the suffix for a slot (checks inline first, then external).
     ///
     /// # Safety Note
@@ -2290,6 +2337,13 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
             #[cfg(feature = "debug-routing")]
             eprintln!("split_pos={split_pos} entries_to_move={entries_to_move}");
 
+            // Pre-allocate external suffix storage if source has it.
+            // Note: inline_ksuf is embedded and doesn't need allocation.
+            // SAFETY: We hold the lock on new_leaf (via split version).
+            if self.has_external_ksuf() {
+                let _ = new_leaf.ensure_external_ksuf_infallible();
+            }
+
             // Move entries using RELAXED ordering (see leaf15.rs for justification)
             for i in 0..entries_to_move {
                 let old_logical_pos = split_pos + i;
@@ -2359,6 +2413,12 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         let old_size = old_perm.size();
 
         debug_assert!(old_size > 0, "Cannot split empty leaf");
+
+        // Pre-allocate external suffix storage if source has it.
+        // SAFETY: We hold the lock on new_leaf (via split version).
+        if self.has_external_ksuf() {
+            let _ = unsafe { new_leaf.ensure_external_ksuf_infallible() };
+        }
 
         // Move all entries using RELAXED ordering
         for i in 0..old_size {

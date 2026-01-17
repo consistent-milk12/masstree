@@ -16,7 +16,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 ## Status
 
-**v0.5.5** — Core feature complete. Heavily tested but concurrent data
+**v0.5.9** — Core feature complete. Heavily tested but concurrent data
 structures require extensive stress testing beyond what tests (even though still
 quite comprehensive) provide. The unsafe code passes Miri with strict-provenance
 flag. It should be noted that the C++ implementation is a research project, not
@@ -43,7 +43,7 @@ in new targeted tests.
 
 ```toml
 [dependencies]
-masstree = { version = "0.5.0", features = ["mimalloc"] }
+masstree = { version = "0.5.9", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

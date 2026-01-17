@@ -2371,6 +2371,16 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
 
             let entries_to_move = old_size - split_pos;
 
+            // Pre-allocate suffix sidecar if source has suffix storage.
+            // This moves allocation outside the loop, eliminating latency
+            // spikes when the first suffix is encountered.
+            //
+            // SAFETY: We hold the lock on new_leaf (via split version).
+            // The new leaf is not yet visible to other threads.
+            if self.has_suffix_storage() {
+                let _ = new_leaf.ensure_sidecar_infallible();
+            }
+
             // Move entries to new leaf using RELAXED ordering.
             //
             // # Why Relaxed Is Safe
@@ -2448,6 +2458,12 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         let old_size = old_perm.size();
 
         debug_assert!(old_size > 0, "Cannot split empty leaf");
+
+        // Pre-allocate suffix sidecar if source has suffix storage.
+        // SAFETY: We hold the lock on new_leaf (via split version).
+        if self.has_suffix_storage() {
+            let _ = unsafe { new_leaf.ensure_sidecar_infallible() };
+        }
 
         // Move all entries to new leaf using RELAXED ordering.
         // (Same justification as split_into_preallocated)
