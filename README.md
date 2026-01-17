@@ -39,6 +39,12 @@ in new targeted tests.
 
 **Not yet implemented:** `Entry` API, `Extend`/`FromIterator`.
 
+## Performance
+
+In benchmarks, MassTree is typically **1.5-4x faster** than comparable ordered maps with support for variable length keys (`indexset`, `crossbeam-skiplist`, `scc::TreeIndex`, `RwLock<BTreeMap>`) for mixed read/write workloads, and **up to 13x faster** under write contention where `RwLock` collapses. It only loses in pure insert workloads (~10% to `scc::TreeIndex`) and single-threaded bulk construction (~30% to `skipmap`), these aren't realistic workloads, but still noteworthy.
+
+See `runs/` for detailed benchmark data.
+
 ## Install
 
 ```toml
