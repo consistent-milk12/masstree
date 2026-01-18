@@ -200,9 +200,9 @@ fn concurrent_insert_then_get_does_not_lose_key() {
     // If it fails, we also scan the leaf B-link chain to determine whether the key
     // is truly missing from all leaves, or only unreachable via the normal get path.
     #[expect(clippy::cast_ptr_alignment)]
-    fn scan_leaf_chain_contains(tree: &MassTree24<u64>, ikey: u64) -> bool {
+    fn scan_leaf_chain_contains(tree: &MassTree<u64>, ikey: u64) -> bool {
         use crate::internode::InternodeNode;
-        use crate::leaf24::LeafNode24;
+        use crate::leaf15::LeafNode15;
 
         let _guard = tree.guard();
 
@@ -231,7 +231,7 @@ fn concurrent_insert_then_get_does_not_lose_key() {
         }
 
         // SAFETY: node points at a leaf.
-        let mut leaf_ptr: *mut LeafNode24<LeafValue<u64>> = node.cast();
+        let mut leaf_ptr: *mut LeafNode15<LeafValue<u64>> = node.cast();
         let mut leaf_steps: usize = 0;
 
         while !leaf_ptr.is_null() {
@@ -240,7 +240,7 @@ fn concurrent_insert_then_get_does_not_lose_key() {
 
             // SAFETY: leaf_ptr is protected by the guard and leaf nodes are never freed
             // while guarded.
-            let leaf: &LeafNode24<LeafValue<u64>> = unsafe { &*leaf_ptr };
+            let leaf: &LeafNode15<LeafValue<u64>> = unsafe { &*leaf_ptr };
             let _ = leaf.version().stable();
 
             let perm = leaf.permutation();
@@ -265,7 +265,7 @@ fn concurrent_insert_then_get_does_not_lose_key() {
     const OPS_PER_THREAD: usize = 500;
 
     for run in 0..30 {
-        let tree = Arc::new(MassTree24::<u64>::new());
+        let tree = Arc::new(MassTree::<u64>::new());
         let missing_key = Arc::new(AtomicU64::new(u64::MAX));
         let missing_thread = Arc::new(AtomicUsize::new(usize::MAX));
         let missing_i = Arc::new(AtomicUsize::new(usize::MAX));

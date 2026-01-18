@@ -5,6 +5,8 @@
 //! When a key is longer than 8 bytes, the first 8 bytes are stored as `ikey0`
 //! and the remaining bytes are stored in a [`SuffixBag`].
 
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
+
 use crate::{AllocError, AllocResult, TreePermutation};
 
 mod clone;
@@ -26,8 +28,11 @@ const INITIAL_CAPACITY: usize = 128;
 // ============================================================================
 
 /// Metadata for a single slot's suffix.
+///
+/// Uses zerocopy derives to enable safe transmutation and array casting
+/// during suffix compaction operations.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 struct SlotMeta {
     /// Offset into the data buffer (`u32::MAX` if no suffix).
     offset: u32,

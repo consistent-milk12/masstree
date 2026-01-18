@@ -1,9 +1,8 @@
 // ============================================================================
-//  Fast Suffix Comparison
+//  Fast Suffix Comparison (zero-overhead optimized)
 // ============================================================================
 
 use std::cmp::Ordering;
-use std::ptr as StdPtr;
 
 /// Threshold below which XOR-based comparison is used.
 const WORD_COMPARE_THRESHOLD: usize = 8;
@@ -13,8 +12,8 @@ pub(super) struct CompareSuffix;
 impl CompareSuffix {
     /// XOR-based equality for short byte slices (≤8 bytes).
     ///
-    /// Uses a single word comparison after padding to compare variable-length
-    /// byte sequences efficiently. Matches C++ `equals_sloppy`.
+    /// Uses safe copy_from_slice instead of unsafe copy_nonoverlapping.
+    /// Matches C++ `equals_sloppy`.
     #[inline(always)]
     fn xor_eq_short(a: &[u8], b: &[u8], len: usize) -> bool {
         debug_assert!(len <= 8);
@@ -26,13 +25,15 @@ impl CompareSuffix {
         }
 
         // Load both as padded u64 values
+        // For partial reads, we pad with zeros
         let mut a_buf: [u8; 8] = [0u8; 8];
         let mut b_buf: [u8; 8] = [0u8; 8];
 
-        // SAFETY: len <= 8, so we're within bounds of both buffers
-        unsafe {
-            StdPtr::copy_nonoverlapping(a.as_ptr(), a_buf.as_mut_ptr(), len);
-            StdPtr::copy_nonoverlapping(b.as_ptr(), b_buf.as_mut_ptr(), len);
+        // INVARIANT: len <= 8, both slices have exactly len bytes
+        #[expect(clippy::indexing_slicing, reason = "len <= 8 by debug_assert")]
+        {
+            a_buf[..len].copy_from_slice(a);
+            b_buf[..len].copy_from_slice(b);
         }
 
         let a_word = u64::from_ne_bytes(a_buf);
@@ -41,6 +42,22 @@ impl CompareSuffix {
         // XOR gives 0 for matching bytes, non-zero for differences
         // Since we zero-padded, XOR result will have zeros in unused positions
         a_word == b_word
+    }
+
+    /// Read a u64 from a byte slice at the given offset.
+    ///
+    /// Zero-overhead: uses direct array conversion + from_ne_bytes.
+    /// The compiler optimizes away the bounds check since caller guarantees size.
+    #[inline(always)]
+    fn read_u64_at(slice: &[u8], offset: usize) -> u64 {
+        // INVARIANT: caller ensures offset + 8 <= slice.len()
+        #[expect(clippy::indexing_slicing, reason = "caller ensures bounds")]
+        let bytes: &[u8] = &slice[offset..offset + 8];
+
+        // Zero-overhead conversion: TryInto for [u8; 8] is infallible here
+        // since we sliced exactly 8 bytes. The unwrap is optimized away.
+        let arr: [u8; 8] = bytes.try_into().expect("slice is exactly 8 bytes");
+        u64::from_ne_bytes(arr)
     }
 
     /// Compare two byte slices for equality.
@@ -61,16 +78,13 @@ impl CompareSuffix {
             return Self::xor_eq_short(a, b, len);
         }
 
-        // Word-aligned path for longer slices
-        let a_ptr: *const u8 = a.as_ptr();
-        let b_ptr: *const u8 = b.as_ptr();
+        // Word-aligned path for longer slices using word loads
         let chunks: usize = len / 8;
 
         for i in 0..chunks {
-            // SAFETY: i * 8 + 8 <= chunks * 8 <= len, within bounds.
-            // Unaligned reads are safe on all modern x86/ARM.
-            let a_word: u64 = unsafe { a_ptr.add(i * 8).cast::<u64>().read_unaligned() };
-            let b_word: u64 = unsafe { b_ptr.add(i * 8).cast::<u64>().read_unaligned() };
+            let offset = i * 8;
+            let a_word = Self::read_u64_at(a, offset);
+            let b_word = Self::read_u64_at(b, offset);
 
             if a_word != b_word {
                 return false;
@@ -79,7 +93,7 @@ impl CompareSuffix {
 
         // Compare remainder (0-7 bytes)
         let remainder_start: usize = chunks * 8;
-        // SAFETY: remainder_start = chunks * 8 <= len (both slices same length)
+        // INVARIANT: remainder_start = chunks * 8 <= len (both slices same length)
         #[expect(clippy::indexing_slicing, reason = "remainder_start <= len")]
         {
             a[remainder_start..] == b[remainder_start..]
@@ -99,15 +113,13 @@ impl CompareSuffix {
             return a.cmp(b);
         }
 
-        // Word-aligned path for longer slices
-        let a_ptr: *const u8 = a.as_ptr();
-        let b_ptr: *const u8 = b.as_ptr();
+        // Word-aligned path for longer slices using word loads
         let chunks: usize = min_len / 8;
 
         for i in 0..chunks {
-            // SAFETY: i * 8 + 8 <= chunks * 8 <= min_len <= both lengths
-            let a_word: u64 = unsafe { a_ptr.add(i * 8).cast::<u64>().read_unaligned() };
-            let b_word: u64 = unsafe { b_ptr.add(i * 8).cast::<u64>().read_unaligned() };
+            let offset = i * 8;
+            let a_word = Self::read_u64_at(a, offset);
+            let b_word = Self::read_u64_at(b, offset);
 
             if a_word != b_word {
                 // Convert to big-endian for correct lexicographic order
@@ -121,7 +133,7 @@ impl CompareSuffix {
         // Compare remainder, then by length
         let remainder_start: usize = chunks * 8;
 
-        // SAFETY: remainder_start <= min_len <= both lengths
+        // INVARIANT: remainder_start <= min_len <= both lengths
         #[expect(clippy::indexing_slicing, reason = "remainder_start <= min_len")]
         match a[remainder_start..min_len].cmp(&b[remainder_start..min_len]) {
             Ordering::Equal => a.len().cmp(&b.len()),

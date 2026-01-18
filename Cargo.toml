@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.5.9"
+version = "0.5.10"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -27,10 +27,14 @@ mimalloc = ["dep:mimalloc"]
 # When enabled, auto-initializes a subscriber that writes NDJSON logs to logs/masstree.jsonl.
 # Respects RUST_LOG env var (default: info). Set MASSTREE_LOG_CONSOLE=0 to disable console.
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
+# Enable serde support for typed module (Serialize/Deserialize derives on error types)
+serde = ["dep:serde"]
+# Enable memcomparable encoding for typed keys (any Serialize type can be a key)
+memcomparable = ["dep:memcomparable", "dep:serde"]
 # Enable CLI tools (divan_parser, criterion_summary). Not needed for library usage.
 bins = [
 	"dep:serde_json",
-	"dep:serde",
+	"serde",
 	"dep:chrono",
 	"dep:clap",
 	"dep:comfy-table",
@@ -46,6 +50,7 @@ seize = "0.5.1"
 parking_lot = "0.12.5"
 portable-atomic = "1.13.0"
 arrayvec = "0.7.6"
+zerocopy = { version = "0.8.33", features = ["derive"] }
 static_assertions = "1.1.0"
 rustc-hash = "2.1.1"
 crossbeam-queue = "0.3.12"
@@ -77,6 +82,9 @@ regex = { version = "1.12.2", optional = true }
 
 # Optional heap profiling (enabled via `dhat-heap` feature)
 dhat = { version = "0.3.3", optional = true }
+
+# Optional memcomparable encoding (enabled via `memcomparable` feature)
+memcomparable = { version = "0.2.0", optional = true }
 
 [dev-dependencies]
 clap = { version = "4.5.54", features = ["derive"] }

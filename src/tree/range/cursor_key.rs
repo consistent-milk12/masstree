@@ -617,6 +617,7 @@ impl CursorKey {
 
     /// Read an ikey from the buffer at the given offset.
     ///
+    /// Zero-overhead: uses direct array conversion for the 8-byte fast path.
     /// Pads with zeros if fewer than 8 bytes remain.
     #[inline(always)]
     fn read_ikey_from_buf(buf: &[u8; MAX_KEY_LENGTH], offset: usize, len: usize) -> u64 {
@@ -628,9 +629,19 @@ impl CursorKey {
         let start: usize = offset;
         let end: usize = offset + available;
 
+        // Fast path: full 8 bytes available - zero-overhead conversion
+        if available == IKEY_SIZE {
+            // TryInto for [u8; 8] is infallible here since we sliced exactly 8 bytes.
+            // The expect is optimized away by the compiler.
+            let arr: [u8; 8] = buf[start..end]
+                .try_into()
+                .expect("slice is exactly 8 bytes");
+            return u64::from_be_bytes(arr);
+        }
+
+        // Slow path: partial read, need zero-padding
         let mut bytes: [u8; 8] = [0u8; 8];
         bytes[..available].copy_from_slice(&buf[start..end]);
-
         u64::from_be_bytes(bytes)
     }
 
