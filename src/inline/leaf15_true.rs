@@ -218,6 +218,42 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
     }
 
+    /// Get the inline value at the given slot without sentinel check.
+    ///
+    /// This is a fast path for when the caller has already verified that the
+    /// slot contains a terminal inline value (not empty, not a layer pointer).
+    /// Saves one atomic load compared to [`Self::inline_get`].
+    ///
+    /// # Safety
+    ///
+    /// Caller must guarantee:
+    /// - `slot < WIDTH_15`
+    /// - The slot contains a terminal inline value, verified by one of:
+    ///   - `!Self::keylenx_is_layer(keylenx)` AND slot is in permutation
+    ///   - `InlineSentinel::is_inline_sentinel(leaf_values[slot])`
+    ///
+    /// Calling this on an empty slot or layer slot returns garbage bits
+    /// interpreted as `V`.
+    ///
+    /// # Ordering
+    ///
+    /// Uses `READ_ORD`. Caller must have validated version before calling.
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "slot bounds guaranteed by caller; see Safety section"
+    )]
+    pub unsafe fn inline_get_unchecked(&self, slot: usize) -> V {
+        debug_assert!(slot < WIDTH_15, "inline_get_unchecked: slot out of bounds");
+        debug_assert!(
+            InlineSentinel::is_inline_sentinel(self.leaf_values[slot].load(READ_ORD)),
+            "inline_get_unchecked: slot does not contain inline sentinel"
+        );
+
+        let bits: u64 = self.inline_values[slot].load(READ_ORD);
+        V::from_bits(bits)
+    }
+
     /// Set the inline value at the given slot.
     ///
     /// # Preconditions
@@ -2397,6 +2433,7 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
 impl<V: InlineBits> crate::leaf_trait::LayerCapableLeaf<TrueInlineSlot<V>>
     for LeafNode15TrueInline<V>
 {
+    #[inline]
     fn try_clone_output(&self, slot: usize) -> Option<V> {
         // For true-inline, the value is Copy - just load it
         self.inline_get(slot)

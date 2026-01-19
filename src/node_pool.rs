@@ -77,11 +77,16 @@ const fn size_class(layout: Layout) -> Option<usize> {
 /// Compute the bucket layout for a size class.
 ///
 /// The bucket layout is `nl * CACHE_LINE` bytes with `CACHE_LINE` alignment.
+///
+/// # Safety
+///
+/// Caller must ensure `nl > 0 && nl <= MAX_SIZE_CLASSES`.
 #[inline]
-fn bucket_layout(nl: usize) -> Layout {
+unsafe fn bucket_layout(nl: usize) -> Layout {
     debug_assert!(nl > 0 && nl <= MAX_SIZE_CLASSES);
 
-    // SAFETY: size is non-zero and alignment is valid power of 2
+    // SAFETY: caller ensures nl is in valid range, so size is non-zero
+    // and alignment is valid power of 2
     unsafe { Layout::from_size_align_unchecked(nl * CACHE_LINE, CACHE_LINE) }
 }
 
@@ -194,7 +199,8 @@ impl ThreadPool {
 
         // SAFETY: size_class() returns nl in [1, MAX_SIZE_CLASSES], so nl-1 is in [0, 19]
         let bucket: &mut Freelist = unsafe { self.buckets.get_unchecked_mut(nl - 1) };
-        let bucket_layout: Layout = bucket_layout(nl);
+        // SAFETY: size_class() guarantees nl in [1, MAX_SIZE_CLASSES]
+        let bucket_layout: Layout = unsafe { bucket_layout(nl) };
 
         if let Some(ptr) = bucket.pop() {
             return ptr;
@@ -228,6 +234,7 @@ impl ThreadPool {
             unsafe { bucket.push(ptr) };
         } else {
             // Pool full, free directly
+            // SAFETY: size_class() guarantees nl in [1, MAX_SIZE_CLASSES]
             unsafe { dealloc(ptr, bucket_layout(nl)) };
         }
     }
@@ -237,7 +244,8 @@ impl Drop for ThreadPool {
     fn drop(&mut self) {
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
             let nl: usize = i + 1;
-            bucket.drain(bucket_layout(nl));
+            // SAFETY: i in [0, MAX_SIZE_CLASSES-1], so nl in [1, MAX_SIZE_CLASSES]
+            bucket.drain(unsafe { bucket_layout(nl) });
         }
     }
 }

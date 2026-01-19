@@ -1741,6 +1741,7 @@ fn test_gc_layer_preserves_siblings() {
 
 /// Test gc_layer with concurrent reads.
 #[test]
+#[cfg_attr(miri, ignore)] // Gets stuck in Miri due to thread scheduling complexity
 fn test_gc_layer_concurrent_reads() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;

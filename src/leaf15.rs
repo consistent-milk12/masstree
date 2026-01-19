@@ -1280,9 +1280,9 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// # Algorithm
     ///
     /// Uses true in-place compaction via `copy_within` (memmove):
-    /// - No cloning of the SuffixBag
+    /// - No cloning of the `SuffixBag`
     /// - No heap allocation during compaction
-    /// - Stack-allocated ArrayVec for bookkeeping
+    /// - Stack-allocated [`ArrayVec`] for bookkeeping
     ///
     /// # Safety
     ///
@@ -2740,6 +2740,7 @@ impl<S: ValueSlot> Drop for LeafNode15<S> {
 impl<V: Send + Sync + 'static> crate::leaf_trait::LayerCapableLeaf<crate::value::LeafValue<V>>
     for LeafNode15<crate::value::LeafValue<V>>
 {
+    #[inline]
     fn try_clone_output(&self, slot: usize) -> Option<Arc<V>> {
         debug_assert!(
             slot < WIDTH_15,
@@ -2832,6 +2833,7 @@ impl<V: Copy + Send + Sync + 'static>
     crate::leaf_trait::LayerCapableLeaf<crate::value::LeafValueIndex<V>>
     for LeafNode15<crate::value::LeafValueIndex<V>>
 {
+    #[inline]
     fn try_clone_output(&self, slot: usize) -> Option<V> {
         debug_assert!(
             slot < WIDTH_15,

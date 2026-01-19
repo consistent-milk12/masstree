@@ -7,7 +7,7 @@ use arrayvec::ArrayVec;
 use super::{PermutationProvider, SlotMeta, SuffixBag};
 
 /// Entry for tracking suffix during compaction.
-/// Stores (slot_index, original_offset, length).
+/// Stores (`slot_index`, `original_offset`, `length`).
 #[derive(Clone, Copy)]
 struct CompactEntry {
     slot: usize,
@@ -19,14 +19,14 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// Compact in-place by moving data within the existing buffer.
     ///
     /// This is a true in-place compaction that:
-    /// 1. Uses stack-allocated ArrayVec for bookkeeping (no heap allocation)
+    /// 1. Uses stack-allocated [`ArrayVec`] for bookkeeping (no heap allocation)
     /// 2. Moves data using `copy_within` (memmove, no allocation)
     /// 3. Truncates the buffer (no allocation)
     ///
     /// # Algorithm
     ///
-    /// 1. Collect active suffixes into ArrayVec, sorted by offset
-    /// 2. Move each suffix to its new position using copy_within
+    /// 1. Collect active suffixes into [`ArrayVec`], sorted by offset
+    /// 2. Move each suffix to its new position using `copy_within`
     /// 3. Update slot metadata with new offsets
     /// 4. Truncate buffer to new size
     #[expect(clippy::indexing_slicing, reason = "Bounds checked via slot iteration")]
@@ -66,6 +66,13 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
             let src_start: usize = entry.offset as usize;
             let src_end: usize = src_start + entry.len as usize;
 
+            // Invariant: since entries are sorted by ascending offset and we
+            // advance write_pos by each entry's length, write_pos <= src_start.
+            debug_assert!(
+                write_pos <= src_start,
+                "compaction invariant violated: write_pos ({write_pos}) > src_start ({src_start})"
+            );
+
             // Only copy if source and dest differ (avoid no-op copies)
             if write_pos != src_start {
                 self.data.copy_within(src_start..src_end, write_pos);
@@ -98,22 +105,36 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// # Arguments
     ///
-    /// * `active_slots` - Iterator yielding physical slot indices that are active
+    /// * `active_slots` - Iterator yielding physical slot indices that are active.
+    ///   Duplicate slots are handled (deduplicated after collection).
     ///
     /// # Returns
     ///
     /// The number of bytes reclaimed.
     #[expect(clippy::indexing_slicing, reason = "Slot bounds explicitly checked")]
-    pub fn compact(&mut self, active_slots: impl Iterator<Item = usize>) -> usize {
+    pub(super) fn compact(&mut self, active_slots: impl Iterator<Item = usize>) -> usize {
         let old_used: usize = self.data.len();
 
-        // Collect active entries into stack-allocated array
+        // Collect active entries into stack-allocated array.
+        // Use bitmask to handle duplicate slots in the iterator.
         let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
+        let mut seen: u64 = 0; // Bitmask for slots already processed
 
         for slot in active_slots {
+            debug_assert!(
+                slot < WIDTH,
+                "active_slots yielded out-of-bounds slot {slot} (WIDTH={WIDTH})"
+            );
             if slot >= WIDTH {
                 continue;
             }
+
+            // Skip duplicate slots
+            let mask: u64 = 1 << slot;
+            if seen & mask != 0 {
+                continue;
+            }
+            seen |= mask;
 
             let meta: SlotMeta = self.slots[slot];
             if meta.has_suffix() {
@@ -144,6 +165,12 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
         for entry in &entries {
             let src_start: usize = entry.offset as usize;
             let src_end: usize = src_start + entry.len as usize;
+
+            // Invariant: write_pos <= src_start (see compact_in_place for proof)
+            debug_assert!(
+                write_pos <= src_start,
+                "compaction invariant violated: write_pos ({write_pos}) > src_start ({src_start})"
+            );
 
             if write_pos != src_start {
                 self.data.copy_within(src_start..src_end, write_pos);

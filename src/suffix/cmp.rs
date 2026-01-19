@@ -12,7 +12,7 @@ pub(super) struct CompareSuffix;
 impl CompareSuffix {
     /// XOR-based equality for short byte slices (≤8 bytes).
     ///
-    /// Uses safe copy_from_slice instead of unsafe copy_nonoverlapping.
+    /// Uses safe `copy_from_slice` instead of unsafe `copy_nonoverlapping`.
     /// Matches C++ `equals_sloppy`.
     #[inline(always)]
     fn xor_eq_short(a: &[u8], b: &[u8], len: usize) -> bool {
@@ -46,7 +46,7 @@ impl CompareSuffix {
 
     /// Read a u64 from a byte slice at the given offset.
     ///
-    /// Zero-overhead: uses direct array conversion + from_ne_bytes.
+    /// Zero-overhead: uses direct array conversion + `from_ne_bytes`.
     /// The compiler optimizes away the bounds check since caller guarantees size.
     #[inline(always)]
     fn read_u64_at(slice: &[u8], offset: usize) -> u64 {
@@ -55,7 +55,8 @@ impl CompareSuffix {
         let bytes: &[u8] = &slice[offset..offset + 8];
 
         // Zero-overhead conversion: TryInto for [u8; 8] is infallible here
-        // since we sliced exactly 8 bytes. The unwrap is optimized away.
+        // since we sliced exactly 8 bytes. The expect is optimized away.
+        #[expect(clippy::expect_used, reason = "infallible: slice is exactly 8 bytes")]
         let arr: [u8; 8] = bytes.try_into().expect("slice is exactly 8 bytes");
         u64::from_ne_bytes(arr)
     }

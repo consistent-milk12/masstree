@@ -437,6 +437,13 @@ pub struct SublayerContext {
 unsafe impl Send for SublayerContext {}
 unsafe impl Sync for SublayerContext {}
 
+/// Maximum number of times an entry can be re-queued before being dropped.
+///
+/// If a leaf stays locked for this many attempts (e.g., due to a crashed thread
+/// holding the lock), we give up and drop the entry. The leaf remains allocated
+/// but logically deleted - a bounded memory leak is preferable to infinite loops.
+const MAX_REQUEUE_COUNT: u8 = 10;
+
 /// Entry in the coalesce queue: pointer to empty leaf and its `ikey_bound`.
 #[derive(Debug, Clone, Copy)]
 struct CoalesceEntry<L> {
@@ -449,6 +456,10 @@ struct CoalesceEntry<L> {
     /// Optional context for sublayer cleanup.
     /// Present when this leaf is inside a sublayer (descended via layer pointer).
     layer_context: Option<SublayerContext>,
+
+    /// Number of times this entry has been re-queued due to lock contention.
+    /// When this exceeds `MAX_REQUEUE_COUNT`, the entry is dropped.
+    requeue_count: u8,
 }
 
 // SAFETY: CoalesceEntry contains raw pointers but is only accessed under
@@ -518,6 +529,7 @@ impl<L> CoalesceQueue<L> {
             leaf_ptr,
             ikey_bound,
             layer_context,
+            requeue_count: 0,
         };
         // Lock-free push - never blocks!
         self.pending.push(entry);
@@ -692,8 +704,20 @@ impl Coalesce {
 
         // Step 1: Try to lock the leaf
         let Some(mut lock) = leaf.version().try_lock() else {
-            // Leaf is locked by another thread - re-queue for later
-            queue.schedule(leaf_ptr, entry_ikey_bound, entry.layer_context);
+            // Leaf is locked by another thread - re-queue for later if within limit
+            let new_count = entry.requeue_count.saturating_add(1);
+            if new_count <= MAX_REQUEUE_COUNT {
+                let requeue_entry = CoalesceEntry {
+                    leaf_ptr,
+                    ikey_bound: entry_ikey_bound,
+                    layer_context: entry.layer_context,
+                    requeue_count: new_count,
+                };
+                queue.pending.push(requeue_entry);
+            }
+            // If exceeded MAX_REQUEUE_COUNT, silently drop the entry.
+            // The leaf remains allocated but logically deleted - bounded memory leak
+            // is preferable to infinite re-queuing (e.g., if holder thread crashed).
             return true;
         };
 
@@ -923,5 +947,27 @@ mod tests {
         queue.schedule(ptr::null_mut(), 300, Some(ctx));
 
         assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn test_requeue_count_limit() {
+        // Verify that CoalesceEntry has the requeue_count field
+        let entry: CoalesceEntry<u8> = CoalesceEntry {
+            leaf_ptr: ptr::null_mut(),
+            ikey_bound: 42,
+            layer_context: None,
+            requeue_count: 0,
+        };
+        assert_eq!(entry.requeue_count, 0);
+
+        // Verify max requeue constant is reasonable
+        assert!(
+            MAX_REQUEUE_COUNT >= 5,
+            "MAX_REQUEUE_COUNT should be at least 5"
+        );
+        assert!(
+            MAX_REQUEUE_COUNT <= 20,
+            "MAX_REQUEUE_COUNT should be at most 20"
+        );
     }
 }

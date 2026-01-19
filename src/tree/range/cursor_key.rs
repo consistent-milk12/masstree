@@ -633,6 +633,7 @@ impl CursorKey {
         if available == IKEY_SIZE {
             // TryInto for [u8; 8] is infallible here since we sliced exactly 8 bytes.
             // The expect is optimized away by the compiler.
+            #[expect(clippy::expect_used, reason = "infallible: guarded by available == 8")]
             let arr: [u8; 8] = buf[start..end]
                 .try_into()
                 .expect("slice is exactly 8 bytes");
