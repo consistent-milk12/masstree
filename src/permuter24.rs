@@ -146,7 +146,7 @@ impl Permuter24 {
 
         if n == 24 {
             return Self {
-                value: Self::SORTED | 24,
+                value: Self::SORTED | 0x18, // 24 in hex
             };
         }
 

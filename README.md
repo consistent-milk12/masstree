@@ -10,20 +10,19 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 - Lock-free reads with version validation
 - Concurrent inserts and deletes with fine-grained leaf locking
 - Zero-copy range scans with `scan_ref` and `scan_prefix`
+- High-throughput value-only scans with `scan_values` (skips key materialization)
 - Memory reclamation via hyaline scheme (`seize` crate)
 - Lazy leaf coalescing for deleted entries
 - Two node widths: `MassTree` (WIDTH=24) and `MassTree15` (WIDTH=15)
+- Extremely high-performance inline variant `MassTree15Inline`, this is only usable on
+Copy types.
 
 ## Status
 
-**v0.5.12** — Core feature complete. Heavily tested but concurrent data
-structures require extensive stress testing beyond what tests (even though still
-quite comprehensive) provide. The unsafe code passes Miri with strict-provenance
-flag. It should be noted that the C++ implementation is a research project, not
-a library specifically developed for production usage. So it is quite possible
-that there are still various rare edge cases and soundness issues that still
-haven't been addressed. Fixed several memory leaks and one UB caught by miri
-in new targeted tests.
+**v0.6.0** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 5/7 benchmarks and
+Rust alternatives on 11/12 workloads. Passes Miri with strict-provenance flag.
+Concurrent data structures require extensive stress testing, the test suite is
+comprehensive (584 lib tests + stress tests (984 tests total)) but edge cases may remain.
 
 | Feature | Status |
 |---------|--------|
@@ -31,19 +30,12 @@ in new targeted tests.
 | `insert` | Fine-grained leaf locking |
 | `remove` | Concurrent deletion with memory reclamation |
 | `scan`, `scan_ref`, `scan_prefix` | Zero-copy range iteration |
+| `scan_values`, `scan_values_rev` | High-throughput value-only scans |
 | `DoubleEndedIterator` | Reverse iteration support |
 | Leaf coalescing | Lazy queue-based cleanup |
 | Memory reclamation | Hyaline scheme via `seize` crate |
 
-**Tests:** 977 total (including doc tests), 584 lib tests. Ignored long-running stress tests pass with `cargo test -- --ignored`. Miri strict provenance clean.
-
 **Not yet implemented:** `Entry` API, `Extend`/`FromIterator`.
-
-## Performance
-
-In benchmarks, MassTree is typically **1.5-4x faster** than comparable ordered maps with support for variable length keys (`indexset`, `crossbeam-skiplist`, `scc::TreeIndex`, `RwLock<BTreeMap>`) for mixed read/write workloads, and **up to 13x faster** under write contention where `RwLock` collapses. It only loses in pure insert workloads (~10% to `scc::TreeIndex`) and single-threaded bulk construction (~30% to `skipmap`), these aren't realistic workloads, but still noteworthy.
-
-See `runs/` for detailed benchmark data.
 
 ## vs C++ Masstree (12T, 10s)
 
@@ -65,7 +57,7 @@ instead of C++'s `> lock_bit`, ignoring both bits 0-1. This is safe because vers
 modifications are in-flight and not yet visible to readers. See `src/nodeversion.rs:643-673`
 for the full safety argument.
 
-The forward-sequential gap (rw3) remains under investigation.
+The forward-sequential gap (rw3) narrowed from 57% to 81% but remains under investigation.
 
 | Benchmark | Rust | C++ | Ratio | Winner |
 |-----------|------|-----|-------|--------|
@@ -75,11 +67,11 @@ The forward-sequential gap (rw3) remains under investigation.
 | **uscale** (random 140M) | 11.05 | 10.58 | **104%** | **Rust** |
 | **wscale** (wide random) | 9.56 | 9.03 | **106%** | **Rust** |
 | **rw1** (random insert+read) | 11.01 | 11.23 | 98% | Tie |
-| **rw3** (forward-seq) | 26.49 | 50.34 | 53% | C++ |
+| **rw3** (forward-seq) | 40.54 | 50.34 | 81% | C++ |
 
 ## vs Rust Concurrent Maps (6T Physical, Rigorous)
 
-> Source: `runs/run135_read_write_rigorous.txt`
+> Source: `runs/run136_read_write.txt`
 > **Config:** Physical cores only, 200 samples, performance governor.
 
 This can be considered the current baseline.
@@ -89,26 +81,57 @@ value. TreeIndex's `insert()` fails on existing keys, requiring a `remove()+inse
 Pure insert benchmarks (13, 14) use fresh keys only, providing a fairer comparison for
 insert-heavy workloads where TreeIndex performs better.
 
+NOTE 2: Recent optimizations (batched timeout checks, hybrid spin-yield backoff, countdown-based guard
+refresh) improved throughput by +18% on average. Notable gains: zipfian +30%, mixed 50/50 +34%,
+pure read +28%. The `insert_only_fair` benchmark flipped from a loss (0.92x) to a win (1.14x).
+
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **22.44** | 15.16 | 9.36 | 12.71 | **1.48x** |
-| 02_zipfian | **26.20** | 11.81 | 10.63 | 5.57 | **2.22x** |
-| 03_shared_prefix | **18.25** | 8.52 | 8.81 | 13.07 | **1.40x** |
-| 04_high_contention | **67.49** | 15.81 | 13.04 | 3.53 | **4.27x** |
-| 05_large_dataset | **12.02** | 9.41 | 6.87 | 7.92 | **1.28x** |
-| 06_single_hot_key | **15.21** | 4.49 | 6.07 | 3.92 | **2.51x** |
-| 07_mixed_50_50 | **18.44** | 5.68 | 5.20 | 12.26 | **1.50x** |
-| 08_8byte_keys | **40.78** | 23.30 | 12.00 | 16.33 | **1.75x** |
-| 09_pure_read | **33.16** | 24.03 | 14.14 | 13.92 | **1.38x** |
-| 10_remove_heavy | **18.71** | 11.75 | 5.51 | 3.71 | **1.59x** |
-| 13_insert_only_fair | 18.16 | **19.78** | 11.53 | 5.71 | 0.92x |
-| 14_pure_insert | 8.71 | **12.78** | 6.39 | 2.35 | **0.68x** |
+| 01_uniform | **28.13** | 15.44 | 9.49 | 12.66 | **1.82x** |
+| 02_zipfian | **33.98** | 11.73 | 10.58 | 4.90 | **2.90x** |
+| 03_shared_prefix | **18.62** | 8.74 | 8.83 | 12.92 | **1.44x** |
+| 04_high_contention | **65.24** | 15.82 | 13.07 | 3.48 | **4.12x** |
+| 05_large_dataset | **13.02** | 9.33 | 6.87 | 7.88 | **1.40x** |
+| 06_single_hot_key | **20.19** | 4.44 | 6.01 | 3.82 | **3.36x** |
+| 07_mixed_50_50 | **24.74** | 5.69 | 5.18 | 12.09 | **2.05x** |
+| 08_8byte_keys | **44.71** | 23.41 | 11.83 | 15.97 | **1.91x** |
+| 09_pure_read | **42.52** | 22.69 | 14.19 | 13.77 | **1.87x** |
+| 10_remove_heavy | **21.70** | 11.57 | 5.50 | 3.68 | **1.88x** |
+| 13_insert_only_fair | **22.53** | 19.68 | 11.32 | 5.64 | **1.14x** |
+| 14_pure_insert | 9.30 | **12.43** | 6.35 | 2.30 | 0.75x |
+
+**Single-thread latency:** masstree15 achieves **864 µs** median read latency vs tree_index 1.31 ms (**1.52x faster**).
+
+**Build time:** masstree15 builds at **8.56 Mitem/s** vs skipmap 6.33, tree_index 4.46, indexset 1.85 (**1.35–4.6x faster**).
+
+## Range Scans (6T Physical, Rigorous)
+
+> Source: `runs/run139_range_scan_optimized.txt` (inline-optimized)
+> **Config:** Physical cores only, 100 samples, performance governor
+
+| Benchmark | masstree15_inline | tree_index | MT vs TI | vs run137 |
+|-----------|-------------------|------------|----------|-----------|
+| 01_sequential_full_scan | **32.29** | 15.37 | **2.10x** | +79% |
+| 02_reverse_scan | **23.50** | 15.31 | **1.53x** | +34% |
+| 03_clustered_scan | **31.61** | 15.25 | **2.07x** | +76% |
+| 04_sparse_scan | **32.19** | 11.60 | **2.77x** | +79% |
+| 05_shared_prefix_scan | **26.38** | 12.97 | **2.03x** | +59% |
+| 06_suffix_differ_scan | **15.86** | 12.16 | **1.30x** | -30% |
+| 07_hierarchical_scan | **17.43** | 11.95 | **1.46x** | +56% |
+| 08_adversarial_splits | **18.75** | 6.71 | **2.79x** | +4% |
+| 09_interleaved_scan | **16.27** | 9.51 | **1.71x** | -2% |
+| 10_blink_stress_scan | **20.75** | 9.81 | **2.11x** | +16% |
+| 11_random_keys_scan | **20.85** | 10.80 | **1.93x** | +17% |
+| 12_long_keys_64b_scan | **19.21** | 12.46 | **1.54x** | +94% |
+| 15_full_scan_aggregate | **1.70 G** | 1.04 G | **1.64x** | — |
+| 16_insert_heavy | **22.60** | 15.93 | **1.42x** | new |
+| 17_hot_spot | 6.03 | **14.87** | 0.41x | new |
 
 ## Install
 
 ```toml
 [dependencies]
-masstree = { version = "0.5.12", features = ["mimalloc"] }
+masstree = { version = "0.6.0", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

@@ -7,9 +7,11 @@
 //! - `#[cold]` on retry/error paths
 //! - Unified slot allocation and value update logic
 
+use crate::leaf_trait::SplitInsertData;
+
 use super::{
-    InsertError, InsertSearchResultGeneric, Key, LayerCapableLeaf, Linker, LocalGuard,
-    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot, LAYER_KEYLENX,
+    InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf, Linker,
+    LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
 };
 
 use crate::nodeversion::LockGuard;
@@ -31,10 +33,6 @@ macro_rules! stat {
 
     (null_ptr_retry) => {
         crate::insert_stats::record_null_ptr_retry()
-    };
-
-    (split_retry) => {
-        crate::insert_stats::record_split_retry()
     };
 
     (successful_insert) => {
@@ -498,7 +496,7 @@ where
                 // - CPU burning while waiting for lock holder
                 // - Thermal throttling on sustained loads
                 // - Tail latency spikes when threads queue on same leaf
-                let mut lock = leaf.version().lock_with_yield();
+                let mut lock = leaf.version().lock_bounded();
 
                 // ================================================================
                 // POST-LOCK VALIDATION (B-link local retry on failure)
@@ -621,31 +619,53 @@ where
                                 }
 
                                 FindSlotResult::NeedsSplit => {
-                                    stat!(split_retry);
-                                    // Split the leaf (FALLIBLE allocation for sibling)
-                                    // Use leaf_ptr directly to preserve mutable provenance
-                                    self.handle_leaf_split_generic(
+                                    // Atomic split+insert - no retry needed!
+                                    // Convert value to raw pointer for split+insert
+                                    let value_ptr = S::output_consume_to_raw(value);
+
+                                    // Compute keylenx from key's current length:
+                                    // - If has suffix (>8 bytes remaining), keylenx = 64 (KSUF_KEYLENX)
+                                    // - Otherwise keylenx = current_len as u8
+                                    let keylenx: u8 = if key.has_suffix() {
+                                        64 // KSUF_KEYLENX
+                                    } else {
+                                        #[expect(
+                                            clippy::cast_possible_truncation,
+                                            reason = "current_len <= 8 when !has_suffix"
+                                        )]
+                                        {
+                                            key.current_len() as u8
+                                        }
+                                    };
+
+                                    // Get suffix if present
+                                    let suffix: Option<&[u8]> = if key.has_suffix() {
+                                        Some(key.suffix())
+                                    } else {
+                                        None
+                                    };
+
+                                    // Build insert data
+                                    let insert_data = SplitInsertData {
+                                        ikey: key.ikey(),
+                                        keylenx,
+                                        suffix,
+                                        value_ptr,
+                                    };
+
+                                    // Atomic split+insert (FALLIBLE allocation for sibling)
+                                    let _result = self.handle_leaf_split_and_insert_generic(
                                         leaf_ptr,
                                         lock,
                                         logical_pos,
-                                        key.ikey(),
+                                        insert_data,
                                         guard,
                                     )?;
 
-                                    // After split, use LOCAL retry (B-link advance)
-                                    // The key likely moved to the new right sibling
-                                    let (advanced_ptr, exceeded) =
-                                        self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
-
-                                    if exceeded {
-                                        stat!(hop_limit_exceeded);
-                                        layer_root = self.load_root_ptr_generic(guard);
-                                        continue 'retry;
-                                    }
-
-                                    leaf_ptr = advanced_ptr;
-                                    leaf = unsafe { &*leaf_ptr };
-                                    continue 'forward;
+                                    // Insert completed during split - done!
+                                    stat!(successful_insert);
+                                    self.count.increment();
+                                    return Ok(None);
                                 }
                             }
                         }
@@ -703,28 +723,53 @@ where
                             }
 
                             FindSlotResult::NeedsSplit => {
-                                stat!(split_retry);
-                                // Use leaf_ptr directly to preserve mutable provenance
-                                self.handle_leaf_split_generic(
+                                // Atomic split+insert - no retry needed!
+                                // Convert value to raw pointer for split+insert
+                                let value_ptr = S::output_consume_to_raw(value);
+
+                                // Compute keylenx from key's current length:
+                                // - If has suffix (>8 bytes remaining), keylenx = 64 (KSUF_KEYLENX)
+                                // - Otherwise keylenx = current_len as u8
+                                let keylenx: u8 = if key.has_suffix() {
+                                    64 // KSUF_KEYLENX
+                                } else {
+                                    #[expect(
+                                        clippy::cast_possible_truncation,
+                                        reason = "current_len <= 8 when !has_suffix"
+                                    )]
+                                    {
+                                        key.current_len() as u8
+                                    }
+                                };
+
+                                // Get suffix if present
+                                let suffix: Option<&[u8]> = if key.has_suffix() {
+                                    Some(key.suffix())
+                                } else {
+                                    None
+                                };
+
+                                // Build insert data
+                                let insert_data = SplitInsertData {
+                                    ikey,
+                                    keylenx,
+                                    suffix,
+                                    value_ptr,
+                                };
+
+                                // Atomic split+insert (FALLIBLE allocation for sibling)
+                                let _result = self.handle_leaf_split_and_insert_generic(
                                     leaf_ptr,
                                     lock,
                                     logical_pos,
-                                    ikey,
+                                    insert_data,
                                     guard,
                                 )?;
 
-                                // After split, use LOCAL retry (B-link advance)
-                                let (advanced_ptr, exceeded) =
-                                    self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
-
-                                if exceeded {
-                                    stat!(hop_limit_exceeded);
-                                    layer_root = self.load_root_ptr_generic(guard);
-                                    continue 'retry;
-                                }
-
-                                leaf_ptr = advanced_ptr;
-                                leaf = unsafe { &*leaf_ptr };
+                                // Insert completed during split - done!
+                                stat!(successful_insert);
+                                self.count.increment();
+                                return Ok(None);
                             }
                         }
                     }

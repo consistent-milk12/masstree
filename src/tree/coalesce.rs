@@ -961,13 +961,17 @@ mod tests {
         assert_eq!(entry.requeue_count, 0);
 
         // Verify max requeue constant is reasonable
-        assert!(
-            MAX_REQUEUE_COUNT >= 5,
-            "MAX_REQUEUE_COUNT should be at least 5"
-        );
-        assert!(
-            MAX_REQUEUE_COUNT <= 20,
-            "MAX_REQUEUE_COUNT should be at most 20"
-        );
+        const {
+            assert!(
+                MAX_REQUEUE_COUNT >= 5,
+                "MAX_REQUEUE_COUNT should be at least 5"
+            );
+        }
+        const {
+            assert!(
+                MAX_REQUEUE_COUNT <= 20,
+                "MAX_REQUEUE_COUNT should be at most 20"
+            );
+        }
     }
 }

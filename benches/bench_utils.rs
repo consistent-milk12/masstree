@@ -55,6 +55,8 @@
     clippy::cast_sign_loss
 )]
 
+use std::sync::atomic::{fence, Ordering as AtomicOrdering};
+
 use arrayvec::ArrayVec;
 
 /// Multipliers for deterministic key chunk generation.
@@ -255,6 +257,33 @@ pub fn shuffle<T>(slice: &mut [T], seed: u64) {
         let j = i + (((state >> 32) as usize) % (n - i));
         slice.swap(i, j);
     }
+}
+
+/// Generate random start indices for range scan benchmarks.
+///
+/// Returns a vector of indices into a key array, allowing scans to start
+/// from random positions rather than always from the beginning.
+/// This provides more realistic benchmarks by:
+/// - Avoiding always scanning the first few leaves (cache-hot)
+/// - Testing different parts of the tree structure
+/// - Reducing measurement bias from predictable access patterns
+///
+/// The indices are pre-generated to avoid RNG overhead during measurement.
+#[must_use]
+pub fn random_start_indices(key_count: usize, ops_count: usize, seed: u64) -> Vec<usize> {
+    // Reserve room at the end so scans don't immediately hit end-of-tree
+    let max_start = key_count.saturating_sub(100).max(1);
+    let mut indices = Vec::with_capacity(ops_count);
+    let mut state = seed;
+
+    for _ in 0..ops_count {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        // Use high bits for better quality
+        indices.push(((state >> 32) as usize) % max_start);
+    }
+    indices
 }
 
 /// Generate random i32 values (like C++ Masstree rw1 test).
@@ -858,8 +887,9 @@ pub fn warmup<F: FnMut()>(mut f: F, iterations: usize) {
     for _ in 0..iterations {
         f();
     }
+
     // Memory barrier to ensure warmup effects are visible
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    fence(AtomicOrdering::SeqCst);
 }
 
 /// Warmup a data structure by accessing random elements.
@@ -880,7 +910,7 @@ pub fn warmup_with_indices<F: FnMut(usize)>(
         let idx = indices[i % n];
         access_fn(idx);
     }
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    fence(AtomicOrdering::SeqCst);
 }
 
 /// Force memory barrier before measurement.
@@ -889,9 +919,9 @@ pub fn warmup_with_indices<F: FnMut(usize)>(
 /// all prior memory operations are complete.
 #[inline]
 pub fn pre_measurement_barrier() {
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    fence(AtomicOrdering::SeqCst);
     // Also try to prevent instruction reordering
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    std::sync::atomic::compiler_fence(AtomicOrdering::SeqCst);
 }
 
 /// Force memory barrier after measurement.
@@ -900,8 +930,8 @@ pub fn pre_measurement_barrier() {
 /// doesn't move measured work outside the timing window.
 #[inline]
 pub fn post_measurement_barrier() {
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    std::sync::atomic::compiler_fence(AtomicOrdering::SeqCst);
+    fence(AtomicOrdering::SeqCst);
 }
 
 /// Try to pin the current thread to a specific CPU core.

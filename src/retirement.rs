@@ -29,6 +29,8 @@
 
 use seize::{Guard, LocalGuard};
 
+use crate::slot::ValueSlot;
+
 // ============================================================================
 //  Public API
 // ============================================================================
@@ -60,7 +62,7 @@ impl BatchedRetire {
     /// }
     /// ```
     #[inline(always)]
-    pub unsafe fn defer_value<S: crate::slot::ValueSlot>(ptr: *mut u8, guard: &LocalGuard<'_>) {
+    pub unsafe fn defer_value<S: ValueSlot>(ptr: *mut u8, guard: &LocalGuard<'_>) {
         // SAFETY: Caller guarantees ptr is valid for S::cleanup_value_ptr
         unsafe {
             guard.defer_retire(ptr, |p: *mut u8, _| {

@@ -28,6 +28,8 @@ use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::thread as StdThread;
 use std::time::{Duration, Instant};
 
+mod bounded;
+
 // ============================================================================
 //  Bit Constants (matching C++ nodeversion_parameters<uint32_t>)
 // ============================================================================
@@ -945,6 +947,15 @@ impl NodeVersion {
     /// yields the CPU to other threads when the lock is contended. This is
     /// more efficient for lock convoy situations where multiple threads are
     /// waiting on the same lock.
+    /// # When to Use
+    ///
+    /// Use `lock_with_yield()` for:
+    /// - Split propagation (longer critical sections, high thread counts)
+    /// - Operations where fairness matters more than throughput
+    ///
+    /// Use [`lock_bounded()`](Self::lock_bounded) for:
+    /// - Leaf-level inserts (short critical sections, transient contention)
+    /// - Sequential insert workloads (rw3 pattern)
     ///
     /// # Algorithm
     ///

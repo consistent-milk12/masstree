@@ -59,7 +59,7 @@ use std::cmp::Ordering;
 use std::fmt as StdFmt;
 use std::ptr as StdPtr;
 use std::sync::atomic::fence;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering as AtomicOrdering};
 
 use seize::Guard;
 
@@ -690,6 +690,10 @@ impl InternodeNode {
     /// - At `i=4`: prefetch CL1 (`ikey0[6]`) if `n > 6`
     /// - At `i=12`: prefetch CL2 (`ikey0[14]`) if `n > 13`
     #[inline]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "n = nkeys() <= WIDTH-1 < WIDTH, so i+3 < i+4 <= n < WIDTH is always in bounds"
+    )]
     pub fn find_insert_position(&self, insert_ikey: u64) -> usize {
         let n = self.nkeys();
 
@@ -850,15 +854,12 @@ impl TreeInternode for InternodeNode {
     }
 
     #[inline(always)]
-    fn new_boxed_for_split(
-        parent_version: &crate::nodeversion::NodeVersion,
-        height: u32,
-    ) -> Box<Self> {
+    fn new_boxed_for_split(parent_version: &NodeVersion, height: u32) -> Box<Self> {
         Self::new_for_split(parent_version, height)
     }
 
     #[inline(always)]
-    fn version(&self) -> &crate::nodeversion::NodeVersion {
+    fn version(&self) -> &NodeVersion {
         Self::version(self)
     }
 

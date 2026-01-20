@@ -70,7 +70,6 @@ pub mod batch {
 
 /// Errors that can occur during insert operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum InsertError {
     /// Leaf node is full and cannot accept more keys.
     /// Caller should trigger a split.

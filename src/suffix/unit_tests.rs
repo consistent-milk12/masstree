@@ -5,6 +5,7 @@ use std::iter as StdIter;
 use std::mem as StdMem;
 
 use super::{INITIAL_CAPACITY, InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar};
+use crate::AllocError;
 use crate::permuter24::Permuter24;
 
 // ========================================================================
@@ -902,7 +903,7 @@ fn test_try_assign_compacts_before_grow() {
     assert_eq!(old_used, 120); // All data still in buffer
 
     // Try to assign - should compact first (reclaiming 60 bytes)
-    let result: Result<(), crate::AllocError> = bag.try_assign(12, b"newdata!!!");
+    let result: Result<(), AllocError> = bag.try_assign(12, b"newdata!!!");
     assert!(result.is_ok());
 
     // After compaction + new assignment: 60 + 10 = 70 bytes
@@ -925,7 +926,7 @@ fn test_try_assign_grows_when_compact_insufficient() {
     let old_capacity = bag.capacity();
 
     // Try to assign - compaction won't help, must grow
-    let result: Result<(), crate::AllocError> = bag.try_assign(2, b"newdata!");
+    let result: Result<(), AllocError> = bag.try_assign(2, b"newdata!");
     assert!(result.is_ok());
 
     // Capacity should have grown

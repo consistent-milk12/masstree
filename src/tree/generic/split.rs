@@ -1,3 +1,4 @@
+use crate::leaf_trait::{SplitInsertData, SplitInsertResult};
 use crate::{SplitPoint, nodeversion::LockGuard};
 
 use super::{
@@ -66,6 +67,12 @@ where
     /// # C++ Reference
     ///
     /// Matches `tcursor::make_split()` in `reference/masstree_split.hh:179-297`.
+    ///
+    /// # Note
+    ///
+    /// This function is kept for backward compatibility and testing.
+    /// Production code uses `handle_leaf_split_and_insert_generic()` instead.
+    #[expect(dead_code, reason = "kept for backward compatibility and testing")]
     pub(crate) fn handle_leaf_split_generic(
         &self,
         left_leaf_ptr: *mut L,
@@ -119,7 +126,7 @@ where
 
         // Perform the split
         // NOTE: split_into_preallocated sets the split-locked version on right_leaf
-        let (split_ikey, _) =
+        let _ =
             unsafe { left_leaf.split_into_preallocated(split_point.pos, right_leaf_ptr, guard) };
 
         // Link leaves in B-link order
@@ -134,6 +141,11 @@ where
         // 1. No-abandon invariant requires completion
         // 2. Internode splits are rare
         // 3. The alternative (corruption) is worse
+        //
+        // NOTE: We use split_point.split_ikey (computed in calculate_split_point)
+        // instead of the one returned by split_into_preallocated. This is critical
+        // for the forward-sequential optimization where entries_to_move = 0 and
+        // the right leaf is empty - we can't read split_ikey from an empty leaf.
 
         let result: Result<(), InsertError> = Propagation::make_split_leaf::<S, L, A>(
             &self.root_ptr,
@@ -141,13 +153,129 @@ where
             left_leaf_ptr,
             lock,
             right_leaf_ptr,
-            split_ikey,
+            split_point.split_ikey,
             is_main_root,
             is_layer_root,
             guard,
         );
 
         result
+    }
+
+    /// Handle a leaf split with atomic insert.
+    ///
+    /// This function implements the ATOMIC SPLIT+INSERT pattern matching C++ Masstree:
+    ///
+    /// # Key Difference from `handle_leaf_split_generic`
+    ///
+    /// Instead of split-then-retry:
+    /// 1. Calculate split point
+    /// 2. Allocate new leaf
+    /// 3. Mark split in progress
+    /// 4. Perform split AND insert atomically
+    /// 5. Link leaves
+    /// 6. Propagate to parent
+    /// 7. **Return success - insert is complete!**
+    ///
+    /// # Benefits
+    ///
+    /// - Enables forward-sequential optimization (`split_pos == size`)
+    /// - Right leaf is never empty (new key is always inserted)
+    /// - No retry needed after split - insert completes in one operation
+    ///
+    /// # Arguments
+    ///
+    /// - `left_leaf_ptr`: Pointer to the leaf being split
+    /// - `lock`: Lock guard (ownership transferred to propagation)
+    /// - `logical_pos`: Insert position for the new key
+    /// - `insert_data`: Key and value data to insert
+    /// - `guard`: Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SplitInsertResult)` - Split and insert completed successfully
+    /// * `Err(InsertError::AllocationFailed)` - Could not allocate sibling leaf
+    /// * `Err(InsertError::SplitFailed)` - Could not calculate split point
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `tcursor::make_split()` in `reference/masstree_split.hh` combined with
+    /// `leaf::split_into()` atomic insert.
+    pub(crate) fn handle_leaf_split_and_insert_generic(
+        &self,
+        left_leaf_ptr: *mut L,
+        lock: LockGuard<'_>,
+        logical_pos: usize,
+        insert_data: SplitInsertData<'_>,
+        guard: &LocalGuard<'_>,
+    ) -> Result<SplitInsertResult, InsertError> {
+        let left_leaf: &L = unsafe { &*left_leaf_ptr };
+        let insert_ikey = insert_data.ikey;
+
+        // Calculate split point
+        let split_point: SplitPoint = left_leaf
+            .calculate_split_point(logical_pos, insert_ikey)
+            .ok_or(InsertError::SplitFailed)?;
+
+        // =========================================================================
+        // CRITICAL: Capture root status BEFORE mark_split
+        // =========================================================================
+        let root_flag_set: bool = left_leaf.version().is_root();
+        let parent_is_null: bool = left_leaf.parent().is_null();
+
+        let is_main_root: bool = root_flag_set && {
+            let current_root: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
+            std::ptr::eq(current_root, left_leaf_ptr)
+        };
+
+        let is_layer_root: bool = root_flag_set && parent_is_null && !is_main_root;
+
+        // =========================================================================
+        // FALLIBLE POINT: Allocate right sibling BEFORE mark_split
+        // =========================================================================
+        let right_leaf_ptr: *mut L = self.allocator.try_alloc_leaf(false, false)?;
+
+        // =========================================================================
+        // PAST POINT OF NO RETURN: mark_split() and beyond
+        // =========================================================================
+        let mut lock: LockGuard<'_> = lock;
+        lock.mark_split();
+
+        // Perform the ATOMIC split+insert
+        // SAFETY: We hold the lock, new leaf is valid and not yet visible
+        let result: SplitInsertResult = unsafe {
+            left_leaf.split_and_insert(
+                split_point.pos,
+                right_leaf_ptr,
+                logical_pos,
+                insert_data,
+                guard,
+            )
+        };
+
+        // Link leaves in B-link order
+        // SAFETY: We hold the lock
+        unsafe { left_leaf.link_sibling(right_leaf_ptr) };
+
+        // =========================================================================
+        // INFALLIBLE: Propagation
+        // =========================================================================
+        // Use result.split_ikey (from the actual split) for parent propagation.
+        // This handles the forward-sequential case where the new key becomes
+        // the separator.
+        let _propagate_result: Result<(), InsertError> = Propagation::make_split_leaf::<S, L, A>(
+            &self.root_ptr,
+            &self.allocator,
+            left_leaf_ptr,
+            lock,
+            right_leaf_ptr,
+            result.split_ikey,
+            is_main_root,
+            is_layer_root,
+            guard,
+        );
+
+        Ok(result)
     }
 
     /// Propagate a leaf split to the parent.
@@ -173,8 +301,8 @@ where
     fn try_find_child_index_generic(&self, parent: &L::Internode, child: *mut u8) -> Option<usize> {
         use crate::leaf_trait::TreeInternode;
 
-        let nkeys = parent.nkeys();
-        (0..=nkeys).find(|&i| parent.child(i) == child)
+        let nkeys: usize = parent.nkeys();
+        (0..=nkeys).find(|i: &usize| parent.child(*i) == child)
     }
 
     /// Find the child index for a given child pointer in an internode.

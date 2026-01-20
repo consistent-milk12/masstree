@@ -1373,6 +1373,147 @@ where
     LeafBatchResultBack::LeafExhausted
 }
 
+/// Batch process entries in a leaf for reverse iteration (value by copy).
+///
+/// This is the non-reference variant that works with ALL storage types including
+/// true-inline (`TrueInlineSlot`). Unlike `process_prev_leaf_batch_ptr` which
+/// dereferences pointers to return `&S::Value`, this uses `S::output_from_raw()`
+/// to return `S::Output` by value.
+///
+/// # Safety Considerations
+///
+/// For true-inline storage, `leaf_value_ptr()` returns an encoded sentinel pointer
+/// (value bits `XORed` with magic constant). This sentinel is NOT a valid memory
+/// address and must NOT be dereferenced. `S::output_from_raw()` correctly decodes
+/// these bits back into the value.
+///
+/// # Performance
+///
+/// Same batch optimization as `process_prev_leaf_batch_ptr`:
+/// - Single OCC validation per leaf
+/// - No per-entry function call overhead
+/// - Prefetching for pipelining
+///
+/// Expected 2-3x improvement for reverse scans touching many entries per leaf.
+#[inline]
+#[expect(clippy::too_many_arguments)]
+pub fn process_prev_leaf_batch<L, S, F>(
+    stack: &mut BackStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<L>,
+    start_bound: &RangeBound<'_>,
+    helper: &mut ReverseScanHelper,
+    visitor: &mut F,
+    count: &mut usize,
+) -> LeafBatchResultBack
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+    F: FnMut(&[u8], S::Output) -> bool,
+{
+    // Cache leaf pointer to avoid borrow conflicts
+    let leaf_ptr: *const L = stack.get_leaf_ptr();
+    let leaf: &L = unsafe { &*leaf_ptr };
+    let perm = *stack.get_perm_ref();
+    let perm_size = perm.size();
+    let cached_version = stack.get_version();
+
+    // Check if leaf was deleted since we cached the version
+    if leaf.version().is_deleted() {
+        return LeafBatchResultBack::VersionChanged;
+    }
+
+    // Get current position (signed for reverse iteration)
+    let mut ki: isize = stack.get_ki();
+
+    // Process remaining entries in reverse order
+    while ki >= 0 && ki.cast_unsigned() < perm_size {
+        let slot = perm.get(ki.cast_unsigned());
+
+        // Read slot data with relaxed ordering (permutation provides synchronization)
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
+        let slot_keylenx: u8 = leaf.keylenx(slot);
+
+        // Prefetch previous slot's value to hide memory latency
+        if ki > 0 {
+            let prev_slot: usize = perm.get((ki - 1).cast_unsigned());
+            prefetch_read(leaf.leaf_value_ptr(prev_slot));
+        }
+
+        // Check for layer pointer - must handle via state machine
+        if slot_keylenx >= LAYER_KEYLENX {
+            // Set up for layer descent
+            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+            layer_stack.push(LayerContext::new(stack.get_root(), stack.get_leaf_ptr()));
+            cursor_key.assign_store_ikey(slot_ikey);
+            prefetch_read(slot_ptr);
+            stack.set_root(slot_ptr.cast_const());
+            // Update ki for when we return from sublayer
+            stack.set_ki(ki - 1);
+            return LeafBatchResultBack::LayerEncountered;
+        }
+
+        // Get value pointer
+        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        if slot_ptr.is_null() {
+            ki -= 1;
+            continue;
+        }
+
+        // Build key
+        cursor_key.assign_store_ikey(slot_ikey);
+
+        let _key_len: usize = if slot_keylenx == KSUF_KEYLENX {
+            if let Some(suffix) = leaf.ksuf(slot) {
+                let suffix_len = suffix.len();
+                let _ = cursor_key.assign_store_suffix(suffix);
+                cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
+                IKEY_SIZE + suffix_len
+            } else {
+                cursor_key.assign_store_length(IKEY_SIZE);
+                IKEY_SIZE
+            }
+        } else {
+            let len = slot_keylenx as usize;
+            cursor_key.assign_store_length(len);
+            len
+        };
+
+        cursor_key.mark_key_complete();
+
+        // Clear upper_bound after first successful key emission
+        helper.mark_key_complete();
+
+        // Check start bound (for reverse iteration)
+        let key: &[u8] = cursor_key.full_key();
+        if !start_bound.contains_reverse(key) {
+            return LeafBatchResultBack::StartBoundExceeded;
+        }
+
+        // SAFETY: Guard protects slot, output_from_raw handles encoding correctly
+        let output: S::Output = unsafe { S::output_from_raw(slot_ptr) };
+
+        *count += 1;
+        ki -= 1;
+
+        if !visitor(key, output) {
+            // Update stack position before returning
+            stack.set_ki(ki);
+            return LeafBatchResultBack::Stopped;
+        }
+    }
+
+    // Update stack with final position
+    stack.set_ki(ki);
+
+    // Validate version after processing batch (OCC)
+    if leaf.version().has_changed(cached_version) {
+        return LeafBatchResultBack::VersionChanged;
+    }
+
+    LeafBatchResultBack::LeafExhausted
+}
+
 /// Advance to previous leaf in the B-link chain (batch processing variant).
 ///
 /// This is a simplified version of `advance_to_prev_leaf` for use in batch
@@ -1647,6 +1788,137 @@ where
     stack.update_state(prev_version, perm, ki);
 
     (ScanStateBack::FindPrev, None)
+}
+
+// ============================================================================
+//  Value-Only Batch Processing (Reverse)
+// ============================================================================
+
+/// Process previous leaf batch without key materialization (values only).
+///
+/// This is the performance-critical function for value-only reverse scans. It:
+/// - Skips all key building (no `assign_store_ikey`, `assign_store_suffix`)
+/// - Uses ikey-only start bound check (approximate for suffix keys)
+/// - Directly extracts and passes values to visitor
+///
+/// # Start Bound Approximation (Reverse Scan)
+///
+/// For reverse scans, the start bound is the lower bound (stopping condition).
+/// We only compare `slot_ikey` against `start_bound_ikey`.
+///
+/// This is exact when:
+/// - Start bound is `Unbounded` (`start_bound_ikey` is `None`)
+/// - Keys have no suffix (`keylenx <= 8`)
+/// - `slot_ikey != start_bound_ikey`
+///
+/// It may over-include entries when `slot_ikey == start_bound_ikey` and both
+/// have suffixes. This is documented in the public API.
+///
+/// # Performance
+///
+/// For 64-byte keys, this saves ~47% of scan time by eliminating:
+/// - `assign_store_suffix()` (30.7% of time)
+/// - `copy_from_slice()` calls (16.7% of time)
+#[inline]
+#[expect(clippy::too_many_arguments)]
+pub fn process_prev_leaf_batch_values<L, S, F>(
+    stack: &mut BackStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<L>,
+    start_bound_ikey: Option<u64>,
+    helper: &mut ReverseScanHelper,
+    visitor: &mut F,
+    count: &mut usize,
+) -> LeafBatchResultBack
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+    F: FnMut(S::Output) -> bool,
+{
+    let leaf_ptr: *const L = stack.get_leaf_ptr();
+    let leaf: &L = unsafe { &*leaf_ptr };
+    let perm = *stack.get_perm_ref();
+    let perm_size = perm.size();
+    let cached_version = stack.get_version();
+
+    // Check if leaf was deleted since we cached the version
+    if leaf.version().is_deleted() {
+        return LeafBatchResultBack::VersionChanged;
+    }
+
+    // Get current position (signed for reverse iteration)
+    let mut ki: isize = stack.get_ki();
+
+    // Process remaining entries in reverse order
+    while ki >= 0 && ki.cast_unsigned() < perm_size {
+        let slot = perm.get(ki.cast_unsigned());
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
+        let slot_keylenx: u8 = leaf.keylenx(slot);
+
+        // Prefetch previous slot's value to hide memory latency
+        if ki > 0 {
+            let prev_slot: usize = perm.get((ki - 1).cast_unsigned());
+            prefetch_read(leaf.leaf_value_ptr(prev_slot));
+        }
+
+        // Handle layer pointer - must use state machine
+        if slot_keylenx >= LAYER_KEYLENX {
+            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+            layer_stack.push(LayerContext::new(stack.get_root(), stack.get_leaf_ptr()));
+            // Still need to track ikey for layer navigation
+            cursor_key.assign_store_ikey(slot_ikey);
+            prefetch_read(slot_ptr);
+            stack.set_root(slot_ptr.cast_const());
+            stack.set_ki(ki - 1);
+            return LeafBatchResultBack::LayerEncountered;
+        }
+
+        // Fast start bound check (ikey only) for reverse iteration
+        // This is approximate for suffix keys when slot_ikey == bound_ikey
+        if let Some(bound_ikey) = start_bound_ikey
+            && slot_ikey < bound_ikey
+        {
+            return LeafBatchResultBack::StartBoundExceeded;
+        }
+
+        // Get value pointer
+        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        if slot_ptr.is_null() {
+            ki -= 1;
+            continue;
+        }
+
+        // === KEY DIFFERENCE: No key building at all ===
+        // Skip: cursor_key.assign_store_ikey(slot_ikey);
+        // Skip: cursor_key.assign_store_suffix(suffix);
+        // Skip: cursor_key.assign_store_length(...);
+
+        // Clear upper_bound after first successful key emission
+        helper.mark_key_complete();
+
+        // Get value directly
+        // SAFETY: Guard protects slot, output_from_raw handles encoding correctly
+        let output: S::Output = unsafe { S::output_from_raw(slot_ptr) };
+
+        *count += 1;
+        ki -= 1;
+
+        // Visitor receives only value, no key
+        if !visitor(output) {
+            stack.set_ki(ki);
+            return LeafBatchResultBack::Stopped;
+        }
+    }
+
+    // Update stack with final position
+    stack.set_ki(ki);
+
+    // Validate version after processing batch (OCC)
+    if leaf.version().has_changed(cached_version) {
+        return LeafBatchResultBack::VersionChanged;
+    }
+
+    LeafBatchResultBack::LeafExhausted
 }
 
 // ============================================================================

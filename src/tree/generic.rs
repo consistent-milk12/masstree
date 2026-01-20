@@ -8,11 +8,12 @@ use std::{
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
-    Linker, MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation,
+    BatchedRetire, Linker, MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation,
     key::Key,
     leaf_trait::LayerCapableLeaf,
     leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
-    nodeversion::NodeVersion,
+    nodeversion::{LockGuard, NodeVersion},
+    prefetch::prefetch_read,
     shard_counter::ShardedCounter,
     slot::ValueSlot,
     tree::{
@@ -108,7 +109,7 @@ where
     #[inline(always)]
     pub fn flush(&self, guard: &LocalGuard<'_>) {
         self.verify_guard(guard);
-        crate::BatchedRetire::flush(guard);
+        BatchedRetire::flush(guard);
     }
 
     /// Get the approximate number of keys in the tree.
@@ -971,7 +972,7 @@ where
             let next_next_raw: *mut L = next.next_raw();
             let next_next_ptr: *mut L = Linker::unmark_ptr(next_next_raw);
             if !next_next_ptr.is_null() {
-                crate::prefetch::prefetch_read(next_next_ptr.cast::<u8>());
+                prefetch_read(next_next_ptr.cast::<u8>());
             }
 
             let next_bound: u64 = next.ikey_bound();
@@ -1108,7 +1109,7 @@ where
     fn assign_slot_generic(
         &self,
         leaf: &L,
-        lock: &mut crate::nodeversion::LockGuard<'_>,
+        lock: &mut LockGuard<'_>,
         slot: usize,
         key: &Key<'_>,
         value: &S::Output,

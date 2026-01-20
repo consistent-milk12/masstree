@@ -109,7 +109,7 @@ fn test_parent_accessors() {
     let node: Box<InternodeNode> = InternodeNode::new(0);
     let mut parent: Box<InternodeNode> = InternodeNode::new(1);
 
-    let parent_ptr: *mut InternodeNode = parent.as_mut() as *mut InternodeNode;
+    let parent_ptr: *mut InternodeNode = StdPtr::from_mut::<InternodeNode>(parent.as_mut());
 
     // set_parent takes *mut u8, so cast the pointer
     node.set_parent(parent_ptr.cast::<u8>());

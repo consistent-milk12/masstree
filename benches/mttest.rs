@@ -16,6 +16,7 @@
 #![allow(clippy::map_unwrap_or)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#![allow(unused_variables)]
 #![expect(clippy::struct_excessive_bools)]
 
 use clap::Parser;
@@ -68,7 +69,7 @@ fn timed_out() -> bool {
     TIMEOUT.load(Ordering::Relaxed)
 }
 
-/// Check timeout only every TIMEOUT_CHECK_INTERVAL operations.
+/// Check timeout only every [`TIMEOUT_CHECK_INTERVAL`] operations.
 /// Returns true if timed out, false otherwise.
 #[inline(always)]
 fn should_stop(op_count: u64) -> bool {

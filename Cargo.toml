@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.5.12"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -241,6 +241,10 @@ harness = false
 
 [[bench]]
 name = "range_masstree15"
+harness = false
+
+[[bench]]
+name = "range_masstree15_inline"
 harness = false
 
 [[bench]]

@@ -1,7 +1,10 @@
 use super::{LeafNode24, LocalGuard, StdPtr, ValueSlot};
 
-use crate::value::traits::{
-    LeafValueClear, LeafValueLoad, LeafValueStore, LeafValueTake, LeafValueUpdate,
+use crate::{
+    BatchedRetire,
+    value::traits::{
+        LeafValueClear, LeafValueLoad, LeafValueStore, LeafValueTake, LeafValueUpdate,
+    },
 };
 
 // ============================================================================
@@ -63,7 +66,7 @@ where
         if S::NEEDS_RETIREMENT {
             // Use batched retirement to amortize coordination overhead
             unsafe {
-                crate::BatchedRetire::defer_value::<S>(old_ptr, guard);
+                BatchedRetire::defer_value::<S>(old_ptr, guard);
             }
         }
 
@@ -84,7 +87,7 @@ where
         if !old_ptr.is_null() && S::NEEDS_RETIREMENT {
             // Use batched retirement to amortize coordination overhead
             unsafe {
-                crate::BatchedRetire::defer_value::<S>(old_ptr, guard);
+                BatchedRetire::defer_value::<S>(old_ptr, guard);
             }
         }
     }
@@ -113,7 +116,7 @@ where
         if S::NEEDS_RETIREMENT {
             // Use batched retirement to amortize coordination overhead
             unsafe {
-                crate::BatchedRetire::defer_value::<S>(old_ptr, guard);
+                BatchedRetire::defer_value::<S>(old_ptr, guard);
             }
         }
 

@@ -1,3 +1,6 @@
+use std::array as StdArray;
+use std::sync::atomic::{Ordering as AtomicOrdering, fence};
+
 use seize::Guard;
 
 use crate::{
@@ -100,12 +103,12 @@ impl InternodeNode {
     #[expect(clippy::indexing_slicing)]
     pub fn load_all_ikeys(&self) -> [u64; WIDTH] {
         // Use Relaxed loads - ordering is established by the fence below
-        let ikeys: [u64; WIDTH] = std::array::from_fn(|i| self.ikey0[i].load(RELAXED));
+        let ikeys: [u64; WIDTH] = StdArray::from_fn(|i| self.ikey0[i].load(RELAXED));
 
         // Single Acquire fence ensures all loads above complete before we return,
         // and synchronizes with Release stores from writers. This is equivalent to
         // 15 individual Acquire loads but more efficient (1 fence vs 15 barriers).
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        fence(AtomicOrdering::Acquire);
 
         ikeys
     }

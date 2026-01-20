@@ -1326,6 +1326,257 @@ where
     LeafBatchResult::LeafExhausted
 }
 
+/// Process remaining entries in current leaf, returning values by copy.
+///
+/// This is the variant of [`process_leaf_batch_ptr`] that works for ALL `ValueSlot`
+/// types, including true-inline storage. Instead of returning `&S::Value` references
+/// (which requires pointer-backed storage), it returns `S::Output` by value.
+///
+/// # Key Differences from `process_leaf_batch_ptr`
+///
+/// | Aspect | `process_leaf_batch_ptr` | `process_leaf_batch` |
+/// |--------|--------------------------|----------------------|
+/// | Visitor signature | `FnMut(&[u8], &S::Value)` | `FnMut(&[u8], S::Output)` |
+/// | Value access | `&*slot_ptr.cast()` (deref) | `S::output_from_raw()` |
+/// | Storage support | `RefValueSlot` only | All `ValueSlot` types |
+/// | Use case | Zero-copy for Arc/Box | Universal, works with inline |
+///
+/// # Performance for Inline Storage
+///
+/// For true-inline storage (`TrueInlineSlot<V>`), this avoids the encode/decode
+/// dance that would occur with pointer dereference (which is UB for inline anyway).
+/// The `output_from_raw` call for inline simply decodes the value bits from the
+/// pointer address.
+///
+/// # Algorithm
+///
+/// Same as `process_leaf_batch_ptr`:
+/// 1. Read slot data `(ikey, keylenx, value_ptr)`
+/// 2. If layer pointer → return [`LeafBatchResult::LayerEncountered`]
+/// 3. If null value → skip
+/// 4. Build key and call visitor with `S::output_from_raw()`
+/// 5. Check end bound
+/// 6. Validate version (OCC) after batch
+#[inline]
+pub fn process_leaf_batch<L, S, F>(
+    stack: &mut ScanStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<L>,
+    end_bound: &RangeBound<'_>,
+    visitor: &mut F,
+    count: &mut usize,
+) -> LeafBatchResult
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+    F: FnMut(&[u8], S::Output) -> bool,
+{
+    // Cache leaf pointer to avoid borrow conflicts
+    let leaf_ptr: *const L = stack.leaf_ptr();
+    // SAFETY: leaf_ptr is valid - protected by guard in caller
+    let leaf: &L = unsafe { &*leaf_ptr };
+    let perm = stack.perm();
+    let perm_size = perm.size();
+    let cached_version = stack.version();
+
+    // Check if leaf was deleted since we cached the version
+    if leaf.version().is_deleted() {
+        return LeafBatchResult::VersionChanged;
+    }
+
+    // Process remaining entries in this leaf
+    while stack.ki() < perm_size {
+        let slot = perm.get(stack.ki());
+
+        // Read slot data with relaxed ordering (permutation provides synchronization)
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
+        let slot_keylenx: u8 = leaf.keylenx(slot);
+
+        // Check for layer pointer - must handle via state machine
+        if slot_keylenx >= LAYER_KEYLENX {
+            // Set up for layer descent
+            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+            layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
+            cursor_key.assign_store_ikey(slot_ikey);
+            prefetch_read(slot_ptr);
+            stack.set_root(slot_ptr);
+            return LeafBatchResult::LayerEncountered;
+        }
+
+        // Get value pointer (for inline: returns encoded value bits as pointer)
+        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        if slot_ptr.is_null() {
+            stack.next();
+            continue;
+        }
+
+        // Build key
+        let _key_len: usize = if slot_keylenx == KSUF_KEYLENX {
+            if let Some(suffix) = leaf.ksuf(slot) {
+                let suffix_len = suffix.len();
+                cursor_key.assign_store_ikey(slot_ikey);
+                let _ = cursor_key.assign_store_suffix(suffix);
+                cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
+                IKEY_SIZE + suffix_len
+            } else {
+                cursor_key.assign_store_ikey(slot_ikey);
+                cursor_key.assign_store_length(IKEY_SIZE);
+                IKEY_SIZE
+            }
+        } else {
+            let len = slot_keylenx as usize;
+            cursor_key.assign_store_ikey(slot_ikey);
+            cursor_key.assign_store_length(len);
+            len
+        };
+
+        cursor_key.mark_key_complete();
+
+        // Check end bound
+        let key: &[u8] = cursor_key.full_key();
+        if !end_bound.contains(key) {
+            return LeafBatchResult::EndBoundExceeded;
+        }
+
+        // Get value via output_from_raw - works for all storage types:
+        // - Arc-based: increments refcount, returns Arc<V>
+        // - Box-based: copies the value, returns V
+        // - Inline: decodes bits from pointer address, returns V
+        //
+        // SAFETY: Guard protects the value, slot is valid (non-null, in permutation)
+        let output: S::Output = unsafe { S::output_from_raw(slot_ptr) };
+
+        *count += 1;
+        stack.next();
+
+        if !visitor(key, output) {
+            return LeafBatchResult::Stopped;
+        }
+    }
+
+    // Validate version after processing batch (OCC)
+    if leaf.version().has_changed(cached_version) {
+        return LeafBatchResult::VersionChanged;
+    }
+
+    LeafBatchResult::LeafExhausted
+}
+
+/// Process leaf batch without key materialization (values only).
+///
+/// This is the performance-critical function for value-only scans. It:
+/// - Skips all key building (no `assign_store_ikey`, `assign_store_suffix`)
+/// - Uses ikey-only end bound check (approximate for suffix keys)
+/// - Directly extracts and passes values to visitor
+///
+/// # End Bound Approximation
+///
+/// For bounded scans, we only compare `slot_ikey` against `end_bound_ikey`.
+/// This is exact when:
+/// - End bound is `Unbounded` (`end_bound_ikey` is `None`)
+/// - Keys have no suffix (`keylenx <= 8`)
+/// - `slot_ikey != end_bound_ikey`
+///
+/// It may over-include entries when `slot_ikey == end_bound_ikey` and both
+/// have suffixes. This is documented in the public API.
+///
+/// # Performance
+///
+/// For 64-byte keys, this saves ~47% of scan time by eliminating:
+/// - `assign_store_suffix()` (30.7% of time)
+/// - `copy_from_slice()` calls (16.7% of time)
+///
+/// # Algorithm
+///
+/// 1. Read slot data `(ikey, keylenx, value_ptr)`
+/// 2. If layer pointer → return [`LeafBatchResult::LayerEncountered`]
+/// 3. Fast end bound check: `slot_ikey > end_bound_ikey` → stop
+/// 4. If null value → skip
+/// 5. Call visitor with value only (no key)
+/// 6. Validate version (OCC) after batch
+#[inline]
+pub fn process_leaf_batch_values<L, S, F>(
+    stack: &mut ScanStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<L>,
+    end_bound_ikey: Option<u64>,
+    visitor: &mut F,
+    count: &mut usize,
+) -> LeafBatchResult
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+    F: FnMut(S::Output) -> bool,
+{
+    let leaf_ptr: *const L = stack.leaf_ptr();
+    // SAFETY: leaf_ptr is valid - protected by guard in caller
+    let leaf: &L = unsafe { &*leaf_ptr };
+    let perm = stack.perm();
+    let perm_size = perm.size();
+    let cached_version = stack.version();
+
+    // Check if leaf was deleted since we cached the version
+    if leaf.version().is_deleted() {
+        return LeafBatchResult::VersionChanged;
+    }
+
+    while stack.ki() < perm_size {
+        let slot = perm.get(stack.ki());
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
+        let slot_keylenx: u8 = leaf.keylenx(slot);
+
+        // Handle layer pointer - must use state machine
+        if slot_keylenx >= LAYER_KEYLENX {
+            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+            layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
+            // Still need to track ikey for layer navigation
+            cursor_key.assign_store_ikey(slot_ikey);
+            prefetch_read(slot_ptr);
+            stack.set_root(slot_ptr);
+            return LeafBatchResult::LayerEncountered;
+        }
+
+        // Fast end bound check (ikey only)
+        // This is approximate for suffix keys when slot_ikey == bound_ikey
+        if let Some(bound_ikey) = end_bound_ikey
+            && slot_ikey > bound_ikey
+        {
+            return LeafBatchResult::EndBoundExceeded;
+        }
+
+        // Get value pointer
+        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        if slot_ptr.is_null() {
+            stack.next();
+            continue;
+        }
+
+        // === KEY DIFFERENCE: No key building at all ===
+        // Skip: cursor_key.assign_store_ikey(slot_ikey);
+        // Skip: cursor_key.assign_store_suffix(suffix);
+        // Skip: cursor_key.assign_store_length(...);
+
+        // Get value directly
+        // SAFETY: Guard protects value, slot is valid (non-null, in permutation)
+        let output: S::Output = unsafe { S::output_from_raw(slot_ptr) };
+
+        *count += 1;
+        stack.next();
+
+        // Visitor receives only value, no key
+        if !visitor(output) {
+            return LeafBatchResult::Stopped;
+        }
+    }
+
+    // Validate version after processing batch (OCC)
+    if leaf.version().has_changed(cached_version) {
+        return LeafBatchResult::VersionChanged;
+    }
+
+    LeafBatchResult::LeafExhausted
+}
+
 // ============================================================================
 //  Tests
 // ============================================================================

@@ -1,3 +1,6 @@
+#![allow(clippy::indexing_slicing)]
+#![allow(unused_variables)]
+
 use super::{
     InsertError, MassTree, MassTree15, MassTree15Inline, MassTree24, MassTreeGeneric, MassTreeIndex,
 };
@@ -1898,4 +1901,103 @@ fn test_wrong_guard_panics_on_iter() {
     let wrong_guard = tree2.guard();
     // Should panic in debug builds - guard is from wrong tree
     let _ = tree1.iter(&wrong_guard).count();
+}
+
+// ========================================================================
+//  Single-Layer Search Optimization Tests
+// ========================================================================
+
+/// Test that inline keys work correctly when a layer pointer exists in the leaf.
+///
+/// This creates a layer pointer by inserting two long keys with the same 8-byte
+/// ikey prefix but different suffixes (suffix conflict → layer creation).
+/// Then inserts inline keys with the same ikey prefix to verify they are
+/// handled correctly by the implicit ordering logic.
+#[test]
+fn test_inline_key_with_layer_pointer() {
+    use crate::RangeBound;
+
+    let tree: MassTree<u64> = MassTree::new();
+    let guard = tree.guard();
+
+    // Two keys with same first 8 bytes but different suffixes → creates layer pointer
+    // "hello wo" is the shared 8-byte ikey
+    tree.insert(b"hello woAAAA", 1).unwrap();
+    tree.insert(b"hello woBBBB", 2).unwrap();
+
+    // Now insert inline keys with the same ikey prefix
+    // These must be handled correctly despite the layer pointer in the leaf
+    tree.insert(b"hello wo", 3).unwrap(); // Exactly 8 bytes
+    tree.insert(b"hello w", 4).unwrap(); // 7 bytes
+    tree.insert(b"hello", 5).unwrap(); // 5 bytes
+
+    // Verify all keys are retrievable
+    assert_eq!(tree.get(b"hello woAAAA").map(|v| *v), Some(1));
+    assert_eq!(tree.get(b"hello woBBBB").map(|v| *v), Some(2));
+    assert_eq!(tree.get(b"hello wo").map(|v| *v), Some(3));
+    assert_eq!(tree.get(b"hello w").map(|v| *v), Some(4));
+    assert_eq!(tree.get(b"hello").map(|v| *v), Some(5));
+
+    // Verify ordering via scan (shorter keys before longer, inline before layer)
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    tree.scan(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |k, _| {
+            keys.push(k.to_vec());
+            true
+        },
+        &guard,
+    );
+
+    // Expected order: "hello" < "hello w" < "hello wo" < "hello woAAAA" < "hello woBBBB"
+    assert_eq!(keys.len(), 5);
+    assert_eq!(keys[0], b"hello");
+    assert_eq!(keys[1], b"hello w");
+    assert_eq!(keys[2], b"hello wo");
+    assert_eq!(keys[3], b"hello woAAAA");
+    assert_eq!(keys[4], b"hello woBBBB");
+}
+
+/// Test inline keys that share the same ikey due to zero-padding.
+///
+/// This exercises the "keylenx ordering decides position" logic that
+/// relies on for implicit layer/suffix handling.
+#[test]
+fn test_inline_keys_same_ikey_different_lengths() {
+    use crate::RangeBound;
+
+    let tree: MassTree<u64> = MassTree::new();
+    let guard = tree.guard();
+
+    // All these keys have the same ikey (zero-padded to 8 bytes)
+    // but different keylenx values (1, 2, 3, 8)
+    tree.insert(b"a", 1).unwrap();
+    tree.insert(b"aa", 2).unwrap();
+    tree.insert(b"aaa", 3).unwrap();
+    tree.insert(b"aaaaaaaa", 8).unwrap(); // Exactly 8 bytes
+
+    // Verify retrieval
+    assert_eq!(tree.get(b"a").map(|v| *v), Some(1));
+    assert_eq!(tree.get(b"aa").map(|v| *v), Some(2));
+    assert_eq!(tree.get(b"aaa").map(|v| *v), Some(3));
+    assert_eq!(tree.get(b"aaaaaaaa").map(|v| *v), Some(8));
+
+    // Verify ordering
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    tree.scan(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |k, _| {
+            keys.push(k.to_vec());
+            true
+        },
+        &guard,
+    );
+
+    assert_eq!(keys.len(), 4);
+    assert_eq!(keys[0], b"a");
+    assert_eq!(keys[1], b"aa");
+    assert_eq!(keys[2], b"aaa");
+    assert_eq!(keys[3], b"aaaaaaaa");
 }

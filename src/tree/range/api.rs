@@ -260,6 +260,252 @@ where
         self.range(start, end, guard).for_each(visitor)
     }
 
+    /// Highest-performance batch-optimized range scan.
+    ///
+    /// This is the fastest scan method for all storage types including inline.
+    /// Unlike [`scan`](Self::scan), this method processes entries in batches
+    /// within each leaf node, reducing per-entry overhead.
+    ///
+    /// # Performance Characteristics
+    ///
+    /// - Processes all entries in a leaf before moving to next leaf
+    /// - Single OCC validation per leaf (vs per-entry in `scan`)
+    /// - No function call overhead per entry within a leaf
+    /// - Falls back to state machine for layer transitions (sublayers)
+    ///
+    /// Expected 2-3x improvement over `scan()` for large scans.
+    ///
+    /// # Availability
+    ///
+    /// Available for ALL storage types including:
+    /// - `MassTree15<V>` (Arc-based)
+    /// - `MassTree24<V>` (Arc-based)
+    /// - `MassTree15Inline<V>` (true-inline)
+    /// - `MassTree24Inline<V>` (Box/index-based)
+    ///
+    /// For pointer-backed storage that can return references, consider
+    /// [`scan_intra_leaf_batch_ref`](Self::scan_intra_leaf_batch_ref) in `api_ref.rs`
+    /// which avoids cloning values.
+    ///
+    /// # Arguments
+    ///
+    /// - `start`: Start bound of the range
+    /// - `end`: End bound of the range
+    /// - `visitor`: Callback function `fn(&[u8], S::Output) -> bool`
+    /// - `guard`: Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// Number of entries visited.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let guard = tree.guard();
+    /// let mut sum = 0u64;
+    ///
+    /// // Fastest scan for large ranges
+    /// tree.scan_intra_leaf_batch(
+    ///     RangeBound::Unbounded,
+    ///     RangeBound::Unbounded,
+    ///     |_key, value| {
+    ///         sum += value;
+    ///         true
+    ///     },
+    ///     &guard
+    /// );
+    /// ```
+    pub fn scan_intra_leaf_batch<F>(
+        &self,
+        start: RangeBound<'_>,
+        end: RangeBound<'_>,
+        visitor: F,
+        guard: &LocalGuard<'_>,
+    ) -> usize
+    where
+        F: FnMut(&[u8], S::Output) -> bool,
+    {
+        self.range(start, end, guard)
+            .for_each_intra_leaf_batch(visitor)
+    }
+
+    /// Highest-performance batch-optimized reverse range scan.
+    ///
+    /// This is the fastest reverse scan method for all storage types including inline.
+    /// Unlike [`scan_intra_leaf_batch`](Self::scan_intra_leaf_batch), this iterates
+    /// in descending key order.
+    ///
+    /// # Performance Characteristics
+    ///
+    /// - Processes all entries in a leaf before moving to previous leaf
+    /// - Single OCC validation per leaf
+    /// - No function call overhead per entry within a leaf
+    /// - Falls back to state machine for layer transitions
+    ///
+    /// Expected 2-3x improvement over standard `iter().rev()` iteration.
+    ///
+    /// # Availability
+    ///
+    /// Available for ALL storage types including:
+    /// - `MassTree15<V>` (Arc-based)
+    /// - `MassTree24<V>` (Arc-based)
+    /// - `MassTree15Inline<V>` (true-inline)
+    /// - `MassTree24Inline<V>` (Box/index-based)
+    ///
+    /// # Arguments
+    ///
+    /// - `start`: Start bound (lower bound - stopping point for reverse)
+    /// - `end`: End bound (upper bound - starting point for reverse)
+    /// - `visitor`: Callback function `fn(&[u8], S::Output) -> bool`
+    /// - `guard`: Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// Number of entries visited.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let guard = tree.guard();
+    /// let mut sum = 0u64;
+    ///
+    /// // Fastest reverse scan for large ranges
+    /// tree.scan_rev_batch(
+    ///     RangeBound::Unbounded,
+    ///     RangeBound::Unbounded,
+    ///     |_key, value| {
+    ///         sum += value;
+    ///         true
+    ///     },
+    ///     &guard
+    /// );
+    /// ```
+    pub fn scan_rev_batch<F>(
+        &self,
+        start: RangeBound<'_>,
+        end: RangeBound<'_>,
+        visitor: F,
+        guard: &LocalGuard<'_>,
+    ) -> usize
+    where
+        F: FnMut(&[u8], S::Output) -> bool,
+    {
+        self.range(start, end, guard)
+            .rev_for_each_intra_leaf_batch(visitor)
+    }
+
+    /// Highest-performance value-only scan (no key materialization).
+    ///
+    /// This is the fastest scan method when you only need values. Keys are not
+    /// built or copied, saving up to 56 bytes of copying per entry for long keys.
+    ///
+    /// # Performance
+    ///
+    /// For 64-byte keys: ~1.5-2x faster than `scan_intra_leaf_batch` when
+    /// the visitor would ignore the key parameter anyway.
+    ///
+    /// # End Bound Behavior
+    ///
+    /// - `Unbounded`: Exact (scans all entries)
+    /// - `Included`/`Excluded`: **Approximate** for keys with suffix
+    ///
+    /// For bounded scans, the end check uses ikey comparison only. This means:
+    /// - Keys where `ikey < bound_ikey`: correctly included
+    /// - Keys where `ikey > bound_ikey`: correctly excluded
+    /// - Keys where `ikey == bound_ikey`: **may over-include** entries
+    ///
+    /// If you need exact end bounds with long keys, use `scan_intra_leaf_batch`.
+    ///
+    /// # When to Use
+    ///
+    /// - Aggregations (sum, count, min, max)
+    /// - Existence checks
+    /// - Any scan where you process values but don't need keys
+    ///
+    /// # When NOT to Use
+    ///
+    /// - When you need the key for each entry
+    /// - When exact end bound semantics matter for long keys
+    ///
+    /// # Arguments
+    ///
+    /// - `start`: Start bound of the range
+    /// - `end`: End bound of the range
+    /// - `visitor`: Callback function `fn(S::Output) -> bool`
+    /// - `guard`: Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// Number of entries visited.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let guard = tree.guard();
+    /// let mut sum = 0u64;
+    ///
+    /// // Fastest: unbounded value scan
+    /// tree.scan_values(
+    ///     RangeBound::Unbounded,
+    ///     RangeBound::Unbounded,
+    ///     |value| { sum += value; true },
+    ///     &guard
+    /// );
+    /// ```
+    pub fn scan_values<F>(
+        &self,
+        start: RangeBound<'_>,
+        end: RangeBound<'_>,
+        visitor: F,
+        guard: &LocalGuard<'_>,
+    ) -> usize
+    where
+        F: FnMut(S::Output) -> bool,
+    {
+        self.range(start, end, guard).for_each_values_batch(visitor)
+    }
+
+    /// Highest-performance reverse value-only scan (no key materialization).
+    ///
+    /// This is the fastest reverse scan method when you only need values.
+    /// Same as [`scan_values`](Self::scan_values) but iterates in descending order.
+    ///
+    /// # Performance
+    ///
+    /// For 64-byte keys: ~1.5-2x faster than `scan_rev_batch` when
+    /// the visitor would ignore the key parameter anyway.
+    ///
+    /// # Start Bound Behavior (Reverse Iteration)
+    ///
+    /// - `Unbounded`: Exact (scans all entries)
+    /// - `Included`/`Excluded`: **Approximate** for keys with suffix
+    ///
+    /// If you need exact start bounds with long keys, use `scan_rev_batch`.
+    ///
+    /// # Arguments
+    ///
+    /// - `start`: Start bound (lower bound - stopping point for reverse)
+    /// - `end`: End bound (upper bound - starting point for reverse)
+    /// - `visitor`: Callback function `fn(S::Output) -> bool`
+    /// - `guard`: Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// Number of entries visited.
+    pub fn scan_values_rev<F>(
+        &self,
+        start: RangeBound<'_>,
+        end: RangeBound<'_>,
+        visitor: F,
+        guard: &LocalGuard<'_>,
+    ) -> usize
+    where
+        F: FnMut(S::Output) -> bool,
+    {
+        self.range(start, end, guard)
+            .rev_for_each_values_batch(visitor)
+    }
+
     /// Scan all entries with a prefix.
     ///
     /// Convenience method for scanning all keys that start with a given prefix.

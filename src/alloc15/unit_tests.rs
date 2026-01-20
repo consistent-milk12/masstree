@@ -5,6 +5,7 @@ use crate::inline::leaf15_true::LeafNode15TrueInline;
 use crate::internode::InternodeNode;
 use crate::leaf_trait::TreeLeafNode;
 use crate::node_pool;
+use crate::nodeversion::NodeVersion;
 use crate::value::LeafValue;
 
 // =============================================================================
@@ -120,7 +121,7 @@ fn test_seize_allocator15_teardown_deep_internode_tree() {
 
         // Update child's parent pointer
         unsafe {
-            let version_ptr = child_ptr.cast::<crate::nodeversion::NodeVersion>();
+            let version_ptr = child_ptr.cast::<NodeVersion>();
             if (*version_ptr).is_leaf() {
                 let leaf: &LeafNode15<LeafValue<u64>> = &*child_ptr.cast();
                 leaf.set_parent(inode_ptr);
@@ -259,7 +260,7 @@ fn test_seize_allocator15_true_inline_teardown_deep_tree() {
 
         // Update child's parent pointer
         unsafe {
-            let version_ptr = child_ptr.cast::<crate::nodeversion::NodeVersion>();
+            let version_ptr = child_ptr.cast::<NodeVersion>();
             if (*version_ptr).is_leaf() {
                 let leaf: &LeafNode15TrueInline<u64> = &*child_ptr.cast();
                 leaf.set_parent(inode_ptr);

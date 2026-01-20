@@ -370,7 +370,7 @@ where
     #[inline]
     fn alloc_internode_direct_for_split(
         &self,
-        parent_version: &crate::nodeversion::NodeVersion,
+        parent_version: &NodeVersion,
         height: u32,
     ) -> *mut u8 {
         use std::alloc::{Layout, alloc};

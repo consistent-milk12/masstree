@@ -18,7 +18,9 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 
 use seize::LocalGuard;
 
+use crate::BatchedRetire;
 use crate::ksearch::upper_bound_internode_generic;
+use crate::tree::coalesce::SublayerContext;
 use crate::{
     TreeInternode,
     alloc_trait::NodeAllocatorGeneric,
@@ -320,7 +322,7 @@ where
             // Use batched retirement to amortize coordination overhead
             // SAFETY: value_ptr is valid (from leaf.leaf_value_ptr()), guard protects reclamation.
             unsafe {
-                crate::BatchedRetire::defer_value::<S>(value_ptr, self.guard);
+                BatchedRetire::defer_value::<S>(value_ptr, self.guard);
             }
         }
 
@@ -356,12 +358,10 @@ where
             let ikey_bound: u64 = leaf.ikey_bound();
 
             // Convert layer context for coalesce queue
-            let sublayer_ctx =
-                self.layer_context
-                    .map(|ctx| crate::tree::coalesce::SublayerContext {
-                        parent_leaf: ctx.parent_leaf.cast_const(),
-                        parent_slot: ctx.parent_slot,
-                    });
+            let sublayer_ctx = self.layer_context.map(|ctx| SublayerContext {
+                parent_leaf: ctx.parent_leaf.cast_const(),
+                parent_slot: ctx.parent_slot,
+            });
 
             // Schedule for cleanup (coalesce will handle leftmost and sublayer cases)
             self.tree

@@ -7,6 +7,7 @@ use seize::{Guard, LocalGuard};
 use static_assertions::const_assert_eq;
 use std::array as StdArray;
 use std::cell::UnsafeCell;
+use std::cmp::Ordering;
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
 use std::mem as StdMem;
@@ -18,14 +19,23 @@ use super::sentinel::InlineSentinel;
 use crate::Linker;
 use crate::alloc_common::BoxAllocator;
 use crate::error::{AllocKind, AllocResult};
+use crate::internode::InternodeNode;
+use crate::key::Key;
+use crate::leaf_trait::LayerCapableLeaf;
+use crate::leaf_trait::SplitInsertData;
+use crate::leaf_trait::SplitInsertResult;
+use crate::leaf_trait::TreeLeafNode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::CAS_FAILURE;
 use crate::ordering::CAS_SUCCESS;
 use crate::ordering::RELAXED;
 use crate::ordering::{READ_ORD, WRITE_ORD};
 use crate::permuter::{AtomicPermuter15, Permuter15};
+use crate::prefetch::prefetch_read;
 use crate::slot::true_inline::TrueInlineSlot;
 use crate::suffix::{InlineSuffixBag, SuffixBag};
+use crate::value::InsertTarget;
+use crate::value::SplitPoint;
 use crate::value::traits::LeafValueClear;
 use crate::value::traits::LeafValueLoad;
 use crate::value::traits::LeafValueStore;
@@ -807,7 +817,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub fn ikey_relaxed(&self, slot: usize) -> u64 {
         debug_assert!(slot < WIDTH_15, "ikey_relaxed: slot out of bounds");
-        self.ikey0[slot].load(crate::ordering::RELAXED)
+        self.ikey0[slot].load(RELAXED)
     }
 
     /// Check if the given slot contains a layer pointer.
@@ -877,7 +887,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub fn take_leaf_value_ptr(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH_15, "take_leaf_value_ptr: slot out of bounds");
-        self.leaf_values[slot].swap(StdPtr::null_mut(), crate::ordering::RELAXED)
+        self.leaf_values[slot].swap(StdPtr::null_mut(), RELAXED)
     }
 
     /// Load the current value pointer at a slot.
@@ -979,7 +989,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     /// Mark the next pointer (during split).
     #[inline(always)]
     pub fn mark_next(&self) {
-        let ptr: *mut Self = self.next.load(crate::ordering::RELAXED);
+        let ptr: *mut Self = self.next.load(RELAXED);
         let marked: *mut Self = ptr.map_addr(|addr: usize| addr | 1);
         self.next.store(marked, WRITE_ORD);
     }
@@ -1203,7 +1213,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             return;
         }
 
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             // SAFETY: old_ext is non-null
             let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
@@ -1234,7 +1244,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             .drain_to_external(&perm, slot, suffix)
             .expect("OOM: suffix bag allocation failed");
 
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             // SAFETY: old_ext is non-null
             let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
@@ -1290,7 +1300,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             return;
         }
 
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
             if bag.try_assign_in_place(slot, suffix) {
@@ -1319,7 +1329,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             .drain_to_external_init(slot, suffix)
             .expect("OOM: suffix bag allocation failed");
 
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
 
@@ -1379,7 +1389,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         // FAST PATH 2: Try external storage in-place (if exists and has room)
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
             if bag.try_assign_in_place(slot, suffix) {
@@ -1422,7 +1432,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         let mut new_bag: SuffixBag<WIDTH_15> = inline.drain_to_external(&perm, slot, suffix)?;
 
         // Merge with existing external suffixes (if any)
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
 
@@ -1485,7 +1495,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         // FAST PATH 2: Try external storage in-place
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
             if bag.try_assign_in_place(slot, suffix) {
@@ -1521,7 +1531,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         let mut new_bag: SuffixBag<WIDTH_15> = inline.drain_to_external_init(slot, suffix)?;
 
         // Merge with existing external suffixes (if any)
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
 
@@ -1568,7 +1578,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             unsafe { &mut *self.inline_ksuf.get() };
         inline.clear(slot);
 
-        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(crate::ordering::RELAXED);
+        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !ext_ptr.is_null() {
             // SAFETY: We hold the lock
             let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *ext_ptr };
@@ -1687,7 +1697,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     #[expect(clippy::indexing_slicing)]
     pub fn prefetch_ikey(&self, slot: usize) {
         debug_assert!(slot < WIDTH_15);
-        crate::prefetch::prefetch_read(&raw const self.ikey0[slot]);
+        prefetch_read(&raw const self.ikey0[slot]);
     }
 
     /// Prefetch leaf node data for range scans.
@@ -1696,10 +1706,10 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
         // SAFETY: Offsets within struct bounds
         unsafe {
-            crate::prefetch::prefetch_read(self_ptr.add(128)); // ikey0[0..7]
-            crate::prefetch::prefetch_read(self_ptr.add(192)); // ikey0[8..14] + keylenx
-            crate::prefetch::prefetch_read(self_ptr.add(256)); // keylenx + leaf_values
-            crate::prefetch::prefetch_read(self_ptr.add(320)); // leaf_values + inline_values
+            prefetch_read(self_ptr.add(128)); // ikey0[0..7]
+            prefetch_read(self_ptr.add(192)); // ikey0[8..14] + keylenx
+            prefetch_read(self_ptr.add(256)); // keylenx + leaf_values
+            prefetch_read(self_ptr.add(320)); // leaf_values + inline_values
         }
     }
 
@@ -1709,9 +1719,9 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
         // SAFETY: Offsets within struct bounds
         unsafe {
-            crate::prefetch::prefetch_read(self_ptr.add(64)); // permutation
-            crate::prefetch::prefetch_read(self_ptr.add(128)); // ikey0[0..7]
-            crate::prefetch::prefetch_read(self_ptr.add(192)); // ikey0[8..14]
+            prefetch_read(self_ptr.add(64)); // permutation
+            prefetch_read(self_ptr.add(128)); // ikey0[0..7]
+            prefetch_read(self_ptr.add(192)); // ikey0[8..14]
         }
     }
 
@@ -1721,13 +1731,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
 
     /// Calculate the optimal split point.
     #[must_use]
-    pub fn calculate_split_point(
-        &self,
-        _insert_pos: usize,
-        insert_ikey: u64,
-    ) -> Option<crate::value::SplitPoint> {
-        use std::cmp::Ordering;
-
+    pub fn calculate_split_point(&self, insert_pos: usize, insert_ikey: u64) -> Option<SplitPoint> {
         let perm = self.permutation();
         let size = perm.size();
 
@@ -1735,11 +1739,63 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             return None;
         }
 
-        let mut split_pos = size / 2;
-        if split_pos == 0 {
-            return None;
+        // =========================================================================
+        // Sequential Split Optimization (C++ masstree_split.hh:70-78)
+        // =========================================================================
+        //
+        // Detect sequential access patterns and optimize split point:
+        //
+        // - Forward-sequential (rw3): All threads insert increasing keys, racing
+        //   to the rightmost leaf. Detected when insert_pos == size (appending)
+        //   and there's no next sibling.
+        //   Optimization: Keep ALL keys in left leaf (split_pos = size).
+        //   The new key goes alone into the right leaf. Zero key movement.
+        //
+        // - Reverse-sequential (rw4): All threads insert decreasing keys, racing
+        //   to the leftmost leaf. Detected when insert_pos == 0 (prepending)
+        //   and there's no prev sibling.
+        //   Optimization: Move all but one key to right (split_pos = 1).
+        //   Clusters keys in the right leaf for subsequent inserts.
+        //
+        // Default: midpoint split
+        //
+        // Forward-sequential optimization is now enabled with atomic
+        // split+insert. The right leaf is never empty because the new key is
+        // inserted during the split operation.
+
+        // Check for forward-sequential pattern: appending to rightmost leaf
+        // SAFETY: Called during insert with lock held, unguarded access is safe
+        if insert_pos == size && unsafe { self.next_raw_unguarded() }.is_null() {
+            // Forward-sequential detected!
+            // split_pos = size means: move 0 keys, new key alone in right leaf
+            return Some(SplitPoint {
+                pos: size,
+                split_ikey: insert_ikey, // The new key becomes the separator
+            });
         }
 
+        // Check for reverse-sequential pattern: prepending to leftmost leaf
+        // SAFETY: Called during insert with lock held, unguarded access is safe
+        if insert_pos == 0 && unsafe { self.prev_unguarded() }.is_null() && size > 1 {
+            // Reverse-sequential detected!
+            // split_pos = 1 means: keep only first key in left, move rest to right
+            let split_slot = perm.get(1);
+            let split_ikey = self.ikey(split_slot);
+            return Some(SplitPoint { pos: 1, split_ikey });
+        }
+
+        // Default: midpoint split
+        let mut split_pos: usize = size / 2;
+
+        // Edge case: ensure split_pos is valid before equal-ikey adjustment
+        if split_pos == 0 {
+            split_pos = 1;
+        }
+
+        // =========================================================================
+        // Equal-ikey Adjustment
+        // =========================================================================
+        //
         // Adjust for equal ikeys: if keys at split boundary are equal,
         // move split point to keep equal keys together.
         //
@@ -1764,6 +1820,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
                 match insert_ikey.cmp(&left_ikey) {
                     // Insert has same ikey - move split right
                     Ordering::Equal => split_pos += 1,
+
                     // Insert goes before this group - move split left
                     Ordering::Less | Ordering::Greater => split_pos -= 1,
                 }
@@ -1772,6 +1829,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             }
         }
 
+        // Note: split_pos == size is now handled by forward-sequential above
         if split_pos == 0 || split_pos >= size {
             return None;
         }
@@ -1779,7 +1837,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         let split_slot = perm.get(split_pos);
         let split_ikey = self.ikey(split_slot);
 
-        Some(crate::value::SplitPoint {
+        Some(SplitPoint {
             pos: split_pos,
             split_ikey,
         })
@@ -1800,10 +1858,10 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         split_pos: usize,
         new_leaf_ptr: *mut Self,
         guard: &LocalGuard<'_>,
-    ) -> (u64, crate::value::InsertTarget) {
+    ) -> (u64, InsertTarget) {
         // CRITICAL (Help-Along Protocol): Initialize new leaf's version for split
         // BEFORE any data is written.
-        let split_version = crate::nodeversion::NodeVersion::new_for_split(&self.version);
+        let split_version = NodeVersion::new_for_split(&self.version);
 
         // SAFETY: new_leaf is not yet visible to other threads
         unsafe {
@@ -1879,7 +1937,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         // Get split key (first key of new leaf)
         let split_ikey = new_leaf.ikey(0);
 
-        (split_ikey, crate::value::InsertTarget::Left)
+        (split_ikey, InsertTarget::Left)
     }
 
     /// Move ALL entries to a new right leaf.
@@ -1892,9 +1950,9 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         &self,
         new_leaf_ptr: *mut Self,
         guard: &LocalGuard<'_>,
-    ) -> (u64, crate::value::InsertTarget) {
+    ) -> (u64, InsertTarget) {
         // CRITICAL (Help-Along Protocol): Initialize new leaf's version for split
-        let split_version = crate::nodeversion::NodeVersion::new_for_split(&self.version);
+        let split_version = NodeVersion::new_for_split(&self.version);
 
         // SAFETY: new_leaf is not yet visible to other threads
         unsafe {
@@ -1954,7 +2012,221 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         self.set_permutation(Permuter15::empty());
 
         let split_ikey = new_leaf.ikey(0);
-        (split_ikey, crate::value::InsertTarget::Right)
+        (split_ikey, InsertTarget::Right)
+    }
+
+    /// Atomically split this leaf AND insert a new key.
+    ///
+    /// For true-inline leaves, this copies inline value bits rather than moving pointers.
+    ///
+    /// # Safety
+    ///
+    /// Same as `split_into_preallocated`.
+    #[expect(clippy::indexing_slicing, clippy::too_many_lines)]
+    pub unsafe fn split_and_insert(
+        &self,
+        split_pos: usize,
+        new_leaf_ptr: *mut Self,
+        insert_pos: usize,
+        insert_data: &SplitInsertData<'_>,
+        guard: &LocalGuard<'_>,
+    ) -> SplitInsertResult {
+        // Initialize new leaf's version for split
+        let split_version = NodeVersion::new_for_split(&self.version);
+        // SAFETY: new_leaf is not yet visible to other threads
+        unsafe {
+            StdPtr::write(
+                StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
+                split_version,
+            );
+        }
+
+        let old_perm = self.permutation();
+        let old_size = old_perm.size();
+
+        // SAFETY: new_leaf_ptr is valid
+        let new_leaf = unsafe { &*new_leaf_ptr };
+
+        // Pre-allocate external suffix storage if source has it
+        if self.has_external_ksuf() {
+            let _ = unsafe { new_leaf.ensure_external_ksuf_infallible() };
+        }
+
+        let insert_goes_right = insert_pos >= split_pos;
+        let entries_to_move = old_size - split_pos;
+        let split_ikey: u64;
+
+        if insert_goes_right {
+            // =================================================================
+            // Case 2: Insert goes to RIGHT leaf (insert_pos >= split_pos)
+            // =================================================================
+
+            let right_insert_pos = insert_pos - split_pos;
+            let right_size = entries_to_move + 1;
+
+            let mut src_idx: usize = 0;
+            for dst_slot in 0..right_size {
+                if dst_slot == right_insert_pos {
+                    // Write the new key
+                    new_leaf.set_ikey(dst_slot, insert_data.ikey);
+                    new_leaf.set_keylenx(dst_slot, insert_data.keylenx);
+
+                    // For true-inline, value_ptr encodes bits
+                    let encoded_bits = insert_data.value_ptr.addr() as u64;
+                    let value_bits = encoded_bits ^ ENCODING_MAGIC;
+                    new_leaf.inline_values[dst_slot].store(value_bits, WRITE_ORD);
+                    new_leaf.leaf_values[dst_slot]
+                        .store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
+
+                    // Handle suffix
+                    if insert_data.keylenx == KSUF_KEYLENX
+                        && let Some(suffix) = insert_data.suffix
+                    {
+                        unsafe { new_leaf.assign_ksuf_init(dst_slot, suffix, guard) };
+                    }
+                } else {
+                    // Move existing entry
+                    let old_logical_pos = split_pos + src_idx;
+                    let old_slot = old_perm.get(old_logical_pos);
+
+                    let ikey = self.ikey(old_slot);
+                    let keylenx_val = self.keylenx(old_slot);
+
+                    new_leaf.set_ikey(dst_slot, ikey);
+                    new_leaf.set_keylenx(dst_slot, keylenx_val);
+
+                    let ptr = self.leaf_values[old_slot].load(READ_ORD);
+                    if InlineSentinel::is_inline_sentinel(ptr) {
+                        let bits = self.inline_values[old_slot].load(READ_ORD);
+                        new_leaf.inline_values[dst_slot].store(bits, WRITE_ORD);
+                        new_leaf.leaf_values[dst_slot]
+                            .store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
+                    } else {
+                        let moved_ptr = self.take_leaf_value_ptr(old_slot);
+                        new_leaf.set_leaf_value_ptr(dst_slot, moved_ptr);
+                    }
+
+                    if keylenx_val == KSUF_KEYLENX {
+                        if let Some(suffix) = self.ksuf(old_slot) {
+                            unsafe { new_leaf.assign_ksuf_init(dst_slot, suffix, guard) };
+                        }
+                        unsafe { self.clear_ksuf(old_slot, guard) };
+                    }
+
+                    self.leaf_values[old_slot].store(StdPtr::null_mut(), WRITE_ORD);
+                    src_idx += 1;
+                }
+            }
+
+            // Right leaf permutation
+            let new_perm = Permuter15::make_sorted(right_size);
+            new_leaf.set_permutation(new_perm);
+
+            split_ikey = new_leaf.ikey(0);
+
+            // Update left leaf permutation
+            let mut left_perm = old_perm;
+            left_perm.set_size(split_pos);
+            self.set_permutation(left_perm);
+
+            SplitInsertResult {
+                split_ikey,
+                insert_target: InsertTarget::Right,
+            }
+        } else {
+            // =================================================================
+            // Case 1: Insert goes to LEFT leaf (insert_pos < split_pos)
+            // =================================================================
+
+            // Move entries to right leaf
+            for i in 0..entries_to_move {
+                let old_logical_pos = split_pos + i;
+                let old_slot = old_perm.get(old_logical_pos);
+                let new_slot = i;
+
+                let ikey = self.ikey(old_slot);
+                let keylenx_val = self.keylenx(old_slot);
+
+                new_leaf.set_ikey(new_slot, ikey);
+                new_leaf.set_keylenx(new_slot, keylenx_val);
+
+                let ptr = self.leaf_values[old_slot].load(READ_ORD);
+                if InlineSentinel::is_inline_sentinel(ptr) {
+                    let bits = self.inline_values[old_slot].load(READ_ORD);
+                    new_leaf.inline_values[new_slot].store(bits, WRITE_ORD);
+                    new_leaf.leaf_values[new_slot]
+                        .store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
+                } else {
+                    let moved_ptr = self.take_leaf_value_ptr(old_slot);
+                    new_leaf.set_leaf_value_ptr(new_slot, moved_ptr);
+                }
+
+                if keylenx_val == KSUF_KEYLENX {
+                    if let Some(suffix) = self.ksuf(old_slot) {
+                        unsafe { new_leaf.assign_ksuf_init(new_slot, suffix, guard) };
+                    }
+                    unsafe { self.clear_ksuf(old_slot, guard) };
+                }
+
+                self.leaf_values[old_slot].store(StdPtr::null_mut(), WRITE_ORD);
+            }
+
+            // Right leaf permutation
+            let new_perm = Permuter15::make_sorted(entries_to_move);
+            new_leaf.set_permutation(new_perm);
+
+            split_ikey = new_leaf.ikey(0);
+
+            // Insert into LEFT leaf at insert_pos
+            let mut left_perm = old_perm;
+            left_perm.set_size(split_pos);
+
+            let new_slot = left_perm.back();
+
+            // Check slot-0 rule
+            let actual_slot = if new_slot == 0 && !self.can_reuse_slot0(insert_data.ikey) {
+                let free_count = WIDTH_15 - split_pos;
+                let mut found_slot = new_slot;
+                for offset in 1..free_count {
+                    let candidate = left_perm.back_at_offset(offset);
+                    if candidate != 0 {
+                        left_perm.swap_free_slots(WIDTH_15 - 1, WIDTH_15 - 1 - offset);
+                        found_slot = candidate;
+                        break;
+                    }
+                }
+                found_slot
+            } else {
+                new_slot
+            };
+
+            // Write the new key
+            self.set_ikey(actual_slot, insert_data.ikey);
+            self.set_keylenx(actual_slot, insert_data.keylenx);
+
+            // For true-inline, value_ptr encodes bits via XOR with ENCODING_MAGIC
+            // Store both the sentinel and the inline bits
+            let encoded_bits = insert_data.value_ptr.addr() as u64;
+            let value_bits = encoded_bits ^ ENCODING_MAGIC;
+            self.inline_values[actual_slot].store(value_bits, WRITE_ORD);
+            self.leaf_values[actual_slot].store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
+
+            // Handle suffix
+            if insert_data.keylenx == KSUF_KEYLENX
+                && let Some(suffix) = insert_data.suffix
+            {
+                unsafe { self.assign_ksuf(actual_slot, suffix, guard) };
+            }
+
+            let allocated = left_perm.insert_from_back(insert_pos);
+            debug_assert_eq!(allocated, actual_slot, "allocated unexpected slot");
+            self.set_permutation(left_perm);
+
+            SplitInsertResult {
+                split_ikey,
+                insert_target: InsertTarget::Left,
+            }
+        }
     }
 
     /// Link this leaf to a new sibling (B-link tree threading).
@@ -2069,10 +2341,10 @@ unsafe impl<V: InlineBits> Sync for LeafNode15TrueInline<V> {}
 //  TreeLeafNode Trait Implementation
 // ============================================================================
 
-impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafNode15TrueInline<V> {
+impl<V: InlineBits> TreeLeafNode<TrueInlineSlot<V>> for LeafNode15TrueInline<V> {
     type Perm = Permuter15;
     // Internodes are non-generic (they don't store values, only keys and child pointers)
-    type Internode = crate::internode::InternodeNode;
+    type Internode = InternodeNode;
     const WIDTH: usize = WIDTH_15;
     const SPLIT_THRESHOLD: usize = 12; // 80% of 15
 
@@ -2094,7 +2366,7 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
 
     // NodeVersion
     #[inline(always)]
-    fn version(&self) -> &crate::nodeversion::NodeVersion {
+    fn version(&self) -> &NodeVersion {
         Self::version(self)
     }
 
@@ -2305,11 +2577,7 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
     }
 
     // Split operations
-    fn calculate_split_point(
-        &self,
-        insert_pos: usize,
-        insert_ikey: u64,
-    ) -> Option<crate::value::SplitPoint> {
+    fn calculate_split_point(&self, insert_pos: usize, insert_ikey: u64) -> Option<SplitPoint> {
         Self::calculate_split_point(self, insert_pos, insert_ikey)
     }
 
@@ -2318,7 +2586,7 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
         split_pos: usize,
         new_leaf_ptr: *mut Self,
         guard: &LocalGuard<'_>,
-    ) -> (u64, crate::value::InsertTarget) {
+    ) -> (u64, InsertTarget) {
         // SAFETY: Same preconditions
         unsafe { Self::split_into_preallocated(self, split_pos, new_leaf_ptr, guard) }
     }
@@ -2327,9 +2595,30 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
         &self,
         new_leaf_ptr: *mut Self,
         guard: &LocalGuard<'_>,
-    ) -> (u64, crate::value::InsertTarget) {
+    ) -> (u64, InsertTarget) {
         // SAFETY: Same preconditions
         unsafe { Self::split_all_to_right_preallocated(self, new_leaf_ptr, guard) }
+    }
+
+    unsafe fn split_and_insert(
+        &self,
+        split_pos: usize,
+        new_leaf_ptr: *mut Self,
+        insert_pos: usize,
+        insert_data: SplitInsertData<'_>,
+        guard: &LocalGuard<'_>,
+    ) -> SplitInsertResult {
+        // SAFETY: Same preconditions
+        unsafe {
+            Self::split_and_insert(
+                self,
+                split_pos,
+                new_leaf_ptr,
+                insert_pos,
+                &insert_data,
+                guard,
+            )
+        }
     }
 
     unsafe fn link_sibling(&self, new_sibling: *mut Self) {
@@ -2450,9 +2739,7 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
 //  LayerCapableLeaf Trait Implementation
 // ============================================================================
 
-impl<V: InlineBits> crate::leaf_trait::LayerCapableLeaf<TrueInlineSlot<V>>
-    for LeafNode15TrueInline<V>
-{
+impl<V: InlineBits> LayerCapableLeaf<TrueInlineSlot<V>> for LeafNode15TrueInline<V> {
     #[inline]
     fn try_clone_output(&self, slot: usize) -> Option<V> {
         // For true-inline, the value is Copy - just load it
@@ -2463,7 +2750,7 @@ impl<V: InlineBits> crate::leaf_trait::LayerCapableLeaf<TrueInlineSlot<V>>
     unsafe fn assign_from_key_arc(
         &self,
         slot: usize,
-        key: &crate::key::Key<'_>,
+        key: &Key<'_>,
         value: Option<V>,
         guard: &LocalGuard<'_>,
     ) {

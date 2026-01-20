@@ -31,6 +31,54 @@ pub use crate::value::InsertTarget;
 pub use crate::value::SplitPoint;
 
 // ============================================================================
+// Split+Insert Types (Atomic Split+Insert Operation)
+// ============================================================================
+
+/// Data for inserting a key during a split operation.
+///
+/// This bundles all the information needed to insert a new key atomically
+/// during a leaf split, matching the C++ `split_into()` semantics.
+///
+/// # C++ Reference
+///
+/// In C++ Masstree, `split_into()` takes `ka` (key accessor) and performs
+/// both the split and the insert atomically. This struct captures the
+/// equivalent data.
+#[derive(Debug)]
+pub struct SplitInsertData<'a> {
+    /// The 8-byte key to insert.
+    pub ikey: u64,
+
+    /// The keylenx value (0-8 for inline, 64 for suffix, >=128 for layer).
+    pub keylenx: u8,
+
+    /// The suffix bytes, if any (present when `keylenx == KSUF_KEYLENX`).
+    pub suffix: Option<&'a [u8]>,
+
+    /// The raw value pointer to insert.
+    ///
+    /// Ownership transfers to the leaf during the split operation.
+    /// Created via `ValueSlot::output_consume_to_raw()`.
+    pub value_ptr: *mut u8,
+}
+
+/// Result of an atomic split+insert operation.
+///
+/// Contains the split key for parent propagation and information about
+/// where the new key was inserted.
+#[derive(Debug, Clone, Copy)]
+pub struct SplitInsertResult {
+    /// The key that separates the left and right leaves.
+    ///
+    /// This is the first ikey of the right leaf and becomes the
+    /// separator key in the parent internode.
+    pub split_ikey: u64,
+
+    /// Which leaf received the new key.
+    pub insert_target: InsertTarget,
+}
+
+// ============================================================================
 //  TreePermutation Trait
 // ============================================================================
 
@@ -804,6 +852,64 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
         new_leaf_ptr: *mut Self,
         guard: &seize::LocalGuard<'_>,
     ) -> (u64, InsertTarget);
+
+    /// Atomically split this leaf AND insert a new key.
+    ///
+    /// This is the key optimization matching C++ Masstree's `split_into()`.
+    /// Unlike `split_into_preallocated()` which only moves existing keys,
+    /// this method performs the split and insert in one atomic operation.
+    ///
+    /// # Algorithm (matches C++ `split_into()`)
+    ///
+    /// Given: `split_pos`, `insert_pos`, existing entries `[0..size)`
+    ///
+    /// **Case 1: `insert_pos < split_pos`** (new key → LEFT leaf)
+    /// - Move `[split_pos, size)` to right leaf
+    /// - Insert new key in left leaf at `insert_pos`
+    /// - `split_ikey` = right leaf's slot 0
+    ///
+    /// **Case 2: `insert_pos >= split_pos`** (new key → RIGHT leaf)
+    /// - Interleaved loop from `split_pos` to `size`:
+    ///   - If position == adjusted insert position: write new key
+    ///   - Else: move existing key
+    /// - `split_ikey` = right leaf's slot 0 (may be the new key)
+    ///
+    /// **Case 3: Sequential optimization** (`insert_pos == size`, `split_pos == size`)
+    /// - Move 0 keys (left keeps all existing)
+    /// - Right leaf gets ONLY the new key at slot 0
+    /// - `split_ikey` = new key's ikey
+    ///
+    /// # Returns
+    ///
+    /// [`SplitInsertResult`] containing the split key for parent propagation
+    /// and information about which leaf received the new key.
+    ///
+    /// # Critical Invariants
+    ///
+    /// 1. **Slot-0 / `ikey_bound`**: Right leaf's slot 0 is ALWAYS filled (never empty)
+    /// 2. **No-abandon**: After `mark_split()`, propagation must complete
+    /// 3. **Memory ordering**: Relaxed stores during move, Release on permutation
+    /// 4. **Value ownership**: `value_ptr` ownership transfers to leaf during split
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the leaf lock
+    /// - `new_leaf_ptr` must point to valid, freshly-allocated leaf memory
+    /// - The new leaf should be freshly allocated (empty) with split-locked version
+    /// - `insert_data.value_ptr` must be a valid pointer from `output_consume_to_raw()`
+    /// - `guard` must be valid
+    ///
+    /// # C++ Reference
+    ///
+    /// Matches `leaf::split_into()` in `masstree_split.hh:63-142`.
+    unsafe fn split_and_insert(
+        &self,
+        split_pos: usize,
+        new_leaf_ptr: *mut Self,
+        insert_pos: usize,
+        insert_data: SplitInsertData<'_>,
+        guard: &seize::LocalGuard<'_>,
+    ) -> SplitInsertResult;
 
     // ========================================================================
     //  Sibling Link Helper (for split)

@@ -284,6 +284,16 @@ where
     }
 
     /// Check a single slot during single-layer insert search.
+    ///
+    /// # Layer Pointer Handling
+    ///
+    /// This function does NOT explicitly check for layer pointers (`keylenx >= 128`).
+    /// Layer pointers are handled implicitly by the ordering comparison:
+    /// - Single-layer mode means `search_keylenx` is 0-8
+    /// - Layer pointers have `slot_keylenx >= 128`
+    /// - The check `search_keylenx < slot_keylenx` (e.g., `8 < 128`) returns `NotFound`
+    ///
+    /// This also correctly handles suffix markers (`keylenx == 64`).
     #[inline(always)]
     fn check_slot_for_insert_single_layer(
         leaf: &L,
@@ -298,17 +308,16 @@ where
             return None;
         }
 
-        // Layer pointer: short key sorts before layer pointer
-        if slot_keylenx >= LAYER_KEYLENX {
-            return Some(InsertSearchResultGeneric::NotFound { logical_pos });
-        }
-
         // Exact match - same ikey and keylenx
         if slot_keylenx == search_keylenx {
             return Some(InsertSearchResultGeneric::Found { slot });
         }
 
         // Same ikey, different keylenx - shorter keys sort first
+        // This implicitly handles:
+        // - Layer pointers (keylenx >= 128): 0-8 < 128, returns NotFound
+        // - Suffix markers (keylenx == 64): 0-8 < 64, returns NotFound
+        // - Longer inline keys: returns NotFound at correct position
         if search_keylenx < slot_keylenx {
             Some(InsertSearchResultGeneric::NotFound { logical_pos })
         } else {
