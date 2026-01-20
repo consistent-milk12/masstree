@@ -49,14 +49,21 @@ See `runs/` for detailed benchmark data.
 
 Results vary between runs and hardware configurations. The `same` benchmark
 (10 hot keys, 12 threads) consistently shows the largest improvement over C++,
-achieving **1.7x higher throughput** under extreme contention. This is likely due
-some of the major divergences from the original like:
+achieving **1.7x higher throughput** under extreme contention. Possible factors:
 
-- **Optimistic read protocol** — Readers retry on version mismatch rather than blocking
-- **Hyaline memory reclamation** — Unlike epoch-based reclamation (EBR), readers never
-  enter quiescent states, eliminating a contention bottleneck
-- **Sharded metadata** — Per-shard counters prevent false sharing on hot cache lines
-- **Relaxed memory ordering** — 11 SeqCst operations vs ~100+ in typical implementations
+- **Hyaline memory reclamation** — Unlike the C++ epoch-based reclamation (EBR),
+  Hyaline (via `seize` crate) allows readers to avoid quiescent state registration
+- **Lazy coalescing** — Empty leaves are queued for deferred cleanup rather than
+  removed inline, avoiding lock-coupling issues during removes
+- **Sharded length counter** — 16 cache-line-aligned shards for `len()` tracking
+  (C++ doesn't track global count)
+
+Note: The optimistic read protocol (version-based OCC) is the original Masstree design,
+not a divergence. One minor divergence: `has_changed()` uses `> (LOCK_BIT | INSERTING_BIT)`
+instead of C++'s `> lock_bit`, ignoring both bits 0-1. This is safe because version
+*counters* (VINSERT/VSPLIT) are the source of truth, INSERTING_BIT is only set while
+modifications are in-flight and not yet visible to readers. See `src/nodeversion.rs:643-673`
+for the full safety argument.
 
 The forward-sequential gap (rw3) remains under investigation.
 
