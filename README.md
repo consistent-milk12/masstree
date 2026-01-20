@@ -16,7 +16,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 ## Status
 
-**v0.5.11** — Core feature complete. Heavily tested but concurrent data
+**v0.5.12** — Core feature complete. Heavily tested but concurrent data
 structures require extensive stress testing beyond what tests (even though still
 quite comprehensive) provide. The unsafe code passes Miri with strict-provenance
 flag. It should be noted that the C++ implementation is a research project, not
@@ -108,7 +108,7 @@ insert-heavy workloads where TreeIndex performs better.
 
 ```toml
 [dependencies]
-masstree = { version = "0.5.11", features = ["mimalloc"] }
+masstree = { version = "0.5.12", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).
