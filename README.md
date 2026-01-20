@@ -16,7 +16,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 ## Status
 
-**v0.5.9** — Core feature complete. Heavily tested but concurrent data
+**v0.5.11** — Core feature complete. Heavily tested but concurrent data
 structures require extensive stress testing beyond what tests (even though still
 quite comprehensive) provide. The unsafe code passes Miri with strict-provenance
 flag. It should be noted that the C++ implementation is a research project, not
@@ -35,7 +35,7 @@ in new targeted tests.
 | Leaf coalescing | Lazy queue-based cleanup |
 | Memory reclamation | Hyaline scheme via `seize` crate |
 
-**Tests:** 951 tests (unit + 88 ported from C++ reference + proptests + stress tests). Miri strict provenance clean.
+**Tests:** 977 total (including doc tests), 584 lib tests. Ignored long-running stress tests pass with `cargo test -- --ignored`. Miri strict provenance clean.
 
 **Not yet implemented:** `Entry` API, `Extend`/`FromIterator`.
 
@@ -45,11 +45,63 @@ In benchmarks, MassTree is typically **1.5-4x faster** than comparable ordered m
 
 See `runs/` for detailed benchmark data.
 
+## vs C++ Masstree (12T, 10s)
+
+Results vary between runs and hardware configurations. The `same` benchmark
+(10 hot keys, 12 threads) consistently shows the largest improvement over C++,
+achieving **1.7x higher throughput** under extreme contention. This is likely due
+some of the major divergences from the original like:
+
+- **Optimistic read protocol** — Readers retry on version mismatch rather than blocking
+- **Hyaline memory reclamation** — Unlike epoch-based reclamation (EBR), readers never
+  enter quiescent states, eliminating a contention bottleneck
+- **Sharded metadata** — Per-shard counters prevent false sharing on hot cache lines
+- **Relaxed memory ordering** — 11 SeqCst operations vs ~100+ in typical implementations
+
+The forward-sequential gap (rw3) remains under investigation.
+
+| Benchmark | Rust | C++ | Ratio | Winner |
+|-----------|------|-----|-------|--------|
+| **rw4** (reverse-seq) | 59.00 | 48.14 | **123%** | **Rust** |
+| **same** (10 hot keys) | 3.56 | 2.09 | **170%** | **Rust** |
+| **rw2g98** (98% reads) | 25.81 | 23.04 | **112%** | **Rust** |
+| **uscale** (random 140M) | 11.05 | 10.58 | **104%** | **Rust** |
+| **wscale** (wide random) | 9.56 | 9.03 | **106%** | **Rust** |
+| **rw1** (random insert+read) | 11.01 | 11.23 | 98% | Tie |
+| **rw3** (forward-seq) | 26.49 | 50.34 | 53% | C++ |
+
+## vs Rust Concurrent Maps (6T Physical, Rigorous)
+
+> Source: `runs/run135_read_write_rigorous.txt`
+> **Config:** Physical cores only, 200 samples, performance governor.
+
+This can be considered the current baseline.
+
+Note: MassTree's `insert()` has upsert semantics, it updates existing keys and returns the old
+value. TreeIndex's `insert()` fails on existing keys, requiring a `remove()+insert()` fallback.
+Pure insert benchmarks (13, 14) use fresh keys only, providing a fairer comparison for
+insert-heavy workloads where TreeIndex performs better.
+
+| Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
+|-----------|-----------|------------|---------|----------|------------|
+| 01_uniform | **22.44** | 15.16 | 9.36 | 12.71 | **1.48x** |
+| 02_zipfian | **26.20** | 11.81 | 10.63 | 5.57 | **2.22x** |
+| 03_shared_prefix | **18.25** | 8.52 | 8.81 | 13.07 | **1.40x** |
+| 04_high_contention | **67.49** | 15.81 | 13.04 | 3.53 | **4.27x** |
+| 05_large_dataset | **12.02** | 9.41 | 6.87 | 7.92 | **1.28x** |
+| 06_single_hot_key | **15.21** | 4.49 | 6.07 | 3.92 | **2.51x** |
+| 07_mixed_50_50 | **18.44** | 5.68 | 5.20 | 12.26 | **1.50x** |
+| 08_8byte_keys | **40.78** | 23.30 | 12.00 | 16.33 | **1.75x** |
+| 09_pure_read | **33.16** | 24.03 | 14.14 | 13.92 | **1.38x** |
+| 10_remove_heavy | **18.71** | 11.75 | 5.51 | 3.71 | **1.59x** |
+| 13_insert_only_fair | 18.16 | **19.78** | 11.53 | 5.71 | 0.92x |
+| 14_pure_insert | 8.71 | **12.78** | 6.39 | 2.35 | **0.68x** |
+
 ## Install
 
 ```toml
 [dependencies]
-masstree = { version = "0.5.9", features = ["mimalloc"] }
+masstree = { version = "0.5.11", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

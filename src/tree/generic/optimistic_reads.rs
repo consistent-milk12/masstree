@@ -18,6 +18,7 @@ use crate::leaf_trait::TreePermutation;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
 use crate::link::Linker;
+use crate::prefetch::prefetch_read;
 use crate::ref_value_slot::RefValueSlot;
 use crate::value::traits::LeafValueLoad;
 
@@ -156,6 +157,13 @@ where
 /// When `needs_suffix_check` is false (inline keys ≤8 bytes), skips:
 /// - Suffix comparison (no suffix exists)
 /// - Layer pointer detection (inline keys can't be layer pointers)
+///
+/// # Prefetch Strategy
+///
+/// Prefetches the value/layer pointer target immediately after loading it.
+/// This hides memory latency while suffix comparison runs.
+///
+/// C++ ref: `masstree_get.hh:41` - `lv_.prefetch(n_->keylenx_[kx.p])`
 #[inline(always)]
 fn check_slot_match<S, L>(
     leaf: &L,
@@ -177,6 +185,12 @@ where
     if slot_ptr.is_null() {
         return None;
     }
+
+    // Prefetch value/layer target to hide memory latency during suffix check.
+    // For values: prefetches the actual value data (Arc/Box target)
+    // For layers: prefetches the sublayer root node
+    // C++ ref: masstree_get.hh:41 - lv_.prefetch(n_->keylenx_[kx.p])
+    prefetch_read(slot_ptr);
 
     if slot_keylenx == search_keylenx {
         // Potential exact match
@@ -491,6 +505,9 @@ where
                         let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
                         if !ptr.is_null() {
+                            // Prefetch value target while version validation runs.
+                            // C++ ref: masstree_get.hh:41 - lv_.prefetch(n_->keylenx_[kx.p])
+                            prefetch_read(ptr);
                             found_ptr = ptr;
 
                             break;

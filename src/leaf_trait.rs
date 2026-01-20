@@ -321,41 +321,6 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     /// Get child pointer at index.
     fn child(&self, idx: usize) -> *mut u8;
 
-    /// Get child pointer with prefetch hint for the next likely child.
-    ///
-    /// Default implementation just calls `child()` without prefetching.
-    /// Optimized implementations can prefetch the next child to hide latency.
-    #[inline(always)]
-    fn child_with_prefetch(&self, idx: usize, _nkeys: usize) -> *mut u8 {
-        self.child(idx)
-    }
-
-    /// Get child pointer with depth-first prefetch for descent.
-    ///
-    /// Prefetches the target child's header and keys, optimizing
-    /// for tree descent (going down) rather than sibling traversal.
-    ///
-    /// # Default Implementation
-    ///
-    /// Falls back to [`Self::child`] without prefetch.
-    #[inline(always)]
-    fn child_with_depth_prefetch(&self, idx: usize) -> *mut u8 {
-        self.child(idx)
-    }
-
-    /// Get child pointer with full prefetch (all key cache lines).
-    ///
-    /// Prefetches all cache lines containing keys. Use when nodes
-    /// are expected to be full.
-    ///
-    /// # Default Implementation
-    ///
-    /// Falls back to [`Self::child`] without prefetch.
-    #[inline(always)]
-    fn child_with_full_prefetch(&self, idx: usize) -> *mut u8 {
-        self.child(idx)
-    }
-
     /// Set child pointer at index.
     fn set_child(&self, idx: usize, child: *mut u8);
 
@@ -501,6 +466,12 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
 
     /// Store a new permutation with Release ordering.
     fn set_permutation(&self, perm: Self::Perm);
+
+    /// Store a new permutation with Relaxed ordering.
+    ///
+    /// Use when caller holds the node lock. The lock's Release fence on unlock
+    /// provides necessary synchronization, allowing us to skip Release here.
+    fn set_permutation_relaxed(&self, perm: Self::Perm);
 
     /// Load raw permutation value with Acquire ordering.
     ///

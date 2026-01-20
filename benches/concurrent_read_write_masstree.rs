@@ -16,7 +16,7 @@
 //! 1. **Explicit warmup**: Each thread warms up the data structure before measurement
 //! 2. **Memory barriers**: Inserted before/after measurement to prevent reordering
 //! 3. **Consistent setup**: All benchmarks use `.with_inputs()` for fresh state
-//! 4. **Increased samples**: 200 samples for better statistical significance
+//! 4. **Increased samples**: 100 samples for better statistical significance
 //! 5. **Min time**: 3 seconds minimum per benchmark for stability
 //!
 //! ## Running
@@ -76,14 +76,14 @@ fn setup_masstree15(keys: &[[u8; KEY_SIZE]]) -> MassTree15Inline<u64> {
 /// Warmup iterations per thread before measurement
 const WARMUP_OPS: usize = 500;
 
-#[divan::bench_group(name = "01_mixed_90_10_uniform", sample_count = 200)]
+#[divan::bench_group(name = "01_mixed_90_10_uniform", sample_count = 100)]
 mod mixed_uniform {
     use super::*;
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 12_500;
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -148,14 +148,14 @@ mod mixed_uniform {
 // 02: MIXED 90-10 - Zipfian Access Pattern (Hot Keys)
 // =============================================================================
 
-#[divan::bench_group(name = "02_mixed_90_10_zipfian", sample_count = 200)]
+#[divan::bench_group(name = "02_mixed_90_10_zipfian", sample_count = 100)]
 mod mixed_zipfian {
     use super::*;
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 12_500;
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
@@ -204,7 +204,7 @@ mod mixed_zipfian {
 // 03: MIXED 90-10 - Shared Prefix (Masstree Stress Test)
 // =============================================================================
 
-#[divan::bench_group(name = "03_mixed_90_10_shared_prefix", sample_count = 200)]
+#[divan::bench_group(name = "03_mixed_90_10_shared_prefix", sample_count = 100)]
 mod mixed_shared_prefix {
     use super::*;
 
@@ -217,7 +217,7 @@ mod mixed_shared_prefix {
         keys_shared_prefix_chunks::<KEY_SIZE>(N, PREFIX_CHUNKS, PREFIX_BUCKETS)
     }
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(prefix_keys());
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -266,14 +266,14 @@ mod mixed_shared_prefix {
 // 04: HIGH CONTENTION - Small Key Space (1000 keys)
 // =============================================================================
 
-#[divan::bench_group(name = "04_mixed_90_10_high_contention", sample_count = 200)]
+#[divan::bench_group(name = "04_mixed_90_10_high_contention", sample_count = 100)]
 mod mixed_high_contention {
     use super::*;
 
     const N: usize = 500; // Small key space = high contention
     const OPS_PER_THREAD: usize = 25_000;
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -322,7 +322,7 @@ mod mixed_high_contention {
 // 05: LARGE DATASET - 1M keys
 // =============================================================================
 
-#[divan::bench_group(name = "05_mixed_90_10_large_dataset", sample_count = 200)]
+#[divan::bench_group(name = "05_mixed_90_10_large_dataset", sample_count = 100)]
 mod mixed_large_dataset {
     use super::*;
 
@@ -333,7 +333,7 @@ mod mixed_large_dataset {
     // to avoid the massive setup cost per iteration. Each thread still warms up before
     // measurement to ensure cache/branch predictor stability.
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let tree = Arc::new(setup_masstree15(keys.as_ref()));
@@ -392,14 +392,14 @@ mod mixed_large_dataset {
 // 06: SINGLE HOT KEY - Maximum Contention
 // =============================================================================
 
-#[divan::bench_group(name = "06_single_hot_key", sample_count = 200)]
+#[divan::bench_group(name = "06_single_hot_key", sample_count = 100)]
 mod single_hot_key {
     use super::*;
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 5_000;
 
-    #[divan::bench(args = [2, 4, 6])]
+    #[divan::bench(args = [2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let hot_key = keys[N / 2];
@@ -445,7 +445,7 @@ mod single_hot_key {
 // 07: WRITE-HEAVY - 50% reads, 50% writes
 // =============================================================================
 
-#[divan::bench_group(name = "07_mixed_50_50", sample_count = 200)]
+#[divan::bench_group(name = "07_mixed_50_50", sample_count = 100)]
 mod mixed_50_50 {
     use super::*;
 
@@ -453,7 +453,7 @@ mod mixed_50_50 {
     const OPS_PER_THREAD: usize = 12_500;
     const WRITE_RATIO_50: usize = 50; // 50% writes
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -498,7 +498,7 @@ mod mixed_50_50 {
 // 08: 8-BYTE KEYS - MassTree Single-Layer Fast Path
 // =============================================================================
 
-#[divan::bench_group(name = "08_8byte_keys_uniform", sample_count = 200)]
+#[divan::bench_group(name = "08_8byte_keys_uniform", sample_count = 100)]
 mod keys_8byte {
     use super::*;
 
@@ -517,7 +517,7 @@ mod keys_8byte {
         tree
     }
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE_8>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -562,7 +562,7 @@ mod keys_8byte {
 // 09: PURE READ - 100% Reads (No Writes)
 // =============================================================================
 
-#[divan::bench_group(name = "09_pure_read_uniform", sample_count = 200)]
+#[divan::bench_group(name = "09_pure_read_uniform", sample_count = 100)]
 mod pure_read {
     use super::*;
 
@@ -572,7 +572,7 @@ mod pure_read {
     // Note: Pure read benchmarks pre-build the tree once since we're measuring
     // read performance only. Each thread still warms up before measurement.
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -628,14 +628,14 @@ mod pure_read {
 // 10: REMOVE HEAVY - 50% Insert, 50% Remove
 // =============================================================================
 
-#[divan::bench_group(name = "10_remove_heavy", sample_count = 200)]
+#[divan::bench_group(name = "10_remove_heavy", sample_count = 100)]
 mod remove_heavy {
     use super::*;
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 25_000;
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -685,7 +685,7 @@ mod remove_heavy {
 // 11: LATENCY DISTRIBUTION - Single-threaded p50/p99/max
 // =============================================================================
 
-#[divan::bench_group(name = "11_latency_single_thread", sample_count = 200)]
+#[divan::bench_group(name = "11_latency_single_thread", sample_count = 100)]
 mod latency_single {
     use super::*;
     use std::time::Instant;
@@ -729,7 +729,7 @@ mod latency_single {
 // 12: MEMORY FOOTPRINT - Measure memory usage
 // =============================================================================
 
-#[divan::bench_group(name = "12_memory_footprint", sample_count = 200)]
+#[divan::bench_group(name = "12_memory_footprint", sample_count = 100)]
 mod memory_footprint {
     use super::*;
 
@@ -762,7 +762,7 @@ mod memory_footprint {
 // This eliminates the TreeIndex upsert workaround penalty, providing
 // a fair comparison where all structures use simple insert operations.
 
-#[divan::bench_group(name = "13_insert_only_fair", sample_count = 200)]
+#[divan::bench_group(name = "13_insert_only_fair", sample_count = 100)]
 mod insert_only_fair {
     use super::*;
 
@@ -797,7 +797,7 @@ mod insert_only_fair {
         out
     }
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let read_keys = Arc::new(keys::<KEY_SIZE>(N));
         let total_writes = (OPS_PER_THREAD * threads) / 10; // 10% writes
@@ -875,14 +875,14 @@ mod insert_only_fair {
 // All operations are inserts to new keys. No reads, no upserts.
 // This is the fairest possible write benchmark.
 
-#[divan::bench_group(name = "14_pure_insert", sample_count = 200)]
+#[divan::bench_group(name = "14_pure_insert", sample_count = 100)]
 mod pure_insert {
     use super::*;
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 10_000;
 
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
 

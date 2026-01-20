@@ -1381,6 +1381,21 @@ impl<S: ValueSlot> LeafNode24<S> {
         self.permutation.store(perm, WRITE_ORD);
     }
 
+    /// Store permutation with Relaxed ordering.
+    ///
+    /// Use this when the caller already holds the node lock. The lock's
+    /// Release fence on unlock provides the necessary synchronization,
+    /// so we can skip the Release store here.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the lock on this node. Using Relaxed without the
+    /// lock would create a data race with concurrent readers.
+    #[inline(always)]
+    pub fn set_permutation_relaxed(&self, perm: Permuter24) {
+        self.permutation.store(perm, RELAXED);
+    }
+
     /// Get raw permutation value (for debugging).
     #[inline(always)]
     #[must_use]
@@ -1626,7 +1641,8 @@ impl<S: ValueSlot> LeafNode24<S> {
                     return next;
                 }
                 Err(_) => {
-                    // CAS failed: someone else updated next, retry
+                    // CAS failed: someone else updated next, retry immediately.
+                    // This is a fast CAS that typically succeeds on first try.
                     StdHint::spin_loop();
                 }
             }
@@ -2030,6 +2046,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn set_permutation(&self, perm: Permuter24) {
         Self::set_permutation(self, perm);
+    }
+
+    #[inline(always)]
+    fn set_permutation_relaxed(&self, perm: Permuter24) {
+        Self::set_permutation_relaxed(self, perm);
     }
 
     #[inline(always)]

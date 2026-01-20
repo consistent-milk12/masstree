@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "masstree"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "arrayvec",
  "chrono",
@@ -1442,9 +1442,9 @@ dependencies = [
 
 [[package]]
 name = "scc"
-version = "3.4.10"
+version = "3.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79d533af0a5c0d082eb3f957aaca91e920ad7064a5ebabee3584ed1d90a0bb24"
+checksum = "61bdded10741a888f89819c96faebc2b292732a632946223641fd9f2793e0235"
 dependencies = [
  "saa",
  "sdd",

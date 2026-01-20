@@ -418,6 +418,21 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         self.permutation.store(perm, WRITE_ORD);
     }
 
+    /// Store permutation with Relaxed ordering.
+    ///
+    /// Use this when the caller already holds the node lock. The lock's
+    /// Release fence on unlock provides the necessary synchronization,
+    /// so we can skip the Release store here.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the lock on this node. Using Relaxed without the
+    /// lock would create a data race with concurrent readers.
+    #[inline(always)]
+    pub fn set_permutation_relaxed(&self, perm: Permuter15) {
+        self.permutation.store(perm, RELAXED);
+    }
+
     /// Get the ikey at the given slot.
     ///
     /// # Panics
@@ -2092,6 +2107,11 @@ impl<V: InlineBits> crate::leaf_trait::TreeLeafNode<TrueInlineSlot<V>> for LeafN
     #[inline(always)]
     fn set_permutation(&self, perm: Self::Perm) {
         Self::set_permutation(self, perm);
+    }
+
+    #[inline(always)]
+    fn set_permutation_relaxed(&self, perm: Self::Perm) {
+        Self::set_permutation_relaxed(self, perm);
     }
 
     #[inline(always)]

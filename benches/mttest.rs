@@ -35,10 +35,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 // Global Timeout Flag (matches C++ volatile bool timeout[2])
 // =============================================================================
 
-const C: u32 = 2_654_435_761;
+/// Knuth multiplicative hash constant (2^32 * phi)
+const KNUTH_MULT: u32 = 2_654_435_761;
 
-// Refresh guard every N ops to allow epoch advancement and memory reclamation
-const GUARD_REFRESH_INTERVAL: u64 = 100_000;
+/// Check timeout every N operations to reduce atomic load overhead.
+/// 512 chosen as power-of-2 for efficient bitmasking, small enough for responsiveness.
+const TIMEOUT_CHECK_INTERVAL: u64 = 512;
+
+/// Refresh guard every N ops to allow epoch advancement and memory reclamation.
+/// Using power-of-2 for efficient countdown reset.
+const GUARD_REFRESH_INTERVAL: u64 = 131_072; // 128K ops
 
 /// Global timeout flag, set by timer thread (matches C++ SIGALRM approach).
 /// Using a single flag since most benchmarks only need put-phase timeout.
@@ -60,6 +66,14 @@ fn reset_timeout() {
 #[inline(always)]
 fn timed_out() -> bool {
     TIMEOUT.load(Ordering::Relaxed)
+}
+
+/// Check timeout only every TIMEOUT_CHECK_INTERVAL operations.
+/// Returns true if timed out, false otherwise.
+#[inline(always)]
+fn should_stop(op_count: u64) -> bool {
+    // Use bitmask for efficient modulo on power-of-2 interval
+    (op_count & (TIMEOUT_CHECK_INTERVAL - 1)) == 0 && timed_out()
 }
 
 /// Spawn a timer thread that sets the timeout flag after `duration`.
@@ -92,15 +106,28 @@ fn pin_thread(tid: usize, core_ids: &[CoreId]) {
 // CLI Arguments
 // =============================================================================
 
+/// Parse threads with validation (must be >= 1)
+fn parse_threads(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| format!("'{s}' is not a valid number"))?;
+    if n == 0 {
+        Err("threads must be at least 1".to_string())
+    } else {
+        Ok(n)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "mttest",
     about = "C++ mttest-compatible Masstree benchmark",
+    // Required: cargo passes --bench to the binary which we must ignore
     ignore_errors = true
 )]
 struct Args {
-    /// Number of threads (default: number of CPU cores)
-    #[arg(short = 'j', long = "threads")]
+    /// Number of threads (default: number of CPU cores, must be >= 1)
+    #[arg(short = 'j', long = "threads", value_parser = parse_threads)]
     threads: Option<usize>,
 
     /// Duration in seconds (default: 10, matching C++ mttest)
@@ -265,6 +292,7 @@ struct ThreadResult {
 #[derive(Clone, Serialize)]
 struct BenchmarkResult {
     name: String,
+    trial: u64,
     threads: usize,
     duration_secs: u64,
     thread_results: Vec<ThreadResult>,
@@ -280,7 +308,7 @@ struct BenchmarkResult {
 #[derive(Serialize)]
 struct RunResults {
     timestamp: String,
-    rust_version: String,
+    crate_version: String,
     threads: usize,
     duration_secs: u64,
     pinned: bool,
@@ -290,28 +318,15 @@ struct RunResults {
 
 impl RunResults {
     fn new(threads: usize, duration_secs: u64, pinned: bool, check: bool) -> Self {
+        // Use Unix timestamp for simplicity and accuracy
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| {
-                // Format as ISO 8601
-                let secs = d.as_secs();
-                let days_since_epoch = secs / 86400;
-                let secs_today = secs % 86400;
-                let hours = secs_today / 3600;
-                let mins = (secs_today % 3600) / 60;
-                let secs = secs_today % 60;
-                // Approximate date calculation (not accounting for leap years perfectly)
-                let years = 1970 + days_since_epoch / 365;
-                let remaining_days = days_since_epoch % 365;
-                let month = remaining_days / 30 + 1;
-                let day = remaining_days % 30 + 1;
-                format!("{years:04}-{month:02}-{day:02}T{hours:02}:{mins:02}:{secs:02}Z")
-            })
-            .unwrap_or_else(|_| "unknown".to_string());
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "0".to_string());
 
         Self {
             timestamp,
-            rust_version: env!("CARGO_PKG_VERSION").to_string(),
+            crate_version: env!("CARGO_PKG_VERSION").to_string(),
             threads,
             duration_secs,
             pinned,
@@ -320,41 +335,26 @@ impl RunResults {
         }
     }
 
-    fn add_benchmark(&mut self, name: &str, thread_results: Vec<ThreadResult>) {
+    fn add_benchmark(&mut self, name: &str, trial: u64, thread_results: Vec<ThreadResult>) {
         let mut total_puts = 0u64;
         let mut total_gets = 0u64;
         let mut total_put_rate = 0.0;
         let mut total_get_rate = 0.0;
         let mut total_ops_rate = 0.0;
 
+        // Reuse ComputedRates for consistent calculation with print_results
         for r in &thread_results {
-            let put_rate = if r.put_time > 0.0 {
-                r.puts as f64 / r.put_time
-            } else {
-                0.0
-            };
-            let get_rate = if r.get_time > 0.0 {
-                r.gets as f64 / r.get_time
-            } else {
-                0.0
-            };
-            let ops = r.puts + r.gets;
-            let total_time = r.put_time + r.get_time;
-            let ops_rate = if total_time > 0.0 {
-                ops as f64 / total_time
-            } else {
-                0.0
-            };
-
+            let rates = ComputedRates::from_result(r);
             total_puts += r.puts;
             total_gets += r.gets;
-            total_put_rate += put_rate;
-            total_get_rate += get_rate;
-            total_ops_rate += ops_rate;
+            total_put_rate += rates.put_rate;
+            total_get_rate += rates.get_rate;
+            total_ops_rate += rates.ops_rate;
         }
 
         self.benchmarks.push(BenchmarkResult {
             name: name.to_string(),
+            trial,
             threads: self.threads,
             duration_secs: self.duration_secs,
             thread_results,
@@ -368,126 +368,121 @@ impl RunResults {
     }
 }
 
-/// Output mode for results
-static mut OUTPUT_JSON: bool = false;
-static mut TOTALS_ONLY: bool = false;
-static mut CURRENT_TRIAL: usize = 0;
+/// Output mode for results (atomic to avoid unsafe blocks)
+static OUTPUT_JSON: AtomicBool = AtomicBool::new(false);
+static TOTALS_ONLY: AtomicBool = AtomicBool::new(false);
+static CURRENT_TRIAL: AtomicU64 = AtomicU64::new(0);
+
+/// Pre-computed rates for a thread result to avoid redundant calculations
+struct ComputedRates {
+    put_rate: f64,
+    get_rate: f64,
+    ops: u64,
+    ops_rate: f64,
+}
+
+impl ComputedRates {
+    #[inline]
+    fn from_result(r: &ThreadResult) -> Self {
+        const EPSILON: f64 = 1e-9;
+        let put_rate = if r.put_time > EPSILON {
+            r.puts as f64 / r.put_time
+        } else {
+            0.0
+        };
+        let get_rate = if r.get_time > EPSILON {
+            r.gets as f64 / r.get_time
+        } else {
+            0.0
+        };
+        let ops = r.puts + r.gets;
+        let total_time = r.put_time + r.get_time;
+        let ops_rate = if total_time > EPSILON {
+            ops as f64 / total_time
+        } else {
+            0.0
+        };
+        Self {
+            put_rate,
+            get_rate,
+            ops,
+            ops_rate,
+        }
+    }
+}
 
 fn print_results(test: &str, threads: usize, results: &[ThreadResult]) {
-    // SAFETY: Only accessed from single-threaded main context
-    let json_mode = unsafe { OUTPUT_JSON };
-    let totals_only = unsafe { TOTALS_ONLY };
-    let trial = unsafe { CURRENT_TRIAL };
+    let json_mode = OUTPUT_JSON.load(Ordering::Relaxed);
+    let totals_only = TOTALS_ONLY.load(Ordering::Relaxed);
+    let trial = CURRENT_TRIAL.load(Ordering::Relaxed);
+
+    // Single pass: compute per-thread rates and accumulate totals
+    let mut total_puts = 0u64;
+    let mut total_gets = 0u64;
+    let mut total_ops_rate = 0.0;
+    let mut total_put_rate = 0.0;
+    let mut total_get_rate = 0.0;
+
+    // Pre-compute all rates in one pass (avoids redundant calculation)
+    let computed: Vec<ComputedRates> = results
+        .iter()
+        .map(|r| {
+            let rates = ComputedRates::from_result(r);
+            total_puts += r.puts;
+            total_gets += r.gets;
+            total_put_rate += rates.put_rate;
+            total_get_rate += rates.get_rate;
+            total_ops_rate += rates.ops_rate;
+            rates
+        })
+        .collect();
 
     if json_mode {
         // C++ compatible JSON output (one line per thread)
-        for (tid, r) in results.iter().enumerate() {
-            let put_rate = if r.put_time > 0.0 {
-                r.puts as f64 / r.put_time
-            } else {
-                0.0
-            };
-            let get_rate = if r.get_time > 0.0 {
-                r.gets as f64 / r.get_time
-            } else {
-                0.0
-            };
-            let ops = r.puts + r.gets;
-            let total_time = r.put_time + r.get_time;
-            let ops_rate = if total_time > 0.0 {
-                ops as f64 / total_time
-            } else {
-                0.0
-            };
-
+        for (tid, (r, rates)) in results.iter().zip(computed.iter()).enumerate() {
             println!(
                 r#"{{"table":"masstree","test":"{}","trial":{},"thread":{},"puts":{},"puts_per_sec":{:.0},"gets":{},"gets_per_sec":{:.0},"ops":{},"ops_per_sec":{:.0}}}"#,
-                test, trial, tid, r.puts, put_rate, r.gets, get_rate, ops, ops_rate
+                test,
+                trial,
+                tid,
+                r.puts,
+                rates.put_rate,
+                r.gets,
+                rates.get_rate,
+                rates.ops,
+                rates.ops_rate
             );
         }
+    } else if totals_only {
+        // Compact single-line format: test_name: X.XX Mops/s
+        let mops = total_ops_rate / 1_000_000.0;
+        println!("{:<8} {:>6.2} Mops/s", format!("{test}:"), mops);
     } else {
-        // Human-readable table format
-        let mut total_puts = 0u64;
-        let mut total_gets = 0u64;
-        let mut total_put_rate = 0.0;
-        let mut total_get_rate = 0.0;
-        let mut total_ops_rate = 0.0;
+        println!("\n{test} with {threads} threads:");
+        println!(
+            "{:>8} {:>12} {:>14} {:>12} {:>14} {:>12} {:>14}",
+            "thread", "puts", "puts/sec", "gets", "gets/sec", "ops", "ops/sec"
+        );
+        println!("{}", "-".repeat(90));
 
-        for r in results {
-            let put_rate = if r.put_time > 0.0 {
-                r.puts as f64 / r.put_time
-            } else {
-                0.0
-            };
-            let get_rate = if r.get_time > 0.0 {
-                r.gets as f64 / r.get_time
-            } else {
-                0.0
-            };
-            let ops = r.puts + r.gets;
-            let total_time = r.put_time + r.get_time;
-            let ops_rate = if total_time > 0.0 {
-                ops as f64 / total_time
-            } else {
-                0.0
-            };
-
-            total_puts += r.puts;
-            total_gets += r.gets;
-            total_put_rate += put_rate;
-            total_get_rate += get_rate;
-            total_ops_rate += ops_rate;
-        }
-
-        if totals_only {
-            // Compact single-line format: test_name: X.XX Mops/s
-            let mops = total_ops_rate / 1_000_000.0;
-            println!("{:<8} {:>6.2} Mops/s", format!("{test}:"), mops);
-        } else {
-            println!("\n{test} with {threads} threads:");
-            println!(
-                "{:>8} {:>12} {:>14} {:>12} {:>14} {:>12} {:>14}",
-                "thread", "puts", "puts/sec", "gets", "gets/sec", "ops", "ops/sec"
-            );
-            println!("{}", "-".repeat(90));
-
-            for (tid, r) in results.iter().enumerate() {
-                let put_rate = if r.put_time > 0.0 {
-                    r.puts as f64 / r.put_time
-                } else {
-                    0.0
-                };
-                let get_rate = if r.get_time > 0.0 {
-                    r.gets as f64 / r.get_time
-                } else {
-                    0.0
-                };
-                let ops = r.puts + r.gets;
-                let total_time = r.put_time + r.get_time;
-                let ops_rate = if total_time > 0.0 {
-                    ops as f64 / total_time
-                } else {
-                    0.0
-                };
-
-                println!(
-                    "{:>8} {:>12} {:>14.0} {:>12} {:>14.0} {:>12} {:>14.0}",
-                    tid, r.puts, put_rate, r.gets, get_rate, ops, ops_rate
-                );
-            }
-
-            println!("{}", "-".repeat(90));
+        for (tid, (r, rates)) in results.iter().zip(computed.iter()).enumerate() {
             println!(
                 "{:>8} {:>12} {:>14.0} {:>12} {:>14.0} {:>12} {:>14.0}",
-                "TOTAL",
-                total_puts,
-                total_put_rate,
-                total_gets,
-                total_get_rate,
-                total_puts + total_gets,
-                total_ops_rate
+                tid, r.puts, rates.put_rate, r.gets, rates.get_rate, rates.ops, rates.ops_rate
             );
         }
+
+        println!("{}", "-".repeat(90));
+        println!(
+            "{:>8} {:>12} {:>14.0} {:>12} {:>14.0} {:>12} {:>14.0}",
+            "TOTAL",
+            total_puts,
+            total_put_rate,
+            total_gets,
+            total_get_rate,
+            total_puts + total_gets,
+            total_ops_rate
+        );
     }
 }
 
@@ -547,7 +542,7 @@ fn bench_rw1(
                     // This enables seize to reclaim retired nodes, reducing memory from
                     // ~16GB to ~2-3GB by not blocking reclamation for entire benchmark
                     let guard = tree.guard();
-                    while !timed_out() && puts <= limit {
+                    while !should_stop(puts) && puts < limit {
                         let x = rng.rand();
                         let key = QuickIstr::new(u64::from(x));
                         let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
@@ -631,7 +626,7 @@ fn bench_rw2(
     threads: usize,
     duration: Duration,
     get_frac: f64,
-    name: &str,
+    name: &'static str,
     limit: u64,
     check: bool,
     core_ids: &Arc<Vec<CoreId>>,
@@ -653,7 +648,6 @@ fn bench_rw2(
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
             let results = Arc::clone(&results);
-            let name = name.to_string();
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
@@ -669,23 +663,33 @@ fn bench_rw2(
                 let mut gets = 0u64;
                 let mut sum = 0u64;
                 let mut guard = tree.guard();
+                // Countdown-based refresh: decrement instead of compare against running total
+                let mut ops_until_refresh = GUARD_REFRESH_INTERVAL;
 
                 let mut check_errors = 0u64;
-                while !timed_out() && (puts + gets) <= limit {
-                    // Periodic guard refresh to allow seize to reclaim retired nodes
-                    if (puts + gets).is_multiple_of(GUARD_REFRESH_INTERVAL) && (puts + gets) > 0 {
+                let mut ops = 0u64;
+                loop {
+                    // Check termination conditions with batched timeout check
+                    if should_stop(ops) || ops >= limit {
+                        break;
+                    }
+
+                    // Countdown-based guard refresh (avoids addition in hot path)
+                    ops_until_refresh -= 1;
+                    if ops_until_refresh == 0 {
                         drop(guard);
                         guard = tree.guard();
+                        ops_until_refresh = GUARD_REFRESH_INTERVAL;
                     }
 
                     if puts == 0 || !rng.bernoulli(get_frac) {
-                        let x = (offset.wrapping_add(puts as u32)).wrapping_mul(C);
+                        let x = (offset.wrapping_add(puts as u32)).wrapping_mul(KNUTH_MULT);
                         let key = QuickIstr::new(u64::from(x));
                         let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
                         puts += 1;
                     } else {
                         let idx = rng.uniform(puts as u32);
-                        let x = (offset.wrapping_add(idx)).wrapping_mul(C);
+                        let x = (offset.wrapping_add(idx)).wrapping_mul(KNUTH_MULT);
                         let key = QuickIstr::new(u64::from(x));
                         let expected = u64::from(x + 1);
                         if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
@@ -698,6 +702,7 @@ fn bench_rw2(
                         }
                         gets += 1;
                     }
+                    ops += 1;
                 }
                 drop(guard);
                 if check && check_errors > 0 {
@@ -722,24 +727,17 @@ fn bench_rw2(
     let thread_results: Vec<_> = results
         .iter()
         .map(|(p, g, t)| {
-            let total_time = t.load(Ordering::Relaxed) as f64 / 1e9;
+            let elapsed = t.load(Ordering::Relaxed) as f64 / 1e9;
             let puts = p.load(Ordering::Relaxed);
             let gets = g.load(Ordering::Relaxed);
-            let total_ops = puts + gets;
-            // Proportionally split time based on operation counts
-            // This is an approximation since puts/gets have different costs,
-            // but it's better than reporting 0.0 for get_time
-            let (put_time, get_time) = if total_ops > 0 {
-                let put_frac = puts as f64 / total_ops as f64;
-                (total_time * put_frac, total_time * (1.0 - put_frac))
-            } else {
-                (total_time, 0.0)
-            };
+            // For mixed workloads, puts and gets happen interleaved in the SAME time period.
+            // Set get_time=0 so ops_rate = (puts+gets)/elapsed is correct.
+            // Individual puts_per_sec and gets_per_sec use put_time (=elapsed) for meaningful rates.
             ThreadResult {
                 puts,
                 gets,
-                put_time,
-                get_time,
+                put_time: elapsed,
+                get_time: 0.0, // Mixed workload: don't double-count time
             }
         })
         .collect();
@@ -788,7 +786,7 @@ fn bench_rw3(
                 {
                     // Scoped guard for put phase - allows epoch advancement between phases
                     let guard = tree.guard();
-                    while !timed_out() && n <= limit {
+                    while !should_stop(n) && n < limit {
                         let key = key8(n);
                         let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
                         n += 1;
@@ -900,7 +898,7 @@ fn bench_rw4(
                 {
                     // Scoped guard for put phase - allows epoch advancement between phases
                     let guard = tree.guard();
-                    while !timed_out() && n <= limit {
+                    while !should_stop(n) && n < limit {
                         let key = key8(TOP - n);
                         let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
                         n += 1;
@@ -1007,11 +1005,18 @@ fn bench_same(
                 let start = Instant::now();
                 let mut n = 0u64;
                 let mut guard = tree.guard();
+                let mut ops_until_refresh = GUARD_REFRESH_INTERVAL;
 
-                while !timed_out() && n <= limit {
-                    if n.is_multiple_of(GUARD_REFRESH_INTERVAL) && n > 0 {
+                loop {
+                    if should_stop(n) || n >= limit {
+                        break;
+                    }
+                    // Countdown-based guard refresh
+                    ops_until_refresh -= 1;
+                    if ops_until_refresh == 0 {
                         drop(guard);
                         guard = tree.guard();
+                        ops_until_refresh = GUARD_REFRESH_INTERVAL;
                     }
                     let x = rng.uniform(NUM_KEYS);
                     let key = QuickIstr::new(u64::from(x));
@@ -1054,6 +1059,7 @@ fn bench_same(
 fn bench_uscale(
     threads: usize,
     duration: Duration,
+    limit: u64,
     core_ids: &Arc<Vec<CoreId>>,
 ) -> Vec<ThreadResult> {
     // C++ constants: ruscale_partsz = (140 * 1000000) / 16, nseqkeys = 16 * ruscale_partsz
@@ -1089,11 +1095,18 @@ fn bench_uscale(
                 let start = Instant::now();
                 let mut n = 0u64;
                 let mut guard = tree.guard();
+                let mut ops_until_refresh = GUARD_REFRESH_INTERVAL;
 
-                while !timed_out() {
-                    if n.is_multiple_of(GUARD_REFRESH_INTERVAL) && n > 0 {
+                loop {
+                    if should_stop(n) || n >= limit {
+                        break;
+                    }
+                    // Countdown-based guard refresh
+                    ops_until_refresh -= 1;
+                    if ops_until_refresh == 0 {
                         drop(guard);
                         guard = tree.guard();
+                        ops_until_refresh = GUARD_REFRESH_INTERVAL;
                     }
                     let x = u64::from(rng.rand()) % NSEQKEYS;
                     let key = QuickIstr::new(x);
@@ -1132,6 +1145,7 @@ fn bench_uscale(
 fn bench_wscale(
     threads: usize,
     duration: Duration,
+    limit: u64,
     core_ids: &Arc<Vec<CoreId>>,
 ) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
@@ -1163,11 +1177,18 @@ fn bench_wscale(
                 let start = Instant::now();
                 let mut n = 0u64;
                 let mut guard = tree.guard();
+                let mut ops_until_refresh = GUARD_REFRESH_INTERVAL;
 
-                while !timed_out() {
-                    if n.is_multiple_of(GUARD_REFRESH_INTERVAL) && n > 0 {
+                loop {
+                    if should_stop(n) || n >= limit {
+                        break;
+                    }
+                    // Countdown-based guard refresh
+                    ops_until_refresh -= 1;
+                    if ops_until_refresh == 0 {
                         drop(guard);
                         guard = tree.guard();
+                        ops_until_refresh = GUARD_REFRESH_INTERVAL;
                     }
                     let x = u64::from(rng.rand());
                     let key = QuickIstr::new(x);
@@ -1223,11 +1244,8 @@ fn main() {
     let trials = args.trials;
     let should_save = args.save || args.output.is_some();
 
-    // SAFETY: Single-threaded main context, before any worker threads
-    unsafe {
-        OUTPUT_JSON = args.json;
-        TOTALS_ONLY = args.totals_only;
-    }
+    OUTPUT_JSON.store(args.json, Ordering::Relaxed);
+    TOTALS_ONLY.store(args.totals_only, Ordering::Relaxed);
 
     // Parse tests - use C++ naming conventions
     let tests: Vec<&str> = if args.tests.is_empty() || args.tests[0] == "all" {
@@ -1271,124 +1289,87 @@ fn main() {
     // Collect results for JSON output
     let mut run_results = RunResults::new(threads, args.duration, args.pin, check);
 
-    for trial in 0..trials {
-        // SAFETY: Single-threaded main context, between test runs
-        unsafe {
-            CURRENT_TRIAL = trial;
-        }
+    for trial in 0..trials as u64 {
+        CURRENT_TRIAL.store(trial, Ordering::Relaxed);
 
         if trials > 1 && !args.quiet && !args.json {
             println!("\n=== Trial {}/{} ===", trial + 1, trials);
         }
-
         for test in &tests {
             match *test {
                 "rw1" => {
-                    let results =
-                        bench_rw1(threads, duration, limit, check, &Arc::clone(&core_ids));
+                    let results = bench_rw1(threads, duration, limit, check, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("rw1", results);
+                        run_results.add_benchmark("rw1", trial, results);
                     }
                 }
                 // C++ naming: rw2 = 50% get fraction
                 "rw2" => {
-                    let results = bench_rw2(
-                        threads,
-                        duration,
-                        0.5,
-                        "rw2",
-                        limit,
-                        check,
-                        &Arc::clone(&core_ids),
-                    );
+                    let results = bench_rw2(threads, duration, 0.5, "rw2", limit, check, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("rw2", results);
+                        run_results.add_benchmark("rw2", trial, results);
                     }
                 }
                 "rw2g90" => {
-                    let results = bench_rw2(
-                        threads,
-                        duration,
-                        0.9,
-                        "rw2g90",
-                        limit,
-                        check,
-                        &Arc::clone(&core_ids),
-                    );
+                    let results =
+                        bench_rw2(threads, duration, 0.9, "rw2g90", limit, check, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("rw2g90", results);
+                        run_results.add_benchmark("rw2g90", trial, results);
                     }
                 }
                 "rw2g98" => {
-                    let results = bench_rw2(
-                        threads,
-                        duration,
-                        0.98,
-                        "rw2g98",
-                        limit,
-                        check,
-                        &Arc::clone(&core_ids),
-                    );
+                    let results =
+                        bench_rw2(threads, duration, 0.98, "rw2g98", limit, check, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("rw2g98", results);
+                        run_results.add_benchmark("rw2g98", trial, results);
                     }
                 }
                 "rw3" => {
-                    let results =
-                        bench_rw3(threads, duration, limit, check, &Arc::clone(&core_ids));
+                    let results = bench_rw3(threads, duration, limit, check, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("rw3", results);
+                        run_results.add_benchmark("rw3", trial, results);
                     }
                 }
                 "rw4" => {
-                    let results =
-                        bench_rw4(threads, duration, limit, check, &Arc::clone(&core_ids));
+                    let results = bench_rw4(threads, duration, limit, check, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("rw4", results);
+                        run_results.add_benchmark("rw4", trial, results);
                     }
                 }
                 "same" => {
-                    let results = bench_same(threads, duration, limit, &Arc::clone(&core_ids));
+                    let results = bench_same(threads, duration, limit, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("same", results);
+                        run_results.add_benchmark("same", trial, results);
                     }
                 }
                 "uscale" => {
-                    let results = bench_uscale(threads, duration, &Arc::clone(&core_ids));
+                    let results = bench_uscale(threads, duration, limit, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("uscale", results);
+                        run_results.add_benchmark("uscale", trial, results);
                     }
                 }
                 "wscale" => {
-                    let results = bench_wscale(threads, duration, &Arc::clone(&core_ids));
+                    let results = bench_wscale(threads, duration, limit, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("wscale", results);
+                        run_results.add_benchmark("wscale", trial, results);
                     }
                 }
                 "all" => {
-                    let r1 = bench_rw1(threads, duration, limit, check, &Arc::clone(&core_ids));
-                    let r2 = bench_rw2(
-                        threads,
-                        duration,
-                        0.98,
-                        "rw2g98",
-                        limit,
-                        check,
-                        &Arc::clone(&core_ids),
-                    );
-                    let r3 = bench_rw3(threads, duration, limit, check, &Arc::clone(&core_ids));
-                    let r4 = bench_rw4(threads, duration, limit, check, &Arc::clone(&core_ids));
-                    let r5 = bench_same(threads, duration, limit, &Arc::clone(&core_ids));
-                    let r6 = bench_uscale(threads, duration, &Arc::clone(&core_ids));
-                    let r7 = bench_wscale(threads, duration, &Arc::clone(&core_ids));
+                    let r1 = bench_rw1(threads, duration, limit, check, &core_ids);
+                    let r2 = bench_rw2(threads, duration, 0.98, "rw2g98", limit, check, &core_ids);
+                    let r3 = bench_rw3(threads, duration, limit, check, &core_ids);
+                    let r4 = bench_rw4(threads, duration, limit, check, &core_ids);
+                    let r5 = bench_same(threads, duration, limit, &core_ids);
+                    let r6 = bench_uscale(threads, duration, limit, &core_ids);
+                    let r7 = bench_wscale(threads, duration, limit, &core_ids);
                     if should_save {
-                        run_results.add_benchmark("rw1", r1);
-                        run_results.add_benchmark("rw2g98", r2);
-                        run_results.add_benchmark("rw3", r3);
-                        run_results.add_benchmark("rw4", r4);
-                        run_results.add_benchmark("same", r5);
-                        run_results.add_benchmark("uscale", r6);
-                        run_results.add_benchmark("wscale", r7);
+                        run_results.add_benchmark("rw1", trial, r1);
+                        run_results.add_benchmark("rw2g98", trial, r2);
+                        run_results.add_benchmark("rw3", trial, r3);
+                        run_results.add_benchmark("rw4", trial, r4);
+                        run_results.add_benchmark("same", trial, r5);
+                        run_results.add_benchmark("uscale", trial, r6);
+                        run_results.add_benchmark("wscale", trial, r7);
                     }
                 }
                 _ => eprintln!("Unknown test: {test}"),

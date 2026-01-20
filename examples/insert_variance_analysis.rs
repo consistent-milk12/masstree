@@ -167,7 +167,7 @@ fn print_and_reset_insert_stats(label: &str) {
 }
 
 #[cfg(not(feature = "insert-stats"))]
-fn print_and_reset_insert_stats(_label: &str) {
+const fn print_and_reset_insert_stats(_label: &str) {
     // No-op when feature is disabled
 }
 

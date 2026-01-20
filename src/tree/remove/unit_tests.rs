@@ -1094,13 +1094,6 @@ fn test_miri_parent_erased_helpers() {
 // ============================================================================
 
 /// Test that process_coalesce doesn't cause infinite loops or panics.
-///
-/// This test verifies the fix for the P0 safety issue where:
-/// 1. Deleted nodes had marked `next` pointers (signaling "split in progress")
-/// 2. Traversal code would loop waiting for the "split" to complete
-/// 3. But deleted nodes never unmark their `next` pointer -> infinite loop
-///
-/// The fix ensures traversal code checks `is_deleted()` and follows B-links.
 #[test]
 fn test_coalesce_safety_no_infinite_loop() {
     let tree: TestTree = TestTree::new();

@@ -176,11 +176,6 @@ impl Propagation {
         // let mut iterations: usize = 0;
         // let mut stale_parent_retries: usize = 0;
 
-        // Exponential backoff state for contention reduction
-        // Starts at 1, doubles on each retry, caps at 64 spins
-        const BACKOFF_CAP: u32 = 64;
-        let mut backoff: u32 = 1;
-
         loop {
             // CRITICAL: Uncomment to detect runaway propagation (tree corruption)
             // iterations += 1;
@@ -265,15 +260,11 @@ impl Propagation {
             let current_left_parent: *mut u8 = Self::get_parent::<S, L>(left_ptr, at_leaf_level);
 
             if current_left_parent != left_parent {
-                // Parent pointer changed - release parent lock and retry with backoff
+                // Parent pointer changed - release parent lock and retry
                 drop(parent_lock); // RAII: auto-unlock
-                // CRITICAL: stale_parent_retries = 0; // Reset: parent changed, not stale
 
-                // Exponential backoff: spin `backoff` times, then double (up to cap)
-                for _ in 0..backoff {
-                    StdHint::spin_loop();
-                }
-                backoff = (backoff * 2).min(BACKOFF_CAP);
+                // Single PAUSE per retry (matches C++ relax_fence pattern)
+                StdHint::spin_loop();
                 continue;
             }
 
@@ -283,8 +274,6 @@ impl Propagation {
 
             let child_idx: usize =
                 if let Some(idx) = ParentLocking::validate_membership::<S, L>(parent, left_ptr) {
-                    // Success: reset backoff for next potential retry
-                    backoff = 1;
                     idx
                 } else {
                     // CRITICAL: Uncomment to prevent livelock on persistent stale parent
@@ -297,14 +286,11 @@ impl Propagation {
                     // }
 
                     // Child not found - parent may have been split concurrently
-                    // Release parent lock and retry with backoff (left_lock still held)
+                    // Release parent lock and retry (left_lock still held)
                     drop(parent_lock); // RAII: auto-unlock
 
-                    // Exponential backoff: spin `backoff` times, then double (up to cap)
-                    for _ in 0..backoff {
-                        StdHint::spin_loop();
-                    }
-                    backoff = (backoff * 2).min(BACKOFF_CAP);
+                    // Single PAUSE per retry (matches C++ relax_fence pattern)
+                    StdHint::spin_loop();
                     continue;
                 };
 

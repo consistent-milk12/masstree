@@ -32,7 +32,7 @@ use crate::key::IKEY_SIZE;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use crate::permuter::{AtomicPermuter15, Permuter15};
-use crate::prefetch::prefetch_read;
+use crate::prefetch::{prefetch_read, prefetch_write};
 use crate::slot::ValueSlot;
 use crate::suffix::{SuffixBag, SuffixSidecar};
 use crate::{Linker, Permuter};
@@ -1194,7 +1194,7 @@ impl<S: ValueSlot> LeafNode15<S> {
 
     /// Check if a slot's suffix equals the given suffix.
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
         debug_assert!(
             slot < WIDTH_15,
@@ -1219,7 +1219,7 @@ impl<S: ValueSlot> LeafNode15<S> {
 
     /// Check if a slot's key matches the given key.
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
         debug_assert!(
             slot < WIDTH_15,
@@ -1289,6 +1289,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// - Caller must hold lock (ensures exclusive access)
     /// - The `_guard` parameter is kept for API compatibility but unused
     ///   since we no longer need to retire the old bag
+    #[inline(always)]
     pub unsafe fn compact_ksuf(
         &self,
         exclude_slot: Option<usize>,
@@ -1407,6 +1408,21 @@ impl<S: ValueSlot> LeafNode15<S> {
     #[inline(always)]
     pub fn set_permutation(&self, perm: Permuter15) {
         self.permutation.store(perm, WRITE_ORD);
+    }
+
+    /// Store permutation with Relaxed ordering.
+    ///
+    /// Use this when the caller already holds the node lock. The lock's
+    /// Release fence on unlock provides the necessary synchronization,
+    /// so we can skip the Release store here.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the lock on this node. Using Relaxed without the
+    /// lock would create a data race with concurrent readers.
+    #[inline(always)]
+    pub fn set_permutation_relaxed(&self, perm: Permuter15) {
+        self.permutation.store(perm, RELAXED);
     }
 
     /// Get raw permutation value (for debugging).
@@ -1654,7 +1670,8 @@ impl<S: ValueSlot> LeafNode15<S> {
                     return next;
                 }
                 Err(_) => {
-                    // CAS failed: someone else updated next, retry
+                    // CAS failed: someone else updated next, retry immediately.
+                    // This is a fast CAS that typically succeeds on first try.
                     std::hint::spin_loop();
                 }
             }
@@ -1967,7 +1984,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// - The leaf is locked
     /// - The slot is valid (0..WIDTH)
     /// - Any value/layer at this slot has been or will be properly retired
-    #[inline]
+    #[inline(always)]
     #[expect(clippy::indexing_slicing)]
     pub fn clear_slot(&self, slot: usize) {
         debug_assert!(slot < WIDTH_15, "clear_slot: slot out of bounds");
@@ -1991,6 +2008,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// # Safety
     ///
     /// The caller must ensure the leaf is locked.
+    #[inline(always)]
     pub fn clear_slot_and_permutation(&self, slot: usize) {
         // Clear the slot
         self.clear_slot(slot);
@@ -2052,6 +2070,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
     #[inline(always)]
     fn set_permutation(&self, perm: Permuter15) {
         Self::set_permutation(self, perm);
+    }
+
+    #[inline(always)]
+    fn set_permutation_relaxed(&self, perm: Permuter15) {
+        Self::set_permutation_relaxed(self, perm);
     }
 
     #[inline(always)]
@@ -2352,6 +2375,8 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         // We're writing to a freshly allocated leaf that is not yet visible.
         // Using ptr::write because NodeVersion doesn't implement Copy.
         unsafe {
+            const PREFETCH_DISTANCE: usize = 2;
+
             let new_leaf: &Self = &*new_leaf_ptr;
             let split_version = crate::nodeversion::NodeVersion::new_for_split(&self.version);
 
@@ -2378,6 +2403,11 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
             // SAFETY: We hold the lock on new_leaf (via split version).
             // The new leaf is not yet visible to other threads.
             if self.has_suffix_storage() {
+                // Prefetch source sidecar to hide latency during suffix migration
+                let sidecar_ptr = self.suffix_sidecar.load(RELAXED);
+                if !sidecar_ptr.is_null() {
+                    prefetch_read(sidecar_ptr.cast::<u8>());
+                }
                 let _ = new_leaf.ensure_sidecar_infallible();
             }
 
@@ -2392,7 +2422,37 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
             //    that Acquire-load next
             // 5. Readers call stable() before accessing data, which provides
             //    Acquire semantics via fence after observing clean version
+            //
+            // # Prefetching Strategy
+            //
+            // We prefetch 2 entries ahead to hide memory latency:
+            // - Source: prefetch_read on old leaf's ikey/value for entry i+2
+            // - Dest: prefetch_write on new leaf's slots for entry i+2
+            //
+            // This gives the prefetch time to complete while we process
+            // the current entry. Particularly helpful when:
+            // - Cache is cold (first access to these leaves)
+            // - Entries span cache line boundaries
+
             for i in 0..entries_to_move {
+                // Prefetch source data for entry i+PREFETCH_DISTANCE
+                #[expect(
+                    clippy::indexing_slicing,
+                    reason = "bounds checked by `i + PREFETCH_DISTANCE < entries_to_move`"
+                )]
+                if i + PREFETCH_DISTANCE < entries_to_move {
+                    let prefetch_logical_pos = split_pos + i + PREFETCH_DISTANCE;
+                    let prefetch_slot = old_perm.get(prefetch_logical_pos);
+                    // Prefetch source ikey and value (keylenx is 1 byte, not worth prefetching)
+                    prefetch_read(StdPtr::addr_of!(self.ikey0[prefetch_slot]));
+                    prefetch_read(StdPtr::addr_of!(self.leaf_values[prefetch_slot]));
+                    // Prefetch destination in exclusive mode (avoids RFO stalls)
+                    let dest_slot = i + PREFETCH_DISTANCE;
+                    prefetch_write(StdPtr::addr_of!(new_leaf.ikey0[dest_slot]).cast_mut());
+                    prefetch_write(StdPtr::addr_of!(new_leaf.keylenx[dest_slot]).cast_mut());
+                    prefetch_write(StdPtr::addr_of!(new_leaf.leaf_values[dest_slot]).cast_mut());
+                }
+
                 let old_logical_pos = split_pos + i;
                 let old_slot = old_perm.get(old_logical_pos);
                 let new_slot = i;
@@ -2440,6 +2500,8 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         new_leaf_ptr: *mut Self,
         guard: &seize::LocalGuard<'_>,
     ) -> (u64, crate::value::InsertTarget) {
+        const PREFETCH_DISTANCE: usize = 2;
+
         // CRITICAL (Help-Along Protocol): Initialize new leaf's version for split
         // (same two-layer publication model as split_into_preallocated)
         let split_version = crate::nodeversion::NodeVersion::new_for_split(&self.version);
@@ -2462,12 +2524,35 @@ impl<S: ValueSlot + Send + Sync + 'static> crate::leaf_trait::TreeLeafNode<S> fo
         // Pre-allocate suffix sidecar if source has suffix storage.
         // SAFETY: We hold the lock on new_leaf (via split version).
         if self.has_suffix_storage() {
+            // Prefetch source sidecar to hide latency during suffix migration
+            let sidecar_ptr = self.suffix_sidecar.load(RELAXED);
+            if !sidecar_ptr.is_null() {
+                prefetch_read(sidecar_ptr.cast::<u8>());
+            }
             let _ = unsafe { new_leaf.ensure_sidecar_infallible() };
         }
 
         // Move all entries to new leaf using RELAXED ordering.
         // (Same justification as split_into_preallocated)
+        //
+        // Prefetch 2 entries ahead for better cache utilization.
         for i in 0..old_size {
+            // Prefetch source and destination for entry i+PREFETCH_DISTANCE
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "bounds checked by `i + PREFETCH_DISTANCE < old_size`"
+            )]
+            if i + PREFETCH_DISTANCE < old_size {
+                let prefetch_slot = old_perm.get(i + PREFETCH_DISTANCE);
+                prefetch_read(StdPtr::addr_of!(self.ikey0[prefetch_slot]));
+                prefetch_read(StdPtr::addr_of!(self.leaf_values[prefetch_slot]));
+                // Prefetch destination in exclusive mode (avoids RFO stalls)
+                let dest_slot = i + PREFETCH_DISTANCE;
+                prefetch_write(StdPtr::addr_of!(new_leaf.ikey0[dest_slot]).cast_mut());
+                prefetch_write(StdPtr::addr_of!(new_leaf.keylenx[dest_slot]).cast_mut());
+                prefetch_write(StdPtr::addr_of!(new_leaf.leaf_values[dest_slot]).cast_mut());
+            }
+
             let old_slot = old_perm.get(i);
             let new_slot = i;
 
