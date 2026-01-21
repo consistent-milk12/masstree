@@ -102,9 +102,10 @@ impl Backoff {
             StdHint::spin_loop();
         }
 
-        // Double count, cap at 31: 0 -> 1 -> 3 -> 7 -> 15 -> 31 -> 31
-        // Higher cap reduces cache line thrashing under heavy contention.
-        self.count = ((self.count << 1) | 1) & 31;
+        // Double count, cap at 15: 0 -> 1 -> 3 -> 7 -> 15 -> 15
+        // Matches C++ backoff_fence_function (compiler.hh:141).
+        // Lower cap yields faster under SMT contention.
+        self.count = ((self.count << 1) | 1) & 15;
     }
 }
 
@@ -480,7 +481,7 @@ impl NodeVersion {
     pub fn stable(&self) -> u32 {
         // Number of backoff iterations before yielding the CPU.
         // Tuned for ~1-2µs spin time before yield on modern CPUs.
-        const SPINS_BEFORE_YIELD: u32 = 4;
+        const SPINS_BEFORE_YIELD: u32 = 2;
 
         let mut backoff = Backoff::new();
         let mut spin_count: u32 = 0;
@@ -613,7 +614,7 @@ impl NodeVersion {
     /// Same as [`stable()`](Self::stable): Acquire fence on success.
     #[must_use]
     pub fn stable_yield(&self) -> u32 {
-        const SPINS_BEFORE_YIELD: u32 = 4;
+        const SPINS_BEFORE_YIELD: u32 = 2;
         let mut spin_count: u32 = 0;
 
         loop {
@@ -968,7 +969,7 @@ impl NodeVersion {
     /// Uses `Acquire` ordering on successful lock acquisition.
     #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock_with_yield(&self) -> LockGuard<'_> {
-        const SPINS_BEFORE_YIELD: u32 = 4;
+        const SPINS_BEFORE_YIELD: u32 = 2;
 
         let mut spin_count: u32 = 0;
 

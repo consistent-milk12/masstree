@@ -38,7 +38,7 @@ fn masstree15_inline_no_leak_with_long_keys() {
 // Scan Tests for Inline Storage
 // ============================================================================
 
-/// Test basic for_each scan on inline tree.
+/// Test basic `for_each` scan on inline tree.
 #[test]
 #[expect(clippy::unwrap_used)]
 fn inline_scan_for_each() {
@@ -94,8 +94,8 @@ fn inline_scan_intra_leaf_batch() {
     // Values should be in order and correct
     for (i, (key, value)) in results.into_iter().enumerate() {
         let expected_key = (i as u64).to_be_bytes();
-        assert_eq!(key, expected_key, "Key mismatch at index {}", i);
-        assert_eq!(value, (i as u64) * 100, "Value mismatch at index {}", i);
+        assert_eq!(key, expected_key, "Key mismatch at index {i}");
+        assert_eq!(value, (i as u64) * 100, "Value mismatch at index {i}");
     }
 }
 
@@ -160,18 +160,18 @@ fn inline_scan_batch_range() {
 #[test]
 #[expect(clippy::unwrap_used, clippy::indexing_slicing)]
 fn inline_scan_batch_multi_layer() {
-    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
-    let guard = tree.guard();
-
-    // Insert keys that will create layers (> 8 bytes with common prefix)
-    fn make_key(i: u64) -> Vec<u8> {
+    // Helper to create keys that will create layers (> 8 bytes with common prefix)
+    let make_key = |i: u64| -> Vec<u8> {
         let mut key = vec![0u8; 16];
         // Common 8-byte prefix
         key[0..8].copy_from_slice(&[0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A]);
         // Varying suffix
         key[8..16].copy_from_slice(&i.to_be_bytes());
         key
-    }
+    };
+
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
+    let guard = tree.guard();
 
     for i in 0u64..30 {
         let key = make_key(i);

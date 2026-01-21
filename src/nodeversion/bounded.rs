@@ -1,6 +1,6 @@
 use super::{Backoff, LockGuard, NodeVersion, StdThread};
 
-const MAX_SPINS: u32 = 64;
+const MAX_SPINS: u32 = 16;
 
 impl NodeVersion {
     /// Acquire the lock with bounded spinning before yielding.
@@ -15,8 +15,8 @@ impl NodeVersion {
     /// # Alogrithm
     ///
     /// 1. Try to acquire the lock with `try_lock()`
-    /// 2. If failed, spin with exponential backoff (up to 64 iterations)
-    /// 3. After 64 spins, yield CPU and restart spin counter
+    /// 2. If failed, spin with exponential backoff (up to 16 iterations)
+    /// 3. After 16 spins, yield CPU and restart spin counter
     /// 4. Repeat until lock acquired
     ///
     /// # When to Use

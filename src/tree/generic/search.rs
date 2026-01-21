@@ -42,7 +42,8 @@ where
         while l < r {
             let m = (l + r) >> 1;
             let slot = perm.get(m);
-            let slot_ikey = leaf.ikey(slot);
+            // Use Relaxed ordering - caller's permutation load provides Acquire synchronization
+            let slot_ikey = leaf.ikey_relaxed(slot);
 
             match target_ikey.cmp(&slot_ikey) {
                 Ordering::Less => r = m,
@@ -82,7 +83,8 @@ where
 
         for i in 0..size {
             let slot = perm.get(i);
-            let slot_ikey = leaf.ikey(slot);
+            // Use Relaxed ordering - caller's permutation load provides Acquire synchronization
+            let slot_ikey = leaf.ikey_relaxed(slot);
 
             if slot_ikey == target_ikey {
                 // Check this slot; continue if it doesn't provide a definitive answer
@@ -146,7 +148,8 @@ where
         // with the same ikey (different keylenx values, layer pointers, etc.)
         for i in start_pos..size {
             let slot = perm.get(i);
-            let slot_ikey = leaf.ikey(slot);
+            // Use Relaxed ordering - caller's permutation load provides Acquire synchronization
+            let slot_ikey = leaf.ikey_relaxed(slot);
 
             // Stop when we pass the matching ikeys
             if slot_ikey != target_ikey {
@@ -265,7 +268,8 @@ where
         // Linear scan from the first matching position
         for i in start_pos..size {
             let slot = perm.get(i);
-            let slot_ikey = leaf.ikey(slot);
+            // Use Relaxed ordering - caller's permutation load provides Acquire synchronization
+            let slot_ikey = leaf.ikey_relaxed(slot);
 
             // Stop when we pass the matching ikeys
             if slot_ikey != target_ikey {
@@ -339,7 +343,8 @@ where
 
         for i in 0..size {
             let slot: usize = perm.get(i);
-            let slot_ikey: u64 = leaf.ikey(slot);
+            // Use Relaxed ordering - caller's permutation load provides Acquire synchronization
+            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
             if slot_ikey == target_ikey {
                 // Check this slot; continue if it doesn't provide a definitive answer

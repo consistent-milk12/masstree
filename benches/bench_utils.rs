@@ -55,7 +55,7 @@
     clippy::cast_sign_loss
 )]
 
-use std::sync::atomic::{fence, Ordering as AtomicOrdering};
+use std::sync::atomic::{Ordering as AtomicOrdering, fence};
 
 use arrayvec::ArrayVec;
 

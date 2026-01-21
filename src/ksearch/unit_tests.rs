@@ -34,6 +34,7 @@ fn test_key_index_position_not_found() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "slot() called on not-found")]
 fn test_key_index_position_slot_panics() {
     let pos = KeyIndexPosition::not_found(0);

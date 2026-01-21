@@ -470,13 +470,12 @@ where
                 continue 'leaf_loop;
             }
 
-            // Prefetch ikey cache lines while waiting for stable version.
-            leaf.prefetch_for_search();
-
             // OPTIMIZATION: Use try_stable() to avoid spinning on locked leaf.
             // If leaf is locked, opportunistically check B-link chain - under
             // high contention, our key may have moved to a sibling leaf.
             let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
+                // Prefetch AFTER successful try_stable to avoid cache pollution
+                leaf.prefetch_for_search();
                 v
             } else {
                 // Leaf is locked - check if key might be in sibling
@@ -486,7 +485,8 @@ where
                     continue 'leaf_loop;
                 }
 
-                // No B-link escape route, must wait for lock
+                // No B-link escape route, prefetch while waiting
+                leaf.prefetch_for_search();
                 leaf.version().stable()
             };
 
@@ -501,7 +501,10 @@ where
                 for i in 0..size {
                     let slot: usize = perm.get(i);
 
-                    if (leaf.ikey(slot) == target_ikey) && (leaf.keylenx(slot) == search_keylenx) {
+                    // Use Relaxed ordering - permutation() Acquire already synchronizes
+                    if (leaf.ikey_relaxed(slot) == target_ikey)
+                        && (leaf.keylenx(slot) == search_keylenx)
+                    {
                         let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
                         if !ptr.is_null() {
@@ -593,11 +596,10 @@ where
                     continue 'leaf_loop;
                 }
 
-                // Prefetch ikey cache lines while waiting for stable version.
-                leaf.prefetch_for_search();
-
                 // OPTIMIZATION: Use try_stable() to avoid spinning on locked leaf.
                 let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
+                    // Prefetch AFTER successful try_stable to avoid cache pollution
+                    leaf.prefetch_for_search();
                     v
                 } else {
                     let target_ikey: u64 = key.ikey();
@@ -608,6 +610,8 @@ where
                         continue 'leaf_loop;
                     }
 
+                    // Prefetch while waiting
+                    leaf.prefetch_for_search();
                     leaf.version().stable()
                 };
 

@@ -83,7 +83,7 @@ mod mixed_uniform {
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 12_500;
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -155,7 +155,7 @@ mod mixed_zipfian {
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 12_500;
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
@@ -217,7 +217,7 @@ mod mixed_shared_prefix {
         keys_shared_prefix_chunks::<KEY_SIZE>(N, PREFIX_CHUNKS, PREFIX_BUCKETS)
     }
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(prefix_keys());
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -273,7 +273,7 @@ mod mixed_high_contention {
     const N: usize = 500; // Small key space = high contention
     const OPS_PER_THREAD: usize = 25_000;
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -333,7 +333,7 @@ mod mixed_large_dataset {
     // to avoid the massive setup cost per iteration. Each thread still warms up before
     // measurement to ensure cache/branch predictor stability.
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let tree = Arc::new(setup_masstree15(keys.as_ref()));
@@ -453,7 +453,7 @@ mod mixed_50_50 {
     const OPS_PER_THREAD: usize = 12_500;
     const WRITE_RATIO_50: usize = 50; // 50% writes
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -517,7 +517,7 @@ mod keys_8byte {
         tree
     }
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE_8>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -572,7 +572,7 @@ mod pure_read {
     // Note: Pure read benchmarks pre-build the tree once since we're measuring
     // read performance only. Each thread still warms up before measurement.
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -635,7 +635,7 @@ mod remove_heavy {
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 25_000;
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
         let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
@@ -797,7 +797,7 @@ mod insert_only_fair {
         out
     }
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let read_keys = Arc::new(keys::<KEY_SIZE>(N));
         let total_writes = (OPS_PER_THREAD * threads) / 10; // 10% writes
@@ -882,7 +882,7 @@ mod pure_insert {
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 10_000;
 
-    #[divan::bench(args = [1, 2, 4, 6, 8, 10, 12])]
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
 
