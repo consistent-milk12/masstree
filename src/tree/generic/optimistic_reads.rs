@@ -448,7 +448,7 @@ where
     where
         F: Fn(*mut u8) -> R,
     {
-        let layer_root: *const u8 = self.load_root_ptr_generic(guard);
+        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
         let target_ikey: u64 = key.ikey();
 
         #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
@@ -489,6 +489,18 @@ where
                 leaf.prefetch_for_search();
                 leaf.version().stable()
             };
+
+            // EARLY too-right check: detect if we descended to a leaf that's
+            // to the right of where the key should be. This can happen during
+            // concurrent splits when internode routing is momentarily inconsistent.
+            // Check BEFORE searching to avoid wasting cycles on the wrong leaf.
+            if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                // Reload root to get latest pointer after concurrent modifications
+                layer_root = self.load_root_ptr_generic(guard);
+                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
+
+                continue 'leaf_loop;
+            }
 
             'search_loop: loop {
                 let perm = leaf.permutation();
@@ -552,6 +564,19 @@ where
                     continue 'search_loop;
                 }
 
+                // Check lower bound for non-leftmost leaves ("too-right" detection).
+                // If key < ikey_bound and prev != null, we descended to a leaf that's
+                // to the right of where the key should be. Recovery requires restart
+                // from layer root (can't safely walk left in a B-link tree).
+                // NOTE: This is a fallback; the early check above should usually catch this.
+                if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                    // Reload root to get latest pointer after concurrent modifications
+                    layer_root = self.load_root_ptr_generic(guard);
+                    leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
+
+                    continue 'leaf_loop;
+                }
+
                 if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
                     leaf_ptr = next_ptr;
 
@@ -566,6 +591,7 @@ where
     /// Multi-layer path for keys > 8 bytes.
     ///
     /// Handles layer descent, suffix matching, and complex key structures.
+    #[expect(clippy::too_many_lines, reason = "complex multi-layer traversal logic")]
     #[inline(always)]
     fn get_impl_multi_layer<R, F>(
         &self,
@@ -614,6 +640,20 @@ where
                     leaf.prefetch_for_search();
                     leaf.version().stable()
                 };
+
+                // EARLY too-right check: detect if we descended to a leaf that's
+                // to the right of where the key should be. Check BEFORE searching.
+                {
+                    let target_ikey: u64 = key.ikey();
+                    if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                        // Reload root to get latest pointer after concurrent modifications
+                        layer_root = self.load_root_ptr_generic(guard);
+                        leaf_ptr =
+                            self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
+
+                        continue 'leaf_loop;
+                    }
+                }
 
                 'search_loop: loop {
                     // Check for gc'd sublayer
@@ -672,6 +712,24 @@ where
                                 version = leaf.version().stable();
 
                                 continue 'search_loop;
+                            }
+
+                            // Check lower bound for non-leftmost leaves ("too-right" detection).
+                            // If key < ikey_bound and prev != null, we descended to a leaf that's
+                            // to the right of where the key should be. Recovery requires restart
+                            // from layer root (can't safely walk left in a B-link tree).
+                            // NOTE: This is a fallback; the early check above should usually catch this.
+                            if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                                // Reload root to get latest pointer after concurrent modifications
+                                layer_root = self.load_root_ptr_generic(guard);
+                                leaf_ptr = self.reach_leaf_concurrent_generic(
+                                    layer_root,
+                                    key,
+                                    in_sublayer,
+                                    guard,
+                                );
+
+                                continue 'leaf_loop;
                             }
 
                             // check_blink_chain now also handles deleted leaves

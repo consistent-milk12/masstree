@@ -1,4 +1,34 @@
-//! Heap-allocated suffix storage sidecar
+//! Heap-allocated suffix storage sidecar.
+//!
+//! # Key Invariant: Suffix Immutability
+//!
+//! Once a suffix is assigned to a slot via [`LeafNode15::assign_ksuf`], the suffix
+//! bytes are **NEVER modified**. The only operations are:
+//!
+//! 1. **Add**: Assign a new suffix to a slot that doesn't have one
+//! 2. **Remove**: Clear a suffix when the entire key is removed
+//!
+//! This invariant enables the "orphaned inline" optimization: when inline suffixes
+//! are drained to external storage, we do NOT clear the inline data. Readers may
+//! observe inline data for slots that have been drained, but since suffixes are
+//! immutable, this data is still valid.
+//!
+//! # Publication Protocol
+//!
+//! Writers must follow this sequence:
+//! 1. Allocate sidecar (if needed)
+//! 2. Write suffix bytes to inline or external storage
+//! 3. Store sidecar pointer with Release ordering (if newly allocated)
+//! 4. Store `keylenx = KSUF_KEYLENX` with Release ordering (publication point)
+//!
+//! Readers observe via:
+//! 1. Load `keylenx` with Acquire ordering
+//! 2. Load sidecar pointer with Acquire ordering
+//! 3. Read suffix from inline or external
+//!
+//! The `keylenx` store is the linearization point for suffix visibility.
+//!
+//! [`LeafNode15::assign_ksuf`]: crate::leaf15::LeafNode15::assign_ksuf
 
 use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, Ordering};

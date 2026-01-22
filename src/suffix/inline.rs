@@ -159,13 +159,26 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// Uses the permutation to find active slots. This is the common case
     /// for suffix overflow during normal inserts.
     ///
+    /// # Atomicity
+    ///
+    /// This function does NOT clear inline state. The caller must:
+    /// 1. Store the returned external bag pointer (Release)
+    /// 2. Only then is it safe to clear inline state (if desired)
+    ///
+    /// This ensures readers always see either:
+    /// - Valid inline data, OR
+    /// - Valid external data (after Acquire load of external pointer)
+    ///
+    /// The inline state becomes "orphaned" metadata after drain, but this is
+    /// safe - readers will find the suffix in external storage.
+    ///
     /// # Returns
     /// * `Ok(bag)` - New external bag with drained suffixes plus new one
     ///
     /// # Errors
     /// Returns `Err(AllocError)` if the external bag allocation fails.
     pub fn drain_to_external(
-        &mut self,
+        &self, // Changed from &mut self - we don't clear inline anymore
         perm: &impl TreePermutation,
         new_slot: usize,
         new_suffix: &[u8],
@@ -211,10 +224,15 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         // Assign new suffix
         external.assign(new_slot, new_suffix);
 
-        // Reset inline state completely
-        self.slots = [InlineSlotMeta::EMPTY; WIDTH];
-        self.size = 0;
-        self.suffix_count = 0;
+        // NOTE: We deliberately do NOT clear inline state here.
+        // The caller must publish the external pointer first, then
+        // may optionally clear inline state.
+        //
+        // Clearing inline before external publication creates a race:
+        // - Reader sees KSUF_KEYLENX (suffix exists)
+        // - Reader checks inline -> empty (we just cleared it)
+        // - Reader checks external -> null (caller hasn't stored it yet)
+        // - Reader returns None for a suffix that exists!
 
         Ok(external)
     }
@@ -226,10 +244,13 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// Used during split operations when the new node's permutation hasn't
     /// been set up yet.
     ///
+    /// # Atomicity
+    ///
+    /// Same as `drain_to_external` - does NOT clear inline state.
+    ///
     /// # Arguments
-    /// * `new_slot` - The slot being assigned; also indicates that slots
-    ///   `0..new_slot` are already filled sequentially.
-    /// * `new_suffix` - The suffix data to assign
+    /// * `new_slot` - Slot index for the new suffix
+    /// * `new_suffix` - The suffix bytes to store
     ///
     /// # Returns
     /// * `Ok(bag)` - New external bag with drained suffixes plus new one
@@ -238,42 +259,42 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// Returns `Err(AllocError)` if the external bag allocation fails.
     #[cold]
     pub fn drain_to_external_init(
-        &mut self,
+        &self, // Changed from &mut self
         new_slot: usize,
         new_suffix: &[u8],
     ) -> AllocResult<SuffixBag<WIDTH>> {
-        // Pass 1: Calculate required capacity and collect slot data
+        // Calculate required capacity
         let mut required_capacity: usize = new_suffix.len();
 
-        // Stack-allocated storage for slots to copy
+        // Collect existing suffixes (slots 0..new_slot filled sequentially)
         let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
         let mut copy_count: usize = 0;
 
-        // Initializing mode: slots 0..new_slot are filled sequentially
         #[expect(clippy::indexing_slicing)]
         for slot in 0..new_slot {
-            if slot < WIDTH {
-                let meta: InlineSlotMeta = self.slots[slot];
+            if slot >= WIDTH {
+                break;
+            }
 
-                if meta.has_suffix() {
-                    let start: usize = meta.offset as usize;
-                    let len: usize = meta.len as usize;
-                    required_capacity += len;
+            let meta: InlineSlotMeta = self.slots[slot];
 
-                    if copy_count < WIDTH {
-                        slots_to_copy[copy_count] = (slot, start, len);
-                        copy_count += 1;
-                    }
+            if meta.has_suffix() {
+                let start: usize = meta.offset as usize;
+                let len: usize = meta.len as usize;
+                required_capacity += len;
+
+                if copy_count < WIDTH {
+                    slots_to_copy[copy_count] = (slot, start, len);
+                    copy_count += 1;
                 }
             }
         }
 
-        // Try to allocate external bag with capacity
+        // Allocate external bag
         let mut external: SuffixBag<WIDTH> = SuffixBag::try_with_capacity(required_capacity)?;
 
-        // Pass 2: Copy suffixes to external bag using collected data
+        // Copy existing suffixes
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
-            // SAFETY: start and len come from valid InlineSlotMeta entries
             let suffix: &[u8] = &self.data[start..(start + len)];
             external.assign(slot, suffix);
         }
@@ -281,10 +302,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         // Assign new suffix
         external.assign(new_slot, new_suffix);
 
-        // Reset inline state completely
-        self.slots = [InlineSlotMeta::EMPTY; WIDTH];
-        self.size = 0;
-        self.suffix_count = 0;
+        // NOTE: Do NOT clear inline state - see drain_to_external comment
 
         Ok(external)
     }

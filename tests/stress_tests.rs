@@ -1104,7 +1104,6 @@ fn repeated_20_runs_8_threads_mixed() {
 
 /// Long-running stress test (100 runs × 8k keys)
 #[test]
-#[ignore = "Unnecessary for now"]
 fn extreme_100_runs_stress() {
     common::init_tracing();
 

@@ -12,6 +12,7 @@
 //! - Memory reclamation via epoch-based deferred cleanup
 //! - Lazy leaf coalescing for deleted entries
 //! - Two node widths: [`MassTree`] (WIDTH=24) and [`MassTree15`] (WIDTH=15)
+//! - high-performance inline variant [`MassTree15Inline`], all benchmark results are based on it.
 //!
 //! ## Variant Selection
 //!
@@ -36,15 +37,6 @@
 //! let inline: MassTree24Inline<u64> = MassTree24Inline::new();
 //! let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
 //! ```
-//!
-//! ## Performance Notes
-//!
-//! On mixed read/write workloads (90% read, 10% write) at 6 threads, [`MassTree15`]
-//! achieves 2-5x higher throughput than `RwLock<BTreeMap>` due to lock-free reads
-//! and per-node versioning. The advantage increases under contention.
-//!
-//! For pure read workloads, `RwLock<BTreeMap>` is competitive or faster—lock-free
-//! structures pay complexity costs that only matter when there's actual contention.
 //!
 //! ## Quick Start
 //!
@@ -94,30 +86,6 @@
 //!
 //! - Keys must be 0-256 bytes. Longer keys will panic.
 //! - Keys are byte slices (`&[u8]`), not generic types.
-//!
-//! ## How It Works
-//!
-//! Keys are split into 8-byte slices, creating a trie where each node is a B+tree:
-//!
-//! ```text
-//! Key: "users/alice/profile" (19 bytes)
-//!      └─ Layer 0: "users/al" (8 bytes)
-//!         └─ Layer 1: "ice/prof" (8 bytes)
-//!            └─ Layer 2: "ile" (3 bytes)
-//! ```
-//!
-//! Keys with shared prefixes share upper layers, making lookups efficient for
-//! hierarchical data.
-//!
-//! ## Value Storage
-//!
-//! - **`MassTree<V>`**: Stores values as `Arc<V>`. Returns `Arc<V>` on get.
-//! - **`MassTreeIndex<V: Copy>`**: Convenience wrapper that copies values.
-//!
-//! ## Feature Flags
-//!
-//! - **`mimalloc`**: Uses mimalloc as the global allocator (recommended).
-//! - **`tracing`**: Enables structured logging to `logs/masstree.jsonl`.
 
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]

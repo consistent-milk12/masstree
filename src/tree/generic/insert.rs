@@ -298,7 +298,7 @@ where
     /// Validate membership: check if key should be in this leaf or a sibling.
     ///
     /// Returns `Ok(())` if key belongs here, `Err(retry_reason)` if we need
-    /// to retry (split in progress or key moved to sibling).
+    /// to retry (split in progress, key moved to sibling, or key below lower bound).
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn validate_membership(&self, leaf: &L, key: &Key<'_>) -> Result<(), MembershipError> {
@@ -310,6 +310,19 @@ where
             return Err(MembershipError::SplitInProgress);
         }
 
+        // Check lower bound for non-leftmost leaves.
+        // If key < ikey_bound and prev exists, we're "too far right" due to
+        // concurrent splits. Recovery requires restart from root (can't walk left).
+        // Skip this check for leftmost leaves (prev == null) since they have no
+        // lower bound constraint.
+        if !leaf.prev().is_null() {
+            let lower_bound: u64 = leaf.ikey_bound();
+            if key.ikey() < lower_bound {
+                return Err(MembershipError::KeyBelowLowerBound);
+            }
+        }
+
+        // Check upper bound (key hasn't moved to right sibling)
         let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
 
         if !next_ptr.is_null() {
@@ -391,8 +404,12 @@ enum MembershipError {
     /// A split is in progress - wait and retry.
     SplitInProgress,
 
-    /// Key has moved to a sibling leaf - retry traversal.
+    /// Key has moved to a sibling leaf - retry traversal (walk right).
     KeyMovedToSibling,
+
+    /// Key is below this leaf's lower bound - must restart from root.
+    /// This cannot be recovered by walking right; requires full re-traversal.
+    KeyBelowLowerBound,
 }
 
 // ============================================================================
@@ -534,23 +551,32 @@ where
                 }
 
                 // Post-lock membership check
-                if self.validate_membership(leaf, key).is_err() {
-                    stat!(membership_failure);
-                    drop(lock);
+                match self.validate_membership(leaf, key) {
+                    Ok(()) => { /* continue to search */ }
+                    Err(MembershipError::SplitInProgress | MembershipError::KeyMovedToSibling) => {
+                        // Existing recovery: B-link advance (walk right)
+                        stat!(membership_failure);
+                        drop(lock);
 
-                    // LOCAL RETRY: B-link advance
-                    let (advanced_ptr, exceeded) =
-                        self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
+                        let (advanced_ptr, exceeded) =
+                            self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
 
-                    if exceeded {
-                        stat!(hop_limit_exceeded);
-                        layer_root = self.load_root_ptr_generic(guard);
+                        if exceeded {
+                            stat!(hop_limit_exceeded);
+                            layer_root = self.load_root_ptr_generic(guard);
+                            continue 'retry;
+                        }
+
+                        leaf_ptr = advanced_ptr;
+                        leaf = unsafe { &*leaf_ptr };
+                        continue 'forward;
+                    }
+                    Err(MembershipError::KeyBelowLowerBound) => {
+                        // Cannot walk left - must restart from layer root
+                        stat!(membership_failure);
+                        drop(lock);
                         continue 'retry;
                     }
-
-                    leaf_ptr = advanced_ptr;
-                    leaf = unsafe { &*leaf_ptr };
-                    continue 'forward;
                 }
 
                 // ================================================================
@@ -654,7 +680,7 @@ where
                                     };
 
                                     // Atomic split+insert (FALLIBLE allocation for sibling)
-                                    let _result = self.handle_leaf_split_and_insert_generic(
+                                    let _split_result = self.handle_leaf_split_and_insert_generic(
                                         leaf_ptr,
                                         lock,
                                         logical_pos,
@@ -717,6 +743,7 @@ where
                                     guard,
                                 );
                                 stat!(successful_insert);
+
                                 drop(lock);
                                 self.count.increment();
                                 return Ok(None);

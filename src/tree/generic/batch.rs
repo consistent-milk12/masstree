@@ -238,8 +238,11 @@ enum FindSlotResult {
 enum MembershipError {
     /// A split is in progress - wait and retry.
     SplitInProgress,
-    /// Key has moved to a sibling leaf - retry traversal.
+    /// Key has moved to a sibling leaf - retry traversal (walk right).
     KeyMovedToSibling,
+    /// Key is below this leaf's lower bound - must restart from root.
+    /// This cannot be recovered by walking right; requires full re-traversal.
+    KeyBelowLowerBound,
 }
 
 // ============================================================================
@@ -846,6 +849,17 @@ where
             return Err(MembershipError::SplitInProgress);
         }
 
+        // Check lower bound for non-leftmost leaves.
+        // If key < ikey_bound and prev exists, we're "too far right" due to
+        // concurrent splits. Recovery requires restart from root (can't walk left).
+        if !leaf.prev().is_null() {
+            let lower_bound: u64 = leaf.ikey_bound();
+            if key.ikey() < lower_bound {
+                return Err(MembershipError::KeyBelowLowerBound);
+            }
+        }
+
+        // Check upper bound (key hasn't moved to right sibling)
         let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
 
         if !next_ptr.is_null() {

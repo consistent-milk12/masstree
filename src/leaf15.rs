@@ -674,31 +674,58 @@ impl<S: ValueSlot> LeafNode15<S> {
         !self.sidecar_ptr().is_null()
     }
 
-    /// Get suffix for slot.
+    /// Get suffix for slot, if present.
     ///
-    /// Returns [`None`] if no suffix is stored for this slot.
+    /// Returns [`None`] if:
+    /// - Slot does not have [`KSUF_KEYLENX`] set
+    /// - Sidecar is null (invariant violation, but handled gracefully)
+    ///
+    /// # Concurrency
+    ///
+    /// Safe to call concurrently with writers IF:
+    /// 1. Caller obtained version via `stable()` (ensures no DIRTY bits)
+    /// 2. Caller will validate via `has_changed()` after use
+    ///
+    /// The `INSERTING_BIT` must be set by writers before any suffix mutations.
     ///
     /// Hot Path: Called during every key comparison for suffix keys.
     /// Uses `#[inline(always)]` to ensure no function call overhead.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Panics if [`Self::has_ksuf`] but sidecar is null (publication invariant violation).
     #[inline(always)]
     pub fn ksuf(&self, slot: usize) -> Option<&[u8]> {
+        // Fast path: check keylenx first (most keys don't have suffixes)
+        //
+        // Note: We use Acquire here to synchronize with the writer's Release
+        // store to keylenx that publishes the suffix. This is the primary
+        // publication edge for suffix visibility.
         if !self.has_ksuf(slot) {
             return None;
         }
 
-        let sidecar = self.suffix_sidecar.load(AtomicOrdering::Acquire);
+        // Load sidecar pointer with Acquire to synchronize with allocation
+        let sidecar: *mut SuffixSidecar<WIDTH_15> =
+            self.suffix_sidecar.load(AtomicOrdering::Acquire);
 
-        // Publication invariant: KSUF_KEYLENX implies sidecar != null
-        debug_assert!(
-            !sidecar.is_null(),
-            "KSUF_KEYLENX set but sidecar is null - publication invariant violated"
-        );
+        // DEFENSIVE: Handle null sidecar gracefully instead of UB
+        //
+        // This should never happen if writers follow the protocol:
+        // 1. Allocate sidecar
+        // 2. Write suffix bytes
+        // 3. Store sidecar pointer (Release)
+        // 4. Store keylenx = KSUF_KEYLENX (Release)
+        //
+        // But if invariants are violated (e.g., due to a bug elsewhere),
+        // returning None is safer than dereferencing null.
+        if sidecar.is_null() {
+            // In debug builds, we want to catch this as it indicates a bug
+            debug_assert!(
+                false,
+                "KSUF_KEYLENX set but sidecar is null - publication invariant violated"
+            );
+            return None;
+        }
 
-        // SAFETY: Sidecar is valid if non-null, immutable during read
+        // SAFETY: Sidecar is valid (non-null, allocated by us)
+        // The Acquire load above synchronizes with the writer's Release store
         unsafe { &*sidecar }.get(slot)
     }
 
@@ -759,6 +786,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// # Safety
     ///
     /// Caller must hold lock. Sidecar must already exist.
+    /// Caller must have called `mark_insert()` before any mutations.
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
@@ -769,13 +797,14 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Sidecar exists (ensure_sidecar_infallible was called in fast path)
-        let sidecar: &mut SuffixSidecar<WIDTH_15> =
-            unsafe { &mut *self.suffix_sidecar.load(AtomicOrdering::Acquire) };
+        let sidecar: &SuffixSidecar<WIDTH_15> =
+            unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
 
         let perm = self.permutation();
 
         // Drain inline to a new external bag with the new suffix.
-        // This infallible path aborts on OOM. Use `try_assign_ksuf` for fallible version.
+        // NOTE: drain_to_external does NOT clear inline state - this is intentional.
+        // The external bag contains all suffixes; inline becomes orphaned metadata.
         #[expect(clippy::expect_used)]
         let mut new_bag: SuffixBag<WIDTH_15> = sidecar
             .inline
@@ -799,7 +828,7 @@ impl<S: ValueSlot> LeafNode15<S> {
             }
         }
 
-        // Install new external bag
+        // Install new external bag (Release ordering for publication)
         let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
         sidecar.external.store(new_ptr, WRITE_ORD);
 
@@ -814,6 +843,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
 
         // CRITICAL: Publish suffix presence LAST (Release ordering)
+        // This is the linearization point for suffix visibility.
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
     }
 
@@ -860,7 +890,9 @@ impl<S: ValueSlot> LeafNode15<S> {
         if !ext_ptr.is_null() {
             let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *ext_ptr };
             if bag.try_assign_in_place(slot, suffix) {
-                sidecar.inline.clear(slot);
+                // NOTE: Do NOT clear inline - suffix immutability invariant means
+                // any existing inline data for this slot is still valid (there isn't any
+                // for a new slot, and we don't update existing suffixes).
                 self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
                 return;
             }
@@ -872,6 +904,10 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// Slow path for suffix assignment during initialization.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold lock. Sidecar must already exist.
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
@@ -882,10 +918,11 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Sidecar exists (ensure_sidecar_infallible was called in fast path)
-        let sidecar: &mut SuffixSidecar<WIDTH_15> =
-            unsafe { &mut *self.suffix_sidecar.load(AtomicOrdering::Acquire) };
+        let sidecar: &SuffixSidecar<WIDTH_15> =
+            unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
 
         // Drain inline using sequential slot iteration (0..slot)
+        // NOTE: drain_to_external_init does NOT clear inline state.
         #[expect(clippy::expect_used)]
         let mut new_bag: SuffixBag<WIDTH_15> = sidecar
             .inline
@@ -904,7 +941,7 @@ impl<S: ValueSlot> LeafNode15<S> {
             }
         }
 
-        // Install new external bag
+        // Install new external bag (Release ordering for publication)
         let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
         sidecar.external.store(new_ptr, WRITE_ORD);
 
@@ -918,6 +955,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
 
         // CRITICAL: Publish suffix presence LAST (Release ordering)
+        // This is the linearization point for suffix visibility.
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
     }
 
@@ -2025,9 +2063,12 @@ impl<S: ValueSlot> LeafNode15<S> {
         // Clear the slot
         self.clear_slot(slot);
 
-        // Remove from permutation
+        // Remove from permutation.
+        // Use remove_slot() which finds the logical position of the physical slot.
+        // The previous code used remove(slot) which is WRONG: remove() expects a
+        // logical position, not a physical slot index.
         let mut perm = self.permutation();
-        perm.remove(slot);
+        perm.remove_slot(slot);
         self.set_permutation(perm);
     }
 }

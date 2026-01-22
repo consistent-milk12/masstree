@@ -207,3 +207,28 @@ asm:
 # View assembly for a function (use index from `just asm`)
 asm-view index:
     cargo asm --lib --rust {{index}}
+
+# === Debug Examples ===
+
+# Run the lost key debug example once
+debug-lost-key:
+    cargo run --example debug_lost_key --release --features "mimalloc,tracing"
+
+# Run the lost key debug example N times to catch the flaky bug
+# Usage: just debug-lost-key-repeat 100
+debug-lost-key-repeat N="50":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "Running debug_lost_key example {{N}} times to catch flaky bug..."
+    for i in $(seq 1 {{N}}); do
+        output=$(cargo run --example debug_lost_key --release --features "mimalloc,tracing" 2>&1)
+        if echo "$output" | grep -q "FAILURE"; then
+            echo "=== CAUGHT BUG on attempt $i ==="
+            echo "$output"
+            exit 1
+        fi
+        if [ $((i % 10)) -eq 0 ]; then
+            echo "Completed $i/{{N}} runs, no failures yet..."
+        fi
+    done
+    echo "Completed {{N}} runs without catching the bug."

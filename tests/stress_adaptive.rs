@@ -1,7 +1,4 @@
 //! Stress tests for adaptive insert.
-//!
-//! These are long-running tests marked `#[ignore]`.
-//! Run with: `cargo test --test stress_adaptive -- --ignored`
 #![expect(clippy::unwrap_used, clippy::cast_precision_loss)]
 
 use masstree::MassTree24;
@@ -25,7 +22,6 @@ const ITERATIONS: usize = 50;
 /// When running under Miri (10-100x slower), the threshold is lowered
 /// significantly to avoid false failures.
 #[test]
-#[ignore = "Long-running stress test"]
 fn stress_extreme_contention() {
     let tree: MassTree24<u64> = MassTree24::new();
     let tree = Arc::new(tree);

@@ -590,6 +590,32 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         self.debug_assert_valid();
     }
 
+    /// Remove a physical slot from the permutation.
+    ///
+    /// This differs from `remove(i)` which removes by **logical position**.
+    /// `remove_slot(slot)` first finds the logical position of `slot`, then
+    /// removes it.
+    ///
+    /// # Panics
+    /// Panics if `slot` is not found in the permutation.
+    ///
+    /// # Algorithm
+    /// 1. Linear scan to find logical position `i` where `get(i) == slot`
+    /// 2. Call `remove(i)` to remove by logical position
+    #[inline]
+    pub fn remove_slot(&mut self, slot: usize) {
+        let size: usize = self.size();
+
+        // Find the logical position of this physical slot
+        let Some(pos) = (0..size).find(|&i| self.get(i) == slot) else {
+            debug_assert!(false, "remove_slot: slot not in permutation");
+            return;
+        };
+
+        // Use the existing remove method which removes by logical position
+        self.remove(pos);
+    }
+
     /// Exchange (swap) the elements at positions `i` and `j`.
     ///
     /// After this operation:

@@ -573,6 +573,7 @@ where
             // is_root() set, which is the current layer root.
             sense = 0;
             n[sense] = start;
+
             loop {
                 // SAFETY: n[sense] is valid, NodeVersion is first field
                 #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
@@ -580,7 +581,6 @@ where
                 v[sense] = version.stable();
 
                 if version.is_root() {
-                    // Found the current layer root
                     break;
                 }
 
@@ -1115,6 +1115,15 @@ where
         value: &S::Output,
         guard: &LocalGuard<'_>,
     ) {
+        // DEBUG: Verify membership invariant at commit point.
+        // If prev exists (non-leftmost leaf), key must be >= ikey_bound.
+        debug_assert!(
+            leaf.prev().is_null() || key.ikey() >= leaf.ikey_bound(),
+            "INSERT INVARIANT VIOLATION: key {:016x} < leaf.ikey_bound {:016x}",
+            key.ikey(),
+            leaf.ikey_bound()
+        );
+
         let ikey: u64 = key.ikey();
         let value_ptr: *mut u8 = S::output_to_raw(value);
 

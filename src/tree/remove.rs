@@ -283,27 +283,36 @@ where
         }
     }
 
-    /// Get a reference to the locked leaf.
-    #[inline(always)]
-    fn leaf(&self) -> &L {
-        // SAFETY: leaf is valid and locked by us
-        unsafe { &*self.leaf }
-    }
-
     /// Complete the removal of a key from the locked leaf.
     ///
-    /// This is the main entry point after finding the key. It,
+    /// This is the main entry point after finding the key. It:
     /// 1. Extracts the value for return
-    /// 2. Schedules value retirement via `seize`
-    /// 3. Clears suffix if present
-    /// 4. Updates permutation
-    /// 5. If leaf is now empty, triggers leaf removal
+    /// 2. Signals mutation via `mark_insert()` (CRITICAL: before any writes)
+    /// 3. Nulls the value pointer (readers skip null slots)
+    /// 4. Clears suffix if present
+    /// 5. Updates permutation
+    /// 6. Schedules value retirement
+    /// 7. If leaf is now empty, triggers leaf removal
+    ///
+    /// # Concurrency Safety
+    ///
+    /// The `mark_insert()` call MUST happen before any mutations. This sets the
+    /// `INSERTING_BIT` which causes `stable()` to spin-wait. Without this,
+    /// readers could observe partially modified state.
     ///
     /// # Returns
     /// The removed value (if any).
     #[must_use]
     pub fn finish_remove(mut self) -> Option<S::Output> {
-        let leaf: &L = self.leaf();
+        // =====================================================================
+        // Phase 1: Read-only extraction (safe before mark_insert)
+        // =====================================================================
+        //
+        // Note: We access the leaf via direct pointer dereference throughout this
+        // function to avoid borrow conflicts with self.lock.mark_insert().
+
+        // SAFETY: leaf is valid and locked by us
+        let leaf: &L = unsafe { &*self.leaf };
 
         // Step 1: Extract the value pointer
         let value_ptr: *mut u8 = leaf.leaf_value_ptr(self.kp);
@@ -315,7 +324,58 @@ where
             leaf.try_clone_output(self.kp)
         };
 
-        // Step 3: Schedule value retirement (only for pointer-backed nodes)
+        // Step 3: Capture keylenx before mutations (for suffix check)
+        let slot_keylenx: u8 = leaf.keylenx(self.kp);
+
+        // =====================================================================
+        // Phase 2: Signal mutation (CRITICAL - must be before any writes)
+        // =====================================================================
+
+        // CRITICAL: Set INSERTING_BIT before ANY mutations.
+        //
+        // This causes concurrent readers calling stable() to spin-wait until
+        // the lock is released. Without this, readers could observe:
+        // - Partially cleared suffix state
+        // - Updated permutation with stale slot data
+        // - Null value pointer for a slot still in the old permutation
+        //
+        // The NodeVersion protocol requires: lock() → mark_insert() → mutate → unlock
+        self.lock.mark_insert();
+
+        // =====================================================================
+        // Phase 3: Mutations (safe now that INSERTING_BIT is set)
+        // =====================================================================
+
+        // Step 4: Null the value pointer FIRST
+        //
+        // This is a defense-in-depth measure. If a reader somehow slips through
+        // (e.g., already past stable() before we set INSERTING_BIT), they will
+        // see a null pointer and skip this slot in their search loop.
+        //
+        // The get path checks: `if !ptr.is_null() { ... }`
+        leaf.set_leaf_value_ptr(self.kp, StdPtr::null_mut());
+
+        // Step 5: Clear suffix if present
+        //
+        // Now safe because:
+        // 1. INSERTING_BIT is set - new readers will spin
+        // 2. Value pointer is null - in-flight readers skip this slot
+        if slot_keylenx == KSUF_KEYLENX {
+            // SAFETY: We hold the lock on this leaf (self.lock), and self.kp is a
+            // valid slot index obtained during search. The guard protects memory.
+            unsafe { leaf.clear_ksuf(self.kp, self.guard) };
+        }
+
+        // Step 6: Update permutation - remove slot at logical position
+        let mut new_perm: L::Perm = leaf.permutation();
+        new_perm.remove(self.ki);
+        leaf.set_permutation(new_perm);
+
+        // Step 7: Schedule value retirement (only for pointer-backed nodes)
+        //
+        // Moved after permutation update so the slot is no longer visible
+        // when we schedule retirement. This is safer for the reclamation path.
+        //
         // For true-inline nodes (NEEDS_RETIREMENT = false), this is a no-op
         // and the compiler will eliminate this entire block.
         if !value_ptr.is_null() && S::NEEDS_RETIREMENT {
@@ -326,26 +386,10 @@ where
             }
         }
 
-        // Step 4: Clear suffix if present
-        let slot_keylenx: u8 = leaf.keylenx(self.kp);
-        if slot_keylenx == KSUF_KEYLENX {
-            // SAFETY: We hold the lock on this leaf (self.lock), and self.kp is a
-            // valid slot index obtained during search. The guard protects memory.
-            unsafe { leaf.clear_ksuf(self.kp, self.guard) };
-        }
-
-        // Step 5: Update permutation - remove slot at logical position
-        let mut new_perm: L::Perm = leaf.permutation();
-        new_perm.remove(self.ki);
-        leaf.set_permutation(new_perm);
-
-        // Step 6: Clear the slot value pointer
-        leaf.set_leaf_value_ptr(self.kp, StdPtr::null_mut());
-
-        // Step 7: Decrecment entry count
+        // Step 8: Decrement entry count
         self.tree.dec_count();
 
-        // Step 8: Lazy coalescing for empty leaves
+        // Step 9: Lazy coalescing for empty leaves
         //
         // When a leaf becomes empty, we:
         // 1. Mark it as empty (so insert can reuse it)
@@ -369,8 +413,10 @@ where
                 .schedule(self.leaf, ikey_bound, sublayer_ctx);
         }
 
-        // Mark insert for version increment (lock drops at end of scope)
-        self.lock.mark_insert();
+        // Lock drops here, which:
+        // 1. Increments VINSERT counter
+        // 2. Clears LOCK_BIT and INSERTING_BIT
+        // 3. Readers calling has_changed() will now detect the version change
 
         value
     }

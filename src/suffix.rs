@@ -417,6 +417,25 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// This is an optimization for the common case where we hold the lock
     /// and can mutate in place. It avoids the clone + box allocation overhead.
     ///
+    /// # Safety Requirements (Concurrency)
+    ///
+    /// This function mutates internal `Vec` state which is NOT thread-safe.
+    /// Callers MUST ensure no concurrent readers by:
+    ///
+    /// 1. Holding the leaf lock (`version.is_locked()`)
+    /// 2. Having called `mark_insert()` to set `INSERTING_BIT`
+    ///
+    /// With `INSERTING_BIT` set, `stable()` will spin-wait, preventing new
+    /// readers from observing the mutation. Existing readers (who called
+    /// `stable()` before `INSERTING_BIT` was set) will detect the change
+    /// via `has_changed()` and retry.
+    ///
+    /// # Memory Ordering
+    ///
+    /// The `Vec::extend_from_slice` and slot metadata updates use regular
+    /// (non-atomic) writes. The caller's subsequent `keylenx` store with
+    /// Release ordering publishes these writes to readers.
+    ///
     /// # Returns
     ///
     /// - `true` if the suffix was assigned successfully (fits in existing capacity)

@@ -220,9 +220,6 @@ impl Propagation {
 
             // 1b. MAIN TREE ROOT
             if left_parent.is_null() && is_main_root {
-                #[cfg(feature = "tracing")]
-                tracing::info!("PROPAGATE_LOOP: creating main tree root");
-
                 let result: Result<(), InsertError> = Self::create_main_root::<S, L, A>(
                     root_ptr,
                     allocator,

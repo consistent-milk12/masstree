@@ -1471,7 +1471,7 @@ mod hot_spot {
     use super::*;
 
     const TOTAL_N: usize = 500_000;
-    const HOT_RANGE: usize = 5; // Only 10 keys are "hot" - extreme contention
+    const HOT_RANGE: usize = 32; // Spans multiple leaves (Leaf15 width=15)
     const OPS: usize = 5_000;
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]

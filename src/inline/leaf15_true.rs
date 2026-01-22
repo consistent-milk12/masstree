@@ -951,8 +951,11 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     /// Clear a slot and update permutation.
     pub fn clear_slot_and_permutation(&self, slot: usize) {
         self.clear_slot(slot);
+        // Use remove_slot() which finds the logical position of the physical slot.
+        // The previous code used remove(slot) which is WRONG: remove() expects a
+        // logical position, not a physical slot index.
         let mut perm = self.permutation();
-        perm.remove(slot);
+        perm.remove_slot(slot);
         self.set_permutation(perm);
     }
 

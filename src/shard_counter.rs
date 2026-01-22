@@ -11,17 +11,13 @@
 //!
 //! # Consistency Model
 //!
-//! Unlike a single [`AtomicUsize`] `load()` is not linearizable , it reads
+//! Unlike a single [`AtomicUsize`], `load()` is not linearizable—it reads
 //! multiple independent atomics sequentially. During concurrent mutations:
 //! - The returned value may be slightly stale or inconsistent
 //! - After all mutating threads have joined/quiesced, `load()` returns the exact count
 //!
 //! This is acceptable for [`MassTree`](crate::MassTree) `len()` which is documented as approximate
 //! during concurrent operations.
-//!
-//! TODO: I have to look into this more for the optimal number of shards.
-//! CPU cores may be a point of optimization, and a custom config builder pattern
-//! can be considered for more advanced use cases.
 //!
 //! # Implementation Details
 //! - Uses 16 shards
@@ -244,6 +240,7 @@ impl ShardedCounter {
 }
 
 impl Default for ShardedCounter {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }

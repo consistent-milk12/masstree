@@ -613,9 +613,11 @@ fn test_inline_drain_to_external() {
         .drain_to_external(&perm, 3, b"new_suffix")
         .expect("drain_to_external should succeed");
 
-    // Inline bag slots should be cleared (count = 0)
-    // Note: used() may still be non-zero since clear() doesn't compact
-    assert_eq!(bag.count(), 0);
+    // Inline bag state is PRESERVED (orphaned inline optimization).
+    // This is intentional - clearing inline before external publication
+    // creates a race where readers see neither inline nor external data.
+    // The inline data becomes "orphaned" but is still valid for readers.
+    assert_eq!(bag.count(), 3);
 
     // External bag should have all suffixes
     assert_eq!(external.get(0), Some(b"suffix0".as_slice()));
@@ -663,8 +665,9 @@ fn test_inline_drain_to_external_init() {
         .drain_to_external_init(3, b"new_suffix_3")
         .expect("drain_to_external_init should succeed");
 
-    // Inline bag should be cleared
-    assert_eq!(bag.count(), 0);
+    // Inline bag state is PRESERVED (orphaned inline optimization).
+    // See drain_to_external test for rationale.
+    assert_eq!(bag.count(), 3);
 
     // External should have all suffixes
     assert_eq!(external.get(0), Some(b"suffix_0".as_slice()));
