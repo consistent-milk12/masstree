@@ -95,6 +95,7 @@ where
             // Handle rare states (layer transitions, retries)
             match self.back_state {
                 ScanStateBack::Down => {
+                    self.flags.disable_single_layer_mode();
                     ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
                     self.back_state = ScanStateBack::Retry;
                     self.flags.require_back_duplicate_check();
@@ -270,15 +271,8 @@ where
                     return 0;
                 }
 
-                // Use output_from_raw to get value by copy
-                let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
-                let output: S::Output = unsafe { S::output_from_raw(ptr) };
-                // Note: ptr was created from snapshot.value which is still alive,
-                // and output_from_raw clones/copies, so we need to clean up ptr
-                unsafe { S::cleanup_output_raw(ptr) };
-
                 count += 1;
-                let should_continue = visitor(key, output);
+                let should_continue = visitor(key, snapshot.value);
 
                 if !should_continue {
                     return count;
@@ -292,6 +286,7 @@ where
             // Handle rare states (layer transitions, retries)
             match self.back_state {
                 ScanStateBack::Down => {
+                    self.flags.disable_single_layer_mode();
                     ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
                     self.back_state = ScanStateBack::Retry;
                     self.flags.require_back_duplicate_check();
@@ -471,13 +466,8 @@ where
                 // Skip start bound check for values-only (approximate)
                 // The bound was already checked during initialization
 
-                // Use output_from_raw to get value by copy
-                let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
-                let output: S::Output = unsafe { S::output_from_raw(ptr) };
-                unsafe { S::cleanup_output_raw(ptr) };
-
                 count += 1;
-                let should_continue = visitor(output);
+                let should_continue = visitor(snapshot.value);
 
                 if !should_continue {
                     return count;
@@ -490,6 +480,7 @@ where
             // Handle rare states (layer transitions, retries)
             match self.back_state {
                 ScanStateBack::Down => {
+                    self.flags.disable_single_layer_mode();
                     ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
                     self.back_state = ScanStateBack::Retry;
                     self.flags.require_back_duplicate_check();

@@ -182,7 +182,7 @@ where
         slot: usize,
         back_offset: usize,
         logical_pos: usize,
-        perm: L::Perm,
+        mut perm: L::Perm,
         key: &Key<'_>,
         value: &S::Output,
         guard: &LocalGuard<'_>,
@@ -190,19 +190,19 @@ where
         // Assign the slot
         self.assign_slot_generic(leaf, lock, slot, key, value, guard);
 
-        // Update permutation
-        let mut new_perm = perm;
-
+        // Update permutation (perm is passed by value, mutate in place)
         if back_offset > 0 {
             let back_pos: usize = L::WIDTH - 1;
             let chosen_pos: usize = back_pos - back_offset;
-            new_perm.swap_free_slots(back_pos, chosen_pos);
+            perm.swap_free_slots(back_pos, chosen_pos);
         }
 
-        let allocated: usize = new_perm.insert_from_back(logical_pos);
+        let allocated: usize = perm.insert_from_back(logical_pos);
         debug_assert_eq!(allocated, slot, "allocated unexpected slot");
 
-        leaf.set_permutation(new_perm);
+        // Use Relaxed ordering since we hold the lock - the lock's Release
+        // fence on drop provides the necessary synchronization.
+        leaf.set_permutation_relaxed(perm);
     }
 
     // ========================================================================
@@ -584,7 +584,9 @@ where
                 // ================================================================
                 // Check if this is an empty leaf that can be reused.
                 // This is a fast path for insert-remove-reinsert workloads.
-                if leaf.is_empty() && self.can_reuse_empty_leaf(leaf, key) {
+                // Use pre_lock_perm.size() instead of leaf.is_empty() to avoid
+                // another atomic load (we already validated perm hasn't changed).
+                if pre_lock_perm.size() == 0 && self.can_reuse_empty_leaf(leaf, key) {
                     let result = self.insert_into_empty_leaf(leaf, &mut lock, key, &value, guard);
                     drop(lock);
                     return result;
@@ -597,119 +599,13 @@ where
                 // our optimistic search result is valid. No re-search needed!
                 // This matches C++ masstree_get.hh which searches before lock().
                 let perm = pre_lock_perm;
-                let search_result = optimistic_search;
 
                 // ================================================================
-                // Single-layer fast path (keys ≤ 8 bytes)
+                // DISPATCH ON SEARCH RESULT
                 // ================================================================
-                if single_layer_mode {
-                    match search_result {
-                        InsertSearchResultGeneric::Found { slot } => {
-                            let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                            if old_ptr.is_null() {
-                                stat!(null_ptr_retry);
-                                drop(lock);
-                                continue 'forward;
-                            }
-
-                            let old_value =
-                                self.update_existing_value(leaf, &mut lock, slot, value, guard);
-                            stat!(successful_update);
-                            drop(lock);
-                            return Ok(Some(old_value));
-                        }
-
-                        InsertSearchResultGeneric::NotFound { logical_pos } => {
-                            let ikey: u64 = key.ikey();
-
-                            match self.find_usable_slot(leaf, &perm, ikey) {
-                                FindSlotResult::Found { slot, back_offset } => {
-                                    self.insert_new_value(
-                                        leaf,
-                                        &mut lock,
-                                        slot,
-                                        back_offset,
-                                        logical_pos,
-                                        perm,
-                                        key,
-                                        &value,
-                                        guard,
-                                    );
-
-                                    stat!(successful_insert);
-                                    drop(lock);
-                                    self.count.increment();
-
-                                    return Ok(None);
-                                }
-
-                                FindSlotResult::NeedsSplit => {
-                                    // Atomic split+insert - no retry needed!
-                                    // Convert value to raw pointer for split+insert
-                                    let value_ptr = S::output_consume_to_raw(value);
-
-                                    // Compute keylenx from key's current length:
-                                    // - If has suffix (>8 bytes remaining), keylenx = 64 (KSUF_KEYLENX)
-                                    // - Otherwise keylenx = current_len as u8
-                                    let keylenx: u8 = if key.has_suffix() {
-                                        64 // KSUF_KEYLENX
-                                    } else {
-                                        #[expect(
-                                            clippy::cast_possible_truncation,
-                                            reason = "current_len <= 8 when !has_suffix"
-                                        )]
-                                        {
-                                            key.current_len() as u8
-                                        }
-                                    };
-
-                                    // Get suffix if present
-                                    let suffix: Option<&[u8]> = if key.has_suffix() {
-                                        Some(key.suffix())
-                                    } else {
-                                        None
-                                    };
-
-                                    // Build insert data
-                                    let insert_data = SplitInsertData {
-                                        ikey: key.ikey(),
-                                        keylenx,
-                                        suffix,
-                                        value_ptr,
-                                    };
-
-                                    // Atomic split+insert (FALLIBLE allocation for sibling)
-                                    let _split_result = self.handle_leaf_split_and_insert_generic(
-                                        leaf_ptr,
-                                        lock,
-                                        logical_pos,
-                                        insert_data,
-                                        guard,
-                                    )?;
-
-                                    // Insert completed during split - done!
-                                    stat!(successful_insert);
-                                    self.count.increment();
-                                    return Ok(None);
-                                }
-                            }
-                        }
-
-                        // These can't happen in single-layer mode
-                        InsertSearchResultGeneric::Layer { .. }
-                        | InsertSearchResultGeneric::Conflict { .. } => {
-                            unreachable!("single-layer search never returns Layer or Conflict")
-                        }
-                    }
-                }
-
-                // ================================================================
-                // Multi-layer path (handles layer descent and conflicts)
-                // ================================================================
-                // Note: search_result is already set from optimistic search above
-
-                match search_result {
+                // Unified path for both single-layer and multi-layer modes.
+                // In single-layer mode, Layer/Conflict are unreachable (dead code eliminated).
+                match optimistic_search {
                     InsertSearchResultGeneric::Found { slot } => {
                         let old_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
@@ -743,7 +639,6 @@ where
                                     guard,
                                 );
                                 stat!(successful_insert);
-
                                 drop(lock);
                                 self.count.increment();
                                 return Ok(None);
@@ -803,6 +698,12 @@ where
 
                     InsertSearchResultGeneric::Layer { slot, .. } => {
                         // Descend into sublayer - requires full traversal
+                        // In single-layer mode, this branch is unreachable (search never returns Layer)
+                        debug_assert!(
+                            !single_layer_mode,
+                            "single-layer search returned Layer variant"
+                        );
+
                         let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
                         drop(lock);
 
@@ -814,6 +715,12 @@ where
 
                     InsertSearchResultGeneric::Conflict { slot } => {
                         // Handle suffix conflict by creating a new layer (FALLIBLE)
+                        // In single-layer mode, this branch is unreachable (search never returns Conflict)
+                        debug_assert!(
+                            !single_layer_mode,
+                            "single-layer search returned Conflict variant"
+                        );
+
                         self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard)?;
                         stat!(successful_insert);
                         return Ok(None);

@@ -76,11 +76,13 @@ where
     pub(crate) fn handle_leaf_split_generic(
         &self,
         left_leaf_ptr: *mut L,
-        lock: LockGuard<'_>,
+        mut lock: LockGuard<'_>,
         logical_pos: usize,
         ikey: u64,
         guard: &LocalGuard<'_>,
     ) -> Result<(), InsertError> {
+        // SAFETY: Caller guarantees left_leaf_ptr is valid and we hold the lock,
+        // preventing concurrent modification. The guard protects against deallocation.
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
 
         // Calculate split point
@@ -98,11 +100,19 @@ where
         let parent_is_null: bool = left_leaf.parent().is_null();
 
         let is_main_root: bool = root_flag_set && {
+            // Acquire ordering: synchronizes with Release store in root updates,
+            // ensuring we see the most recent root pointer value.
             let current_root: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
             std::ptr::eq(current_root, left_leaf_ptr)
         };
 
         let is_layer_root: bool = root_flag_set && parent_is_null && !is_main_root;
+
+        // Invariant check: ROOT_BIT with non-null parent must be main root
+        debug_assert!(
+            !root_flag_set || parent_is_null || is_main_root,
+            "Invalid state: ROOT_BIT set with non-null parent but not main root"
+        );
 
         // =========================================================================
         // FALLIBLE POINT: Allocate right sibling BEFORE mark_split
@@ -121,15 +131,14 @@ where
         //
         // After mark_split(), we MUST complete the split. All subsequent
         // allocations (internode in propagation) are infallible and abort on OOM.
-        let mut lock: LockGuard<'_> = lock;
         lock.mark_split();
 
-        // Perform the split
-        // NOTE: split_into_preallocated sets the split-locked version on right_leaf
+        // SAFETY: We hold the lock on left_leaf, right_leaf_ptr is freshly allocated
+        // and not yet visible to other threads. The guard protects memory reclamation.
         let _ =
             unsafe { left_leaf.split_into_preallocated(split_point.pos, right_leaf_ptr, guard) };
 
-        // Link leaves in B-link order
+        // SAFETY: We hold the lock, right_leaf_ptr is valid and properly initialized.
         unsafe { left_leaf.link_sibling(right_leaf_ptr) };
 
         // =========================================================================
@@ -204,11 +213,13 @@ where
     pub(crate) fn handle_leaf_split_and_insert_generic(
         &self,
         left_leaf_ptr: *mut L,
-        lock: LockGuard<'_>,
+        mut lock: LockGuard<'_>,
         logical_pos: usize,
         insert_data: SplitInsertData<'_>,
         guard: &LocalGuard<'_>,
     ) -> Result<SplitInsertResult, InsertError> {
+        // SAFETY: Caller guarantees left_leaf_ptr is valid and we hold the lock,
+        // preventing concurrent modification. The guard protects against deallocation.
         let left_leaf: &L = unsafe { &*left_leaf_ptr };
         let insert_ikey = insert_data.ikey;
 
@@ -224,11 +235,19 @@ where
         let parent_is_null: bool = left_leaf.parent().is_null();
 
         let is_main_root: bool = root_flag_set && {
+            // Acquire ordering: synchronizes with Release store in root updates,
+            // ensuring we see the most recent root pointer value.
             let current_root: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
             std::ptr::eq(current_root, left_leaf_ptr)
         };
 
         let is_layer_root: bool = root_flag_set && parent_is_null && !is_main_root;
+
+        // Invariant check: ROOT_BIT with non-null parent must be main root
+        debug_assert!(
+            !root_flag_set || parent_is_null || is_main_root,
+            "Invalid state: ROOT_BIT set with non-null parent but not main root"
+        );
 
         // =========================================================================
         // FALLIBLE POINT: Allocate right sibling BEFORE mark_split
@@ -238,11 +257,10 @@ where
         // =========================================================================
         // PAST POINT OF NO RETURN: mark_split() and beyond
         // =========================================================================
-        let mut lock: LockGuard<'_> = lock;
         lock.mark_split();
 
-        // Perform the ATOMIC split+insert
-        // SAFETY: We hold the lock, new leaf is valid and not yet visible
+        // SAFETY: We hold the lock on left_leaf, right_leaf_ptr is freshly allocated
+        // and not yet visible to other threads. The guard protects memory reclamation.
         let result: SplitInsertResult = unsafe {
             left_leaf.split_and_insert(
                 split_point.pos,
@@ -253,8 +271,7 @@ where
             )
         };
 
-        // Link leaves in B-link order
-        // SAFETY: We hold the lock
+        // SAFETY: We hold the lock, right_leaf_ptr is valid and properly initialized.
         unsafe { left_leaf.link_sibling(right_leaf_ptr) };
 
         // =========================================================================
@@ -263,7 +280,10 @@ where
         // Use result.split_ikey (from the actual split) for parent propagation.
         // This handles the forward-sequential case where the new key becomes
         // the separator.
-        let _propagate_result: Result<(), InsertError> = Propagation::make_split_leaf::<S, L, A>(
+        //
+        // Propagation is documented as infallible (aborts on OOM). We verify this
+        // invariant in debug builds to catch any violations early.
+        let propagate_result: Result<(), InsertError> = Propagation::make_split_leaf::<S, L, A>(
             &self.root_ptr,
             &self.allocator,
             left_leaf_ptr,
@@ -275,23 +295,14 @@ where
             guard,
         );
 
+        debug_assert!(
+            propagate_result.is_ok(),
+            "Propagation failed unexpectedly: {propagate_result:?}"
+        );
+
         Ok(result)
     }
 
-    /// Propagate a leaf split to the parent.
-    ///
-    /// # Arguments
-    /// * `is_layer_root` - True if the left leaf was a layer root BEFORE the lock was dropped.
-    ///   This must be captured before `drop(lock)` because `SPLIT_UNLOCK_MASK` clears `ROOT_BIT`.
-    ///
-    /// # Help-Along Protocol
-    ///
-    /// The right sibling (`right_leaf_ptr`) is created with a split-locked version
-    /// (`LOCK_BIT` | `SPLITTING_BIT` set). This function unlocks it after setting its
-    /// parent pointer. This prevents other threads from trying to split the right
-    /// sibling while its parent is NULL.
-    ///
-    /// All exit paths must call `(*right_leaf_ptr).version().unlock_for_split()`.
     /// Try to find the child index for a given child pointer in an internode.
     ///
     /// Returns `Some(index)` if found, `None` if not found. Use this in retry loops
@@ -306,11 +317,18 @@ where
     }
 
     /// Find the child index for a given child pointer in an internode.
-    /// Panics if not found.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the child is not found in the parent. This indicates a bug in
+    /// the tree structure - the child should always be present when this is called.
     #[allow(dead_code, reason = "traversal helper for future features")]
-    #[expect(clippy::expect_used, reason = "FATAL: Fail Fast")]
     fn find_child_index_generic(&self, parent: &L::Internode, child: *mut u8) -> usize {
         self.try_find_child_index_generic(parent, child)
-            .expect("Child not found in parent internode")
+            .unwrap_or_else(|| {
+                // This is a fatal invariant violation - the child must exist in its parent.
+                // Using unreachable! instead of expect to satisfy library code policy.
+                unreachable!("Child not found in parent internode - tree structure corrupted")
+            })
     }
 }
