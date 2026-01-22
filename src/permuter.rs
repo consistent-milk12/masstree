@@ -22,7 +22,10 @@ const SIZE_MASK: u64 = 0xF;
 
 use crate::{leaf_trait::TreePermutation, suffix::PermutationProvider};
 
-/// Utility functions for [`Permuter`].
+/// Namespace for const helper functions used by [`Permuter`].
+///
+/// These are separated into a utility struct because const generic methods
+/// cannot be called in const contexts on the parent type.
 struct PermuterUtils;
 
 impl PermuterUtils {
@@ -39,7 +42,7 @@ impl PermuterUtils {
     ///     - size = 0
     const fn compute_initial_value<const WIDTH: usize>() -> u64 {
         // Build value: position i contains slot (WIDTH - 1 - i), size = 0
-        // This is REVERSE order to match C++ reference: x0123456789ABCDE0
+        // This is REVERSE order to match C++ reference: 0x0123_4567_89AB_CDE0
         let mut value: u64 = 0;
         let mut i: usize = 0;
 
@@ -283,6 +286,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     pub const fn get(&self, i: usize) -> usize {
         debug_assert!(i < WIDTH, "get: index out of bounds");
 
+        // Shift: skip 4-bit size field, then 4 bits per position
         ((self.value >> ((i * 4) + 4)) & 0xF) as usize
     }
 
@@ -429,20 +433,9 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         debug_assert!(self.size() < WIDTH, "insert_from_back: permuter full");
 
         let slot: usize = self.back();
-
-        // Bit manipulation matching C++ reference:
-        // - Increment size, keep positions < i unchanged
-        // - Insert slot at position i
-        // - Shift positions >= i up by one (they move to i + 1, i + 2, ...)
         let i_shift: usize = (i * 4) + 4;
-
-        // Bits for size + positions 0..(i - 1)
         let low_mask: u64 = (1u64 << i_shift) - 1;
 
-        // Algorithm:
-        // 1. Increment size, keep lower positions unchanged
-        // 2. Insert slot at position i
-        // 3. Shift higher positions up (including free slots)
         self.value = ((self.value + 1) & low_mask)
             | ((slot as u64) << i_shift)
             | ((self.value << 4) & !(low_mask | (0xF << i_shift)));
@@ -508,6 +501,9 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// - Positions `i..size()-1` shift down (position j gets old position j+1)
     /// - `back()` returns the slot that was at position `i`
     ///
+    /// This is used for deferred slot recycling where the removed slot needs
+    /// to be immediately available for re-allocation via `back()`.
+    ///
     /// # Panics
     /// Panics in debug mode if `i >= size()`.
     ///
@@ -519,18 +515,9 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     pub fn remove_to_back(&mut self, i: usize) {
         debug_assert!(i < self.size(), "remove_to_back: i >= size");
 
-        // mask covers bits for positions >= i (not including size bits for positions < i)
-        // i_shift = bit offset of position i = (i + 1) * 4
         let i_shift: usize = (i + 1) * 4;
         let mask: u64 = !((1u64 << i_shift) - 1);
-
-        // Use compile-time WIDTH_MASK to clear unused upper bits
         let x: u64 = self.value & Self::WIDTH_MASK;
-
-        // Bit manipulation matching C++ reference:
-        // - Decrement size, keep positions < i unchanged
-        // - Shift positions >= i down by one (position i gets position i+1's slot, etc.)
-        // - Move the removed element (original position i) to the back (position WIDTH-1)
         let shift_to_back: usize = (WIDTH - i - 1) * 4;
 
         self.value = ((x - 1) & !mask)           // decrement size, keep positions < i
@@ -597,23 +584,17 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// removes it.
     ///
     /// # Panics
-    /// Panics if `slot` is not found in the permutation.
-    ///
-    /// # Algorithm
-    /// 1. Linear scan to find logical position `i` where `get(i) == slot`
-    /// 2. Call `remove(i)` to remove by logical position
-    #[inline]
+    /// Debug-panics if `slot` is not found in the in-use portion of the permutation.
+    #[inline(always)]
     pub fn remove_slot(&mut self, slot: usize) {
-        let size: usize = self.size();
-
-        // Find the logical position of this physical slot
-        let Some(pos) = (0..size).find(|&i| self.get(i) == slot) else {
-            debug_assert!(false, "remove_slot: slot not in permutation");
-            return;
-        };
-
-        // Use the existing remove method which removes by logical position
-        self.remove(pos);
+        let size = self.size();
+        for i in 0..size {
+            if self.get(i) == slot {
+                self.remove(i);
+                return;
+            }
+        }
+        debug_assert!(false, "remove_slot: slot {slot} not in permutation");
     }
 
     /// Exchange (swap) the elements at positions `i` and `j`.
@@ -624,11 +605,11 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// - `get(j)` returns what was at position `i`
     /// - All other positions are unchanged
     ///
+    /// Used during insertion to maintain sorted order by swapping a newly
+    /// inserted slot into its correct position.
+    ///
     /// # Panics
     /// Panics in debug mode if `i >= WIDTH` or `j >= WIDTH`.
-    ///
-    /// # Algorithm (matches C++ `kpermuter::exchange`)
-    /// Uses XOR swap trick on the 4-bit slot values.
     #[inline(always)]
     pub fn exchange(&mut self, i: usize, j: usize) {
         debug_assert!(i < WIDTH, "exchange: i >= WIDTH");
@@ -651,34 +632,31 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         self.debug_assert_valid();
     }
 
-    /// Rotate elements between positions `i` and `j`.
+    /// Rotate elements from position `i` to end, moving positions `i..j` to the back.
     ///
     /// After this operation:
     /// - `size()` is unchanged
     /// - Positions `0..i` are unchanged
-    /// - For positions `k` in `i..WIDTH`:
-    ///   `new[k] = old[i + (k - i + j - i) mod (WIDTH - i)]`
-    ///
-    /// This effectively rotates the elements from position `i` to the end
-    /// by `(j - i)` positions.
+    /// - Positions `j..WIDTH` shift left to `i..(i + WIDTH - j)`
+    /// - Positions `i..j` wrap to the end
     ///
     /// # Example
     ///
     /// ```text
-    /// rotate(2, 4) with WIDTH=7:
-    ///   Before: [A, B, C, D, E, F, G]
-    ///                ^     ^
-    ///                i     j
-    ///   After:  [A, B, E, F, G, C, D]
+    /// rotate(2, 4) with WIDTH=7, slots [s0, s1, s2, s3, s4, s5, s6]:
     ///
-    /// Positions 2..7 rotated left by 2 places (j - i = 2).
-    /// Elements at positions 2,3 wrap around to positions 5,6.
+    ///   Position:  0   1   2   3   4   5   6
+    ///   Before:   s0  s1  s2  s3  s4  s5  s6
+    ///                     ^^--^^  (positions 2..4 will move to end)
+    ///
+    ///   After:    s0  s1  s4  s5  s6  s2  s3
+    ///                     ^^------^^  ^^--^^ (wrapped)
+    ///
+    /// Positions 2,3 moved to 5,6. Positions 4,5,6 shifted left to 2,3,4.
     /// ```
     ///
     /// # Panics
     /// Panics in debug mode if `i > j` or `j > WIDTH`.
-    ///
-    /// # Algorithm (matches C++ `kpermuter::rotate`)
     #[inline(always)]
     pub fn rotate(&mut self, i: usize, j: usize) {
         debug_assert!(i <= j, "rotate: i > j");
@@ -740,7 +718,7 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     /// Verify permuter invariants (no-op in release builds).
     #[inline]
     #[cfg(not(debug_assertions))]
-    pub fn debug_assert_valid(&self) {}
+    pub const fn debug_assert_valid(&self) {}
 }
 
 // ============================================================================
@@ -758,10 +736,6 @@ impl<const WIDTH: usize> PermutationProvider for Permuter<WIDTH> {
         self.get(i)
     }
 }
-
-// ============================================================================
-//  TreePermutation Implementation
-// ============================================================================
 
 // ============================================================================
 //  AtomicPermuter (u64-based atomic wrapper)
@@ -911,27 +885,27 @@ impl<const WIDTH: usize> TreePermutation for Permuter<WIDTH> {
 
     #[inline(always)]
     fn value(&self) -> u64 {
-        Self::value(self)
+        self.value
     }
 
     #[inline(always)]
     fn size(&self) -> usize {
-        Self::size(self)
+        self.size()
     }
 
     #[inline(always)]
     fn get(&self, i: usize) -> usize {
-        Self::get(self, i)
+        self.get(i)
     }
 
     #[inline(always)]
     fn back(&self) -> usize {
-        Self::back(self)
+        self.back()
     }
 
     #[inline(always)]
     fn back_at_offset(&self, offset: usize) -> usize {
-        Self::back_at_offset(self, offset)
+        self.back_at_offset(offset)
     }
 
     #[inline(always)]

@@ -592,7 +592,7 @@ where
     ///
     /// Handles layer descent, suffix matching, and complex key structures.
     #[expect(clippy::too_many_lines, reason = "complex multi-layer traversal logic")]
-    #[inline(always)]
+    #[inline]
     fn get_impl_multi_layer<R, F>(
         &self,
         key: &mut Key<'_>,
@@ -612,6 +612,10 @@ where
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             'leaf_loop: loop {
+                // OPTIMIZATION: Compute ikey once per leaf iteration.
+                // key.shift() mutates on layer descent, so this must be per-iteration.
+                let target_ikey: u64 = key.ikey();
+
                 let leaf: &L = unsafe { &*leaf_ptr };
 
                 // If we landed on a deleted leaf, follow B-link to successor.
@@ -628,8 +632,6 @@ where
                     leaf.prefetch_for_search();
                     v
                 } else {
-                    let target_ikey: u64 = key.ikey();
-
                     if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
                         leaf_ptr = next_ptr;
 
@@ -643,16 +645,13 @@ where
 
                 // EARLY too-right check: detect if we descended to a leaf that's
                 // to the right of where the key should be. Check BEFORE searching.
-                {
-                    let target_ikey: u64 = key.ikey();
-                    if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
-                        // Reload root to get latest pointer after concurrent modifications
-                        layer_root = self.load_root_ptr_generic(guard);
-                        leaf_ptr =
-                            self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
+                if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                    // Reload root to get latest pointer after concurrent modifications
+                    layer_root = self.load_root_ptr_generic(guard);
+                    leaf_ptr =
+                        self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
-                        continue 'leaf_loop;
-                    }
+                    continue 'leaf_loop;
                 }
 
                 'search_loop: loop {
@@ -665,7 +664,7 @@ where
                         continue 'layer_loop;
                     }
 
-                    let target_ikey: u64 = key.ikey();
+                    // target_ikey already computed at start of 'leaf_loop
                     let result: LookupResult = search_leaf_multi_layer::<S, L>(leaf, key);
 
                     if leaf.version().has_changed(version) {

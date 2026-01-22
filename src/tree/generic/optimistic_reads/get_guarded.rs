@@ -63,7 +63,7 @@ where
     /// - No layer pointer detection needed
     /// - Simpler search loop
     /// - Stores pointer directly (matches `get_ref` pattern)
-    #[inline(always)]
+    #[inline]
     fn get_with_guard_single_layer(
         &self,
         key: &Key<'_>,
@@ -153,8 +153,10 @@ where
                 };
 
                 // Version validation after all reads (common case: unchanged)
-                if leaf.version().has_changed(version) {
-                    if leaf.version().has_split_no_compiler_fence(version) {
+                // Store version reference once to avoid repeated method calls
+                let ver = leaf.version();
+                if ver.has_changed(version) {
+                    if ver.has_split_no_compiler_fence(version) {
                         let (advanced, new_version) =
                             self.advance_to_key_generic(leaf, key, version, guard);
 
@@ -167,7 +169,7 @@ where
                         version = new_version;
                     } else {
                         // Update only, re-stabilize without B-link check
-                        version = leaf.version().stable();
+                        version = ver.stable();
                     }
 
                     continue 'search_loop;
@@ -179,8 +181,8 @@ where
                 }
 
                 // Not found, check dirty or B-link
-                if leaf.version().is_dirty() {
-                    version = leaf.version().stable();
+                if ver.is_dirty() {
+                    version = ver.stable();
 
                     continue 'search_loop;
                 }
@@ -214,7 +216,7 @@ where
     /// - `deleted_layer()` recovery (GC'd sublayer)
     /// - `check_sublayer_valid` before descent
     /// - Stores pointer directly (matches `get_ref` pattern)
-    #[inline(always)]
+    #[inline]
     #[expect(clippy::too_many_lines, reason = "Complex multi-layer logic")]
     fn get_with_guard_multi_layer(
         &self,
@@ -232,6 +234,10 @@ where
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             'leaf_loop: loop {
+                // OPTIMIZATION: Compute ikey once per leaf iteration.
+                // key.shift() mutates on layer descent, so this must be per-iteration.
+                let target_ikey: u64 = key.ikey();
+
                 // SAFETY: leaf_ptr protected by guard
                 let leaf: &L = unsafe { &*leaf_ptr };
 
@@ -248,8 +254,6 @@ where
                     leaf.prefetch_for_search();
                     v
                 } else {
-                    let target_ikey: u64 = key.ikey();
-
                     if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
                         leaf_ptr = next_ptr;
 
@@ -265,7 +269,7 @@ where
                 // to the right of where the key should be. This can happen during
                 // concurrent splits when internode routing is momentarily inconsistent.
                 // Check BEFORE searching to avoid wasting cycles on the wrong leaf.
-                if !leaf.prev().is_null() && key.ikey() < leaf.ikey_bound() {
+                if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
                     // Reload root to get latest pointer after concurrent modifications
                     leaf_ptr =
                         self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
@@ -283,8 +287,11 @@ where
                         continue 'layer_loop;
                     }
 
-                    let target_ikey: u64 = key.ikey();
+                    // target_ikey already computed at start of 'leaf_loop
                     let result: LookupResult = search_leaf_multi_layer::<S, L>(leaf, key);
+
+                    // Store version reference once for all validation checks below
+                    let ver = leaf.version();
 
                     match result {
                         LookupResult::ValueSlot(slot) => {
@@ -299,8 +306,8 @@ where
                                 Some(unsafe { S::output_from_raw(ptr) })
                             };
 
-                            if leaf.version().has_changed(version) {
-                                if leaf.version().has_split_no_compiler_fence(version) {
+                            if ver.has_changed(version) {
+                                if ver.has_split_no_compiler_fence(version) {
                                     let (new_ptr, new_version, changed_leaf) =
                                         self.handle_version_change(leaf, key, version, guard);
 
@@ -312,7 +319,7 @@ where
 
                                     version = new_version;
                                 } else {
-                                    version = leaf.version().stable();
+                                    version = ver.stable();
                                 }
 
                                 continue 'search_loop;
@@ -323,8 +330,8 @@ where
 
                         LookupResult::Layer(layer_ptr) => {
                             // Validate version BEFORE descending
-                            if leaf.version().has_changed(version) {
-                                if leaf.version().has_split_no_compiler_fence(version) {
+                            if ver.has_changed(version) {
+                                if ver.has_split_no_compiler_fence(version) {
                                     let (new_ptr, new_version, changed_leaf) =
                                         self.handle_version_change(leaf, key, version, guard);
 
@@ -336,7 +343,7 @@ where
 
                                     version = new_version;
                                 } else {
-                                    version = leaf.version().stable();
+                                    version = ver.stable();
                                 }
 
                                 continue 'search_loop;
@@ -356,8 +363,8 @@ where
 
                         LookupResult::NotFound => {
                             // Validate before returning None
-                            if leaf.version().has_changed(version) {
-                                if leaf.version().has_split_no_compiler_fence(version) {
+                            if ver.has_changed(version) {
+                                if ver.has_split_no_compiler_fence(version) {
                                     let (new_ptr, new_version, changed_leaf) =
                                         self.handle_version_change(leaf, key, version, guard);
 
@@ -369,14 +376,14 @@ where
 
                                     version = new_version;
                                 } else {
-                                    version = leaf.version().stable();
+                                    version = ver.stable();
                                 }
 
                                 continue 'search_loop;
                             }
 
-                            if leaf.version().is_dirty() {
-                                version = leaf.version().stable();
+                            if ver.is_dirty() {
+                                version = ver.stable();
 
                                 continue 'search_loop;
                             }

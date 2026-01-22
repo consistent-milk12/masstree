@@ -19,7 +19,7 @@ Copy types.
 
 ## Status
 
-**v0.6.3** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 5/7 benchmarks and
+**v0.6.4** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 5/7 benchmarks and
 Rust alternatives on 11/12 workloads. Passes Miri with strict-provenance flag. Concurrent data structures
 require extensive stress testing, the test suite is comprehensive (998 tests total) but edge cases may remain.
 
@@ -58,15 +58,15 @@ for the full safety argument.
 
 The forward-sequential gap (rw3) narrowed from 57% to 81% but remains under investigation.
 
-| Benchmark | Rust | C++ | Ratio | Winner |
-|-----------|------|-----|-------|--------|
-| **rw4** (reverse-seq) | 59.00 | 48.14 | **123%** | **Rust** |
-| **same** (10 hot keys) | 3.56 | 2.09 | **170%** | **Rust** |
-| **rw2g98** (98% reads) | 25.81 | 23.04 | **112%** | **Rust** |
-| **uscale** (random 140M) | 11.05 | 10.58 | **104%** | **Rust** |
-| **wscale** (wide random) | 9.56 | 9.03 | **106%** | **Rust** |
-| **rw1** (random insert+read) | 11.01 | 11.23 | 98% | Tie |
-| **rw3** (forward-seq) | 40.54 | 50.34 | 81% | C++ |
+| Benchmark | Rust | C++ | Ratio |
+|-----------|------|-----|-------|
+| **rw4** (reverse-seq) | 59.00 | 48.14 | **123%** |
+| **same** (10 hot keys) | 3.56 | 2.09 | **170%** |
+| **rw2g98** (98% reads) | 25.81 | 23.04 | **112%** |
+| **uscale** (random 140M) | 11.05 | 10.58 | **104%** |
+| **wscale** (wide random) | 9.56 | 9.03 | **106%** |
+| **rw1** (random insert+read) | 11.01 | 11.23 | 98% |
+| **rw3** (forward-seq) | 40.54 | 50.34 | 81% |
 
 ## vs Rust Concurrent Maps (6T Physical, Rigorous)
 
@@ -130,7 +130,7 @@ pure read +28%. The `insert_only_fair` benchmark flipped from a loss (0.92x) to 
 
 ```toml
 [dependencies]
-masstree = { version = "0.6.3", features = ["mimalloc"] }
+masstree = { version = "0.6.4", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

@@ -1,23 +1,20 @@
-//! Filepath: `src/tree/split/propagation_context`.
+//! Unified-lifetime lock context for split propagation.
 //!
-//! The core insight: Rust's [`LockGuard<'_>`] has a lifetime parameter tried to the node
-//! it wwas acquired from. When we transition from leaf level to internode level, we
-//! need to "transefer" the lock from the parent to become the new left , but Rust
-//! lifetimes prevent `left_lock = parent_lock`.
+//! # Problem
 //!
-//! The solution proposed here is a refinement over the two previous solutions.
-//! I originally came up with the following:
+//! [`LockGuard<'_>`] has a lifetime tied to the node it was acquired from.
+//! When transitioning from leaf to internode level, we need to transfer the lock
+//! (`left_lock = parent_lock`), but Rust lifetimes prevent this assignment.
 //!
-//! Solution 1: The curent broken system.
-//! Solution 2: [`PropagationLock`] - A guard type with no lifetime parameter and no [`Drop`].
-//! I implemented this on my side before realizing it had a major flaw:
-//! Lock leaks on panic, excruciatingly hard to audit. And after my current experience debugging
-//! this EXTREMELY complex [`MassTree`] implementation, I just knew that I had to come up with
-//! something better
+//! # Solution
 //!
-//! **Refined Current**: [`PropagationContext`] Unify all guard lifetimes via a context struct.
-//! The key is that all nodes remain valid for 'op (the reclamation guard's lifetime),
-//! so we can safely extend any [`LockGuard<'a>`] to [`LockGuard<'op>`].
+//! [`PropagationContext`] unifies all guard lifetimes to `'op` (the reclamation
+//! guard's lifetime). Since all nodes remain valid for `'op`, extending any
+//! [`LockGuard<'a>`] to [`LockGuard<'op>`] is safe.
+//!
+//! Previous approaches considered:
+//! - No-drop guard type: Lock leaks on panic, hard to audit
+//! - Current approach: RAII-safe, auditable, panic-safe
 
 use crate::nodeversion::{LockGuard, NodeVersion};
 use seize::LocalGuard;
@@ -25,18 +22,14 @@ use std::marker::PhantomData;
 
 /// Context for hand-over-hand split propagation with unified lifetimes.
 ///
-/// This type provides panic-safe RAII locking by ensuring all [`LockGuard`]'s,
-/// have the same lifetime parameter `'op` tied to the reclamation guard.
+/// Provides panic-safe RAII locking by binding all [`LockGuard`]s to lifetime `'op`.
 ///
 /// # Why This Works
 ///
-/// All nodes in the tree remain valid for the duration of `'op` because:
-/// 1. The [`LocalGuard`] prevents memory reclamation
-/// 2. Nodes are never deallocated while a reclamation guard in active
+/// All nodes remain valid for `'op` because the [`LocalGuard`] prevents reclamation.
+/// Therefore, extending [`LockGuard<'a>`] to [`LockGuard<'op>`] is sound.
 ///
-/// Therefore, extending a [`LockGuard<'shorter'>`] to [`LockGuard<'op>`] is safe.
-///
-/// # Usage
+/// # Example
 ///
 /// ```rust,ignore
 /// let ctx = PropagationContext::new(guard);
@@ -44,24 +37,18 @@ use std::marker::PhantomData;
 ///
 /// loop {
 ///     let parent_lock: LockGuard<'op> = unsafe { ctx.lock_node(parent_version_ptr) };
-///     // ... work ...
-///
-///     drop(left_lock); // RAII unlock
-///     left_lock = parent_lock; // This works: same lifetime 'op
+///     drop(left_lock);
+///     left_lock = parent_lock; // Same lifetime allows assignment
 /// }
-///
 /// // left_lock auto-unlocks on drop
 /// ```
 pub struct PropagationContext<'op> {
-    /// Marker to bind the 'op lifetime to the reclamation guard.
-    /// The [`LocalGuard`] is stored externally, we just need the lifetime.
+    /// Binds `'op` to the reclamation guard's lifetime.
     _marker: PhantomData<&'op LocalGuard<'op>>,
 }
 
 impl<'op> PropagationContext<'op> {
-    /// Create a new propagation context.
-    ///
-    /// The `'op` lifetime is tied to the provided reclamation guard.
+    /// Create a context tied to the reclamation guard's lifetime.
     #[inline]
     pub const fn new(_guard: &'op LocalGuard<'op>) -> Self {
         Self {
@@ -69,49 +56,42 @@ impl<'op> PropagationContext<'op> {
         }
     }
 
-    /// Lock a [`NodeVersion`] and return a [`LockGuard`] with unified lifetime `'op`.
+    /// Lock a node and return a [`LockGuard`] with unified lifetime `'op`.
     ///
-    /// Note: For high-contention scenarios (like split propagation), prefer
-    /// [`Self::lock_node_yielding`] which reduces CPU waste.
+    /// Prefer [`Self::lock_node_yielding`] for high-contention scenarios.
     ///
     /// # Safety
-    /// `version_ptr` must point to a valid [`NodeVersion`] that remains valid
-    /// for the duration of `'op`. This is guaranteed by the reclamation guard.
+    /// `version_ptr` must point to a valid node protected by the reclamation guard.
     #[inline(always)]
-    #[allow(
-        dead_code,
-        reason = "API for low-contention scenarios; prefer lock_node_yielding"
-    )]
-    #[expect(clippy::unused_self, reason = "API Consistency")]
+    #[allow(dead_code, reason = "Low-contention API; prefer lock_node_yielding")]
+    #[expect(clippy::unused_self, reason = "Binds output lifetime to context's 'op")]
     pub unsafe fn lock_node(&self, version_ptr: *const NodeVersion) -> LockGuard<'op> {
-        // Create a reference with the unified lifetime.
-        // SAFETY: Caller guarantees version_ptr is valid for 'op.
+        // SAFETY: Caller guarantees validity for 'op.
         let version: &'op NodeVersion = unsafe { &*version_ptr };
-
         version.lock()
     }
 
-    /// Lock a [`NodeVersion`] using [`NodeVersion::lock_with_yield`] for high contention.
-    ///
-    /// Used in split propagation to reduce CPU waste under high thread counts.
+    /// Lock a node with yield-on-contention for high thread counts.
     ///
     /// # Safety
-    /// Same requirements as `lock_node`.
+    /// Same as [`Self::lock_node`].
     #[inline(always)]
-    #[expect(clippy::unused_self, reason = "API Consistency")]
+    #[expect(clippy::unused_self, reason = "Binds output lifetime to context's 'op")]
     pub unsafe fn lock_node_yielding(&self, version_ptr: *const NodeVersion) -> LockGuard<'op> {
-        // SAFETY: Caller guarantees version_ptr is valid for 'op.
+        // SAFETY: Caller guarantees validity for 'op.
         let version: &'op NodeVersion = unsafe { &*version_ptr };
-
         version.lock_with_yield()
     }
 
+    /// Extend a [`LockGuard`]'s lifetime to the unified `'op`.
+    ///
+    /// # Safety
+    /// The guard's underlying node must remain valid for `'op`.
+    /// This is guaranteed when the node is protected by the reclamation guard.
     #[inline(always)]
-    #[expect(clippy::unused_self, reason = "API Consistency")]
+    #[expect(clippy::unused_self, reason = "Binds output lifetime to context's 'op")]
     pub unsafe fn unify_guard<'a>(&self, guard: LockGuard<'a>) -> LockGuard<'op> {
-        // SAFETY: Both 'a and 'op are within the reclamation guard's protection.
-        // The node cannot be freed while any guard exists, so extending
-        // the lifetime is safe.
+        // SAFETY: Reclamation guard prevents deallocation for 'op.
         unsafe { std::mem::transmute(guard) }
     }
 }

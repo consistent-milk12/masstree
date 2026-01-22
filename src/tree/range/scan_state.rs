@@ -93,12 +93,14 @@ pub enum ScanState {
 impl ScanState {
     /// Check if this state will yield an entry.
     #[inline(always)]
+    #[allow(dead_code, reason = "Scan state API")]
     pub const fn is_emit(self) -> bool {
         matches!(self, Self::Emit)
     }
 
     /// Check if this state requires layer stack manipulation.
     #[inline(always)]
+    #[allow(dead_code, reason = "Scan state API")]
     pub const fn is_layer_transition(self) -> bool {
         matches!(self, Self::Down | Self::Up)
     }
@@ -230,6 +232,7 @@ where
     ///
     /// - `leaf`: Raw pointer to the leaf node (may be null)
     #[must_use]
+    #[allow(dead_code, reason = "Scan stack element API")]
     pub const fn with_leaf(
         root: *const u8,
         leaf: *mut L,
@@ -291,6 +294,7 @@ where
     ///
     /// The caller must ensure the guard that protects this pointer is still alive.
     #[inline(always)]
+    #[allow(dead_code, reason = "Scan stack element API")]
     pub unsafe fn try_leaf_ref(&self) -> Option<&L> {
         // SAFETY: Caller ensures guard is held
         self.leaf.map(|nn| unsafe { nn.as_ref() })
@@ -328,6 +332,7 @@ where
 
     /// Check if the leaf is exhausted (no more slots at current position).
     #[inline(always)]
+    #[allow(dead_code, reason = "Scan stack element API")]
     pub fn is_exhausted(&self) -> bool {
         self.ki >= self.perm.size()
     }
@@ -358,18 +363,21 @@ where
 
     /// Set the cached version.
     #[inline(always)]
+    #[allow(dead_code, reason = "Scan stack element API")]
     pub const fn set_version(&mut self, version: u32) {
         self.version = version;
     }
 
     /// Set the cached permutation.
     #[inline(always)]
+    #[allow(dead_code, reason = "Scan stack element API")]
     pub const fn set_perm(&mut self, perm: L::Perm) {
         self.perm = perm;
     }
 
     /// Set the logical position.
     #[inline(always)]
+    #[allow(dead_code, reason = "Scan stack element API")]
     pub const fn set_ki(&mut self, ki: usize) {
         self.ki = ki;
     }
@@ -398,6 +406,7 @@ where
     /// # Safety
     ///
     /// The caller must ensure `self.leaf` is `Some` and valid.
+    #[allow(dead_code, reason = "Scan stack element API")]
     pub unsafe fn refresh_from_leaf(&mut self, ki: usize) {
         debug_assert!(self.leaf.is_some(), "refresh_from_leaf called on null leaf");
         // SAFETY: Caller ensures leaf is valid
@@ -569,6 +578,7 @@ pub struct ScanSnapshot<S: ValueSlot> {
 /// This eliminates Arc atomic increment/decrement per scanned entry,
 /// which can improve scan throughput by 2-3x for Arc-based trees.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code, reason = "Zero-copy scan snapshot API")]
 pub struct ScanSnapshotPtr<V> {
     /// Typed pointer to the value data.
     ///
@@ -580,6 +590,7 @@ pub struct ScanSnapshotPtr<V> {
     pub key_len: usize,
 }
 
+#[allow(dead_code, reason = "Zero-copy scan snapshot API")]
 impl<V> ScanSnapshotPtr<V> {
     /// Create a new zero-copy snapshot.
     #[inline(always)]

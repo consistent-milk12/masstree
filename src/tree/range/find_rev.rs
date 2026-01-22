@@ -1169,10 +1169,10 @@ impl ReverseScan {
         // This sets len = 9 (IKEY_SIZE + 1) as sentinel
         cursor_key.unshift();
 
-        // Step 4: Handle edge case - cursor became empty after unshift
+        // Step 4: Handle edge case - cursor became empty at root layer
         // This happens if we ascend from a layer that was at offset 0
         // C++: while (unlikely(ka.empty())) { pop + unshift }
-        if cursor_key.is_empty_after_unshift() {
+        if cursor_key.is_at_empty_root() {
             // Need to continue ascending (recursive, but bounded by layer depth)
             return Self::handle_up_back(stack, cursor_key, layer_stack, helper, guard);
         }

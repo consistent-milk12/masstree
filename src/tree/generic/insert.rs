@@ -8,6 +8,7 @@
 //! - Unified slot allocation and value update logic
 
 use crate::leaf_trait::SplitInsertData;
+use crate::leaf24::KSUF_KEYLENX;
 
 use super::{
     InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf, Linker,
@@ -62,11 +63,30 @@ macro_rules! stat {
 // ============================================================================
 
 /// Result of finding a usable slot for insertion.
+///
+/// # Slot-0 Rule
+///
+/// Slot 0 stores the leaf's `ikey_bound()` value. When a key is deleted from slot 0,
+/// the slot cannot be reused for a different ikey because readers use `ikey_bound()`
+/// for B-link navigation. The slot-0 rule ensures:
+///
+/// - If slot 0 is free and `ikey == ikey_bound()`, slot 0 can be reused
+/// - If slot 0 is free but `ikey != ikey_bound()`, we must find another slot
+/// - If no other slots are free, we trigger a split (even though slot 0 is "free")
 enum FindSlotResult {
-    /// Found a usable slot at the given index with `back_offset` for permutation.
+    /// Found a usable slot at the given physical index.
+    ///
+    /// - `slot`: Physical slot index in the leaf (0..WIDTH)
+    /// - `back_offset`: Offset from the back of the free list where this slot was found.
+    ///   Usually 0 (meaning the slot was at `perm.back()`). Non-zero when slot-0 rule
+    ///   forced us to skip slot 0 and find an alternative.
     Found { slot: usize, back_offset: usize },
 
-    /// No usable slot available - need to split the leaf.
+    /// No usable slot available - the leaf must be split.
+    ///
+    /// This occurs when:
+    /// - The leaf is full (`perm.size() >= WIDTH`), OR
+    /// - Only slot 0 is free but cannot be reused (slot-0 rule violation)
     NeedsSplit,
 }
 
@@ -299,7 +319,7 @@ where
     ///
     /// Returns `Ok(())` if key belongs here, `Err(retry_reason)` if we need
     /// to retry (split in progress, key moved to sibling, or key below lower bound).
-    #[inline(always)]
+    #[inline] // Not #[inline(always)] - 35+ lines with multiple branches
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn validate_membership(&self, leaf: &L, key: &Key<'_>) -> Result<(), MembershipError> {
         let next_raw: *mut L = leaf.next_raw();
@@ -400,15 +420,34 @@ where
 }
 
 /// Errors from membership validation.
+///
+/// Each variant indicates why the key doesn't belong in the current leaf
+/// and how to recover.
 enum MembershipError {
-    /// A split is in progress - wait and retry.
+    /// A split is in progress on this leaf.
+    ///
+    /// # Recovery
+    ///
+    /// Wait for split completion (`wait_for_split()`), then B-link advance.
+    /// The key may now be in this leaf or a right sibling.
     SplitInProgress,
 
-    /// Key has moved to a sibling leaf - retry traversal (walk right).
+    /// Key's ikey is >= the next sibling's lower bound.
+    ///
+    /// # Recovery
+    ///
+    /// B-link advance (walk right) to find the correct leaf. This is the
+    /// common case during concurrent splits - the key moved to a newly
+    /// created right sibling.
     KeyMovedToSibling,
 
-    /// Key is below this leaf's lower bound - must restart from root.
-    /// This cannot be recovered by walking right; requires full re-traversal.
+    /// Key's ikey is < this leaf's lower bound (`ikey_bound()`).
+    ///
+    /// # Recovery
+    ///
+    /// **Cannot recover by walking right.** Must restart traversal from
+    /// the layer root. This occurs when concurrent splits created new
+    /// leaves to the left of our traversal path.
     KeyBelowLowerBound,
 }
 
@@ -593,16 +632,11 @@ where
                 }
 
                 // ================================================================
-                // USE OPTIMISTIC SEARCH RESULT
+                // DISPATCH ON SEARCH RESULT
                 // ================================================================
                 // Since validation passed (version and perm unchanged),
                 // our optimistic search result is valid. No re-search needed!
                 // This matches C++ masstree_get.hh which searches before lock().
-                let perm = pre_lock_perm;
-
-                // ================================================================
-                // DISPATCH ON SEARCH RESULT
-                // ================================================================
                 // Unified path for both single-layer and multi-layer modes.
                 // In single-layer mode, Layer/Conflict are unreachable (dead code eliminated).
                 match optimistic_search {
@@ -625,7 +659,7 @@ where
                     InsertSearchResultGeneric::NotFound { logical_pos } => {
                         let ikey: u64 = key.ikey();
 
-                        match self.find_usable_slot(leaf, &perm, ikey) {
+                        match self.find_usable_slot(leaf, &pre_lock_perm, ikey) {
                             FindSlotResult::Found { slot, back_offset } => {
                                 self.insert_new_value(
                                     leaf,
@@ -633,7 +667,7 @@ where
                                     slot,
                                     back_offset,
                                     logical_pos,
-                                    perm,
+                                    pre_lock_perm,
                                     key,
                                     &value,
                                     guard,
@@ -650,10 +684,10 @@ where
                                 let value_ptr = S::output_consume_to_raw(value);
 
                                 // Compute keylenx from key's current length:
-                                // - If has suffix (>8 bytes remaining), keylenx = 64 (KSUF_KEYLENX)
+                                // - If has suffix (>8 bytes remaining), keylenx = KSUF_KEYLENX (64)
                                 // - Otherwise keylenx = current_len as u8
                                 let keylenx: u8 = if key.has_suffix() {
-                                    64 // KSUF_KEYLENX
+                                    KSUF_KEYLENX
                                 } else {
                                     #[expect(
                                         clippy::cast_possible_truncation,

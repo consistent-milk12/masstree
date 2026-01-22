@@ -4,7 +4,7 @@
 //! Main tree roots use atomic store (we hold the lock on current root).
 //! Layer roots use parent pointer updates only (no modification to `root_ptr`).
 
-use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering, fence as atomic_fence};
+use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use crate::NodeAllocatorGeneric;
 use crate::leaf_trait::{LayerCapableLeaf, TreeInternode};
@@ -41,9 +41,11 @@ impl RootCreation {
     /// fails (another thread installed a root first).
     ///
     /// # Note
-    ///
-    /// Caller is responsible for unlocking `right_leaf_ptr` after this returns.
-    #[expect(clippy::unnecessary_wraps, reason = "API Consistency")]
+    /// Caller must unlock `right_leaf_ptr` after this returns.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Returns Result for API consistency"
+    )]
     pub fn create_root_from_leaves<S, L, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
@@ -58,21 +60,20 @@ impl RootCreation {
         L: LayerCapableLeaf<S>,
         A: NodeAllocatorGeneric<S, L>,
     {
-        // Create new root internode directly in pool (height=0, children are leaves)
+        // Allocate root internode (height=0, leaf children)
         let new_root_ptr: *mut u8 = allocator.alloc_internode_direct_root(0);
         let new_root: &L::Internode = unsafe { &*new_root_ptr.cast::<L::Internode>() };
 
-        // Set up children: [left] -split_ikey- [right]
+        // Layout: [left] -split_ikey- [right]
         new_root.set_child(0, left_leaf_ptr.cast());
         new_root.set_ikey(0, split_ikey);
         new_root.set_child(1, right_leaf_ptr.cast());
         new_root.set_nkeys(1);
 
-        // Atomically install new root
-        // CRITICAL: We hold lock on left (current root), so this store is safe.
-        // Using Release ordering to ensure new_root is fully visible before the swap.
+        // Install new root. We hold left's lock, so store is safe.
         root_ptr.store(new_root_ptr, AtomicOrdering::Release);
 
+        // SAFETY: Both leaves are valid and locked (left by caller, right split-locked).
         unsafe {
             (*left_leaf_ptr).set_parent(new_root_ptr);
             (*right_leaf_ptr).set_parent(new_root_ptr);
@@ -84,8 +85,15 @@ impl RootCreation {
 
     /// Create a new main tree root internode from two internodes.
     ///
-    /// Used when the existing root internode splits.
-    #[expect(clippy::unnecessary_wraps, reason = "API Consistency")]
+    /// Used when the existing root internode splits. Atomically installs via
+    /// store on `root_ptr` (we hold the lock on current root).
+    ///
+    /// # Note
+    /// Caller must unlock `right_inode_ptr` after this returns.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Matches create_root_from_leaves signature"
+    )]
     pub fn create_root_from_internodes<S, L, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
@@ -102,19 +110,20 @@ impl RootCreation {
     {
         let left: &L::Internode = unsafe { &*left_inode_ptr };
 
-        // Create new root directly in pool (height = left.height + 1)
+        // Allocate root internode (height = left.height + 1)
         let new_root_ptr: *mut u8 = allocator.alloc_internode_direct_root(left.height() + 1);
         let new_root: &L::Internode = unsafe { &*new_root_ptr.cast::<L::Internode>() };
 
+        // Layout: [left] -split_ikey- [right]
         new_root.set_child(0, left_inode_ptr.cast());
         new_root.set_ikey(0, split_ikey);
         new_root.set_child(1, right_inode_ptr.cast());
         new_root.set_nkeys(1);
 
-        // Atomically install new root
-        // CRITICAL: We hold lock on left (current root), so this store is safe.
+        // Install new root. We hold left's lock, so store is safe.
         root_ptr.store(new_root_ptr, AtomicOrdering::Release);
 
+        // SAFETY: Both internodes are valid and locked (left by caller, right split-locked).
         unsafe {
             (*left_inode_ptr).set_parent(new_root_ptr);
             (*right_inode_ptr).set_parent(new_root_ptr);
@@ -125,7 +134,7 @@ impl RootCreation {
     }
 
     // =========================================================================
-    // Layer Root Creation (NO CAS on root_ptr)
+    // Layer Root Creation (no root_ptr modification)
     // =========================================================================
 
     /// Promote a layer root leaf to a new layer internode.
@@ -148,24 +157,21 @@ impl RootCreation {
         L: LayerCapableLeaf<S>,
         A: NodeAllocatorGeneric<S, L>,
     {
-        // Create new internode directly in pool (height=0, children are leaves)
-        // Mark as layer root (has root flag, but not main tree root)
+        // Allocate layer root internode (height=0, leaf children)
         let new_inode_ptr: *mut u8 = allocator.alloc_internode_direct_root(0);
         let new_inode: &L::Internode = unsafe { &*new_inode_ptr.cast::<L::Internode>() };
 
+        // Layout: [left] -split_ikey- [right]
         new_inode.set_child(0, left_leaf_ptr.cast());
         new_inode.set_ikey(0, split_ikey);
         new_inode.set_child(1, right_leaf_ptr.cast());
         new_inode.set_nkeys(1);
 
-        // Update parent pointers - NO CAS needed
+        // SAFETY: Both leaves are valid and locked (left by caller, right split-locked).
+        // set_parent uses Release ordering internally.
         unsafe {
-            atomic_fence(AtomicOrdering::Release);
-
             (*left_leaf_ptr).set_parent(new_inode_ptr);
             (*right_leaf_ptr).set_parent(new_inode_ptr);
-
-            // Clear root flags on both leaves
             (*left_leaf_ptr).version().mark_nonroot();
             (*right_leaf_ptr).version().mark_nonroot();
         }
@@ -174,6 +180,9 @@ impl RootCreation {
     }
 
     /// Promote a layer root internode to a new layer internode.
+    ///
+    /// Used when an existing layer root internode splits. Updates parent
+    /// pointers only (no `root_ptr` modification).
     pub fn promote_layer_root_internodes<S, L, A>(
         allocator: &A,
         left_inode_ptr: *mut L::Internode,
@@ -189,18 +198,19 @@ impl RootCreation {
     {
         let left: &L::Internode = unsafe { &*left_inode_ptr };
 
-        // Create new internode directly in pool with root flag
+        // Allocate layer root internode (height = left.height + 1)
         let new_inode_ptr: *mut u8 = allocator.alloc_internode_direct_root(left.height() + 1);
         let new_inode: &L::Internode = unsafe { &*new_inode_ptr.cast::<L::Internode>() };
 
+        // Layout: [left] -split_ikey- [right]
         new_inode.set_child(0, left_inode_ptr.cast());
         new_inode.set_ikey(0, split_ikey);
         new_inode.set_child(1, right_inode_ptr.cast());
         new_inode.set_nkeys(1);
 
+        // SAFETY: Both internodes are valid and locked (left by caller, right split-locked).
+        // set_parent uses Release ordering internally.
         unsafe {
-            atomic_fence(AtomicOrdering::Release);
-
             (*left_inode_ptr).set_parent(new_inode_ptr);
             (*right_inode_ptr).set_parent(new_inode_ptr);
             (*left_inode_ptr).version().mark_nonroot();

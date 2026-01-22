@@ -543,7 +543,7 @@ impl Permuter24 {
     /// No-op in release builds.
     #[cfg(not(debug_assertions))]
     #[inline]
-    pub fn debug_assert_valid(&self) {}
+    pub const fn debug_assert_valid(&self) {}
 }
 
 // =============================================================================

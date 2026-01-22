@@ -23,6 +23,11 @@
 //! - [`CursorKey::unshift`]: Return to parent layer after exhausting
 //!   a sublayer (sets len=9 as sentinel for duplicate filtering)
 //!
+//! # Constants
+//!
+//! Layer pointers are identified by `keylenx >= 128` (the `LAYER_KEYLENX` constant
+//! from `leaf24.rs`). This affects comparison logic in [`CursorKey::compare`].
+//!
 //! # Duplicate Filtering
 //!
 //! After emitting a key, call `assign_store_*` methods to record it. The
@@ -101,6 +106,10 @@ impl std::fmt::Debug for CursorKey {
     }
 }
 
+/// Creates a minimum-key cursor (ikey=0, len=0).
+///
+/// Equivalent to [`CursorKey::empty()`]. This positions the cursor at the
+/// smallest possible key, suitable for unbounded forward scans.
 impl Default for CursorKey {
     fn default() -> Self {
         Self::empty()
@@ -122,12 +131,13 @@ impl CursorKey {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use masstree::tree::range::cursor_key::CursorKey;
     /// let cursor = CursorKey::from_slice(b"hello world");
     /// assert_eq!(cursor.current_ikey(), u64::from_be_bytes(*b"hello wo"));
-    ///
+    /// ```
     #[must_use]
-    #[inline(always)]
+    #[inline]
     pub fn from_slice(data: &[u8]) -> Self {
         assert!(
             data.len() <= MAX_KEY_LENGTH,
@@ -178,6 +188,7 @@ impl CursorKey {
     /// For unbounded end, we use `len = UNSHIFT_SENTINEL_LEN` (9) as a sentinel
     /// that signals "start from maximum" to `lower_reverse`.
     #[must_use]
+    #[inline]
     pub fn for_reverse_scan(end: &super::iterator::RangeBound<'_>) -> Self {
         use super::iterator::RangeBound;
 
@@ -293,14 +304,15 @@ impl CursorKey {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use masstree::tree::range::cursor_key::CursorKey;
     /// let mut cursor = CursorKey::from_slice(b"hello world!!!!");
     /// assert_eq!(cursor.current_ikey(), u64::from_be_bytes(*b"hello wo"));
     ///
     /// cursor.shift();
     /// assert_eq!(cursor.current_ikey(), u64::from_be_bytes(*b"rld!!!!!"));
-    ///
-    #[inline(always)]
+    /// ```
+    #[inline]
     pub fn shift(&mut self) {
         debug_assert!(self.has_suffix(), "shift() called without suffix");
 
@@ -328,7 +340,7 @@ impl CursorKey {
     ///
     /// The `len = 9` is critical: it makes the cursor behave like it has a suffix,
     /// which affects comparisons with layer pointers and duplicate filtering.
-    #[inline(always)]
+    #[inline]
     pub fn shift_clear_reverse(&mut self) {
         debug_assert!(
             self.offset + IKEY_SIZE <= MAX_KEY_LENGTH,
@@ -363,24 +375,29 @@ impl CursorKey {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use masstree::tree::range::cursor_key::CursorKey;
     /// let mut cursor = CursorKey::from_slice(b"hello");
     /// cursor.shift_clear();
     ///
     /// // Now at layer 1 with minimum key
     /// assert_eq!(cursor.current_ikey(), 0);
     /// assert_eq!(cursor.current_len(), 0);
-    ///
-    #[inline(always)]
+    /// ```
+    #[inline]
     pub fn shift_clear(&mut self) {
         self.offset += IKEY_SIZE;
         self.len = 0;
         self.ikey = 0;
 
-        // Clear the buffer bytes at the new layer (for clean full_key output)
-        let clear_start: usize = self.offset;
-        let clear_end: usize = (self.offset + IKEY_SIZE).min(MAX_KEY_LENGTH);
-        self.buf[clear_start..clear_end].fill(0);
+        // Debug-only: clear buffer bytes for deterministic full_key() output in tests.
+        // Not needed for correctness since full_key() only reads up to offset+len.
+        #[cfg(debug_assertions)]
+        {
+            let clear_start: usize = self.offset;
+            let clear_end: usize = (self.offset + IKEY_SIZE).min(MAX_KEY_LENGTH);
+            self.buf[clear_start..clear_end].fill(0);
+        }
     }
 
     /// Return to parent layer after exhausting a sublayer.
@@ -415,37 +432,44 @@ impl CursorKey {
         self.len = UNSHIFT_SENTINEL_LEN;
     }
 
-    /// Check if cursor is effectively empty after unshift.
+    /// Check if cursor represents an empty key at the root layer.
     ///
-    /// This occurs when:
-    /// - offset is 0 (at root layer)
-    /// - len is 0 (no key content)
+    /// Returns `true` when both:
+    /// - `offset == 0` (at root layer, no shifts performed)
+    /// - `len == 0` (no key content)
     ///
-    /// Used by `handle_up_back` to detect multi-level ascent needs.
-    /// This is the Rust equivalent of C++ `ka.empty()` check.
+    /// This condition occurs after `unshift()` ascends past the original key's
+    /// layer, indicating the scan has exhausted all sublayers and should continue
+    /// ascending. Used by `handle_up_back` for multi-level ascent detection.
     ///
     /// # C++ Reference
     ///
+    /// Equivalent to C++ `ka.empty()` check in `masstree_scan.hh:359-372`:
     /// ```cpp
-    /// // masstree_scan.hh:359-372
     /// do {
     ///     ka.unshift();
     /// } while (unlikely(ka.empty()));
     /// ```
     #[inline(always)]
-    pub const fn is_empty_after_unshift(&self) -> bool {
+    pub const fn is_at_empty_root(&self) -> bool {
         self.offset == 0 && self.len == 0
     }
 
     /// Reset to root layer (undo all shifts).
     ///
     /// This is a full reset - the cursor will point to the original key
-    /// from the buffer.
-    #[inline(always)]
+    /// from the buffer. Uses an O(n) scan to find the key end, so this
+    /// should only be used for error recovery, not in hot paths.
+    ///
+    /// # Performance
+    ///
+    /// Calls [`find_key_end`] which scans backward through the buffer.
+    /// Marked `#[cold]` as this is only used for recovery/reset scenarios.
+    #[cold]
     pub fn unshift_all(&mut self) {
         if self.offset > 0 {
-            // Find total key length by scanning for last non-zero byte
-            // (This is an approximation - in practice, we track this separately)
+            // Find total key length by scanning for last non-zero byte.
+            // This is O(n) but acceptable since unshift_all is rare.
             let total_len: usize = self.find_key_end();
 
             self.offset = 0;
@@ -491,15 +515,17 @@ impl CursorKey {
     ///
     /// The total key length at this layer (`IKEY_SIZE` + suffix.len).
     ///
-    /// # Panics
+    /// # Safety Invariant
     ///
-    /// Panics if the suffix would overflow the buffer.
-    #[inline(always)]
+    /// Callers must ensure `offset + IKEY_SIZE + suffix.len() <= MAX_KEY_LENGTH`.
+    /// This is guaranteed when suffix comes from a valid leaf slot, as keys are
+    /// validated on insertion. Debug builds verify this with an assertion.
+    #[inline]
     pub fn assign_store_suffix(&mut self, suffix: &[u8]) -> usize {
         let suffix_start: usize = self.offset + IKEY_SIZE;
         let suffix_end: usize = suffix_start + suffix.len();
 
-        assert!(
+        debug_assert!(
             suffix_end <= MAX_KEY_LENGTH,
             "suffix would overflow buffer: offset={}, suffix.len={}",
             self.offset,
@@ -529,12 +555,17 @@ impl CursorKey {
 
     /// Mark the current key as complete (ready for emission).
     ///
-    /// This is a no-op in the current implementation but exists for API
-    /// compatibility with C++ `key::mark_key_complete()`.
+    /// # Implementation Note
+    ///
+    /// This is a **permanent no-op** in Rust. The C++ version uses this to set
+    /// a "key complete" flag for certain suffix operations, but our design
+    /// ensures the key is always complete after `assign_store_*` calls.
+    ///
+    /// Kept for API parity with C++ `key::mark_key_complete()` to ease porting.
     #[inline(always)]
-    #[expect(clippy::unused_self, reason = "API Consistency")]
+    #[expect(clippy::unused_self, reason = "C++ API compatibility")]
     pub const fn mark_key_complete(&self) {
-        // No-op: the key is already complete after assign_store_* calls
+        // Permanent no-op: key is complete after assign_store_* calls
     }
 
     // ========================================================================
@@ -617,9 +648,9 @@ impl CursorKey {
 
     /// Read an ikey from the buffer at the given offset.
     ///
-    /// Zero-overhead: uses direct array conversion for the 8-byte fast path.
+    /// Zero-overhead for the 8-byte fast path (direct array conversion).
     /// Pads with zeros if fewer than 8 bytes remain.
-    #[inline(always)]
+    #[inline]
     fn read_ikey_from_buf(buf: &[u8; MAX_KEY_LENGTH], offset: usize, len: usize) -> u64 {
         if len == 0 {
             return 0;
@@ -648,8 +679,9 @@ impl CursorKey {
 
     /// Find the end of the key in the buffer (for `unshift_all`).
     ///
-    /// This scans backward from [`MAX_KEY_LENGTH`] to find the last non-zero byte.
-    /// In practice, we should track this separately, but this works as a fallback.
+    /// Scans backward from the current position to find the last non-zero byte.
+    /// This is O(n) and only used by [`unshift_all`] for recovery scenarios.
+    #[cold]
     fn find_key_end(&self) -> usize {
         // Start from the furthest point we've written
         let max_end: usize = self.offset + self.len;

@@ -786,7 +786,7 @@ impl InternodeNode {
     /// No-op in release builds.
     #[cfg(not(debug_assertions))]
     #[inline]
-    pub fn debug_assert_invariants(&self) {}
+    pub const fn debug_assert_invariants(&self) {}
 }
 
 impl Default for InternodeNode {
@@ -876,6 +876,11 @@ impl TreeInternode for InternodeNode {
     #[inline(always)]
     fn nkeys(&self) -> usize {
         Self::nkeys(self)
+    }
+
+    #[inline(always)]
+    fn nkeys_relaxed(&self) -> usize {
+        Self::nkeys_relaxed(self)
     }
 
     #[inline(always)]

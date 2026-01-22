@@ -50,14 +50,25 @@ impl InternodeNode {
     #[must_use]
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        self.nkeys.load(READ_ORD) == 0
+        self.nkeys() == 0
     }
 
     /// Check if the internode is full.
     #[must_use]
     #[inline(always)]
     pub fn is_full(&self) -> bool {
-        self.nkeys.load(READ_ORD) as usize >= WIDTH
+        self.nkeys() >= WIDTH
+    }
+
+    /// Get the number of keys using Relaxed ordering.
+    ///
+    /// Use this variant when the caller already holds the node lock or when
+    /// only an approximate count is needed. Avoids the Acquire barrier of
+    /// [`Self::nkeys`].
+    #[must_use]
+    #[inline(always)]
+    pub(crate) fn nkeys_relaxed(&self) -> usize {
+        self.nkeys.load(RELAXED) as usize
     }
 
     /// Get the key at the given index.
@@ -214,7 +225,7 @@ impl InternodeNode {
     ///
     /// Prefetching null pointers is harmless on x86/ARM (becomes a no-op).
     #[must_use]
-    #[inline(always)]
+    #[inline]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn child_with_prefetch(&self, i: usize, nkeys: usize, guard: &impl Guard) -> *mut u8 {
         debug_assert!(i <= WIDTH, "child_with_prefetch: index out of bounds");
@@ -292,7 +303,7 @@ impl InternodeNode {
     /// * `i` - Child index to return
     /// * `guard` - Guard for protected load
     #[must_use]
-    #[inline(always)]
+    #[inline]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn child_with_depth_prefetch(&self, i: usize, guard: &impl Guard) -> *mut u8 {
         debug_assert!(i <= WIDTH, "child_with_depth_prefetch: index out of bounds");
@@ -316,7 +327,7 @@ impl InternodeNode {
     /// * `i` - Child index to return
     /// * `guard` - Guard for protected load
     #[must_use]
-    #[inline(always)]
+    #[inline]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn child_with_full_prefetch(&self, i: usize, guard: &impl Guard) -> *mut u8 {
         debug_assert!(i <= WIDTH, "child_with_full_prefetch: index out of bounds");
@@ -336,28 +347,28 @@ impl InternodeNode {
     /// # Safety Note
     ///
     /// Prefetch is a performance hint only; it must not be relied upon for
-    /// correctness. This helper is safe and cheap on all targets.
+    /// correctness. Prefetching null or invalid addresses is harmless on
+    /// x86/ARM (becomes a no-op). No null check is performed to avoid
+    /// adding a branch on the hot path.
     #[inline(always)]
     pub(super) fn prefetch_child_internal(ptr: *mut u8) {
-        if ptr.is_null() {
-            return;
-        }
-
         // Prefetch CL 0 (offset 0) and CL 1 (offset 64) of the child node.
         //
         // Note: use `wrapping_add` so this remains purely "address arithmetic"
         // (no in-bounds requirement), and avoid integer casts for provenance.
+        //
+        // Null/invalid pointers are safe: prefetch instructions are no-ops
+        // for unmapped addresses on x86_64/aarch64.
         prefetch_read(ptr);
         prefetch_read(ptr.wrapping_add(64));
     }
 
     /// Prefetch a child node's header and all three key cache lines.
+    ///
+    /// Null/invalid pointers are safe: prefetch instructions are no-ops
+    /// for unmapped addresses on `x86_64` and `aarch64`.
     #[inline(always)]
     pub(super) fn prefetch_child_full(ptr: *mut u8) {
-        if ptr.is_null() {
-            return;
-        }
-
         prefetch_read(ptr);
         prefetch_read(ptr.wrapping_add(64));
         prefetch_read(ptr.wrapping_add(128));

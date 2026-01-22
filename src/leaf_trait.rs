@@ -301,6 +301,12 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     /// Get number of keys.
     fn nkeys(&self) -> usize;
 
+    /// Get number of keys using Relaxed ordering.
+    ///
+    /// Use this variant when the value is only needed for hints/speculation
+    /// (e.g., prefetch index calculation) and correctness doesn't depend on it.
+    fn nkeys_relaxed(&self) -> usize;
+
     /// Set number of keys.
     fn set_nkeys(&self, n: u8);
 

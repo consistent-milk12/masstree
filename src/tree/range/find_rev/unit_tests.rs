@@ -66,11 +66,11 @@ fn test_handle_down_back_multiple_descents() {
 }
 
 // ============================================================================
-//  CursorKey::is_empty_after_unshift Tests
+//  CursorKey::is_at_empty_root Tests
 // ============================================================================
 
 #[test]
-fn test_is_empty_after_unshift_false_normally() {
+fn test_is_at_empty_root_false_normally() {
     let mut cursor_key = CursorKey::from_slice(b"hello world!!!!!");
 
     // Shift to layer 1, then unshift back
@@ -78,18 +78,18 @@ fn test_is_empty_after_unshift_false_normally() {
     cursor_key.unshift();
 
     // Normal case: not empty because we have key content
-    assert!(!cursor_key.is_empty_after_unshift());
+    assert!(!cursor_key.is_at_empty_root());
 }
 
 #[test]
-fn test_is_empty_after_unshift_at_root() {
+fn test_is_at_empty_root_at_root() {
     let cursor_key = CursorKey::empty();
 
     // Empty cursor at root layer
     assert_eq!(cursor_key.offset(), 0);
     assert_eq!(cursor_key.current_len(), 0);
-    // Note: is_empty_after_unshift checks offset==0 && len==0
-    assert!(cursor_key.is_empty_after_unshift());
+    // is_at_empty_root checks offset==0 && len==0
+    assert!(cursor_key.is_at_empty_root());
 }
 
 // ============================================================================

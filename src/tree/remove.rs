@@ -10,7 +10,7 @@
 //! 3. Lock the leaf and verify the key still exists
 //! 4. Remove the slot from the permutation
 //! 5. Retire the value via seize
-//! 6. If leaf is now empty, trigger leaf removal
+//! 6. If leaf is now empty, schedule for lazy coalescing
 
 use std::hint as StdHint;
 use std::ptr as StdPtr;
@@ -163,6 +163,9 @@ const MAX_RETRIES: usize = 1000;
 
 /// Maximum retries when locking parent during tree walk.
 const MAX_PARENT_RETRIES: usize = 100;
+
+/// Size of the inline key (ikey) in bytes.
+const IKEY_SIZE: u8 = 8;
 
 // ============================================================================
 //  Locked Parent Result
@@ -334,7 +337,8 @@ where
         // CRITICAL: Set INSERTING_BIT before ANY mutations.
         //
         // This causes concurrent readers calling stable() to spin-wait until
-        // the lock is released. Without this, readers could observe:
+        // both LOCK_BIT and INSERTING_BIT are cleared. Without this, readers
+        // could observe:
         // - Partially cleared suffix state
         // - Updated permutation with stale slot data
         // - Null value pointer for a slot still in the old permutation
@@ -505,7 +509,8 @@ impl NodeCleaner {
                 }
             };
 
-            // SAFETY: parent_ptr is a valid internode pointer returned by locked_parent.
+            // SAFETY: parent_ptr is a valid internode pointer returned by locked_parent_generic.
+            // The function only returns Locked variant with valid internode pointers.
             // We hold parent_lock which guarantees exclusive access.
             let parent: &L::Internode = unsafe { &*parent_ptr.cast::<L::Internode>() };
 
@@ -550,17 +555,19 @@ impl NodeCleaner {
             parent.set_child(kp, new_child);
 
             // Step 6: Handle replacement or shift
-            if let Some(repl) = current_replacement {
-                if !repl.is_null() {
+            // If we have a non-null replacement, reparent it; otherwise shift down.
+            let should_shift: bool = match current_replacement {
+                Some(repl) if !repl.is_null() => {
                     // SAFETY: repl is a valid node pointer (the replacement child).
                     // parent_ptr is valid and we hold parent_lock.
                     unsafe {
                         Self::set_parent_erased::<S, L>(repl, parent_ptr);
                     }
-                } else if kp > 0 {
-                    Self::shift_internode_down_generic::<L::Internode>(parent, kp);
+                    false
                 }
-            } else if kp > 0 {
+                _ => kp > 0,
+            };
+            if should_shift {
                 Self::shift_internode_down_generic::<L::Internode>(parent, kp);
             }
 
@@ -578,12 +585,7 @@ impl NodeCleaner {
             // to new_ikey (the first key of the new leftmost child).
             if (kp <= 1) && (parent.nkeys() > 0) && parent.child(0).is_null() {
                 let new_ikey: u64 = parent.ikey(0);
-                Self::redirect_ikey_bounds_generic::<S, L>(
-                    parent_ptr,
-                    &mut parent_lock,
-                    current_ikey,
-                    new_ikey,
-                );
+                Self::redirect_ikey_bounds_generic::<S, L>(parent_ptr, current_ikey, new_ikey);
                 current_ikey = new_ikey;
             }
 
@@ -751,7 +753,9 @@ impl NodeCleaner {
                     }
 
                     RemoveSearchResult::DescendLayer { layer_ptr, slot } => {
-                        // Check if sublayer is deleted before descending
+                        // Speculative check: avoid layer descent if already deleted.
+                        // This is an optimization - the authoritative check happens
+                        // under lock in lock_and_verify_for_remove.
                         if !Self::is_sublayer_valid(layer_ptr) {
                             return Ok(None);
                         }
@@ -846,7 +850,7 @@ impl NodeCleaner {
             }
 
             // Inline key (no suffix)
-            if key_len <= 8 && slot_keylenx == key_len {
+            if key_len <= IKEY_SIZE && slot_keylenx == key_len {
                 // Exact match for short key
                 return RemoveSearchResult::Found { ki, kp };
             }
@@ -1034,47 +1038,18 @@ impl NodeCleaner {
     ///
     /// # Lock Coupling
     /// This function uses hand-over-hand locking matching C++ pattern:
-    /// - Start with `start_internode` locked (passed as `current_lock`)
+    /// - Start with `start_internode` locked (caller holds the lock)
     /// - Lock parent, then unlock current
     /// - Continue until we reach a position where updates are no longer needed
     ///
     /// # C++ Reference
     ///
-    /// `masstree_remove.hh:257-276`:
-    /// ```cpp
-    /// void tcursor<P>::redirect(internode_type* n, ikey_type ikey,
-    ///                           ikey_type replacement_ikey, threadinfo& ti) {
-    ///     int kp = -1;
-    ///
-    ///     do {
-    ///         internode_type* p = n->locked_parent(ti);
-    ///
-    ///         if (kp >= 0) {
-    ///             n->unlock();
-    ///         }
-    ///
-    ///         kp = internode_type::bound_type::upper(ikey, *p);
-    ///         masstree_invariant(p->child_[kp] == n);
-    ///
-    ///         if (kp > 0) {
-    ///             p->ikey0_[kp - 1] = replacement_ikey;
-    ///         }
-    ///
-    ///         n = p;
-    ///     } while (kp == 0 || (kp == 1 && !n->child_[0]));
-    ///
-    ///     n->unlock();
-    /// }
-    /// ```
+    /// See `masstree_remove.hh:257-276` (`tcursor<P>::redirect`)
     #[cold]
     #[inline(never)]
     #[expect(clippy::cast_sign_loss)]
-    fn redirect_ikey_bounds_generic<S, L>(
-        start_internode: *mut u8,
-        _start_lock: &mut LockGuard<'_>,
-        old_ikey: u64,
-        new_ikey: u64,
-    ) where
+    fn redirect_ikey_bounds_generic<S, L>(start_internode: *mut u8, old_ikey: u64, new_ikey: u64)
+    where
         S: ValueSlot,
         S::Value: Send + Sync + 'static,
         S::Output: Send + Sync,
@@ -1141,7 +1116,7 @@ impl NodeCleaner {
             );
 
             if kp > 0 {
-                // NOTE: The C++ comment sayas 'p->ikey0_[kp - 1] might not equal ikey'
+                // NOTE: The C++ comment says 'p->ikey0_[kp - 1] might not equal ikey'
                 // This is because we're looking up by the bound, not exact match
                 parent.set_ikey((kp - 1) as usize, new_ikey);
             }

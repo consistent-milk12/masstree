@@ -8,11 +8,11 @@
 //!
 //! # Design: Value vs Output
 //! The trait distinguishes between:
-//! - `Value`: What users provie to `insert()` (e.g., `String`, `u64`)
+//! - `Value`: What users provide to `insert()` (e.g., `String`, `u64`)
 //! - `Output`: What the tree carries internally and returns (e.g. `Arc<String>`, `u64`)
 //!
-//! This seperation is criticial for retry loops: when an insert splits a leaf or
-//! crates a layer, the tree must retry without re-allocating the [`Arc`]. The
+//! This separation is critical for retry loops: when an insert splits a leaf or
+//! creates a layer, the tree must retry without re-allocating the [`Arc`]. The
 //! `Output` type is created once via `into_output()` and reused across retries.
 //!
 //! # Storage Nodes
@@ -31,9 +31,9 @@ use crate::alloc_common::BoxAllocator;
 use crate::error::{AllocKind, AllocResult};
 use crate::value::{LeafValue, LeafValueIndex};
 
-// ================================================================================
+// ============================================================================
 //  ValueSlot Trait
-// ================================================================================
+// ============================================================================
 
 /// Trait for value slots stored in leaf nodes.
 ///
@@ -46,15 +46,18 @@ use crate::value::{LeafValue, LeafValueIndex};
 ///
 /// # Associated Types
 /// - `Value`: The user-facing value type (what users insert)
-/// - `Output`: The type carried across retires and returned from `get()`
+/// - `Output`: The type carried across retries and returned from `get()`
 ///
 /// # Why `Output` is separate from `Value`
-/// Insert operations may retry
+///
+/// Insert operations may retry due to concurrent modifications (splits, layer
+/// creation). The `Output` type allows the allocated value (e.g., `Arc<V>`) to
+/// be reused across retries without re-allocation.
 pub trait ValueSlot: Default + Sized {
     /// Whether value pointers produced by this slot type require deferred retirement.
     ///
     /// - `true` (default): values are heap-backed ([`Arc`]/[`Box`]), old pointers must be retired
-    /// - `false`: values are heap-backed (future true-inline), skip defer retire
+    /// - `false`: values are stored inline (future true-inline mode), skip deferred retirement
     ///
     /// # Usage
     ///
@@ -85,12 +88,12 @@ pub trait ValueSlot: Default + Sized {
     /// - For [`LeafValue<V>`]: [`Arc<V>`] (cheap clone via refcount)
     /// - For [`LeafValueIndex<V>`]: `V` (direct copy)
     ///
-    /// Mus be [`Clone`] to support returning values from optimistic reads.
+    /// Must be [`Clone`] to support returning values from optimistic reads.
     type Output: Clone;
 
-    // ================================================================================
+    // ========================================================================
     //  Output Conversion (Critical for Retry Semantics)
-    // ================================================================================
+    // ========================================================================
 
     /// Convert a user value into an output handle.
     ///

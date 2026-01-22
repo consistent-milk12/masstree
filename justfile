@@ -11,14 +11,22 @@ build:
     cargo build
 
 # Build in release mode
-build-release:
+buildr:
     cargo build --release
+
+# Run benchmarks
+bench:
+    cargo bench --bench mttest --features mimalloc
+
+# Run benchmarks with specific args (e.g., just bench-args "all -j12 -d10")
+bench-args ARGS:
+    cargo bench --bench mttest --features mimalloc -- {{ARGS}}
 
 # Run all tests with nextest (saves failures to file if any)
 test:
     #!/usr/bin/env bash
     set -o pipefail
-    cargo nextest run --no-fail-fast 2>&1 | tee .test-output.tmp
+    cargo nextest run --no-fail-fast --status-level=all 2>&1 | tee .test-output.tmp
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
         # Ensure failures directory exists
@@ -48,7 +56,7 @@ next-repeat N="10":
     failed=0
     for i in $(seq 1 {{N}}); do
         echo "=== Run $i/{{N}} ==="
-        if cargo nextest run --no-fail-fast --features mimalloc 2>&1 | tail -5; then
+        if cargo nextest run --no-fail-fast --features mimalloc; then
             echo "PASS"
             passed=$((passed + 1))
         else
@@ -92,8 +100,7 @@ test-all: test test-loom test-shuttle miri-strict
 
 # Run loom tests for deterministic concurrency verification
 test-loom:
-    RUSTFLAGS="--cfg loom" cargo test --lib nodeversion::loom_tests
-    RUSTFLAGS="--cfg loom" cargo test --lib tree::loom_tests
+    RUSTFLAGS="--cfg loom" cargo test --lib loom_tests
 
 # Run shuttle linearizability tests
 test-shuttle:
@@ -114,6 +121,12 @@ fmt:
 # Check formatting
 fmt-check:
     cargo fmt --all -- --check
+
+# Format and lint (quick pre-commit)
+pre: fmt lint
+
+# Quick pre-commit check (faster than check-all)
+check: fmt lint test-unit
 
 # Run all checks (format, lint, test)
 check-all: fmt-check lint-strict test
@@ -152,83 +165,10 @@ miri-leaks:
 miri-tree-borrows:
     MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test --lib
 
-# === Benchmarks ===
+# Bump patch version (0.X.Y -> 0.X.(Y+1)) in Cargo.toml and README.md
+bump:
+    python3 scripts/bump_version.py && cargo build
 
-# Run benchmarks
-bench:
-    cargo bench
-
-# Run benchmarks with native CPU optimizations (AVX2, etc.)
-bench-native:
-    RUSTFLAGS="-C target-cpu=native" cargo bench --bench concurrent_maps24 --features mimalloc
-
-# Run specific benchmark with native optimizations
-# Usage: just bench-native-one 08a_read_scaling
-bench-native-one FILTER:
-    RUSTFLAGS="-C target-cpu=native" cargo bench --bench concurrent_maps24 --features mimalloc -- {{FILTER}}
-
-# === Profiling ===
-
-# Build with debug symbols for profiling
-build-profile:
-    cargo build --profile release-with-debug
-
-# Run flamegraph on the profile example
-# Usage: just flamegraph [workload]
-flamegraph workload="tree":
-    CARGO_PROFILE_PROFILING_DEBUG=2 \
-    RUSTFLAGS="-C force-frame-pointers=yes" \
-    cargo flamegraph --profile profiling --example profile -- {{workload}}
-    @echo "Output: flamegraph.svg"
-
-# Run flamegraph on a specific benchmark
-flamegraph-bench bench filter="":
-    CARGO_PROFILE_PROFILING_DEBUG=2 \
-    RUSTFLAGS="-C force-frame-pointers=yes" \
-    cargo flamegraph --profile profiling --bench {{bench}} -- {{filter}}
-    @echo "Output: flamegraph.svg"
-
-# === Safety ===
-
-# Run address sanitizer (requires nightly)
-asan:
-    RUSTFLAGS="-Z sanitizer=address" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
-
-# Run thread sanitizer (requires nightly)
-tsan:
-    RUSTFLAGS="-Z sanitizer=thread" cargo +nightly test --lib --tests --target x86_64-unknown-linux-gnu
-
-# === Assembly Inspection (requires cargo-show-asm) ===
-
-# List all inspectable symbols in the crate
-asm:
-    @cargo asm --lib || true
-
-# View assembly for a function (use index from `just asm`)
-asm-view index:
-    cargo asm --lib --rust {{index}}
-
-# === Debug Examples ===
-
-# Run the lost key debug example once
-debug-lost-key:
-    cargo run --example debug_lost_key --release --features "mimalloc,tracing"
-
-# Run the lost key debug example N times to catch the flaky bug
-# Usage: just debug-lost-key-repeat 100
-debug-lost-key-repeat N="50":
-    #!/usr/bin/env bash
-    set -uo pipefail
-    echo "Running debug_lost_key example {{N}} times to catch flaky bug..."
-    for i in $(seq 1 {{N}}); do
-        output=$(cargo run --example debug_lost_key --release --features "mimalloc,tracing" 2>&1)
-        if echo "$output" | grep -q "FAILURE"; then
-            echo "=== CAUGHT BUG on attempt $i ==="
-            echo "$output"
-            exit 1
-        fi
-        if [ $((i % 10)) -eq 0 ]; then
-            echo "Completed $i/{{N}} runs, no failures yet..."
-        fi
-    done
-    echo "Completed {{N}} runs without catching the bug."
+# Bump version (dry run - show what would change)
+bump-dry:
+    python3 scripts/bump_version.py --dry-run

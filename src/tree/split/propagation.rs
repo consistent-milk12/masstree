@@ -20,7 +20,7 @@
 //! - RAII: guards auto-unlock on drop (panic-safe)
 //! - No `mem::forget` patterns
 //!
-//! The another potential approach (No Drop in release mode) was replaced because it
+//! Another potential approach (no-drop in release mode) was replaced because it
 //! created lock leak risks and made auditing harder.
 //!
 //! # No-Abandon invariant
@@ -52,6 +52,12 @@ use super::root_creation::RootCreation;
 // CRITICAL: Defensive bounds - uncomment if debugging infinite loops or livelock
 // const MAX_PROPAGATION_ITERATIONS: usize = 64;
 // const MAX_STALE_PARENT_RETRIES: usize = 16;
+
+/// Maximum spins before backoff caps.
+///
+/// 64 iterations ≈ 200-400 cycles on x86, sufficient for typical lock hold times.
+/// Power of 2 enables efficient doubling. Beyond this, we yield to the OS.
+const BACKOFF_CAP: u32 = 64;
 
 /// Unit struct namespace for split propagation operations.
 pub struct Propagation;
@@ -127,8 +133,9 @@ impl Propagation {
         // Create PropagationContext with unified lifetime tied to reclamation guard
         let ctx: PropagationContext<'op> = PropagationContext::new(guard);
 
-        // Convert LockGuard to unified lifetime for use in propagation loop
-        // SAFETY: The reclamation guard ensures the leaf remains valid for 'op
+        // SAFETY: Lifetime extension is sound because:
+        // 1. Reclamation guard prevents deallocation while we hold it
+        // 2. Leaf is locked, preventing structural modification
         let left_lock: LockGuard<'op> = unsafe { ctx.unify_guard(left_lock) };
         let result: Result<(), InsertError> = Self::propagation_loop::<S, L, A>(
             root_ptr,
@@ -146,11 +153,13 @@ impl Propagation {
         result
     }
 
-    /// The core iterative propagation loop.
+    /// Core iterative propagation loop with hand-over-hand locking.
     ///
-    /// Uses `PropagationContext<'op>` for all lock management. All guards have
-    /// the unified lifetime `'op`, enabling assignment between guards while
-    /// preserving RAII (auto-unlock on drop).
+    /// Uses `PropagationContext<'op>` for unified-lifetime lock management,
+    /// enabling RAII guard transfer across loop iterations.
+    ///
+    /// # Errors
+    /// Returns `InsertError::SplitFailed` only if main root CAS fails.
     #[expect(clippy::too_many_lines, reason = "Complex state machine with tracing")]
     #[expect(clippy::too_many_arguments, reason = "State passed explicitly")]
     fn propagation_loop<'op, S, L, A>(
@@ -177,13 +186,7 @@ impl Propagation {
         // let mut stale_parent_retries: usize = 0;
 
         // Exponential backoff state for contention reduction.
-        //
-        // SMT (hyperthreading) threads share execution resources on the same
-        // physical core. Without backoff, two sibling threads spinning on
-        // contended locks thrash and create pipeline stalls.
-        //
-        // Starts at 1, doubles on each retry, caps at 64 spins.
-        const BACKOFF_CAP: u32 = 64;
+        // See `spin_backoff()` for details on SMT optimization.
         let mut backoff: u32 = 1;
 
         loop {
@@ -269,13 +272,8 @@ impl Propagation {
             if current_left_parent != left_parent {
                 // Parent pointer changed - release parent lock and retry with backoff
                 drop(parent_lock); // RAII: auto-unlock
+                Self::spin_backoff(&mut backoff);
 
-                // Exponential backoff: spin `backoff` times, then double (up to cap).
-                // Critical for SMT where sibling threads share execution resources.
-                for _ in 0..backoff {
-                    StdHint::spin_loop();
-                }
-                backoff = (backoff * 2).min(BACKOFF_CAP);
                 continue;
             }
 
@@ -301,13 +299,8 @@ impl Propagation {
                     // Child not found - parent may have been split concurrently
                     // Release parent lock and retry with backoff (left_lock still held)
                     drop(parent_lock); // RAII: auto-unlock
+                    Self::spin_backoff(&mut backoff);
 
-                    // Exponential backoff: spin `backoff` times, then double (up to cap).
-                    // Critical for SMT where sibling threads share execution resources.
-                    for _ in 0..backoff {
-                        StdHint::spin_loop();
-                    }
-                    backoff = (backoff * 2).min(BACKOFF_CAP);
                     continue;
                 };
 
@@ -366,8 +359,10 @@ impl Propagation {
             // `parent.parent().is_null() && parent.is_root()` matches both
             let parent_is_main_root: bool = {
                 let current_root: *mut u8 = root_ptr.load(AtomicOrdering::Acquire);
+
                 StdPtr::eq(current_root, left_parent)
             };
+
             let parent_is_layer_root: bool =
                 !parent_is_main_root && parent.parent().is_null() && parent.is_root();
 
@@ -481,6 +476,10 @@ impl Propagation {
     // Helper methods
     // =========================================================================
 
+    /// Returns parent pointer for a type-erased node.
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid node matching `is_leaf`.
     #[inline]
     fn get_parent<S, L>(ptr: *mut u8, is_leaf: bool) -> *mut u8
     where
@@ -496,6 +495,10 @@ impl Propagation {
         }
     }
 
+    /// Sets parent pointer for a type-erased node.
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid, locked node matching `is_leaf`.
     #[inline]
     fn set_parent<S, L>(ptr: *mut u8, parent: *mut u8, is_leaf: bool)
     where
@@ -505,8 +508,10 @@ impl Propagation {
         L: LayerCapableLeaf<S>,
     {
         if is_leaf {
+            // SAFETY: Caller guarantees ptr is valid leaf
             unsafe { (*ptr.cast::<L>()).set_parent(parent) };
         } else {
+            // SAFETY: Caller guarantees ptr is valid internode
             unsafe { (*ptr.cast::<L::Internode>()).set_parent(parent) };
         }
     }
@@ -534,10 +539,13 @@ impl Propagation {
         }
     }
 
-    // NOTE: unlock_right() removed in v3 - not needed with RAII.
-    // Split-locked siblings are always unlocked via unlock_for_split().
-    // Regular nodes are unlocked via LockGuard::drop() (RAII).
-
+    /// Fixes parent pointers for children that moved to the split sibling.
+    ///
+    /// After internode split, children in the sibling still reference the old parent.
+    ///
+    /// # Safety
+    /// - `parent` must be locked
+    /// - `sibling_ptr` must be valid and split-locked
     fn update_sibling_children_parents<S, L>(parent: &L::Internode, sibling_ptr: *mut L::Internode)
     where
         S: ValueSlot,
@@ -546,23 +554,33 @@ impl Propagation {
         L: LayerCapableLeaf<S>,
     {
         let sibling: &L::Internode = unsafe { &*sibling_ptr };
+        let nkeys: usize = sibling.nkeys();
 
         if parent.children_are_leaves() {
-            for i in 0..=sibling.nkeys() {
+            for i in 0..=nkeys {
                 let child: *mut u8 = sibling.child(i);
-                if !child.is_null() {
-                    unsafe {
-                        (*child.cast::<L>()).set_parent(sibling_ptr.cast());
-                    }
+
+                // Children at valid indices should never be null in a well-formed internode.
+                debug_assert!(
+                    !child.is_null(),
+                    "update_sibling_children_parents: null child at index {i}"
+                );
+
+                unsafe {
+                    (*child.cast::<L>()).set_parent(sibling_ptr.cast());
                 }
             }
         } else {
-            for i in 0..=sibling.nkeys() {
+            for i in 0..=nkeys {
                 let child: *mut u8 = sibling.child(i);
-                if !child.is_null() {
-                    unsafe {
-                        (*child.cast::<L::Internode>()).set_parent(sibling_ptr.cast());
-                    }
+
+                debug_assert!(
+                    !child.is_null(),
+                    "update_sibling_children_parents: null child at index {i}"
+                );
+
+                unsafe {
+                    (*child.cast::<L::Internode>()).set_parent(sibling_ptr.cast());
                 }
             }
         }
@@ -636,5 +654,21 @@ impl Propagation {
             )
             .map(|_| ())
         }
+    }
+
+    /// Exponential backoff: spin `backoff` times, then double (capped).
+    ///
+    /// Yields to OS scheduler at cap to avoid wasting cycles under sustained contention.
+    #[inline]
+    fn spin_backoff(backoff: &mut u32) {
+        for _ in 0..*backoff {
+            StdHint::spin_loop();
+        }
+
+        if *backoff >= BACKOFF_CAP {
+            std::thread::yield_now();
+        }
+
+        *backoff = (*backoff * 2).min(BACKOFF_CAP);
     }
 }

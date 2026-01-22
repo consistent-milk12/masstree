@@ -66,12 +66,14 @@ impl KeyIndexedPosition {
 
     /// Check if an exact ikey match was found.
     #[inline(always)]
+    #[allow(dead_code, reason = "API completeness for KeyIndexedPosition")]
     pub const fn has_match(&self) -> bool {
         self.p.is_some()
     }
 
     /// Get the physical slot (panics if no match).
     #[inline(always)]
+    #[allow(dead_code, reason = "API completeness for KeyIndexedPosition")]
     #[expect(clippy::expect_used, reason = "Fail fast")]
     pub const fn slot(&self) -> usize {
         self.p
@@ -102,6 +104,7 @@ impl ForwardScanHelper {
     ///
     /// For forward scans: `ki + 1`.
     #[inline(always)]
+    #[allow(dead_code, reason = "Forward scan helper API")]
     pub const fn next(ki: usize) -> usize {
         ki + 1
     }
@@ -126,6 +129,7 @@ impl ForwardScanHelper {
     ///
     /// Used when repositioning after a version change.
     #[inline(always)]
+    #[allow(dead_code, reason = "Forward scan helper API")]
     pub fn stable<L, S>(leaf: &L) -> u32
     where
         L: TreeLeafNode<S>,
@@ -179,6 +183,7 @@ impl ForwardScanHelper {
     ///
     /// Matches `forward_scan_helper::is_duplicate()` in `masstree_scan.hh:68-76`.
     #[inline(always)]
+    #[allow(dead_code, reason = "Forward scan helper API")]
     pub fn is_duplicate(cursor_key: &CursorKey, ikey: u64, keylenx: u8) -> bool {
         // For forward scan: duplicate if cursor >= slot
         // cursor.compare returns: Less if cursor < slot, Equal/Greater if cursor >= slot
@@ -198,6 +203,7 @@ impl ForwardScanHelper {
     ///
     /// `true` if this slot should be skipped.
     #[inline(always)]
+    #[allow(dead_code, reason = "Forward scan helper API")]
     pub fn is_duplicate_with_suffix(cursor_key: &CursorKey, stored_suffix: &[u8]) -> bool {
         // For forward scan: duplicate if cursor suffix >= stored suffix
         cursor_key.compare_suffix(stored_suffix) != Ordering::Less
@@ -489,12 +495,14 @@ where
 
 /// Check if a keylenx indicates a layer pointer.
 #[inline(always)]
+#[allow(dead_code, reason = "Keylenx classification API")]
 pub const fn is_layer_keylenx(keylenx: u8) -> bool {
     keylenx >= LAYER_KEYLENX
 }
 
 /// Check if a keylenx indicates a suffix key.
 #[inline(always)]
+#[allow(dead_code, reason = "Keylenx classification API")]
 pub const fn has_suffix_keylenx(keylenx: u8) -> bool {
     keylenx == KSUF_KEYLENX
 }
@@ -504,6 +512,7 @@ pub const fn has_suffix_keylenx(keylenx: u8) -> bool {
 /// For inline keys (keylenx 0-8), returns the key length.
 /// For suffix/layer keys, returns 8 (the ikey portion).
 #[inline(always)]
+#[allow(dead_code, reason = "Keylenx classification API")]
 #[expect(clippy::cast_possible_truncation, reason = "Known Value")]
 pub const fn inline_key_len(keylenx: u8) -> usize {
     if keylenx <= (IKEY_SIZE as u8) {

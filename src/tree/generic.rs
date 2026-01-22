@@ -697,7 +697,10 @@ where
                     // Instead of always prefetching child(0), prefetch based on key direction.
                     // For reverse-sequential keys, the target is often in higher-indexed children.
                     // Use child_idx as a hint: if we went right in parent, likely go right in child.
-                    let child_nkeys: usize = child_inode.nkeys();
+                    //
+                    // Note: Uses nkeys_relaxed() since this is purely speculative - correctness
+                    // doesn't depend on the exact value, just a reasonable prefetch target.
+                    let child_nkeys: usize = child_inode.nkeys_relaxed();
                     let grandchild_idx: usize = if child_idx == 0 {
                         0 // Leftmost path - continue left
                     } else if child_idx > child_nkeys / 2 {
@@ -707,10 +710,9 @@ where
                         // Middle - use same relative position
                         child_idx.min(child_nkeys)
                     };
+                    // Prefetch is safe even for null/invalid pointers (no-op on x86/ARM)
                     let grandchild_ptr: *mut u8 = child_inode.child(grandchild_idx);
-                    if !grandchild_ptr.is_null() {
-                        prefetch_read(grandchild_ptr);
-                    }
+                    prefetch_read(grandchild_ptr);
                 }
 
                 // Get stable version of child BEFORE validating parent
@@ -932,8 +934,9 @@ where
         let mut leaf: &L = unsafe { &*leaf_ptr };
 
         // Wait for any in-progress split to complete
-        if leaf.version().is_splitting() {
-            let _ = leaf.version().stable();
+        let version = leaf.version();
+        if version.is_splitting() {
+            let _ = version.stable();
         }
 
         loop {
@@ -978,12 +981,10 @@ where
 
             // OPTIMIZATION: Prefetch next->next while we compare ikey_bound.
             // This hides memory latency for the next B-link hop (~50-100ns L3 hit).
-            // Prefetch both the version (first cache line) and the next pointer.
+            // Prefetch is safe even for null/invalid pointers (no-op on x86/ARM).
             let next_next_raw: *mut L = next.next_raw();
             let next_next_ptr: *mut L = Linker::unmark_ptr(next_next_raw);
-            if !next_next_ptr.is_null() {
-                prefetch_read(next_next_ptr.cast::<u8>());
-            }
+            prefetch_read(next_next_ptr.cast::<u8>());
 
             let next_bound: u64 = next.ikey_bound();
 

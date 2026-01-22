@@ -1,47 +1,18 @@
-//! ========================================================================
-//!  Batch Insert Utilities
-//! ========================================================================
+//! Batch insert preparation and analysis utilities.
 //!
-//! Utility functions for preparing and analyzing batch insert operations.
-//!
-//! # Note
-//!
-//! The `insert_batch()` method is available directly on all tree types
-//! (`MassTree24`, `MassTree15`, `MassTree24Inline`, `MassTree15Inline`)
-//! because they are type aliases for `MassTreeGeneric`.
+//! The `insert_batch()` method is available on all tree types via `MassTreeGeneric`.
 
-#![allow(clippy::indexing_slicing)]
+#![allow(clippy::indexing_slicing, reason = "Bounded by key length checks")]
 
 use std::collections::BTreeSet;
 
 // ============================================================================
-//  Entry Preparation Utilities
+// Entry Preparation
 // ============================================================================
 
-/// Prepare a batch of entries from parallel iterators.
+/// Zip separate key and value iterators into batch entries.
 ///
-/// Combines separate key and value iterators into batch entries.
-///
-/// # Arguments
-///
-/// * `keys` - Iterator of key bytes (anything that converts to `Vec<u8>`)
-/// * `values` - Iterator of values
-///
-/// # Returns
-///
-/// Vector of `(Vec<u8>, V)` tuples ready for `insert_batch`.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use masstree::batch::zip_into_entries;
-///
-/// let keys = vec![b"a".to_vec(), b"b".to_vec()];
-/// let values = vec![1u64, 2u64];
-///
-/// let entries = zip_into_entries(keys, values);
-/// tree.insert_batch(entries)?;
-/// ```
+/// Returns `Vec<(Vec<u8>, V)>` ready for `insert_batch`.
 #[inline]
 #[must_use]
 pub fn zip_into_entries<K, V, IK, IV>(keys: IK, values: IV) -> Vec<(Vec<u8>, V)>
@@ -56,29 +27,9 @@ where
         .collect()
 }
 
-/// Prepare a batch of entries from a map-like iterator.
+/// Convert a `(key, value)` iterator into batch entries.
 ///
-/// # Arguments
-///
-/// * `iter` - Iterator of (key, value) pairs where keys convert to bytes
-///
-/// # Returns
-///
-/// Vector of `(Vec<u8>, V)` tuples ready for `insert_batch`.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use std::collections::HashMap;
-/// use masstree::batch::from_iter;
-///
-/// let mut map = HashMap::new();
-/// map.insert("key1", 1u64);
-/// map.insert("key2", 2u64);
-///
-/// let entries = from_iter(map.into_iter().map(|(k, v)| (k.as_bytes().to_vec(), v)));
-/// tree.insert_batch(entries)?;
-/// ```
+/// Returns `Vec<(Vec<u8>, V)>` ready for `insert_batch`.
 #[inline]
 #[must_use]
 pub fn from_iter<K, V, I>(iter: I) -> Vec<(Vec<u8>, V)>
@@ -89,29 +40,9 @@ where
     iter.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
-/// Generate sequential byte keys with a common prefix.
+/// Generate sequential keys: `{prefix}{number:0width}` for `[start, end)`.
 ///
-/// Useful for benchmarking and testing batch insert performance.
-///
-/// # Arguments
-///
-/// * `prefix` - Common prefix for all keys
-/// * `start` - Starting number (inclusive)
-/// * `end` - Ending number (exclusive)
-/// * `width` - Zero-padding width for numbers
-///
-/// # Returns
-///
-/// Vector of byte keys.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use masstree::batch::sequential_keys;
-///
-/// let keys = sequential_keys(b"user:", 0, 1000, 6);
-/// // Produces: ["user:000000", "user:000001", ..., "user:000999"]
-/// ```
+/// Useful for benchmarking batch insert performance.
 #[must_use]
 pub fn sequential_keys(prefix: &[u8], start: usize, end: usize, width: usize) -> Vec<Vec<u8>> {
     (start..end)
@@ -123,24 +54,9 @@ pub fn sequential_keys(prefix: &[u8], start: usize, end: usize, width: usize) ->
         .collect()
 }
 
-/// Generate sequential 8-byte keys (u64 big-endian).
+/// Generate sequential 8-byte keys (u64 big-endian) for `[start, end)`.
 ///
-/// These keys have optimal locality for batch insert.
-///
-/// # Arguments
-///
-/// * `start` - Starting value (inclusive)
-/// * `end` - Ending value (exclusive)
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use masstree::batch::sequential_u64_keys;
-///
-/// let keys = sequential_u64_keys(0, 1000);
-/// let entries: Vec<_> = keys.into_iter().zip(0u64..1000).collect();
-/// tree.insert_batch(entries)?;
-/// ```
+/// Optimal locality for batch insert (single ikey per entry).
 #[must_use]
 #[inline(always)]
 pub fn sequential_u64_keys(start: u64, end: u64) -> Vec<Vec<u8>> {
@@ -148,58 +64,31 @@ pub fn sequential_u64_keys(start: u64, end: u64) -> Vec<Vec<u8>> {
 }
 
 // ============================================================================
-//  Batch Analysis
+// Batch Analysis
 // ============================================================================
 
-/// Statistics about a batch of entries before insertion.
-///
-/// Use this to estimate batch performance and optimize entry ordering.
+/// Pre-insertion statistics for batch performance estimation.
 #[must_use]
 #[derive(Debug, Clone, Default)]
 pub struct BatchStats {
-    /// Total number of entries.
+    /// Total entry count.
     pub count: usize,
 
-    /// Number of unique ikey prefixes (first 8 bytes).
-    ///
-    /// Lower values indicate better locality (entries cluster into fewer leaves).
+    /// Unique ikey prefixes (first 8 bytes). Lower = better locality.
     pub unique_ikeys: usize,
 
     /// Average key length in bytes.
     pub avg_key_len: f64,
 
-    /// Number of keys with suffixes (> 8 bytes).
+    /// Keys with suffixes (> 8 bytes).
     pub keys_with_suffix: usize,
 
-    /// Number of keys that are single-layer (≤ 8 bytes).
+    /// Single-layer keys (≤ 8 bytes).
     pub single_layer_keys: usize,
 }
 
 impl BatchStats {
-    /// Analyze a batch of entries and compute statistics.
-    ///
-    /// # Arguments
-    ///
-    /// * `entries` - Slice of (key, value) pairs
-    ///
-    /// # Returns
-    ///
-    /// Statistics about the batch.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use masstree::batch::BatchStats;
-    ///
-    /// let entries = vec![
-    ///     (b"short".to_vec(), 1),
-    ///     (b"this_is_a_longer_key".to_vec(), 2),
-    /// ];
-    ///
-    /// let stats = BatchStats::analyze(&entries);
-    /// println!("Unique prefixes: {}", stats.unique_ikeys);
-    /// println!("Keys with suffix: {}", stats.keys_with_suffix);
-    /// ```
+    /// Compute statistics for a batch of entries.
     pub fn analyze<V>(entries: &[(Vec<u8>, V)]) -> Self {
         let count = entries.len();
 
@@ -207,15 +96,14 @@ impl BatchStats {
             return Self::default();
         }
 
-        // Use BTreeSet instead of HashSet to avoid allocation overhead
-        // and provide deterministic iteration order
+        // BTreeSet: deterministic order, lower allocation overhead than HashSet
         let mut unique_ikeys = BTreeSet::new();
         let mut total_key_len: usize = 0;
         let mut keys_with_suffix = 0;
         let mut single_layer_keys = 0;
 
         for (key, _) in entries {
-            // Compute ikey
+            // Extract ikey (first 8 bytes, zero-padded)
             let mut buf = [0u8; 8];
             let len = key.len().min(8);
             buf[..len].copy_from_slice(&key[..len]);
@@ -246,24 +134,9 @@ impl BatchStats {
         }
     }
 
-    /// Estimate the locality factor (0.0 to 1.0).
+    /// Locality factor (0.0-1.0). Higher = better clustering.
     ///
-    /// Higher values indicate better locality:
-    /// - 1.0 = All entries have the same ikey prefix (best case)
-    /// - 0.0 = All entries have unique ikey prefixes (worst case)
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let stats = BatchStats::analyze(&entries);
-    /// let locality = stats.locality_factor();
-    ///
-    /// if locality > 0.5 {
-    ///     println!("Good locality - batch insert recommended");
-    /// } else {
-    ///     println!("Poor locality - consider sorting keys differently");
-    /// }
-    /// ```
+    /// 1.0 = all same ikey prefix, 0.0 = all unique prefixes.
     #[inline]
     #[must_use]
     #[expect(
@@ -274,21 +147,17 @@ impl BatchStats {
         if self.count == 0 || self.unique_ikeys == 0 {
             return 0.0;
         }
-        // Clamp to [0.0, 1.0] to handle edge cases
         (1.0 - (self.unique_ikeys as f64 / self.count as f64)).clamp(0.0, 1.0)
     }
 
-    /// Estimate the number of leaves that will be touched.
-    ///
-    /// This is a rough estimate based on unique ikey prefixes.
-    /// Actual leaf count may be higher if leaves split during insertion.
+    /// Estimated leaf count (may increase if splits occur).
     #[must_use]
     #[inline(always)]
     pub const fn estimated_leaves(&self) -> usize {
         self.unique_ikeys
     }
 
-    /// Check if single-layer optimization applies to all keys.
+    /// True if all keys are single-layer (≤ 8 bytes).
     #[must_use]
     #[inline(always)]
     pub const fn all_single_layer(&self) -> bool {
