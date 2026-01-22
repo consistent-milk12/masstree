@@ -244,6 +244,10 @@ pub use leaf24::{
     LeafNode24, MODSTATE_DELETED_LAYER, MODSTATE_INSERT, MODSTATE_REMOVE, WIDTH_24 as LEAF24_WIDTH,
 };
 
+// Re-export internode and version types (for debugging)
+pub use internode::InternodeNode;
+pub use nodeversion::NodeVersion;
+
 // Re-export allocator types
 pub use alloc15::{SeizeAllocator15, SeizeAllocator15TrueInline};
 pub use alloc24::SeizeAllocator24;

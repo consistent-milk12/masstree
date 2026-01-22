@@ -2,11 +2,11 @@ use seize::LocalGuard;
 use std::ptr as StdPtr;
 
 use crate::{
-    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
     key::Key,
     leaf_trait::LayerCapableLeaf,
-    tree::generic::optimistic_reads::{LookupResult, search_leaf_multi_layer},
+    tree::generic::optimistic_reads::{search_leaf_multi_layer, LookupResult},
     value::traits::LeafValueLoad,
+    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
 };
 
 impl<S, L, A> MassTreeGeneric<S, L, A>
@@ -110,6 +110,17 @@ where
                 leaf.version().stable()
             };
 
+            // EARLY too-right check: detect if we descended to a leaf that's
+            // to the right of where the key should be. This can happen during
+            // concurrent splits when internode routing is momentarily inconsistent.
+            // Check BEFORE searching to avoid wasting cycles on the wrong leaf.
+            if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                // Reload root to get latest pointer after concurrent modifications
+                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
+
+                continue 'leaf_loop;
+            }
+
             'search_loop: loop {
                 let perm = leaf.permutation();
                 let size: usize = perm.size();
@@ -180,6 +191,16 @@ where
                     continue 'leaf_loop;
                 }
 
+                // Fallback too-right check: If key < ikey_bound and prev != null,
+                // we descended to a leaf that's to the right of where the key should be.
+                // Recovery requires restart from layer root (can't safely walk left).
+                // NOTE: This is defense-in-depth; the early check above catches most cases.
+                if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                    leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
+
+                    continue 'leaf_loop;
+                }
+
                 return None;
             }
         }
@@ -239,6 +260,18 @@ where
                     leaf.prefetch_for_search();
                     leaf.version().stable()
                 };
+
+                // EARLY too-right check: detect if we descended to a leaf that's
+                // to the right of where the key should be. This can happen during
+                // concurrent splits when internode routing is momentarily inconsistent.
+                // Check BEFORE searching to avoid wasting cycles on the wrong leaf.
+                if !leaf.prev().is_null() && key.ikey() < leaf.ikey_bound() {
+                    // Reload root to get latest pointer after concurrent modifications
+                    leaf_ptr =
+                        self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
+
+                    continue 'leaf_loop;
+                }
 
                 'search_loop: loop {
                     // Check for GC'd sublayer - must restart from root
@@ -350,6 +383,21 @@ where
 
                             if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
                                 leaf_ptr = next_ptr;
+
+                                continue 'leaf_loop;
+                            }
+
+                            // Fallback too-right check: If key < ikey_bound and prev != null,
+                            // we descended to a leaf that's to the right of where the key should be.
+                            // Recovery requires restart from layer root (can't safely walk left).
+                            // NOTE: This is defense-in-depth; the early check above catches most cases.
+                            if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                                leaf_ptr = self.reach_leaf_concurrent_generic(
+                                    layer_root,
+                                    key,
+                                    in_sublayer,
+                                    guard,
+                                );
 
                                 continue 'leaf_loop;
                             }

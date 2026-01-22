@@ -216,6 +216,16 @@ where
         self.root_ptr.load(AtomicOrdering::Acquire)
     }
 
+    /// Returns the root pointer for debugging/testing purposes.
+    ///
+    /// # Safety
+    /// The returned pointer is only valid while the guard is held.
+    /// Caller must not dereference after dropping the guard.
+    #[doc(hidden)]
+    pub fn debug_root_ptr(&self, _guard: &LocalGuard<'_>) -> *mut u8 {
+        self.root_ptr.load(AtomicOrdering::Acquire)
+    }
+
     /// Check if the current root is a leaf node.
     ///
     /// # Safety
