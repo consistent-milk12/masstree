@@ -273,8 +273,6 @@ where
     /// - No function call overhead per entry within a leaf
     /// - Falls back to state machine for layer transitions (sublayers)
     ///
-    /// Expected 2-3x improvement over `scan()` for large scans.
-    ///
     /// # Availability
     ///
     /// Available for ALL storage types including:
@@ -341,8 +339,6 @@ where
     /// - Single OCC validation per leaf
     /// - No function call overhead per entry within a leaf
     /// - Falls back to state machine for layer transitions
-    ///
-    /// Expected 2-3x improvement over standard `iter().rev()` iteration.
     ///
     /// # Availability
     ///

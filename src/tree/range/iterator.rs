@@ -1,94 +1,106 @@
-//! Filepath: src/tree/range/iterator.rs
+//! Filepath: src/tree/range/iterator/mod.rs
 //!
-//! Range iterator implementation.
+//! Range iterator implementation for Masstree.
 //!
 //! Provides [`RangeIter`], an iterator over key-value pairs in lexicographic order.
 //! The iterator yields [`ScanEntry`] items containing owned keys and values.
 //!
 //! # State Machine
 //!
-//! The iterator is implemented as an explicit state machine with the following states:
+//! The iterator is driven by a state machine that handles Masstree's layered
+//! structure (trie of B+ trees) and optimistic concurrency control.
 //!
-//! ```text
-//!                     ┌────────────────────────────────────────────┐
-//!                     │                                            │
-//!                     ▼                                            │
-//!               ┌──────────┐                                       │
-//!          ┌───▶│  Emit    │──────── yield entry ─────────────────▶│
-//!          │    └──────────┘                                       │
-//!          │         │                                             │
-//!          │         │ advance ki                                  │
-//!          │         ▼                                             │
-//!          │    ┌──────────┐                                       │
-//!          ├────│ FindNext │◀──────────────────────────────────────┤
-//!          │    └────┬─────┘                                       │
-//!          │         │                                             │
-//!          │    ┌────┼────────┬────────────┬────────────┐          │
-//!          │    ▼    │        ▼            ▼            ▼          │
-//!          │ found   │     layer_ptr    exhausted   version_fail   │
-//!          │    │    │        │            │            │          │
-//!          │    │    │   ┌────┴────┐  ┌────┴────┐       │          │
-//!          │    │    │   │  Down   │  │   Up    │       │          │
-//!          │    │    │   └────┬────┘  └────┬────┘       │          │
-//!          │    │    │        │            │            │          │
-//!          │    │    │ shift_clear()   unshift()        │          │
-//!          │    │    │        │            │            │          │
-//!          │    │    │        └─────┬──────┴────────────┘          │
-//!          │    │    │              ▼                              │
-//!          │    │    │       ┌──────────┐                          │
-//!          │    │    └──────▶│  Retry   │                          │
-//!          │    │            └────┬─────┘                          │
-//!          │    │                 │                                │
-//!          │    │           find_retry()                           │
-//!          │    │                 │                                │
-//!          └────┴─────────────────┴────────────────────────────────┘
-//! ```
+//! ## States
 //!
-//! ## State Descriptions
-//!
-//! - **`Emit`**: Ready to yield a key-value pair to the caller
-//! - **`FindNext`**: Searching for the next entry in the current leaf
-//! - **`Down`**: Descending into a sublayer (encountered a layer pointer)
-//! - **`Up`**: Ascending to parent layer (current layer exhausted)
-//! - **`Retry`**: Repositioning after version conflict or layer transition
-//!
-//! ## Key Transitions
+//! | State | Description |
+//! |-------|-------------|
+//! | **`Emit`** | Valid entry found; ready to yield to caller |
+//! | **`FindNext`** | Scanning current leaf for the next valid slot |
+//! | **`Down`** | Layer pointer encountered; must descend into sublayer |
+//! | **`Up`** | Current layer exhausted; must return to parent layer |
+//! | **`Retry`** | Repositioning after version conflict or layer transition |
 //!
 //! | From | To | Trigger |
 //! |------|-----|---------|
-//! | `FindNext` | `Emit` | Found valid entry |
-//! | `FindNext` | `Down` | Encountered layer pointer |
-//! | `FindNext` | `Up` | Leaf exhausted, no next leaf |
-//! | `FindNext` | `Retry` | Version changed |
-//! | `Emit` | `FindNext` | Entry yielded |
-//! | `Down` | `Retry` | After `shift_clear()` |
-//! | `Up` | `FindNext` | After `unshift()` and state refresh |
-//! | `Retry` | `FindNext` | After `find_retry()` repositioning |
+//! | `FindNext` | `Emit` | Found valid entry passing duplicate filter |
+//! | `FindNext` | `FindNext` | Advanced to sibling leaf via B-link pointer |
+//! | `FindNext` | `Down` | Slot contains layer pointer (`keylenx >= LAYER`) |
+//! | `FindNext` | `Up` | Leaf exhausted with no next sibling |
+//! | `FindNext` | `Retry` | Version validation failed (concurrent modification) |
+//! | `Emit` | `FindNext` | Entry yielded; `ki` advanced to next slot |
+//! | `Down` | `Retry` | After `shift_clear()` pushes prefix and clears suffix |
+//! | `Up` | `FindNext` | After `unshift()` restores parent context (or Done if stack empty) |
+//! | `Retry` | `FindNext` | After `find_retry()` repositions using key prefix stack |
+//!
+//! ## Why `Down` Always Transitions to `Retry`
+//!
+//! When descending into a sublayer, `shift_clear()` updates the cursor's key prefix
+//! but the scan position is unknown in the new layer. `find_retry()` performs a fresh
+//! lookup using the accumulated key prefix to find the correct starting position.
+//!
+//! ## Version Conflict Recovery
+//!
+//! On version mismatch (detected via OCC protocol), the iterator transitions to `Retry`.
+//! The `find_retry()` function uses the cursor's key prefix stack to reposition to the
+//! correct location, ensuring no entries are skipped or duplicated.
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```no_run
+//! # use masstree::{MassTree, RangeBound};
+//! let tree: MassTree<u64> = MassTree::new();
 //! let guard = tree.guard();
 //!
-//! // Full iteration
+//! // Full iteration (all keys)
 //! for entry in tree.iter(&guard) {
 //!     println!("{:?} -> {:?}", entry.key, entry.value);
 //! }
 //!
-//! // Range iteration
+//! // Bounded range: keys in ["start", "end")
 //! for entry in tree.range(
 //!     RangeBound::Included(b"start"),
 //!     RangeBound::Excluded(b"end"),
 //!     &guard
 //! ) {
-//!     // ...
+//!     // entry.key is >= b"start" and < b"end"
 //! }
-//!```
+//!
+//! // Reverse iteration
+//! for entry in tree.iter(&guard).rev() {
+//!     // keys in descending order
+//! }
+//! ```
+
+// ============================================================================
+//  Submodule declarations
+// ============================================================================
+
+mod adapters;
+mod batch_forward;
+mod batch_reverse;
+mod cleanup_guard;
+mod iter_flags;
+mod range_bound;
+mod scan_entry;
+
+#[cfg(test)]
+mod unit_tests;
+
+// ============================================================================
+//  Public re-exports
+// ============================================================================
+
+pub use adapters::{KeysIter, ValuesIter};
+pub use range_bound::RangeBound;
+pub use scan_entry::ScanEntry;
+
+// ============================================================================
+//  Internal imports
+// ============================================================================
 
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
-use std::ops::Bound;
 
 use arrayvec::ArrayVec;
 use seize::LocalGuard;
@@ -96,15 +108,12 @@ use seize::LocalGuard;
 use crate::alloc_trait::NodeAllocatorGeneric;
 use crate::key::IKEY_SIZE;
 use crate::leaf_trait::{LayerCapableLeaf, TreeLeafNode};
-use crate::ref_value_slot::RefValueSlot;
 use crate::slot::ValueSlot;
 use crate::tree::MassTreeGeneric;
 
 use super::cursor_key::CursorKey;
 use super::find::{
-    find_initial, find_next, find_next_ptr, find_next_single_layer_ptr,
-    find_next_with_duplicate_check, find_next_with_duplicate_check_ptr, find_retry, handle_down,
-    handle_up,
+    find_initial, find_next, find_next_with_duplicate_check, find_retry, handle_down, handle_up,
 };
 use super::find_rev::ReverseScan;
 use super::helper::ReverseScanHelper;
@@ -113,464 +122,7 @@ use super::scan_state::{
     ScanStateBack,
 };
 
-// ============================================================================
-//  RangeBound
-// ============================================================================
-
-/// Range bound for scan operations.
-///
-/// Specifies the start or end of a key range for scanning.
-///
-/// # Variants
-///
-/// - [`Unbounded`](RangeBound::Unbounded): No bound (all keys)
-/// - [`Included`](RangeBound::Included): Include the specified key
-/// - [`Excluded`](RangeBound::Excluded): Exclude the specified key
-///
-/// # Example
-///
-/// ```ignore
-/// // Scan from "aaa" (inclusive) to "zzz" (exclusive)
-/// let start = RangeBound::Included(b"aaa");
-/// let end = RangeBound::Excluded(b"zzz");
-///
-/// for entry in tree.range(start, end, &guard) {
-///     // entry.key will be >= "aaa" and < "zzz"
-/// }
-///
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RangeBound<'a> {
-    /// No bound - start from minimum or continue to maximum.
-    Unbounded,
-
-    /// Inclusive bound - include the specified key.
-    Included(&'a [u8]),
-
-    /// Exclusive bound - exclude the specified key.
-    Excluded(&'a [u8]),
-}
-
-impl<'a> RangeBound<'a> {
-    /// Check if a key is within this bound (for end bound checking).
-    ///
-    /// For end bounds:
-    /// - `Unbounded`: all keys are within
-    /// - `Included(k)`: keys <= k are within
-    /// - `Excluded(k)`: keys < k are within
-    ///
-    /// # Arguments
-    ///
-    /// - `key`: The key to check
-    ///
-    /// # Returns
-    ///
-    /// `true` if the key is within the bound.
-    #[must_use]
-    #[inline(always)]
-    pub fn contains(&self, key: &[u8]) -> bool {
-        match self {
-            RangeBound::Unbounded => true,
-            RangeBound::Included(bound) => key <= *bound,
-            RangeBound::Excluded(bound) => key < *bound,
-        }
-    }
-
-    /// Convert to `(start_key, emit_equal)` parameters for `find_initial`.
-    ///
-    /// For start bounds:
-    /// - `Unbounded`: empty key, `emit_equal = true`
-    /// - `Included(k)`: key k, `emit_equal = true`
-    /// - `Excluded(k)`: key k, `emit_equal = false`
-    ///
-    /// # Returns
-    ///
-    /// Tuple of (key bytes, `emit_equal` flag).
-    #[must_use]
-    #[inline(always)]
-    pub const fn to_start_params(&self) -> (&'a [u8], bool) {
-        match self {
-            RangeBound::Unbounded => (&[], true),
-            RangeBound::Included(k) => (*k, true),
-            RangeBound::Excluded(k) => (*k, false),
-        }
-    }
-
-    /// Check if this is an unbounded bound.
-    #[must_use]
-    #[inline(always)]
-    pub const fn is_unbounded(&self) -> bool {
-        matches!(self, RangeBound::Unbounded)
-    }
-
-    /// Get the bound key if this is a bounded bound.
-    ///
-    /// # Note
-    ///
-    /// This method is provided for API completeness and may be useful for
-    /// external callers who need to inspect bounds programmatically.
-    #[must_use]
-    #[inline(always)]
-    pub const fn key(&self) -> Option<&'a [u8]> {
-        match self {
-            RangeBound::Unbounded => None,
-            RangeBound::Included(k) | RangeBound::Excluded(k) => Some(*k),
-        }
-    }
-
-    /// Check if a key is within this bound for reverse iteration (start bound).
-    ///
-    /// For start bounds used in reverse iteration:
-    /// - `Unbounded`: all keys are within
-    /// - `Included(k)`: keys >= k are within
-    /// - `Excluded(k)`: keys > k are within
-    ///
-    /// This is the reverse of `contains()` which is for end bounds.
-    #[must_use]
-    #[inline(always)]
-    pub fn contains_reverse(&self, key: &[u8]) -> bool {
-        match self {
-            RangeBound::Unbounded => true,
-            RangeBound::Included(bound) => key >= *bound,
-            RangeBound::Excluded(bound) => key > *bound,
-        }
-    }
-
-    /// Extract the ikey from a bound for fast comparison.
-    ///
-    /// Returns `None` for `Unbounded`, otherwise extracts the first 8 bytes
-    /// as a big-endian u64 (zero-padded if key is shorter).
-    ///
-    /// This is used by value-only scans to perform approximate end bound checks
-    /// without building the full key.
-    #[must_use]
-    #[inline]
-    pub fn extract_ikey(&self) -> Option<u64> {
-        match self {
-            RangeBound::Unbounded => None,
-            RangeBound::Included(bound) | RangeBound::Excluded(bound) => {
-                Some(Self::key_to_ikey(bound))
-            }
-        }
-    }
-
-    /// Convert key bytes to ikey (first 8 bytes as big-endian u64).
-    #[inline]
-    #[expect(clippy::indexing_slicing, reason = "length is checked before indexing")]
-    fn key_to_ikey(key: &[u8]) -> u64 {
-        use crate::key::IKEY_SIZE;
-
-        if key.len() >= IKEY_SIZE {
-            // SAFETY: length checked above
-            #[expect(clippy::expect_used, reason = "length is checked")]
-            u64::from_be_bytes(key[..IKEY_SIZE].try_into().expect("slice is 8 bytes"))
-        } else {
-            // Zero-pad short keys
-            let mut bytes = [0u8; IKEY_SIZE];
-            bytes[..key.len()].copy_from_slice(key);
-            u64::from_be_bytes(bytes)
-        }
-    }
-}
-
-// Conversion from std::ops::Bound
-impl<'a> From<Bound<&'a [u8]>> for RangeBound<'a> {
-    fn from(bound: Bound<&'a [u8]>) -> Self {
-        match bound {
-            Bound::Unbounded => RangeBound::Unbounded,
-            Bound::Included(k) => RangeBound::Included(k),
-            Bound::Excluded(k) => RangeBound::Excluded(k),
-        }
-    }
-}
-
-// ============================================================================
-//  ScanEntry
-// ============================================================================
-
-/// Entry returned by the range iterator.
-///
-/// Contains an owned copy of the key and the value output.
-///
-/// # Type Parameters
-///
-/// - `O`: The output type (e.g., `Arc<V>` for `MassTree<V>`, `V` for `MassTree24Inline<V>`)
-///
-/// # Example
-///
-/// ```ignore
-/// for entry in tree.iter(&guard) {
-///     let key: &[u8] = &entry.key;
-///     let value: &V = entry.value.as_ref(); // For Arc<V>
-/// }
-///
-#[derive(Debug, Clone)]
-pub struct ScanEntry<O> {
-    /// The key as owned bytes.
-    pub key: Vec<u8>,
-
-    /// The value output.
-    ///
-    /// For `MassTree<V>`: `Arc<V>` (shared reference)
-    /// For `MassTree24Inline<V>`: `V` (copy)
-    pub value: O,
-}
-
-impl<O> ScanEntry<O> {
-    /// Create a new scan entry.
-    #[inline(always)]
-    pub const fn new(key: Vec<u8>, value: O) -> Self {
-        Self { key, value }
-    }
-
-    /// Get the key bytes.
-    #[inline(always)]
-    pub fn key(&self) -> &[u8] {
-        &self.key
-    }
-
-    /// Get a reference to the value.
-    #[inline(always)]
-    pub const fn value(&self) -> &O {
-        &self.value
-    }
-
-    /// Consume the entry and return (key, value).
-    #[inline(always)]
-    pub fn into_parts(self) -> (Vec<u8>, O) {
-        (self.key, self.value)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct IterFlags(u16);
-
-#[allow(dead_code, reason = "API Completeness")]
-impl IterFlags {
-    // Bit Positions (forward iteration)
-    const EXHAUSTED: u16 = 1 << 0;
-    const INITIALIZED: u16 = 1 << 1;
-    const EMIT_EQUAL: u16 = 1 << 2;
-    const NEEDS_DUPLICATE_CHECK: u16 = 1 << 3;
-    const SINGLE_LAYER_MODE: u16 = 1 << 4;
-    // Bit Positions (reverse iteration for DoubleEndedIterator)
-    const BACK_EXHAUSTED: u16 = 1 << 5;
-    const BACK_INITIALIZED: u16 = 1 << 6;
-    const BACK_EMIT_EQUAL: u16 = 1 << 7;
-    const BACK_NEEDS_DUPLICATE_CHECK: u16 = 1 << 8;
-
-    /// Create new flags with all bits cleared.
-    #[inline(always)]
-    pub const fn new() -> Self {
-        Self(0)
-    }
-
-    /// Create flags with initial values for forward iteration.
-    #[inline(always)]
-    pub const fn with_values(emit_equal: bool, single_layer_mode: bool) -> Self {
-        let mut bits: u16 = 0;
-
-        if emit_equal {
-            bits |= Self::EMIT_EQUAL;
-        }
-
-        if single_layer_mode {
-            bits |= Self::SINGLE_LAYER_MODE;
-        }
-
-        Self(bits)
-    }
-
-    /// Create flags with initial values for both forward and backward iteration.
-    #[inline(always)]
-    pub const fn with_both_bounds(
-        emit_equal: bool,
-        single_layer_mode: bool,
-        back_emit_equal: bool,
-    ) -> Self {
-        let mut bits: u16 = 0;
-
-        if emit_equal {
-            bits |= Self::EMIT_EQUAL;
-        }
-
-        if single_layer_mode {
-            bits |= Self::SINGLE_LAYER_MODE;
-        }
-
-        if back_emit_equal {
-            bits |= Self::BACK_EMIT_EQUAL;
-        }
-
-        Self(bits)
-    }
-
-    // ========================================================================
-    //  Getters
-    // ========================================================================
-
-    #[inline(always)]
-    pub const fn exhausted(self) -> bool {
-        self.0 & Self::EXHAUSTED != 0
-    }
-
-    #[inline(always)]
-    pub const fn initialized(self) -> bool {
-        self.0 & Self::INITIALIZED != 0
-    }
-
-    #[inline(always)]
-    pub const fn emit_equal(self) -> bool {
-        self.0 & Self::EMIT_EQUAL != 0
-    }
-
-    #[inline(always)]
-    pub const fn needs_duplicate_check(self) -> bool {
-        self.0 & Self::NEEDS_DUPLICATE_CHECK != 0
-    }
-
-    #[inline(always)]
-    pub const fn single_layer_mode(self) -> bool {
-        self.0 & Self::SINGLE_LAYER_MODE != 0
-    }
-
-    // Back iteration getters
-    #[inline(always)]
-    pub const fn back_exhausted(self) -> bool {
-        self.0 & Self::BACK_EXHAUSTED != 0
-    }
-
-    #[inline(always)]
-    pub const fn back_initialized(self) -> bool {
-        self.0 & Self::BACK_INITIALIZED != 0
-    }
-
-    #[inline(always)]
-    pub const fn back_emit_equal(self) -> bool {
-        self.0 & Self::BACK_EMIT_EQUAL != 0
-    }
-
-    #[inline(always)]
-    pub const fn back_needs_duplicate_check(self) -> bool {
-        self.0 & Self::BACK_NEEDS_DUPLICATE_CHECK != 0
-    }
-
-    // ========================================================================
-    //  Setters
-    // ========================================================================
-
-    #[inline(always)]
-    pub const fn set_exhausted(&mut self, value: bool) {
-        if value {
-            self.0 |= Self::EXHAUSTED;
-        } else {
-            self.0 &= !Self::EXHAUSTED;
-        }
-    }
-
-    #[inline(always)]
-    pub const fn set_initialized(&mut self, value: bool) {
-        if value {
-            self.0 |= Self::INITIALIZED;
-        } else {
-            self.0 &= !Self::INITIALIZED;
-        }
-    }
-
-    #[inline(always)]
-    pub const fn set_emit_equal(&mut self, value: bool) {
-        if value {
-            self.0 |= Self::EMIT_EQUAL;
-        } else {
-            self.0 &= !Self::EMIT_EQUAL;
-        }
-    }
-
-    #[inline(always)]
-    pub const fn set_needs_duplicate_check(&mut self, value: bool) {
-        if value {
-            self.0 |= Self::NEEDS_DUPLICATE_CHECK;
-        } else {
-            self.0 &= !Self::NEEDS_DUPLICATE_CHECK;
-        }
-    }
-
-    #[inline(always)]
-    pub const fn set_single_layer_mode(&mut self, value: bool) {
-        if value {
-            self.0 |= Self::SINGLE_LAYER_MODE;
-        } else {
-            self.0 &= !Self::SINGLE_LAYER_MODE;
-        }
-    }
-
-    // ========================================================================
-    //  Convenience methods
-    // ========================================================================
-
-    /// Mark as exhausted.
-    #[inline(always)]
-    pub const fn mark_exhausted(&mut self) {
-        self.0 |= Self::EXHAUSTED;
-    }
-
-    /// Mark as initialized.
-    #[inline(always)]
-    pub const fn mark_initialized(&mut self) {
-        self.0 |= Self::INITIALIZED;
-    }
-
-    /// Clear `needs_duplicate_check` flag.
-    #[inline(always)]
-    pub const fn clear_duplicate_check(&mut self) {
-        self.0 &= !Self::NEEDS_DUPLICATE_CHECK;
-    }
-
-    /// Set `needs_duplicate_check` flag.
-    #[inline(always)]
-    pub const fn require_duplicate_check(&mut self) {
-        self.0 |= Self::NEEDS_DUPLICATE_CHECK;
-    }
-
-    /// Disable single-layer mode (fall back to multi-layer).
-    #[inline(always)]
-    pub const fn disable_single_layer_mode(&mut self) {
-        self.0 &= !Self::SINGLE_LAYER_MODE;
-    }
-
-    // ========================================================================
-    //  Back iteration convenience methods
-    // ========================================================================
-
-    /// Mark back iterator as exhausted.
-    #[inline(always)]
-    pub const fn mark_back_exhausted(&mut self) {
-        self.0 |= Self::BACK_EXHAUSTED;
-    }
-
-    /// Mark back iterator as initialized.
-    #[inline(always)]
-    pub const fn mark_back_initialized(&mut self) {
-        self.0 |= Self::BACK_INITIALIZED;
-    }
-
-    /// Check if both front and back are exhausted (completely consumed).
-    #[inline(always)]
-    pub const fn fully_exhausted(self) -> bool {
-        (self.0 & Self::EXHAUSTED != 0) && (self.0 & Self::BACK_EXHAUSTED != 0)
-    }
-
-    /// Clear `back_needs_duplicate_check` flag.
-    #[inline(always)]
-    pub const fn clear_back_duplicate_check(&mut self) {
-        self.0 &= !Self::BACK_NEEDS_DUPLICATE_CHECK;
-    }
-
-    /// Set `back_needs_duplicate_check` flag.
-    #[inline(always)]
-    pub const fn require_back_duplicate_check(&mut self) {
-        self.0 |= Self::BACK_NEEDS_DUPLICATE_CHECK;
-    }
-}
+use iter_flags::IterFlags;
 
 // ============================================================================
 //  RangeIter
@@ -581,6 +133,9 @@ impl IterFlags {
 /// Yields entries in lexicographic key order. The iterator maintains internal
 /// state for the scan position and handles concurrent modifications via the
 /// optimistic concurrency control protocol.
+///
+/// Implements both [`Iterator`] and [`DoubleEndedIterator`], allowing forward
+/// iteration with `next()` and reverse iteration with `next_back()` or `.rev()`.
 ///
 /// # Thread Safety
 ///
@@ -594,7 +149,7 @@ impl IterFlags {
 /// - Keys are yielded in sorted order
 /// - May see some concurrent inserts and miss others
 /// - No torn reads (partial key/value data)
-/// - Best-effort no duplicates (via duplicate filtering)
+/// - Duplicates filtered via cursor key tracking (may rarely occur under extreme contention)
 ///
 /// # Performance
 ///
@@ -603,9 +158,14 @@ impl IterFlags {
 /// - `SmallVec` for layer stack (usually inline, up to 4 layers)
 /// - No per-item allocation for value cloning (Arc refcount bump or Copy)
 ///
+/// For higher performance, use the batch methods: [`for_each`](Self::for_each),
+/// [`for_each_ref`](Self::for_each_ref), or [`for_each_intra_leaf_batch_ref`](Self::for_each_intra_leaf_batch_ref).
+///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # use masstree::{MassTree, RangeBound};
+/// # let tree: MassTree<u64> = MassTree::new();
 /// let guard = tree.guard();
 /// let mut count = 0;
 ///
@@ -629,22 +189,22 @@ where
     //  Forward iteration state
     // ========================================================================
     /// Memory reclamation guard.
-    guard: &'g LocalGuard<'a>,
+    pub(super) guard: &'g LocalGuard<'a>,
 
     /// Current scan position (forward).
-    stack: ScanStackElement<L, S>,
+    pub(super) stack: ScanStackElement<L, S>,
 
     /// Parent layer stack for sublayer navigation (forward).
-    layer_stack: LayerStack<L>,
+    pub(super) layer_stack: LayerStack<L>,
 
     /// Cursor tracking current key position (forward).
-    cursor_key: CursorKey,
+    pub(super) cursor_key: CursorKey,
 
     /// Current state machine state (forward).
-    state: ScanState,
+    pub(super) state: ScanState,
 
     /// Captured snapshot for current entry (forward, if in Emit state).
-    snapshot: Option<ScanSnapshot<S>>,
+    pub(super) snapshot: Option<ScanSnapshot<S>>,
 
     /// Tracks the output pointer from `initialize()`'s snapshot.
     ///
@@ -666,46 +226,46 @@ where
     /// pointers directly into the leaf node (protected by guard), so no
     /// allocation tracking is needed. Only the `initialize()` snapshot path
     /// requires allocation tracking because it converts `S::Output` → raw pointer.
-    last_output_ptr: Option<*mut u8>,
+    pub(super) last_output_ptr: Option<*mut u8>,
 
     // ========================================================================
     //  Reverse iteration state (for DoubleEndedIterator)
     // ========================================================================
     /// Current scan position (backward).
-    back_stack: BackStackElement<L, S>,
+    pub(super) back_stack: BackStackElement<L, S>,
 
     /// Parent layer stack for sublayer navigation (backward).
-    back_layer_stack: LayerStack<L>,
+    pub(super) back_layer_stack: LayerStack<L>,
 
     /// Cursor tracking current key position (backward).
-    back_cursor_key: CursorKey,
+    pub(super) back_cursor_key: CursorKey,
 
     /// Reverse scan helper (tracks `upper_bound` state).
-    back_helper: ReverseScanHelper,
+    pub(super) back_helper: ReverseScanHelper,
 
     /// Current state machine state (backward).
-    back_state: ScanStateBack,
+    pub(super) back_state: ScanStateBack,
 
     /// Captured snapshot for current entry (backward, if in Emit state).
-    back_snapshot: Option<ScanSnapshot<S>>,
+    pub(super) back_snapshot: Option<ScanSnapshot<S>>,
 
     // ========================================================================
     //  Shared state
     // ========================================================================
     /// Tree root pointer (needed for back initialization).
-    tree_root: *const u8,
+    pub(super) tree_root: *const u8,
 
     /// Start bound for the range (needed for back bound checking).
-    start_bound: RangeBound<'a>,
+    pub(super) start_bound: RangeBound<'a>,
 
     /// End bound for the range (needed for forward bound checking).
-    end_bound: RangeBound<'a>,
+    pub(super) end_bound: RangeBound<'a>,
 
     /// Packed boolean flags.
     ///
     /// Contains: exhausted, initialized, `emit_equal`, `needs_duplicate_check`, `single_layer_mode`,
     /// `back_initialized`, `back_exhausted`, `back_emit_equal`
-    flags: IterFlags,
+    pub(super) flags: IterFlags,
 
     /// Marker for lifetime and type parameter covariance.
     _marker: PhantomData<&'a A>,
@@ -726,20 +286,6 @@ where
             .field("back_initialized", &self.flags.back_initialized())
             .field("back_state", &self.back_state)
             .finish_non_exhaustive()
-    }
-}
-
-// SAFETY: Use a scope guard to ensure cleanup on panic.
-// If visitor() panics, the guard's Drop will run and clean up ptr.
-struct CleanupGuard<S: ValueSlot> {
-    ptr: *mut u8,
-    _marker: PhantomData<S>,
-}
-
-impl<S: ValueSlot> Drop for CleanupGuard<S> {
-    fn drop(&mut self) {
-        // SAFETY: ptr was created by S::output_to_raw
-        unsafe { S::cleanup_output_raw(self.ptr) };
     }
 }
 
@@ -845,7 +391,7 @@ where
     /// - `Down`: Descend into sublayer, shift cursor key
     /// - `Retry`: Re-traverse after version conflict
     /// - Other: Ready to iterate
-    fn initialize(&mut self) {
+    pub(super) fn initialize(&mut self) {
         if self.flags.initialized() {
             return;
         }
@@ -859,10 +405,10 @@ where
 
         // Run initial descent loop
         loop {
-            // IMPORTANT: Save parent ROOT before find_initial, because
-            // find_initial may update stack.root to the layer pointer.
-            // However, stack.leaf is still valid after find_initial returns
-            // (it points to the parent leaf where the layer pointer was found).
+            // Save parent ROOT before find_initial modifies it.
+            // We need the original root for the LayerContext when descending,
+            // since find_initial overwrites stack.root with the layer pointer.
+            // Note: stack.leaf remains valid (points to parent leaf with layer pointer).
             let parent_root: *const u8 = self.stack.root();
 
             let (state, snapshot) = find_initial(
@@ -917,6 +463,7 @@ where
                 ScanState::Emit => {
                     // Check end bound
                     let key = self.cursor_key.full_key();
+
                     if !self.end_bound.contains(key) {
                         self.flags.mark_exhausted();
                         return None;
@@ -925,6 +472,7 @@ where
                     // Check meeting condition: front caught up to back
                     if self.flags.back_initialized() && !self.flags.back_exhausted() {
                         let back_key = self.back_cursor_key.full_key();
+
                         if key >= back_key {
                             self.flags.mark_exhausted();
                             self.flags.mark_back_exhausted();
@@ -932,7 +480,12 @@ where
                         }
                     }
 
-                    // Take snapshot
+                    // Take snapshot (should always be Some when in Emit state)
+                    debug_assert!(
+                        self.snapshot.is_some(),
+                        "Emit state entered without snapshot - state machine bug"
+                    );
+
                     let snapshot = self.snapshot.take()?;
 
                     // Build entry
@@ -986,7 +539,9 @@ where
                         self.flags.mark_exhausted();
                         return None;
                     }
+
                     self.state = ScanState::FindNext;
+
                     // After layer ascent, we need duplicate check
                     self.flags.require_duplicate_check();
                 }
@@ -1007,7 +562,7 @@ where
     /// Initialize the back cursor for reverse iteration.
     ///
     /// Called lazily on the first `next_back()` call.
-    fn initialize_back(&mut self) {
+    pub(super) fn initialize_back(&mut self) {
         if self.flags.back_initialized() {
             return;
         }
@@ -1040,6 +595,7 @@ where
                 ScanStateBack::Down => {
                     // Descend into sublayer
                     ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
+
                     // Continue loop to call find_initial_reverse with new layer root
                 }
 
@@ -1074,7 +630,8 @@ where
             match self.back_state {
                 ScanStateBack::Emit => {
                     // Check start bound (reverse of end bound check)
-                    let key = self.back_cursor_key.full_key();
+                    let key: &[u8] = self.back_cursor_key.full_key();
+
                     if !self.start_bound.contains_reverse(key) {
                         self.flags.mark_back_exhausted();
                         return None;
@@ -1082,16 +639,18 @@ where
 
                     // Check meeting condition: back caught up to front
                     if self.flags.initialized() && !self.flags.exhausted() {
-                        let front_key = self.cursor_key.full_key();
+                        let front_key: &[u8] = self.cursor_key.full_key();
+
                         if key <= front_key {
                             self.flags.mark_back_exhausted();
                             self.flags.mark_exhausted();
+
                             return None;
                         }
                     }
 
                     // Take snapshot
-                    let snapshot = self.back_snapshot.take()?;
+                    let snapshot: ScanSnapshot<S> = self.back_snapshot.take()?;
 
                     // Build entry
                     let entry = ScanEntry::new(key.to_vec(), snapshot.value);
@@ -1110,6 +669,7 @@ where
                     // not in normal reverse iteration
                     let (new_state, snapshot) = if self.flags.back_needs_duplicate_check() {
                         self.flags.clear_back_duplicate_check();
+
                         ReverseScan::find_prev_with_duplicate_check(
                             &mut self.back_stack,
                             &mut self.back_cursor_key,
@@ -1148,6 +708,7 @@ where
 
                     self.back_state = state;
                     self.back_snapshot = snapshot;
+
                     // After layer descent, we need duplicate check
                     self.flags.require_back_duplicate_check();
                 }
@@ -1162,9 +723,12 @@ where
                     ) {
                         // No parent layer, scan complete
                         self.flags.mark_back_exhausted();
+
                         return None;
                     }
+
                     self.back_state = ScanStateBack::FindPrev;
+
                     // After layer ascent, we need duplicate check
                     self.flags.require_back_duplicate_check();
                 }
@@ -1176,14 +740,30 @@ where
                         &mut self.back_helper,
                         self.guard,
                     );
+
                     self.back_state = new_state;
+
                     // After retry, we need duplicate check on next FindPrev
                     self.flags.require_back_duplicate_check();
                 }
             }
         }
     }
+
+    /// Convert to a keys-only iterator.
+    pub const fn keys(self) -> KeysIter<'a, 'g, S, L, A> {
+        KeysIter { inner: self }
+    }
+
+    /// Convert to a values-only iterator.
+    pub const fn values(self) -> ValuesIter<'a, 'g, S, L, A> {
+        ValuesIter { inner: self }
+    }
 }
+
+// ============================================================================
+//  Iterator Trait Implementations
+// ============================================================================
 
 impl<S, L, A> Iterator for RangeIter<'_, '_, S, L, A>
 where
@@ -1204,6 +784,7 @@ where
         // Lazy initialization
         if !self.flags.initialized() {
             self.initialize();
+
             if self.flags.exhausted() {
                 return None;
             }
@@ -1211,8 +792,9 @@ where
 
         // Meeting detection: if back is initialized, check if we've crossed
         if self.flags.back_initialized() && !self.flags.back_exhausted() {
-            let front_key = self.cursor_key.full_key();
-            let back_key = self.back_cursor_key.full_key();
+            let front_key: &[u8] = self.cursor_key.full_key();
+            let back_key: &[u8] = self.back_cursor_key.full_key();
+
             if front_key >= back_key {
                 // Mark both as exhausted when they meet
                 self.flags.mark_exhausted();
@@ -1253,6 +835,7 @@ where
         // Lazy initialization of back cursor
         if !self.flags.back_initialized() {
             self.initialize_back();
+
             if self.flags.back_exhausted() {
                 return None;
             }
@@ -1260,1789 +843,19 @@ where
 
         // Check meeting condition: if front has advanced past where back would be
         if self.flags.initialized() && !self.flags.exhausted() {
-            let front_key = self.cursor_key.full_key();
-            let back_key = self.back_cursor_key.full_key();
+            let front_key: &[u8] = self.cursor_key.full_key();
+            let back_key: &[u8] = self.back_cursor_key.full_key();
+
             if back_key <= front_key {
                 // Mark both as exhausted when they meet
                 self.flags.mark_back_exhausted();
                 self.flags.mark_exhausted();
+
                 return None;
             }
         }
 
         self.advance_back()
-    }
-}
-
-impl<S, L, A> RangeIter<'_, '_, S, L, A>
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    /// Zero-allocation iteration with a visitor closure.
-    ///
-    /// This is significantly faster than the `Iterator` trait because it:
-    /// - Avoids allocating `Vec<u8>` for each key
-    /// - Uses references directly from internal buffers
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Closure receiving `(&[u8], S::Output)`. Return `true` to continue,
-    ///   `false` to stop early.
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    ///
-    /// # Performance
-    ///
-    /// ~3-5x faster than using the Iterator trait for large scans.
-    #[inline]
-    pub fn for_each<F>(mut self, mut visitor: F) -> usize
-    where
-        F: FnMut(&[u8], S::Output) -> bool,
-    {
-        if self.flags.exhausted() {
-            return 0;
-        }
-
-        // Lazy initialization
-        if !self.flags.initialized() {
-            self.initialize();
-            if self.flags.exhausted() {
-                return 0;
-            }
-        }
-
-        let mut count: usize = 0;
-
-        'l: loop {
-            // Fast path: process current entry without allocation
-            if let Some(entry) = self.advance_no_alloc() {
-                count += 1;
-                if !visitor(entry.0, entry.1) {
-                    break 'l;
-                }
-            } else {
-                break 'l;
-            }
-        }
-
-        count
-    }
-
-    /// Advance without allocating key Vec.
-    ///
-    /// Returns `(&[u8], S::Output)` where the key slice is borrowed from
-    /// the internal `cursor_key` buffer.
-    ///
-    /// # Performance: Inlined Hot Path
-    ///
-    /// This function inlines the common case `(FindNext → Emit)` to avoid:
-    /// - State machine dispatch overhead
-    /// - Function call overhead to `find_next()`
-    ///
-    /// Only rare cases (Down, Up, Retry) use function calls.
-    #[inline(always)]
-    fn advance_no_alloc(&mut self) -> Option<(&[u8], S::Output)> {
-        // Fast path: if we have a pending emit, process it first
-        if self.state == ScanState::Emit
-            && let Some(snapshot) = self.snapshot.take()
-        {
-            let key = self.cursor_key.full_key();
-
-            if !self.end_bound.contains(key) {
-                self.flags.mark_exhausted();
-                return None;
-            }
-
-            self.state = ScanState::FindNext;
-            return Some((key, snapshot.value));
-        }
-
-        loop {
-            // Handle rare states first (will break out of loop on Emit)
-            match self.state {
-                ScanState::Down => {
-                    handle_down(&mut self.stack, &mut self.cursor_key);
-                    self.state = ScanState::Retry;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Up => {
-                    if !handle_up(
-                        &mut self.stack,
-                        &mut self.cursor_key,
-                        &mut self.layer_stack,
-                        self.guard,
-                    ) {
-                        self.flags.mark_exhausted();
-                        return None;
-                    }
-
-                    self.state = ScanState::FindNext;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Emit | ScanState::FindNext => {}
-            }
-
-            // Main hot path: FindNext (inlined from find_next)
-            let (new_state, snapshot) = if self.flags.needs_duplicate_check() {
-                self.flags.clear_duplicate_check();
-                find_next_with_duplicate_check(
-                    &mut self.stack,
-                    &mut self.cursor_key,
-                    &mut self.layer_stack,
-                    self.guard,
-                )
-            } else {
-                find_next(
-                    &mut self.stack,
-                    &mut self.cursor_key,
-                    &mut self.layer_stack,
-                    self.guard,
-                )
-            };
-
-            self.state = new_state;
-
-            // Fast path: if Emit, return immediately without another loop iteration
-            if new_state == ScanState::Emit
-                && let Some(snap) = snapshot
-            {
-                let key = self.cursor_key.full_key();
-
-                if !self.end_bound.contains(key) {
-                    self.flags.mark_exhausted();
-                    return None;
-                }
-
-                self.state = ScanState::FindNext;
-                return Some((key, snap.value));
-            }
-
-            self.snapshot = snapshot;
-        }
-    }
-
-    /// Zero-copy iteration with borrowed value references.
-    ///
-    /// Unlike [`Self::for_each`] which clones values (Arc increment for `LeafValue`),
-    /// this returns `&S::Value` references tied to the guard lifetime.
-    ///
-    /// # Performance
-    ///
-    /// Eliminates 2 atomic operations per entry (Arc increment + decrement),
-    /// which can improve scan throughput by 2-3x for Arc-based trees.
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue,
-    ///   `false` to stop early.
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    ///
-    /// # Safety
-    ///
-    /// The value references are valid only during the callback. Do not store them.
-    /// The guard ensures the underlying data isn't deallocated during iteration.
-    #[inline]
-    pub fn for_each_ref<F>(mut self, mut visitor: F) -> usize
-    where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> bool,
-    {
-        if self.flags.exhausted() {
-            return 0;
-        }
-
-        // Lazy initialization
-        if !self.flags.initialized() {
-            self.initialize();
-            if self.flags.exhausted() {
-                return 0;
-            }
-        }
-
-        let mut count: usize = 0;
-
-        'l: loop {
-            // Use the zero-copy advance method
-            if let Some((key, value_ref)) = self.advance_no_alloc_ref() {
-                count += 1;
-                if !visitor(key, value_ref) {
-                    break 'l;
-                }
-            } else {
-                break 'l;
-            }
-        }
-
-        count
-    }
-
-    /// Batch iteration with zero-copy value references and reduced dispatch overhead.
-    ///
-    /// This is the highest-performance iteration method. It eliminates state machine
-    /// dispatch overhead while maintaining identical correctness to [`Self::for_each_ref`].
-    ///
-    /// # Correctness
-    ///
-    /// Unlike approaches that validate only once per leaf, this method:
-    /// - Uses per-entry OCC validation (same as `for_each_ref`)
-    /// - Properly updates cursor key for duplicate filtering
-    /// - Handles layer transitions correctly (dynamically switches from single-layer
-    ///   to multi-layer mode when `Down` is encountered)
-    ///
-    /// # Performance
-    ///
-    /// Expected 1.3-1.5x improvement over `for_each_ref` for large scans.
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue.
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    #[inline]
-    #[expect(clippy::too_many_lines, reason = "Complex state management logic")]
-    pub fn for_each_batch_ref<F>(mut self, mut visitor: F) -> usize
-    where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> bool,
-    {
-        if self.flags.exhausted() {
-            return 0;
-        }
-
-        // Lazy initialization - reuses existing RangeIter::initialize()
-        // which correctly handles start-bound descent (shift vs shift_clear)
-        if !self.flags.initialized() {
-            self.initialize();
-            if self.flags.exhausted() {
-                return 0;
-            }
-        }
-
-        let mut count: usize = 0;
-
-        // NOTE: We don't use advance_no_alloc_ref here because it has issues
-        // with multi-layer keys. Instead, we use the batch loop for all entries
-        // which correctly handles cursor_key updates via find_next_ptr.
-
-        // If state is Emit with a snapshot from initialize(), handle it specially
-        // by extracting the snapshot and emitting directly
-        if self.state == ScanState::Emit {
-            if let Some(snapshot) = self.snapshot.take() {
-                let key: &[u8] = self.cursor_key.full_key();
-
-                if !self.end_bound.contains(key) {
-                    self.flags.mark_exhausted();
-                    return 0;
-                }
-
-                // Convert snapshot to reference
-                let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
-
-                let guard = CleanupGuard::<S> {
-                    ptr,
-                    _marker: PhantomData,
-                };
-
-                let value_ref: &S::Value = unsafe { &*ptr.cast::<S::Value>() };
-
-                count += 1;
-                let should_continue = visitor(key, value_ref);
-
-                // Explicitly drop guard to clean up (also runs on panic)
-                drop(guard);
-
-                if !should_continue {
-                    return count;
-                }
-            }
-            self.state = ScanState::FindNext;
-        }
-
-        // Main batch loop - uses find_next_ptr which correctly updates cursor_key
-
-        loop {
-            // ================================================================
-            // Handle rare states (layer transitions, retries, exhaustion)
-            // ================================================================
-
-            // Handle pending state transitions first (like advance_no_alloc_ref)
-            match self.state {
-                ScanState::Down => {
-                    self.flags.disable_single_layer_mode();
-                    handle_down(&mut self.stack, &mut self.cursor_key);
-                    self.state = ScanState::Retry;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Up => {
-                    if !handle_up(
-                        &mut self.stack,
-                        &mut self.cursor_key,
-                        &mut self.layer_stack,
-                        self.guard,
-                    ) {
-                        self.flags.mark_exhausted();
-                        return count;
-                    }
-                    self.state = ScanState::FindNext;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Emit | ScanState::FindNext => {}
-            }
-
-            // Check for null stack (layer exhausted)
-            if self.stack.is_null() {
-                if self.layer_stack.is_empty() {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-                self.state = ScanState::Up;
-                continue;
-            }
-
-            // Check leaf deletion
-            let leaf: &L = unsafe { self.stack.leaf_ref() };
-            if leaf.version().is_deleted() {
-                self.state = ScanState::Retry;
-                continue;
-            }
-
-            // ================================================================
-            // Main hot path: FindNext → Emit (inlined)
-            // ================================================================
-
-            let (new_state, snapshot_ptr) = if self.flags.needs_duplicate_check() {
-                self.flags.clear_duplicate_check();
-                find_next_with_duplicate_check_ptr(
-                    &mut self.stack,
-                    &mut self.cursor_key,
-                    &mut self.layer_stack,
-                    self.guard,
-                )
-            } else {
-                find_next_ptr(
-                    &mut self.stack,
-                    &mut self.cursor_key,
-                    &mut self.layer_stack,
-                    self.guard,
-                )
-            };
-
-            self.state = new_state;
-
-            match new_state {
-                ScanState::Emit => {
-                    if let Some(snap) = snapshot_ptr {
-                        let key: &[u8] = self.cursor_key.full_key();
-
-                        // Check end bound
-                        if !self.end_bound.contains(key) {
-                            self.flags.mark_exhausted();
-                            return count;
-                        }
-
-                        // SAFETY: find_next_ptr validated version, guard protects pointer
-                        let value_ref: &S::Value = unsafe { &*snap.value_ptr };
-
-                        count += 1;
-                        self.state = ScanState::FindNext;
-
-                        if !visitor(key, value_ref) {
-                            return count;
-                        }
-                    }
-                    // Continue to next entry
-                }
-
-                // Other states are handled at the top of the loop
-                ScanState::FindNext | ScanState::Down | ScanState::Up | ScanState::Retry => {}
-            }
-        }
-    }
-
-    /// Intra-leaf batch iteration with maximum performance.
-    ///
-    /// This is the highest-performance iteration method. It processes entire
-    /// leaves in tight loops, minimizing per-entry overhead.
-    ///
-    /// # Performance Characteristics
-    ///
-    /// - Processes all entries in a leaf before moving to next leaf
-    /// - Single OCC validation per leaf (vs per-entry in `for_each_batch_ref`)
-    /// - No function call overhead per entry within a leaf
-    /// - Falls back to state machine for layer transitions
-    ///
-    /// Expected 2-3x improvement over `for_each_batch_ref` for large scans
-    /// with many entries per leaf (typical case).
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue.
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    #[inline]
-    #[expect(clippy::too_many_lines)]
-    pub fn for_each_intra_leaf_batch_ref<F>(mut self, mut visitor: F) -> usize
-    where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> bool,
-    {
-        use super::find::{
-            LeafBatchResult, advance_leaf_ptr, find_retry, handle_down, handle_up,
-            process_leaf_batch_ptr,
-        };
-
-        if self.flags.exhausted() {
-            return 0;
-        }
-
-        // Lazy initialization
-        if !self.flags.initialized() {
-            self.initialize();
-            if self.flags.exhausted() {
-                return 0;
-            }
-        }
-
-        let mut count: usize = 0;
-
-        // Handle initial Emit state from initialize() if present
-        if self.state == ScanState::Emit {
-            if let Some(snapshot) = self.snapshot.take() {
-                let key: &[u8] = self.cursor_key.full_key();
-
-                if !self.end_bound.contains(key) {
-                    self.flags.mark_exhausted();
-                    return 0;
-                }
-
-                let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
-                let guard = CleanupGuard::<S> {
-                    ptr,
-                    _marker: PhantomData,
-                };
-                let value_ref: &S::Value = unsafe { &*ptr.cast::<S::Value>() };
-
-                count += 1;
-                let should_continue = visitor(key, value_ref);
-                drop(guard);
-
-                if !should_continue {
-                    return count;
-                }
-            }
-            self.state = ScanState::FindNext;
-        }
-
-        loop {
-            // Handle rare states (layer transitions, retries)
-            match self.state {
-                ScanState::Down => {
-                    self.flags.disable_single_layer_mode();
-                    handle_down(&mut self.stack, &mut self.cursor_key);
-                    self.state = ScanState::Retry;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Up => {
-                    if !handle_up(
-                        &mut self.stack,
-                        &mut self.cursor_key,
-                        &mut self.layer_stack,
-                        self.guard,
-                    ) {
-                        self.flags.mark_exhausted();
-                        return count;
-                    }
-                    self.state = ScanState::FindNext;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Emit | ScanState::FindNext => {}
-            }
-
-            // Check for null stack (layer exhausted)
-            if self.stack.is_null() {
-                if self.layer_stack.is_empty() {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-                self.state = ScanState::Up;
-                continue;
-            }
-
-            // Check leaf deletion
-            let leaf: &L = unsafe { self.stack.leaf_ref() };
-            if leaf.version().is_deleted() {
-                self.state = ScanState::Retry;
-                continue;
-            }
-
-            // ================================================================
-            // INTRA-LEAF BATCH: Process all remaining entries in this leaf
-            // ================================================================
-
-            let result = process_leaf_batch_ptr(
-                &mut self.stack,
-                &mut self.cursor_key,
-                &mut self.layer_stack,
-                &self.end_bound,
-                &mut visitor,
-                &mut count,
-            );
-
-            match result {
-                LeafBatchResult::LeafExhausted => {
-                    // Advance to next leaf
-                    let (state, _) =
-                        advance_leaf_ptr(&mut self.stack, &self.cursor_key, self.guard);
-                    self.state = state;
-                }
-                LeafBatchResult::LayerEncountered => {
-                    self.state = ScanState::Down;
-                }
-                LeafBatchResult::VersionChanged => {
-                    self.state = ScanState::Retry;
-                }
-                LeafBatchResult::Stopped => {
-                    return count;
-                }
-                LeafBatchResult::EndBoundExceeded => {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-            }
-        }
-    }
-
-    /// Intra-leaf batch iteration returning values by copy.
-    ///
-    /// This is the variant of [`Self::for_each_intra_leaf_batch_ref`] that works for ALL
-    /// `ValueSlot` types, including true-inline storage. Instead of returning `&S::Value`
-    /// references, it returns `S::Output` by value.
-    ///
-    /// # Performance Characteristics
-    ///
-    /// Same optimizations as `for_each_intra_leaf_batch_ref`:
-    /// - Processes all entries in a leaf before moving to next leaf
-    /// - Single OCC validation per leaf (vs per-entry)
-    /// - No function call overhead per entry within a leaf
-    /// - Falls back to state machine for layer transitions
-    ///
-    /// # Use Cases
-    ///
-    /// - **True-inline storage**: Required since inline values cannot be returned by reference
-    /// - **Copy types**: When cloning is cheap (integers, small structs)
-    /// - **Arc storage**: Works but incurs refcount operations per entry
-    ///
-    /// For Arc-based storage where zero-copy matters, prefer `for_each_intra_leaf_batch_ref`.
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Closure receiving `(&[u8], S::Output)`. Return `true` to continue.
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    #[inline]
-    #[expect(clippy::too_many_lines)]
-    pub fn for_each_intra_leaf_batch<F>(mut self, mut visitor: F) -> usize
-    where
-        F: FnMut(&[u8], S::Output) -> bool,
-    {
-        use super::find::{
-            LeafBatchResult, advance_leaf_ptr, find_retry, handle_down, handle_up,
-            process_leaf_batch,
-        };
-
-        if self.flags.exhausted() {
-            return 0;
-        }
-
-        // Lazy initialization
-        if !self.flags.initialized() {
-            self.initialize();
-            if self.flags.exhausted() {
-                return 0;
-            }
-        }
-
-        let mut count: usize = 0;
-
-        // Handle initial Emit state from initialize() if present
-        if self.state == ScanState::Emit {
-            if let Some(snapshot) = self.snapshot.take() {
-                let key: &[u8] = self.cursor_key.full_key();
-
-                if !self.end_bound.contains(key) {
-                    self.flags.mark_exhausted();
-                    return 0;
-                }
-
-                count += 1;
-                let should_continue = visitor(key, snapshot.value);
-
-                if !should_continue {
-                    return count;
-                }
-            }
-            self.state = ScanState::FindNext;
-        }
-
-        loop {
-            // Handle rare states (layer transitions, retries)
-            match self.state {
-                ScanState::Down => {
-                    self.flags.disable_single_layer_mode();
-                    handle_down(&mut self.stack, &mut self.cursor_key);
-                    self.state = ScanState::Retry;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Up => {
-                    if !handle_up(
-                        &mut self.stack,
-                        &mut self.cursor_key,
-                        &mut self.layer_stack,
-                        self.guard,
-                    ) {
-                        self.flags.mark_exhausted();
-                        return count;
-                    }
-                    self.state = ScanState::FindNext;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Emit | ScanState::FindNext => {}
-            }
-
-            // Check for null stack (layer exhausted)
-            if self.stack.is_null() {
-                if self.layer_stack.is_empty() {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-                self.state = ScanState::Up;
-                continue;
-            }
-
-            // Check leaf deletion
-            let leaf: &L = unsafe { self.stack.leaf_ref() };
-            if leaf.version().is_deleted() {
-                self.state = ScanState::Retry;
-                continue;
-            }
-
-            // ================================================================
-            // INTRA-LEAF BATCH: Process all remaining entries in this leaf
-            // ================================================================
-
-            let result = process_leaf_batch(
-                &mut self.stack,
-                &mut self.cursor_key,
-                &mut self.layer_stack,
-                &self.end_bound,
-                &mut visitor,
-                &mut count,
-            );
-
-            match result {
-                LeafBatchResult::LeafExhausted => {
-                    // Advance to next leaf
-                    let (state, _) =
-                        advance_leaf_ptr(&mut self.stack, &self.cursor_key, self.guard);
-                    self.state = state;
-                }
-                LeafBatchResult::LayerEncountered => {
-                    self.state = ScanState::Down;
-                }
-                LeafBatchResult::VersionChanged => {
-                    self.state = ScanState::Retry;
-                }
-                LeafBatchResult::Stopped => {
-                    return count;
-                }
-                LeafBatchResult::EndBoundExceeded => {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-            }
-        }
-    }
-
-    /// Highest-performance value-only batch iteration (no key materialization).
-    ///
-    /// This is the fastest scan method when you only need values. Keys are not
-    /// built or copied, saving up to 56 bytes of copying per entry for long keys.
-    ///
-    /// # Performance
-    ///
-    /// For 64-byte keys: ~1.5-2x faster than `for_each_intra_leaf_batch` when
-    /// the visitor would ignore the key parameter anyway.
-    ///
-    /// # End Bound Behavior
-    ///
-    /// - `Unbounded`: Exact (scans all entries)
-    /// - `Included`/`Excluded`: **Approximate** for keys with suffix
-    ///
-    /// For bounded scans, the end check uses ikey comparison only. This means:
-    /// - Keys where `ikey < bound_ikey`: correctly included
-    /// - Keys where `ikey > bound_ikey`: correctly excluded
-    /// - Keys where `ikey == bound_ikey`: **may over-include** entries
-    ///
-    /// If you need exact end bounds with long keys, use `for_each_intra_leaf_batch`.
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Closure receiving `S::Output`. Return `true` to continue.
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut sum = 0u64;
-    /// tree.iter(&guard).for_each_values_batch(|value| {
-    ///     sum += value;
-    ///     true
-    /// });
-    /// ```
-    #[inline]
-    #[expect(clippy::too_many_lines)]
-    pub fn for_each_values_batch<F>(mut self, mut visitor: F) -> usize
-    where
-        F: FnMut(S::Output) -> bool,
-    {
-        use super::find::{
-            LeafBatchResult, advance_leaf_ptr, find_retry, handle_down, handle_up,
-            process_leaf_batch_values,
-        };
-
-        if self.flags.exhausted() {
-            return 0;
-        }
-
-        // Lazy initialization
-        if !self.flags.initialized() {
-            self.initialize();
-            if self.flags.exhausted() {
-                return 0;
-            }
-        }
-
-        let mut count: usize = 0;
-
-        // Pre-extract end bound ikey for fast comparison
-        let end_bound_ikey: Option<u64> = self.end_bound.extract_ikey();
-
-        // Handle initial Emit state from initialize() if present
-        if self.state == ScanState::Emit {
-            if let Some(snapshot) = self.snapshot.take() {
-                // Skip end bound check for values-only (approximate)
-                // The bound was already checked during find_initial
-                count += 1;
-                let should_continue = visitor(snapshot.value);
-
-                if !should_continue {
-                    return count;
-                }
-            }
-            self.state = ScanState::FindNext;
-        }
-
-        loop {
-            // Handle rare states (layer transitions, retries)
-            match self.state {
-                ScanState::Down => {
-                    self.flags.disable_single_layer_mode();
-                    handle_down(&mut self.stack, &mut self.cursor_key);
-                    self.state = ScanState::Retry;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Up => {
-                    if !handle_up(
-                        &mut self.stack,
-                        &mut self.cursor_key,
-                        &mut self.layer_stack,
-                        self.guard,
-                    ) {
-                        self.flags.mark_exhausted();
-                        return count;
-                    }
-                    self.state = ScanState::FindNext;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Emit | ScanState::FindNext => {}
-            }
-
-            // Check for null stack (layer exhausted)
-            if self.stack.is_null() {
-                if self.layer_stack.is_empty() {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-                self.state = ScanState::Up;
-                continue;
-            }
-
-            // Check leaf deletion
-            let leaf: &L = unsafe { self.stack.leaf_ref() };
-            if leaf.version().is_deleted() {
-                self.state = ScanState::Retry;
-                continue;
-            }
-
-            // ================================================================
-            // VALUE-ONLY BATCH: Process all remaining entries without key building
-            // ================================================================
-
-            let result = process_leaf_batch_values(
-                &mut self.stack,
-                &mut self.cursor_key,
-                &mut self.layer_stack,
-                end_bound_ikey,
-                &mut visitor,
-                &mut count,
-            );
-
-            match result {
-                LeafBatchResult::LeafExhausted => {
-                    // Advance to next leaf
-                    let (state, _) =
-                        advance_leaf_ptr(&mut self.stack, &self.cursor_key, self.guard);
-                    self.state = state;
-                }
-                LeafBatchResult::LayerEncountered => {
-                    self.state = ScanState::Down;
-                }
-                LeafBatchResult::VersionChanged => {
-                    self.state = ScanState::Retry;
-                }
-                LeafBatchResult::Stopped => {
-                    return count;
-                }
-                LeafBatchResult::EndBoundExceeded => {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-            }
-        }
-    }
-
-    /// Fallible iteration with zero-copy value references.
-    ///
-    /// Like [`Self::for_each_ref`], but the visitor can return an error to stop
-    /// iteration early. This is useful when processing entries might fail (e.g.,
-    /// serialization, validation, I/O).
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `Ok(true)` to
-    ///   continue, `Ok(false)` to stop early, or `Err(E)` to stop with an error.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(count)`: Number of entries successfully visited
-    /// - `Err(e)`: The error returned by the visitor
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let result = tree.iter(&guard).try_for_each_ref(|key, value| {
-    ///     if key.len() > MAX_KEY_LEN {
-    ///         return Err(ValidationError::KeyTooLong);
-    ///     }
-    ///     writer.write_entry(key, value)?;
-    ///     Ok(true)
-    /// });
-    ///
-    /// match result {
-    ///     Ok(count) => println!("Wrote {} entries", count),
-    ///     Err(e) => eprintln!("Failed: {}", e),
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if fails to advance
-    #[inline]
-    pub fn try_for_each_ref<F, E>(mut self, mut visitor: F) -> Result<usize, E>
-    where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> Result<bool, E>,
-    {
-        if self.flags.exhausted() {
-            return Ok(0);
-        }
-
-        // Lazy initialization
-        if !self.flags.initialized() {
-            self.initialize();
-            if self.flags.exhausted() {
-                return Ok(0);
-            }
-        }
-
-        let mut count: usize = 0;
-
-        loop {
-            // Use the zero-copy advance method
-            if let Some((key, value_ref)) = self.advance_no_alloc_ref() {
-                count += 1;
-                match visitor(key, value_ref) {
-                    Ok(true) => {}
-
-                    Ok(false) => return Ok(count),
-
-                    Err(e) => return Err(e),
-                }
-            } else {
-                return Ok(count);
-            }
-        }
-    }
-
-    /// Advance without cloning values.
-    ///
-    /// Returns `(&[u8], &S::Value)` where both are borrowed references.
-    /// The value is obtained by dereferencing the raw pointer directly,
-    /// avoiding Arc clone overhead.
-    ///
-    /// # Note on Initial Entry
-    ///
-    /// After `initialize()`, there may be a pending emit in `self.snapshot`.
-    /// For the first entry, we convert the Output to a raw pointer and dereference.
-    /// This requires that `S::Output` is dereferenceable to `S::Value`.
-    ///
-    /// # Safety
-    ///
-    /// The returned references are valid because:
-    /// 1. The guard prevents deallocation during iteration
-    /// 2. Version validation ensures the slot hasn't been modified
-    #[inline(always)]
-    #[expect(clippy::too_many_lines, reason = "Complex allocation logic")]
-    fn advance_no_alloc_ref(&mut self) -> Option<(&[u8], &S::Value)>
-    where
-        S: RefValueSlot,
-    {
-        // Handle pending emit from initialize() - first entry case
-        if self.state == ScanState::Emit && self.snapshot.is_some() {
-            let key = self.cursor_key.full_key();
-
-            if !self.end_bound.contains(key) {
-                self.flags.mark_exhausted();
-                return None;
-            }
-
-            // Take the snapshot to get the value
-            let snapshot = self.snapshot.take()?;
-
-            // Transition to FindNext for next call
-            self.state = ScanState::FindNext;
-
-            // Clean up the previous output pointer before creating a new one.
-            // For LeafValueIndex (Copy types), output_to_raw allocates a Box
-            // that must be freed. For LeafValue (Arc types), this decrements
-            // the cloned Arc's refcount.
-            if let Some(old_ptr) = self.last_output_ptr.take() {
-                // SAFETY: old_ptr was created by output_to_raw in a previous call
-                unsafe { S::cleanup_output_raw(old_ptr) };
-            }
-
-            // Convert the output to a raw pointer and dereference.
-            // For Arc<V>: output_to_raw gives us the Arc's data pointer
-            // For Copy types: output_to_raw gives us the Box's data pointer
-            let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
-
-            // Track this pointer so we can clean it up later
-            self.last_output_ptr = Some(ptr);
-
-            // SAFETY: We just created this pointer from a valid Output.
-            // The guard protects the underlying data.
-            let value_ref: &S::Value = unsafe { &*ptr.cast::<S::Value>() };
-
-            return Some((key, value_ref));
-        }
-
-        loop {
-            // ================================================================
-            // Single-layer fast path (keys ≤ 8 bytes)
-            // ================================================================
-            if self.flags.single_layer_mode() {
-                // Retry handling in single-layer mode
-                if self.state == ScanState::Retry {
-                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                let (new_state, snapshot_ptr) = find_next_single_layer_ptr(
-                    &mut self.stack,
-                    &mut self.cursor_key,
-                    self.guard,
-                    self.flags.needs_duplicate_check(),
-                );
-
-                if self.flags.needs_duplicate_check() {
-                    self.flags.clear_duplicate_check();
-                }
-
-                self.state = new_state;
-
-                match new_state {
-                    ScanState::Emit => {
-                        if let Some(snap) = snapshot_ptr {
-                            let key = self.cursor_key.full_key();
-
-                            if !self.end_bound.contains(key) {
-                                self.flags.mark_exhausted();
-                                return None;
-                            }
-
-                            self.state = ScanState::FindNext;
-                            let value_ref: &S::Value = unsafe { &*snap.value_ptr };
-
-                            return Some((key, value_ref));
-                        }
-                    }
-
-                    ScanState::FindNext => {
-                        if self.stack.is_null() {
-                            self.flags.mark_exhausted();
-                            return None;
-                        }
-
-                        continue;
-                    }
-
-                    ScanState::Retry => continue,
-
-                    ScanState::Down => {
-                        // Encountered layer pointer - fall back to multi-layer
-                        self.flags.disable_single_layer_mode();
-
-                        // Push PARENT context to layer_stack before setting new root.
-                        // find_next_single_layer_ptr already stored the ikey to cursor.
-                        self.layer_stack
-                            .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
-
-                        // Read the layer pointer from current slot and set as new root.
-                        // Stack position is still at the layer pointer slot.
-                        // SAFETY: find_next_single_layer_ptr verified leaf is valid
-                        let Some(slot) = self.stack.kp() else {
-                            // Defensive: shouldn't happen, but if slot is somehow invalid,
-                            // fall back to multi-layer retry path
-                            debug_assert!(false, "Down state should have valid slot");
-                            self.state = ScanState::Retry;
-                            continue;
-                        };
-                        let leaf: &L = unsafe { self.stack.leaf_ref() };
-                        let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-                        self.stack.set_root(layer_ptr);
-
-                        // Don't continue; fall through to handle Down below
-                    }
-
-                    ScanState::Up => {
-                        self.flags.mark_exhausted();
-                        return None;
-                    }
-                }
-            }
-
-            // ================================================================
-            // Multi-layer path (handles Down/Up transitions)
-            // ================================================================
-
-            // Handle rare states first
-            match self.state {
-                ScanState::Down => {
-                    handle_down(&mut self.stack, &mut self.cursor_key);
-                    self.state = ScanState::Retry;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Up => {
-                    if !handle_up(
-                        &mut self.stack,
-                        &mut self.cursor_key,
-                        &mut self.layer_stack,
-                        self.guard,
-                    ) {
-                        self.flags.mark_exhausted();
-                        return None;
-                    }
-
-                    self.state = ScanState::FindNext;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Emit | ScanState::FindNext => {}
-            }
-
-            // Use zero-copy find_next variants
-            let (new_state, snapshot_ptr) = if self.flags.needs_duplicate_check() {
-                self.flags.clear_duplicate_check();
-                find_next_with_duplicate_check_ptr(
-                    &mut self.stack,
-                    &mut self.cursor_key,
-                    &mut self.layer_stack,
-                    self.guard,
-                )
-            } else {
-                find_next_ptr(
-                    &mut self.stack,
-                    &mut self.cursor_key,
-                    &mut self.layer_stack,
-                    self.guard,
-                )
-            };
-
-            self.state = new_state;
-
-            // If Emit, return the reference directly
-            if new_state == ScanState::Emit
-                && let Some(snap) = snapshot_ptr
-            {
-                let key = self.cursor_key.full_key();
-
-                if !self.end_bound.contains(key) {
-                    self.flags.mark_exhausted();
-                    return None;
-                }
-
-                self.state = ScanState::FindNext;
-
-                // SAFETY: Guard prevents deallocation, version was validated
-                // in find_next_inner_ptr before returning the pointer.
-                // We dereference the raw pointer directly (not via snap.value_ref())
-                // because the reference must outlive the local `snap` variable.
-                let value_ref: &S::Value = unsafe { &*snap.value_ptr };
-                return Some((key, value_ref));
-            }
-
-            // All non-Emit states (Up, Down, Retry, FindNext) continue the loop.
-            // Exhaustion is detected by stack.is_null() or handle_up() returning false.
-        }
-    }
-
-    // ========================================================================
-    //  Reverse Iteration with Batch Processing
-    // ========================================================================
-
-    /// High-performance reverse iteration with zero-copy references.
-    ///
-    /// This is the fastest reverse iteration method. It processes entire
-    /// leaves in tight loops, minimizing per-entry overhead.
-    ///
-    /// # Performance Characteristics
-    ///
-    /// - Processes all entries in a leaf before moving to previous leaf
-    /// - Single OCC validation per leaf
-    /// - No function call overhead per entry within a leaf
-    /// - Falls back to state machine for layer transitions
-    ///
-    /// Expected 2-3x improvement over standard `next_back()` iteration.
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue.
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    #[inline]
-    #[expect(clippy::too_many_lines)]
-    pub fn rev_for_each_ref<F>(mut self, mut visitor: F) -> usize
-    where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> bool,
-    {
-        use super::find_rev::{
-            LeafBatchResultBack, ReverseScan, advance_prev_leaf_ptr, process_prev_leaf_batch_ptr,
-        };
-
-        if self.flags.back_exhausted() {
-            return 0;
-        }
-
-        // Lazy initialization of back cursor
-        if !self.flags.back_initialized() {
-            self.initialize_back();
-            if self.flags.back_exhausted() {
-                return 0;
-            }
-        }
-
-        let mut count: usize = 0;
-
-        // Handle initial Emit state from initialize_back() if present
-        if self.back_state == ScanStateBack::Emit {
-            if let Some(snapshot) = self.back_snapshot.take() {
-                let key: &[u8] = self.back_cursor_key.full_key();
-
-                if !self.start_bound.contains_reverse(key) {
-                    self.flags.mark_back_exhausted();
-                    return 0;
-                }
-
-                let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
-                let guard = CleanupGuard::<S> {
-                    ptr,
-                    _marker: PhantomData,
-                };
-                let value_ref: &S::Value = unsafe { &*ptr.cast::<S::Value>() };
-
-                count += 1;
-                let should_continue = visitor(key, value_ref);
-                drop(guard);
-
-                if !should_continue {
-                    return count;
-                }
-            }
-            self.back_state = ScanStateBack::FindPrev;
-        }
-
-        loop {
-            // Handle rare states (layer transitions, retries)
-            match self.back_state {
-                ScanStateBack::Down => {
-                    ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
-                    self.back_state = ScanStateBack::Retry;
-                    self.flags.require_back_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Up => {
-                    if !ReverseScan::handle_up_back(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_layer_stack,
-                        &mut self.back_helper,
-                        self.guard,
-                    ) {
-                        self.flags.mark_back_exhausted();
-                        return count;
-                    }
-                    self.back_state = ScanStateBack::FindPrev;
-                    self.flags.require_back_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Retry => {
-                    let (new_state, _) = ReverseScan::reposition_back(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_helper,
-                        self.guard,
-                    );
-                    self.back_state = new_state;
-                    self.flags.require_back_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Emit | ScanStateBack::FindPrev => {}
-            }
-
-            // Check for null stack (layer exhausted)
-            if self.back_stack.get_leaf_ptr().is_null() {
-                if self.back_layer_stack.is_empty() {
-                    self.flags.mark_back_exhausted();
-                    return count;
-                }
-                self.back_state = ScanStateBack::Up;
-                continue;
-            }
-
-            // Check leaf deletion
-            let leaf: &L = unsafe { &*self.back_stack.get_leaf_ptr() };
-            if leaf.version().is_deleted() {
-                self.back_state = ScanStateBack::Retry;
-                continue;
-            }
-
-            // ================================================================
-            // INTRA-LEAF BATCH: Process all remaining entries in this leaf
-            // ================================================================
-
-            let result = process_prev_leaf_batch_ptr(
-                &mut self.back_stack,
-                &mut self.back_cursor_key,
-                &mut self.back_layer_stack,
-                &self.start_bound,
-                &mut self.back_helper,
-                &mut visitor,
-                &mut count,
-            );
-
-            match result {
-                LeafBatchResultBack::LeafExhausted => {
-                    // Advance to previous leaf
-                    if !advance_prev_leaf_ptr(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        self.guard,
-                    ) {
-                        // No previous leaf - check if we need to go up
-                        if self.back_layer_stack.is_empty() {
-                            self.flags.mark_back_exhausted();
-                            return count;
-                        }
-                        self.back_state = ScanStateBack::Up;
-                    }
-                }
-                LeafBatchResultBack::LayerEncountered => {
-                    self.back_state = ScanStateBack::Down;
-                }
-                LeafBatchResultBack::VersionChanged => {
-                    self.back_state = ScanStateBack::Retry;
-                }
-                LeafBatchResultBack::Stopped => {
-                    return count;
-                }
-                LeafBatchResultBack::StartBoundExceeded => {
-                    self.flags.mark_back_exhausted();
-                    return count;
-                }
-            }
-        }
-    }
-
-    /// Highest-performance batch-optimized reverse iteration (value by copy).
-    ///
-    /// This is the non-reference variant that works with ALL storage types including
-    /// true-inline (`MassTree15Inline`). Unlike `rev_for_each_ref` which returns
-    /// `&S::Value` references, this returns `S::Output` by value.
-    ///
-    /// # Performance Characteristics
-    ///
-    /// - Processes all entries in a leaf before moving to previous leaf
-    /// - Single OCC validation per leaf
-    /// - No function call overhead per entry within a leaf
-    /// - Falls back to state machine for layer transitions
-    ///
-    /// Expected 2-3x improvement over standard `iter().rev()` iteration.
-    ///
-    /// # Availability
-    ///
-    /// Available for ALL storage types:
-    /// - `MassTree15<V>` (Arc-based)
-    /// - `MassTree24<V>` (Arc-based)
-    /// - `MassTree15Inline<V>` (true-inline)
-    /// - `MassTree24Inline<V>` (Box/index-based)
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Callback function `fn(&[u8], S::Output) -> bool`
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    #[inline]
-    #[expect(clippy::too_many_lines)]
-    pub fn rev_for_each_intra_leaf_batch<F>(mut self, mut visitor: F) -> usize
-    where
-        F: FnMut(&[u8], S::Output) -> bool,
-    {
-        use super::find_rev::{
-            LeafBatchResultBack, ReverseScan, advance_prev_leaf_ptr, process_prev_leaf_batch,
-        };
-
-        if self.flags.back_exhausted() {
-            return 0;
-        }
-
-        // Lazy initialization of back cursor
-        if !self.flags.back_initialized() {
-            self.initialize_back();
-            if self.flags.back_exhausted() {
-                return 0;
-            }
-        }
-
-        let mut count: usize = 0;
-
-        // Handle initial Emit state from initialize_back() if present
-        if self.back_state == ScanStateBack::Emit {
-            if let Some(snapshot) = self.back_snapshot.take() {
-                let key: &[u8] = self.back_cursor_key.full_key();
-
-                if !self.start_bound.contains_reverse(key) {
-                    self.flags.mark_back_exhausted();
-                    return 0;
-                }
-
-                // Use output_from_raw to get value by copy
-                let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
-                let output: S::Output = unsafe { S::output_from_raw(ptr) };
-                // Note: ptr was created from snapshot.value which is still alive,
-                // and output_from_raw clones/copies, so we need to clean up ptr
-                unsafe { S::cleanup_output_raw(ptr) };
-
-                count += 1;
-                let should_continue = visitor(key, output);
-
-                if !should_continue {
-                    return count;
-                }
-            }
-            self.back_state = ScanStateBack::FindPrev;
-        }
-
-        loop {
-            // Handle rare states (layer transitions, retries)
-            match self.back_state {
-                ScanStateBack::Down => {
-                    ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
-                    self.back_state = ScanStateBack::Retry;
-                    self.flags.require_back_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Up => {
-                    if !ReverseScan::handle_up_back(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_layer_stack,
-                        &mut self.back_helper,
-                        self.guard,
-                    ) {
-                        self.flags.mark_back_exhausted();
-                        return count;
-                    }
-                    self.back_state = ScanStateBack::FindPrev;
-                    self.flags.require_back_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Retry => {
-                    let (new_state, _) = ReverseScan::reposition_back(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_helper,
-                        self.guard,
-                    );
-                    self.back_state = new_state;
-                    self.flags.require_back_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Emit | ScanStateBack::FindPrev => {}
-            }
-
-            // Check for null stack (layer exhausted)
-            if self.back_stack.get_leaf_ptr().is_null() {
-                if self.back_layer_stack.is_empty() {
-                    self.flags.mark_back_exhausted();
-                    return count;
-                }
-                self.back_state = ScanStateBack::Up;
-                continue;
-            }
-
-            // Check leaf deletion
-            let leaf: &L = unsafe { &*self.back_stack.get_leaf_ptr() };
-            if leaf.version().is_deleted() {
-                self.back_state = ScanStateBack::Retry;
-                continue;
-            }
-
-            // ================================================================
-            // INTRA-LEAF BATCH: Process all remaining entries in this leaf
-            // ================================================================
-
-            let result = process_prev_leaf_batch(
-                &mut self.back_stack,
-                &mut self.back_cursor_key,
-                &mut self.back_layer_stack,
-                &self.start_bound,
-                &mut self.back_helper,
-                &mut visitor,
-                &mut count,
-            );
-
-            match result {
-                LeafBatchResultBack::LeafExhausted => {
-                    // Advance to previous leaf
-                    if !advance_prev_leaf_ptr(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        self.guard,
-                    ) {
-                        // No previous leaf - check if we need to go up
-                        if self.back_layer_stack.is_empty() {
-                            self.flags.mark_back_exhausted();
-                            return count;
-                        }
-                        self.back_state = ScanStateBack::Up;
-                    }
-                }
-                LeafBatchResultBack::LayerEncountered => {
-                    self.back_state = ScanStateBack::Down;
-                }
-                LeafBatchResultBack::VersionChanged => {
-                    self.back_state = ScanStateBack::Retry;
-                }
-                LeafBatchResultBack::Stopped => {
-                    return count;
-                }
-                LeafBatchResultBack::StartBoundExceeded => {
-                    self.flags.mark_back_exhausted();
-                    return count;
-                }
-            }
-        }
-    }
-
-    /// Highest-performance reverse value-only batch iteration (no key materialization).
-    ///
-    /// This is the fastest reverse scan method when you only need values. Keys are not
-    /// built or copied, saving up to 56 bytes of copying per entry for long keys.
-    ///
-    /// # Performance
-    ///
-    /// For 64-byte keys: ~1.5-2x faster than `rev_for_each_intra_leaf_batch` when
-    /// the visitor would ignore the key parameter anyway.
-    ///
-    /// # Start Bound Behavior (Reverse Iteration)
-    ///
-    /// - `Unbounded`: Exact (scans all entries)
-    /// - `Included`/`Excluded`: **Approximate** for keys with suffix
-    ///
-    /// For bounded scans, the start check uses ikey comparison only. This means:
-    /// - Keys where `ikey > bound_ikey`: correctly included
-    /// - Keys where `ikey < bound_ikey`: correctly excluded
-    /// - Keys where `ikey == bound_ikey`: **may over-include** entries
-    ///
-    /// If you need exact start bounds with long keys, use `rev_for_each_intra_leaf_batch`.
-    ///
-    /// # Arguments
-    ///
-    /// - `visitor`: Closure receiving `S::Output`. Return `true` to continue.
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    #[inline]
-    #[expect(clippy::too_many_lines)]
-    pub fn rev_for_each_values_batch<F>(mut self, mut visitor: F) -> usize
-    where
-        F: FnMut(S::Output) -> bool,
-    {
-        use super::find_rev::{
-            LeafBatchResultBack, ReverseScan, advance_prev_leaf_ptr, process_prev_leaf_batch_values,
-        };
-
-        if self.flags.back_exhausted() {
-            return 0;
-        }
-
-        // Lazy initialization of back cursor
-        if !self.flags.back_initialized() {
-            self.initialize_back();
-            if self.flags.back_exhausted() {
-                return 0;
-            }
-        }
-
-        let mut count: usize = 0;
-
-        // Pre-extract start bound ikey for fast comparison (reverse uses start as lower bound)
-        let start_bound_ikey: Option<u64> = self.start_bound.extract_ikey();
-
-        // Handle initial Emit state from initialize_back() if present
-        if self.back_state == ScanStateBack::Emit {
-            if let Some(snapshot) = self.back_snapshot.take() {
-                // Skip start bound check for values-only (approximate)
-                // The bound was already checked during initialization
-
-                // Use output_from_raw to get value by copy
-                let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
-                let output: S::Output = unsafe { S::output_from_raw(ptr) };
-                unsafe { S::cleanup_output_raw(ptr) };
-
-                count += 1;
-                let should_continue = visitor(output);
-
-                if !should_continue {
-                    return count;
-                }
-            }
-            self.back_state = ScanStateBack::FindPrev;
-        }
-
-        loop {
-            // Handle rare states (layer transitions, retries)
-            match self.back_state {
-                ScanStateBack::Down => {
-                    ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
-                    self.back_state = ScanStateBack::Retry;
-                    self.flags.require_back_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Up => {
-                    if !ReverseScan::handle_up_back(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_layer_stack,
-                        &mut self.back_helper,
-                        self.guard,
-                    ) {
-                        self.flags.mark_back_exhausted();
-                        return count;
-                    }
-                    self.back_state = ScanStateBack::FindPrev;
-                    self.flags.require_back_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Retry => {
-                    let (new_state, _) = ReverseScan::reposition_back(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_helper,
-                        self.guard,
-                    );
-                    self.back_state = new_state;
-                    self.flags.require_back_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Emit | ScanStateBack::FindPrev => {}
-            }
-
-            // Check for null stack (layer exhausted)
-            if self.back_stack.get_leaf_ptr().is_null() {
-                if self.back_layer_stack.is_empty() {
-                    self.flags.mark_back_exhausted();
-                    return count;
-                }
-                self.back_state = ScanStateBack::Up;
-                continue;
-            }
-
-            // Check leaf deletion
-            let leaf: &L = unsafe { &*self.back_stack.get_leaf_ptr() };
-            if leaf.version().is_deleted() {
-                self.back_state = ScanStateBack::Retry;
-                continue;
-            }
-
-            // ================================================================
-            // VALUE-ONLY BATCH: Process all remaining entries without key building
-            // ================================================================
-
-            let result = process_prev_leaf_batch_values(
-                &mut self.back_stack,
-                &mut self.back_cursor_key,
-                &mut self.back_layer_stack,
-                start_bound_ikey,
-                &mut self.back_helper,
-                &mut visitor,
-                &mut count,
-            );
-
-            match result {
-                LeafBatchResultBack::LeafExhausted => {
-                    // Advance to previous leaf
-                    if !advance_prev_leaf_ptr(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        self.guard,
-                    ) {
-                        // No previous leaf - check if we need to go up
-                        if self.back_layer_stack.is_empty() {
-                            self.flags.mark_back_exhausted();
-                            return count;
-                        }
-                        self.back_state = ScanStateBack::Up;
-                    }
-                }
-                LeafBatchResultBack::LayerEncountered => {
-                    self.back_state = ScanStateBack::Down;
-                }
-                LeafBatchResultBack::VersionChanged => {
-                    self.back_state = ScanStateBack::Retry;
-                }
-                LeafBatchResultBack::Stopped => {
-                    return count;
-                }
-                LeafBatchResultBack::StartBoundExceeded => {
-                    self.flags.mark_back_exhausted();
-                    return count;
-                }
-            }
-        }
     }
 }
 
@@ -3072,145 +885,3 @@ where
         }
     }
 }
-
-// ============================================================================
-//  Key/Value Only Iterators
-// ============================================================================
-
-/// Iterator adapter that yields only keys.
-pub struct KeysIter<'a, 'g, S, L, A>
-where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    inner: RangeIter<'a, 'g, S, L, A>,
-}
-
-impl<S, L, A> Debug for KeysIter<'_, '_, S, L, A>
-where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
-        f.debug_struct("KeysIter")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl<S, L, A> Iterator for KeysIter<'_, '_, S, L, A>
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    type Item = Vec<u8>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|entry| entry.key)
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
-impl<S, L, A> FusedIterator for KeysIter<'_, '_, S, L, A>
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-}
-
-/// Iterator adapter that yields only values.
-pub struct ValuesIter<'a, 'g, S, L, A>
-where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    inner: RangeIter<'a, 'g, S, L, A>,
-}
-
-impl<S, L, A> Debug for ValuesIter<'_, '_, S, L, A>
-where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
-        f.debug_struct("ValuesIter")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl<S, L, A> Iterator for ValuesIter<'_, '_, S, L, A>
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    type Item = S::Output;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|entry| entry.value)
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
-impl<S, L, A> FusedIterator for ValuesIter<'_, '_, S, L, A>
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-}
-
-// ============================================================================
-//  Factory Functions (used by api.rs)
-// ============================================================================
-
-impl<'a, 'g, S, L, A> RangeIter<'a, 'g, S, L, A>
-where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    /// Convert to a keys-only iterator.
-    pub const fn keys(self) -> KeysIter<'a, 'g, S, L, A> {
-        KeysIter { inner: self }
-    }
-
-    /// Convert to a values-only iterator.
-    pub const fn values(self) -> ValuesIter<'a, 'g, S, L, A> {
-        ValuesIter { inner: self }
-    }
-}
-
-// ============================================================================
-//  Tests
-// ============================================================================
-
-#[cfg(test)]
-mod unit_tests;

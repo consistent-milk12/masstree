@@ -1252,8 +1252,6 @@ use super::iterator::RangeBound;
 /// - Function call overhead per entry
 /// - State machine dispatch per entry
 /// - Redundant leaf/version checks
-///
-/// Expected 2-3x improvement for reverse scans touching many entries per leaf.
 #[inline]
 #[expect(clippy::too_many_arguments)]
 pub fn process_prev_leaf_batch_ptr<L, S, F>(
@@ -1393,8 +1391,6 @@ where
 /// - Single OCC validation per leaf
 /// - No per-entry function call overhead
 /// - Prefetching for pipelining
-///
-/// Expected 2-3x improvement for reverse scans touching many entries per leaf.
 #[inline]
 #[expect(clippy::too_many_arguments)]
 pub fn process_prev_leaf_batch<L, S, F>(
@@ -1616,7 +1612,7 @@ use super::scan_state::ScanSnapshotPtr;
 ///
 /// # Performance
 ///
-/// ~20% faster than standard `find_prev` for single-layer data by eliminating
+/// Faster than standard `find_prev` for single-layer data by eliminating
 /// branch mispredictions from layer pointer checks.
 #[inline]
 #[allow(dead_code)] // Kept for future single-layer optimization path
@@ -1683,13 +1679,16 @@ where
         cursor_key.assign_store_ikey(slot_ikey);
         let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
         prefetch_read(layer_ptr);
+
         return (ScanStateBack::Down, None);
     }
 
     // Value slot - prepare for emit
     let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
     if slot_ptr.is_null() {
         stack.set_ki(ki - 1);
+
         return (ScanStateBack::FindPrev, None);
     }
 
@@ -1727,6 +1726,7 @@ where
     S: ValueSlot,
 {
     let leaf_ptr: *mut L = stack.get_leaf_ptr();
+
     if leaf_ptr.is_null() {
         return (ScanStateBack::FindPrev, None);
     }
@@ -1764,6 +1764,7 @@ where
 
     // Prefetch prev-prev leaf for 2-way pipelining
     let prev_prev: *mut L = prev_leaf.prev();
+
     if !prev_prev.is_null() {
         let prev_prev_leaf: &L = unsafe { &*prev_prev };
         prev_prev_leaf.prefetch();
@@ -1837,9 +1838,9 @@ where
 {
     let leaf_ptr: *const L = stack.get_leaf_ptr();
     let leaf: &L = unsafe { &*leaf_ptr };
-    let perm = *stack.get_perm_ref();
-    let perm_size = perm.size();
-    let cached_version = stack.get_version();
+    let perm: <L as TreeLeafNode<S>>::Perm = *stack.get_perm_ref();
+    let perm_size: usize = perm.size();
+    let cached_version: u32 = stack.get_version();
 
     // Check if leaf was deleted since we cached the version
     if leaf.version().is_deleted() {
@@ -1851,7 +1852,7 @@ where
 
     // Process remaining entries in reverse order
     while ki >= 0 && ki.cast_unsigned() < perm_size {
-        let slot = perm.get(ki.cast_unsigned());
+        let slot: usize = perm.get(ki.cast_unsigned());
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
         let slot_keylenx: u8 = leaf.keylenx(slot);
 
@@ -1865,11 +1866,13 @@ where
         if slot_keylenx >= LAYER_KEYLENX {
             let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
             layer_stack.push(LayerContext::new(stack.get_root(), stack.get_leaf_ptr()));
+
             // Still need to track ikey for layer navigation
             cursor_key.assign_store_ikey(slot_ikey);
             prefetch_read(slot_ptr);
             stack.set_root(slot_ptr.cast_const());
             stack.set_ki(ki - 1);
+
             return LeafBatchResultBack::LayerEncountered;
         }
 

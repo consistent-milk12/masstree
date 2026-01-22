@@ -53,7 +53,8 @@ fn inline_scan_for_each() {
 
     // Scan using for_each
     let mut results: Vec<(Vec<u8>, u64)> = Vec::new();
-    tree.iter(&guard).for_each(|key, value| {
+
+    let _ = tree.iter(&guard).for_each(|key, value| {
         results.push((key.to_vec(), value));
         true
     });
@@ -139,18 +140,21 @@ fn inline_scan_batch_range() {
     let end = 75u64.to_be_bytes();
 
     let mut results: Vec<u64> = Vec::new();
-    tree.range(
-        RangeBound::Included(&start),
-        RangeBound::Excluded(&end),
-        &guard,
-    )
-    .for_each_intra_leaf_batch(|_key, value| {
-        results.push(value);
-        true
-    });
+
+    let _ = tree
+        .range(
+            RangeBound::Included(&start),
+            RangeBound::Excluded(&end),
+            &guard,
+        )
+        .for_each_intra_leaf_batch(|_key, value| {
+            results.push(value);
+            true
+        });
 
     // Should get 25..75 = 50 values
     assert_eq!(results.len(), 50);
+
     for (i, value) in results.into_iter().enumerate() {
         assert_eq!(value, (25 + i) as u64);
     }

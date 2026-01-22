@@ -765,11 +765,6 @@ where
     /// This is significantly faster than [`Self::get_with_guard`] for read-heavy workloads
     /// because it avoids atomic reference count operations (Arc clone/drop).
     ///
-    /// # Performance
-    ///
-    /// Under high concurrency, `get_ref` can be **2-5x faster** than `get_with_guard`
-    /// because it eliminates cache line bouncing on shared Arc reference counts.
-    ///
     /// # Note
     ///
     /// This method is only available for pointer-backed storage modes

@@ -11,12 +11,12 @@
 //! `concurrent_insert_then_get_does_not_lose_key`
 
 #![expect(clippy::unwrap_used)]
-#![expect(clippy::indexing_slicing)]
+#![expect(clippy::cast_ptr_alignment)]
 #![expect(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use masstree::{InternodeNode, LeafNode15, LeafValue, MassTree, NodeVersion};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Instant;
 
@@ -52,7 +52,7 @@ fn main() {
             return;
         }
 
-        if run % 100 == 0 {
+        if run.is_multiple_of(100) {
             let elapsed = start.elapsed();
             println!(
                 "Completed {} runs in {:.2}s ({:.0} runs/sec)",
@@ -117,7 +117,9 @@ fn run_single_iteration(run: u64) -> Option<Failure> {
     }
 
     let key_val = missing_key.load(Ordering::SeqCst);
-    if key_val != u64::MAX {
+    if key_val == u64::MAX {
+        None
+    } else {
         let thread_id = missing_thread.load(Ordering::SeqCst);
         let iteration = missing_i.load(Ordering::SeqCst);
         let in_leaf_chain = scan_leaf_chain_contains(&tree, key_val);
@@ -131,8 +133,6 @@ fn run_single_iteration(run: u64) -> Option<Failure> {
             in_leaf_chain,
             tree,
         })
-    } else {
-        None
     }
 }
 
@@ -230,27 +230,26 @@ fn diagnose_failure(failure: &Failure) {
 
     // Try get() again now that threads are joined
     let get_now = failure.tree.get_with_guard(&key, &guard);
-    println!("get() after join: {:?}", get_now);
+    println!("get() after join: {get_now:?}");
 
     // Check neighboring keys
     println!("\nNeighboring keys via get():");
     for offset in -5i64..=5 {
-        let check_val = (failure.key_val as i64 + offset) as u64;
+        let check_val = (failure.key_val.cast_signed() + offset).cast_unsigned();
         let check_key = check_val.to_be_bytes();
         let result = failure.tree.get_with_guard(&check_key, &guard);
         let marker = if offset == 0 { " <-- MISSING" } else { "" };
         let status = if result.is_some() { "found" } else { "MISS" };
-        println!(
-            "  0x{:016x} ({:>6}): {}{marker}",
-            check_val, check_val, status
-        );
+        println!("  0x{check_val:016x} ({check_val:>6}): {status}{marker}");
     }
 
     // Check what keys are around this in the same thread's sequence
     println!("\nThread {}'s nearby keys:", failure.thread_id);
     let t = failure.thread_id;
     for i_offset in -3i64..=3 {
+        #[expect(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
         let i = (failure.iteration as i64 + i_offset) as usize;
+
         if i < OPS_PER_THREAD {
             let kv = (t * 10_000 + i) as u64;
             let k = kv.to_be_bytes();

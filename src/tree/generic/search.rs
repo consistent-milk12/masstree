@@ -34,14 +34,15 @@ where
     /// This matches C++ `key_lower_bound_by` in `ksearch.hh:64-80`.
     #[inline(always)]
     fn binary_search_ikey_lower_bound(leaf: &L, perm: &L::Perm, target_ikey: u64) -> (usize, bool) {
-        let size = perm.size();
+        let size: usize = perm.size();
         let mut l: usize = 0;
         let mut r: usize = size;
-        let mut found = false;
+        let mut found: bool = false;
 
         while l < r {
-            let m = (l + r) >> 1;
-            let slot = perm.get(m);
+            let m: usize = (l + r) >> 1;
+            let slot: usize = perm.get(m);
+
             // Use Relaxed ordering - caller's permutation load provides Acquire synchronization
             let slot_ikey = leaf.ikey_relaxed(slot);
 
@@ -78,13 +79,14 @@ where
         perm: &L::Perm,
         search_keylenx: u8,
     ) -> InsertSearchResultGeneric {
-        let target_ikey = key.ikey();
-        let size = perm.size();
+        let target_ikey: u64 = key.ikey();
+        let size: usize = perm.size();
 
         for i in 0..size {
-            let slot = perm.get(i);
+            let slot: usize = perm.get(i);
+
             // Use Relaxed ordering - caller's permutation load provides Acquire synchronization
-            let slot_ikey = leaf.ikey_relaxed(slot);
+            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
             if slot_ikey == target_ikey {
                 // Check this slot; continue if it doesn't provide a definitive answer
@@ -93,6 +95,7 @@ where
                 {
                     return result;
                 }
+
                 // Continue to next slot with same ikey
                 continue;
             }
@@ -134,8 +137,8 @@ where
         }
 
         // Binary search for larger leaves (WIDTH > 16)
-        let target_ikey = key.ikey();
-        let size = perm.size();
+        let target_ikey: u64 = key.ikey();
+        let size: usize = perm.size();
         let (start_pos, found) = Self::binary_search_ikey_lower_bound(leaf, perm, target_ikey);
 
         if !found {
@@ -147,9 +150,10 @@ where
         // Linear scan from the first matching position to handle multiple entries
         // with the same ikey (different keylenx values, layer pointers, etc.)
         for i in start_pos..size {
-            let slot = perm.get(i);
+            let slot: usize = perm.get(i);
+
             // Use Relaxed ordering - caller's permutation load provides Acquire synchronization
-            let slot_ikey = leaf.ikey_relaxed(slot);
+            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
             // Stop when we pass the matching ikeys
             if slot_ikey != target_ikey {
@@ -179,8 +183,8 @@ where
         slot: usize,
         search_keylenx: u8,
     ) -> Option<InsertSearchResultGeneric> {
-        let slot_keylenx = leaf.keylenx(slot);
-        let slot_ptr = leaf.leaf_value_ptr(slot);
+        let slot_keylenx: u8 = leaf.keylenx(slot);
+        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
         // Null pointer means slot is being modified - skip and continue
         if slot_ptr.is_null() {
@@ -201,21 +205,25 @@ where
             if slot_keylenx == KSUF_KEYLENX {
                 // Both have suffixes - compare them
                 let key_suffix = key.suffix();
+
                 if let Some(slot_suffix) = leaf.ksuf(slot) {
                     if key_suffix == slot_suffix {
                         return Some(InsertSearchResultGeneric::Found { slot });
                     }
+
                     return Some(InsertSearchResultGeneric::Conflict { slot });
                 }
+
                 return Some(InsertSearchResultGeneric::Conflict { slot });
             }
+
             // Inline keys with matching keylenx = same key
             return Some(InsertSearchResultGeneric::Found { slot });
         }
 
         // Same ikey, different keylenx - check if conflict is needed
-        let slot_has_suffix = slot_keylenx == KSUF_KEYLENX;
-        let key_has_suffix = key.has_suffix();
+        let slot_has_suffix: bool = slot_keylenx == KSUF_KEYLENX;
+        let key_has_suffix: bool = key.has_suffix();
 
         if slot_has_suffix && key_has_suffix {
             return Some(InsertSearchResultGeneric::Conflict { slot });
@@ -353,6 +361,7 @@ where
                 {
                     return result;
                 }
+
                 // Continue to next slot with same ikey
                 continue;
             }

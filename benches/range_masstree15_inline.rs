@@ -223,18 +223,21 @@ mod reverse_scan {
                     .map(|_| {
                         let tree = Arc::clone(&tree);
                         let barrier = Arc::clone(&barrier);
+
                         thread::spawn(move || {
                             barrier.wait();
                             let guard = tree.guard();
                             let mut total = 0usize;
                             for _ in 0..OPS_PER_THREAD {
                                 let mut count = 0usize;
-                                tree.iter(&guard).for_each_intra_leaf_batch(|_, _| {
+                                let _ = tree.iter(&guard).for_each_intra_leaf_batch(|_, _| {
                                     count += 1;
                                     count < SCAN_LIMIT
                                 });
+
                                 total += count;
                             }
+
                             black_box(total);
                         })
                     })

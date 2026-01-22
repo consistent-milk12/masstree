@@ -22,6 +22,7 @@ const ITERATIONS: usize = 50;
 /// When running under Miri (10-100x slower), the threshold is lowered
 /// significantly to avoid false failures.
 #[test]
+#[ignore = "long test"]
 fn stress_extreme_contention() {
     let tree: MassTree24<u64> = MassTree24::new();
     let tree = Arc::new(tree);

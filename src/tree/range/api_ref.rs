@@ -72,10 +72,6 @@ where
     /// It is **NOT** available for true-inline storage (`MassTree15Inline`).
     /// Use [`Self::scan`] instead for inline storage.
     ///
-    /// # Performance
-    ///
-    /// For `MassTree<V>` (Arc-based): 2-3x faster than `scan()` for scan-heavy workloads.
-    ///
     /// # Arguments
     ///
     /// - `start`: Start bound of the range
@@ -142,7 +138,7 @@ where
     ///
     /// # Performance
     ///
-    /// Expected 1.3-1.5x improvement over `scan_ref` for large scans, from:
+    /// Improvement over `scan_ref` for large scans, from:
     /// - Eliminating `match state {}` dispatch overhead
     /// - Inlining the common `FindNext` → `Emit` path
     ///
@@ -203,8 +199,6 @@ where
     /// - No function call overhead per entry within a leaf
     /// - Falls back to state machine for layer transitions (sublayers)
     ///
-    /// Expected 2-3x improvement over `scan_batch_ref` for large scans.
-    ///
     /// # Arguments
     ///
     /// - `start`: Start bound of the range
@@ -258,8 +252,6 @@ where
     /// - Single OCC validation per leaf
     /// - No function call overhead per entry within a leaf
     /// - Falls back to state machine for layer transitions
-    ///
-    /// Expected 2-3x improvement over standard `iter().rev()` iteration.
     ///
     /// # Arguments
     ///

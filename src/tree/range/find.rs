@@ -1224,8 +1224,6 @@ pub enum LeafBatchResult {
 /// - Function call overhead per entry
 /// - State machine dispatch per entry
 /// - Redundant leaf/version checks
-///
-/// Expected 2-3x improvement for scans touching many entries per leaf.
 #[inline]
 pub fn process_leaf_batch_ptr<L, S, F>(
     stack: &mut ScanStackElement<L, S>,

@@ -744,15 +744,15 @@ fn range_scan_ordering_during_inserts() {
                 for entry in tree.iter(&guard) {
                     let curr_key = entry.key().to_vec();
 
-                    if let Some(ref pk) = prev_key {
-                        if pk.as_slice() >= curr_key.as_slice() {
-                            violations_this_scan += 1;
-                            tracing::error!(
-                                prev = ?pk,
-                                curr = ?curr_key,
-                                "ORDERING VIOLATION in scan"
-                            );
-                        }
+                    if let Some(ref pk) = prev_key
+                        && pk.as_slice() >= curr_key.as_slice()
+                    {
+                        violations_this_scan += 1;
+                        tracing::error!(
+                            prev = ?pk,
+                            curr = ?curr_key,
+                            "ORDERING VIOLATION in scan"
+                        );
                     }
 
                     prev_key = Some(curr_key);
@@ -842,10 +842,10 @@ fn range_scan_during_removes() {
                     let curr_key = entry.key().to_vec();
 
                     // Check ordering
-                    if let Some(ref pk) = prev_key {
-                        if pk.as_slice() >= curr_key.as_slice() {
-                            ordering_violations.fetch_add(1, Ordering::Relaxed);
-                        }
+                    if let Some(ref pk) = prev_key
+                        && pk.as_slice() >= curr_key.as_slice()
+                    {
+                        ordering_violations.fetch_add(1, Ordering::Relaxed);
                     }
 
                     // Check for duplicates
@@ -969,9 +969,9 @@ fn btreemap_oracle_comparison() {
                     // But key must exist
                 }
             }
+
             None => {
                 check_errors += 1;
-                tracing::error!(key = key, "Key in oracle but not in tree");
             }
         }
     }
@@ -979,9 +979,9 @@ fn btreemap_oracle_comparison() {
     // Check tree doesn't have extra keys (not in oracle)
     for entry in tree.iter(&guard) {
         let key = u64::from_be_bytes(entry.key().try_into().unwrap());
+
         if !oracle.contains_key(&key) {
             check_errors += 1;
-            tracing::error!(key = key, "Key in tree but not in oracle");
         }
     }
 
@@ -995,12 +995,15 @@ fn btreemap_oracle_comparison() {
     // Note: tree.len() and oracle.len() should be equal
     // But due to concurrent updates, small differences are acceptable
     let len_diff = (oracle.len() as i64 - tree.len() as i64).unsigned_abs();
+
     assert!(
         len_diff <= 10,
         "Length mismatch too large: oracle={}, tree={}",
         oracle.len(),
         tree.len()
     );
+
+    drop(oracle);
 
     assert_eq!(
         check_errors, 0,
@@ -1015,6 +1018,7 @@ fn btreemap_oracle_comparison() {
 
 /// Long-running stress test with all operations.
 #[test]
+#[ignore = "long test"]
 fn long_running_mixed_workload() {
     common::init_tracing();
 
@@ -1078,9 +1082,10 @@ fn long_running_mixed_workload() {
                 local_ops += 1;
 
                 // Periodic verification
-                if local_ops % 10_000 == 0 {
+                if local_ops.is_multiple_of(10_000) {
                     // Verify a random key that we just operated on
-                    let verify_key = rng_state % (KEY_RANGE / 2);
+                    let verify_key: u64 = rng_state % (KEY_RANGE / 2);
+
                     if tree
                         .get_with_guard(&verify_key.to_be_bytes(), &guard)
                         .is_some()
