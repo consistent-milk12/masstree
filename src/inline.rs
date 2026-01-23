@@ -12,3 +12,6 @@
 pub mod bits;
 pub mod leaf15_true;
 pub mod sentinel;
+
+#[cfg(all(test, loom))]
+mod loom_tests;

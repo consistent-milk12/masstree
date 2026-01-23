@@ -70,7 +70,7 @@ The forward-sequential gap (rw3) narrowed from 57% to 81% but remains under inve
 
 ## vs Rust Concurrent Maps (6T Physical, Rigorous)
 
-> Source: `runs/run136_read_write.txt`
+> Source: `runs/run150_read_write_correctness.txt`
 > **Config:** Physical cores only, 200 samples, performance governor.
 
 This can be considered the current baseline.
@@ -80,51 +80,47 @@ value. TreeIndex's `insert()` fails on existing keys, requiring a `remove()+inse
 Pure insert benchmarks (13, 14) use fresh keys only, providing a fairer comparison for
 insert-heavy workloads where TreeIndex performs better.
 
-NOTE 2: Recent optimizations (batched timeout checks, hybrid spin-yield backoff, countdown-based guard
-refresh) improved throughput by +18% on average. Notable gains: zipfian +30%, mixed 50/50 +34%,
-pure read +28%. The `insert_only_fair` benchmark flipped from a loss (0.92x) to a win (1.14x).
-
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **28.13** | 15.44 | 9.49 | 12.66 | **1.82x** |
-| 02_zipfian | **33.98** | 11.73 | 10.58 | 4.90 | **2.90x** |
-| 03_shared_prefix | **18.62** | 8.74 | 8.83 | 12.92 | **1.44x** |
-| 04_high_contention | **65.24** | 15.82 | 13.07 | 3.48 | **4.12x** |
-| 05_large_dataset | **13.02** | 9.33 | 6.87 | 7.88 | **1.40x** |
-| 06_single_hot_key | **20.19** | 4.44 | 6.01 | 3.82 | **3.36x** |
-| 07_mixed_50_50 | **24.74** | 5.69 | 5.18 | 12.09 | **2.05x** |
-| 08_8byte_keys | **44.71** | 23.41 | 11.83 | 15.97 | **1.91x** |
-| 09_pure_read | **42.52** | 22.69 | 14.19 | 13.77 | **1.87x** |
-| 10_remove_heavy | **21.70** | 11.57 | 5.50 | 3.68 | **1.88x** |
-| 13_insert_only_fair | **22.53** | 19.68 | 11.32 | 5.64 | **1.14x** |
-| 14_pure_insert | 9.30 | **12.43** | 6.35 | 2.30 | 0.75x |
+| 01_uniform | **28.03** | 13.93 | 8.78 | 12.23 | **2.01x** |
+| 02_zipfian | **30.89** | 11.63 | 9.90 | 4.20 | **2.66x** |
+| 03_shared_prefix | **15.57** | 8.48 | 7.66 | 11.80 | **1.32x** |
+| 04_high_contention | **59.10** | 14.78 | 12.94 | 3.47 | **4.00x** |
+| 05_large_dataset | **13.76** | 8.98 | 6.71 | 7.68 | **1.53x** |
+| 06_single_hot_key | **18.02** | 4.50 | 5.94 | 4.04 | **3.03x** |
+| 07_mixed_50_50 | **25.99** | 5.67 | 5.13 | 12.12 | **2.14x** |
+| 08_8byte_keys | **43.67** | 21.52 | 11.86 | 16.95 | **2.03x** |
+| 09_pure_read | **42.10** | 22.88 | 13.70 | 13.31 | **1.84x** |
+| 10_remove_heavy | **15.02** | 11.62 | 5.07 | 3.93 | **1.29x** |
+| 13_insert_only_fair | **22.49** | 17.77 | 10.37 | 5.42 | **1.27x** |
+| 14_pure_insert | 9.04 | **11.95** | 6.31 | 2.37 | 0.76x |
 
-**Single-thread latency:** masstree15 achieves **864 µs** median read latency vs tree_index 1.31 ms (**1.52x faster**).
+**Single-thread latency:** masstree15 achieves **836 µs** median read latency vs tree_index 1.35 ms (**1.61x faster**).
 
-**Build time:** masstree15 builds at **8.56 Mitem/s** vs skipmap 6.33, tree_index 4.46, indexset 1.85 (**1.35–4.6x faster**).
+**Build time:** masstree15 builds at **8.46 Mitem/s** vs skipmap 6.17, tree_index 4.35, indexset 1.86 (**1.37–4.6x faster**).
 
 ## Range Scans (6T Physical, Rigorous)
 
-> Source: `runs/run139_range_scan_optimized.txt` (inline-optimized)
+> Source: `runs/run149_range_scan_correctness.txt` (inline-optimized)
 > **Config:** Physical cores only, 100 samples, performance governor
 
-| Benchmark | masstree15_inline | tree_index | MT vs TI | vs run137 |
+| Benchmark | masstree15_inline | tree_index | MT vs TI | vs run139 |
 |-----------|-------------------|------------|----------|-----------|
-| 01_sequential_full_scan | **32.29** | 15.37 | **2.10x** | +79% |
-| 02_reverse_scan | **23.50** | 15.31 | **1.53x** | +34% |
-| 03_clustered_scan | **31.61** | 15.25 | **2.07x** | +76% |
-| 04_sparse_scan | **32.19** | 11.60 | **2.77x** | +79% |
-| 05_shared_prefix_scan | **26.38** | 12.97 | **2.03x** | +59% |
-| 06_suffix_differ_scan | **15.86** | 12.16 | **1.30x** | -30% |
-| 07_hierarchical_scan | **17.43** | 11.95 | **1.46x** | +56% |
-| 08_adversarial_splits | **18.75** | 6.71 | **2.79x** | +4% |
-| 09_interleaved_scan | **16.27** | 9.51 | **1.71x** | -2% |
-| 10_blink_stress_scan | **20.75** | 9.81 | **2.11x** | +16% |
-| 11_random_keys_scan | **20.85** | 10.80 | **1.93x** | +17% |
-| 12_long_keys_64b_scan | **19.21** | 12.46 | **1.54x** | +94% |
-| 15_full_scan_aggregate | **1.70 G** | 1.04 G | **1.64x** | — |
-| 16_insert_heavy | **22.60** | 15.93 | **1.42x** | new |
-| 17_hot_spot | 6.03 | **14.87** | 0.41x | new |
+| 01_sequential_full_scan | **30.73** | 15.34 | **2.00x** | -5% |
+| 02_reverse_scan | **23.35** | 15.17 | **1.54x** | -1% |
+| 03_clustered_scan | **30.84** | 15.16 | **2.03x** | -2% |
+| 04_sparse_scan | **30.83** | 15.36 | **2.01x** | -4% |
+| 05_shared_prefix_scan | **26.75** | 15.40 | **1.74x** | +1% |
+| 06_suffix_differ_scan | **23.69** | 16.44 | **1.44x** | +49% |
+| 07_hierarchical_scan | **28.93** | 16.67 | **1.74x** | +66% |
+| 08_adversarial_splits | **30.23** | 9.23 | **3.28x** | +61% |
+| 09_interleaved_scan | **26.98** | 15.07 | **1.79x** | +66% |
+| 10_blink_stress_scan | **29.94** | 15.14 | **1.98x** | +44% |
+| 11_random_keys_scan | **30.53** | 15.35 | **1.99x** | +46% |
+| 12_long_keys_64b_scan | **29.78** | 16.45 | **1.81x** | +55% |
+| 15_full_scan_aggregate | **1.93 G** | 1.10 G | **1.75x** | +13% |
+| 16_insert_heavy | **22.89** | 16.32 | **1.40x** | +1% |
+| 17_hot_spot | 10.78 | **19.54** | 0.55x | +79% |
 
 ## Install
 

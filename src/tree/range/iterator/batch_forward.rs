@@ -87,11 +87,22 @@ where
     ///
     /// Only rare cases (Down, Up, Retry) use function calls.
     #[inline(always)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "State machine with debug instrumentation"
+    )]
     pub(super) fn advance_no_alloc(&mut self) -> Option<(&[u8], S::Output)> {
         // Fast path: if we have a pending emit, process it first
         if self.state == ScanState::Emit
             && let Some(snapshot) = self.snapshot.take()
         {
+            // DEBUG: Assert strict ordering (must copy key to avoid borrow conflict)
+            #[cfg(debug_assertions)]
+            {
+                let key_copy = self.cursor_key.full_key().to_vec();
+                self.assert_ordering(&key_copy);
+            }
+
             let key: &[u8] = self.cursor_key.full_key();
 
             if !self.end_bound.contains(key) {
@@ -108,14 +119,27 @@ where
             // Handle rare states first (will break out of loop on Emit)
             match self.state {
                 ScanState::Down => {
+                    #[cfg(debug_assertions)]
+                    let pre_cursor = self.cursor_key.debug_state();
+
                     handle_down(&mut self.stack, &mut self.cursor_key);
                     self.state = ScanState::Retry;
                     self.flags.require_duplicate_check();
+
+                    #[cfg(debug_assertions)]
+                    self.record_transition(format!(
+                        "Down -> Retry: pre={}, post={}",
+                        pre_cursor,
+                        self.cursor_key.debug_state()
+                    ));
 
                     continue;
                 }
 
                 ScanState::Up => {
+                    #[cfg(debug_assertions)]
+                    let pre_cursor = self.cursor_key.debug_state();
+
                     if !handle_up(
                         &mut self.stack,
                         &mut self.cursor_key,
@@ -124,18 +148,40 @@ where
                     ) {
                         self.flags.mark_exhausted();
 
+                        #[cfg(debug_assertions)]
+                        self.record_transition(format!("Up -> Exhausted: pre={pre_cursor}"));
+
                         return None;
                     }
 
                     self.state = ScanState::FindNext;
                     self.flags.require_duplicate_check();
 
+                    #[cfg(debug_assertions)]
+                    self.record_transition(format!(
+                        "Up -> FindNext: pre={}, post={}",
+                        pre_cursor,
+                        self.cursor_key.debug_state()
+                    ));
+
                     continue;
                 }
 
                 ScanState::Retry => {
+                    #[cfg(debug_assertions)]
+                    let pre_cursor = self.cursor_key.debug_state();
+
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
                     self.flags.require_duplicate_check();
+
+                    #[cfg(debug_assertions)]
+                    self.record_transition(format!(
+                        "Retry -> {:?}: pre={}, post={}",
+                        self.state,
+                        pre_cursor,
+                        self.cursor_key.debug_state()
+                    ));
+
                     continue;
                 }
 
@@ -166,6 +212,13 @@ where
             if new_state == ScanState::Emit
                 && let Some(snap) = snapshot
             {
+                // DEBUG: Assert strict ordering (must copy key to avoid borrow conflict)
+                #[cfg(debug_assertions)]
+                {
+                    let key_copy = self.cursor_key.full_key().to_vec();
+                    self.assert_ordering(&key_copy);
+                }
+
                 let key = self.cursor_key.full_key();
 
                 if !self.end_bound.contains(key) {
@@ -554,7 +607,60 @@ where
             }
 
             // ================================================================
+            // DUPLICATE CHECK SLOW PATH: After Retry/Down/Up, use per-entry
+            // path to filter already-emitted keys before resuming batch mode.
+            //
+            // This is critical for correctness: after a VersionChanged retry,
+            // we may reposition to a leaf containing keys we already emitted.
+            // The batch functions don't check CursorKey, so we must use the
+            // non-batch path (which has duplicate filtering) for at least one
+            // entry before resuming batching.
+            // ================================================================
+            if self.flags.needs_duplicate_check() {
+                self.flags.clear_duplicate_check();
+
+                let (new_state, snapshot_ptr) = find_next_with_duplicate_check_ptr(
+                    &mut self.stack,
+                    &mut self.cursor_key,
+                    &mut self.layer_stack,
+                    self.guard,
+                );
+
+                self.state = new_state;
+
+                match new_state {
+                    ScanState::Emit => {
+                        if let Some(snap) = snapshot_ptr {
+                            let key: &[u8] = self.cursor_key.full_key();
+
+                            if !self.end_bound.contains(key) {
+                                self.flags.mark_exhausted();
+                                return count;
+                            }
+
+                            // SAFETY: find_next_with_duplicate_check_ptr validated version,
+                            // guard protects pointer
+                            let value_ref: &S::Value = unsafe { &*snap.value_ptr };
+
+                            count += 1;
+                            self.state = ScanState::FindNext;
+
+                            if !visitor(key, value_ref) {
+                                return count;
+                            }
+                        }
+                    }
+
+                    // Other states continue the loop
+                    ScanState::FindNext | ScanState::Down | ScanState::Up | ScanState::Retry => {}
+                }
+
+                continue;
+            }
+
+            // ================================================================
             // INTRA-LEAF BATCH: Process all remaining entries in this leaf
+            // (Fast path - no duplicate checking needed)
             // ================================================================
 
             let result = process_leaf_batch_ptr(
@@ -722,7 +828,51 @@ where
             }
 
             // ================================================================
+            // DUPLICATE CHECK SLOW PATH: After Retry/Down/Up, use per-entry
+            // path to filter already-emitted keys before resuming batch mode.
+            // See for_each_intra_leaf_batch_ref for detailed rationale.
+            // ================================================================
+            if self.flags.needs_duplicate_check() {
+                self.flags.clear_duplicate_check();
+
+                let (new_state, snapshot) = find_next_with_duplicate_check(
+                    &mut self.stack,
+                    &mut self.cursor_key,
+                    &mut self.layer_stack,
+                    self.guard,
+                );
+
+                self.state = new_state;
+
+                match new_state {
+                    ScanState::Emit => {
+                        if let Some(snap) = snapshot {
+                            let key: &[u8] = self.cursor_key.full_key();
+
+                            if !self.end_bound.contains(key) {
+                                self.flags.mark_exhausted();
+                                return count;
+                            }
+
+                            count += 1;
+                            self.state = ScanState::FindNext;
+
+                            if !visitor(key, snap.value) {
+                                return count;
+                            }
+                        }
+                    }
+
+                    // Other states continue the loop
+                    ScanState::FindNext | ScanState::Down | ScanState::Up | ScanState::Retry => {}
+                }
+
+                continue;
+            }
+
+            // ================================================================
             // INTRA-LEAF BATCH: Process all remaining entries in this leaf
+            // (Fast path - no duplicate checking needed)
             // ================================================================
 
             let result = process_leaf_batch(
@@ -906,7 +1056,46 @@ where
             }
 
             // ================================================================
+            // DUPLICATE CHECK SLOW PATH: After Retry/Down/Up, use per-entry
+            // path to filter already-emitted keys before resuming batch mode.
+            // See for_each_intra_leaf_batch_ref for detailed rationale.
+            // ================================================================
+            if self.flags.needs_duplicate_check() {
+                self.flags.clear_duplicate_check();
+
+                let (new_state, snapshot) = find_next_with_duplicate_check(
+                    &mut self.stack,
+                    &mut self.cursor_key,
+                    &mut self.layer_stack,
+                    self.guard,
+                );
+
+                self.state = new_state;
+
+                match new_state {
+                    ScanState::Emit => {
+                        if let Some(snap) = snapshot {
+                            // Values-only: skip end bound check (approximate ikey-based)
+                            // This matches the batch function's behavior
+                            count += 1;
+                            self.state = ScanState::FindNext;
+
+                            if !visitor(snap.value) {
+                                return count;
+                            }
+                        }
+                    }
+
+                    // Other states continue the loop
+                    ScanState::FindNext | ScanState::Down | ScanState::Up | ScanState::Retry => {}
+                }
+
+                continue;
+            }
+
+            // ================================================================
             // VALUE-ONLY BATCH: Process all remaining entries without key building
+            // (Fast path - no duplicate checking needed)
             // ================================================================
 
             let result = process_leaf_batch_values(

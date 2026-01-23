@@ -116,7 +116,14 @@ impl ForwardScanHelper {
     /// # Safety
     ///
     /// The returned pointer is only valid while the guard is held.
+    ///
+    /// # Note
+    ///
+    /// This is no longer used directly by `advance_leaf*` functions (they now
+    /// use `next_raw()` + `Linker::is_marked()` for split-aware advancement),
+    /// but kept for API completeness and potential future use.
     #[inline(always)]
+    #[allow(dead_code, reason = "Forward scan helper API")]
     pub fn advance<L, S>(leaf: &L) -> *mut L
     where
         L: TreeLeafNode<S>,

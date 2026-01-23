@@ -89,18 +89,6 @@ impl Propagation {
     /// # C++ Reference
     ///
     /// `tcursor::make_split()` in `reference/masstree_split.hh:179-297`
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(
-            level = "debug",
-            skip(root_ptr, allocator, left_lock, guard),
-            fields(
-                left = ?left_leaf_ptr,
-                right = ?right_leaf_ptr,
-                split_ikey = %format_args!("{:016x}", split_ikey)
-            )
-        )
-    )]
     #[expect(
         clippy::too_many_arguments,
         reason = "Split propagation requires full context"
@@ -126,8 +114,7 @@ impl Propagation {
         // DEBUG: Trace leaf split
         #[cfg(feature = "debug-routing")]
         eprintln!(
-            "[LEAF_SPLIT] left={:p} right={:p} split_ikey={:016x} is_main_root={} is_layer_root={}",
-            left_leaf_ptr, right_leaf_ptr, split_ikey, is_main_root, is_layer_root
+            "[LEAF_SPLIT] left={left_leaf_ptr:p} right={right_leaf_ptr:p} split_ikey={split_ikey:016x} is_main_root={is_main_root} is_layer_root={is_layer_root}"
         );
 
         // Create PropagationContext with unified lifetime tied to reclamation guard

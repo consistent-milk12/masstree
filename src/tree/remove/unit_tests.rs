@@ -11,6 +11,8 @@ use crate::leaf24::LeafNode24;
 use crate::nodeversion::{LockGuard, NodeVersion};
 use crate::tree::MassTree24;
 use crate::value::LeafValue;
+
+use std::ptr as StdPtr;
 use std::sync::Arc;
 
 // Type aliases for coalescing tests
@@ -507,7 +509,7 @@ fn test_shift_internode_down_middle() {
     inode.set_child(3, c3);
 
     // "Remove" c2 by setting to null (simulating the removal)
-    inode.set_child(2, std::ptr::null_mut());
+    inode.set_child(2, StdPtr::null_mut());
 
     // Test: shift_internode_down(kp=2)
     NodeCleaner::shift_internode_down_generic::<TestInternode>(&inode, 2);
@@ -560,7 +562,7 @@ fn test_shift_internode_down_last() {
     inode.set_child(2, c2);
     inode.set_child(3, c3);
 
-    inode.set_child(3, std::ptr::null_mut());
+    inode.set_child(3, StdPtr::null_mut());
 
     // Test: shift_internode_down(kp=3)
     NodeCleaner::shift_internode_down_generic::<TestInternode>(&inode, 3);
@@ -610,7 +612,7 @@ fn test_shift_internode_down_second() {
     inode.set_child(1, c1);
     inode.set_child(2, c2);
 
-    inode.set_child(1, std::ptr::null_mut());
+    inode.set_child(1, StdPtr::null_mut());
 
     // Test
     NodeCleaner::shift_internode_down_generic::<TestInternode>(&inode, 1);

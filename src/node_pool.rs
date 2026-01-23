@@ -377,7 +377,7 @@ pub unsafe fn reclaim_leaf15_true_inline<V: InlineBits>(
     ptr: *mut LeafNode15TrueInline<V>,
     _collector: &Collector,
 ) {
-    unsafe { std::ptr::drop_in_place(ptr) };
+    unsafe { StdPtr::drop_in_place(ptr) };
     let layout = Layout::new::<LeafNode15TrueInline<V>>();
     unsafe { pool_dealloc(ptr.cast(), layout) };
 }

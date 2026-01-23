@@ -473,7 +473,7 @@ fn test_inline_default() {
 
 #[test]
 fn test_inline_try_assign_basic() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
 
     assert!(bag.try_assign(0, b"hello"));
     assert!(bag.try_assign(5, b"world"));
@@ -487,7 +487,7 @@ fn test_inline_try_assign_basic() {
 
 #[test]
 fn test_inline_try_assign_reuse_slot() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
 
     // Assign longer suffix first
     assert!(bag.try_assign(0, b"hello world"));
@@ -503,7 +503,7 @@ fn test_inline_try_assign_reuse_slot() {
 
 #[test]
 fn test_inline_try_assign_append() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
 
     assert!(bag.try_assign(0, b"first"));
     assert!(bag.try_assign(1, b"second"));
@@ -515,7 +515,7 @@ fn test_inline_try_assign_append() {
 
 #[test]
 fn test_inline_try_assign_fails_when_full() {
-    let mut bag: InlineSuffixBag<24, 32> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 32> = InlineSuffixBag::new();
 
     // Fill most of the capacity
     assert!(bag.try_assign(0, b"12345678901234567890")); // 20 bytes
@@ -532,7 +532,7 @@ fn test_inline_try_assign_fails_when_full() {
 
 #[test]
 fn test_inline_clear() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     assert!(bag.has_suffix(0));
@@ -547,7 +547,7 @@ fn test_inline_clear() {
 
 #[test]
 fn test_inline_clear_all() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     bag.try_assign(1, b"world");
@@ -562,7 +562,7 @@ fn test_inline_clear_all() {
 
 #[test]
 fn test_inline_get_or_empty() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
 
@@ -572,7 +572,7 @@ fn test_inline_get_or_empty() {
 
 #[test]
 fn test_inline_suffix_equals() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
 
@@ -583,7 +583,7 @@ fn test_inline_suffix_equals() {
 
 #[test]
 fn test_inline_suffix_compare() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
 
@@ -594,7 +594,7 @@ fn test_inline_suffix_compare() {
 
 #[test]
 fn test_inline_drain_to_external() {
-    let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
 
     // Fill inline bag
     bag.try_assign(0, b"suffix0");
@@ -628,7 +628,7 @@ fn test_inline_drain_to_external() {
 
 #[test]
 fn test_inline_drain_replaces_slot() {
-    let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"old_suffix");
     bag.try_assign(1, b"keep_this");
@@ -652,7 +652,7 @@ fn test_inline_drain_replaces_slot() {
 
 #[test]
 fn test_inline_drain_to_external_init() {
-    let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
 
     // Simulate split initialization: slots 0, 1, 2 filled sequentially
     bag.try_assign(0, b"suffix_0");
@@ -678,7 +678,7 @@ fn test_inline_drain_to_external_init() {
 
 #[test]
 fn test_inline_drain_to_external_init_replaces_slot() {
-    let mut bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
 
     // Simulate: slots 0, 1 filled, now replacing slot 1
     bag.try_assign(0, b"keep_this");
@@ -698,7 +698,7 @@ fn test_inline_drain_to_external_init_replaces_slot() {
 
 #[test]
 fn test_inline_clone() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
     bag.try_assign(0, b"hello");
     bag.try_assign(5, b"world");
 
@@ -712,7 +712,7 @@ fn test_inline_clone() {
 
 #[test]
 fn test_inline_empty_suffix() {
-    let mut bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
 
     // Empty suffix should work
     assert!(bag.try_assign(0, b""));
@@ -724,13 +724,13 @@ fn test_inline_empty_suffix() {
 #[test]
 fn test_inline_various_widths() {
     // Test with different WIDTH parameters
-    let mut bag7: InlineSuffixBag<7, 128> = InlineSuffixBag::new();
+    let bag7: InlineSuffixBag<7, 128> = InlineSuffixBag::new();
     bag7.try_assign(0, b"test");
     bag7.try_assign(6, b"last");
     assert_eq!(bag7.get(0), Some(b"test".as_slice()));
     assert_eq!(bag7.get(6), Some(b"last".as_slice()));
 
-    let mut bag15: InlineSuffixBag<15, 128> = InlineSuffixBag::new();
+    let bag15: InlineSuffixBag<15, 128> = InlineSuffixBag::new();
     bag15.try_assign(14, b"slot14");
     assert_eq!(bag15.get(14), Some(b"slot14".as_slice()));
 }
@@ -837,7 +837,7 @@ fn test_suffix_count_clone() {
 
 #[test]
 fn test_inline_suffix_count_try_assign() {
-    let mut bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
     assert_eq!(bag.count(), 0);
 
     assert!(bag.try_assign(0, b"hello"));
@@ -853,7 +853,7 @@ fn test_inline_suffix_count_try_assign() {
 
 #[test]
 fn test_inline_suffix_count_clear() {
-    let mut bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     bag.try_assign(1, b"world");
@@ -872,7 +872,7 @@ fn test_inline_suffix_count_clear() {
 
 #[test]
 fn test_inline_suffix_count_clear_all() {
-    let mut bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     bag.try_assign(1, b"world");
@@ -983,7 +983,7 @@ fn test_clone_empty_bag() {
 /// Miri will detect any memory leaks or invalid drops.
 #[test]
 fn test_sidecar_drop_inline_only() {
-    let mut sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+    let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
 
     // Add a few inline suffixes
     sidecar.inline.try_assign(0, b"hello");
@@ -1039,7 +1039,7 @@ fn test_sidecar_drop_with_external() {
 /// Exercises the full Drop path.
 #[test]
 fn test_sidecar_drop_mixed_inline_external() {
-    let mut sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+    let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
 
     // Add inline suffixes
     sidecar.inline.try_assign(0, b"inline_0");

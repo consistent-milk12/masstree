@@ -766,8 +766,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Caller holds lock
-        let sidecar: &mut SuffixSidecar<WIDTH_15> =
-            unsafe { &mut *self.ensure_sidecar_infallible() };
+        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar_infallible() };
 
         // try_assign returns bool: true = success, false = no capacity
         if sidecar.inline.try_assign(slot, suffix) {
@@ -875,8 +874,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Caller holds lock
-        let sidecar: &mut SuffixSidecar<WIDTH_15> =
-            unsafe { &mut *self.ensure_sidecar_infallible() };
+        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar_infallible() };
 
         // FAST PATH: Try inline storage first
         if sidecar.inline.try_assign(slot, suffix) {
@@ -995,7 +993,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Caller holds lock
-        let sidecar: &mut SuffixSidecar<WIDTH_15> = unsafe { &mut *self.ensure_sidecar()? };
+        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar()? };
 
         // FAST PATH 1: Try inline storage first (no allocation!)
         if sidecar.inline.try_assign(slot, suffix) {
@@ -1043,8 +1041,8 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
-        let sidecar: &mut SuffixSidecar<WIDTH_15> =
-            unsafe { &mut *self.suffix_sidecar.load(AtomicOrdering::Acquire) };
+        let sidecar: &SuffixSidecar<WIDTH_15> =
+            unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
 
         let perm = self.permutation();
 
@@ -1118,7 +1116,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Caller holds lock
-        let sidecar: &mut SuffixSidecar<WIDTH_15> = unsafe { &mut *self.ensure_sidecar()? };
+        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar()? };
 
         // FAST PATH: Try inline storage first
         if sidecar.inline.try_assign(slot, suffix) {
@@ -1159,8 +1157,8 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
-        let sidecar: &mut SuffixSidecar<WIDTH_15> =
-            unsafe { &mut *self.suffix_sidecar.load(AtomicOrdering::Acquire) };
+        let sidecar: &SuffixSidecar<WIDTH_15> =
+            unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
 
         // Drain inline using sequential slot iteration (0..slot) (FALLIBLE)
         let mut new_bag: SuffixBag<WIDTH_15> =
@@ -1224,7 +1222,7 @@ impl<S: ValueSlot> LeafNode15<S> {
             self.suffix_sidecar.load(AtomicOrdering::Acquire);
         if !sidecar_ptr.is_null() {
             // SAFETY: sidecar_ptr is non-null, we hold the lock
-            let sidecar: &mut SuffixSidecar<WIDTH_15> = unsafe { &mut *sidecar_ptr };
+            let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*sidecar_ptr };
 
             // Clear from inline storage
             sidecar.inline.clear(slot);
@@ -1358,7 +1356,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
 
         // SAFETY: sidecar_ptr is non-null, we hold the lock
-        let sidecar: &mut SuffixSidecar<WIDTH_15> = unsafe { &mut *sidecar_ptr };
+        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*sidecar_ptr };
 
         let bag_ptr: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
         if bag_ptr.is_null() {

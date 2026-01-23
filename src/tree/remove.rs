@@ -12,6 +12,7 @@
 //! 5. Retire the value via seize
 //! 6. If leaf is now empty, schedule for lazy coalescing
 
+use std::fmt::{self as StdFmt, Display, Formatter};
 use std::hint as StdHint;
 use std::ptr as StdPtr;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -46,8 +47,8 @@ pub enum RemoveError {
     RetryLimitExceeded,
 }
 
-impl std::fmt::Display for RemoveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for RemoveError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         match self {
             Self::RetryLimitExceeded => write!(f, "retry limit exceeded"),
         }

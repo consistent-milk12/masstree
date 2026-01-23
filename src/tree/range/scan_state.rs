@@ -12,6 +12,7 @@
 //! - Multi-layer navigation (sublayer descent and ascent)
 //! - B-link chain traversal
 
+use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::marker::PhantomData;
 use std::ptr::{self as StdPtr, NonNull};
 
@@ -185,12 +186,12 @@ where
     }
 }
 
-impl<L, S> std::fmt::Debug for ScanStackElement<L, S>
+impl<L, S> Debug for ScanStackElement<L, S>
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("ScanStackElement")
             .field("root", &self.root)
             .field("leaf", &self.leaf)
@@ -454,8 +455,8 @@ pub struct LayerContext<L> {
     pub leaf: NonNull<L>,
 }
 
-impl<L> std::fmt::Debug for LayerContext<L> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<L> Debug for LayerContext<L> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("LayerContext")
             .field("root", &self.root)
             .field("leaf", &self.leaf)
@@ -837,12 +838,12 @@ where
     }
 }
 
-impl<L, S> std::fmt::Debug for BackStackElement<L, S>
+impl<L, S> Debug for BackStackElement<L, S>
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("BackStackElement")
             .field("root", &self.root)
             .field("leaf", &self.leaf)

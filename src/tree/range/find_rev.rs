@@ -3,7 +3,9 @@
 // ============================================================================
 
 use crate::{TreeInternode, ksearch::upper_bound_internode_generic, leaf15::KSUF_KEYLENX};
+
 use std::cmp::Ordering;
+use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
@@ -475,7 +477,7 @@ impl ReverseScan {
         S: ValueSlot,
     {
         if start.is_null() {
-            return std::ptr::null_mut();
+            return StdPtr::null_mut();
         }
 
         let target_ikey: u64 = cursor_key.current_ikey();
@@ -916,7 +918,7 @@ impl ReverseScan {
         if prev_ptr.is_null() {
             // No previous leaf - layer is exhausted
             // Clear leaf to signal exhaustion
-            stack.set_leaf(std::ptr::null_mut());
+            stack.set_leaf(StdPtr::null_mut());
             return (ScanStateBack::Up, None);
         }
 
@@ -1021,7 +1023,7 @@ impl ReverseScan {
 
             // Check for empty tree / layer
             if leaf_ptr.is_null() {
-                stack.set_leaf(std::ptr::null_mut());
+                stack.set_leaf(StdPtr::null_mut());
                 return (ScanStateBack::Up, None);
             }
 
@@ -1055,7 +1057,7 @@ impl ReverseScan {
             "reposition_back exceeded MAX_REPOSITION_RETRIES ({MAX_REPOSITION_RETRIES})"
         );
 
-        stack.set_leaf(std::ptr::null_mut());
+        stack.set_leaf(StdPtr::null_mut());
         (ScanStateBack::Up, None)
     }
 
@@ -1546,7 +1548,7 @@ where
     let prev_ptr: *mut L = ReverseScanHelper::retreat(current_leaf);
 
     if prev_ptr.is_null() {
-        stack.set_leaf(std::ptr::null_mut());
+        stack.set_leaf(StdPtr::null_mut());
         return false;
     }
 
@@ -1749,7 +1751,7 @@ where
 
     if prev.is_null() {
         // No more leaves - scan exhausted (no Up in single-layer)
-        stack.set_leaf(std::ptr::null_mut());
+        stack.set_leaf(StdPtr::null_mut());
         return (ScanStateBack::FindPrev, None);
     }
 

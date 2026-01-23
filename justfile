@@ -157,6 +157,10 @@ miri-test TEST:
 miri-strict:
     MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test --lib
 
+# Run Miri with strict provenance on integration tests
+miri-strict-int:
+    MIRIFLAGS="-Zmiri-strict-provenance" cargo +nightly miri test --test '*'
+
 # Run Miri checking for memory leaks
 miri-leaks:
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri test --lib

@@ -904,11 +904,6 @@ where
     ///
     /// Returns `(leaf, exceeded_hop_limit)`. If `exceeded_hop_limit` is true,
     /// the caller should retry from the root instead of trusting this leaf.
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(level = "trace", skip_all, fields(ikey = %format_args!("{:016x}", key.ikey())))
-    )]
-    #[expect(clippy::unused_self, reason = "API Consistency")]
     /// Advance along B-links to find the leaf containing the key.
     ///
     /// # Provenance
@@ -922,6 +917,7 @@ where
     ///
     /// - `(*mut L, false)` - Found the correct leaf
     /// - `(*mut L, true)` - Exceeded hop limit, caller should retry from root
+    #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_by_bound_generic(
         &self,
         mut leaf_ptr: *mut L,

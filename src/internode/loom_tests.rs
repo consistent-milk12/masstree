@@ -1,5 +1,5 @@
-use loom::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use loom::sync::Arc;
+use loom::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use loom::thread;
 use std::array as StdArray;
 

@@ -8,7 +8,7 @@
 //! # Architecture Support
 //!
 //! - **`x86_64`**: Uses `_mm_prefetch` with `_MM_HINT_T0` (read) or `_MM_HINT_ET0` (write)
-//! - **`aarch64`**: Uses `_prefetch` with locality hint 3 (keep in cache)
+//! - **`aarch64`**: Uses inline `PRFM` instruction (stable, no feature gates)
 //! - **Other**: No-op (safe fallback)
 //!
 //! # Usage
@@ -61,14 +61,14 @@ pub fn prefetch_read<T>(ptr: *const T) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: _prefetch is always safe to call on aarch64.
-        // Parameters: pointer, read (0) vs write (1), locality (0-3)
-        // Locality 3 = keep in cache as long as possible
+        // Use inline asm instead of unstable std::arch::aarch64::_prefetch.
+        // PRFM PLDL1KEEP, [ptr] - Prefetch for load, L1 cache, keep in cache.
+        // SAFETY: PRFM is always safe - it's a hint that doesn't fault on invalid addresses.
         unsafe {
-            std::arch::aarch64::_prefetch(
-                ptr.cast::<i8>(),
-                std::arch::aarch64::_PREFETCH_READ,
-                std::arch::aarch64::_PREFETCH_LOCALITY3,
+            std::arch::asm!(
+                "prfm pldl1keep, [{ptr}]",
+                ptr = in(reg) ptr,
+                options(nostack, preserves_flags),
             );
         }
     }
@@ -109,13 +109,14 @@ pub fn prefetch_write<T>(ptr: *mut T) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: _prefetch is always safe to call on aarch64.
-        // _PREFETCH_WRITE hints that we'll modify the data.
+        // Use inline asm instead of unstable std::arch::aarch64::_prefetch.
+        // PRFM PSTL1KEEP, [ptr] - Prefetch for store, L1 cache, keep in cache.
+        // SAFETY: PRFM is always safe - it's a hint that doesn't fault on invalid addresses.
         unsafe {
-            std::arch::aarch64::_prefetch(
-                ptr.cast::<i8>(),
-                std::arch::aarch64::_PREFETCH_WRITE,
-                std::arch::aarch64::_PREFETCH_LOCALITY3,
+            std::arch::asm!(
+                "prfm pstl1keep, [{ptr}]",
+                ptr = in(reg) ptr,
+                options(nostack, preserves_flags),
             );
         }
     }

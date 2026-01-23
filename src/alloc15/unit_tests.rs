@@ -1,4 +1,5 @@
 use std::alloc::Layout;
+use std::ptr as StdPtr;
 
 use super::{LeafNode15, NodeAllocatorGeneric, SeizeAllocator15, SeizeAllocator15TrueInline};
 use crate::inline::leaf15_true::LeafNode15TrueInline;
@@ -66,7 +67,7 @@ fn test_seize_allocator15_alloc_leaf_direct() {
 
     // Clean up - alloc_leaf_direct uses pool, so use pool_dealloc
     unsafe {
-        std::ptr::drop_in_place(ptr);
+        StdPtr::drop_in_place(ptr);
         let layout = Layout::new::<LeafNode15<LeafValue<u64>>>();
         node_pool::pool_dealloc(ptr.cast(), layout);
     }
@@ -222,7 +223,7 @@ fn test_seize_allocator15_true_inline_alloc_leaf_direct() {
 
     // Clean up - alloc_leaf_direct uses pool, so use pool_dealloc
     unsafe {
-        std::ptr::drop_in_place(ptr);
+        StdPtr::drop_in_place(ptr);
         let layout = Layout::new::<LeafNode15TrueInline<u64>>();
         node_pool::pool_dealloc(ptr.cast(), layout);
     }
@@ -291,7 +292,7 @@ fn test_seize_allocator15_teardown_null() {
     let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
 
     // Should handle null gracefully (no-op)
-    alloc.teardown_tree(std::ptr::null_mut());
+    alloc.teardown_tree(StdPtr::null_mut());
 }
 
 #[test]
@@ -299,5 +300,5 @@ fn test_seize_allocator15_true_inline_teardown_null() {
     let alloc: SeizeAllocator15TrueInline<u64> = SeizeAllocator15TrueInline::new();
 
     // Should handle null gracefully (no-op)
-    alloc.teardown_tree(std::ptr::null_mut());
+    alloc.teardown_tree(StdPtr::null_mut());
 }

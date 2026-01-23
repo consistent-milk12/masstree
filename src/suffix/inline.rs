@@ -1,8 +1,22 @@
+use std::array as StdArray;
+use std::cell::UnsafeCell;
 use std::cmp::Ordering;
+use std::fmt::{self as StdFmt, Debug, Formatter};
+use std::ptr as StdPtr;
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering as AtomicOrdering};
 
 use super::{AllocResult, CompareSuffix, SuffixBag, TreePermutation};
 
 const U16_MAX: usize = u16::MAX as usize;
+
+/// Atomic ordering for reading slot metadata (pairs with Release stores).
+const READ_ORD: AtomicOrdering = AtomicOrdering::Acquire;
+
+/// Atomic ordering for writing slot metadata (pairs with Acquire loads).
+const WRITE_ORD: AtomicOrdering = AtomicOrdering::Release;
+
+/// Relaxed ordering for non-synchronizing accesses (under lock).
+const RELAXED: AtomicOrdering = AtomicOrdering::Relaxed;
 
 // ============================================================================
 //  InlineSlotMeta
@@ -12,7 +26,10 @@ const U16_MAX: usize = u16::MAX as usize;
 ///
 /// Uses `u16` for offset to keep metadata compact (4 bytes per slot).
 /// Maximum inline capacity is 65535 bytes.
-#[repr(C)]
+///
+/// Packed into `AtomicU32` for concurrent access:
+/// - High 16 bits: offset
+/// - Low 16 bits: length
 #[derive(Clone, Copy, Debug)]
 struct InlineSlotMeta {
     /// Offset into the data buffer (`u16::MAX` if no suffix).
@@ -29,10 +46,32 @@ impl InlineSlotMeta {
         len: 0,
     };
 
+    /// Packed representation of EMPTY for atomic initialization.
+    const EMPTY_PACKED: u32 = Self::EMPTY.pack();
+
     /// Check if this slot has a suffix.
     #[inline(always)]
     const fn has_suffix(self) -> bool {
         self.offset != u16::MAX
+    }
+
+    /// Pack into u32 for atomic storage.
+    #[inline(always)]
+    const fn pack(self) -> u32 {
+        ((self.offset as u32) << 16) | (self.len as u32)
+    }
+
+    /// Unpack from u32 loaded atomically.
+    #[inline(always)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Intentional: extracting u16 fields from packed u32"
+    )]
+    const fn unpack(packed: u32) -> Self {
+        Self {
+            offset: (packed >> 16) as u16,
+            len: packed as u16,
+        }
     }
 }
 
@@ -53,6 +92,16 @@ impl Default for InlineSlotMeta {
 /// where total suffix data is small. Based on C++ Masstree's `iksuf_`
 /// (internal key suffix) design.
 ///
+/// # Concurrency
+///
+/// This structure uses interior mutability for safe concurrent access:
+/// - Slot metadata uses `AtomicU32` (Acquire/Release ordering)
+/// - Size and count use atomics for writer updates under lock
+/// - Data buffer uses `UnsafeCell` (writers hold lock, readers use version validation)
+///
+/// **Writers** must hold the leaf lock before calling mutation methods.
+/// **Readers** may call read methods without the lock, using OCC validation.
+///
 /// # Design
 ///
 /// - Embedded in the leaf node (no heap allocation)
@@ -63,12 +112,13 @@ impl Default for InlineSlotMeta {
 /// # Memory Layout
 ///
 /// ```text
-/// InlineSuffixBag<WIDTH=24, CAPACITY=256> (356 bytes total)
-/// ├── slots: [InlineSlotMeta; 24]  // 96 bytes (4 bytes each)
-/// ├── size: u16                     // 2 bytes
-/// ├── suffix_count: u8              // 1 byte
-/// ├── data: [u8; 256]               // 256 bytes
-/// └── (1 byte padding for u16 alignment)
+/// InlineSuffixBag<WIDTH=24, CAPACITY=256> (360 bytes total)
+/// ├── slots: [AtomicU32; 24]   // 96 bytes (4 bytes each)
+/// ├── size: AtomicU16          // 2 bytes
+/// ├── suffix_count: AtomicU8   // 1 byte
+/// ├── _pad: u8                 // 1 byte padding
+/// ├── data: UnsafeCell<[u8; 256]>  // 256 bytes
+/// └── (4 bytes padding for alignment)
 /// ```
 ///
 /// # Type Parameters
@@ -76,19 +126,41 @@ impl Default for InlineSlotMeta {
 /// * `WIDTH` - Number of slots (must match the leaf node's WIDTH)
 /// * `CAPACITY` - Fixed capacity in bytes for suffix data
 #[repr(C)]
-#[derive(Debug)]
 pub struct InlineSuffixBag<const WIDTH: usize, const CAPACITY: usize> {
-    /// Per-slot metadata: (offset, length) pairs.
-    slots: [InlineSlotMeta; WIDTH],
+    /// Per-slot metadata: packed (offset, length) pairs.
+    /// Accessed atomically for concurrent read/write safety.
+    slots: [AtomicU32; WIDTH],
 
     /// Current write position in data buffer.
-    size: u16,
+    /// Writers update under lock, readers don't need this.
+    size: AtomicU16,
 
     /// Cached count of slots with suffixes.
-    suffix_count: u8,
+    /// Writers update under lock, readers don't need this.
+    suffix_count: AtomicU8,
+
+    /// Padding for alignment.
+    _pad: u8,
 
     /// Fixed-size data buffer.
-    data: [u8; CAPACITY],
+    /// Writers update under lock, readers access with OCC validation.
+    data: UnsafeCell<[u8; CAPACITY]>,
+}
+
+// SAFETY: InlineSuffixBag is Sync because:
+// - slots use AtomicU32 for thread-safe access
+// - size/suffix_count use atomics (writers hold lock)
+// - data is protected by OCC protocol (readers validate version after read)
+unsafe impl<const WIDTH: usize, const CAPACITY: usize> Sync for InlineSuffixBag<WIDTH, CAPACITY> {}
+
+impl<const WIDTH: usize, const CAPACITY: usize> Debug for InlineSuffixBag<WIDTH, CAPACITY> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
+        f.debug_struct("InlineSuffixBag")
+            .field("size", &self.size.load(RELAXED))
+            .field("suffix_count", &self.suffix_count.load(RELAXED))
+            .field("capacity", &CAPACITY)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY> {
@@ -100,20 +172,42 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     // ========================================================================
 
     /// Create an empty inline suffix bag.
-    ///
-    /// This is a const fn so it can be used in static/const contexts.
     #[must_use]
     #[inline(always)]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         // Force compile-time evaluation of WIDTH assertion
         let () = Self::ASSERT_WIDTH_FITS_U8;
 
         Self {
-            slots: [InlineSlotMeta::EMPTY; WIDTH],
-            size: 0,
-            suffix_count: 0,
-            data: [0u8; CAPACITY],
+            slots: StdArray::from_fn(|_| AtomicU32::new(InlineSlotMeta::EMPTY_PACKED)),
+            size: AtomicU16::new(0),
+            suffix_count: AtomicU8::new(0),
+            _pad: 0,
+            data: UnsafeCell::new([0u8; CAPACITY]),
         }
+    }
+
+    // ========================================================================
+    //  Slot Access (Atomic)
+    // ========================================================================
+
+    /// Load slot metadata atomically.
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "Bounds checked via debug_assert")]
+    fn load_meta(&self, slot: usize) -> InlineSlotMeta {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        // SAFETY: slot bounds checked above
+        let packed: u32 = self.slots[slot].load(READ_ORD);
+        InlineSlotMeta::unpack(packed)
+    }
+
+    /// Store slot metadata atomically.
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "Bounds checked via debug_assert")]
+    fn store_meta(&self, slot: usize, meta: InlineSlotMeta) {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        // SAFETY: slot bounds checked above
+        self.slots[slot].store(meta.pack(), WRITE_ORD);
     }
 
     // ========================================================================
@@ -130,24 +224,22 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// Return the number of bytes currently used.
     #[must_use]
     #[inline(always)]
-    pub const fn used(&self) -> usize {
-        self.size as usize
+    pub fn used(&self) -> usize {
+        self.size.load(RELAXED) as usize
     }
 
     /// Return the remaining capacity.
     #[must_use]
     #[inline(always)]
-    pub const fn remaining(&self) -> usize {
-        CAPACITY - (self.size as usize)
+    pub fn remaining(&self) -> usize {
+        CAPACITY - self.used()
     }
 
     /// Return the number of slots that have suffixes.
-    ///
-    /// This is now O(1), the count is cached and maintained incrementally.
     #[must_use]
     #[inline(always)]
-    pub const fn count(&self) -> usize {
-        self.suffix_count as usize
+    pub fn count(&self) -> usize {
+        self.suffix_count.load(RELAXED) as usize
     }
 
     // ========================================================================
@@ -178,7 +270,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// # Errors
     /// Returns `Err(AllocError)` if the external bag allocation fails.
     pub fn drain_to_external(
-        &self, // Changed from &mut self - we don't clear inline anymore
+        &self,
         perm: &impl TreePermutation,
         new_slot: usize,
         new_suffix: &[u8],
@@ -191,12 +283,15 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
         let mut copy_count: usize = 0;
 
+        // SAFETY: We hold the lock, so data buffer is stable
+        let data: &[u8; CAPACITY] = unsafe { &*self.data.get() };
+
         #[expect(clippy::indexing_slicing)]
         for i in 0..perm_size {
             let slot: usize = perm.get(i);
 
             if (slot != new_slot) && (slot < WIDTH) {
-                let meta: InlineSlotMeta = self.slots[slot];
+                let meta: InlineSlotMeta = self.load_meta(slot);
 
                 if meta.has_suffix() {
                     let start: usize = meta.offset as usize;
@@ -217,7 +312,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         // Pass 2: Copy suffixes to external bag using collected data
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
             // SAFETY: start and len come from valid InlineSlotMeta entries
-            let suffix: &[u8] = &self.data[start..(start + len)];
+            let suffix: &[u8] = &data[start..(start + len)];
             external.assign(slot, suffix);
         }
 
@@ -227,12 +322,6 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         // NOTE: We deliberately do NOT clear inline state here.
         // The caller must publish the external pointer first, then
         // may optionally clear inline state.
-        //
-        // Clearing inline before external publication creates a race:
-        // - Reader sees KSUF_KEYLENX (suffix exists)
-        // - Reader checks inline -> empty (we just cleared it)
-        // - Reader checks external -> null (caller hasn't stored it yet)
-        // - Reader returns None for a suffix that exists!
 
         Ok(external)
     }
@@ -259,7 +348,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// Returns `Err(AllocError)` if the external bag allocation fails.
     #[cold]
     pub fn drain_to_external_init(
-        &self, // Changed from &mut self
+        &self,
         new_slot: usize,
         new_suffix: &[u8],
     ) -> AllocResult<SuffixBag<WIDTH>> {
@@ -270,13 +359,16 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
         let mut copy_count: usize = 0;
 
+        // SAFETY: We hold the lock, so data buffer is stable
+        let data: &[u8; CAPACITY] = unsafe { &*self.data.get() };
+
         #[expect(clippy::indexing_slicing)]
         for slot in 0..new_slot {
             if slot >= WIDTH {
                 break;
             }
 
-            let meta: InlineSlotMeta = self.slots[slot];
+            let meta: InlineSlotMeta = self.load_meta(slot);
 
             if meta.has_suffix() {
                 let start: usize = meta.offset as usize;
@@ -295,20 +387,18 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
 
         // Copy existing suffixes
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
-            let suffix: &[u8] = &self.data[start..(start + len)];
+            let suffix: &[u8] = &data[start..(start + len)];
             external.assign(slot, suffix);
         }
 
         // Assign new suffix
         external.assign(new_slot, new_suffix);
 
-        // NOTE: Do NOT clear inline state - see drain_to_external comment
-
         Ok(external)
     }
 
     // ========================================================================
-    //  Slot Access
+    //  Slot Access (Read)
     // ========================================================================
 
     /// Check if a slot has a suffix.
@@ -318,45 +408,54 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// Panics in debug mode if `slot >= WIDTH`.
     #[must_use]
     #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
-    )]
     pub fn has_suffix(&self, slot: usize) -> bool {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
-        self.slots[slot].has_suffix()
+        self.load_meta(slot).has_suffix()
     }
 
     /// Get the suffix for a slot, or `None` if no suffix.
+    ///
+    /// # Safety Contract
+    ///
+    /// Readers must use OCC validation after calling this method.
+    /// The returned slice is only valid if the version check passes.
     ///
     /// # Panics
     ///
     /// Panics in debug mode if `slot >= WIDTH`.
     #[must_use]
     #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Bounds checked via debug_assert and invariant"
-    )]
     pub fn get(&self, slot: usize) -> Option<&[u8]> {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
-        let meta: InlineSlotMeta = self.slots[slot];
+        let meta: InlineSlotMeta = self.load_meta(slot);
 
         if !meta.has_suffix() {
             return None;
         }
 
         let start: usize = meta.offset as usize;
-        let end: usize = start + meta.len as usize;
+        let len: usize = meta.len as usize;
 
         // INVARIANT: Valid metadata points to valid data range.
         debug_assert!(
-            end <= CAPACITY,
-            "inline suffix metadata points past capacity: {end} > {CAPACITY}"
+            start + len <= CAPACITY,
+            "inline suffix metadata points past capacity: {} > {CAPACITY}",
+            start + len
         );
 
-        Some(&self.data[start..end])
+        // Use raw pointer to create slice directly, avoiding a retag of the entire array.
+        // This allows concurrent readers while a writer (holding the lock) modifies
+        // a different region. Readers use OCC validation to detect modifications.
+        //
+        // SAFETY:
+        // - Metadata bounds are validated by invariant (debug_assert above)
+        // - Readers retry if version changed (OCC protocol)
+        // - Writers hold the lock, ensuring no concurrent writes
+        let data_ptr: *const u8 = self.data.get().cast::<u8>();
+        let suffix: &[u8] = unsafe { std::slice::from_raw_parts(data_ptr.add(start), len) };
+
+        Some(suffix)
     }
 
     /// Get the suffix for a slot, or empty slice if no suffix.
@@ -367,7 +466,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     }
 
     // ========================================================================
-    //  Suffix Assignment
+    //  Suffix Assignment (Write - requires lock)
     // ========================================================================
 
     /// Try to assign a suffix to a slot in-place.
@@ -376,6 +475,10 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// 1. If new suffix fits in old slot's space, reuse it
     /// 2. Otherwise, append to end if there's room
     /// 3. If no room, return `false` (caller should use external bag)
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock.
     ///
     /// # Returns
     ///
@@ -386,11 +489,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     ///
     /// Panics if `slot >= WIDTH` or if suffix length exceeds `u16::MAX`.
     #[inline]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
-    )]
-    pub fn try_assign(&mut self, slot: usize, suffix: &[u8]) -> bool {
+    pub fn try_assign(&self, slot: usize, suffix: &[u8]) -> bool {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
         let suffix_len: usize = suffix.len();
@@ -400,34 +499,50 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
             return false;
         }
 
-        let meta: InlineSlotMeta = self.slots[slot];
+        let meta: InlineSlotMeta = self.load_meta(slot);
+
+        // Use raw pointer to avoid creating &mut that conflicts with concurrent readers.
+        // SAFETY: We hold the lock, exclusive write access to data buffer.
+        // Readers use OCC validation to detect our writes.
+        let data_ptr: *mut u8 = self.data.get().cast::<u8>();
 
         // Fast Path 1: Reuse existing slot if new suffix fits in old space
         if meta.has_suffix() && (suffix_len <= (meta.len as usize)) {
             let start: usize = meta.offset as usize;
-            self.data[start..(start + suffix_len)].copy_from_slice(suffix);
+            // SAFETY: start + suffix_len <= meta.len <= CAPACITY (invariant)
+            unsafe {
+                StdPtr::copy_nonoverlapping(suffix.as_ptr(), data_ptr.add(start), suffix_len);
+            }
 
             #[expect(clippy::cast_possible_truncation, reason = "len checked above")]
-            {
-                self.slots[slot] = InlineSlotMeta {
+            self.store_meta(
+                slot,
+                InlineSlotMeta {
                     offset: meta.offset,
                     len: suffix_len as u16,
-                };
-            }
+                },
+            );
 
             // Count unchanged, slot already had suffix
             return true;
         }
 
         // Fast Path 2: Append to end if there's room
-        let new_offset: usize = self.size as usize;
+        let current_size: usize = self.size.load(RELAXED) as usize;
 
-        if (new_offset + suffix_len) <= CAPACITY {
-            self.data[new_offset..(new_offset + suffix_len)].copy_from_slice(suffix);
+        if (current_size + suffix_len) <= CAPACITY {
+            // SAFETY: current_size + suffix_len <= CAPACITY (checked above)
+            unsafe {
+                StdPtr::copy_nonoverlapping(
+                    suffix.as_ptr(),
+                    data_ptr.add(current_size),
+                    suffix_len,
+                );
+            }
 
             // Update count if this is a new suffix
             if !meta.has_suffix() {
-                self.suffix_count += 1;
+                self.suffix_count.fetch_add(1, RELAXED);
             }
 
             #[expect(
@@ -435,12 +550,15 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
                 reason = "offset and len checked to fit"
             )]
             {
-                self.slots[slot] = InlineSlotMeta {
-                    offset: new_offset as u16,
-                    len: suffix_len as u16,
-                };
+                self.store_meta(
+                    slot,
+                    InlineSlotMeta {
+                        offset: current_size as u16,
+                        len: suffix_len as u16,
+                    },
+                );
 
-                self.size = (new_offset + suffix_len) as u16;
+                self.size.store((current_size + suffix_len) as u16, RELAXED);
             }
 
             return true;
@@ -455,29 +573,35 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// This marks the slot as having no suffix but does not reclaim
     /// the data buffer space. Space is only reclaimed when draining
     /// to an external bag.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock.
     #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
-    )]
-    pub fn clear(&mut self, slot: usize) {
+    pub fn clear(&self, slot: usize) {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
-        if self.slots[slot].has_suffix() {
-            self.suffix_count -= 1;
+        if self.load_meta(slot).has_suffix() {
+            self.suffix_count.fetch_sub(1, RELAXED);
         }
 
-        self.slots[slot] = InlineSlotMeta::EMPTY;
+        self.store_meta(slot, InlineSlotMeta::EMPTY);
     }
 
     /// Clear all slots and reset size to zero.
     ///
     /// Used after draining to an external bag.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock.
     #[inline(always)]
-    pub const fn clear_all(&mut self) {
-        self.slots = [InlineSlotMeta::EMPTY; WIDTH];
-        self.size = 0;
-        self.suffix_count = 0;
+    pub fn clear_all(&self) {
+        for slot in 0..WIDTH {
+            self.store_meta(slot, InlineSlotMeta::EMPTY);
+        }
+        self.size.store(0, RELAXED);
+        self.suffix_count.store(0, RELAXED);
     }
 
     // ========================================================================
@@ -486,7 +610,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
 
     /// Check if a slot's suffix equals the given suffix.
     ///
-    /// Uses word-aligned comparision for suffixes >= 8 bytes.
+    /// Uses word-aligned comparison for suffixes >= 8 bytes.
     #[must_use]
     #[inline(always)]
     pub fn suffix_equals(&self, slot: usize, suffix: &[u8]) -> bool {
@@ -514,12 +638,19 @@ impl<const WIDTH: usize, const CAPACITY: usize> Default for InlineSuffixBag<WIDT
 
 impl<const WIDTH: usize, const CAPACITY: usize> Clone for InlineSuffixBag<WIDTH, CAPACITY> {
     #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "from_fn iterates 0..WIDTH, index always in bounds"
+    )]
     fn clone(&self) -> Self {
+        // SAFETY: Clone is typically called under exclusive access or during init
+        let data: [u8; CAPACITY] = unsafe { *self.data.get() };
         Self {
-            slots: self.slots,
-            size: self.size,
-            suffix_count: self.suffix_count,
-            data: self.data,
+            slots: StdArray::from_fn(|i| AtomicU32::new(self.slots[i].load(RELAXED))),
+            size: AtomicU16::new(self.size.load(RELAXED)),
+            suffix_count: AtomicU8::new(self.suffix_count.load(RELAXED)),
+            _pad: 0,
+            data: UnsafeCell::new(data),
         }
     }
 }

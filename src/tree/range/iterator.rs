@@ -111,6 +111,9 @@ use crate::leaf_trait::{LayerCapableLeaf, TreeLeafNode};
 use crate::slot::ValueSlot;
 use crate::tree::MassTreeGeneric;
 
+#[cfg(debug_assertions)]
+use super::cursor_key::CursorDebugState;
+
 use super::cursor_key::CursorKey;
 use super::find::{
     find_initial, find_next, find_next_with_duplicate_check, find_retry, handle_down, handle_up,
@@ -267,6 +270,35 @@ where
     /// `back_initialized`, `back_exhausted`, `back_emit_equal`
     pub(super) flags: IterFlags,
 
+    // ========================================================================
+    //  Debug-only fields for ordering violation detection
+    // ========================================================================
+    /// Last emitted key for forward iteration (debug builds only).
+    ///
+    /// Used to assert that keys are emitted in strictly increasing order.
+    /// This catches ordering violations at the exact point they occur.
+    #[cfg(debug_assertions)]
+    pub(super) debug_last_emitted_key: Option<Vec<u8>>,
+
+    /// Last emitted key for backward iteration (debug builds only).
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(super) debug_last_emitted_key_back: Option<Vec<u8>>,
+
+    /// Cursor state at last emission (debug builds only).
+    ///
+    /// Captures the full cursor state when a key is emitted, useful for
+    /// diagnosing what went wrong when an ordering violation is detected.
+    #[cfg(debug_assertions)]
+    pub(super) debug_last_cursor_state: Option<CursorDebugState>,
+
+    /// Ring buffer of recent state transitions for debugging (debug builds only).
+    ///
+    /// Stores the last N state transitions (Retry, Down, Up) to help diagnose
+    /// what happened before an ordering violation.
+    #[cfg(debug_assertions)]
+    pub(super) debug_transition_history: Vec<String>,
+
     /// Marker for lifetime and type parameter covariance.
     _marker: PhantomData<&'a A>,
 }
@@ -375,6 +407,19 @@ where
             end_bound: end,
             flags: IterFlags::with_both_bounds(emit_equal, single_layer_mode, back_emit_equal),
 
+            // Debug-only fields for ordering violation detection
+            #[cfg(debug_assertions)]
+            debug_last_emitted_key: None,
+
+            #[cfg(debug_assertions)]
+            debug_last_emitted_key_back: None,
+
+            #[cfg(debug_assertions)]
+            debug_last_cursor_state: None,
+
+            #[cfg(debug_assertions)]
+            debug_transition_history: Vec::with_capacity(32),
+
             _marker: PhantomData,
         }
     }
@@ -457,6 +502,10 @@ where
 
     /// Advance the iterator state machine.
     #[inline]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "State machine with debug instrumentation"
+    )]
     fn advance(&mut self) -> Option<ScanEntry<S::Output>> {
         loop {
             match self.state {
@@ -478,6 +527,44 @@ where
                             self.flags.mark_back_exhausted();
                             return None;
                         }
+                    }
+
+                    // DEBUG: Assert strict ordering - key must be greater than last emitted
+                    #[cfg(debug_assertions)]
+                    #[allow(
+                        clippy::panic,
+                        reason = "Intentional panic for debug-only ordering violation detection"
+                    )]
+                    {
+                        if let Some(ref last_key) = self.debug_last_emitted_key
+                            && key <= last_key.as_slice()
+                        {
+                            // Capture current state for diagnosis
+                            let current_state = self.cursor_key.debug_state();
+                            let last_state = self.debug_last_cursor_state.as_ref();
+
+                            // Log detailed information before panicking
+                            eprintln!("\n=== ORDERING VIOLATION DETECTED ===");
+                            eprintln!("Current key:  {:?}", String::from_utf8_lossy(key));
+                            eprintln!("Last key:     {:?}", String::from_utf8_lossy(last_key));
+                            eprintln!("Current key bytes: {key:?}");
+                            eprintln!("Last key bytes:    {last_key:?}");
+                            eprintln!("Current cursor: {current_state}");
+                            if let Some(last) = last_state {
+                                eprintln!("Last cursor:    {last}");
+                            }
+                            eprintln!("=== END ORDERING VIOLATION ===\n");
+
+                            panic!(
+                                "Scan ordering violation: emitted key {:?} is not > last emitted key {:?}",
+                                String::from_utf8_lossy(key),
+                                String::from_utf8_lossy(last_key)
+                            );
+                        }
+
+                        // Update tracking state
+                        self.debug_last_emitted_key = Some(key.to_vec());
+                        self.debug_last_cursor_state = Some(self.cursor_key.debug_state());
                     }
 
                     // Take snapshot (should always be Some when in Emit state)
@@ -524,6 +611,7 @@ where
                 ScanState::Down => {
                     handle_down(&mut self.stack, &mut self.cursor_key);
                     self.state = ScanState::Retry;
+
                     // After layer descent, we need duplicate check
                     self.flags.require_duplicate_check();
                 }
@@ -537,6 +625,7 @@ where
                     ) {
                         // No parent layer, scan complete
                         self.flags.mark_exhausted();
+
                         return None;
                     }
 
@@ -548,6 +637,7 @@ where
 
                 ScanState::Retry => {
                     self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
+
                     // After retry, we need duplicate check on next FindNext
                     self.flags.require_duplicate_check();
                 }
@@ -758,6 +848,71 @@ where
     /// Convert to a values-only iterator.
     pub const fn values(self) -> ValuesIter<'a, 'g, S, L, A> {
         ValuesIter { inner: self }
+    }
+
+    /// Assert that keys are emitted in strictly increasing order (debug builds only).
+    ///
+    /// This catches ordering violations at the exact point they occur, providing
+    /// detailed diagnostic information about the cursor state.
+    #[cfg(debug_assertions)]
+    #[inline]
+    #[allow(
+        clippy::panic,
+        reason = "Intentional panic for debug-only ordering violation detection"
+    )]
+    pub(super) fn assert_ordering(&mut self, key: &[u8]) {
+        if let Some(ref last_key) = self.debug_last_emitted_key
+            && key <= last_key.as_slice()
+        {
+            // Capture current state for diagnosis
+            let current_state = self.cursor_key.debug_state();
+            let last_state = self.debug_last_cursor_state.as_ref();
+
+            // Log detailed information before panicking
+            eprintln!("\n=== ORDERING VIOLATION DETECTED (batch path) ===");
+            eprintln!("Current key:  {:?}", String::from_utf8_lossy(key));
+            eprintln!("Last key:     {:?}", String::from_utf8_lossy(last_key));
+            eprintln!("Current key bytes: {key:?}");
+            eprintln!("Last key bytes:    {last_key:?}");
+            eprintln!("Current cursor: {current_state}");
+            if let Some(last) = last_state {
+                eprintln!("Last cursor:    {last}");
+            }
+
+            // Print recent state transitions
+            eprintln!("\n--- Recent state transitions ---");
+            for (i, transition) in self.debug_transition_history.iter().enumerate() {
+                eprintln!("[{i}] {transition}");
+            }
+            eprintln!("--- End transitions ---");
+            eprintln!("=== END ORDERING VIOLATION ===\n");
+
+            panic!(
+                "Scan ordering violation: emitted key {:?} is not > last emitted key {:?}",
+                String::from_utf8_lossy(key),
+                String::from_utf8_lossy(last_key)
+            );
+        }
+
+        // Update tracking state and record emission
+        self.debug_last_emitted_key = Some(key.to_vec());
+        self.debug_last_cursor_state = Some(self.cursor_key.debug_state());
+        self.record_transition(format!(
+            "EMIT: {:?} cursor={}",
+            String::from_utf8_lossy(key),
+            self.cursor_key.debug_state()
+        ));
+    }
+
+    /// Record a state transition for debugging (debug builds only).
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub(super) fn record_transition(&mut self, description: String) {
+        // Keep last 32 transitions
+        if self.debug_transition_history.len() >= 32 {
+            self.debug_transition_history.remove(0);
+        }
+        self.debug_transition_history.push(description);
     }
 }
 

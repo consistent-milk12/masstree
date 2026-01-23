@@ -14,7 +14,10 @@
 //! masstree::insert_stats::reset_stats();
 //! ```
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    fmt::{self as StdFmt, Display, Formatter},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 /// Global statistics counters for insert operations.
 #[derive(Debug)]
@@ -152,8 +155,8 @@ impl StatsSnapshot {
     }
 }
 
-impl std::fmt::Display for StatsSnapshot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for StatsSnapshot {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         writeln!(f, "Insert Statistics:")?;
         writeln!(f, "  Attempts:             {:>12}", self.attempts)?;
         writeln!(f, "  Successful inserts:   {:>12}", self.successful_inserts)?;

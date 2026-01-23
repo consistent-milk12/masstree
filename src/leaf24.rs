@@ -716,8 +716,8 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         // FAST PATH 1: Try inline storage first (no allocation!)
         // SAFETY: We hold the lock (verified above), so no concurrent writers.
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
-            unsafe { &mut *self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
 
         if inline.try_assign(slot, suffix) {
             self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -757,8 +757,8 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         let perm = self.permutation();
         // SAFETY: Caller holds lock (verified above), ensuring exclusive access to inline_ksuf.
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
-            unsafe { &mut *self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
 
         // Drain inline to a new external bag with the new suffix.
         // This infallible path aborts on OOM. Use `try_assign_ksuf` for fallible version.
@@ -825,8 +825,8 @@ impl<S: ValueSlot> LeafNode24<S> {
         );
 
         // FAST PATH: Try inline storage first
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
-            unsafe { &mut *self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
 
         if inline.try_assign(slot, suffix) {
             self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -858,8 +858,8 @@ impl<S: ValueSlot> LeafNode24<S> {
             "assign_ksuf_init_slow: caller must hold lock or node must be unpublished"
         );
 
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
-            unsafe { &mut *self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
 
         // Drain inline using sequential slot iteration (0..slot)
         #[expect(clippy::expect_used)]
@@ -927,8 +927,8 @@ impl<S: ValueSlot> LeafNode24<S> {
         );
 
         // FAST PATH 1: Try inline storage first (no allocation!)
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
-            unsafe { &mut *self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
 
         if inline.try_assign(slot, suffix) {
             self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -972,8 +972,8 @@ impl<S: ValueSlot> LeafNode24<S> {
         );
 
         let perm = self.permutation();
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
-            unsafe { &mut *self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
 
         // Drain inline to a new external bag with the new suffix (FALLIBLE)
         let mut new_bag: SuffixBag<WIDTH_24> = inline.drain_to_external(&perm, slot, suffix)?;
@@ -1039,8 +1039,8 @@ impl<S: ValueSlot> LeafNode24<S> {
         );
 
         // FAST PATH: Try inline storage first
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
-            unsafe { &mut *self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
 
         if inline.try_assign(slot, suffix) {
             self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -1077,8 +1077,8 @@ impl<S: ValueSlot> LeafNode24<S> {
             "try_assign_ksuf_init_slow: caller must hold lock or node must be unpublished"
         );
 
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
-            unsafe { &mut *self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
 
         // Drain inline using sequential slot iteration (0..slot) (FALLIBLE)
         let mut new_bag: SuffixBag<WIDTH_24> = inline.drain_to_external_init(slot, suffix)?;
@@ -1137,8 +1137,8 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         // Clear from inline storage
         // SAFETY: We hold the lock (verified above), so no concurrent writers.
-        let inline: &mut InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
-            unsafe { &mut *self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag<WIDTH_24, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
         inline.clear(slot);
 
         // Clear from external storage (if exists)

@@ -31,6 +31,8 @@
 //! - Lock-free pop for consumers
 //! - Excellent scalability under high remove rates
 
+use std::fmt::{self as StdFmt, Debug, Formatter};
+
 use crossbeam_queue::SegQueue;
 use seize::LocalGuard;
 
@@ -193,8 +195,8 @@ impl<L> CoalesceQueue<L> {
     }
 }
 
-impl<L> std::fmt::Debug for CoalesceQueue<L> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<L> Debug for CoalesceQueue<L> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("CoalesceQueue")
             .field("pending_count", &self.pending.len())
             .finish()

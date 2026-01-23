@@ -85,7 +85,7 @@ pub struct SuffixSidecar<const WIDTH: usize> {
 impl<const WIDTH: usize> SuffixSidecar<WIDTH> {
     /// Create a new empty sidecar.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inline: InlineSuffixBag::new(),
             external: AtomicPtr::new(StdPtr::null_mut()),

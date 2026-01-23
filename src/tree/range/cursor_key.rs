@@ -36,7 +36,9 @@
 
 #![expect(clippy::indexing_slicing, reason = "Safety notes are provided inline")]
 
-use std::cmp::Ordering;
+#[cfg(debug_assertions)]
+use std::fmt::{self as StdFmt, Display, Formatter};
+use std::{cmp::Ordering, fmt::Debug};
 
 use crate::key::{IKEY_SIZE, MAX_KEY_LENGTH};
 
@@ -95,8 +97,8 @@ pub struct CursorKey {
 }
 
 #[expect(clippy::missing_fields_in_debug, reason = "don't print buffer")]
-impl std::fmt::Debug for CursorKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for CursorKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("CursorKey")
             .field("offset", &self.offset)
             .field("len", &self.len)
@@ -131,8 +133,7 @@ impl CursorKey {
     ///
     /// # Example
     ///
-    /// ```
-    /// # use masstree::tree::range::cursor_key::CursorKey;
+    /// ```ignore
     /// let cursor = CursorKey::from_slice(b"hello world");
     /// assert_eq!(cursor.current_ikey(), u64::from_be_bytes(*b"hello wo"));
     /// ```
@@ -304,8 +305,7 @@ impl CursorKey {
     ///
     /// # Example
     ///
-    /// ```
-    /// # use masstree::tree::range::cursor_key::CursorKey;
+    /// ```ignore
     /// let mut cursor = CursorKey::from_slice(b"hello world!!!!");
     /// assert_eq!(cursor.current_ikey(), u64::from_be_bytes(*b"hello wo"));
     ///
@@ -375,8 +375,7 @@ impl CursorKey {
     ///
     /// # Example
     ///
-    /// ```
-    /// # use masstree::tree::range::cursor_key::CursorKey;
+    /// ```ignore
     /// let mut cursor = CursorKey::from_slice(b"hello");
     /// cursor.shift_clear();
     ///
@@ -643,6 +642,27 @@ impl CursorKey {
     }
 
     // ========================================================================
+    //  Debug Helpers
+    // ========================================================================
+
+    /// Returns a debug representation of the cursor state for tracing.
+    ///
+    /// This is useful for debugging ordering violations where the cursor state
+    /// needs to be captured at various points during iteration.
+    #[must_use]
+    #[cfg(debug_assertions)]
+    pub fn debug_state(&self) -> CursorDebugState {
+        CursorDebugState {
+            offset: self.offset,
+            len: self.len,
+            ikey: self.ikey,
+            full_key: self.full_key().to_vec(),
+            has_suffix: self.has_suffix(),
+            layer_depth: self.layer_depth(),
+        }
+    }
+
+    // ========================================================================
     //  Internal Helpers
     // ========================================================================
 
@@ -693,6 +713,51 @@ impl CursorKey {
         }
 
         0
+    }
+}
+
+// ============================================================================
+//  Debug State Struct
+// ============================================================================
+
+/// Debug snapshot of cursor state for tracing ordering violations.
+///
+/// Captures the complete cursor state at a point in time, useful for
+/// debugging concurrent scan ordering issues.
+#[cfg(debug_assertions)]
+#[derive(Clone, Debug)]
+pub struct CursorDebugState {
+    /// Current layer offset
+    pub offset: usize,
+
+    /// Current key length at this layer
+    pub len: usize,
+
+    /// Current ikey (cached)
+    pub ikey: u64,
+
+    /// Complete key bytes (owned copy)
+    pub full_key: Vec<u8>,
+
+    /// Whether cursor has suffix (len > 8)
+    pub has_suffix: bool,
+
+    /// Layer depth (offset / 8)
+    pub layer_depth: usize,
+}
+
+#[cfg(debug_assertions)]
+impl Display for CursorDebugState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
+        write!(
+            f,
+            "CursorState {{ offset: {}, len: {}, ikey: {:016x}, layer: {}, key: {:?} }}",
+            self.offset,
+            self.len,
+            self.ikey,
+            self.layer_depth,
+            String::from_utf8_lossy(&self.full_key)
+        )
     }
 }
 

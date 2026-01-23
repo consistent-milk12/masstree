@@ -16,6 +16,7 @@
 //! logic in `masstree_scan.hh`.
 
 use std::cmp::Ordering;
+use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
@@ -23,6 +24,7 @@ use crate::key::IKEY_SIZE;
 use crate::ksearch::upper_bound_internode_generic;
 use crate::leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
 use crate::leaf24::{KSUF_KEYLENX, LAYER_KEYLENX};
+use crate::link::Linker;
 use crate::nodeversion::NodeVersion;
 use crate::prefetch::prefetch_read;
 use crate::slot::ValueSlot;
@@ -372,10 +374,25 @@ where
     };
 
     // Read slot data - Guard ensures memory safety
-    // No per-entry version check: validated at leaf boundaries only
     // Use Relaxed ordering - permutation loaded with Acquire, OCC validates at end
     let slot_ikey: u64 = leaf.ikey_relaxed(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
+
+    // CRITICAL: Always verify monotonicity to catch concurrent modifications.
+    //
+    // If the leaf's permutation changed while we were iterating (due to concurrent
+    // insert/split), the cached permutation may point to a slot that now contains
+    // a different key. Without this check, we could emit keys out of order.
+    //
+    // This is a cheap check (one u64 comparison) that catches the backward-jump case
+    // without requiring per-entry version validation.
+    //
+    // NOTE: This only checks ikey, not full key with suffix. For exact duplicate
+    // detection (same ikey, different suffix), we still need `needs_duplicate_check`.
+    if slot_ikey < cursor_key.current_ikey() {
+        // Slot ikey went backwards - leaf was modified, need to retry
+        return (ScanState::Retry, None);
+    }
 
     // Check for duplicate only when needed (after Retry)
     // OPTIMIZATION: In normal forward iteration, stack.next() already advances
@@ -413,14 +430,17 @@ where
         let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
         layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
         cursor_key.assign_store_ikey(slot_ikey);
+
         // Prefetch layer root before descending (hide memory latency)
         prefetch_read(slot_ptr);
         stack.set_root(slot_ptr);
+
         return (ScanState::Down, None);
     }
 
     // Value slot - prepare for emit
     let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
     if slot_ptr.is_null() {
         stack.next();
         return (ScanState::FindNext, None);
@@ -434,10 +454,12 @@ where
     let key_len: usize = if slot_keylenx == KSUF_KEYLENX {
         // Read suffix only when emitting
         if let Some(suffix) = leaf.ksuf(slot) {
-            let suffix_len = suffix.len();
+            let suffix_len: usize = suffix.len();
+
             // Update cursor for duplicate detection on retry
             cursor_key.assign_store_ikey(slot_ikey);
             let _ = cursor_key.assign_store_suffix(suffix);
+
             cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
             IKEY_SIZE + suffix_len
         } else {
@@ -446,7 +468,8 @@ where
             IKEY_SIZE
         }
     } else {
-        let len = slot_keylenx as usize;
+        let len: usize = slot_keylenx as usize;
+
         cursor_key.assign_store_ikey(slot_ikey);
         cursor_key.assign_store_length(len);
         len
@@ -552,6 +575,11 @@ where
     // Use Relaxed ordering - permutation loaded with Acquire, OCC validates at end
     let slot_ikey: u64 = leaf.ikey_relaxed(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
+
+    // CRITICAL: Always verify monotonicity (see find_next_inner for rationale)
+    if slot_ikey < cursor_key.current_ikey() {
+        return (ScanState::Retry, None);
+    }
 
     // Check for duplicate only when needed (after Retry)
     if needs_duplicate_check {
@@ -683,6 +711,11 @@ where
     let slot_ikey: u64 = leaf.ikey_relaxed(slot);
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
+    // CRITICAL: Always verify monotonicity (see find_next_inner for rationale)
+    if slot_ikey < cursor_key.current_ikey() {
+        return (ScanState::Retry, None);
+    }
+
     // Check for duplicate only when needed (after Retry)
     if needs_duplicate_check {
         let cmp: Ordering = cursor_key.compare(slot_ikey, slot_keylenx as usize);
@@ -765,17 +798,43 @@ where
     let leaf: &L = unsafe { stack.leaf_ref() };
     let version: u32 = stack.version();
 
-    // Check if version changed (concurrent modification)
+    // CRITICAL: Split-aware leaf boundary validation (TOCTOU-safe ordering).
+    //
+    // At leaf boundaries we must detect splits in progress. The split protocol
+    // marks the `next` pointer while modifying the B-link chain. Following a
+    // marked `next` can cause the scan to skip the new sibling and later observe
+    // keys out of order.
+    //
+    // TOCTOU-safe protocol (load next BEFORE checking version):
+    // 1. Load next_raw FIRST (captures current next pointer)
+    // 2. Check if marked (split already in progress on this boundary)
+    // 3. Check has_changed_or_locked() AFTER (catches splits that started after step 1)
+    //
+    // This ordering closes the race window: if a split starts after we load next_raw,
+    // the version check will detect it. See Analysis.md for the full analysis.
+
+    // Step 1: Load raw next pointer FIRST (may be marked)
+    let next_raw: *mut L = leaf.next_raw();
+
+    // Step 2: Check if next is marked (split in progress on this boundary)
+    if Linker::is_marked(next_raw) {
+        leaf.wait_for_split();
+
+        return (ScanState::Retry, None);
+    }
+
+    // Step 3: Validate version AFTER loading next_raw (catches concurrent splits)
     if leaf.version().has_changed(version) {
         return (ScanState::Retry, None);
     }
 
-    // Get next leaf
-    let next: *mut L = ForwardScanHelper::advance(leaf);
+    // Clear mark bit (safe_next equivalent, but we already loaded raw)
+    let next: *mut L = next_raw.map_addr(|addr| addr & !1);
 
     if next.is_null() {
         // No more leaves - scan exhausted (no Up in single-layer)
-        stack.set_leaf(std::ptr::null_mut());
+        stack.set_leaf(StdPtr::null_mut());
+
         return (ScanState::FindNext, None);
     }
 
@@ -810,6 +869,7 @@ where
 
     // Reposition using full key comparison
     let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
+
     stack.update_state(next_version, perm, kx.i);
 
     (ScanState::FindNext, None)
@@ -838,13 +898,25 @@ where
     let leaf: &L = unsafe { stack.leaf_ref() };
     let version: u32 = stack.version();
 
-    // Check if version changed (concurrent modification)
+    // CRITICAL: Split-aware leaf boundary validation (TOCTOU-safe ordering).
+    // See advance_leaf_single_layer for the full rationale.
+
+    // Step 1: Load raw next pointer FIRST
+    let next_raw: *mut L = leaf.next_raw();
+
+    // Step 2: Check if next is marked
+    if Linker::is_marked(next_raw) {
+        leaf.wait_for_split();
+        return (ScanState::Retry, None);
+    }
+
+    // Step 3: Validate version AFTER loading next_raw
     if leaf.version().has_changed(version) {
         return (ScanState::Retry, None);
     }
 
-    // Get next leaf
-    let next: *mut L = ForwardScanHelper::advance(leaf);
+    // Clear mark bit
+    let next: *mut L = next_raw.map_addr(|addr| addr & !1);
 
     if next.is_null() {
         // No more leaves in this layer
@@ -881,7 +953,8 @@ where
     let perm: L::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison
-    let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
+    let kx: KeyIndexedPosition = lower_with_suffix(cursor_key, next_leaf, &perm);
+
     stack.update_state(next_version, perm, kx.i);
 
     (ScanState::FindNext, None)
@@ -908,15 +981,27 @@ where
     let leaf: &L = unsafe { stack.leaf_ref() };
     let version: u32 = stack.version();
 
-    // Check if version changed (concurrent modification)
-    if leaf.version().has_changed(version) {
-        // Need to reposition
+    // CRITICAL: Split-aware leaf boundary validation (TOCTOU-safe ordering).
+    // See advance_leaf_single_layer for the full rationale.
+
+    // Step 1: Load raw next pointer FIRST
+    let next_raw: *mut L = leaf.next_raw();
+
+    // Step 2: Check if next is marked
+    if Linker::is_marked(next_raw) {
+        leaf.wait_for_split();
         return (ScanState::Retry, None);
     }
 
-    // Get next leaf
-    let next: *mut L = ForwardScanHelper::advance(leaf);
+    // Step 3: Validate version AFTER loading next_raw
+    if leaf.version().has_changed(version) {
+        return (ScanState::Retry, None);
+    }
 
+    // Clear mark bit
+    let next: *mut L = next_raw.map_addr(|addr| addr & !1);
+
+    // Capture prev leaf info for tracing before mutating stack
     if next.is_null() {
         // No more leaves in this layer
         return (ScanState::Up, None);
@@ -955,6 +1040,7 @@ where
     // Reposition using full key comparison (like C++ `helper.lower(ka, this)`).
     // This ensures we skip past any keys <= cursor_key.
     let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
+
     stack.update_state(next_version, perm, kx.i);
 
     (ScanState::FindNext, None)
@@ -1048,7 +1134,7 @@ where
     S: ValueSlot,
 {
     if start.is_null() {
-        return std::ptr::null_mut();
+        return StdPtr::null_mut();
     }
 
     let target_ikey: u64 = cursor_key.current_ikey();
@@ -1172,7 +1258,6 @@ where
     // Find position (cursor has len=9, will skip past the layer pointer)
     // Use suffix-aware search to handle keys with same ikey correctly
     let kx: KeyIndexedPosition = lower_with_suffix(cursor_key, leaf, &perm);
-
     stack.update_state(version, perm, kx.i);
 
     true

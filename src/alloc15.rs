@@ -19,6 +19,7 @@
 use std::alloc as StdAlloc;
 use std::alloc::Layout;
 use std::marker::PhantomData;
+use std::ptr as StdPtr;
 
 use arrayvec::ArrayVec;
 use seize::{Collector, Guard, LocalGuard};
@@ -260,7 +261,8 @@ unsafe fn reclaim_subtree_15<S: ValueSlot + 'static>(ptr: *mut u8, _collector: &
             LeafNode15::leaf_value_ptr,
             |leaf| leaf.parent_unguarded(),
             |leaf_ptr| {
-                std::ptr::drop_in_place(leaf_ptr.cast::<LeafNode15<S>>());
+                StdPtr::drop_in_place(leaf_ptr.cast::<LeafNode15<S>>());
+
                 node_pool::pool_dealloc(leaf_ptr, Layout::new::<LeafNode15<S>>());
             },
         );
@@ -283,9 +285,10 @@ unsafe fn reclaim_subtree_15_true_inline<V: InlineBits + 'static>(
             ptr,
             LeafNode15TrueInline::is_layer,
             LeafNode15TrueInline::leaf_value_ptr,
-            |leaf| leaf.parent_unguarded(),
-            |leaf_ptr| {
-                std::ptr::drop_in_place(leaf_ptr.cast::<LeafNode15TrueInline<V>>());
+            |leaf: &LeafNode15TrueInline<V>| leaf.parent_unguarded(),
+            |leaf_ptr: *mut u8| {
+                StdPtr::drop_in_place(leaf_ptr.cast::<LeafNode15TrueInline<V>>());
+
                 node_pool::pool_dealloc(leaf_ptr, Layout::new::<LeafNode15TrueInline<V>>());
             },
         );
