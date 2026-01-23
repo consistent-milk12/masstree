@@ -979,9 +979,19 @@ where
             // OPTIMIZATION: Prefetch next->next while we compare ikey_bound.
             // This hides memory latency for the next B-link hop (~50-100ns L3 hit).
             // Prefetch is safe even for null/invalid pointers (no-op on x86/ARM).
+            //
+            // Prefetch 2 cache lines for B-link traversal:
+            // - CL0 (0):  header (version, next ptr, ikey_bound) - needed for B-link decisions
+            // - CL1 (64): permutation - needed when search starts
+            //
+            // We don't prefetch ikey0 here because:
+            // 1. The B-link loop only checks ikey_bound, not individual keys
+            // 2. prefetch_for_search() will fetch ikeys when we land on the final leaf
             let next_next_raw: *mut L = next.next_raw();
             let next_next_ptr: *mut L = Linker::unmark_ptr(next_next_raw);
-            prefetch_read(next_next_ptr.cast::<u8>());
+            let prefetch_base: *const u8 = next_next_ptr.cast::<u8>();
+            prefetch_read(prefetch_base);
+            prefetch_read(prefetch_base.wrapping_add(64));
 
             let next_bound: u64 = next.ikey_bound();
 

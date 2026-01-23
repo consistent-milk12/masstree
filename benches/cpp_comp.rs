@@ -170,7 +170,7 @@ mod rw1 {
 
     const OPS_PER_THREAD: usize = 50_000;
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn random_insert_then_read(bencher: Bencher, threads: usize) {
         bencher
             .counter(divan::counter::ItemsCount::new(
@@ -326,17 +326,17 @@ mod rw2 {
             });
     }
 
-    #[divan::bench(name = "50pct_get", args = [1, 2, 4, 6])]
+    #[divan::bench(name = "50pct_get", args = [1, 2, 4, 6, 8, 12])]
     fn rw2_50(bencher: Bencher, threads: usize) {
         run_rw2(bencher, threads, 0.5);
     }
 
-    #[divan::bench(name = "90pct_get", args = [1, 2, 4, 6])]
+    #[divan::bench(name = "90pct_get", args = [1, 2, 4, 6, 8, 12])]
     fn rw2_90(bencher: Bencher, threads: usize) {
         run_rw2(bencher, threads, 0.9);
     }
 
-    #[divan::bench(name = "98pct_get", args = [1, 2, 4, 6])]
+    #[divan::bench(name = "98pct_get", args = [1, 2, 4, 6, 8, 12])]
     fn rw2_98(bencher: Bencher, threads: usize) {
         run_rw2(bencher, threads, 0.98);
     }
@@ -352,7 +352,7 @@ mod rw3 {
 
     const OPS_PER_THREAD: usize = 100_000;
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn sequential_insert_then_read(bencher: Bencher, threads: usize) {
         bencher
             .counter(divan::counter::ItemsCount::new(
@@ -410,7 +410,7 @@ mod rw3 {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn sequential_disjoint(bencher: Bencher, threads: usize) {
         bencher
             .counter(divan::counter::ItemsCount::new(
@@ -469,7 +469,7 @@ mod rw3 {
             });
     }
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn sequential_binary_keys(bencher: Bencher, threads: usize) {
         bencher
             .counter(divan::counter::ItemsCount::new(
@@ -538,7 +538,7 @@ mod rw4 {
     const OPS_PER_THREAD: usize = 100_000;
     const TOP: u64 = 2_147_483_647;
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn reverse_sequential(bencher: Bencher, threads: usize) {
         bencher
             .counter(divan::counter::ItemsCount::new(
@@ -608,7 +608,7 @@ mod same {
     const OPS_PER_THREAD: usize = 100_000;
     const NUM_KEYS: u32 = 10;
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn hot_10_keys(bencher: Bencher, threads: usize) {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -674,7 +674,7 @@ mod wscale {
 
     const OPS_PER_THREAD: usize = 100_000;
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn random_writes(bencher: Bencher, threads: usize) {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -737,7 +737,7 @@ mod rscale {
     const KEYS_PER_THREAD: usize = 100_000;
     const OPS_PER_THREAD: usize = 100_000;
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn random_reads(bencher: Bencher, threads: usize) {
         // Pre-populate tree
         let tree = Arc::new(MassTree15Inline::<u64>::new());
@@ -829,7 +829,7 @@ mod uscale {
     /// Match mttest scale: ~7M ops/thread in 5s run
     const OPS_PER_THREAD: usize = 5_000_000;
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn random_writes_empty_tree(bencher: Bencher, threads: usize) {
         // NO pre-population - matches C++ kvtest_uscale semantics
         bencher
@@ -894,7 +894,7 @@ mod rw1long {
     const FORMATS: [&str; 4] = ["user", "machine", "opening", "fartparade"];
     const OPS_PER_THREAD: usize = 25_000;
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn long_string_keys(bencher: Bencher, threads: usize) {
         bencher
             .counter(divan::counter::ItemsCount::new(
@@ -980,7 +980,7 @@ mod rwsmall24 {
     const NKEYS: u32 = 24;
     const OPS_PER_THREAD: usize = 100_000;
 
-    #[divan::bench(args = [1, 2, 4, 6])]
+    #[divan::bench(args = [1, 2, 4, 6, 8, 12])]
     fn small_keyset_mixed(bencher: Bencher, threads: usize) {
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))

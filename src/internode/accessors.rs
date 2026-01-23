@@ -1,5 +1,5 @@
 use std::array as StdArray;
-use std::sync::atomic::{Ordering as AtomicOrdering, fence};
+use std::sync::atomic::{fence, Ordering as AtomicOrdering};
 
 use seize::Guard;
 
@@ -239,40 +239,11 @@ impl InternodeNode {
         if i < nkeys {
             let next_child_ptr = self.child[i + 1].load(RELAXED);
 
-            // SAFETY: Prefetch instructions are safe even with null/invalid pointers.
-            // On x86/ARM, prefetching an invalid address is a no-op (silently ignored).
-            // The CPU's prefetch unit handles TLB misses gracefully.
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                // Prefetch cache line 0: header + ikey0[0..5]
-                std::arch::x86_64::_mm_prefetch(
-                    next_child_ptr.cast::<i8>(),
-                    std::arch::x86_64::_MM_HINT_T0,
-                );
-                // Prefetch cache line 1: ikey0[6..=13]
-                std::arch::x86_64::_mm_prefetch(
-                    next_child_ptr.cast::<i8>().wrapping_add(64),
-                    std::arch::x86_64::_MM_HINT_T0,
-                );
-            }
-
-            // SAFETY: Same as x86_64 - prefetch of invalid addresses is harmless.
-            #[cfg(target_arch = "aarch64")]
-            unsafe {
-                // Prefetch cache line 0: header + ikey0[0..5]
-                std::arch::aarch64::_prefetch(
-                    next_child_ptr.cast::<i8>(),
-                    std::arch::aarch64::_PREFETCH_READ,
-                    std::arch::aarch64::_PREFETCH_LOCALITY3,
-                );
-
-                // Prefetch cache line 1: ikey0[6..=13]
-                std::arch::aarch64::_prefetch(
-                    next_child_ptr.cast::<i8>().wrapping_add(64),
-                    std::arch::aarch64::_PREFETCH_READ,
-                    std::arch::aarch64::_PREFETCH_LOCALITY3,
-                );
-            }
+            // Prefetch cache line 0: header + ikey0[0..5]
+            // Prefetch cache line 1: ikey0[6..=13]
+            // Uses unified wrapper that handles x86_64/aarch64/other architectures.
+            prefetch_read(next_child_ptr);
+            prefetch_read(next_child_ptr.wrapping_add(64));
         }
 
         ptr
