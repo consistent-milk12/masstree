@@ -22,6 +22,53 @@ bench:
 bench-args ARGS:
     cargo bench --bench mttest --features mimalloc -- {{ARGS}}
 
+# === Benchmark comparison commands ===
+
+# Default benchmark parameters
+BENCH_THREADS := "12"
+BENCH_DURATION := "10"
+
+# Run all C++ benchmarks and save to cpp_benches/
+cpp-bench:
+    #!/usr/bin/env bash
+    set -e
+    mkdir -p cpp_benches
+    tests="rw1 rw2g98 rw3 rw4 same uscale wscale"
+    echo "Running C++ benchmarks ({{BENCH_THREADS}} threads, {{BENCH_DURATION}}s)..."
+    for test in $tests; do
+        echo "  Running $test..."
+        ./reference/mttest -j{{BENCH_THREADS}} -d{{BENCH_DURATION}} $test 2>&1 > cpp_benches/$test.txt
+    done
+    echo "Done. Results saved to cpp_benches/"
+
+# Parse C++ benchmark results
+cpp-parse:
+    python3 cpp_benches/parse_results.py
+
+# Run all Rust benchmarks and save to rust_benches/
+rust-bench:
+    #!/usr/bin/env bash
+    set -e
+    mkdir -p rust_benches
+    tests="rw1 rw2g98 rw3 rw4 same uscale wscale"
+    echo "Running Rust benchmarks ({{BENCH_THREADS}} threads, {{BENCH_DURATION}}s)..."
+    for test in $tests; do
+        echo "  Running $test..."
+        cargo bench --bench mttest --features mimalloc -- $test -j{{BENCH_THREADS}} -d{{BENCH_DURATION}} 2>&1 > rust_benches/$test.txt
+    done
+    echo "Done. Results saved to rust_benches/"
+
+# Parse Rust benchmark results
+rust-parse:
+    python3 rust_benches/parse_results.py
+
+# Compare C++ and Rust benchmark results
+bench-compare:
+    python3 scripts/compare_benches.py
+
+# Run all benchmarks and compare (full benchmark suite)
+bench-all: cpp-bench rust-bench bench-compare
+
 # Run all tests with nextest (saves failures to file if any)
 test:
     #!/usr/bin/env bash
