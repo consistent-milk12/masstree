@@ -2,11 +2,12 @@ use seize::LocalGuard;
 use std::ptr as StdPtr;
 
 use crate::{
-    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
+    hints::unlikely,
     key::Key,
     leaf_trait::LayerCapableLeaf,
-    tree::generic::optimistic_reads::{LookupResult, search_leaf_multi_layer},
+    tree::generic::optimistic_reads::{search_leaf_multi_layer, LookupResult},
     value::traits::LeafValueLoad,
+    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
 };
 
 impl<S, L, A> MassTreeGeneric<S, L, A>
@@ -155,8 +156,8 @@ where
                 // Version validation after all reads (common case: unchanged)
                 // Store version reference once to avoid repeated method calls
                 let ver = leaf.version();
-                if ver.has_changed(version) {
-                    if ver.has_split_no_compiler_fence(version) {
+                if unlikely(ver.has_changed(version)) {
+                    if unlikely(ver.has_split_no_compiler_fence(version)) {
                         let (advanced, new_version) =
                             self.advance_to_key_generic(leaf, key, version, guard);
 
@@ -181,7 +182,7 @@ where
                 }
 
                 // Not found, check dirty or B-link
-                if ver.is_dirty() {
+                if unlikely(ver.is_dirty()) {
                     version = ver.stable();
 
                     continue 'search_loop;
@@ -197,7 +198,7 @@ where
                 // we descended to a leaf that's to the right of where the key should be.
                 // Recovery requires restart from layer root (can't safely walk left).
                 // NOTE: This is defense-in-depth; the early check above catches most cases.
-                if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                if unlikely(!leaf.prev().is_null() && target_ikey < leaf.ikey_bound()) {
                     leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
 
                     continue 'leaf_loop;
@@ -241,8 +242,8 @@ where
                 // SAFETY: leaf_ptr protected by guard
                 let leaf: &L = unsafe { &*leaf_ptr };
 
-                // Handle deleted leaf (concurrent coalesce)
-                if leaf.version().is_deleted() {
+                // Handle deleted leaf (concurrent coalesce) - rare condition
+                if unlikely(leaf.version().is_deleted()) {
                     leaf_ptr = self.handle_deleted_leaf(leaf, layer_root, key, in_sublayer, guard);
 
                     continue 'leaf_loop;
@@ -306,8 +307,8 @@ where
                                 Some(unsafe { S::output_from_raw(ptr) })
                             };
 
-                            if ver.has_changed(version) {
-                                if ver.has_split_no_compiler_fence(version) {
+                            if unlikely(ver.has_changed(version)) {
+                                if unlikely(ver.has_split_no_compiler_fence(version)) {
                                     let (new_ptr, new_version, changed_leaf) =
                                         self.handle_version_change(leaf, key, version, guard);
 
@@ -330,8 +331,8 @@ where
 
                         LookupResult::Layer(layer_ptr) => {
                             // Validate version BEFORE descending
-                            if ver.has_changed(version) {
-                                if ver.has_split_no_compiler_fence(version) {
+                            if unlikely(ver.has_changed(version)) {
+                                if unlikely(ver.has_split_no_compiler_fence(version)) {
                                     let (new_ptr, new_version, changed_leaf) =
                                         self.handle_version_change(leaf, key, version, guard);
 
@@ -350,7 +351,7 @@ where
                             }
 
                             // Check sublayer is not deleted before descent
-                            if !self.check_sublayer_valid(layer_ptr) {
+                            if unlikely(!self.check_sublayer_valid(layer_ptr)) {
                                 return None;
                             }
 
@@ -363,8 +364,8 @@ where
 
                         LookupResult::NotFound => {
                             // Validate before returning None
-                            if ver.has_changed(version) {
-                                if ver.has_split_no_compiler_fence(version) {
+                            if unlikely(ver.has_changed(version)) {
+                                if unlikely(ver.has_split_no_compiler_fence(version)) {
                                     let (new_ptr, new_version, changed_leaf) =
                                         self.handle_version_change(leaf, key, version, guard);
 
@@ -382,7 +383,7 @@ where
                                 continue 'search_loop;
                             }
 
-                            if ver.is_dirty() {
+                            if unlikely(ver.is_dirty()) {
                                 version = ver.stable();
 
                                 continue 'search_loop;
@@ -398,7 +399,7 @@ where
                             // we descended to a leaf that's to the right of where the key should be.
                             // Recovery requires restart from layer root (can't safely walk left).
                             // NOTE: This is defense-in-depth; the early check above catches most cases.
-                            if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                            if unlikely(!leaf.prev().is_null() && target_ikey < leaf.ikey_bound()) {
                                 leaf_ptr = self.reach_leaf_concurrent_generic(
                                     layer_root,
                                     key,

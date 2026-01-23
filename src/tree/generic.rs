@@ -9,6 +9,7 @@ use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
     BatchedRetire, Linker, MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation,
+    hints::{likely, unlikely},
     key::Key,
     leaf_trait::LayerCapableLeaf,
     leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
@@ -671,8 +672,8 @@ where
                 let child: *mut u8 = inode.child(child_idx);
                 n[other] = child.cast_const();
 
-                // Null child means concurrent split in progress
-                if child.is_null() {
+                // Null child means concurrent split in progress (rare)
+                if unlikely(child.is_null()) {
                     // Retry - root fix-up loop will find current root
                     continue 'retry;
                 }
@@ -725,7 +726,7 @@ where
 
                 // Now validate parent - did it change during our read?
                 // Common case: unchanged (no concurrent modification)
-                if !inode.version().has_changed(v[sense]) {
+                if likely(!inode.version().has_changed(v[sense])) {
                     // Success! Parent unchanged, child read is valid
                     // Swap sense to "move" to child
                     sense = other;
@@ -736,7 +737,7 @@ where
                 let old_v: u32 = v[sense];
                 v[sense] = inode.version().stable(); // Re-read parent version
 
-                if inode.version().has_split(old_v) {
+                if unlikely(inode.version().has_split(old_v)) {
                     // Split occurred - check if our key moved to the right sibling
                     // If target_ikey > last_key, key is beyond this internode's range
                     let nkeys: usize = inode.nkeys();
@@ -803,7 +804,7 @@ where
             };
 
             // Check if version is still valid (common case: unchanged)
-            if !leaf.version().has_changed(version) {
+            if likely(!leaf.version().has_changed(version)) {
                 return cmp;
             }
 
@@ -834,10 +835,10 @@ where
 
         // Check if we need to walk the B-link chain
         // C++: if (unlikely(v.has_split(oldv)) && n->stable_last_key_compare(ka, v, ti) > 0)
-        let needs_walk: bool = if leaf.version().has_split(old_version) {
+        let needs_walk: bool = if unlikely(leaf.version().has_split(old_version)) {
             // Split occurred - check if key is greater than last key in leaf
             Self::stable_last_key_compare(leaf, key, version) == Ordering::Greater
-        } else if leaf.version().is_splitting() {
+        } else if unlikely(leaf.version().is_splitting()) {
             // Split in progress - wait and check
             version = leaf.version().stable();
             Self::stable_last_key_compare(leaf, key, version) == Ordering::Greater
@@ -849,8 +850,8 @@ where
             return (leaf, version);
         }
 
-        // Walk B-link chain to find correct leaf
-        while !leaf.version().is_deleted() {
+        // Walk B-link chain to find correct leaf (common case: not deleted)
+        while likely(!leaf.version().is_deleted()) {
             let next_raw: *mut L = leaf.next_raw();
 
             // Check for marked pointer (split in progress OR deleted node)
@@ -945,9 +946,9 @@ where
                 return (leaf_ptr, true);
             }
 
-            // Check if current leaf was deleted (e.g., by coalescing)
+            // Check if current leaf was deleted (e.g., by coalescing) - rare
             // If so, follow B-link to successor and continue from there
-            if leaf.version().is_deleted() {
+            if unlikely(leaf.version().is_deleted()) {
                 let next_raw: *mut L = leaf.next_raw();
                 let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
                 if next_ptr.is_null() {

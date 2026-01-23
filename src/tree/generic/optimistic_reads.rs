@@ -14,9 +14,10 @@ use super::{
     ValueSlot,
 };
 
-use crate::leaf_trait::TreePermutation;
+use crate::hints::unlikely;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
+use crate::leaf_trait::TreePermutation;
 use crate::link::Linker;
 use crate::prefetch::prefetch_read;
 use crate::ref_value_slot::RefValueSlot;
@@ -530,11 +531,11 @@ where
                     }
                 }
 
-                // Version validation after all reads
-                if leaf.version().has_changed(version) {
+                // Version validation after all reads (common case: unchanged)
+                if unlikely(leaf.version().has_changed(version)) {
                     // Only do full B-link handling if split occurred
                     // For update-only, simple retry is faster
-                    if leaf.version().has_split_no_compiler_fence(version) {
+                    if unlikely(leaf.version().has_split_no_compiler_fence(version)) {
                         let (advanced, new_version) =
                             self.advance_to_key_generic(leaf, key, version, guard);
 
@@ -558,7 +559,7 @@ where
                 }
 
                 // Not found, check dirty or B-link (also handles deleted via check_blink_chain)
-                if leaf.version().is_dirty() {
+                if unlikely(leaf.version().is_dirty()) {
                     version = leaf.version().stable();
 
                     continue 'search_loop;
@@ -569,7 +570,7 @@ where
                 // to the right of where the key should be. Recovery requires restart
                 // from layer root (can't safely walk left in a B-link tree).
                 // NOTE: This is a fallback; the early check above should usually catch this.
-                if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                if unlikely(!leaf.prev().is_null() && target_ikey < leaf.ikey_bound()) {
                     // Reload root to get latest pointer after concurrent modifications
                     layer_root = self.load_root_ptr_generic(guard);
                     leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
@@ -667,9 +668,9 @@ where
                     // target_ikey already computed at start of 'leaf_loop
                     let result: LookupResult = search_leaf_multi_layer::<S, L>(leaf, key);
 
-                    if leaf.version().has_changed(version) {
+                    if unlikely(leaf.version().has_changed(version)) {
                         // Only do full B-link handling if split occurred
-                        if leaf.version().has_split_no_compiler_fence(version) {
+                        if unlikely(leaf.version().has_split_no_compiler_fence(version)) {
                             let (new_ptr, new_version, changed_leaf) =
                                 self.handle_version_change(leaf, key, version, guard);
 

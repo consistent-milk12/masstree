@@ -25,7 +25,7 @@
 //! │ Cache Lines 3-4 (128 bytes)                                     │
 //! │   child[7..16]: [AtomicPtr<u8>; 9] (72 bytes)                   │
 //! └─────────────────────────────────────────────────────────────────┘
-//! Total: ~280 bytes (5 cache lines)
+//! Total: 264 bytes of data, 320 bytes with alignment (5 cache lines)
 //! ```
 //!
 //! # B+Tree Routing Model
@@ -107,7 +107,7 @@ const NUM_CHILDREN: usize = WIDTH + 1;
 ///
 /// # Memory Layout
 /// Uses `#[repr(C, align(64))]` for cache-line alignment.
-/// Total size is ~264 bytes (5 cache lines).
+/// Total size is 264 bytes of data, 320 bytes with alignment (5 cache lines).
 #[repr(C, align(64))]
 pub struct InternodeNode {
     // ========================================================================
@@ -591,7 +591,7 @@ impl InternodeNode {
                 // SAFETY: height > 0 means children are InternodeNode
                 #[expect(
                     clippy::cast_ptr_alignment,
-                    reason = "height > 0 means children are InternodeNode"
+                    reason = "height > 0 guarantees children are InternodeNode with 64-byte alignment"
                 )]
                 unsafe {
                     (*child.cast::<Self>()).set_parent(new_right_ptr_u8);
@@ -681,14 +681,19 @@ impl InternodeNode {
     ///
     /// # Memory Ordering
     ///
-    /// Uses a single Acquire fence followed by Relaxed loads. Safe because
-    /// callers validate node version before/after, providing synchronization.
+    /// Uses a single Acquire fence followed by Relaxed loads. The Acquire fence
+    /// orders subsequent Relaxed loads after the caller's version load. Readers
+    /// retry if version changes, ensuring consistency even with Relaxed key loads.
     ///
     /// # Prefetch Strategy
     ///
-    /// Cache lines are prefetched mid-loop to hide L2 latency (~16 cycles):
-    /// - At `i=4`: prefetch CL1 (`ikey0[6]`) if `n > 6`
-    /// - At `i=12`: prefetch CL2 (`ikey0[14]`) if `n > 13`
+    /// Cache lines are prefetched with lead time to hide L2 latency (~12-16 cycles):
+    /// - Before loop: prefetch CL1 (`ikey0[6]`) if `n > 6`
+    /// - At `i=8`: prefetch CL2 (`ikey0[14]`) if `n > 13`
+    ///
+    /// CL0 is assumed hot from the caller's version check. Prefetching CL1 before
+    /// the loop gives ~4 iterations (~16-32 cycles) of lead time before we access
+    /// `ikey0[6]` at `i=4`.
     #[inline]
     #[expect(
         clippy::indexing_slicing,
@@ -697,19 +702,24 @@ impl InternodeNode {
     pub fn find_insert_position(&self, insert_ikey: u64) -> usize {
         let n = self.nkeys();
 
-        // Single Acquire fence, subsequent loads can be Relaxed.
+        // Acquire fence orders subsequent Relaxed loads after caller's version load.
+        // See module-level Memory Ordering documentation in thread safety section.
         fence(AtomicOrdering::Acquire);
+
+        // Prefetch CL1 (ikey0[6..=13]) early to hide L2 latency.
+        // CL0 is likely hot from the version check that precedes this call.
+        // This gives ~4 iterations of lead time before we access ikey0[6] at i=4.
+        if n > 6 {
+            prefetch_read(&raw const self.ikey0[6]);
+        }
 
         let mut i = 0;
 
-        // Main loop with mid-loop prefetch
+        // Main loop with 4x unrolling.
         while (i + 4) <= n {
-            // Prefetch next cache line when approaching boundary.
-            if (i == 4) && (n > 6) {
-                prefetch_read(&raw const self.ikey0[6]);
-            }
-
-            if (i == 12) && (n > 13) {
+            // Prefetch CL2 (ikey0[14]) at i=8, giving 4 iterations of lead time
+            // before we access it at i=12.
+            if (i == 8) && (n > 13) {
                 prefetch_read(&raw const self.ikey0[14]);
             }
 
@@ -752,7 +762,7 @@ impl InternodeNode {
     /// Checks:
     /// - nkeys <= WIDTH
     /// - Keys are in ascending order
-    /// - Children for valid indices are potentially non-null (soft check)
+    /// - Children for valid indices are non-null (debug-only assertion)
     ///
     /// # Panics
     /// If any invariant is violated.
@@ -903,11 +913,6 @@ impl TreeInternode for InternodeNode {
         Self::ikey(self, idx)
     }
 
-    // #[inline(always)]
-    // fn ikey_relaxed(&self, idx: usize) -> u64 {
-    //     Self::ikey_relaxed(self, idx)
-    // }
-
     /// Get the key at the given index using Relaxed ordering.
     ///
     /// Used in internal operations where ordering is handled by caller.
@@ -955,7 +960,7 @@ impl TreeInternode for InternodeNode {
     /// Uses unguarded loads - caller must ensure no concurrent retirement.
     #[inline(always)]
     fn child(&self, idx: usize) -> *mut u8 {
-        // SAFETY: BTreeNodeCommon trait methods are called during locked operations.
+        // SAFETY: TreeInternode trait methods are called during locked operations.
         unsafe { Self::child_unguarded(self, idx) }
     }
 
@@ -980,7 +985,7 @@ impl TreeInternode for InternodeNode {
     /// Uses unguarded loads - caller must ensure no concurrent retirement.
     #[inline(always)]
     fn parent(&self) -> *mut u8 {
-        // SAFETY: BTreeNodeCommon trait methods are called during locked operations.
+        // SAFETY: TreeInternode trait methods are called during locked operations.
         unsafe { Self::parent_unguarded(self) }
     }
 
@@ -999,7 +1004,7 @@ impl TreeInternode for InternodeNode {
     /// Called under exclusive lock - uses unguarded child loads.
     #[inline(always)]
     fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize) {
-        // SAFETY: Trait method is called during locked operations.
+        // SAFETY: TreeInternode trait methods are called during locked operations.
         unsafe { Self::shift_from(self, dst_pos, src, src_pos, count) };
     }
 

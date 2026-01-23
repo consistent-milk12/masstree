@@ -1,5 +1,5 @@
 use std::array as StdArray;
-use std::sync::atomic::{Ordering as AtomicOrdering, fence};
+use std::sync::atomic::{fence, Ordering as AtomicOrdering};
 
 use seize::Guard;
 
@@ -39,7 +39,7 @@ impl InternodeNode {
         self.nkeys.load(READ_ORD) as usize
     }
 
-    /// Get the number of keys as usize (convenience method).
+    /// Alias for [`Self::nkeys`] for API consistency with leaf nodes.
     #[must_use]
     #[inline(always)]
     pub fn size(&self) -> usize {
@@ -111,7 +111,7 @@ impl InternodeNode {
     /// An array of all WIDTH ikeys. Only the first `nkeys` are valid.
     #[must_use]
     #[inline(always)]
-    #[expect(clippy::indexing_slicing)]
+    #[expect(clippy::indexing_slicing, reason = "i < WIDTH guaranteed by from_fn")]
     pub fn load_all_ikeys(&self) -> [u64; WIDTH] {
         // Use Relaxed loads - ordering is established by the fence below
         let ikeys: [u64; WIDTH] = StdArray::from_fn(|i| self.ikey0[i].load(RELAXED));
@@ -220,8 +220,8 @@ impl InternodeNode {
     /// # Prefetch Strategy
     ///
     /// When descending to `child[i]`, we speculatively prefetch `child[i+1]`:
-    /// - Offset 0: Node header + first 6 ikeys (cache line 0)
-    /// - Offset 64: Remaining ikeys (cache line 1)
+    /// - Offset 0: Node header + ikey0[0..=5] (cache line 0)
+    /// - Offset 64: ikey0[6..=13] (cache line 1)
     ///
     /// Prefetching null pointers is harmless on x86/ARM (becomes a no-op).
     #[must_use]
@@ -249,7 +249,7 @@ impl InternodeNode {
                     next_child_ptr.cast::<i8>(),
                     std::arch::x86_64::_MM_HINT_T0,
                 );
-                // Prefetch cache line 1: ikey0[6..13]
+                // Prefetch cache line 1: ikey0[6..=13]
                 std::arch::x86_64::_mm_prefetch(
                     next_child_ptr.cast::<i8>().wrapping_add(64),
                     std::arch::x86_64::_MM_HINT_T0,
@@ -266,7 +266,7 @@ impl InternodeNode {
                     std::arch::aarch64::_PREFETCH_LOCALITY3,
                 );
 
-                // Prefetch cache line 1: ikey0[6..13]
+                // Prefetch cache line 1: ikey0[6..=13]
                 std::arch::aarch64::_prefetch(
                     next_child_ptr.cast::<i8>().wrapping_add(64),
                     std::arch::aarch64::_PREFETCH_READ,
