@@ -19,7 +19,7 @@ Copy types.
 
 ## Status
 
-**v0.6.4** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 5/7 benchmarks and
+**v0.6.5** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 5/7 benchmarks and
 Rust alternatives on 11/12 workloads. Passes Miri with strict-provenance flag. Concurrent data structures
 require extensive stress testing, the test suite is comprehensive (998 tests total) but edge cases may remain.
 
@@ -126,7 +126,7 @@ insert-heavy workloads where TreeIndex performs better.
 
 ```toml
 [dependencies]
-masstree = { version = "0.6.4", features = ["mimalloc"] }
+masstree = { version = "0.6.5", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

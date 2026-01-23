@@ -10,6 +10,13 @@
 //! 2. [`find_next`]: Iterate through entries, handling all transitions
 //! 3. [`find_retry`]: Reposition after version changes or layer transitions
 //!
+//! # Performance Characteristics
+//!
+//! - **O(1)** per-entry iteration within a leaf (permutation index increment)
+//! - **O(log n)** cost for layer transitions (tree traversal)
+//! - **Prefetching strategy**: 3-way pipelining prefetches current leaf's data arrays,
+//!   next leaf (full 6 cache lines), and next-next leaf for memory latency hiding
+//!
 //! # C++ Reference
 //!
 //! Corresponds to `scanstackelt::find_initial`, `find_next`, and the retry
@@ -20,6 +27,7 @@ use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
+use crate::hints::likely;
 use crate::key::IKEY_SIZE;
 use crate::ksearch::upper_bound_internode_generic;
 use crate::leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
@@ -71,9 +79,14 @@ use super::scan_state::{
 ///
 /// - `(ScanState, Option<ScanSnapshot>)`: Next state and optional value snapshot
 ///
+/// # Panics
+///
+/// This function assumes the guard is held and protects all accessed pointers.
+/// Undefined behavior may occur if called without proper memory reclamation protection.
+///
 /// # C++ Reference
 ///
-/// Corresponds to `scanstackelt::find_initial` in `masstree_scan.hh:130-188`.
+/// Corresponds to `scanstackelt::find_initial` in `masstree_scan.hh`.
 pub fn find_initial<L, S>(
     root: *const u8,
     stack: &mut ScanStackElement<L, S>,
@@ -135,14 +148,14 @@ where
     }
 
     // Update stack with validated state
-    // IMPORTANT: If we found a match (kx.p.is_some()), we need to advance past it.
-    // This applies whether we emitted it (emit_equal=true) or skipped it (emit_equal=false).
-    // Only when there's no match (kx.p.is_none()) do we start at the insertion point.
-    let final_pos = if kx.p.is_some() {
-        kx.i + 1 // Advance past matched entry (emitted or skipped)
-    } else {
-        kx.i // No match, start at insertion point
-    };
+    //
+    // Position logic (kx.i is the permutation index, not the physical slot):
+    // - Match found (kx.p.is_some()): advance to kx.i + 1 to skip past the matched
+    //   entry, regardless of whether we emitted it (emit_equal=true) or skipped it
+    //   (emit_equal=false for Excluded bound).
+    // - No match (kx.p.is_none()): start at kx.i, which is the insertion point
+    //   where the next greater key would be.
+    let final_pos = if kx.p.is_some() { kx.i + 1 } else { kx.i };
     stack.update_state(version, perm, final_pos);
 
     (next_state, snapshot)
@@ -150,6 +163,7 @@ where
 
 /// Handle an exact ikey match in `find_initial`.
 #[expect(clippy::too_many_arguments, reason = "Internals")]
+#[inline(always)]
 fn handle_initial_match<L, S>(
     leaf: &L,
     slot: usize,
@@ -276,9 +290,14 @@ where
 ///
 /// - `(ScanState, Option<ScanSnapshot>)`: Next state and optional value snapshot
 ///
+/// # Panics
+///
+/// Assumes the stack contains a valid leaf pointer protected by the guard.
+/// Undefined behavior may occur if called with an invalid stack state.
+///
 /// # C++ Reference
 ///
-/// Corresponds to `scanstackelt::find_next` in `masstree_scan.hh:246-317`.
+/// Corresponds to `scanstackelt::find_next` in `masstree_scan.hh`.
 #[inline]
 pub fn find_next<L, S>(
     stack: &mut ScanStackElement<L, S>,
@@ -292,8 +311,8 @@ where
     S::Output: Clone,
 {
     // OPTIMIZATION: Skip duplicate check in normal forward iteration.
-    // Duplicates can only occur after Retry states (version conflict).
-    // The caller (iterator.rs) tracks this via `needs_duplicate_check` flag.
+    // Duplicates only occur after Retry states (version conflict), so the
+    // iterator state machine calls find_next_with_duplicate_check after retries.
     find_next_inner(stack, cursor_key, layer_stack, guard, false)
 }
 
@@ -401,21 +420,20 @@ where
         // First check ikey + keylenx level
         let cmp: Ordering = cursor_key.compare(slot_ikey, slot_keylenx as usize);
 
-        let is_dup: bool = match cmp {
-            Ordering::Greater => true, // cursor > slot, definitely duplicate
-
-            Ordering::Less => false, // cursor < slot, not duplicate
-
-            Ordering::Equal => {
-                // Need suffix comparison if both have suffixes
-                if slot_keylenx == KSUF_KEYLENX && cursor_key.has_suffix() {
-                    // Read suffix and compare
-                    leaf.ksuf(slot).is_none_or(|stored_suffix| {
-                        cursor_key.compare_suffix(stored_suffix) != Ordering::Less
-                    })
-                } else {
-                    true // Equal at ikey+keylenx level, is duplicate
-                }
+        // After retry repositioning, we typically land past duplicates (Less case).
+        // Use likely() hint to help branch prediction.
+        let is_dup: bool = if likely(cmp == Ordering::Less) {
+            false // cursor < slot, not duplicate (common case)
+        } else if cmp == Ordering::Greater {
+            true // cursor > slot, definitely duplicate
+        } else {
+            // Ordering::Equal - need suffix comparison if both have suffixes
+            if slot_keylenx == KSUF_KEYLENX && cursor_key.has_suffix() {
+                leaf.ksuf(slot).is_none_or(|stored_suffix| {
+                    cursor_key.compare_suffix(stored_suffix) != Ordering::Less
+                })
+            } else {
+                true // Equal at ikey+keylenx level, is duplicate
             }
         };
 
@@ -541,6 +559,14 @@ where
 ///
 /// See [`find_next_inner`] for the full algorithm documentation.
 /// The duplication is intentional for hot-path performance.
+///
+/// # Safety
+///
+/// The returned pointer is only valid while:
+/// 1. The guard is held (ensures memory isn't reclaimed)
+/// 2. The version hasn't changed (OCC validation at leaf boundaries)
+///
+/// Callers must dereference immediately within the same guard scope.
 #[inline]
 fn find_next_inner_ptr<L, S>(
     stack: &mut ScanStackElement<L, S>,
@@ -585,17 +611,19 @@ where
     if needs_duplicate_check {
         let cmp: Ordering = cursor_key.compare(slot_ikey, slot_keylenx as usize);
 
-        let is_dup: bool = match cmp {
-            Ordering::Greater => true,
-            Ordering::Less => false,
-            Ordering::Equal => {
-                if slot_keylenx == KSUF_KEYLENX && cursor_key.has_suffix() {
-                    leaf.ksuf(slot).is_none_or(|stored_suffix| {
-                        cursor_key.compare_suffix(stored_suffix) != Ordering::Less
-                    })
-                } else {
-                    true
-                }
+        // After retry repositioning, we typically land past duplicates (Less case).
+        let is_dup: bool = if likely(cmp == Ordering::Less) {
+            false
+        } else if cmp == Ordering::Greater {
+            true
+        } else {
+            // Ordering::Equal
+            if slot_keylenx == KSUF_KEYLENX && cursor_key.has_suffix() {
+                leaf.ksuf(slot).is_none_or(|stored_suffix| {
+                    cursor_key.compare_suffix(stored_suffix) != Ordering::Less
+                })
+            } else {
+                true
             }
         };
 
@@ -720,14 +748,9 @@ where
     if needs_duplicate_check {
         let cmp: Ordering = cursor_key.compare(slot_ikey, slot_keylenx as usize);
 
-        let is_dup: bool = match cmp {
-            Ordering::Less => false,
-
-            Ordering::Greater | Ordering::Equal => {
-                // For single-layer, no suffix comparison needed (keylenx <= 8)
-                true
-            }
-        };
+        // After retry repositioning, we typically land past duplicates (Less case).
+        // For single-layer, no suffix comparison needed (keylenx <= 8).
+        let is_dup: bool = !likely(cmp == Ordering::Less);
 
         if is_dup {
             stack.next();
@@ -781,10 +804,8 @@ where
 /// Advance to next leaf in single-layer mode.
 ///
 /// Simplified version of `advance_leaf_ptr` that doesn't handle Up transitions.
-///
-/// # Note
-///
-/// The `guard` parameter ensures pointer validity through lifetime binding.
+/// The guard parameter (prefixed `_`) ensures pointer validity through lifetime
+/// binding even though it's not directly used in this function.
 #[inline(always)]
 fn advance_leaf_single_layer<L, S>(
     stack: &mut ScanStackElement<L, S>,
@@ -878,13 +899,8 @@ where
 /// Advance to next leaf, zero-copy variant.
 ///
 /// Same as [`advance_leaf`] but returns `ScanSnapshotPtr`.
-///
-/// # Note
-///
-/// The `guard` parameter is unused but required for API consistency
-/// and to ensure pointer validity through lifetime binding.
-///
-/// Uses `#[inline]` - medium-sized function; let compiler decide on inlining.
+/// The guard parameter (prefixed `_`) ensures pointer validity through lifetime
+/// binding even though it's not directly used in this function.
 #[inline]
 pub fn advance_leaf_ptr<L, S>(
     stack: &mut ScanStackElement<L, S>,
@@ -964,10 +980,8 @@ where
 ///
 /// Uses `lower_with_suffix` to find the correct starting position in the new
 /// leaf, matching the C++ behavior of `helper.lower(ka, this)`.
-///
-/// # Note
-///
-/// The `guard` parameter ensures pointer validity through lifetime binding.
+/// The guard parameter (prefixed `_`) ensures pointer validity through lifetime
+/// binding even though it's not directly used in this function.
 #[inline]
 fn advance_leaf<L, S>(
     stack: &mut ScanStackElement<L, S>,
@@ -1119,10 +1133,8 @@ where
 /// Traverse from layer root to target leaf.
 ///
 /// Similar to `reach_leaf_concurrent_generic` but uses cursor key's ikey.
-///
-/// # Note
-///
-/// The `guard` parameter ensures pointer validity through lifetime binding.
+/// The guard parameter (prefixed `_`) ensures pointer validity through lifetime
+/// binding even though it's not directly used in this function.
 #[inline]
 fn reach_leaf_for_scan<L, S>(
     start: *const u8,
@@ -1219,7 +1231,7 @@ where
 /// - `stack`: Current scan position
 /// - `cursor_key`: Cursor to unshift
 /// - `layer_stack`: Parent layer stack to pop from
-/// - `guard`: Memory reclamation guard (ensures pointer validity)
+/// - `_guard`: Memory reclamation guard (ensures pointer validity through lifetime binding)
 ///
 /// # Returns
 ///
@@ -1268,6 +1280,10 @@ where
 // ============================================================================
 
 /// Result of processing entries within a single leaf.
+///
+/// Uses `#[repr(u8)]` for smaller size (1 byte vs default enum size) and
+/// faster dispatch via direct byte comparison. This enum is returned from
+/// hot-path batch processing functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum LeafBatchResult {
@@ -1362,25 +1378,22 @@ where
             continue;
         }
 
-        // Build key
-        let _key_len: usize = if slot_keylenx == KSUF_KEYLENX {
+        // Build key in cursor (side effects only, key_len computed via cursor)
+        if slot_keylenx == KSUF_KEYLENX {
             if let Some(suffix) = leaf.ksuf(slot) {
                 let suffix_len = suffix.len();
                 cursor_key.assign_store_ikey(slot_ikey);
                 let _ = cursor_key.assign_store_suffix(suffix);
                 cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
-                IKEY_SIZE + suffix_len
             } else {
                 cursor_key.assign_store_ikey(slot_ikey);
                 cursor_key.assign_store_length(IKEY_SIZE);
-                IKEY_SIZE
             }
         } else {
             let len = slot_keylenx as usize;
             cursor_key.assign_store_ikey(slot_ikey);
             cursor_key.assign_store_length(len);
-            len
-        };
+        }
 
         cursor_key.mark_key_complete();
 
@@ -1390,7 +1403,7 @@ where
             return LeafBatchResult::EndBoundExceeded;
         }
 
-        // SAFETY: Guard protects value pointer, slot is valid
+        // SAFETY: Guard protects value pointer, slot is valid within permutation
         let value_ref: &S::Value = unsafe { &*slot_ptr.cast::<S::Value>() };
 
         *count += 1;
@@ -1493,25 +1506,22 @@ where
             continue;
         }
 
-        // Build key
-        let _key_len: usize = if slot_keylenx == KSUF_KEYLENX {
+        // Build key in cursor (side effects only, key_len computed via cursor)
+        if slot_keylenx == KSUF_KEYLENX {
             if let Some(suffix) = leaf.ksuf(slot) {
                 let suffix_len = suffix.len();
                 cursor_key.assign_store_ikey(slot_ikey);
                 let _ = cursor_key.assign_store_suffix(suffix);
                 cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
-                IKEY_SIZE + suffix_len
             } else {
                 cursor_key.assign_store_ikey(slot_ikey);
                 cursor_key.assign_store_length(IKEY_SIZE);
-                IKEY_SIZE
             }
         } else {
             let len = slot_keylenx as usize;
             cursor_key.assign_store_ikey(slot_ikey);
             cursor_key.assign_store_length(len);
-            len
-        };
+        }
 
         cursor_key.mark_key_complete();
 

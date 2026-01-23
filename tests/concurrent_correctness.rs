@@ -930,21 +930,24 @@ fn btreemap_oracle_comparison() {
                 let key = rng_state % KEY_RANGE;
                 let value = (tid as u64 * 1_000_000) + op as u64;
 
+                // Hold oracle lock DURING tree operation to ensure atomicity.
+                // Without this, another thread can interleave between tree op and oracle op,
+                // causing the final states to diverge.
                 match op % 10 {
                     0..=5 => {
                         // 60% inserts
+                        let mut oracle_guard = oracle.lock().unwrap();
                         let _ = tree.insert_with_guard(&key.to_be_bytes(), value, &guard);
-                        oracle.lock().unwrap().insert(key, value);
+                        oracle_guard.insert(key, value);
                     }
                     6..=7 => {
                         // 20% removes
+                        let mut oracle_guard = oracle.lock().unwrap();
                         let _ = tree.remove_with_guard(&key.to_be_bytes(), &guard);
-                        oracle.lock().unwrap().remove(&key);
+                        oracle_guard.remove(&key);
                     }
                     _ => {
-                        // 20% reads - verify consistency
-                        // Note: Due to concurrent updates, we can only check existence consistency
-                        // after all threads complete
+                        // 20% reads (no oracle sync needed)
                     }
                 }
             }
@@ -992,13 +995,11 @@ fn btreemap_oracle_comparison() {
         check_errors
     );
 
-    // Note: tree.len() and oracle.len() should be equal
-    // But due to concurrent updates, small differences are acceptable
-    let len_diff = (oracle.len() as i64 - tree.len() as i64).unsigned_abs();
-
-    assert!(
-        len_diff <= 10,
-        "Length mismatch too large: oracle={}, tree={}",
+    // With the fix (holding oracle lock during tree ops), lengths must match exactly
+    assert_eq!(
+        oracle.len(),
+        tree.len(),
+        "Length mismatch: oracle={}, tree={}",
         oracle.len(),
         tree.len()
     );

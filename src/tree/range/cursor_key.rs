@@ -36,9 +36,11 @@
 
 #![expect(clippy::indexing_slicing, reason = "Safety notes are provided inline")]
 
-#[cfg(debug_assertions)]
-use std::fmt::{self as StdFmt, Display, Formatter};
+use std::fmt::{self as StdFmt, Formatter};
 use std::{cmp::Ordering, fmt::Debug};
+
+#[cfg(debug_assertions)]
+use std::fmt::Display;
 
 use crate::key::{IKEY_SIZE, MAX_KEY_LENGTH};
 

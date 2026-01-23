@@ -1,4 +1,4 @@
-use super::{CursorKey, Ordering, MAX_KEY_LENGTH};
+use super::{CursorKey, MAX_KEY_LENGTH, Ordering};
 
 #[test]
 fn test_from_slice_basic() {
