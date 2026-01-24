@@ -19,7 +19,7 @@ Copy types.
 
 ## Status
 
-**v0.6.6** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 5/7 benchmarks and
+**v0.6.7** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 5/7 benchmarks and
 Rust alternatives on 11/12 workloads. Passes Miri with strict-provenance flag. Concurrent data structures
 require extensive stress testing, the test suite is comprehensive (998 tests total) but edge cases may remain.
 
@@ -33,8 +33,6 @@ require extensive stress testing, the test suite is comprehensive (998 tests tot
 | `DoubleEndedIterator` | Reverse iteration support |
 | Leaf coalescing | Lazy queue-based cleanup |
 | Memory reclamation | Hyaline scheme via `seize` crate |
-
-**Not yet implemented:** `Entry` API, `Extend`/`FromIterator`.
 
 ## vs C++ Masstree (12T, 10s)
 
@@ -130,7 +128,7 @@ Note: `17_hot_spot` is sensitive to update semantics. MassTree overwrites existi
 
 ```toml
 [dependencies]
-masstree = { version = "0.6.6", features = ["mimalloc"] }
+masstree = { version = "0.6.7", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

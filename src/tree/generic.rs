@@ -20,14 +20,17 @@ use crate::{
     tree::{
         InsertError, InsertSearchResultGeneric,
         coalesce::{Coalesce, CoalesceQueue},
+        generic::entry::Entry,
         remove::NodeCleaner,
         split::Propagation,
     },
+    value::traits::LeafValueLoad,
 };
 
 use super::remove::RemoveError;
 
 mod batch;
+mod entry;
 mod insert;
 mod layer;
 mod optimistic_reads;
@@ -1057,8 +1060,25 @@ where
         guard: &LocalGuard<'_>,
     ) -> Result<Option<S::Output>, InsertError> {
         self.verify_guard(guard);
-        let mut key = Key::new(key);
-        let output = S::into_output(value);
+        let mut key: Key<'_> = Key::new(key);
+        let output: <S as ValueSlot>::Output = S::into_output(value);
+
+        self.insert_concurrent_generic(&mut key, output, guard)
+    }
+
+    /// Internal: Insert with a pre-created output value
+    ///
+    /// Used by entry API to avoid double traversal, the output is created
+    /// before insertion so it can be cloned and returned without re-fetching.
+    pub(crate) fn insert_output_with_guard(
+        &self,
+        key: &[u8],
+        output: S::Output,
+        guard: &LocalGuard<'_>,
+    ) -> Result<Option<S::Output>, InsertError> {
+        self.verify_guard(guard);
+
+        let mut key: Key<'_> = Key::new(key);
         self.insert_concurrent_generic(&mut key, output, guard)
     }
 
@@ -1167,6 +1187,93 @@ where
             let keylenx: u8 = key.current_len() as u8;
             leaf.set_keylenx_relaxed(slot, keylenx);
         }
+    }
+
+    // ========================================================================
+    //  Entry API
+    // ========================================================================
+
+    /// Gets the given key's corresponding entry for in-place manipulation.
+    ///
+    /// # Differences from `HashMap::entry`
+    ///
+    /// - Requires a [`LocalGuard`] for concurrent access
+    /// - Returns values by-value, not by mutable reference
+    /// - `and_modify` takes a transform function `FnOnce(&Output) -> Value`
+    /// - Key is borrowed (zero allocation for entry creation)
+    /// - Provides fallible `try_*` variants
+    ///
+    /// # Why No `entry()` Without Guard
+    ///
+    /// A guard-less `entry(&self, key)` would need to create a guard internally,
+    /// but the Entry must hold a reference to that guard. This creates a
+    /// self-referential struct, which Rust does not support without unsafe.
+    ///
+    /// # Concurrency Warning
+    ///
+    /// Entry operations are **NOT atomic**. Between the initial lookup and
+    /// any modifications, other threads may update the same key. This follows
+    /// "last-writer-wins" semantics.
+    ///
+    /// **Critical:** `or_insert` may OVERWRITE a value inserted by another
+    /// thread between `entry_with_guard()` and `or_insert()`. This differs
+    /// from `HashMap::or_insert`.
+    ///
+    /// ```text
+    /// Thread A: entry_with_guard(key) -> Vacant
+    /// Thread B: insert(key, 100)       // Inserts 100
+    /// Thread A: or_insert(0)           // OVERWRITES with 0!
+    /// // Result: 0 (Thread B's insert is lost)
+    /// ``
+    /// For atomic read-modify-write, use external synchronization.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use masstree::MassTree;
+    ///
+    /// let tree: MassTree<u64> = MassTree::new();
+    /// let guard = tree.guard();
+    ///
+    /// // Insert if absent, returning the value
+    /// let value = tree.entry_with_guard(b"key", &guard).or_insert(42);
+    ///
+    /// // Increment counter, defaulting to 0
+    /// let value = tree.entry_with_guard(b"counter", &guard)
+    ///     .and_modify(|v| *v + 1)  // For Arc<u64>: dereference Arc
+    ///     .or_insert(0);
+    ///
+    /// // Fallible insertion
+    /// let result = tree.entry_with_guard(b"key", &guard)
+    ///     .or_try_insert(100);
+    ///
+    /// // Pattern matching
+    /// use masstree::Entry;
+    /// match tree.entry_with_guard(b"maybe", &guard) {
+    ///     Entry::Occupied(o) => {
+    ///         // Remove returns the actually removed value, or None if deleted
+    ///         if let Some(val) = o.remove() {
+    ///             println!("Removed: {:?}", val);
+    ///         }
+    ///     }
+    ///     Entry::Vacant(v) => {
+    ///         v.insert(100);
+    ///         println!("Inserted default");
+    ///     }
+    /// }
+    /// ```
+    #[inline]
+    pub fn entry_with_guard<'t, 'e>(
+        &'t self,
+        key: &'e [u8],
+        guard: &'e LocalGuard<'t>,
+    ) -> Entry<'t, 'e, S, L, A>
+    where
+        L: LeafValueLoad<S>,
+        S::Output: Clone,
+    {
+        self.verify_guard(guard);
+        Entry::new(self, key, guard)
     }
 }
 

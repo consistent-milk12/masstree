@@ -1,0 +1,18 @@
+   Compiling masstree v0.6.6 (/home/saad/Desktop/Programming/Rust/rust_data_structures/masstree)
+    Finished `bench` profile [optimized] target(s) in 30.14s
+     Running benches/range_masstree15_inline.rs (target/release/deps/range_masstree15_inline-012ff9a39a81eae3)
+Timer precision: 20 ns
+range_masstree15_inline  fastest       │ slowest       │ median        │ mean          │ samples │ iters
+╰─ 17_hot_spot                         │               │               │               │         │
+   ├─ masstree15_inline                │               │               │               │         │
+   │  ├─ 1               289.1 µs      │ 717.1 µs      │ 310 µs        │ 322 µs        │ 100     │ 100
+   │  │                  17.29 Mitem/s │ 6.972 Mitem/s │ 16.12 Mitem/s │ 15.52 Mitem/s │         │
+   │  ├─ 2               508.9 µs      │ 1.56 ms       │ 826.8 µs      │ 870.3 µs      │ 100     │ 100
+   │  │                  19.64 Mitem/s │ 6.409 Mitem/s │ 12.09 Mitem/s │ 11.48 Mitem/s │         │
+   │  ├─ 3               765.7 µs      │ 2.219 ms      │ 1.202 ms      │ 1.317 ms      │ 100     │ 100
+   │  │                  19.58 Mitem/s │ 6.757 Mitem/s │ 12.47 Mitem/s │ 11.38 Mitem/s │         │
+   │  ├─ 4               1.427 ms      │ 2.649 ms      │ 1.701 ms      │ 1.738 ms      │ 100     │ 100
+   │  │                  14.01 Mitem/s │ 7.547 Mitem/s │ 11.75 Mitem/s │ 11.5 Mitem/s  │         │
+   │  ├─ 5               1.349 ms      │ 2.918 ms      │ 2.226 ms      │ 2.258 ms      │ 100     │ 100
+   │  │                  18.52 Mitem/s │ 8.565 Mitem/s │ 11.22 Mitem/s │ 11.07 Mitem/s │         │
+   │  ╰─ 6               
