@@ -1,5 +1,5 @@
 use std::array as StdArray;
-use std::sync::atomic::{fence, Ordering as AtomicOrdering};
+use std::sync::atomic::{Ordering as AtomicOrdering, fence};
 
 use seize::Guard;
 

@@ -2001,3 +2001,215 @@ fn test_inline_keys_same_ikey_different_lengths() {
     assert_eq!(keys[2], b"aaa");
     assert_eq!(keys[3], b"aaaaaaaa");
 }
+
+// ============================================================================
+//  FromIterator and Extend Tests
+// ============================================================================
+
+#[test]
+fn test_from_iterator_basic() {
+    let data: Vec<(Vec<u8>, u64)> = vec![
+        (b"apple".to_vec(), 1),
+        (b"banana".to_vec(), 2),
+        (b"cherry".to_vec(), 3),
+    ];
+
+    let tree: MassTree<u64> = data.into_iter().collect();
+
+    assert_eq!(tree.len(), 3);
+    assert_eq!(tree.get(b"apple"), Some(Arc::new(1)));
+    assert_eq!(tree.get(b"banana"), Some(Arc::new(2)));
+    assert_eq!(tree.get(b"cherry"), Some(Arc::new(3)));
+}
+
+#[test]
+fn test_from_iterator_empty() {
+    let data: Vec<(Vec<u8>, u64)> = vec![];
+    let tree: MassTree<u64> = data.into_iter().collect();
+
+    assert!(tree.is_empty());
+    assert_eq!(tree.len(), 0);
+}
+
+#[test]
+fn test_from_iterator_string_keys() {
+    // Test with String keys (via AsRef<[u8]>)
+    let data: Vec<(String, u64)> = vec![("hello".to_string(), 1), ("world".to_string(), 2)];
+
+    let tree: MassTree<u64> = data.into_iter().collect();
+
+    assert_eq!(tree.len(), 2);
+    assert_eq!(tree.get(b"hello"), Some(Arc::new(1)));
+}
+
+#[test]
+fn test_from_iterator_byte_literal_keys() {
+    // Test with &[u8; N] keys (byte literals) - no .as_slice() needed
+    let data = vec![
+        (b"alpha".to_vec(), 1u64),
+        (b"beta".to_vec(), 2u64),
+        (b"gamma".to_vec(), 3u64),
+    ];
+
+    let tree: MassTree<u64> = data.into_iter().collect();
+
+    assert_eq!(tree.len(), 3);
+    assert_eq!(tree.get(b"alpha"), Some(Arc::new(1)));
+}
+
+#[test]
+fn test_from_iterator_duplicate_keys() {
+    // Later values should overwrite earlier ones (upsert semantics)
+    let data = vec![
+        (b"key".as_slice(), 1u64),
+        (b"key".as_slice(), 2u64),
+        (b"key".as_slice(), 3u64),
+    ];
+
+    let tree: MassTree<u64> = data.into_iter().collect();
+
+    assert_eq!(tree.len(), 1);
+    assert_eq!(tree.get(b"key"), Some(Arc::new(3)));
+}
+
+#[test]
+fn test_extend_basic() {
+    let mut tree: MassTree<u64> = MassTree::new();
+    tree.insert(b"existing", 0).unwrap();
+
+    tree.extend([(b"a", 1u64), (b"b", 2u64), (b"c", 3u64)]);
+
+    assert_eq!(tree.len(), 4);
+    assert_eq!(tree.get(b"existing"), Some(Arc::new(0)));
+    assert_eq!(tree.get(b"a"), Some(Arc::new(1)));
+    assert_eq!(tree.get(b"b"), Some(Arc::new(2)));
+    assert_eq!(tree.get(b"c"), Some(Arc::new(3)));
+}
+
+#[test]
+fn test_extend_overwrites_existing() {
+    let mut tree: MassTree<u64> = MassTree::new();
+    tree.insert(b"key", 100).unwrap();
+
+    tree.extend([(b"key", 200u64)]);
+
+    // Upsert semantics: value should be updated, not duplicated
+    assert_eq!(tree.get(b"key"), Some(Arc::new(200)));
+    assert_eq!(tree.len(), 1);
+}
+
+#[test]
+fn test_extend_empty_iterator() {
+    let mut tree: MassTree<u64> = MassTree::new();
+    tree.insert(b"existing", 42).unwrap();
+
+    let empty: Vec<(&[u8], u64)> = vec![];
+    tree.extend(empty);
+
+    assert_eq!(tree.len(), 1);
+    assert_eq!(tree.get(b"existing"), Some(Arc::new(42)));
+}
+
+#[test]
+fn test_extend_with_vec_keys() {
+    let mut tree: MassTree<u64> = MassTree::new();
+
+    tree.extend(vec![(b"key1".to_vec(), 100u64), (b"key2".to_vec(), 200u64)]);
+
+    assert_eq!(tree.len(), 2);
+    assert_eq!(tree.get(b"key1"), Some(Arc::new(100)));
+    assert_eq!(tree.get(b"key2"), Some(Arc::new(200)));
+}
+
+#[test]
+fn test_from_iterator_masstree15() {
+    use crate::MassTree15;
+
+    let data = vec![(b"a".to_vec(), 1u64), (b"b".to_vec(), 2u64)];
+
+    let tree: MassTree15<u64> = data.into_iter().collect();
+    assert_eq!(tree.len(), 2);
+}
+
+#[test]
+fn test_from_iterator_inline() {
+    use crate::MassTree15Inline;
+
+    let data = vec![(b"x".to_vec(), 10u64), (b"y".to_vec(), 20u64)];
+
+    let tree: MassTree15Inline<u64> = data.into_iter().collect();
+
+    assert_eq!(tree.len(), 2);
+
+    let guard = tree.guard();
+    assert_eq!(tree.get_with_guard(b"x", &guard), Some(10));
+    assert_eq!(tree.get_with_guard(b"y", &guard), Some(20));
+}
+
+#[test]
+fn test_extend_inline() {
+    use crate::MassTree15Inline;
+
+    let mut tree: MassTree15Inline<u64> = MassTree15Inline::new();
+
+    tree.extend([(b"a", 1u64), (b"b", 2u64)]);
+
+    assert_eq!(tree.len(), 2);
+}
+
+#[test]
+fn test_from_iterator_large() {
+    // Test with many entries to exercise splits
+    let tree: MassTree<u64> = (0..1000u64)
+        .map(|i| (format!("key{i:04}").into_bytes(), i))
+        .collect();
+
+    assert_eq!(tree.len(), 1000);
+
+    // Spot check
+    assert_eq!(tree.get(b"key0000"), Some(Arc::new(0)));
+    assert_eq!(tree.get(b"key0500"), Some(Arc::new(500)));
+    assert_eq!(tree.get(b"key0999"), Some(Arc::new(999)));
+}
+
+#[test]
+fn test_from_iterator_then_concurrent_access() {
+    // Verify tree built via collect() works correctly with concurrent access
+    let tree: Arc<MassTree<u64>> = Arc::new(
+        (0..100u64)
+            .map(|i| (format!("init{i:03}").into_bytes(), i))
+            .collect(),
+    );
+
+    assert_eq!(tree.len(), 100);
+
+    let handles: Vec<_> = (0..4)
+        .map(|t| {
+            let tree = Arc::clone(&tree);
+            thread::spawn(move || {
+                let guard = tree.guard();
+                // Each thread inserts 50 unique keys
+                for i in 0..50 {
+                    let key = format!("t{t}_{i:03}");
+                    let _ = tree.insert_with_guard(key.as_bytes(), (t * 1000 + i) as u64, &guard);
+                }
+                // And reads some original keys
+                for i in 0..20 {
+                    let key = format!("init{i:03}");
+                    let _ = tree.get_with_guard(key.as_bytes(), &guard);
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Original 100 + 4 threads * 50 keys = 300
+    assert_eq!(tree.len(), 300);
+
+    // Original keys still accessible
+    assert_eq!(tree.get(b"init000"), Some(Arc::new(0)));
+    assert_eq!(tree.get(b"init099"), Some(Arc::new(99)));
+}

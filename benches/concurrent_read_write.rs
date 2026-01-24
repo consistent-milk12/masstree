@@ -2540,12 +2540,13 @@ mod insert_only_fair {
 mod pure_insert {
     use super::*;
 
-    const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 10_000;
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn masstree15(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<KEY_SIZE>(N));
+        // Use unique keys for every insert across all threads so this is truly "pure insert"
+        // (no overwrites, no failed inserts).
+        let keys = Arc::new(keys::<KEY_SIZE>(threads * OPS_PER_THREAD));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -2565,7 +2566,7 @@ mod pure_insert {
                             pre_measurement_barrier();
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
-                                let idx = (base + i) % keys.len();
+                                let idx = base + i;
                                 let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                             }
                             post_measurement_barrier();
@@ -2581,7 +2582,7 @@ mod pure_insert {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn skipmap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<KEY_SIZE>(N));
+        let keys = Arc::new(keys::<KEY_SIZE>(threads * OPS_PER_THREAD));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -2600,7 +2601,7 @@ mod pure_insert {
                             pre_measurement_barrier();
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
-                                let idx = (base + i) % keys.len();
+                                let idx = base + i;
                                 map.insert(keys[idx], i as u64);
                             }
                             post_measurement_barrier();
@@ -2616,7 +2617,7 @@ mod pure_insert {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn indexset(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<KEY_SIZE>(N));
+        let keys = Arc::new(keys::<KEY_SIZE>(threads * OPS_PER_THREAD));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -2635,7 +2636,7 @@ mod pure_insert {
                             pre_measurement_barrier();
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
-                                let idx = (base + i) % keys.len();
+                                let idx = base + i;
                                 map.insert(keys[idx], i as u64);
                             }
                             post_measurement_barrier();
@@ -2651,7 +2652,7 @@ mod pure_insert {
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn tree_index(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<KEY_SIZE>(N));
+        let keys = Arc::new(keys::<KEY_SIZE>(threads * OPS_PER_THREAD));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -2670,7 +2671,7 @@ mod pure_insert {
                             pre_measurement_barrier();
                             start.wait();
                             for i in 0..OPS_PER_THREAD {
-                                let idx = (base + i) % keys.len();
+                                let idx = base + i;
                                 // FAIR: Simple insert_sync, no workaround!
                                 let _ = tree.insert_sync(keys[idx], i as u64);
                             }

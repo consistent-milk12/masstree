@@ -1169,3 +1169,115 @@ where
         }
     }
 }
+
+// ============================================================================
+//  Standard Collection Traits (FromIterator, Extend)
+// ============================================================================
+
+impl<S, L, A, K, V> FromIterator<(K, V)> for MassTreeGeneric<S, L, A>
+where
+    S: ValueSlot<Value = V>,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L> + Default,
+    K: AsRef<[u8]>,
+{
+    /// Creates a tree from an iterator of key-value pairs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if memory allocation fails during tree construction.
+    /// This matches std collection behavior.
+    ///
+    /// # Performance
+    ///
+    /// Uses sequential single-threaded insertion. For parallel bulk insertion
+    /// of large datasets, use [`insert_batch`](Self::insert_batch) or rayon
+    /// with explicit guards.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use masstree::MassTree;
+    ///
+    /// let data = vec![
+    ///     (b"key1".to_vec(), 1u64),
+    ///     (b"key2".to_vec(), 2u64),
+    ///     (b"key3".to_vec(), 3u64),
+    /// ];
+    ///
+    /// let tree: MassTree<u64> = data.into_iter().collect();
+    ///
+    /// assert_eq!(tree.len(), 3);
+    /// ```
+    #[expect(clippy::expect_used, reason = "Allocation failure")]
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+    {
+        let allocator: A = A::default();
+        let tree: Self = Self::with_allocator(allocator);
+        let guard: LocalGuard<'_> = tree.guard();
+
+        for (key, value) in iter {
+            // Panic on allocation failure, matches std collection behavor
+            tree.insert_with_guard(key.as_ref(), value, &guard)
+                .expect("MassTree::from_iter: allocation failed");
+        }
+
+        drop(guard);
+
+        tree
+    }
+}
+
+impl<S, L, A, K, V> Extend<(K, V)> for MassTreeGeneric<S, L, A>
+where
+    S: ValueSlot<Value = V>,
+    S::Value: Send + Sync + 'static,
+    S::Output: Send + Sync,
+    L: LayerCapableLeaf<S>,
+    A: NodeAllocatorGeneric<S, L>,
+    K: AsRef<[u8]>,
+{
+    /// Extends the tree with key-value pairs from an iterator.
+    ///
+    /// # Failure Behavior
+    ///
+    /// Allocation failures are silently skipped. The [`Extend`] trait returns `()`,
+    /// so errors cannot be propagated. If you need to detect failures,
+    /// use [`insert_batch()`](Self::insert_batch) which returns [`Result`].
+    ///
+    /// # Upsert Semantics
+    ///
+    /// If a key already exists, it's value is replaced (same as `insert()`).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use masstree::MassTree;
+    ///
+    /// let mut tree: MassTree<u64> = MassTree::new();
+    /// tree.insert(b"existing", 0).unwrap();
+    ///
+    /// // Can use byte literals directly, &[u8; N] implements AsRef<[u8]>
+    /// tree.extend([
+    ///     (b"key1", 1u64);
+    ///     (b"key2", 2u64);
+    /// ]);
+    ///
+    /// assert_eq!(tree.len(), 3);
+    /// ```
+    fn extend<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+    {
+        let guard: LocalGuard<'_> = self.guard();
+
+        for (key, value) in iter {
+            // Skip failed inserts, Extend returns () so we can't propagate errors
+            let _ = self.insert_with_guard(key.as_ref(), value, &guard);
+        }
+    }
+}

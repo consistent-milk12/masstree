@@ -93,11 +93,13 @@ insert-heavy workloads where TreeIndex performs better.
 | 09_pure_read | **42.10** | 22.88 | 13.70 | 13.31 | **1.84x** |
 | 10_remove_heavy | **15.02** | 11.62 | 5.07 | 3.93 | **1.29x** |
 | 13_insert_only_fair | **22.49** | 17.77 | 10.37 | 5.42 | **1.27x** |
-| 14_pure_insert | 9.04 | **11.95** | 6.31 | 2.37 | 0.76x |
+| 14_pure_insert | 9.93 | **11.42** | 8.13 | 2.17 | 0.87x |
 
 **Single-thread latency:** masstree15 achieves **836 µs** median read latency vs tree_index 1.35 ms (**1.61x faster**).
 
 **Build time:** masstree15 builds at **8.46 Mitem/s** vs skipmap 6.17, tree_index 4.35, indexset 1.86 (**1.37–4.6x faster**).
+
+Note: The `14_pure_insert` numbers above are from the updated `benches/concurrent_read_write.rs` benchmark which uses unique keys per insert (true insert-only). Older `runs/run150_read_write_correctness.txt` results for `14_pure_insert` were affected by key reuse.
 
 ## Range Scans (6T Physical, Rigorous)
 
@@ -120,7 +122,9 @@ insert-heavy workloads where TreeIndex performs better.
 | 12_long_keys_64b_scan | **29.78** | 16.45 | **1.81x** | +55% |
 | 15_full_scan_aggregate | **1.93 G** | 1.10 G | **1.75x** | +13% |
 | 16_insert_heavy | **22.89** | 16.32 | **1.40x** | +1% |
-| 17_hot_spot | 10.78 | **19.54** | 0.55x | +79% |
+| 17_hot_spot | **10.26** | 3.05 | **3.37x** | n/a |
+
+Note: `17_hot_spot` is sensitive to update semantics. MassTree overwrites existing keys on `insert()`. For `scc::TreeIndex`, the benchmark now emulates overwrite updates via `remove()+insert()` to match semantics (see `benches/range_masstree15_inline.rs`). The `runs/run149_range_scan_correctness.txt` hot-spot result predates this semantic fix.
 
 ## Install
 

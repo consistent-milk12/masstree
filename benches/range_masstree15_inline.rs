@@ -1,8 +1,7 @@
 //! Concurrent range scan stress benchmarks for MassTree15Inline.
 //!
-//! Compares MassTree15Inline, scc::TreeIndex, and crossbeam_skiplist::SkipMap across
-//! various key patterns designed to stress different aspects of concurrent
-//! ordered map implementations.
+//! Compares MassTree15Inline and scc::TreeIndex across various key patterns designed
+//! to stress different aspects of concurrent ordered map implementations.
 //!
 //! ## Configuration
 //!
@@ -50,7 +49,6 @@
 //!
 //! - **MassTree15Inline**: Uses `for_each_intra_leaf_batch` — optimized batch scan
 //! - **TreeIndex**: Uses `.iter().take()` — lazy iterator
-//! - **SkipMap**: Uses `.iter().take()` — lazy iterator
 //!
 //! ## Running
 //!
@@ -120,9 +118,148 @@ fn setup_tree_index<const K: usize>(keys: &[[u8; K]]) -> TreeIndex<[u8; K], u64>
     tree
 }
 
+fn tree_index_upsert_sync<const K: usize>(
+    tree: &TreeIndex<[u8; K], u64>,
+    key: [u8; K],
+    value: u64,
+) {
+    let mut key = key;
+    let mut value = value;
+    for _ in 0..3 {
+        match tree.insert_sync(key, value) {
+            Ok(()) => return,
+            Err((k, v)) => {
+                tree.remove_sync(&k);
+                key = k;
+                value = v;
+            }
+        }
+    }
+    let _ = tree.insert_sync(key, value);
+}
+
 // =============================================================================
 // 01: SEQUENTIAL KEYS - Best case for range scans
 // =============================================================================
+
+// =============================================================================
+// 00: SNAPSHOT VERIFY (READ-ONLY) - Deterministic prefix scan
+// =============================================================================
+//
+// Verifies that each scan returns the expected key/value sequence for a stable
+// (read-only) dataset. This is a "snapshot" check in the sense that the dataset
+// is not mutating; it does not attempt to validate linearizable snapshot
+// semantics under concurrent writers.
+//
+// Keep this group small so it remains fast for both implementations.
+
+#[divan::bench_group(name = "00_snapshot_verify_sequential_prefix", sample_count = 50)]
+mod snapshot_verify_sequential_prefix {
+    use super::*;
+
+    const VERIFY_N: usize = 50_000;
+    const VERIFY_OPS_PER_THREAD: usize = 1_000;
+
+    // Verify a fixed, deterministic prefix so we can validate both key order and values
+    // without allocating.
+    const VERIFY_SCAN_LIMIT: usize = 50;
+
+    fn expected_prefix<const K: usize>(keys: &[[u8; K]]) -> Vec<([u8; K], u64)> {
+        keys.iter()
+            .take(VERIFY_SCAN_LIMIT)
+            .enumerate()
+            .map(|(i, k)| (*k, i as u64))
+            .collect()
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn masstree15_inline(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys_sequential::<8>(VERIFY_N));
+        let expected = Arc::new(expected_prefix(keys.as_ref()));
+        let tree = Arc::new(setup_masstree15_inline(keys.as_ref()));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(
+                threads * VERIFY_OPS_PER_THREAD,
+            ))
+            .bench_local(|| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let tree = Arc::clone(&tree);
+                        let expected = Arc::clone(&expected);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = tree.guard();
+
+                            for _ in 0..VERIFY_OPS_PER_THREAD {
+                                let mut seen = 0usize;
+                                let visited =
+                                    tree.iter(&guard).for_each_intra_leaf_batch(|k, v| {
+                                        if seen < VERIFY_SCAN_LIMIT {
+                                            let (exp_k, exp_v) = expected[seen];
+                                            assert_eq!(k, exp_k.as_slice());
+                                            assert_eq!(v, exp_v);
+                                            seen += 1;
+                                            seen < VERIFY_SCAN_LIMIT
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                black_box(visited);
+                                assert_eq!(seen, VERIFY_SCAN_LIMIT);
+                            }
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
+    fn tree_index(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys_sequential::<8>(VERIFY_N));
+        let expected = Arc::new(expected_prefix(keys.as_ref()));
+        let tree = Arc::new(setup_tree_index(keys.as_ref()));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(
+                threads * VERIFY_OPS_PER_THREAD,
+            ))
+            .bench_local(|| {
+                let barrier = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|_| {
+                        let tree = Arc::clone(&tree);
+                        let expected = Arc::clone(&expected);
+                        let barrier = Arc::clone(&barrier);
+                        thread::spawn(move || {
+                            barrier.wait();
+                            let guard = sdd::Guard::new();
+
+                            for _ in 0..VERIFY_OPS_PER_THREAD {
+                                for (i, (k, v)) in
+                                    tree.iter(&guard).take(VERIFY_SCAN_LIMIT).enumerate()
+                                {
+                                    let (exp_k, exp_v) = expected[i];
+                                    assert_eq!(k, &exp_k);
+                                    assert_eq!(*v, exp_v);
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
 
 #[divan::bench_group(name = "01_sequential_full_scan", sample_count = 100)]
 mod sequential_full_scan {
@@ -1549,7 +1686,9 @@ mod hot_spot {
                                 if rng_state.is_multiple_of(2) {
                                     black_box(tree.peek(&hot[idx], &guard));
                                 } else {
-                                    let _ = tree.insert_sync(hot[idx], i as u64);
+                                    // TreeIndex doesn't provide an in-place upsert/update, so emulate
+                                    // MassTree's overwrite semantics with remove+insert.
+                                    tree_index_upsert_sync(&tree, hot[idx], i as u64);
                                 }
                             }
                         })
