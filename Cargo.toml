@@ -264,6 +264,14 @@ name = "extreme_stress_15_crit"
 harness = false
 
 [[bench]]
+name = "high_impact"
+harness = false
+
+[[bench]]
+name = "high_impact_masstree"
+harness = false
+
+[[bench]]
 name = "concurrent_masstree15_crit"
 harness = false
 

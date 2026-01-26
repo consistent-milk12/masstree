@@ -19,7 +19,7 @@ Copy types.
 
 ## Status
 
-**v0.6.7** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 5/7 benchmarks and
+**v0.6.8** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 7/8 benchmarks and
 Rust alternatives on 11/12 workloads. Passes Miri with strict-provenance flag. Concurrent data structures
 require extensive stress testing, the test suite is comprehensive (998 tests total) but edge cases may remain.
 
@@ -97,7 +97,67 @@ insert-heavy workloads where TreeIndex performs better.
 
 **Build time:** masstree15 builds at **8.46 Mitem/s** vs skipmap 6.17, tree_index 4.35, indexset 1.86 (**1.37–4.6x faster**).
 
-Note: The `14_pure_insert` numbers above are from the updated `benches/concurrent_read_write.rs` benchmark which uses unique keys per insert (true insert-only). Older `runs/run150_read_write_correctness.txt` results for `14_pure_insert` were affected by key reuse.
+## vs Rust Concurrent Maps (12T SMT)
+
+> Source: `runs/run151_read_write_smt.txt`
+> **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
+
+| Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
+|-----------|-----------|------------|---------|----------|------------|
+| 01_uniform | **50.29** | 21.11 | 14.35 | 17.60 | **2.38x** |
+| 02_zipfian | **47.95** | 18.60 | 15.34 | 3.31 | **2.58x** |
+| 03_shared_prefix | **26.26** | 14.75 | 13.02 | 16.60 | **1.58x** |
+| 04_high_contention | **77.58** | 17.30 | 18.00 | 1.95 | **4.31x** |
+| 05_large_dataset | **21.06** | 12.61 | 10.45 | 11.31 | **1.67x** |
+| 06_single_hot_key | **14.33** | 4.35 | 7.15 | 2.49 | **2.01x** |
+| 07_mixed_50_50 | **37.37** | 9.42 | 7.20 | 17.17 | **2.18x** |
+| 08_8byte_keys | **60.74** | 32.25 | 17.37 | 21.03 | **1.88x** |
+| 09_pure_read | **56.60** | 29.95 | 21.39 | 19.02 | **1.89x** |
+| 10_remove_heavy | **19.83** | 18.00 | 8.27 | 4.52 | **1.10x** |
+| 13_insert_only_fair | **30.94** | 26.01 | 17.10 | 6.21 | **1.19x** |
+| 14_pure_insert | 9.79 | **13.09** | 10.77 | 2.44 | 0.75x |
+
+**Single-thread latency (11):** masstree15 achieves **830 µs** median read latency vs tree_index 1.36 ms (**1.64x faster**).
+
+**Build time (12):** masstree15 builds at **8.08 Mitem/s** vs skipmap 6.31, tree_index 4.33, indexset 1.86 (**1.28–4.3x faster**).
+
+SMT scaling highlights: High-contention workloads benefit most from hyperthreading, with
+masstree15 reaching **77.58 Mitem/s** (4.31x vs alternatives). Remove-heavy and insert-only
+workloads show diminishing SMT returns as write contention increases.
+
+Note: `06_single_hot_key` masstree15 peaks at 4T (15.05 Mitem/s) and plateaus through 12T
+(14.33 Mitem/s). With only one key contended, additional threads increase optimistic read
+retries without adding useful parallelism.
+
+## High-Impact Workloads (12T SMT)
+
+> Source: `runs/run154_high_impact_twig_optimization.txt`
+> **Config:** 12 threads on 6 physical cores (SMT), 200 samples
+
+Benchmarks targeting Masstree's architectural advantages: long keys, variable-length keys,
+hot key patterns, mixed operations, prefix queries, and deep trie traversal.
+
+| Benchmark | masstree15 | indexset | tree_index | skipmap | MT vs Best |
+|-----------|------------|----------|------------|---------|------------|
+| 01_long_keys_128b | **34.95** | 14.58 | 14.98 | 11.15 | **2.33x** |
+| 02_multiple_hot_keys | **40.97** | 14.24 | 12.43 | 13.26 | **2.88x** |
+| 03_mixed_get_insert_remove | **27.24** | 6.00 | 11.93 | 8.85 | **2.28x** |
+| 04_variable_long_keys | **28.17** | 9.30 | 8.29 | 7.51 | **3.03x** |
+| 05_prefix_queries (Kitem/s) | **426.3** | n/a | 14.56 | 140.7 | **3.02x** |
+| 06_deep_trie_traversal | **18.16** | 13.77 | 11.16 | 8.84 | **1.32x** |
+| 07_deep_trie_read_only | **27.90** | 15.05 | 17.35 | 15.28 | **1.61x** |
+| 08_variable_keys_arc | **29.56** | 11.13 | 11.55 | 8.46 | **2.56x** |
+
+**Wins 8/8** with margins from 1.32x to 3.03x.
+
+Key insights:
+
+- **Long keys (128B):** Unique prefixes test suffix handling; Masstree stores suffixes inline
+- **Variable keys (64-256B):** Masstree takes `&[u8]` slices; others `clone()` `Vec<u8>`
+- **Multiple hot keys:** OCC reads excel under localized contention (8 keys, 80% access)
+- **Mixed ops (70/20/10):** `seize`-based reclamation handles concurrent deletes well
+- **Prefix queries:** Native `scan_prefix()` vs range simulation (29x faster than tree_index)
+- **Deep trie:** Shared prefix chunks force multi-layer descent; narrowest margin (1.32x)
 
 ## Range Scans (6T Physical, Rigorous)
 
@@ -128,7 +188,7 @@ Note: `17_hot_spot` is sensitive to update semantics. MassTree overwrites existi
 
 ```toml
 [dependencies]
-masstree = { version = "0.6.7", features = ["mimalloc"] }
+masstree = { version = "0.6.8", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

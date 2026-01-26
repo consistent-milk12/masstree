@@ -15,9 +15,9 @@ use super::{
 };
 
 use crate::hints::unlikely;
-use crate::leaf_trait::TreePermutation;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
+use crate::leaf_trait::TreePermutation;
 use crate::link::Linker;
 use crate::prefetch::prefetch_read;
 use crate::ref_value_slot::RefValueSlot;
@@ -44,6 +44,30 @@ enum LookupResult {
 
     /// Key not found in this leaf.
     NotFound,
+}
+
+/// Result of twig-chain fast descent.
+///
+/// Explicitly encodes the three possible outcomes to avoid sentinel values
+/// and null-pointer pitfalls. The `Leaf` parameter is the leaf node type.
+enum TwigDescentResult<Leaf> {
+    /// Continue to `'leaf_loop` with the given leaf pointer.
+    /// The leaf is valid and ready for normal search.
+    ContinueLeafLoop {
+        layer_root: *const u8,
+        leaf_ptr: *mut Leaf,
+    },
+
+    /// Restart `'layer_loop` with the given layer root.
+    /// Used when: `deleted_layer` detected, or fast path reached a non-leaf/non-root node.
+    RestartLayerLoop {
+        layer_root: *const u8,
+        in_sublayer: bool,
+    },
+
+    /// Return `None` from `get_impl_multi_layer`.
+    /// Used when: sublayer is deleted (`is_deleted()` check failed).
+    ReturnNone,
 }
 
 // ============================================================================
@@ -308,6 +332,207 @@ where
         let sublayer_version: &NodeVersion = unsafe { &*layer_ptr.cast::<NodeVersion>() };
 
         !sublayer_version.is_deleted()
+    }
+
+    /// Descend through a chain of trivial twigs (single-entry layer leaves).
+    ///
+    /// A "trivial twig" is a leaf node with exactly one entry that is a layer pointer,
+    /// still marked as a layer root. These form when keys share multiple 8-byte prefix chunks.
+    ///
+    /// This method loops through consecutive twigs without restarting `'layer_loop`,
+    /// avoiding repeated overhead. It maintains all OCC safety invariants and exits
+    /// to the normal path on any concurrent modification or unexpected structure.
+    ///
+    /// # Preconditions
+    ///
+    /// - `initial_ptr` is non-null and points to a valid node (caller must verify)
+    /// - The node at `initial_ptr` has already passed `is_deleted()` check
+    ///
+    /// # Safety
+    ///
+    /// This function performs unsafe pointer casts. The caller must ensure `initial_ptr`
+    /// is a valid pointer to a node protected by the guard's epoch.
+    #[inline]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "complex twig-chain traversal with safety checks"
+    )]
+    fn descend_twig_chain(
+        &self,
+        initial_ptr: *mut u8,
+        key: &mut Key<'_>,
+        guard: &LocalGuard<'_>,
+    ) -> TwigDescentResult<L> {
+        let mut ptr: *mut u8 = initial_ptr;
+
+        loop {
+            key.shift();
+
+            // ------------------------------------------------------------------
+            // STEP 1: Read version and validate node type BEFORE casting to leaf
+            // ------------------------------------------------------------------
+            // Layer pointers can point to internodes after splits. We must check
+            // is_leaf() before assuming we can treat this as a leaf node.
+
+            // SAFETY: ptr is non-null (checked by caller or previous iteration)
+            #[expect(clippy::cast_ptr_alignment, reason = "NodeVersion is first field")]
+            let node_version: &NodeVersion = unsafe { &*ptr.cast::<NodeVersion>() };
+
+            // Check if sublayer was deleted (return None, matching line 698-701 behavior)
+            if node_version.is_deleted() {
+                return TwigDescentResult::ReturnNone;
+            }
+
+            // Check if node is still a leaf (layer roots can become internodes after splits)
+            if !node_version.is_leaf() {
+                // Not a leaf - must use normal traversal via reach_leaf_concurrent_generic
+                return TwigDescentResult::RestartLayerLoop {
+                    layer_root: ptr.cast_const(),
+                    in_sublayer: true,
+                };
+            }
+
+            // Check if node is still a layer root (skipping reach_leaf is only safe for roots)
+            // Twigs are allocated with ROOT_BIT set (try_alloc_leaf(false, true))
+            if !node_version.is_root() {
+                // No longer a root - must use normal traversal
+                return TwigDescentResult::RestartLayerLoop {
+                    layer_root: ptr.cast_const(),
+                    in_sublayer: true,
+                };
+            }
+
+            // ------------------------------------------------------------------
+            // STEP 2: Now safe to cast to leaf and read leaf-specific fields
+            // ------------------------------------------------------------------
+
+            // SAFETY: Verified is_leaf() above, ptr is valid sublayer pointer
+            let twig: &L = unsafe { &*ptr.cast::<L>() };
+
+            // Check for deleted_layer (sublayer was GC'd - must restart from main root)
+            if twig.deleted_layer() {
+                key.unshift_all();
+                let root = self.load_root_ptr_generic(guard);
+
+                return TwigDescentResult::RestartLayerLoop {
+                    layer_root: root,
+                    in_sublayer: false,
+                };
+            }
+
+            // ------------------------------------------------------------------
+            // STEP 3: Version stabilization
+            // ------------------------------------------------------------------
+            // Use stable() which spins until dirty bits clear. This is acceptable
+            // in this niche path because:
+            // 1. Twigs are rarely contended (single-entry nodes with no values)
+            // 2. If contention is high, we'll exit fast path via has_changed() anyway
+            // 3. Avoiding try_stable() simplifies the code (no B-link fallback needed)
+            let twig_version: u32 = twig.version().stable();
+
+            // Prefetch for next iteration (hides memory latency)
+            twig.prefetch_for_search();
+
+            // ------------------------------------------------------------------
+            // STEP 4: "Too-right" detection (concurrent split moved our key)
+            // ------------------------------------------------------------------
+            let target_ikey: u64 = key.ikey();
+
+            if !twig.prev().is_null() && target_ikey < twig.ikey_bound() {
+                // We're on a leaf that's to the right of where key should be.
+                // Exit to normal leaf_loop which will handle this (either via
+                // the early too-right check or NotFound → too-right recovery).
+                return TwigDescentResult::ContinueLeafLoop {
+                    layer_root: ptr.cast_const(),
+                    leaf_ptr: ptr.cast::<L>(),
+                };
+            }
+
+            // ------------------------------------------------------------------
+            // STEP 5: Check if this is a trivial twig we can fast-path through
+            // ------------------------------------------------------------------
+            let twig_perm = twig.permutation();
+
+            // Exit fast path if not single-entry
+            if twig_perm.size() != 1 {
+                return TwigDescentResult::ContinueLeafLoop {
+                    layer_root: ptr.cast_const(),
+                    leaf_ptr: ptr.cast::<L>(),
+                };
+            }
+
+            let slot: usize = twig_perm.get(0);
+            let twig_ikey: u64 = twig.ikey_relaxed(slot);
+
+            // Verify ikey matches (detects concurrent modification)
+            if twig_ikey != target_ikey {
+                return TwigDescentResult::ContinueLeafLoop {
+                    layer_root: ptr.cast_const(),
+                    leaf_ptr: ptr.cast::<L>(),
+                };
+            }
+
+            let twig_keylenx: u8 = twig.keylenx(slot);
+
+            // Exit fast path if not a layer pointer (it's a value)
+            if twig_keylenx < LAYER_KEYLENX {
+                return TwigDescentResult::ContinueLeafLoop {
+                    layer_root: ptr.cast_const(),
+                    leaf_ptr: ptr.cast::<L>(),
+                };
+            }
+
+            // ------------------------------------------------------------------
+            // STEP 6: Extract next pointer and validate
+            // ------------------------------------------------------------------
+            let next_ptr: *mut u8 = twig.leaf_value_ptr(slot);
+
+            // Null pointer means slot is being modified (matches check_slot_match line 185-188)
+            if next_ptr.is_null() {
+                return TwigDescentResult::ContinueLeafLoop {
+                    layer_root: ptr.cast_const(),
+                    leaf_ptr: ptr.cast::<L>(),
+                };
+            }
+
+            // ------------------------------------------------------------------
+            // STEP 7: Version validation before following pointer
+            // ------------------------------------------------------------------
+            if twig.version().has_changed(twig_version) {
+                // Concurrent modification detected - fall back to safe path
+                return TwigDescentResult::ContinueLeafLoop {
+                    layer_root: ptr.cast_const(),
+                    leaf_ptr: ptr.cast::<L>(),
+                };
+            }
+
+            // ------------------------------------------------------------------
+            // STEP 8: Check if search key has more layers to descend
+            // ------------------------------------------------------------------
+            // CRITICAL: This mirrors the check in search_leaf_multi_layer/check_slot_match
+            // (line 210-211) that only returns LookupResult::Layer when needs_suffix_check
+            // is true. Without this, we'd call key.shift() on a key with no suffix,
+            // triggering a debug assertion panic (src/key.rs:238).
+            //
+            // Scenario: search key is a strict prefix of longer keys that created
+            // a deeper twig chain. Normal lookup would stop here (search returns
+            // NotFound), but we must also stop the fast path.
+            if !key.has_suffix() {
+                // Search key has no more layers - it's a prefix of stored keys.
+                // Exit to normal search which will return NotFound.
+                return TwigDescentResult::ContinueLeafLoop {
+                    layer_root: ptr.cast_const(),
+                    leaf_ptr: ptr.cast::<L>(),
+                };
+            }
+
+            // ------------------------------------------------------------------
+            // STEP 9: Follow the layer pointer to next node
+            // ------------------------------------------------------------------
+            ptr = next_ptr;
+
+            // Loop continues: check if next node is also a trivial twig
+        }
     }
 }
 
@@ -696,15 +921,57 @@ where
                         }
 
                         LookupResult::Layer(ptr) => {
-                            if !self.check_sublayer_valid(ptr) {
+                            // Validate initial sublayer pointer (non-null, not deleted)
+                            // NOTE: This null check is defensive/future-proofing. Currently
+                            // unreachable because check_slot_match returns None on null
+                            // pointers (line 185-188), so LookupResult::Layer never
+                            // contains null. Included for safety if that invariant changes.
+                            if ptr.is_null() {
+                                continue 'search_loop;
+                            }
+
+                            // SAFETY: ptr is non-null, cast to read version
+                            #[expect(
+                                clippy::cast_ptr_alignment,
+                                reason = "NodeVersion is first field"
+                            )]
+                            let sublayer_version: &NodeVersion =
+                                unsafe { &*ptr.cast::<NodeVersion>() };
+
+                            if sublayer_version.is_deleted() {
                                 return None;
                             }
 
-                            key.shift();
-                            layer_root = ptr;
-                            in_sublayer = true;
+                            // === TWIG-CHAIN FAST PATH ===
+                            // Collapse consecutive single-entry layer pointers without
+                            // full outer-loop restart. Falls back to normal path on any
+                            // concurrent modification or non-trivial structure.
+                            match self.descend_twig_chain(ptr, key, guard) {
+                                TwigDescentResult::ContinueLeafLoop {
+                                    layer_root: new_root,
+                                    leaf_ptr: new_leaf,
+                                } => {
+                                    layer_root = new_root;
+                                    leaf_ptr = new_leaf;
+                                    in_sublayer = true;
 
-                            continue 'layer_loop;
+                                    continue 'leaf_loop;
+                                }
+
+                                TwigDescentResult::RestartLayerLoop {
+                                    layer_root: new_root,
+                                    in_sublayer: new_in_sublayer,
+                                } => {
+                                    layer_root = new_root;
+                                    in_sublayer = new_in_sublayer;
+
+                                    continue 'layer_loop;
+                                }
+
+                                TwigDescentResult::ReturnNone => {
+                                    return None;
+                                }
+                            }
                         }
 
                         LookupResult::NotFound => {

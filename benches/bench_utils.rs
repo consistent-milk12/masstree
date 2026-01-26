@@ -55,7 +55,7 @@
     clippy::cast_sign_loss
 )]
 
-use std::sync::atomic::{Ordering as AtomicOrdering, fence};
+use std::sync::atomic::{fence, Ordering as AtomicOrdering};
 
 use arrayvec::ArrayVec;
 
@@ -913,25 +913,22 @@ pub fn warmup_with_indices<F: FnMut(usize)>(
     fence(AtomicOrdering::SeqCst);
 }
 
-/// Force memory barrier before measurement.
+/// Compiler barrier before measurement.
 ///
-/// Call this right before starting the timed portion to ensure
-/// all prior memory operations are complete.
+/// Prevents the compiler from reordering measured code before this point.
+/// Uses compiler_fence only (no hardware fence) to minimize overhead.
 #[inline]
 pub fn pre_measurement_barrier() {
-    fence(AtomicOrdering::SeqCst);
-    // Also try to prevent instruction reordering
     std::sync::atomic::compiler_fence(AtomicOrdering::SeqCst);
 }
 
-/// Force memory barrier after measurement.
+/// Compiler barrier after measurement.
 ///
-/// Call this right after the timed portion to ensure the compiler
-/// doesn't move measured work outside the timing window.
+/// Prevents the compiler from reordering measured code after this point.
+/// Uses compiler_fence only (no hardware fence) to minimize overhead.
 #[inline]
 pub fn post_measurement_barrier() {
     std::sync::atomic::compiler_fence(AtomicOrdering::SeqCst);
-    fence(AtomicOrdering::SeqCst);
 }
 
 /// Try to pin the current thread to a specific CPU core.

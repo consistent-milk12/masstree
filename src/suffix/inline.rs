@@ -3,9 +3,9 @@ use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering as AtomicOrdering};
 
-use super::{AllocResult, CompareSuffix, SuffixBag, TreePermutation};
+use super::{AllocResult, SuffixBag, TreePermutation};
 
 const U16_MAX: usize = u16::MAX as usize;
 
@@ -609,23 +609,17 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     // ========================================================================
 
     /// Check if a slot's suffix equals the given suffix.
-    ///
-    /// Uses word-aligned comparison for suffixes >= 8 bytes.
     #[must_use]
     #[inline(always)]
     pub fn suffix_equals(&self, slot: usize, suffix: &[u8]) -> bool {
-        self.get(slot)
-            .is_some_and(|stored: &[u8]| CompareSuffix::fast_slice_eq(stored, suffix))
+        self.get(slot).is_some_and(|stored: &[u8]| stored == suffix)
     }
 
     /// Compare a slot's suffix with the given suffix.
-    ///
-    /// Uses word-aligned comparison for suffixes >= 8 bytes.
     #[must_use]
     #[inline(always)]
     pub fn suffix_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering> {
-        self.get(slot)
-            .map(|stored: &[u8]| CompareSuffix::fast_slice_cmp(stored, suffix))
+        self.get(slot).map(|stored: &[u8]| stored.cmp(suffix))
     }
 }
 

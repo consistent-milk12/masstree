@@ -10,12 +10,10 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use crate::{AllocError, AllocResult, TreePermutation};
 
 mod clone;
-mod cmp;
 mod compact;
 mod inline;
 mod sidecar;
 
-use cmp::CompareSuffix;
 pub use inline::InlineSuffixBag;
 
 pub use sidecar::{SideCarUtils, SuffixSidecar};
@@ -586,8 +584,6 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
 
     /// Check if a slot's suffix equals the given suffix.
     ///
-    /// Uses word-aligned comparison for suffixes >= 8 bytes.
-    ///
     /// # Returns
     ///
     /// - `true` if suffixes match exactly
@@ -595,13 +591,10 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     #[must_use]
     #[inline(always)]
     pub fn suffix_equals(&self, slot: usize, suffix: &[u8]) -> bool {
-        self.get(slot)
-            .is_some_and(|stored: &[u8]| CompareSuffix::fast_slice_eq(stored, suffix))
+        self.get(slot).is_some_and(|stored: &[u8]| stored == suffix)
     }
 
     /// Compare a slot's suffix with the given suffix.
-    ///
-    /// Uses word-aligned comparison for suffixes >= 8 bytes.
     ///
     /// # Returns
     ///
@@ -610,8 +603,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     #[must_use]
     #[inline(always)]
     pub fn suffix_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering> {
-        self.get(slot)
-            .map(|stored: &[u8]| CompareSuffix::fast_slice_cmp(stored, suffix))
+        self.get(slot).map(|stored: &[u8]| stored.cmp(suffix))
     }
 }
 
