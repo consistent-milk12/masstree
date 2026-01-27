@@ -37,6 +37,18 @@
 //! | `keys_random_length_simulation` | Unpredictable sizes | Layer transition overhead |
 //! | `keys_blink_stress` | Bit-reversal order | B-link pointer following |
 //!
+//! ### Index/Sampling Helpers
+//!
+//! | Function | Distribution | Use Case |
+//! |----------|--------------|----------|
+//! | `zipfian_indices` | True Zipfian (via `rand_distr`) | Hot-key workloads, configurable skew |
+//! | `skewed_indices` | Power-law approximation | Fast alternative to Zipfian |
+//! | `uniform_indices` | Uniform random | Baseline random access |
+//! | `shuffle` | Fisher-Yates | Randomize slice order |
+//! | `shuffled_indices` | Shuffled sequential | Random lookup order |
+//! | `random_start_indices` | Uniform with margin | Range scan start positions |
+//! | `rw1_keys` | Random i32 pairs | C++ Masstree compatibility |
+//!
 //! ### Scan Helpers
 //!
 //! | Function | Purpose |
@@ -52,12 +64,16 @@
     clippy::items_after_statements,
     clippy::indexing_slicing,
     clippy::cast_precision_loss,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::expect_used
 )]
 
-use std::sync::atomic::{fence, Ordering as AtomicOrdering};
+use std::sync::atomic::{compiler_fence, fence, Ordering as AtomicOrdering};
 
 use arrayvec::ArrayVec;
+use rand::{seq::SliceRandom, Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use rand_distr::{Distribution, Zipf};
 
 /// Multipliers for deterministic key chunk generation.
 /// Each chunk uses a different multiplier to ensure variation across chunks.
@@ -203,60 +219,62 @@ pub fn keys_shared_prefix_chunks<const K: usize>(
     out
 }
 
-/// Generate Zipfian-distributed indices (hot keys accessed more frequently).
-/// Uses s=1.0 (standard Zipf), approximated via rejection sampling.
+/// Fast power-law skewed indices (not true Zipfian but similar shape).
+///
+/// Uses `n^(1-u) - 1` which produces a skewed distribution where lower
+/// indices are accessed more frequently. This is faster than true Zipfian
+/// (no precomputation) but doesn't match the exact Zipfian PMF.
+///
+/// For true Zipfian distribution, use [`zipfian_indices`] instead.
 #[must_use]
-pub fn zipfian_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
-    let mut indices = Vec::with_capacity(count);
-    let mut state = seed;
+pub fn skewed_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    (0..count)
+        .map(|_| {
+            let u: f64 = rng.random();
+            ((n as f64).powf(1.0 - u) - 1.0)
+                .max(0.0)
+                .min((n - 1) as f64) as usize
+        })
+        .collect()
+}
 
-    for _ in 0..count {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        let u = (state >> 33) as f64 / (1u64 << 31) as f64;
-        let idx = ((n as f64).powf(1.0 - u) - 1.0).max(0.0) as usize;
-        indices.push(idx.min(n - 1));
-    }
-    indices
+/// Generate true Zipfian-distributed indices using `rand_distr::Zipf`.
+///
+/// The skew parameter `s` controls the distribution shape:
+/// - `s = 1.0`: Standard Zipf's law (top 20% keys get ~80% accesses)
+/// - `s > 1.0`: More skewed toward lower indices
+/// - `s < 1.0`: Flatter distribution
+///
+/// Uses the well-tested `rand_distr` crate for correct Zipfian sampling.
+#[must_use]
+pub fn zipfian_indices(n: usize, count: usize, s: f64, seed: u64) -> Vec<usize> {
+    assert!(n > 0, "n must be > 0");
+    assert!(s > 0.0, "s must be > 0 for Zipf distribution");
+
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let zipf = Zipf::new(n as f64, s).expect("invalid Zipf parameters");
+
+    (0..count)
+        .map(|_| {
+            // Zipf returns 1-indexed values in [1, n], convert to 0-indexed
+            let sample: f64 = zipf.sample(&mut rng);
+            (sample as usize).saturating_sub(1).min(n - 1)
+        })
+        .collect()
 }
 
 /// Uniform random indices.
-///
-/// Note: Uses high bits of LCG state for better randomness quality.
 #[must_use]
 pub fn uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
-    let mut indices = Vec::with_capacity(count);
-    let mut state = seed;
-
-    for _ in 0..count {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        // Use high bits for better quality
-        indices.push(((state >> 32) as usize) % n);
-    }
-    indices
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    (0..count).map(|_| rng.random_range(0..n)).collect()
 }
 
 /// Shuffle a slice in-place using Fisher-Yates algorithm.
-///
-/// Note: Uses high bits of LCG state for better randomness quality.
 pub fn shuffle<T>(slice: &mut [T], seed: u64) {
-    let n = slice.len();
-    if n <= 1 {
-        return;
-    }
-
-    let mut state = seed;
-    for i in 0..(n - 1) {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        // Use high bits for better quality, select j in [i, n) for unbiased shuffle
-        let j = i + (((state >> 32) as usize) % (n - i));
-        slice.swap(i, j);
-    }
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    slice.shuffle(&mut rng);
 }
 
 /// Generate random start indices for range scan benchmarks.
@@ -273,34 +291,18 @@ pub fn shuffle<T>(slice: &mut [T], seed: u64) {
 pub fn random_start_indices(key_count: usize, ops_count: usize, seed: u64) -> Vec<usize> {
     // Reserve room at the end so scans don't immediately hit end-of-tree
     let max_start = key_count.saturating_sub(100).max(1);
-    let mut indices = Vec::with_capacity(ops_count);
-    let mut state = seed;
-
-    for _ in 0..ops_count {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        // Use high bits for better quality
-        indices.push(((state >> 32) as usize) % max_start);
-    }
-    indices
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    (0..ops_count)
+        .map(|_| rng.random_range(0..max_start))
+        .collect()
 }
 
 /// Generate random i32 values (like C++ Masstree rw1 test).
 /// Returns (keys, values) where value[i] = key[i] + 1.
 #[must_use]
 pub fn rw1_keys(n: usize, seed: u64) -> (Vec<i32>, Vec<i32>) {
-    let mut keys = Vec::with_capacity(n);
-    let mut state = seed;
-
-    for _ in 0..n {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        let key = state as i32;
-        keys.push(key);
-    }
-
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let keys: Vec<i32> = (0..n).map(|_| rng.random()).collect();
     let values: Vec<i32> = keys.iter().map(|k| k.wrapping_add(1)).collect();
     (keys, values)
 }
@@ -526,18 +528,14 @@ pub struct VariableLengthKeys {
 /// Keys are stored inline using `ArrayVec` to avoid per-key heap allocations.
 #[must_use]
 pub fn keys_variable_length(n: usize, seed: u64) -> VariableLengthKeys {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut keys = Vec::with_capacity(n);
     let mut distribution = [0usize; 4];
-    let mut state = seed;
 
     let sizes = [8, 16, 24, 32];
 
     for i in 0..n {
-        // Pseudo-random size selection
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        let size_idx = ((state >> 62) as usize) % 4;
+        let size_idx = rng.random_range(0..4);
         let size = sizes[size_idx];
         distribution[size_idx] += 1;
 
@@ -701,15 +699,12 @@ pub fn keys_random_length_simulation<const K: usize>(n: usize, seed: u64) -> Vec
     assert!((16..=128).contains(&K), "key size must be 16..=128");
 
     let chunks = K / 8;
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut out = Vec::with_capacity(n);
-    let mut state = seed;
 
     for i in 0..n {
         // Determine "effective length" for this key (1 to chunks)
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        let effective_chunks = 1 + ((state >> 60) as usize % chunks);
+        let effective_chunks = rng.random_range(1..=chunks);
 
         let mut key = [0u8; K];
 
@@ -916,48 +911,19 @@ pub fn warmup_with_indices<F: FnMut(usize)>(
 /// Compiler barrier before measurement.
 ///
 /// Prevents the compiler from reordering measured code before this point.
-/// Uses compiler_fence only (no hardware fence) to minimize overhead.
+/// Uses `compiler_fence` only (no hardware fence) to minimize overhead.
 #[inline]
 pub fn pre_measurement_barrier() {
-    std::sync::atomic::compiler_fence(AtomicOrdering::SeqCst);
+    compiler_fence(AtomicOrdering::SeqCst);
 }
 
 /// Compiler barrier after measurement.
 ///
 /// Prevents the compiler from reordering measured code after this point.
-/// Uses compiler_fence only (no hardware fence) to minimize overhead.
+/// Uses `compiler_fence` only (no hardware fence) to minimize overhead.
 #[inline]
 pub fn post_measurement_barrier() {
-    std::sync::atomic::compiler_fence(AtomicOrdering::SeqCst);
-}
-
-/// Try to pin the current thread to a specific CPU core.
-///
-/// Returns `true` if pinning succeeded, `false` if not available.
-/// Pinning reduces variance from CPU migration during benchmarks.
-///
-/// Note: Currently returns false on all platforms. To enable actual CPU pinning
-/// on Linux, add `libc` as a dev-dependency and uncomment the implementation.
-#[allow(dead_code)]
-#[must_use]
-pub const fn try_pin_to_core(_core_id: usize) -> bool {
-    // CPU pinning requires libc. Enable if needed:
-    // #[cfg(target_os = "linux")]
-    // {
-    //     use std::mem::MaybeUninit;
-    //     unsafe {
-    //         let mut cpuset: libc::cpu_set_t = MaybeUninit::zeroed().assume_init();
-    //         libc::CPU_ZERO(&mut cpuset);
-    //         libc::CPU_SET(_core_id, &mut cpuset);
-    //         let result = libc::pthread_setaffinity_np(
-    //             libc::pthread_self(),
-    //             std::mem::size_of::<libc::cpu_set_t>(),
-    //             &cpuset,
-    //         );
-    //         return result == 0;
-    //     }
-    // }
-    false
+    compiler_fence(AtomicOrdering::SeqCst);
 }
 
 /// Helper to run a benchmark with proper setup.
@@ -1008,11 +974,6 @@ impl BenchmarkRunner {
         W: FnMut(),
         B: FnOnce() -> R,
     {
-        // Pin if requested
-        if let Some(core) = self.pin_core {
-            let _ = try_pin_to_core(core);
-        }
-
         // Warmup
         warmup(warmup_fn, self.warmup_iters);
 

@@ -373,7 +373,7 @@ mod point_get_zipf_64b {
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<64>(N));
         let tree = Arc::new(setup_masstree15::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -424,7 +424,7 @@ mod point_get_zipf_64b {
     fn std_rwlock_btreemap(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<64>(N));
         let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -476,7 +476,7 @@ mod point_get_zipf_64b {
     fn std_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<64>(N));
         let map = Arc::new(setup_std_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -530,7 +530,7 @@ mod point_get_zipf_64b {
     fn parking_rwlock_btreemap(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<64>(N));
         let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -582,7 +582,7 @@ mod point_get_zipf_64b {
     fn parking_rwlock_btreemap_batched(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<64>(N));
         let map = Arc::new(setup_parking_rwlock_btreemap::<64>(keys.as_ref()));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
@@ -840,7 +840,7 @@ mod mixed_zipf_hotset_95_5_64b {
 
     fn access_indices(threads: usize) -> Vec<usize> {
         // Indices into hotset [0..HOTSET), Zipfian-distributed.
-        zipfian_indices(HOTSET, OPS_PER_THREAD * threads, 42)
+        zipfian_indices(HOTSET, OPS_PER_THREAD * threads, 1.0, 42)
     }
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]

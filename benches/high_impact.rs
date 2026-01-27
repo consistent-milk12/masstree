@@ -44,7 +44,7 @@ mod bench_utils;
 
 use bench_utils::{keys, post_measurement_barrier, pre_measurement_barrier, uniform_indices};
 use crossbeam_skiplist::SkipMap;
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::MassTree15Inline;
 use scc::TreeIndex;
@@ -2055,7 +2055,7 @@ mod deep_trie_read_only {
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 25_000; // More ops since read-only is faster
-                                          // Same prefix configuration as benchmark 06
+    // Same prefix configuration as benchmark 06
     const PREFIX_CHUNKS: usize = 4;
     const PREFIX_BUCKETS: u64 = 16;
 

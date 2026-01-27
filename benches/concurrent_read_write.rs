@@ -39,7 +39,7 @@ use bench_utils::{
     uniform_indices, zipfian_indices,
 };
 use crossbeam_skiplist::SkipMap;
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::MassTree15Inline;
 use scc::TreeIndex;
@@ -418,7 +418,7 @@ mod mixed_zipfian {
     #[divan::bench(args = THREAD_COUNTS)]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
         let write_decisions: Arc<Vec<Vec<bool>>> = Arc::new(
             (0..threads)
                 .map(|t| shuffled_write_decisions(OPS_PER_THREAD, WRITE_RATIO, 42 + t as u64))
@@ -478,7 +478,7 @@ mod mixed_zipfian {
     #[divan::bench(args = THREAD_COUNTS)]
     fn skipmap(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
         let write_decisions: Arc<Vec<Vec<bool>>> = Arc::new(
             (0..threads)
                 .map(|t| shuffled_write_decisions(OPS_PER_THREAD, WRITE_RATIO, 42 + t as u64))
@@ -537,7 +537,7 @@ mod mixed_zipfian {
     #[divan::bench(args = THREAD_COUNTS)]
     fn indexset(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
         let write_decisions: Arc<Vec<Vec<bool>>> = Arc::new(
             (0..threads)
                 .map(|t| shuffled_write_decisions(OPS_PER_THREAD, WRITE_RATIO, 42 + t as u64))
@@ -596,7 +596,7 @@ mod mixed_zipfian {
     #[divan::bench(args = THREAD_COUNTS)]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
         let write_decisions: Arc<Vec<Vec<bool>>> = Arc::new(
             (0..threads)
                 .map(|t| shuffled_write_decisions(OPS_PER_THREAD, WRITE_RATIO, 42 + t as u64))

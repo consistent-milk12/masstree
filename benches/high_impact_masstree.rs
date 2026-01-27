@@ -1,4 +1,13 @@
-//! High-impact benchmarks targeting Masstree's architectural advantages.
+//! Regression test benchmarks for MassTree15Inline.
+//!
+//! These benchmarks track performance over time for a single implementation.
+//! They are NOT comparative benchmarks against other data structures.
+//!
+//! ## Purpose
+//!
+//! - Detect performance regressions after code changes
+//! - Validate optimizations with before/after comparisons
+//! - Exercise different access patterns and tree depths
 //!
 //! ## Benchmark Groups
 //!
@@ -8,27 +17,35 @@
 //! | 02 | multiple_hot_keys | Read-hot cache pattern (Zipfian) |
 //! | 03 | mixed_get_insert_remove | Dynamic set with removes |
 //! | 04 | variable_long_keys | API cost (Vec<u8> clones) |
-//! | 05 | prefix_queries | Native scan_prefix vs range |
+//! | 05 | prefix_queries | Native scan_prefix (~500 records/scan) |
 //! | 06 | deep_trie_traversal | Multi-layer descent (10% writes) |
 //! | 07 | deep_trie_read_only | Multi-layer descent (pure reads) |
 //! | 08 | variable_keys_arc | Structure-only (Arc<[u8]> keys) |
 //!
-//! ## Methodology Notes
+//! ## Methodology
 //!
-//! - **Warmup excluded from counters**: All benchmarks perform warmup iterations
-//!   BEFORE the measurement barrier. Warmup ops are NOT included in `ItemsCount`.
-//! - **Barrier synchronization**: All threads synchronize BEFORE the measurement
-//!   barrier to ensure synchronization overhead is excluded from timing.
-//! - **Thread spawn overhead**: Thread creation occurs inside `bench_local_values`
-//!   due to divan API constraints. This adds ~10-50µs per thread per sample.
-//!   For absolute numbers, consider this overhead; for relative comparisons
-//!   between structures, it cancels out.
-//! - **Compiler barriers**: Pre/post measurement barriers use `compiler_fence` only
-//!   (no hardware fence) to minimize overhead while preventing reordering.
-//! - Benchmark 04 includes `Vec<u8>` clone overhead; benchmark 08 uses `Arc<[u8]>`
-//!   for structure-only comparison without allocator costs.
-//! - Benchmark 05 counters measure scans/sec not records/sec (~500 records/scan).
-//! - See per-benchmark comments for detailed methodology notes.
+//! ### Warmup
+//! - Warmup mirrors measurement op mix (reads AND writes for mixed benchmarks)
+//! - Warmup ops are excluded from `ItemsCount` counters
+//! - Ensures branch predictors, caches, and allocator are in steady state
+//!
+//! ### Synchronization
+//! - Single barrier after warmup synchronizes all threads before measurement
+//! - Compiler barriers (`compiler_fence`) bracket measurement region
+//!
+//! ### Overhead Included in Measurement
+//! - **Thread spawn**: ~10-50µs per thread per sample (divan API constraint)
+//! - **Guard creation**: `tree.guard()` epoch registration per thread
+//!
+//! These overheads are consistent across runs, making them acceptable for
+//! regression detection. For absolute latency numbers, subtract ~50-100µs.
+//!
+//! ### Thread Affinity
+//! No CPU pinning is performed. OS scheduler may migrate threads between
+//! cores, adding variance. For lower variance, pin externally:
+//! ```bash
+//! taskset -c 0-11 cargo bench --bench high_impact_masstree
+//! ```
 //!
 //! ## Running
 //!
@@ -44,7 +61,9 @@
 
 mod bench_utils;
 
-use bench_utils::{keys, post_measurement_barrier, pre_measurement_barrier, uniform_indices};
+use bench_utils::{
+    keys, post_measurement_barrier, pre_measurement_barrier, uniform_indices, zipfian_indices,
+};
 use divan::{black_box, Bencher};
 use masstree::MassTree15Inline;
 use std::sync::Arc;
@@ -122,7 +141,7 @@ fn shuffled_write_decisions(count: usize, write_ratio_percent: usize, seed: u64)
 // uses index * 1 for chunk 0). This means lookups stay in the first trie layer
 // and the benchmark measures:
 // - Suffix storage and comparison overhead for 120-byte suffixes
-// - Long key comparison costs vs flat structures
+// - Long key comparison costs
 //
 // This is NOT a multi-layer trie traversal test. For that, see benchmark 06
 // (keys_shared_prefix_chunks) which forces collisions in early chunks.
@@ -146,36 +165,36 @@ mod long_keys {
         );
 
         bencher
-            // Counter excludes warmup - only counts actual measured operations
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15_long(keys.as_ref())))
             .bench_local_values(|tree| {
-                let warmup_done = Arc::new(Barrier::new(threads));
-                let measurement_start = Arc::new(Barrier::new(threads));
+                let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
                         let write_decisions = Arc::clone(&write_decisions);
-                        let warmup_done = Arc::clone(&warmup_done);
-                        let measurement_start = Arc::clone(&measurement_start);
+                        let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * OPS_PER_THREAD;
                             let is_write = &write_decisions[t];
 
-                            // Warmup phase (excluded from measurement)
+                            // Warmup: mirror measurement op mix (reads + writes)
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + i];
-                                black_box(tree.get_with_guard(&keys[idx], &guard));
+                                if is_write[i] {
+                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                                } else {
+                                    black_box(tree.get_with_guard(&keys[idx], &guard));
+                                }
                             }
 
-                            // Synchronize after warmup, BEFORE measurement barrier
-                            warmup_done.wait();
-                            measurement_start.wait();
+                            // Single barrier after warmup
+                            barrier.wait();
 
-                            // === MEASUREMENT REGION START ===
+                            // === MEASUREMENT ===
                             pre_measurement_barrier();
                             let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
@@ -183,11 +202,10 @@ mod long_keys {
                                 if is_write[i] {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = black_box(sum.wrapping_add(v));
                                 }
                             }
                             post_measurement_barrier();
-                            // === MEASUREMENT REGION END ===
 
                             black_box(sum);
                         })
@@ -206,16 +224,9 @@ mod long_keys {
 // =============================================================================
 //
 // Tests access patterns following a Zipfian distribution where a small number
-// of keys receive the majority of accesses. This is more realistic than
-// uniform random:
-// - Caches often have a small working set
-// - Database indices see power-law access patterns
-// - Web servers have popular pages
-//
-// METHODOLOGY NOTES:
-// - Uses Zipfian distribution with skew parameter s=1.0 (classic Zipf's law)
+// of keys receive the majority of accesses:
 // - Top key gets ~19% of accesses, top 8 keys get ~50%
-// - This is a READ-HOT benchmark with 10% writes
+// - 10% writes mixed in
 // - Uses unique-prefix keys (keys<128>), so comparisons short-circuit early
 
 #[divan::bench_group(name = "02_multiple_hot_keys", sample_count = 200)]
@@ -226,45 +237,9 @@ mod multiple_hot_keys {
     const OPS_PER_THREAD: usize = 10_000;
     const WRITE_RATIO: usize = 10;
 
-    /// Generate indices following Zipfian distribution.
-    /// Rank r has probability proportional to 1/r^s where s is the skew.
-    fn zipfian_indices(n: usize, count: usize, skew: f64, seed: u64) -> Vec<usize> {
-        // Precompute CDF for Zipfian distribution
-        let mut cdf = Vec::with_capacity(n);
-        let mut sum = 0.0f64;
-        for rank in 1..=n {
-            sum += 1.0 / (rank as f64).powf(skew);
-            cdf.push(sum);
-        }
-        // Normalize
-        for x in cdf.iter_mut() {
-            *x /= sum;
-        }
-
-        let mut indices = Vec::with_capacity(count);
-        let mut state = seed;
-
-        for _ in 0..count {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1);
-            // Generate uniform random in [0, 1)
-            let u = (state >> 11) as f64 / (1u64 << 53) as f64;
-
-            // Binary search in CDF to find rank
-            let rank = match cdf.binary_search_by(|x| x.partial_cmp(&u).unwrap()) {
-                Ok(i) => i,
-                Err(i) => i,
-            };
-            indices.push(rank.min(n - 1));
-        }
-        indices
-    }
-
     #[divan::bench(args = THREAD_COUNTS)]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<LONG_KEY_SIZE>(N));
-        // Zipfian with s=1.0 (classic Zipf's law)
         let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
         let write_decisions: Arc<Vec<Vec<bool>>> = Arc::new(
             (0..threads)
@@ -276,29 +251,30 @@ mod multiple_hot_keys {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15_long(keys.as_ref())))
             .bench_local_values(|tree| {
-                let warmup_done = Arc::new(Barrier::new(threads));
-                let measurement_start = Arc::new(Barrier::new(threads));
+                let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
                         let write_decisions = Arc::clone(&write_decisions);
-                        let warmup_done = Arc::clone(&warmup_done);
-                        let measurement_start = Arc::clone(&measurement_start);
+                        let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * OPS_PER_THREAD;
                             let is_write = &write_decisions[t];
 
-                            // Warmup phase
+                            // Warmup: mirror measurement op mix
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + i];
-                                black_box(tree.get_with_guard(&keys[idx], &guard));
+                                if is_write[i] {
+                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                                } else {
+                                    black_box(tree.get_with_guard(&keys[idx], &guard));
+                                }
                             }
 
-                            warmup_done.wait();
-                            measurement_start.wait();
+                            barrier.wait();
 
                             pre_measurement_barrier();
                             let mut sum = 0u64;
@@ -307,7 +283,7 @@ mod multiple_hot_keys {
                                 if is_write[i] {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = black_box(sum.wrapping_add(v));
                                 }
                             }
                             post_measurement_barrier();
@@ -328,22 +304,11 @@ mod multiple_hot_keys {
 // 03: MIXED GET/INSERT/REMOVE - Full Operation Mix (Dynamic Set)
 // =============================================================================
 //
-// Tests all three operations with realistic distribution:
-// - 70% get (reads)
-// - 20% insert (upserts)
-// - 10% remove (deletes)
+// Tests all three operations: 70% get, 20% insert, 10% remove.
+// Stresses memory reclamation and tests the full API surface.
 //
-// This stresses memory reclamation and tests the full API surface.
-//
-// METHODOLOGY NOTES:
-//
-// 1. State drift: Removes and inserts operate on the SAME keyspace, so:
-//    - Removes can become "remove-miss" once a key was already deleted
-//    - Inserts can become "update-existing" for structures with upsert semantics
-//    - Set size can drift and the effective op mix changes over the run
-//
-//    This is intentional - it represents a dynamic working set. The tree is
-//    recreated each sample via `with_inputs`, ensuring consistent starting state.
+// State drift: Over measurement, removes cause misses and inserts become updates.
+// Tree is recreated each sample via `with_inputs` for consistent starting state.
 
 #[divan::bench_group(name = "03_mixed_get_insert_remove", sample_count = 200)]
 mod mixed_operations {
@@ -403,29 +368,37 @@ mod mixed_operations {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15_long(keys.as_ref())))
             .bench_local_values(|tree| {
-                let warmup_done = Arc::new(Barrier::new(threads));
-                let measurement_start = Arc::new(Barrier::new(threads));
+                let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
                         let op_decisions = Arc::clone(&op_decisions);
-                        let warmup_done = Arc::clone(&warmup_done);
-                        let measurement_start = Arc::clone(&measurement_start);
+                        let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * OPS_PER_THREAD;
                             let ops = &op_decisions[t];
 
-                            // Warmup phase
+                            // Warmup: mirror measurement op mix
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + i];
-                                black_box(tree.get_with_guard(&keys[idx], &guard));
+                                match ops[i] {
+                                    Op::Get => {
+                                        black_box(tree.get_with_guard(&keys[idx], &guard));
+                                    }
+                                    Op::Insert => {
+                                        let _ =
+                                            tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                                    }
+                                    Op::Remove => {
+                                        let _ = tree.remove_with_guard(&keys[idx], &guard);
+                                    }
+                                }
                             }
 
-                            warmup_done.wait();
-                            measurement_start.wait();
+                            barrier.wait();
 
                             pre_measurement_barrier();
                             let mut sum = 0u64;
@@ -434,7 +407,7 @@ mod mixed_operations {
                                 match ops[i] {
                                     Op::Get => {
                                         if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                            sum = sum.wrapping_add(v);
+                                            sum = black_box(sum.wrapping_add(v));
                                         }
                                     }
                                     Op::Insert => {
@@ -461,19 +434,11 @@ mod mixed_operations {
 }
 
 // =============================================================================
-// 04: VARIABLE LENGTH KEYS (64-256 bytes) - Realistic Key Sizes + API Cost
+// 04: VARIABLE LENGTH KEYS (64-256 bytes) - Realistic Key Sizes
 // =============================================================================
 //
-// Real-world keys vary in length: URLs, file paths, composite keys.
-// This tests how structures handle variable-length keys from 64 to 256 bytes.
-//
-// METHODOLOGY NOTE: This benchmark includes key ownership/cloning costs:
-// - Masstree: passes `&[u8]` slices directly, NO clone on write
-// - Others: must `clone()` the `Vec<u8>` on every write (~64-256 byte alloc)
-//
-// This is intentional - it reflects the real API cost of using these structures
-// with owned variable-length keys. For structure-only comparison with minimized
-// cloning overhead, see benchmark 08 (variable_keys_arc) which uses Arc<[u8]>.
+// Tests variable-length keys (64-256 bytes) representing URLs, paths, etc.
+// Masstree passes `&[u8]` slices directly with no clone overhead on writes.
 
 #[divan::bench_group(name = "04_variable_long_keys", sample_count = 200)]
 mod variable_keys {
@@ -491,13 +456,11 @@ mod variable_keys {
         let mut state = seed;
 
         for i in 0..n {
-            // Determine key length
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1);
             let len = min + ((state >> 32) as usize) % (max - min + 1);
 
-            // Fill key with deterministic bytes
             let mut key = vec![0u8; len];
             let base = (i as u64).to_be_bytes();
             key[0..8].copy_from_slice(&base);
@@ -537,29 +500,34 @@ mod variable_keys {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15_var(keys.as_ref())))
             .bench_local_values(|tree| {
-                let warmup_done = Arc::new(Barrier::new(threads));
-                let measurement_start = Arc::new(Barrier::new(threads));
+                let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
                         let write_decisions = Arc::clone(&write_decisions);
-                        let warmup_done = Arc::clone(&warmup_done);
-                        let measurement_start = Arc::clone(&measurement_start);
+                        let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * OPS_PER_THREAD;
                             let is_write = &write_decisions[t];
 
-                            // Warmup phase
+                            // Warmup: mirror measurement op mix
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + i];
-                                black_box(tree.get_with_guard(keys[idx].as_slice(), &guard));
+                                if is_write[i] {
+                                    let _ = tree.insert_with_guard(
+                                        keys[idx].as_slice(),
+                                        i as u64,
+                                        &guard,
+                                    );
+                                } else {
+                                    black_box(tree.get_with_guard(keys[idx].as_slice(), &guard));
+                                }
                             }
 
-                            warmup_done.wait();
-                            measurement_start.wait();
+                            barrier.wait();
 
                             pre_measurement_barrier();
                             let mut sum = 0u64;
@@ -574,7 +542,7 @@ mod variable_keys {
                                 } else if let Some(v) =
                                     tree.get_with_guard(keys[idx].as_slice(), &guard)
                                 {
-                                    sum = sum.wrapping_add(v);
+                                    sum = black_box(sum.wrapping_add(v));
                                 }
                             }
                             post_measurement_barrier();
@@ -592,23 +560,13 @@ mod variable_keys {
 }
 
 // =============================================================================
-// 05: PREFIX QUERIES - Trie Natural Advantage
+// 05: PREFIX QUERIES - Prefix Scan Performance
 // =============================================================================
 //
-// Tests prefix scan performance where Masstree's trie structure should excel.
-// Keys share common prefixes (e.g., "/users/123/...", "/users/456/...").
-// Each thread scans all keys matching a randomly selected prefix.
+// Tests scan_prefix() with 100 distinct prefixes (~500 keys each).
 //
-// Masstree uses native `scan_prefix()` which navigates directly to the prefix
-// subtrie. Other structures use range bounds (start_key..end_key) which is
-// efficient but requires computing the lexicographic successor of the prefix.
-//
-// METHODOLOGY NOTES:
-// - Counter measures SCANS/SEC, not records/sec. Each scan visits ~N/PREFIX_BUCKETS
-//   keys (~500 keys with current settings). To convert to records/sec, multiply
-//   by ~500.
-// - Range bounds are PRECOMPUTED to avoid in-loop allocation overhead for
-//   non-Masstree structures.
+// Counter measures SCANS/SEC not records/sec. Each scan visits ~500 keys.
+// To convert to records/sec, multiply by ~500.
 
 #[divan::bench_group(name = "05_prefix_queries", sample_count = 200)]
 mod prefix_queries {
@@ -656,23 +614,20 @@ mod prefix_queries {
         ));
 
         bencher
-            // Counter excludes warmup scans
             .counter(divan::counter::ItemsCount::new(threads * SCANS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15_prefix(keys.as_ref())))
             .bench_local_values(|tree| {
-                let warmup_done = Arc::new(Barrier::new(threads));
-                let measurement_start = Arc::new(Barrier::new(threads));
+                let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let prefixes = Arc::clone(&prefixes);
-                        let warmup_done = Arc::clone(&warmup_done);
-                        let measurement_start = Arc::clone(&measurement_start);
+                        let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * SCANS_PER_THREAD;
 
-                            // Warmup phase
+                            // Warmup: same scan pattern as measurement
                             for i in 0..WARMUP_SCANS {
                                 let prefix = &prefixes[base + i];
                                 let mut count = 0u64;
@@ -687,8 +642,7 @@ mod prefix_queries {
                                 black_box(count);
                             }
 
-                            warmup_done.wait();
-                            measurement_start.wait();
+                            barrier.wait();
 
                             pre_measurement_barrier();
                             let mut total = 0u64;
@@ -697,7 +651,7 @@ mod prefix_queries {
                                 tree.scan_prefix(
                                     prefix,
                                     |_, v| {
-                                        total = total.wrapping_add(v);
+                                        total = black_box(total.wrapping_add(v));
                                         true
                                     },
                                     &guard,
@@ -721,16 +675,10 @@ mod prefix_queries {
 // 06: DEEP TRIE TRAVERSAL - Multi-layer Descent via Shared Prefix Chunks
 // =============================================================================
 //
-// Unlike 01_long_keys_128b which has unique first chunks, this benchmark uses
-// keys_shared_prefix_chunks to force collisions in the FIRST 4 trie layers.
-// With prefix_buckets=16, we get ~3125 keys per bucket sharing 4 initial chunks.
+// Uses keys_shared_prefix_chunks to force collisions in the FIRST 4 trie layers.
+// With prefix_buckets=16, ~3125 keys per bucket share 4 initial chunks (32 bytes).
 //
-// This actually tests Masstree's multi-layer trie traversal and demonstrates
-// the architectural advantage of prefix sharing across layers.
-//
-// METHODOLOGY NOTES:
-// - This is a mixed read/write workload (10% writes). For pure traversal cost
-//   without write-path differences, see benchmark 07 (deep_trie_read_only).
+// Mixed read/write workload (10% writes). For pure traversal cost, see 07.
 
 #[divan::bench_group(name = "06_deep_trie_traversal", sample_count = 200)]
 mod deep_trie {
@@ -740,8 +688,6 @@ mod deep_trie {
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 12_500;
     const WRITE_RATIO: usize = 10;
-    // 4 shared prefix chunks = 32 bytes of shared prefix
-    // 16 buckets = ~3125 keys per bucket, forcing deep trie descent
     const PREFIX_CHUNKS: usize = 4;
     const PREFIX_BUCKETS: u64 = 16;
 
@@ -774,29 +720,30 @@ mod deep_trie {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15_deep(keys.as_ref())))
             .bench_local_values(|tree| {
-                let warmup_done = Arc::new(Barrier::new(threads));
-                let measurement_start = Arc::new(Barrier::new(threads));
+                let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
                         let write_decisions = Arc::clone(&write_decisions);
-                        let warmup_done = Arc::clone(&warmup_done);
-                        let measurement_start = Arc::clone(&measurement_start);
+                        let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * OPS_PER_THREAD;
                             let is_write = &write_decisions[t];
 
-                            // Warmup phase
+                            // Warmup: mirror measurement op mix
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + i];
-                                black_box(tree.get_with_guard(&keys[idx], &guard));
+                                if is_write[i] {
+                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                                } else {
+                                    black_box(tree.get_with_guard(&keys[idx], &guard));
+                                }
                             }
 
-                            warmup_done.wait();
-                            measurement_start.wait();
+                            barrier.wait();
 
                             pre_measurement_barrier();
                             let mut sum = 0u64;
@@ -805,7 +752,7 @@ mod deep_trie {
                                 if is_write[i] {
                                     let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = black_box(sum.wrapping_add(v));
                                 }
                             }
                             post_measurement_barrier();
@@ -826,11 +773,8 @@ mod deep_trie {
 // 07: DEEP TRIE READ-ONLY - Isolate Traversal Cost from Write Overhead
 // =============================================================================
 //
-// Pure read workload variant of benchmark 06. This isolates the multi-layer
-// trie traversal cost from write-path differences (allocator behavior, etc.).
-//
-// Use this to measure the pure lookup/comparison cost when keys share common
-// prefixes and force deep trie descent.
+// Pure read workload variant of benchmark 06. Isolates multi-layer trie
+// traversal cost from write-path overhead (allocator behavior, etc.).
 
 #[divan::bench_group(name = "07_deep_trie_read_only", sample_count = 200)]
 mod deep_trie_read_only {
@@ -839,7 +783,6 @@ mod deep_trie_read_only {
 
     const N: usize = 50_000;
     const OPS_PER_THREAD: usize = 25_000; // More ops since read-only is faster
-                                          // Same prefix configuration as benchmark 06
     const PREFIX_CHUNKS: usize = 4;
     const PREFIX_BUCKETS: u64 = 16;
 
@@ -867,34 +810,31 @@ mod deep_trie_read_only {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15_deep(keys.as_ref())))
             .bench_local_values(|tree| {
-                let warmup_done = Arc::new(Barrier::new(threads));
-                let measurement_start = Arc::new(Barrier::new(threads));
+                let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
-                        let warmup_done = Arc::clone(&warmup_done);
-                        let measurement_start = Arc::clone(&measurement_start);
+                        let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * OPS_PER_THREAD;
 
-                            // Warmup phase
+                            // Warmup: pure reads (matches measurement)
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + i];
                                 black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
 
-                            warmup_done.wait();
-                            measurement_start.wait();
+                            barrier.wait();
 
                             pre_measurement_barrier();
                             let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = black_box(sum.wrapping_add(v));
                                 }
                             }
                             post_measurement_barrier();
@@ -912,15 +852,11 @@ mod deep_trie_read_only {
 }
 
 // =============================================================================
-// 08: VARIABLE LENGTH KEYS WITH ARC - Structure-Only Comparison
+// 08: VARIABLE LENGTH KEYS WITH ARC - Cheap Key References
 // =============================================================================
 //
-// This benchmark uses Arc<[u8]> keys instead of Vec<u8> to minimize per-write
-// allocation overhead. All structures clone the same cheap Arc reference on
-// writes, making this a fairer structure-only comparison.
-//
-// Compare results with benchmark 04 to see how much of the difference was due
-// to API ownership costs (Vec<u8> clone) vs actual structure ordering behavior.
+// Uses Arc<[u8]> keys (64-256 bytes) for cheap reference cloning.
+// Compare with benchmark 04 to isolate key ownership costs from structure perf.
 
 #[divan::bench_group(name = "08_variable_keys_arc", sample_count = 200)]
 mod variable_keys_arc {
@@ -938,13 +874,11 @@ mod variable_keys_arc {
         let mut state = seed;
 
         for i in 0..n {
-            // Determine key length
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1);
             let len = min + ((state >> 32) as usize) % (max - min + 1);
 
-            // Fill key with deterministic bytes
             let mut key = vec![0u8; len];
             let base = (i as u64).to_be_bytes();
             key[0..8].copy_from_slice(&base);
@@ -984,36 +918,40 @@ mod variable_keys_arc {
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| Arc::new(setup_masstree15_arc(keys.as_ref())))
             .bench_local_values(|tree| {
-                let warmup_done = Arc::new(Barrier::new(threads));
-                let measurement_start = Arc::new(Barrier::new(threads));
+                let barrier = Arc::new(Barrier::new(threads));
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let tree = Arc::clone(&tree);
                         let keys = Arc::clone(&keys);
                         let indices = Arc::clone(&indices);
                         let write_decisions = Arc::clone(&write_decisions);
-                        let warmup_done = Arc::clone(&warmup_done);
-                        let measurement_start = Arc::clone(&measurement_start);
+                        let barrier = Arc::clone(&barrier);
                         thread::spawn(move || {
                             let guard = tree.guard();
                             let base = t * OPS_PER_THREAD;
                             let is_write = &write_decisions[t];
 
-                            // Warmup phase
+                            // Warmup: mirror measurement op mix
                             for i in 0..WARMUP_OPS {
                                 let idx = indices[base + i];
-                                black_box(tree.get_with_guard(keys[idx].as_ref(), &guard));
+                                if is_write[i] {
+                                    let _ = tree.insert_with_guard(
+                                        keys[idx].as_ref(),
+                                        i as u64,
+                                        &guard,
+                                    );
+                                } else {
+                                    black_box(tree.get_with_guard(keys[idx].as_ref(), &guard));
+                                }
                             }
 
-                            warmup_done.wait();
-                            measurement_start.wait();
+                            barrier.wait();
 
                             pre_measurement_barrier();
                             let mut sum = 0u64;
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    // Masstree still takes &[u8], no clone needed
                                     let _ = tree.insert_with_guard(
                                         keys[idx].as_ref(),
                                         i as u64,
@@ -1022,7 +960,7 @@ mod variable_keys_arc {
                                 } else if let Some(v) =
                                     tree.get_with_guard(keys[idx].as_ref(), &guard)
                                 {
-                                    sum = sum.wrapping_add(v);
+                                    sum = black_box(sum.wrapping_add(v));
                                 }
                             }
                             post_measurement_barrier();

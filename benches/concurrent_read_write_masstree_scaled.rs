@@ -153,7 +153,7 @@ mod mixed_zipfian {
     #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
     fn masstree15(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<KEY_SIZE>(N));
-        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 42));
+        let indices = Arc::new(zipfian_indices(N, OPS_PER_THREAD * threads, 1.0, 42));
 
         bencher
             .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
