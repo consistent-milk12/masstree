@@ -39,7 +39,7 @@ use bench_utils::{
     keys, keys_shared_prefix_chunks, post_measurement_barrier, pre_measurement_barrier,
     skewed_indices,
 };
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use masstree::MassTree15Inline;
 use std::sync::Arc;
 use std::sync::Barrier;

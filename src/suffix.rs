@@ -150,6 +150,20 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
         }
     }
 
+    /// Construct [`SuffixBag`] by reusing an existing [`Vec<u8>`] buffer.
+    #[must_use]
+    #[inline(always)]
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        let () = Self::ASSERT_WIDTH_FITS_U8;
+        debug_assert!(data.is_empty(), "from_vec expects empty Vec");
+
+        Self {
+            slots: [SlotMeta::EMPTY; WIDTH],
+            data,
+            suffix_count: 0,
+        }
+    }
+
     // ========================================================================
     //  Capacity & Size
     // ========================================================================

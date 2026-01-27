@@ -622,6 +622,7 @@ where
                 // Trade-off: Write-heavy workloads may see slight regression (~15%)
                 // due to more retries, but read-heavy workloads (the common case)
                 // get significant speedups.
+                //
                 v[sense] = match version.try_stable() {
                     Some(v) => v,
                     None => continue 'retry, // Node is locked, restart from root
@@ -1143,6 +1144,9 @@ where
     ///
     /// Handles both inline keys (0-8 bytes) and suffix keys (>8 bytes).
     /// For suffix keys, stores `keylenx = KSUF_KEYLENX` and allocates suffix storage.
+    ///
+    /// Returns a raw pointer to a suffix bag that must be retired after
+    /// releasing the lock, or null if no retirement is needed.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "API Consistency")]
     #[expect(clippy::too_many_arguments, reason = "Internals")]
@@ -1154,7 +1158,8 @@ where
         key: &Key<'_>,
         value: &S::Output,
         guard: &LocalGuard<'_>,
-    ) {
+        pre_allocated: Option<Vec<u8>>,
+    ) -> *mut u8 {
         // DEBUG: Verify membership invariant at commit point.
         // If prev exists (non-leftmost leaf), key must be >= ikey_bound.
         debug_assert!(
@@ -1180,14 +1185,18 @@ where
         if key.has_suffix() {
             // Key has suffix bytes beyond the 8-byte ikey
             leaf.set_keylenx_relaxed(slot, KSUF_KEYLENX);
-            // SAFETY: We hold the lock, guard is from this tree's collector
-            // Pass initializing=false: this is a normal insert, not split initialization
-            unsafe { leaf.assign_ksuf(slot, key.suffix(), guard) };
+            // SAFETY: We hold the lock, guard is from this tree's collector.
+            // Use prealloc path if buffer available, otherwise normal path.
+            pre_allocated.map_or_else(
+                || unsafe { leaf.assign_ksuf(slot, key.suffix(), guard) },
+                |buffer| unsafe { leaf.assign_ksuf_prealloc(slot, key.suffix(), guard, buffer) },
+            )
         } else {
             // Inline key (0-8 bytes total, no suffix)
             #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
             let keylenx: u8 = key.current_len() as u8;
             leaf.set_keylenx_relaxed(slot, keylenx);
+            StdPtr::null_mut()
         }
     }
 

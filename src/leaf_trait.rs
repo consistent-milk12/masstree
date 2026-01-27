@@ -481,6 +481,13 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// - WIDTH=24: threshold=19 (79%)
     const SPLIT_THRESHOLD: usize;
 
+    /// Inline suffix bag capacity in bytes.
+    ///
+    /// Used by the pre-allocation heuristic to predict inline overflow
+    /// before acquiring the leaf lock. Override for leaf types with
+    /// non-default inline capacity.
+    const INLINE_KSUF_CAPACITY: usize = 256;
+
     // ========================================================================
     //  Construction
     // ========================================================================
@@ -947,11 +954,34 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// Uses the permutation to determine which slots are active.
     /// This is the hot path for normal inserts/updates.
     ///
+    /// # Returns
+    ///
+    /// A raw pointer to the old external suffix bag that must be retired
+    /// via [`retire_suffix_bag_ptr`](Self::retire_suffix_bag_ptr) **after
+    /// releasing the leaf lock**. Returns null if no retirement is needed
+    /// (fast-path inline/in-place assignment, or no previous external bag).
+    ///
     /// # Safety
     ///
     /// - Caller must hold the leaf lock
     /// - Slot must be valid
-    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &seize::LocalGuard<'_>);
+    unsafe fn assign_ksuf(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &seize::LocalGuard<'_>,
+    ) -> *mut u8;
+
+    /// Retire a suffix bag pointer that was returned by [`assign_ksuf`](Self::assign_ksuf).
+    ///
+    /// This must be called **after releasing the leaf lock** to avoid holding
+    /// locks during EBR retirement (which may issue `sys_membarrier` syscalls).
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must be non-null and must have come from `assign_ksuf`
+    /// - `guard` must be from this tree's collector
+    unsafe fn retire_suffix_bag_ptr(&self, ptr: *mut u8, guard: &seize::LocalGuard<'_>);
 
     /// Assign a suffix to a slot during node initialization (e.g., splits).
     ///
@@ -1287,6 +1317,21 @@ where
         value: Option<S::Output>,
         guard: &LocalGuard<'_>,
     );
+
+    /// Assign a suffix using a pre-alloced buffer.
+    ///
+    /// # Safety
+    ///
+    /// Check `assign_ksuf`.
+    unsafe fn assign_ksuf_prealloc(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &LocalGuard<'_>,
+        _prealloc: Vec<u8>,
+    ) -> *mut u8 {
+        unsafe { self.assign_ksuf(slot, suffix, guard) }
+    }
 }
 
 // ============================================================================

@@ -15,9 +15,9 @@ use super::{
 };
 
 use crate::hints::unlikely;
+use crate::leaf_trait::TreePermutation;
 use crate::leaf24::KSUF_KEYLENX;
 use crate::leaf24::LAYER_KEYLENX;
-use crate::leaf_trait::TreePermutation;
 use crate::link::Linker;
 use crate::prefetch::prefetch_read;
 use crate::ref_value_slot::RefValueSlot;

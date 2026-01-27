@@ -751,9 +751,14 @@ impl<S: ValueSlot> LeafNode15<S> {
     ///
     /// Panics if sidecar allocation fails (rare, only on OOM).
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    pub unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    pub unsafe fn assign_ksuf(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        _guard: &LocalGuard<'_>,
+    ) -> *mut u8 {
         if suffix.is_empty() {
-            return;
+            return StdPtr::null_mut();
         }
 
         debug_assert!(
@@ -772,15 +777,17 @@ impl<S: ValueSlot> LeafNode15<S> {
         if sidecar.inline.try_assign(slot, suffix) {
             // CRITICAL: Publish suffix presence AFTER bytes are written
             self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-            return;
+            return StdPtr::null_mut();
         }
 
         // Overflow to external
         // SAFETY: Caller holds lock
-        unsafe { self.assign_ksuf_slow(slot, suffix, guard) };
+        unsafe { self.assign_ksuf_slow(slot, suffix) }
     }
 
     /// Slow path for suffix assignment: drain inline to external bag.
+    ///
+    /// Returns the old external bag pointer for deferred retirement, or null.
     ///
     /// # Safety
     ///
@@ -789,7 +796,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8]) -> *mut u8 {
         debug_assert!(
             self.version.is_locked() || self.version.is_unpublished(),
             "assign_ksuf_slow: caller must hold lock or node must be unpublished"
@@ -831,19 +838,28 @@ impl<S: ValueSlot> LeafNode15<S> {
         let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
         sidecar.external.store(new_ptr, WRITE_ORD);
 
-        // Retire old external bag
-        if !old_ext.is_null() {
-            // SAFETY: old_ext is non-null and came from Box::into_raw
-            unsafe {
-                guard.defer_retire(old_ext, |ptr, _| {
-                    drop(Box::from_raw(ptr));
-                });
-            }
-        }
-
         // CRITICAL: Publish suffix presence LAST (Release ordering)
         // This is the linearization point for suffix visibility.
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+
+        // Return old pointer for deferred retirement OUTSIDE the lock.
+        old_ext.cast()
+    }
+
+    /// Retire a suffix bag pointer returned by [`assign_ksuf`](Self::assign_ksuf).
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have come from `assign_ksuf` on this leaf type
+    /// - `guard` must be from this tree's collector
+    pub unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
+        let typed: *mut SuffixBag<WIDTH_15> = ptr.cast();
+        // SAFETY: ptr came from Box::into_raw of a SuffixBag<WIDTH_15>
+        unsafe {
+            guard.defer_retire(typed, |ptr, _| {
+                drop(Box::from_raw(ptr));
+            });
+        }
     }
 
     /// Assign a suffix during node initialization (e.g., splits).
@@ -3001,9 +3017,14 @@ impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode15<S> {
     }
 
     #[inline(always)]
-    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) -> *mut u8 {
         // SAFETY: Caller guarantees preconditions
         unsafe { Self::assign_ksuf(self, slot, suffix, guard) }
+    }
+
+    unsafe fn retire_suffix_bag_ptr(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // SAFETY: ptr came from assign_ksuf on this leaf type
+        unsafe { Self::retire_suffix_bag_ptr(ptr, guard) };
     }
 
     #[inline(always)]

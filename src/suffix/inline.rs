@@ -3,7 +3,7 @@ use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering as AtomicOrdering};
 
 use super::{AllocResult, SuffixBag, TreePermutation};
 
@@ -324,6 +324,65 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         // may optionally clear inline state.
 
         Ok(external)
+    }
+
+    /// Drain inline suffixes to external bag, reusing a pre-allocated buffer.
+    ///
+    /// # Panics
+    ///
+    /// On OOM, while trying to allocate for [`SuffixBag`].
+    pub fn drain_to_external_with_vec(
+        &self,
+        perm: &impl TreePermutation,
+        new_slot: usize,
+        new_suffix: &[u8],
+        buffer: Vec<u8>,
+    ) -> SuffixBag<WIDTH> {
+        // Pass 1: Calculate required capacity and collect slot data.
+        let mut required_capacity: usize = new_suffix.len();
+        let perm_size: usize = perm.size();
+        let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
+        let mut copy_count: usize = 0;
+
+        // SAFETY: We hold the lock, so data buffer is stable
+        let data: &[u8; CAPACITY] = unsafe { &*self.data.get() };
+
+        #[expect(clippy::indexing_slicing)]
+        for i in 0..perm_size {
+            let slot: usize = perm.get(i);
+
+            if (slot != new_slot) && (slot < WIDTH) {
+                let meta: InlineSlotMeta = self.load_meta(slot);
+
+                if meta.has_suffix() {
+                    let start: usize = meta.offset as usize;
+                    let len: usize = meta.len as usize;
+                    required_capacity += len;
+
+                    if copy_count < WIDTH {
+                        slots_to_copy[copy_count] = (slot, start, len);
+                        copy_count += 1;
+                    }
+                }
+            }
+        }
+
+        let mut external: SuffixBag<WIDTH> = SuffixBag::from_vec(buffer);
+
+        #[expect(clippy::expect_used)]
+        if external.capacity() < required_capacity {
+            external
+                .try_reserve(required_capacity - external.capacity())
+                .expect("OOM: suffix bag reserve failed");
+        }
+
+        for &(slot, start, len) in &slots_to_copy[..copy_count] {
+            let suffix: &[u8] = &data[start..(start + len)];
+            external.assign(slot, suffix);
+        }
+
+        external.assign(new_slot, new_suffix);
+        external
     }
 
     /// Drain inline suffixes to external bag during node initialization.

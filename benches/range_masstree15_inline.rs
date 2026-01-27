@@ -76,7 +76,7 @@ use bench_utils::{
     keys_interleaved_ranges, keys_reverse, keys_sequential, keys_shared_prefix, keys_sparse,
     keys_suffix_only_differ, post_measurement_barrier, pre_measurement_barrier,
 };
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use masstree::{MassTree15Inline, RangeBound};
 use scc::TreeIndex;
 use std::sync::Arc;

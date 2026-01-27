@@ -71,7 +71,7 @@ use bench_utils::{
     keys_suffix_only_differ, post_measurement_barrier, pre_measurement_barrier,
 };
 use crossbeam_skiplist::SkipMap;
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use masstree::{MassTree15, RangeBound};
 use scc::TreeIndex;
 use std::sync::Arc;
@@ -177,7 +177,7 @@ fn thread_uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
 
 /// Generate divergent seed for thread t to avoid correlation.
 /// Uses multiplicative hashing to spread seeds across the space.
-fn thread_seed(base_seed: u64, thread_id: usize) -> u64 {
+const fn thread_seed(base_seed: u64, thread_id: usize) -> u64 {
     let combined = base_seed.wrapping_add(thread_id as u64);
     // Mix with golden ratio hash
     combined.wrapping_mul(0x9e3779b97f4a7c15)

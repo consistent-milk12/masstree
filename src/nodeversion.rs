@@ -480,7 +480,10 @@ impl NodeVersion {
     #[must_use]
     pub fn stable(&self) -> u32 {
         // Number of backoff iterations before yielding the CPU.
-        // Tuned for ~1-2µs spin time before yield on modern CPUs.
+        // Tuned for sub-microsecond lock hold times on modern CPUs.
+        // Higher values (8 vs 2) reduce yield_now() context switch overhead
+        // under SMT contention where lock holders finish quickly but OS
+        // yields cost 1-5µs — far exceeding the ~100ns critical sections.
         const SPINS_BEFORE_YIELD: u32 = 2;
 
         let mut backoff = Backoff::new();
@@ -1058,7 +1061,7 @@ impl NodeVersion {
     #[must_use]
     #[inline(always)]
     pub fn new_for_split(source: &Self) -> Self {
-        let source_value = source.value.load(Ordering::Relaxed);
+        let source_value: u32 = source.value.load(Ordering::Relaxed);
         debug_assert!(
             (source_value & LOCK_BIT) != 0,
             "new_for_split: source must be locked"
@@ -1074,7 +1077,7 @@ impl NodeVersion {
         // 1. This is a split operation
         // 2. unlock_for_split should increment vsplit, not vinsert
         // 3. SPLIT_UNLOCK_MASK clears ROOT_BIT which is correct for split children
-        let new_value = (source_value & ISLEAF_BIT) | LOCK_BIT | SPLITTING_BIT;
+        let new_value: u32 = (source_value & ISLEAF_BIT) | LOCK_BIT | SPLITTING_BIT;
 
         Self {
             value: AtomicU32::new(new_value),

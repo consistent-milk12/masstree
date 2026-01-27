@@ -64,7 +64,7 @@ mod bench_utils;
 use bench_utils::{
     keys, post_measurement_barrier, pre_measurement_barrier, uniform_indices, zipfian_indices,
 };
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use masstree::MassTree15Inline;
 use std::sync::Arc;
 use std::sync::Barrier;

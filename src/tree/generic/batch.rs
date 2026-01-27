@@ -205,8 +205,9 @@ impl<O> BatchInsertResult<O> {
 
 /// Result of trying to insert a single entry in a batch.
 enum BatchEntryResult<O> {
-    /// Entry was inserted as a new key.
-    Inserted,
+    /// Entry was inserted as a new key. Contains a pointer to a suffix bag
+    /// that must be retired after the lock is dropped (null if none).
+    Inserted(*mut u8),
 
     /// Entry updated an existing key, returning the old value.
     Updated(O),
@@ -489,16 +490,25 @@ where
                 }
 
                 // Now we hold the lock - process as many entries as fit in this leaf
+                let mut deferred_retires: Vec<*mut u8> = Vec::new();
                 let processed = self.insert_batch_into_locked_leaf(
                     leaf,
                     &mut lock,
                     batch,
                     index,
                     &mut result,
+                    &mut deferred_retires,
                     guard,
                 );
 
                 drop(lock);
+
+                // Retire old suffix bags OUTSIDE the lock
+                for ptr in deferred_retires {
+                    unsafe {
+                        leaf.retire_suffix_bag_ptr(ptr, guard);
+                    }
+                }
 
                 // If we processed nothing and the leaf is full, we need to fall back
                 // to regular insert to trigger a split
@@ -539,6 +549,8 @@ where
     /// Insert as many entries as possible into a locked leaf.
     ///
     /// Returns the number of entries processed (inserted, updated, or marked failed).
+    /// Deferred suffix bag pointers are collected in `deferred_retires` and must be
+    /// retired via `retire_suffix_bag_ptr` after the lock is dropped.
     #[expect(
         clippy::too_many_arguments,
         reason = "Batch insertion requires context"
@@ -554,6 +566,7 @@ where
         batch: &[BatchEntry<S>],
         start_index: usize,
         result: &mut BatchInsertResult<S::Output>,
+        deferred_retires: &mut Vec<*mut u8>,
         guard: &LocalGuard<'_>,
     ) -> usize {
         let mut processed = 0;
@@ -574,7 +587,11 @@ where
             let entry = &batch[start_index];
             let key = Key::new(&entry.key);
             if self.can_reuse_empty_leaf_batch(leaf, &key) {
-                self.insert_into_empty_leaf_batch(leaf, lock, &key, &entry.output, guard);
+                let deferred =
+                    self.insert_into_empty_leaf_batch(leaf, lock, &key, &entry.output, guard);
+                if !deferred.is_null() {
+                    deferred_retires.push(deferred);
+                }
                 result.record_insert();
                 processed = 1;
                 perm = leaf.permutation();
@@ -617,7 +634,10 @@ where
             };
 
             match insert_result {
-                BatchEntryResult::Inserted => {
+                BatchEntryResult::Inserted(deferred) => {
+                    if !deferred.is_null() {
+                        deferred_retires.push(deferred);
+                    }
                     result.record_insert();
                     processed += 1;
                 }
@@ -684,7 +704,7 @@ where
 
                 match self.find_usable_slot_batch(leaf, perm, ikey) {
                     FindSlotResult::Found { slot, back_offset } => {
-                        self.insert_into_slot_batch(
+                        let deferred_retire = self.insert_into_slot_batch(
                             leaf,
                             lock,
                             slot,
@@ -699,7 +719,7 @@ where
 
                         // Update perm for next iteration
                         *perm = leaf.permutation();
-                        BatchEntryResult::Inserted
+                        BatchEntryResult::Inserted(deferred_retire)
                     }
 
                     FindSlotResult::NeedsSplit => BatchEntryResult::NeedsSplit,
@@ -745,7 +765,7 @@ where
 
                 match self.find_usable_slot_batch(leaf, perm, ikey) {
                     FindSlotResult::Found { slot, back_offset } => {
-                        self.insert_into_slot_batch(
+                        let deferred_retire = self.insert_into_slot_batch(
                             leaf,
                             lock,
                             slot,
@@ -760,7 +780,7 @@ where
 
                         // Update perm for next iteration
                         *perm = leaf.permutation();
-                        BatchEntryResult::Inserted
+                        BatchEntryResult::Inserted(deferred_retire)
                     }
 
                     FindSlotResult::NeedsSplit => BatchEntryResult::NeedsSplit,
@@ -887,7 +907,8 @@ where
         leaf.ikey_bound() == key.ikey()
     }
 
-    /// Insert into an empty leaf.
+    /// Insert into an empty leaf. Returns a pointer to a suffix bag that must be
+    /// retired after the lock is dropped (null if none).
     fn insert_into_empty_leaf_batch(
         &self,
         leaf: &L,
@@ -895,13 +916,14 @@ where
         key: &Key<'_>,
         value: &S::Output,
         guard: &LocalGuard<'_>,
-    ) {
+    ) -> *mut u8 {
         leaf.clear_empty_state();
         let slot = 0;
-        self.assign_slot_generic(leaf, lock, slot, key, value, guard);
+        let deferred_retire = self.assign_slot_generic(leaf, lock, slot, key, value, guard, None);
         let new_perm = L::Perm::make_sorted(1);
         leaf.set_permutation(new_perm);
         self.count.increment();
+        deferred_retire
     }
 
     /// Update a value in an existing slot, returning the old value.
@@ -939,7 +961,8 @@ where
         old_output
     }
 
-    /// Insert a new value into a slot.
+    /// Insert a new value into a slot. Returns a pointer to a suffix bag that must be
+    /// retired after the lock is dropped (null if none).
     #[expect(clippy::too_many_arguments)]
     fn insert_into_slot_batch(
         &self,
@@ -952,9 +975,9 @@ where
         key: &Key<'_>,
         value: &S::Output,
         guard: &LocalGuard<'_>,
-    ) {
+    ) -> *mut u8 {
         // Assign the slot
-        self.assign_slot_generic(leaf, lock, slot, key, value, guard);
+        let deferred_retire = self.assign_slot_generic(leaf, lock, slot, key, value, guard, None);
 
         // Update permutation
         let mut new_perm = perm;
@@ -969,5 +992,6 @@ where
         debug_assert_eq!(allocated, slot, "allocated unexpected slot");
 
         leaf.set_permutation(new_perm);
+        deferred_retire
     }
 }

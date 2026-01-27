@@ -45,8 +45,12 @@ use crate::value::traits::LeafValueUpdate;
 /// Width constant for [`LeafNode15TrueInline`].
 pub const WIDTH_15: usize = 15;
 
-/// Default capacity for inline suffix storage (bytes).
-const INLINE_KSUF_CAPACITY: usize = 256;
+/// Inline suffix bag capacity in bytes.
+///
+/// 512 bytes holds 9 suffixes of 56 bytes (64-byte keys), reducing the
+/// heap-allocation slow path from 73% to 40% of inserts into a full leaf.
+/// Trade-off: each leaf grows from 896 to 1152 bytes (+29%).
+const INLINE_KSUF_CAPACITY: usize = 512;
 
 /// Special keylenx value indicating key has a suffix.
 pub const KSUF_KEYLENX: u8 = 64;
@@ -133,6 +137,16 @@ pub struct LeafNode15TrueInline<V: InlineBits> {
 
     _marker: PhantomData<V>,
 }
+
+// Verify exact leaf size on 64-bit targets to catch accidental layout drift.
+// Expected: 1152 bytes after inline capacity increase to 512 (was 896 at 256).
+const _: () = {
+    #[cfg(target_pointer_width = "64")]
+    assert!(
+        std::mem::size_of::<LeafNode15TrueInline<u64>>() == 1152,
+        "Unexpected leaf size: expected 1152 bytes (inline capacity 512)"
+    );
+};
 
 impl<V: InlineBits> StdFmt::Debug for LeafNode15TrueInline<V> {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
@@ -1200,7 +1214,12 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     /// - Caller must hold lock
     /// - `guard` must come from this tree's collector
     #[expect(clippy::indexing_slicing)]
-    pub unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    pub unsafe fn assign_ksuf(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        _guard: &LocalGuard<'_>,
+    ) -> *mut u8 {
         debug_assert!(slot < WIDTH_15, "assign_ksuf: slot out of bounds");
         debug_assert!(
             self.version.is_locked() || self.version.is_unpublished(),
@@ -1213,7 +1232,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
 
         if inline.try_assign(slot, suffix) {
             self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-            return;
+            return StdPtr::null_mut();
         }
 
         let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
@@ -1223,19 +1242,22 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             if bag.try_assign_in_place(slot, suffix) {
                 inline.clear(slot);
                 self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-                return;
+                return StdPtr::null_mut();
             }
         }
 
         // SAFETY: Same preconditions
-        unsafe { self.assign_ksuf_slow(slot, suffix, guard) };
+        unsafe { self.assign_ksuf_slow(slot, suffix) }
     }
 
     /// Slow path for suffix assignment.
+    ///
+    /// Returns the old external bag pointer that needs deferred retirement,
+    /// or null if there was no previous external bag.
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing)]
-    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8]) -> *mut u8 {
         let perm = self.permutation();
         // SAFETY: Caller holds lock
         let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
@@ -1265,16 +1287,127 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
         self.external_ksuf.store(new_ptr, WRITE_ORD);
 
+        self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+
+        // Return old pointer for deferred retirement OUTSIDE the lock.
+        // Caller must call retire_suffix_bag_ptr after releasing the lock.
+        old_ext.cast()
+    }
+
+    /// Assign a suffix using a pre-allocated buffer.
+    ///
+    /// Same as `assign_ksuf` but uses the pre-allocated `Vec<u8>` for the
+    /// slow-path rebuild, avoiding heap allocation inside the critical section.
+    ///
+    /// # Safety
+    ///
+    /// Same preconditions as `assign_ksuf`.
+    #[expect(clippy::indexing_slicing)]
+    pub unsafe fn assign_ksuf_prealloc(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        _guard: &LocalGuard<'_>,
+        prealloc: Vec<u8>,
+    ) -> *mut u8 {
+        debug_assert!(slot < WIDTH_15, "assign_ksuf_prealloc: slot out of bounds");
+        debug_assert!(
+            self.version.is_locked() || self.version.is_unpublished(),
+            "assign_ksuf_prealloc: caller must hold lock"
+        );
+
+        // SAFETY: We hold the lock
+        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
+
+        // Fast path 1: inline storage has room — prealloc is wasted (dropped)
+        if inline.try_assign(slot, suffix) {
+            self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+            return StdPtr::null_mut();
+        }
+
+        // Fast path 2: external bag has room in-place — prealloc is wasted
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
-            // SAFETY: old_ext is non-null
-            unsafe {
-                guard.defer_retire(old_ext, |ptr, _| {
-                    drop(Box::from_raw(ptr));
-                });
+            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
+            if bag.try_assign_in_place(slot, suffix) {
+                inline.clear(slot);
+                self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+                return StdPtr::null_mut();
             }
         }
 
+        // Slow path: rebuild with pre-allocated buffer
+        // SAFETY: Same preconditions as assign_ksuf_slow
+        unsafe { self.assign_ksuf_with_prealloc(slot, suffix, prealloc) }
+    }
+
+    /// Slow path for suffix assignment using a pre-allocated `Vec<u8>` buffer.
+    ///
+    /// The buffer was allocated outside the lock to reduce critical section
+    /// time. We construct the `SuffixBag` from this buffer, drain inline
+    /// suffixes, and copy from the old external bag — same as
+    /// `assign_ksuf_slow` but without the initial heap allocation.
+    ///
+    /// Because the buffer is sized for the full leaf (`WIDTH * suffix_len`),
+    /// the resulting external bag has slack for future inserts. This makes
+    /// rebuilds a one-time event per leaf fill: subsequent inserts succeed
+    /// via `try_assign_in_place` without triggering another rebuild.
+    ///
+    /// Returns the old external bag pointer for deferred retirement.
+    #[cold]
+    #[inline(never)]
+    #[expect(clippy::indexing_slicing)]
+    unsafe fn assign_ksuf_with_prealloc(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        buffer: Vec<u8>,
+    ) -> *mut u8 {
+        let perm = self.permutation();
+        // SAFETY: Caller holds lock
+        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+            unsafe { &*self.inline_ksuf.get() };
+
+        // Drain inline to external using pre-allocated buffer.
+        let mut new_bag: SuffixBag<WIDTH_15> =
+            inline.drain_to_external_with_vec(&perm, slot, suffix, buffer);
+
+        // Merge from old external bag (if any).
+        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+        if !old_ext.is_null() {
+            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
+            for i in 0..perm.size() {
+                let s: usize = perm.get(i);
+                if s != slot
+                    && let Some(ext_suffix) = old_bag.get(s)
+                {
+                    new_bag.assign(s, ext_suffix);
+                }
+            }
+        }
+
+        let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
+        self.external_ksuf.store(new_ptr, WRITE_ORD);
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+
+        old_ext.cast()
+    }
+
+    /// Retire a suffix bag pointer returned by [`assign_ksuf`](Self::assign_ksuf).
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have come from `assign_ksuf` on this leaf type
+    /// - `guard` must be from this tree's collector
+    pub unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
+        let typed: *mut SuffixBag<WIDTH_15> = ptr.cast();
+        // SAFETY: ptr came from Box::into_raw of a SuffixBag<WIDTH_15>
+        unsafe {
+            guard.defer_retire(typed, |ptr, _| {
+                drop(Box::from_raw(ptr));
+            });
+        }
     }
 
     /// Assign a suffix during node initialization (e.g., splits).
@@ -2634,9 +2767,14 @@ impl<V: InlineBits> TreeLeafNode<TrueInlineSlot<V>> for LeafNode15TrueInline<V> 
         Self::ksuf(self, slot)
     }
 
-    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) -> *mut u8 {
         // SAFETY: Same preconditions
-        unsafe { Self::assign_ksuf(self, slot, suffix, guard) };
+        unsafe { Self::assign_ksuf(self, slot, suffix, guard) }
+    }
+
+    unsafe fn retire_suffix_bag_ptr(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // SAFETY: ptr came from assign_ksuf on this leaf type
+        unsafe { Self::retire_suffix_bag_ptr(ptr, guard) };
     }
 
     unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
@@ -2775,6 +2913,17 @@ impl<V: InlineBits> LayerCapableLeaf<TrueInlineSlot<V>> for LeafNode15TrueInline
             let len = key.current_len().min(8) as u8;
             self.set_keylenx(slot, len);
         }
+    }
+
+    unsafe fn assign_ksuf_prealloc(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &LocalGuard<'_>,
+        prealloc: Vec<u8>,
+    ) -> *mut u8 {
+        // SAFETY: Same preconditions
+        unsafe { Self::assign_ksuf_prealloc(self, slot, suffix, guard, prealloc) }
     }
 }
 

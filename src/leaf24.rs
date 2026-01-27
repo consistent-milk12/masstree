@@ -51,6 +51,8 @@ mod value_traits;
 
 /// Default capacity for inline suffix storage (bytes).
 /// Matches C++ Masstree's typical iksuf size.
+// TODO: Consider increasing to 512 if leaf24 insert benchmarks
+// show the same suffix-allocation bottleneck as leaf15_true.
 const INLINE_KSUF_CAPACITY: usize = 256;
 
 /// Special keylenx value indicating key has a suffix.
@@ -704,7 +706,12 @@ impl<S: ValueSlot> LeafNode24<S> {
         clippy::indexing_slicing,
         reason = "Slot bounds checked via debug_assert"
     )]
-    pub unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    pub unsafe fn assign_ksuf(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        _guard: &LocalGuard<'_>,
+    ) -> *mut u8 {
         debug_assert!(
             slot < WIDTH_24,
             "assign_ksuf: slot {slot} >= WIDTH_24 {WIDTH_24}"
@@ -721,7 +728,7 @@ impl<S: ValueSlot> LeafNode24<S> {
 
         if inline.try_assign(slot, suffix) {
             self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-            return;
+            return StdPtr::null_mut();
         }
 
         // FAST PATH 2: Try external storage in-place (if exists and has room)
@@ -733,23 +740,25 @@ impl<S: ValueSlot> LeafNode24<S> {
                 // Clear from inline if it was there
                 inline.clear(slot);
                 self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-                return;
+                return StdPtr::null_mut();
             }
         }
 
         // SLOW PATH: Drain inline to external and allocate new external bag
         // SAFETY: Same preconditions as this function (caller holds lock, guard is valid).
-        unsafe { self.assign_ksuf_slow(slot, suffix, guard) };
+        unsafe { self.assign_ksuf_slow(slot, suffix) }
     }
 
     /// Slow path for suffix assignment: allocate/reallocate external bag.
+    ///
+    /// Returns the old external bag pointer for deferred retirement, or null.
     ///
     /// # Safety
     /// Same as `assign_ksuf`.
     #[cold]
     #[inline(never)]
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8]) -> *mut u8 {
         debug_assert!(
             self.version.is_locked() || self.version.is_unpublished(),
             "assign_ksuf_slow: caller must hold lock or node must be unpublished"
@@ -788,17 +797,26 @@ impl<S: ValueSlot> LeafNode24<S> {
         let new_ptr: *mut SuffixBag<WIDTH_24> = Box::into_raw(Box::new(new_bag));
         self.external_ksuf.store(new_ptr, WRITE_ORD);
 
-        // Retire old external bag
-        if !old_ext.is_null() {
-            // SAFETY: old_ext is non-null and came from Box::into_raw
-            unsafe {
-                guard.defer_retire(old_ext, |ptr, _| {
-                    drop(Box::from_raw(ptr));
-                });
-            }
-        }
-
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+
+        // Return old pointer for deferred retirement OUTSIDE the lock.
+        old_ext.cast()
+    }
+
+    /// Retire a suffix bag pointer returned by [`assign_ksuf`](Self::assign_ksuf).
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have come from `assign_ksuf` on this leaf type
+    /// - `guard` must be from this tree's collector
+    pub unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
+        let typed: *mut SuffixBag<WIDTH_24> = ptr.cast();
+        // SAFETY: ptr came from Box::into_raw of a SuffixBag<WIDTH_24>
+        unsafe {
+            guard.defer_retire(typed, |ptr, _| {
+                drop(Box::from_raw(ptr));
+            });
+        }
     }
 
     /// Assign a suffix during node initialization (e.g., splits).
@@ -2767,9 +2785,14 @@ impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode24<S> {
     }
 
     #[inline(always)]
-    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) -> *mut u8 {
         // SAFETY: Caller guarantees preconditions
         unsafe { Self::assign_ksuf(self, slot, suffix, guard) }
+    }
+
+    unsafe fn retire_suffix_bag_ptr(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // SAFETY: ptr came from assign_ksuf on this leaf type
+        unsafe { Self::retire_suffix_bag_ptr(ptr, guard) };
     }
 
     #[inline(always)]

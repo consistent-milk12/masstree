@@ -2,12 +2,12 @@ use seize::LocalGuard;
 use std::ptr as StdPtr;
 
 use crate::{
+    MassTreeGeneric, NodeAllocatorGeneric, NodeVersion, TreePermutation, ValueSlot,
     hints::unlikely,
     key::Key,
     leaf_trait::LayerCapableLeaf,
-    tree::generic::optimistic_reads::{search_leaf_multi_layer, LookupResult},
+    tree::generic::optimistic_reads::{LookupResult, search_leaf_multi_layer},
     value::traits::LeafValueLoad,
-    MassTreeGeneric, NodeAllocatorGeneric, TreePermutation, ValueSlot,
 };
 
 impl<S, L, A> MassTreeGeneric<S, L, A>
@@ -22,12 +22,6 @@ where
     ///
     /// This is the main read path for all storage modes, including true-inline.
     /// Uses optimistic concurrency control with version validation.
-    ///
-    /// # Optimizations
-    ///
-    /// - **Single-layer fast path**: Keys ≤8 bytes skip suffix/layer checks
-    /// - **Contention escape**: Uses `try_stable()` with B-link fallback
-    /// - **Deleted leaf recovery**: Handles concurrent coalesce operations
     ///
     /// # Arguments
     ///
@@ -92,10 +86,9 @@ where
             }
 
             // OPTIM: Use try_stable() to avoid spinning on locked leaf.
+            //
             // If locked, check B-link chain, key may have moved to sibling.
             let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
-                // Prefetch AFTER successful try_stable to avoid cache pollution
-                // under high contention (e.g., single hot key benchmark).
                 leaf.prefetch_for_search();
                 v
             } else {
@@ -111,10 +104,7 @@ where
                 leaf.version().stable()
             };
 
-            // EARLY too-right check: detect if we descended to a leaf that's
-            // to the right of where the key should be. This can happen during
-            // concurrent splits when internode routing is momentarily inconsistent.
-            // Check BEFORE searching to avoid wasting cycles on the wrong leaf.
+            // Early too-right check
             if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
                 // Reload root to get latest pointer after concurrent modifications
                 leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
@@ -123,7 +113,7 @@ where
             }
 
             'search_loop: loop {
-                let perm = leaf.permutation();
+                let perm: L::Perm = leaf.permutation();
                 let size: usize = perm.size();
                 let mut found_ptr: *mut u8 = StdPtr::null_mut();
 
@@ -155,7 +145,7 @@ where
 
                 // Version validation after all reads (common case: unchanged)
                 // Store version reference once to avoid repeated method calls
-                let ver = leaf.version();
+                let ver: &NodeVersion = leaf.version();
                 if unlikely(ver.has_changed(version)) {
                     if unlikely(ver.has_split_no_compiler_fence(version)) {
                         let (advanced, new_version) =
@@ -194,9 +184,8 @@ where
                     continue 'leaf_loop;
                 }
 
-                // Fallback too-right check: If key < ikey_bound and prev != null,
-                // we descended to a leaf that's to the right of where the key should be.
-                // Recovery requires restart from layer root (can't safely walk left).
+                // Fallback too-right check
+                //
                 // NOTE: This is defense-in-depth; the early check above catches most cases.
                 if unlikely(!leaf.prev().is_null() && target_ikey < leaf.ikey_bound()) {
                     leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
@@ -235,7 +224,8 @@ where
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             'leaf_loop: loop {
-                // OPTIMIZATION: Compute ikey once per leaf iteration.
+                // OPTIM: Compute ikey once per leaf iteration.
+                //
                 // key.shift() mutates on layer descent, so this must be per-iteration.
                 let target_ikey: u64 = key.ikey();
 
@@ -249,9 +239,8 @@ where
                     continue 'leaf_loop;
                 }
 
-                // OPTIMIZATION: Use try_stable() to avoid spinning
+                // OPTIM: Use try_stable() to avoid spinning
                 let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
-                    // Prefetch AFTER successful try_stable to avoid cache pollution
                     leaf.prefetch_for_search();
                     v
                 } else {
@@ -266,10 +255,7 @@ where
                     leaf.version().stable()
                 };
 
-                // EARLY too-right check: detect if we descended to a leaf that's
-                // to the right of where the key should be. This can happen during
-                // concurrent splits when internode routing is momentarily inconsistent.
-                // Check BEFORE searching to avoid wasting cycles on the wrong leaf.
+                // Early too-right check
                 if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
                     // Reload root to get latest pointer after concurrent modifications
                     leaf_ptr =
@@ -292,7 +278,7 @@ where
                     let result: LookupResult = search_leaf_multi_layer::<S, L>(leaf, key);
 
                     // Store version reference once for all validation checks below
-                    let ver = leaf.version();
+                    let ver: &NodeVersion = leaf.version();
 
                     match result {
                         LookupResult::ValueSlot(slot) => {
