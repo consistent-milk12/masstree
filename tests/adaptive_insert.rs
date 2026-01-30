@@ -5,7 +5,7 @@
 
 #![expect(clippy::expect_used, clippy::unwrap_used)]
 
-use masstree::{BatchInsertResult, MassTree24};
+use masstree::{BatchInsertResult, MassTree15};
 use std::sync::Arc;
 use std::thread;
 
@@ -30,7 +30,7 @@ const ENTRIES_PER_BATCH: usize = 100;
 
 #[test]
 fn test_shared_prefix_correctness() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let tree = Arc::new(tree);
 
     let handles: Vec<_> = (0..THREADS)
@@ -61,7 +61,7 @@ fn test_shared_prefix_correctness() {
         for i in 0..KEYS_PER_THREAD {
             let key = format!("PREFIX00T{tid}I{i:04}");
             let expected = (tid * KEYS_PER_THREAD + i) as u64;
-            // get() returns Option<Arc<u64>> for MassTree24
+            // get() returns Option<Arc<u64>> for MassTree15
             let value = tree.get(key.as_bytes()).expect("key should exist");
             assert_eq!(*value, expected);
         }
@@ -71,7 +71,7 @@ fn test_shared_prefix_correctness() {
 /// Test normal (non-contended) workloads still work correctly.
 #[test]
 fn test_random_keys_correctness() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let tree = Arc::new(tree);
     let handles: Vec<_> = (0..THREADS)
         .map(|tid| {
@@ -98,7 +98,7 @@ fn test_random_keys_correctness() {
 /// Test mixed workload: some shared-prefix, some random.
 #[test]
 fn test_mixed_prefix_random() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let tree = Arc::new(tree);
 
     let handles: Vec<_> = (0..THREADS)
@@ -133,7 +133,7 @@ fn test_mixed_prefix_random() {
 /// It only tests that updates succeed and return valid old values.
 #[test]
 fn test_shared_prefix_updates() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let tree = Arc::new(tree);
 
     // Pre-populate
@@ -177,7 +177,7 @@ fn test_shared_prefix_updates() {
 /// layer descent and be marked as failures in batch mode.
 #[test]
 fn test_batch_shared_prefix() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let tree = Arc::new(tree);
 
     let handles: Vec<_> = (0..THREADS)
@@ -225,7 +225,7 @@ fn test_batch_shared_prefix() {
 /// - The key invariant is "at least one operation succeeded"
 #[test]
 fn test_batch_long_keys_with_conflicts() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // All keys share first 8 bytes "longpref", will cause suffix conflicts
     let entries: Vec<_> = (0..ENTRIES)

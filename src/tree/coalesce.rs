@@ -469,7 +469,7 @@ impl Coalesce {
         L: LayerCapableLeaf<S>,
         A: NodeAllocatorGeneric<S, L>,
     {
-        use crate::leaf24::LAYER_KEYLENX;
+        use crate::leaf15::LAYER_KEYLENX;
 
         // SAFETY: leaf_ptr is valid and locked (we hold `lock`).
         let leaf: &L = unsafe { &*leaf_ptr };
@@ -486,11 +486,32 @@ impl Coalesce {
         // This prevents deadlock (always lock in parent -> child order)
         drop(lock);
 
-        // Step 3: Lock the parent leaf
+        // Step 3: Try to lock the parent leaf (bounded retries to avoid hangs)
         // SAFETY: ctx.parent_leaf was a valid leaf pointer obtained during traversal
         // and protected by the guard. We released sublayer lock before acquiring parent.
         let parent_leaf: &L = unsafe { &*(ctx.parent_leaf.cast::<L>()) };
-        let mut parent_lock = parent_leaf.version().lock();
+
+        // Use bounded retries instead of blocking lock() to prevent potential hangs.
+        // If parent is persistently locked (e.g., concurrent heavy operations), we
+        // leave the sublayer marked deleted_layer but don't retire it. This is a
+        // bounded memory leak but prevents hangs and ensures safety (no dangling ptr).
+        const MAX_LOCK_RETRIES: u32 = 1000;
+        let mut parent_lock = None;
+        for _ in 0..MAX_LOCK_RETRIES {
+            if let Some(lock) = parent_leaf.version().try_lock() {
+                parent_lock = Some(lock);
+                break;
+            }
+            std::hint::spin_loop();
+        }
+
+        let Some(mut parent_lock) = parent_lock else {
+            // Could not acquire parent lock after retries.
+            // Sublayer is marked deleted_layer so readers handle it correctly.
+            // We don't retire it to avoid dangling pointer in parent slot.
+            // This is a bounded memory leak but prevents hangs.
+            return true;
+        };
 
         // Step 4: Verify slot still points to sublayer (may have changed concurrently)
         let current_slot_ptr: *mut u8 = parent_leaf.leaf_value_ptr(ctx.parent_slot);

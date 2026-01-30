@@ -1,6 +1,6 @@
 use super::{NodeAllocatorGeneric, TreeLeafNode, ValueSlot};
-use crate::alloc24::SeizeAllocator24;
-use crate::leaf24::LeafNode24;
+use crate::alloc15::SeizeAllocator15;
+use crate::leaf15::LeafNode15;
 use crate::value::LeafValue;
 
 // ========================================================================
@@ -47,19 +47,19 @@ where
 }
 
 // ========================================================================
-// SeizeAllocator24 Tests
+// SeizeAllocator15 Tests
 // ========================================================================
 
 #[test]
-fn test_seize_allocator24_generic_alloc() {
-    let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
-    test_generic_alloc_leaf::<LeafValue<u64>, LeafNode24<LeafValue<u64>>, _>(&alloc);
+fn test_seize_allocator15_generic_alloc() {
+    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
+    test_generic_alloc_leaf::<LeafValue<u64>, LeafNode15<LeafValue<u64>>, _>(&alloc);
 }
 
 #[test]
-fn test_seize_allocator24_generic_track() {
-    let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
-    test_generic_track_leaf::<LeafValue<u64>, LeafNode24<LeafValue<u64>>, _>(&alloc);
+fn test_seize_allocator15_generic_track() {
+    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
+    test_generic_track_leaf::<LeafValue<u64>, LeafNode15<LeafValue<u64>>, _>(&alloc);
 }
 
 // ========================================================================
@@ -79,11 +79,11 @@ where
 
 #[test]
 fn test_generic_code_compiles() {
-    let mut alloc24: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+    let mut alloc15: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
 
     assert!(generic_tree_setup::<
         LeafValue<u64>,
-        LeafNode24<LeafValue<u64>>,
+        LeafNode15<LeafValue<u64>>,
         _,
-    >(&mut alloc24));
+    >(&mut alloc15));
 }

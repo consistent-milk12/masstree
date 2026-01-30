@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use seize::LocalGuard;
 
-use crate::{InsertError, MassTree, tree::generic::entry::Entry};
+use crate::{InsertError, MassTree15, tree::generic::entry::Entry};
 
 // ============================================================================
 //  Entry API Tests
@@ -13,7 +13,7 @@ use crate::{InsertError, MassTree, tree::generic::entry::Entry};
 
 #[test]
 fn test_entry_or_insert_vacant() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Key doesn't exist, should insert
@@ -27,7 +27,7 @@ fn test_entry_or_insert_vacant() {
 
 #[test]
 fn test_entry_or_insert_occupied() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Pre-insert a value
@@ -41,7 +41,7 @@ fn test_entry_or_insert_occupied() {
 
 #[test]
 fn test_entry_or_try_insert() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Fallible insert on vacant
@@ -65,7 +65,7 @@ enum Bool {
 
 #[test]
 fn test_entry_or_insert_with_lazy() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     let mut called: Bool = Bool::False;
@@ -80,7 +80,7 @@ fn test_entry_or_insert_with_lazy() {
 
 #[test]
 fn test_entry_or_insert_with_not_called_when_occupied() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     tree.insert_with_guard(b"key", 50, &guard).unwrap();
@@ -97,7 +97,7 @@ fn test_entry_or_insert_with_not_called_when_occupied() {
 
 #[test]
 fn test_entry_or_insert_with_key() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Insert based on key length
@@ -110,7 +110,7 @@ fn test_entry_or_insert_with_key() {
 
 #[test]
 fn test_entry_and_modify_occupied() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     tree.insert_with_guard(b"counter", 10, &guard).unwrap();
@@ -126,7 +126,7 @@ fn test_entry_and_modify_occupied() {
 
 #[test]
 fn test_entry_and_modify_vacant() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // and_modify should be skipped for vacant, or_insert should run
@@ -140,7 +140,7 @@ fn test_entry_and_modify_vacant() {
 
 #[test]
 fn test_entry_try_and_modify() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     tree.insert_with_guard(b"counter", 10, &guard).unwrap();
@@ -160,7 +160,7 @@ fn test_entry_try_and_modify() {
 
 #[test]
 fn test_entry_occupied_get() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     tree.insert_with_guard(b"key", 42, &guard).unwrap();
@@ -177,7 +177,7 @@ fn test_entry_occupied_get() {
 
 #[test]
 fn test_entry_occupied_insert_returns_old() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     tree.insert_with_guard(b"key", 10, &guard).unwrap();
@@ -197,7 +197,7 @@ fn test_entry_occupied_insert_returns_old() {
 
 #[test]
 fn test_entry_occupied_try_insert() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     tree.insert_with_guard(b"key", 10, &guard).unwrap();
@@ -215,7 +215,7 @@ fn test_entry_occupied_try_insert() {
 
 #[test]
 fn test_entry_occupied_remove_returns_actual_value() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     tree.insert_with_guard(b"key", 42, &guard).unwrap();
@@ -237,7 +237,7 @@ fn test_entry_occupied_remove_returns_actual_value() {
 
 #[test]
 fn test_entry_occupied_try_remove() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     tree.insert_with_guard(b"key", 42, &guard).unwrap();
@@ -255,7 +255,7 @@ fn test_entry_occupied_try_remove() {
 
 #[test]
 fn test_entry_occupied_remove_entry() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     tree.insert_with_guard(b"mykey", 123, &guard).unwrap();
@@ -276,7 +276,7 @@ fn test_entry_occupied_remove_entry() {
 
 #[test]
 fn test_entry_vacant_key() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     match tree.entry_with_guard(b"newkey", &guard) {
@@ -290,7 +290,7 @@ fn test_entry_vacant_key() {
 
 #[test]
 fn test_entry_vacant_into_key() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     match tree.entry_with_guard(b"newkey", &guard) {
@@ -305,7 +305,7 @@ fn test_entry_vacant_into_key() {
 
 #[test]
 fn test_entry_vacant_insert() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     match tree.entry_with_guard(b"newkey", &guard) {
@@ -323,7 +323,7 @@ fn test_entry_vacant_insert() {
 
 #[test]
 fn test_entry_vacant_try_insert() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     match tree.entry_with_guard(b"newkey", &guard) {
@@ -338,7 +338,7 @@ fn test_entry_vacant_try_insert() {
 
 #[test]
 fn test_entry_insert_entry_from_vacant() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Start vacant, insert_entry returns OccupiedEntry
@@ -353,7 +353,7 @@ fn test_entry_insert_entry_from_vacant() {
 
 #[test]
 fn test_entry_insert_entry_from_occupied() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     tree.insert_with_guard(b"key", 10, &guard).unwrap();
@@ -367,7 +367,7 @@ fn test_entry_insert_entry_from_occupied() {
 
 #[test]
 fn test_entry_try_insert_entry() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     let result = tree.entry_with_guard(b"key", &guard).try_insert_entry(42);
@@ -377,7 +377,7 @@ fn test_entry_try_insert_entry() {
 
 #[test]
 fn test_entry_get_on_entry() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Vacant entry - get returns None
@@ -392,7 +392,7 @@ fn test_entry_get_on_entry() {
 
 #[test]
 fn test_entry_key_method() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Vacant
@@ -426,7 +426,7 @@ fn test_entry_inline_variant() {
 
 #[test]
 fn test_entry_multiple_operations() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Simulate a counter pattern (Arc<u64>: dereference twice)
@@ -442,7 +442,7 @@ fn test_entry_multiple_operations() {
 
 #[test]
 fn test_entry_different_keys() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Insert multiple keys via entry API
@@ -458,7 +458,7 @@ fn test_entry_different_keys() {
 
 #[test]
 fn test_entry_long_key() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Key longer than 8 bytes (triggers multi-layer path)
@@ -481,7 +481,7 @@ fn test_entry_long_key() {
 #[test]
 fn test_entry_temporary_key_with_reused_guard() {
     // Verify that the key can be a temporary slice while reusing guard
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // This pattern should work: reuse guard with temporary keys
@@ -497,7 +497,7 @@ fn test_entry_temporary_key_with_reused_guard() {
 
 #[test]
 fn test_entry_or_default() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // or_default on vacant - uses Default::default() = 0
@@ -512,7 +512,7 @@ fn test_entry_or_default() {
 
 #[test]
 fn test_entry_or_default_with_and_modify() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Counter pattern using or_default (Arc<u64>: dereference twice)
@@ -529,7 +529,7 @@ fn test_entry_or_default_with_and_modify() {
 
 #[test]
 fn test_entry_or_try_insert_with_key() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Fallible insert based on key length
@@ -551,7 +551,7 @@ fn test_entry_or_try_insert_with_key() {
 
 #[test]
 fn test_entry_debug_impl() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
     // Vacant entry debug

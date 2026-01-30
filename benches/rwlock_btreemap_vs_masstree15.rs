@@ -3,7 +3,7 @@
 //! This is meant to answer: “Can `MassTree15` replace `RwLock<BTreeMap>` for
 //! concurrent point ops?”
 //!
-//! Notes:
+//! NOTE:
 //! - This file benchmarks *single-operation* patterns (`get`/`insert`/range scan).
 //! - `RwLock<BTreeMap>` can provide larger atomic critical sections (multi-op
 //!   invariants) that a concurrent map does not replicate without an outer lock.

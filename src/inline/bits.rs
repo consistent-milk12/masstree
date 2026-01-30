@@ -170,6 +170,33 @@ impl InlineBits for i64 {
     }
 }
 
+impl InlineBits for f32 {
+    #[inline(always)]
+    fn to_bits(self) -> u64 {
+        u64::from(self.to_bits())
+    }
+
+    #[inline(always)]
+    fn from_bits(bits: u64) -> Self {
+        #[expect(clippy::cast_possible_truncation, reason = "Intentional truncation")]
+        {
+            Self::from_bits(bits as u32)
+        }
+    }
+}
+
+impl InlineBits for f64 {
+    #[inline(always)]
+    fn to_bits(self) -> u64 {
+        self.to_bits()
+    }
+
+    #[inline(always)]
+    fn from_bits(bits: u64) -> Self {
+        Self::from_bits(bits)
+    }
+}
+
 #[cfg(target_pointer_width = "64")]
 impl InlineBits for usize {
     #[inline(always)]

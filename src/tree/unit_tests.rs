@@ -1,9 +1,7 @@
 #![allow(clippy::indexing_slicing)]
 #![allow(unused_variables)]
 
-use super::{
-    InsertError, MassTree, MassTree15, MassTree15Inline, MassTree24, MassTreeGeneric, MassTreeIndex,
-};
+use super::{InsertError, MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};
 use crate::nodeversion::NodeVersion;
 use crate::value::LeafValue;
 use std::sync::Arc;
@@ -118,9 +116,9 @@ fn test_first_last_single_element() {
     let last = tree.last().unwrap();
 
     assert_eq!(first.key(), b"only");
-    assert_eq!(*first.value, 42);
+    assert_eq!(first.value, 42);
     assert_eq!(last.key(), b"only");
-    assert_eq!(*last.value, 42);
+    assert_eq!(last.value, 42);
 }
 
 #[test]
@@ -137,9 +135,9 @@ fn test_first_last_multiple_elements() {
     let last = tree.last().unwrap();
 
     assert_eq!(first.key(), b"apple");
-    assert_eq!(*first.value, 1);
+    assert_eq!(first.value, 1);
     assert_eq!(last.key(), b"date");
-    assert_eq!(*last.value, 4);
+    assert_eq!(last.value, 4);
 
     // With guard
     let guard = tree.guard();
@@ -324,12 +322,12 @@ fn concurrent_insert_then_get_does_not_lose_key() {
 }
 
 // ========================================================================
-//  MassTreeIndex Basic Tests
+//  MassTree15Inline Basic Tests
 // ========================================================================
 
 #[test]
 fn test_index_new_is_empty() {
-    let tree: MassTreeIndex<u64> = MassTreeIndex::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     assert!(tree.is_empty());
     assert_eq!(tree.len(), 0);
@@ -337,7 +335,7 @@ fn test_index_new_is_empty() {
 
 #[test]
 fn test_index_get_on_empty() {
-    let tree: MassTreeIndex<u64> = MassTreeIndex::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     assert!(tree.get(b"hello").is_none());
 }
@@ -385,7 +383,7 @@ fn test_default_trait() {
 
 #[test]
 fn test_index_default_trait() {
-    let tree: MassTreeIndex<u64> = MassTreeIndex::default();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::default();
 
     assert!(tree.is_empty());
 }
@@ -402,7 +400,7 @@ fn test_get_after_insert() {
 
     let result = tree.get(b"hello");
     assert!(result.is_some());
-    assert_eq!(*result.unwrap(), 42);
+    assert_eq!(result.unwrap(), 42);
 }
 
 #[test]
@@ -426,9 +424,9 @@ fn test_get_multiple_keys() {
     tree.insert(b"ccc", 300).unwrap();
 
     // Test retrieval
-    assert_eq!(*tree.get(b"aaa").unwrap(), 100);
-    assert_eq!(*tree.get(b"bbb").unwrap(), 200);
-    assert_eq!(*tree.get(b"ccc").unwrap(), 300);
+    assert_eq!(tree.get(b"aaa").unwrap(), 100);
+    assert_eq!(tree.get(b"bbb").unwrap(), 200);
+    assert_eq!(tree.get(b"ccc").unwrap(), 300);
 
     // Non-existent keys
     assert!(tree.get(b"ddd").is_none());
@@ -441,7 +439,7 @@ fn test_get_multiple_keys() {
 
 #[test]
 fn test_index_get_after_insert() {
-    let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     tree.insert(b"test", 999).unwrap();
 
@@ -459,7 +457,7 @@ fn test_insert_and_get_empty_key() {
     let tree: MassTree<u64> = MassTree::new();
 
     tree.insert(b"", 123).unwrap();
-    assert_eq!(*tree.get(b"").unwrap(), 123);
+    assert_eq!(tree.get(b"").unwrap(), 123);
 }
 
 #[test]
@@ -470,7 +468,7 @@ fn test_insert_and_get_max_inline_key() {
     let key_bytes = b"12345678";
     tree.insert(key_bytes, 888).unwrap();
 
-    assert_eq!(*tree.get(key_bytes).unwrap(), 888);
+    assert_eq!(tree.get(key_bytes).unwrap(), 888);
 }
 
 #[test]
@@ -481,7 +479,7 @@ fn test_insert_and_get_binary_key() {
     let key_bytes = &[0x00, 0x01, 0x02, 0x00, 0xFF];
     tree.insert(key_bytes, 777).unwrap();
 
-    assert_eq!(*tree.get(key_bytes).unwrap(), 777);
+    assert_eq!(tree.get(key_bytes).unwrap(), 777);
 }
 
 // ========================================================================
@@ -508,7 +506,7 @@ fn test_insert_and_get() {
 
     let value = tree.get(b"hello");
     assert!(value.is_some());
-    assert_eq!(*value.unwrap(), 42);
+    assert_eq!(value.unwrap(), 42);
 }
 
 #[test]
@@ -520,9 +518,9 @@ fn test_insert_multiple_keys() {
     tree.insert(b"ccc", 300).unwrap();
 
     assert_eq!(tree.len(), 3);
-    assert_eq!(*tree.get(b"aaa").unwrap(), 100);
-    assert_eq!(*tree.get(b"bbb").unwrap(), 200);
-    assert_eq!(*tree.get(b"ccc").unwrap(), 300);
+    assert_eq!(tree.get(b"aaa").unwrap(), 100);
+    assert_eq!(tree.get(b"bbb").unwrap(), 200);
+    assert_eq!(tree.get(b"ccc").unwrap(), 300);
 }
 
 #[test]
@@ -535,16 +533,16 @@ fn test_insert_updates_existing() {
 
     // Update
     let old = tree.insert(b"key", 200).unwrap();
-    assert_eq!(*old.unwrap(), 100);
+    assert_eq!(old.unwrap(), 100);
 
     // Verify new value
-    assert_eq!(*tree.get(b"key").unwrap(), 200);
+    assert_eq!(tree.get(b"key").unwrap(), 200);
     assert_eq!(tree.len(), 1); // Still one key
 }
 
 #[test]
 fn test_insert_returns_old_arc() {
-    let tree: MassTree<String> = MassTree::new();
+    let tree: MassTree15<String> = MassTree15::new();
 
     tree.insert(b"key", "first".to_string()).unwrap();
 
@@ -566,7 +564,7 @@ fn test_insert_ascending_order() {
     // Verify all values
     for i in 0..10 {
         let key = format!("key{i:02}");
-        assert_eq!(*tree.get(key.as_bytes()).unwrap(), i as u64);
+        assert_eq!(tree.get(key.as_bytes()).unwrap(), i as u64);
     }
 }
 
@@ -583,7 +581,7 @@ fn test_insert_descending_order() {
 
     for i in 0..10 {
         let key = format!("key{i:02}");
-        assert_eq!(*tree.get(key.as_bytes()).unwrap(), i as u64);
+        assert_eq!(tree.get(key.as_bytes()).unwrap(), i as u64);
     }
 }
 
@@ -600,7 +598,7 @@ fn test_insert_random_order() {
     assert_eq!(tree.len(), 6);
 
     for (i, key) in keys.iter().enumerate() {
-        assert_eq!(*tree.get(key.as_bytes()).unwrap(), i as u64);
+        assert_eq!(tree.get(key.as_bytes()).unwrap(), i as u64);
     }
 }
 
@@ -625,7 +623,7 @@ fn test_insert_triggers_split() {
 
     // Verify the new key is accessible
     let value = tree.get(b"overflow");
-    assert_eq!(*value.unwrap(), 999);
+    assert_eq!(value.unwrap(), 999);
 
     // Verify all original keys are still accessible
     for i in 0..24 {
@@ -633,7 +631,7 @@ fn test_insert_triggers_split() {
         let value = tree.get(key.as_bytes());
 
         assert!(value.is_some(), "Key {key:?} not found after split");
-        assert_eq!(*value.unwrap(), i as u64);
+        assert_eq!(value.unwrap(), i as u64);
     }
 }
 
@@ -667,7 +665,7 @@ fn test_insert_max_key_length() {
     let max_key = b"12345678";
     let result = tree.insert(max_key, 42);
     assert!(result.is_ok());
-    assert_eq!(*tree.get(max_key).unwrap(), 42);
+    assert_eq!(tree.get(max_key).unwrap(), 42);
 }
 
 #[test]
@@ -678,7 +676,7 @@ fn test_slot0_reuse_no_predecessor() {
     tree.insert(b"first", 1).unwrap();
 
     // Verify the value was stored
-    assert_eq!(*tree.get(b"first").unwrap(), 1);
+    assert_eq!(tree.get(b"first").unwrap(), 1);
 }
 
 #[test]
@@ -692,8 +690,8 @@ fn test_slot0_reuse_same_ikey() {
     // This should allow slot 0 reuse if needed
     tree.insert(b"aab", 2).unwrap();
 
-    assert_eq!(*tree.get(b"aaa").unwrap(), 1);
-    assert_eq!(*tree.get(b"aab").unwrap(), 2);
+    assert_eq!(tree.get(b"aaa").unwrap(), 1);
+    assert_eq!(tree.get(b"aab").unwrap(), 2);
 }
 
 #[test]
@@ -709,14 +707,14 @@ fn test_permutation_updates_correctly() {
     assert_eq!(tree.len(), 3);
 
     // Verify get still works (relies on correct permutation)
-    assert_eq!(*tree.get(b"aaa").unwrap(), 1);
-    assert_eq!(*tree.get(b"bbb").unwrap(), 2);
-    assert_eq!(*tree.get(b"ccc").unwrap(), 3);
+    assert_eq!(tree.get(b"aaa").unwrap(), 1);
+    assert_eq!(tree.get(b"bbb").unwrap(), 2);
+    assert_eq!(tree.get(b"ccc").unwrap(), 3);
 }
 
 #[test]
 fn test_index_insert_basic() {
-    let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     let result = tree.insert(b"key", 42);
 
@@ -727,7 +725,7 @@ fn test_index_insert_basic() {
 
 #[test]
 fn test_index_insert_update() {
-    let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     tree.insert(b"key", 100).unwrap();
 
@@ -743,7 +741,7 @@ fn test_insert_empty_key() {
 
     tree.insert(b"", 42).unwrap();
 
-    assert_eq!(*tree.get(b"").unwrap(), 42);
+    assert_eq!(tree.get(b"").unwrap(), 42);
 }
 
 #[test]
@@ -754,7 +752,7 @@ fn test_insert_max_inline_key() {
 
     tree.insert(key, 888).unwrap();
 
-    assert_eq!(*tree.get(key).unwrap(), 888);
+    assert_eq!(tree.get(key).unwrap(), 888);
 }
 
 #[test]
@@ -773,7 +771,7 @@ fn test_insert_binary_keys() {
     }
 
     for (i, key) in keys.iter().enumerate() {
-        assert_eq!(*tree.get(key).unwrap(), i as u64);
+        assert_eq!(tree.get(key).unwrap(), i as u64);
     }
 }
 
@@ -786,10 +784,10 @@ fn test_insert_similar_keys() {
     tree.insert(b"test12", 3).unwrap();
     tree.insert(b"tes", 4).unwrap();
 
-    assert_eq!(*tree.get(b"test").unwrap(), 1);
-    assert_eq!(*tree.get(b"test1").unwrap(), 2);
-    assert_eq!(*tree.get(b"test12").unwrap(), 3);
-    assert_eq!(*tree.get(b"tes").unwrap(), 4);
+    assert_eq!(tree.get(b"test").unwrap(), 1);
+    assert_eq!(tree.get(b"test1").unwrap(), 2);
+    assert_eq!(tree.get(b"test12").unwrap(), 3);
+    assert_eq!(tree.get(b"tes").unwrap(), 4);
 }
 
 // ========================================================================
@@ -808,11 +806,7 @@ fn test_differential_small_sequential() {
         let tree_old = tree.insert(&key, i as u64).unwrap();
         let oracle_old = oracle.insert(key.clone(), i as u64);
 
-        assert_eq!(
-            tree_old.map(|arc| *arc),
-            oracle_old,
-            "Insert mismatch for key {key:?}"
-        );
+        assert_eq!(tree_old, oracle_old, "Insert mismatch for key {key:?}");
     }
 }
 
@@ -828,10 +822,10 @@ fn test_differential_updates() {
     for value in [100, 200, 300] {
         let tree_old = tree.insert(&key, value).unwrap();
         let oracle_old = oracle.insert(key.clone(), value);
-        assert_eq!(tree_old.map(|arc| *arc), oracle_old);
+        assert_eq!(tree_old, oracle_old);
     }
 
-    assert_eq!(*tree.get(&key).unwrap(), *oracle.get(&key).unwrap());
+    assert_eq!(tree.get(&key).unwrap(), *oracle.get(&key).unwrap());
 }
 
 #[test]
@@ -843,28 +837,16 @@ fn test_differential_interleaved() {
 
     tree.insert(b"a", 1).unwrap();
     oracle.insert(b"a".to_vec(), 1);
-    assert_eq!(
-        tree.get(b"a").map(|a| *a),
-        oracle.get(b"a".as_slice()).copied()
-    );
+    assert_eq!(tree.get(b"a"), oracle.get(b"a".as_slice()).copied());
 
     tree.insert(b"b", 2).unwrap();
     oracle.insert(b"b".to_vec(), 2);
-    assert_eq!(
-        tree.get(b"a").map(|a| *a),
-        oracle.get(b"a".as_slice()).copied()
-    );
-    assert_eq!(
-        tree.get(b"b").map(|a| *a),
-        oracle.get(b"b".as_slice()).copied()
-    );
+    assert_eq!(tree.get(b"a"), oracle.get(b"a".as_slice()).copied());
+    assert_eq!(tree.get(b"b"), oracle.get(b"b".as_slice()).copied());
 
     tree.insert(b"a", 10).unwrap();
     oracle.insert(b"a".to_vec(), 10);
-    assert_eq!(
-        tree.get(b"a").map(|a| *a),
-        oracle.get(b"a".as_slice()).copied()
-    );
+    assert_eq!(tree.get(b"a"), oracle.get(b"a".as_slice()).copied());
 }
 
 #[test]
@@ -875,14 +857,14 @@ fn test_differential_get_missing() {
     let oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
     assert_eq!(
-        tree.get(b"missing").map(|a| *a),
+        tree.get(b"missing"),
         oracle.get(b"missing".as_slice()).copied()
     );
 
     tree.insert(b"present", 42).unwrap();
 
-    assert_eq!(tree.get(b"missing").map(|a| *a), None);
-    assert_eq!(*tree.get(b"present").unwrap(), 42);
+    assert_eq!(tree.get(b"missing"), None);
+    assert_eq!(tree.get(b"present").unwrap(), 42);
 }
 
 // ========================================================================
@@ -904,7 +886,7 @@ fn test_insert_100_keys() {
         let key = format!("{i:08}");
         let value = tree.get(key.as_bytes());
         assert!(value.is_some(), "Key {i} not found");
-        assert_eq!(*value.unwrap(), i as u64);
+        assert_eq!(value.unwrap(), i as u64);
     }
 
     // Verify len() works after multiple splits
@@ -950,7 +932,7 @@ fn test_insert_1000_sequential() {
     for (key, expected) in &oracle {
         let actual = tree.get(key);
         assert!(actual.is_some(), "Key {key:?} not found in tree");
-        assert_eq!(*actual.unwrap(), *expected);
+        assert_eq!(actual.unwrap(), *expected);
     }
 }
 
@@ -974,13 +956,13 @@ fn test_insert_1000_random() {
     for (key, expected) in &oracle {
         let actual = tree.get(key);
         assert!(actual.is_some(), "Key {key:?} not found");
-        assert_eq!(*actual.unwrap(), *expected);
+        assert_eq!(actual.unwrap(), *expected);
     }
 }
 
 #[test]
 fn test_split_preserves_values() {
-    let tree: MassTree<String> = MassTree::new();
+    let tree: MassTree15<String> = MassTree15::new();
 
     // Insert values with distinct content
     let test_values: Vec<(&[u8], String)> = vec![
@@ -1023,14 +1005,14 @@ fn test_split_with_updates() {
     for i in (0..30).step_by(2) {
         let key = format!("{i:04}");
         let old = tree.insert(key.as_bytes(), (i + 1000) as u64).unwrap();
-        assert_eq!(*old.unwrap(), i as u64);
+        assert_eq!(old.unwrap(), i as u64);
     }
 
     // Verify
     for i in 0..30 {
         let key = format!("{i:04}");
         let expected = if i % 2 == 0 { i + 1000 } else { i };
-        assert_eq!(*tree.get(key.as_bytes()).unwrap(), expected as u64);
+        assert_eq!(tree.get(key.as_bytes()).unwrap(), expected as u64);
     }
 }
 
@@ -1069,14 +1051,14 @@ fn test_split_empty_right_edge_case() {
 
     // Verify all keys
     for i in 0..25 {
-        assert_eq!(*tree.get(&[i as u8]).unwrap(), i as u64);
+        assert_eq!(tree.get(&[i as u8]).unwrap(), i as u64);
     }
 }
 
 #[test]
 fn test_split_index_mode() {
-    // Test splits work with MassTreeIndex too
-    let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
+    // Test splits work with MassTree15Inline too
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     for i in 0..50 {
         let key = format!("{i:02}");
@@ -1104,7 +1086,7 @@ fn test_split_maintains_key_order() {
         let key = format!("{i:02}");
         let value = tree.get(key.as_bytes());
         assert!(value.is_some(), "Key {i:02} not found");
-        assert_eq!(*value.unwrap(), i as u64);
+        assert_eq!(value.unwrap(), i as u64);
     }
 }
 
@@ -1123,8 +1105,8 @@ fn test_layer_creation_same_prefix() {
     tree.insert(b"hello worm", 2).unwrap();
 
     // Both should be retrievable
-    assert_eq!(tree.get(b"hello world!").map(|v| *v), Some(1));
-    assert_eq!(tree.get(b"hello worm").map(|v| *v), Some(2));
+    assert_eq!(tree.get(b"hello world!"), Some(1));
+    assert_eq!(tree.get(b"hello worm"), Some(2));
 }
 
 #[test]
@@ -1143,8 +1125,8 @@ fn test_deep_layer_chain() {
     // Layer 1: ikey="bbbbbbbb" → twig
     // Layer 2: ikey="XXXXXXXX" and "YYYYYYYY" (different, final leaf)
 
-    assert_eq!(tree.get(key1).map(|v| *v), Some(1));
-    assert_eq!(tree.get(key2).map(|v| *v), Some(2));
+    assert_eq!(tree.get(key1), Some(1));
+    assert_eq!(tree.get(key2), Some(2));
 }
 
 #[test]
@@ -1158,8 +1140,8 @@ fn test_layer_with_suffixes() {
     tree.insert(key1, 1).unwrap();
     tree.insert(key2, 2).unwrap();
 
-    assert_eq!(tree.get(key1).map(|v| *v), Some(1));
-    assert_eq!(tree.get(key2).map(|v| *v), Some(2));
+    assert_eq!(tree.get(key1), Some(1));
+    assert_eq!(tree.get(key2), Some(2));
     assert_eq!(tree.get(b"prefixAArest3"), None);
 }
 
@@ -1174,9 +1156,9 @@ fn test_insert_into_existing_layer() {
     // Insert another key with same prefix, different continuation
     tree.insert(b"hello wonder", 3).unwrap();
 
-    assert_eq!(tree.get(b"hello world!").map(|v| *v), Some(1));
-    assert_eq!(tree.get(b"hello worm").map(|v| *v), Some(2));
-    assert_eq!(tree.get(b"hello wonder").map(|v| *v), Some(3));
+    assert_eq!(tree.get(b"hello world!"), Some(1));
+    assert_eq!(tree.get(b"hello worm"), Some(2));
+    assert_eq!(tree.get(b"hello wonder"), Some(3));
 }
 
 #[test]
@@ -1188,10 +1170,10 @@ fn test_update_in_layer() {
 
     // Update existing key in layer
     let old = tree.insert(b"hello world!", 100).unwrap();
-    assert_eq!(old.map(|v| *v), Some(1));
+    assert_eq!(old, Some(1));
 
-    assert_eq!(tree.get(b"hello world!").map(|v| *v), Some(100));
-    assert_eq!(tree.get(b"hello worm").map(|v| *v), Some(2));
+    assert_eq!(tree.get(b"hello world!"), Some(100));
+    assert_eq!(tree.get(b"hello worm"), Some(2));
 }
 
 #[test]
@@ -1217,8 +1199,8 @@ fn test_long_key_insert_and_get() {
     tree.insert(key1, 100).unwrap();
     tree.insert(key2, 200).unwrap();
 
-    assert_eq!(tree.get(key1).map(|v| *v), Some(100));
-    assert_eq!(tree.get(key2).map(|v| *v), Some(200));
+    assert_eq!(tree.get(key1), Some(100));
+    assert_eq!(tree.get(key2), Some(200));
 }
 
 #[test]
@@ -1231,10 +1213,10 @@ fn test_mixed_short_and_long_keys() {
     tree.insert(b"this is longer", 3).unwrap();
     tree.insert(b"another long key", 4).unwrap();
 
-    assert_eq!(tree.get(b"short").map(|v| *v), Some(1));
-    assert_eq!(tree.get(b"exactly8").map(|v| *v), Some(2));
-    assert_eq!(tree.get(b"this is longer").map(|v| *v), Some(3));
-    assert_eq!(tree.get(b"another long key").map(|v| *v), Some(4));
+    assert_eq!(tree.get(b"short"), Some(1));
+    assert_eq!(tree.get(b"exactly8"), Some(2));
+    assert_eq!(tree.get(b"this is longer"), Some(3));
+    assert_eq!(tree.get(b"another long key"), Some(4));
 }
 
 #[test]
@@ -1262,7 +1244,7 @@ fn test_layer_differential_vs_btreemap() {
 
     // Verify all oracle entries
     for (key, expected) in &oracle {
-        let actual = tree.get(key).map(|v| *v);
+        let actual = tree.get(key);
         assert_eq!(actual, Some(*expected), "mismatch for key {key:?}");
     }
 }
@@ -1311,7 +1293,7 @@ fn test_layer_growth_beyond_width() {
         key.extend_from_slice(&i.to_be_bytes());
         let result = tree.get(&key);
         assert!(result.is_some(), "Key with suffix {i} not found");
-        assert_eq!(*result.unwrap(), i);
+        assert_eq!(result.unwrap(), i);
     }
 }
 
@@ -1332,8 +1314,8 @@ fn test_layer_root_becomes_internode() {
     }
 
     // Verify initial keys still findable
-    assert_eq!(*tree.get(b"prefix00suffix_a").unwrap(), 1);
-    assert_eq!(*tree.get(b"prefix00suffix_b").unwrap(), 2);
+    assert_eq!(tree.get(b"prefix00suffix_a").unwrap(), 1);
+    assert_eq!(tree.get(b"prefix00suffix_b").unwrap(), 2);
 
     // Verify all numbered keys findable
     for i in 0..20u64 {
@@ -1361,7 +1343,7 @@ fn test_layer_split_preserves_all_keys() {
     for (key, expected) in &keys_and_values {
         let result = tree.get(key);
         assert!(result.is_some(), "Key {key:?} not found");
-        assert_eq!(*result.unwrap(), *expected);
+        assert_eq!(result.unwrap(), *expected);
     }
 
     assert_eq!(tree.len(), 50);
@@ -1373,15 +1355,15 @@ fn test_layer_split_preserves_all_keys() {
 
 #[test]
 fn test_masstree_generic_new_is_empty() {
-    use crate::alloc24::SeizeAllocator24;
-    use crate::leaf24::LeafNode24;
+    use crate::alloc15::SeizeAllocator15;
+    use crate::leaf15::LeafNode15;
 
     // Create via with_allocator
-    let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
     let tree: MassTreeGeneric<
         LeafValue<u64>,
-        LeafNode24<LeafValue<u64>>,
-        SeizeAllocator24<LeafValue<u64>>,
+        LeafNode15<LeafValue<u64>>,
+        SeizeAllocator15<LeafValue<u64>>,
     > = MassTreeGeneric::with_allocator(alloc);
 
     assert!(tree.is_empty());
@@ -1390,31 +1372,31 @@ fn test_masstree_generic_new_is_empty() {
 
 #[test]
 fn test_masstree_generic_debug() {
-    use crate::alloc24::SeizeAllocator24;
-    use crate::leaf24::LeafNode24;
+    use crate::alloc15::SeizeAllocator15;
+    use crate::leaf15::LeafNode15;
 
-    let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
     let tree: MassTreeGeneric<
         LeafValue<u64>,
-        LeafNode24<LeafValue<u64>>,
-        SeizeAllocator24<LeafValue<u64>>,
+        LeafNode15<LeafValue<u64>>,
+        SeizeAllocator15<LeafValue<u64>>,
     > = MassTreeGeneric::with_allocator(alloc);
 
     let debug_str = format!("{tree:?}");
     assert!(debug_str.contains("MassTreeGeneric"));
-    assert!(debug_str.contains("width: 24"));
+    assert!(debug_str.contains("width: 15"));
 }
 
 #[test]
 fn test_masstree_generic_guard() {
-    use crate::alloc24::SeizeAllocator24;
-    use crate::leaf24::LeafNode24;
+    use crate::alloc15::SeizeAllocator15;
+    use crate::leaf15::LeafNode15;
 
-    let alloc: SeizeAllocator24<LeafValue<u64>> = SeizeAllocator24::new();
+    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
     let tree: MassTreeGeneric<
         LeafValue<u64>,
-        LeafNode24<LeafValue<u64>>,
-        SeizeAllocator24<LeafValue<u64>>,
+        LeafNode15<LeafValue<u64>>,
+        SeizeAllocator15<LeafValue<u64>>,
     > = MassTreeGeneric::with_allocator(alloc);
 
     // Just verify guard creation doesn't panic
@@ -1429,26 +1411,26 @@ fn _assert_masstree_generic_send_sync()
 where
     MassTreeGeneric<
         LeafValue<u64>,
-        crate::leaf24::LeafNode24<LeafValue<u64>>,
-        crate::alloc24::SeizeAllocator24<LeafValue<u64>>,
+        crate::leaf15::LeafNode15<LeafValue<u64>>,
+        crate::alloc15::SeizeAllocator15<LeafValue<u64>>,
     >: Send + Sync,
 {
 }
 
 // ========================================================================
-//  MassTree24 Type Alias Tests
+//  MassTree15 Type Alias Tests
 // ========================================================================
 
 #[test]
-fn test_masstree24_new() {
-    let tree: MassTree24<u64> = MassTree24::new();
+fn test_masstree15_new() {
+    let tree: MassTree15<u64> = MassTree15::new();
     assert!(tree.is_empty());
     assert_eq!(tree.len(), 0);
 }
 
 #[test]
-fn test_masstree24_get_empty() {
-    let tree: MassTree24<u64> = MassTree24::new();
+fn test_masstree15_get_empty() {
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Get on empty tree should return None
@@ -1457,8 +1439,8 @@ fn test_masstree24_get_empty() {
 }
 
 #[test]
-fn test_masstree24_insert_and_get() {
-    let tree: MassTree24<u64> = MassTree24::new();
+fn test_masstree15_insert_and_get() {
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Insert a value
@@ -1473,8 +1455,8 @@ fn test_masstree24_insert_and_get() {
 }
 
 #[test]
-fn test_masstree24_multiple_inserts() {
-    let tree: MassTree24<u64> = MassTree24::new();
+fn test_masstree15_multiple_inserts() {
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Insert multiple values (up to WIDTH=24 without split)
@@ -1496,8 +1478,8 @@ fn test_masstree24_multiple_inserts() {
 }
 
 #[test]
-fn test_masstree24_update_existing() {
-    let tree: MassTree24<u64> = MassTree24::new();
+fn test_masstree15_update_existing() {
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Insert initial value
@@ -1536,13 +1518,13 @@ fn test_masstree_insert_and_get() {
     // Get the value back
     let value = tree.get_with_guard(b"hello", &guard);
     assert!(value.is_some());
-    assert_eq!(*value.unwrap(), 42);
+    assert_eq!(value.unwrap(), 42);
 }
 
 #[test]
-fn test_masstree24_split_triggers() {
+fn test_masstree15_split_triggers() {
     // Test that inserting more than 24 keys triggers a split
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Insert 24 keys (should all succeed, filling the root leaf)
@@ -1577,9 +1559,9 @@ fn test_masstree24_split_triggers() {
 }
 
 #[test]
-fn test_masstree24_many_splits() {
+fn test_masstree15_many_splits() {
     // Test inserting many more keys that require multiple splits
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Insert 100 keys (should trigger multiple splits)
@@ -1602,10 +1584,10 @@ fn test_masstree24_many_splits() {
 
 #[test]
 #[cfg(not(miri))]
-fn test_masstree24_sequential_u64_limited() {
+fn test_masstree15_sequential_u64_limited() {
     // Test inserting keys with u64 sequential pattern
     // Uses 10,000 keys to trigger multiple internode splits
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     const KEY_COUNT: u64 = 10_000;
@@ -1629,10 +1611,10 @@ fn test_masstree24_sequential_u64_limited() {
 
 #[test]
 #[cfg(not(miri))]
-fn test_masstree24_internode_splits_stress() {
+fn test_masstree15_internode_splits_stress() {
     // Stress test to verify multi-level internode splits work
     // Uses 50,000 keys to trigger deep tree with multiple internode levels
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     const KEY_COUNT: u64 = 50_000;
@@ -1658,7 +1640,7 @@ fn test_masstree24_internode_splits_stress() {
 /// Key [52] was being lost.
 #[test]
 fn test_proptest_regression_two_keys() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     let key1: &[u8] = &[52, 0];
     let key2: &[u8] = &[52];
@@ -1681,7 +1663,7 @@ fn test_proptest_regression_two_keys() {
 /// Key was being lost after insert.
 #[test]
 fn test_proptest_regression_nine_zeros() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     let key: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0];
     tree.insert(key, 42).unwrap();
@@ -1696,7 +1678,7 @@ fn test_proptest_regression_nine_zeros() {
 /// This creates a conflict that should create a layer.
 #[test]
 fn test_two_suffix_keys_same_prefix() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Two 16-byte keys with same 8-byte prefix "prefix00"
     let key1: &[u8] = b"prefix0000000000";
@@ -1720,7 +1702,7 @@ fn test_two_suffix_keys_same_prefix() {
 /// Tests layer handling as keys accumulate.
 #[test]
 fn test_many_suffix_keys_same_prefix() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // 20 keys with same 8-byte prefix "prefix00"
     for i in 0..20u64 {
@@ -1862,7 +1844,7 @@ fn test_masstree15_concurrent() {
 
 #[test]
 fn test_correct_guard_works() {
-    let tree = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
     // Should not panic - guard is from the correct tree
     tree.insert_with_guard(b"key", 42, &guard).unwrap();
@@ -1873,8 +1855,8 @@ fn test_correct_guard_works() {
 #[cfg(debug_assertions)]
 #[should_panic(expected = "different collector")]
 fn test_wrong_guard_panics_on_insert() {
-    let tree1: MassTree24<u64> = MassTree24::new();
-    let tree2: MassTree24<u64> = MassTree24::new();
+    let tree1: MassTree15<u64> = MassTree15::new();
+    let tree2: MassTree15<u64> = MassTree15::new();
     let wrong_guard = tree2.guard();
     // Should panic in debug builds - guard is from wrong tree
     let _ = tree1.insert_with_guard(b"key", 42, &wrong_guard);
@@ -1884,8 +1866,8 @@ fn test_wrong_guard_panics_on_insert() {
 #[cfg(debug_assertions)]
 #[should_panic(expected = "different collector")]
 fn test_wrong_guard_panics_on_remove() {
-    let tree1: MassTree24<u64> = MassTree24::new();
-    let tree2: MassTree24<u64> = MassTree24::new();
+    let tree1: MassTree15<u64> = MassTree15::new();
+    let tree2: MassTree15<u64> = MassTree15::new();
     tree1.insert(b"key", 42).unwrap();
     let wrong_guard = tree2.guard();
     // Should panic in debug builds - guard is from wrong tree
@@ -1896,8 +1878,8 @@ fn test_wrong_guard_panics_on_remove() {
 #[cfg(debug_assertions)]
 #[should_panic(expected = "different collector")]
 fn test_wrong_guard_panics_on_iter() {
-    let tree1: MassTree24<u64> = MassTree24::new();
-    let tree2: MassTree24<u64> = MassTree24::new();
+    let tree1: MassTree15<u64> = MassTree15::new();
+    let tree2: MassTree15<u64> = MassTree15::new();
     let wrong_guard = tree2.guard();
     // Should panic in debug builds - guard is from wrong tree
     let _ = tree1.iter(&wrong_guard).count();
@@ -1932,11 +1914,11 @@ fn test_inline_key_with_layer_pointer() {
     tree.insert(b"hello", 5).unwrap(); // 5 bytes
 
     // Verify all keys are retrievable
-    assert_eq!(tree.get(b"hello woAAAA").map(|v| *v), Some(1));
-    assert_eq!(tree.get(b"hello woBBBB").map(|v| *v), Some(2));
-    assert_eq!(tree.get(b"hello wo").map(|v| *v), Some(3));
-    assert_eq!(tree.get(b"hello w").map(|v| *v), Some(4));
-    assert_eq!(tree.get(b"hello").map(|v| *v), Some(5));
+    assert_eq!(tree.get(b"hello woAAAA"), Some(1));
+    assert_eq!(tree.get(b"hello woBBBB"), Some(2));
+    assert_eq!(tree.get(b"hello wo"), Some(3));
+    assert_eq!(tree.get(b"hello w"), Some(4));
+    assert_eq!(tree.get(b"hello"), Some(5));
 
     // Verify ordering via scan (shorter keys before longer, inline before layer)
     let mut keys: Vec<Vec<u8>> = Vec::new();
@@ -1978,10 +1960,10 @@ fn test_inline_keys_same_ikey_different_lengths() {
     tree.insert(b"aaaaaaaa", 8).unwrap(); // Exactly 8 bytes
 
     // Verify retrieval
-    assert_eq!(tree.get(b"a").map(|v| *v), Some(1));
-    assert_eq!(tree.get(b"aa").map(|v| *v), Some(2));
-    assert_eq!(tree.get(b"aaa").map(|v| *v), Some(3));
-    assert_eq!(tree.get(b"aaaaaaaa").map(|v| *v), Some(8));
+    assert_eq!(tree.get(b"a"), Some(1));
+    assert_eq!(tree.get(b"aa"), Some(2));
+    assert_eq!(tree.get(b"aaa"), Some(3));
+    assert_eq!(tree.get(b"aaaaaaaa"), Some(8));
 
     // Verify ordering
     let mut keys: Vec<Vec<u8>> = Vec::new();
@@ -2017,9 +1999,9 @@ fn test_from_iterator_basic() {
     let tree: MassTree<u64> = data.into_iter().collect();
 
     assert_eq!(tree.len(), 3);
-    assert_eq!(tree.get(b"apple"), Some(Arc::new(1)));
-    assert_eq!(tree.get(b"banana"), Some(Arc::new(2)));
-    assert_eq!(tree.get(b"cherry"), Some(Arc::new(3)));
+    assert_eq!(tree.get(b"apple"), Some(1));
+    assert_eq!(tree.get(b"banana"), Some(2));
+    assert_eq!(tree.get(b"cherry"), Some(3));
 }
 
 #[test]
@@ -2039,7 +2021,7 @@ fn test_from_iterator_string_keys() {
     let tree: MassTree<u64> = data.into_iter().collect();
 
     assert_eq!(tree.len(), 2);
-    assert_eq!(tree.get(b"hello"), Some(Arc::new(1)));
+    assert_eq!(tree.get(b"hello"), Some(1));
 }
 
 #[test]
@@ -2054,7 +2036,7 @@ fn test_from_iterator_byte_literal_keys() {
     let tree: MassTree<u64> = data.into_iter().collect();
 
     assert_eq!(tree.len(), 3);
-    assert_eq!(tree.get(b"alpha"), Some(Arc::new(1)));
+    assert_eq!(tree.get(b"alpha"), Some(1));
 }
 
 #[test]
@@ -2069,7 +2051,7 @@ fn test_from_iterator_duplicate_keys() {
     let tree: MassTree<u64> = data.into_iter().collect();
 
     assert_eq!(tree.len(), 1);
-    assert_eq!(tree.get(b"key"), Some(Arc::new(3)));
+    assert_eq!(tree.get(b"key"), Some(3));
 }
 
 #[test]
@@ -2080,10 +2062,10 @@ fn test_extend_basic() {
     tree.extend([(b"a", 1u64), (b"b", 2u64), (b"c", 3u64)]);
 
     assert_eq!(tree.len(), 4);
-    assert_eq!(tree.get(b"existing"), Some(Arc::new(0)));
-    assert_eq!(tree.get(b"a"), Some(Arc::new(1)));
-    assert_eq!(tree.get(b"b"), Some(Arc::new(2)));
-    assert_eq!(tree.get(b"c"), Some(Arc::new(3)));
+    assert_eq!(tree.get(b"existing"), Some(0));
+    assert_eq!(tree.get(b"a"), Some(1));
+    assert_eq!(tree.get(b"b"), Some(2));
+    assert_eq!(tree.get(b"c"), Some(3));
 }
 
 #[test]
@@ -2094,7 +2076,7 @@ fn test_extend_overwrites_existing() {
     tree.extend([(b"key", 200u64)]);
 
     // Upsert semantics: value should be updated, not duplicated
-    assert_eq!(tree.get(b"key"), Some(Arc::new(200)));
+    assert_eq!(tree.get(b"key"), Some(200));
     assert_eq!(tree.len(), 1);
 }
 
@@ -2107,7 +2089,7 @@ fn test_extend_empty_iterator() {
     tree.extend(empty);
 
     assert_eq!(tree.len(), 1);
-    assert_eq!(tree.get(b"existing"), Some(Arc::new(42)));
+    assert_eq!(tree.get(b"existing"), Some(42));
 }
 
 #[test]
@@ -2117,8 +2099,8 @@ fn test_extend_with_vec_keys() {
     tree.extend(vec![(b"key1".to_vec(), 100u64), (b"key2".to_vec(), 200u64)]);
 
     assert_eq!(tree.len(), 2);
-    assert_eq!(tree.get(b"key1"), Some(Arc::new(100)));
-    assert_eq!(tree.get(b"key2"), Some(Arc::new(200)));
+    assert_eq!(tree.get(b"key1"), Some(100));
+    assert_eq!(tree.get(b"key2"), Some(200));
 }
 
 #[test]
@@ -2167,9 +2149,9 @@ fn test_from_iterator_large() {
     assert_eq!(tree.len(), 1000);
 
     // Spot check
-    assert_eq!(tree.get(b"key0000"), Some(Arc::new(0)));
-    assert_eq!(tree.get(b"key0500"), Some(Arc::new(500)));
-    assert_eq!(tree.get(b"key0999"), Some(Arc::new(999)));
+    assert_eq!(tree.get(b"key0000"), Some(0));
+    assert_eq!(tree.get(b"key0500"), Some(500));
+    assert_eq!(tree.get(b"key0999"), Some(999));
 }
 
 #[test]
@@ -2210,6 +2192,6 @@ fn test_from_iterator_then_concurrent_access() {
     assert_eq!(tree.len(), 300);
 
     // Original keys still accessible
-    assert_eq!(tree.get(b"init000"), Some(Arc::new(0)));
-    assert_eq!(tree.get(b"init099"), Some(Arc::new(99)));
+    assert_eq!(tree.get(b"init000"), Some(0));
+    assert_eq!(tree.get(b"init099"), Some(99));
 }

@@ -28,9 +28,9 @@ fn test_compute_prefix_upper_bound() {
 #[test]
 fn test_scan_ref_returns_same_values_as_scan() {
     use super::RangeBound;
-    use crate::MassTree24Inline;
+    use crate::MassTree15;
 
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Insert some test data
@@ -45,7 +45,7 @@ fn test_scan_ref_returns_same_values_as_scan() {
         RangeBound::Unbounded,
         RangeBound::Unbounded,
         |_key, value| {
-            values_scan.push(value);
+            values_scan.push(*value);
             true
         },
         &guard,
@@ -71,9 +71,9 @@ fn test_scan_ref_returns_same_values_as_scan() {
 #[test]
 fn test_scan_ref_with_range_bounds() {
     use super::RangeBound;
-    use crate::MassTree24Inline;
+    use crate::MassTree15;
 
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Insert keys "a", "b", "c", "d", "e"
@@ -87,7 +87,7 @@ fn test_scan_ref_with_range_bounds() {
         RangeBound::Included(b"b"),
         RangeBound::Included(b"d"),
         |_key, value| {
-            values_scan.push(value);
+            values_scan.push(*value);
             true
         },
         &guard,
@@ -112,9 +112,9 @@ fn test_scan_ref_with_range_bounds() {
 #[test]
 fn test_scan_ref_early_stop() {
     use super::RangeBound;
-    use crate::MassTree24Inline;
+    use crate::MassTree15;
 
-    let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Insert 100 entries

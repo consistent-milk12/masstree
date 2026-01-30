@@ -8,7 +8,7 @@
 //! - Unified slot allocation and value update logic
 
 use crate::leaf_trait::SplitInsertData;
-use crate::leaf24::KSUF_KEYLENX;
+use crate::leaf15::KSUF_KEYLENX;
 
 use super::{
     InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LayerCapableLeaf, Linker,

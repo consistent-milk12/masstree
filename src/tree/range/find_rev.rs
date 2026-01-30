@@ -9,6 +9,7 @@ use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
+use crate::hints::unlikely;
 use crate::{
     TreeLeafNode, TreePermutation, ValueSlot,
     key::IKEY_SIZE,
@@ -1300,7 +1301,8 @@ where
         }
 
         // Check for layer pointer - must handle via state machine
-        if slot_keylenx >= LAYER_KEYLENX {
+        // Most slots are values, not layer pointers
+        if unlikely(slot_keylenx >= LAYER_KEYLENX) {
             // Set up for layer descent
             let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
             layer_stack.push(LayerContext::new(stack.get_root(), stack.get_leaf_ptr()));
@@ -1314,7 +1316,8 @@ where
 
         // Get value pointer
         let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-        if slot_ptr.is_null() {
+        // Most slots have values (null means deleted/empty)
+        if unlikely(slot_ptr.is_null()) {
             ki -= 1;
             continue;
         }
@@ -1344,7 +1347,8 @@ where
         helper.mark_key_complete();
 
         // Check start bound (for reverse iteration)
-        let key: &[u8] = cursor_key.full_key();
+        // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+        let key: &[u8] = unsafe { cursor_key.full_key_unchecked() };
         if !start_bound.contains_reverse(key) {
             return LeafBatchResultBack::StartBoundExceeded;
         }
@@ -1366,7 +1370,8 @@ where
     stack.set_ki(ki);
 
     // Validate version after processing batch (OCC)
-    if leaf.version().has_changed(cached_version) {
+    // Version rarely changes mid-scan
+    if unlikely(leaf.version().has_changed(cached_version)) {
         return LeafBatchResultBack::VersionChanged;
     }
 
@@ -1439,7 +1444,8 @@ where
         }
 
         // Check for layer pointer - must handle via state machine
-        if slot_keylenx >= LAYER_KEYLENX {
+        // Most slots are values, not layer pointers
+        if unlikely(slot_keylenx >= LAYER_KEYLENX) {
             // Set up for layer descent
             let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
             layer_stack.push(LayerContext::new(stack.get_root(), stack.get_leaf_ptr()));
@@ -1453,7 +1459,8 @@ where
 
         // Get value pointer
         let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-        if slot_ptr.is_null() {
+        // Most slots have values (null means deleted/empty)
+        if unlikely(slot_ptr.is_null()) {
             ki -= 1;
             continue;
         }
@@ -1483,7 +1490,8 @@ where
         helper.mark_key_complete();
 
         // Check start bound (for reverse iteration)
-        let key: &[u8] = cursor_key.full_key();
+        // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+        let key: &[u8] = unsafe { cursor_key.full_key_unchecked() };
         if !start_bound.contains_reverse(key) {
             return LeafBatchResultBack::StartBoundExceeded;
         }
@@ -1505,7 +1513,8 @@ where
     stack.set_ki(ki);
 
     // Validate version after processing batch (OCC)
-    if leaf.version().has_changed(cached_version) {
+    // Version rarely changes mid-scan
+    if unlikely(leaf.version().has_changed(cached_version)) {
         return LeafBatchResultBack::VersionChanged;
     }
 
@@ -1919,7 +1928,8 @@ where
     stack.set_ki(ki);
 
     // Validate version after processing batch (OCC)
-    if leaf.version().has_changed(cached_version) {
+    // Version rarely changes mid-scan
+    if unlikely(leaf.version().has_changed(cached_version)) {
         return LeafBatchResultBack::VersionChanged;
     }
 

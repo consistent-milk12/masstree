@@ -1,19 +1,4 @@
 //! Concurrent benchmarks for MassTree15 (WIDTH=15)
-//!
-//! Tests concurrent write performance and variance at different thread counts.
-//!
-//! ## Key Metrics
-//!
-//! - Split frequency: WIDTH=15 is the standard width variant
-//! - Variance: Difference between fastest and slowest runs
-//! - Scaling: Performance at high thread counts (16, 32)
-//!
-//! ## Running
-//!
-//! ```bash
-//! cargo bench --bench concurrent_maps15
-//! cargo bench --bench concurrent_maps15 --features mimalloc
-//! ```
 
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::pedantic)]

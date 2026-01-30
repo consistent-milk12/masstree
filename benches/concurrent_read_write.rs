@@ -1,31 +1,4 @@
 //! Concurrent read/write benchmarks with 64-byte keys.
-//!
-//! Compares MassTree15Inline against other concurrent ordered maps under mixed
-//! read-write workloads. All benchmarks use 64-byte keys to test multi-layer
-//! traversal performance.
-//!
-//! ## Key Characteristics
-//!
-//! - Various read/write ratios (90-10, 50-50, pure read, pure write)
-//! - 64-byte keys (8 chunks, tests suffix handling)
-//! - Various access patterns: uniform, zipfian, shared prefix
-//!
-//! ## Methodology
-//!
-//! Each benchmark follows a rigorous methodology:
-//! 1. **Explicit warmup**: Every benchmark warms up caches before measurement
-//! 2. **Memory barriers**: Inserted before/after measurement to prevent reordering
-//! 3. **Fresh state**: All benchmarks use `.with_inputs()` for fresh tree per sample
-//! 4. **Randomized writes**: Write decisions use pre-shuffled arrays, not modulo
-//! 5. **Consistent threads**: All benchmarks use [1, 2, 4, 6, 8, 12] thread counts
-//! 6. **200 samples**: For statistical significance
-//!
-//! ## Running
-//!
-//! ```bash
-//! cargo bench --bench concurrent_read_write
-//! cargo bench --bench concurrent_read_write -- 01_
-//! ```
 
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::pedantic)]

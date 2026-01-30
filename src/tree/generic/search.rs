@@ -3,7 +3,7 @@ use super::{
     ValueSlot,
 };
 use crate::leaf_trait::TreePermutation;
-use crate::leaf24::{KSUF_KEYLENX, LAYER_KEYLENX};
+use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 
 /// Threshold for switching from linear to binary search.
 ///

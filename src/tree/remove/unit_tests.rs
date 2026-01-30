@@ -7,22 +7,22 @@
 
 use super::{LockedParentResult, NodeCleaner};
 use crate::internode::InternodeNode;
-use crate::leaf24::LeafNode24;
+use crate::leaf15::LeafNode15;
 use crate::nodeversion::{LockGuard, NodeVersion};
-use crate::tree::MassTree24;
+use crate::tree::MassTree15;
 use crate::value::LeafValue;
 
 use std::ptr as StdPtr;
 use std::sync::Arc;
 
 // Type aliases for coalescing tests
-type TestLeaf = LeafNode24<LeafValue<u64>>;
+type TestLeaf = LeafNode15<LeafValue<u64>>;
 type TestInternode = InternodeNode;
-type TestTree = MassTree24<u64>;
+type TestTree = MassTree15<u64>;
 
 #[test]
 fn test_remove_single_key() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     tree.insert(b"key1", 42).unwrap();
     assert_eq!(tree.len(), 1);
@@ -34,7 +34,7 @@ fn test_remove_single_key() {
 
 #[test]
 fn test_remove_nonexistent_key() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     tree.insert(b"key1", 42).unwrap();
 
@@ -47,7 +47,7 @@ fn test_remove_nonexistent_key() {
 
 #[test]
 fn test_remove_updates_count() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..10u64 {
         tree.insert(&i.to_be_bytes(), i).unwrap();
@@ -70,7 +70,7 @@ fn test_remove_updates_count() {
 
 #[test]
 fn test_remove_returns_old_value() {
-    let tree: MassTree24<String> = MassTree24::new();
+    let tree: MassTree15<String> = MassTree15::new();
 
     tree.insert(b"key", "hello".to_string()).unwrap();
     tree.insert(b"key", "world".to_string()).unwrap();
@@ -81,7 +81,7 @@ fn test_remove_returns_old_value() {
 
 #[test]
 fn test_remove_short_key() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // 1-byte key
     tree.insert(&[42], 1).unwrap();
@@ -95,7 +95,7 @@ fn test_remove_short_key() {
 
 #[test]
 fn test_remove_with_suffix() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // 16-byte key (requires suffix)
     let key16 = b"0123456789ABCDEF";
@@ -108,7 +108,7 @@ fn test_remove_with_suffix() {
 
 #[test]
 fn test_remove_all_keys_empties_tree() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     let keys: Vec<_> = (0..100u64).map(u64::to_be_bytes).collect();
 
@@ -126,7 +126,7 @@ fn test_remove_all_keys_empties_tree() {
 
 #[test]
 fn test_remove_in_reverse_order() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..50u64 {
         tree.insert(&i.to_be_bytes(), i).unwrap();
@@ -143,7 +143,7 @@ fn test_remove_in_reverse_order() {
 
 #[test]
 fn test_remove_alternating() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..100u64 {
         tree.insert(&i.to_be_bytes(), i).unwrap();
@@ -164,7 +164,7 @@ fn test_remove_alternating() {
 
 #[test]
 fn test_remove_and_reinsert_same_key() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     tree.insert(b"key", 1).unwrap();
     tree.remove(b"key").unwrap();
@@ -176,7 +176,7 @@ fn test_remove_and_reinsert_same_key() {
 
 #[test]
 fn test_remove_reinsert_cycle() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let key = b"test_key";
 
     for i in 0..10u64 {
@@ -191,14 +191,14 @@ fn test_remove_reinsert_cycle() {
 
 #[test]
 fn test_remove_from_empty_tree() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let result = tree.remove(b"key");
     assert!(matches!(result, Ok(None)));
 }
 
 #[test]
 fn test_remove_empty_key() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Empty key is valid
     tree.insert(&[], 0).unwrap();
@@ -208,7 +208,7 @@ fn test_remove_empty_key() {
 
 #[test]
 fn test_remove_preserves_other_keys() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     tree.insert(b"aaa", 1).unwrap();
     tree.insert(b"bbb", 2).unwrap();

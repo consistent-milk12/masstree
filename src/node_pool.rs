@@ -32,7 +32,6 @@ use crate::inline::bits::InlineBits;
 use crate::inline::leaf15_true::LeafNode15TrueInline;
 use crate::internode::InternodeNode;
 use crate::leaf15::LeafNode15;
-use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
 
 // ============================================================================
@@ -295,13 +294,11 @@ pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
 ///
 /// - 8 cache lines (512 bytes): `InternodeNode`
 /// - 12 cache lines (768 bytes): `LeafNode15`
-/// - 16 cache lines (1024 bytes): `LeafNode24`
 pub fn warmup_pool() {
     // Size classes commonly used by Masstree nodes
     const WARMUP_SIZES: &[usize] = &[
         8 * CACHE_LINE,  // 512 bytes - InternodeNode
         12 * CACHE_LINE, // 768 bytes - LeafNode15
-        16 * CACHE_LINE, // 1024 bytes - LeafNode24
     ];
 
     for &size in WARMUP_SIZES {
@@ -343,17 +340,6 @@ pub unsafe fn reclaim_leaf15<S: ValueSlot>(ptr: *mut LeafNode15<S>, _collector: 
 
     // Return raw memory to pool
     let layout = Layout::new::<LeafNode15<S>>();
-    unsafe { pool_dealloc(ptr.cast(), layout) };
-}
-
-/// Reclaim a `LeafNode24` to the thread-local pool.
-///
-/// # Safety
-/// - `ptr` must point to a valid `LeafNode24<S>`
-#[inline]
-pub unsafe fn reclaim_leaf24<S: ValueSlot>(ptr: *mut LeafNode24<S>, _collector: &Collector) {
-    unsafe { StdPtr::drop_in_place(ptr) };
-    let layout = Layout::new::<LeafNode24<S>>();
     unsafe { pool_dealloc(ptr.cast(), layout) };
 }
 

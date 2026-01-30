@@ -4,60 +4,10 @@
 //! various key patterns designed to stress different aspects of concurrent
 //! ordered map implementations.
 //!
-//! ## Configuration
-//!
-//! - **Dataset size**: 500,000 keys
-//! - **Ops per thread**: 5,000
-//! - **Thread counts**: 1, 2, 4, 6, 8, 12
-//!
-//! ## Key Patterns Tested
-//!
-//! ### General Patterns
-//! - Sequential keys (best-case for range scans)
-//! - Reverse keys (insertion stress)
-//! - Clustered keys (hot ranges with gaps)
-//! - Sparse keys (cache miss stress)
-//!
-//! ### MassTree-Optimized Patterns
-//! - Shared prefix (trie prefix sharing)
-//! - Suffix-only differ (suffix mechanism)
-//! - Hierarchical (namespace:category:id)
-//!
-//! ### Stress Patterns
-//! - Adversarial splits (split propagation)
-//! - Interleaved ranges (cache thrashing)
-//! - B-link stress (fragmented scans)
-//!
-//! ## API Differences (Fairness Notes)
-//!
-//! - **MassTree**: Uses `scan(callback)` — function call overhead per element
-//! - **TreeIndex**: Uses `.iter().take()` — lazy iterator
-//! - **SkipMap**: Uses `.iter().take()` — lazy iterator, no epoch guard needed
-//!
-//! These are the native APIs for each implementation. The callback vs iterator
-//! difference is inherent to the designs.
-//!
-//! ## Methodology
-//!
-//! Each benchmark follows a rigorous methodology:
-//! 1. **Workload-matched warmup**: Warmup mirrors measurement scan pattern
-//! 2. **Independent randomness**: Each thread has independent RNG streams
-//! 3. **Fresh state**: All benchmarks use `.with_inputs()` for fresh tree per sample
-//! 4. **Randomized writes**: Write decisions use pre-shuffled arrays, not modulo
-//! 5. **Consistent threads**: All benchmarks use [1, 2, 4, 6, 8, 12] thread counts
-//! 6. **100 samples**: For statistical significance
-//! 7. **Proper barrier placement**: Memory barriers after thread synchronization
-//!
-//! ## Running
-//!
-//! ```bash
-//! cargo bench --bench range_masstree15
-//! cargo bench --bench range_masstree15 --features mimalloc
-//!
-//! # Specific pattern
-//! cargo bench --bench range_masstree15 -- sequential
-//! cargo bench --bench range_masstree15 -- hierarchical
-//! ```
+//! NOTE: TreeIndex doesn't provide native 'upsert' support, so for an update op,
+//! we have to do an insert+remove operation. This can either be viewed as unfair
+//! or as an API limitation of the current TreeIndex implementation based on specific use case.
+//! It should be noted that it scales best for pure insert tasks (all unique keys, no update ops).
 
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::pedantic)]

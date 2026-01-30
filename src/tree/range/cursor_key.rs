@@ -237,6 +237,29 @@ impl CursorKey {
         &self.buf[..end]
     }
 
+    /// Returns the full key bytes without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `offset + len <= MAX_KEY_LENGTH`.
+    /// This is guaranteed by `CursorKey`'s internal invariants - all methods
+    /// that modify `offset` and `len` maintain this invariant.
+    #[must_use]
+    #[inline(always)]
+    pub unsafe fn full_key_unchecked(&self) -> &[u8] {
+        let end: usize = self.offset + self.len;
+        debug_assert!(
+            end <= MAX_KEY_LENGTH,
+            "CursorKey invariant violated: offset({}) + len({}) = {} > MAX_KEY_LENGTH({})",
+            self.offset,
+            self.len,
+            end,
+            MAX_KEY_LENGTH
+        );
+        // SAFETY: Caller guarantees offset + len <= MAX_KEY_LENGTH
+        unsafe { self.buf.get_unchecked(..end) }
+    }
+
     /// Returns the suffix bytes (after current ikey).
     ///
     /// Returns an empty slice if there is no suffix (len <= 8).

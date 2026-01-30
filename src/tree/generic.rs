@@ -12,7 +12,7 @@ use crate::{
     hints::{likely, unlikely},
     key::Key,
     leaf_trait::LayerCapableLeaf,
-    leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
+    leaf15::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::{LockGuard, NodeVersion},
     prefetch::prefetch_read,
     shard_counter::ShardedCounter,

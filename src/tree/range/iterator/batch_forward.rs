@@ -103,7 +103,8 @@ where
                 self.assert_ordering(&key_copy);
             }
 
-            let key: &[u8] = self.cursor_key.full_key();
+            // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+            let key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
 
             if !self.end_bound.contains(key) {
                 self.flags.mark_exhausted();
@@ -197,6 +198,7 @@ where
                     &mut self.layer_stack,
                     self.guard,
                 )
+                .into_parts()
             } else {
                 find_next(
                     &mut self.stack,
@@ -204,6 +206,7 @@ where
                     &mut self.layer_stack,
                     self.guard,
                 )
+                .into_parts()
             };
 
             self.state = new_state;
@@ -219,7 +222,8 @@ where
                     self.assert_ordering(&key_copy);
                 }
 
-                let key = self.cursor_key.full_key();
+                // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                let key = unsafe { self.cursor_key.full_key_unchecked() };
 
                 if !self.end_bound.contains(key) {
                     self.flags.mark_exhausted();
@@ -339,7 +343,8 @@ where
         // by extracting the snapshot and emitting directly
         if self.state == ScanState::Emit {
             if let Some(snapshot) = self.snapshot.take() {
-                let key: &[u8] = self.cursor_key.full_key();
+                // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                let key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
 
                 if !self.end_bound.contains(key) {
                     self.flags.mark_exhausted();
@@ -451,7 +456,8 @@ where
             match new_state {
                 ScanState::Emit => {
                     if let Some(snap) = snapshot_ptr {
-                        let key: &[u8] = self.cursor_key.full_key();
+                        // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                        let key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
 
                         // Check end bound
                         if !self.end_bound.contains(key) {
@@ -525,7 +531,8 @@ where
         // Handle initial Emit state from initialize() if present
         if self.state == ScanState::Emit {
             if let Some(snapshot) = self.snapshot.take() {
-                let key: &[u8] = self.cursor_key.full_key();
+                // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                let key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
 
                 if !self.end_bound.contains(key) {
                     self.flags.mark_exhausted();
@@ -631,7 +638,8 @@ where
                 match new_state {
                     ScanState::Emit => {
                         if let Some(snap) = snapshot_ptr {
-                            let key: &[u8] = self.cursor_key.full_key();
+                            // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                            let key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
 
                             if !self.end_bound.contains(key) {
                                 self.flags.mark_exhausted();
@@ -756,7 +764,8 @@ where
         // Handle initial Emit state from initialize() if present
         if self.state == ScanState::Emit {
             if let Some(snapshot) = self.snapshot.take() {
-                let key: &[u8] = self.cursor_key.full_key();
+                // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                let key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
 
                 if !self.end_bound.contains(key) {
                     self.flags.mark_exhausted();
@@ -840,14 +849,16 @@ where
                     &mut self.cursor_key,
                     &mut self.layer_stack,
                     self.guard,
-                );
+                )
+                .into_parts();
 
                 self.state = new_state;
 
                 match new_state {
                     ScanState::Emit => {
                         if let Some(snap) = snapshot {
-                            let key: &[u8] = self.cursor_key.full_key();
+                            // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                            let key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
 
                             if !self.end_bound.contains(key) {
                                 self.flags.mark_exhausted();
@@ -1068,7 +1079,8 @@ where
                     &mut self.cursor_key,
                     &mut self.layer_stack,
                     self.guard,
-                );
+                )
+                .into_parts();
 
                 self.state = new_state;
 
@@ -1236,7 +1248,8 @@ where
     {
         // Handle pending emit from initialize() - first entry case
         if self.state == ScanState::Emit && self.snapshot.is_some() {
-            let key = self.cursor_key.full_key();
+            // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+            let key = unsafe { self.cursor_key.full_key_unchecked() };
 
             if !self.end_bound.contains(key) {
                 self.flags.mark_exhausted();
@@ -1303,7 +1316,8 @@ where
                 match new_state {
                     ScanState::Emit => {
                         if let Some(snap) = snapshot_ptr {
-                            let key = self.cursor_key.full_key();
+                            // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                            let key = unsafe { self.cursor_key.full_key_unchecked() };
 
                             if !self.end_bound.contains(key) {
                                 self.flags.mark_exhausted();
@@ -1434,7 +1448,8 @@ where
             if new_state == ScanState::Emit
                 && let Some(snap) = snapshot_ptr
             {
-                let key = self.cursor_key.full_key();
+                // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                let key = unsafe { self.cursor_key.full_key_unchecked() };
 
                 if !self.end_bound.contains(key) {
                     self.flags.mark_exhausted();

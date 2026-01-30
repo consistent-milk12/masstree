@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 
-use masstree::{MassTree15, MassTree15Inline, MassTree24};
+use masstree::{MassTree15, MassTree15Inline};
 
 // ============================================================================
 //  Basic Functionality Tests
@@ -23,7 +23,7 @@ use masstree::{MassTree15, MassTree15Inline, MassTree24};
 
 #[test]
 fn test_batch_insert_empty() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     let entries: Vec<(Vec<u8>, u64)> = vec![];
     let result = tree.insert_batch(entries).unwrap();
@@ -37,7 +37,7 @@ fn test_batch_insert_empty() {
 
 #[test]
 fn test_batch_insert_single_entry() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     let entries = vec![(b"hello".to_vec(), 42u64)];
     let result = tree.insert_batch(entries).unwrap();
@@ -53,7 +53,7 @@ fn test_batch_insert_single_entry() {
 
 #[test]
 fn test_batch_insert_multiple_entries() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     let entries: Vec<(Vec<u8>, u64)> = (0..100)
         .map(|i| (format!("key{i:03}").into_bytes(), i as u64))
@@ -76,7 +76,7 @@ fn test_batch_insert_multiple_entries() {
 
 #[test]
 fn test_batch_insert_with_updates() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Insert initial values
     for i in 0..50 {
@@ -114,7 +114,7 @@ fn test_batch_insert_with_updates() {
 
 #[test]
 fn test_batch_insert_all_updates() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Insert initial values
     for i in 0..100 {
@@ -143,7 +143,7 @@ fn test_batch_insert_all_updates() {
 }
 
 // ============================================================================
-//  Tree Width Tests (MassTree15 vs MassTree24)
+//  Tree Width Tests (MassTree15 vs MassTree15)
 // ============================================================================
 
 #[test]
@@ -220,7 +220,7 @@ fn test_batch_insert_inline_with_updates() {
 
 #[test]
 fn test_batch_insert_sequential_keys() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Sequential 8-byte keys (optimal locality)
     let entries: Vec<(Vec<u8>, u64)> = (0u64..10000)
@@ -235,7 +235,7 @@ fn test_batch_insert_sequential_keys() {
 
 #[test]
 fn test_batch_insert_reverse_sequential() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Reverse sequential (tests sorting)
     let entries: Vec<(Vec<u8>, u64)> = (0u64..1000)
@@ -257,7 +257,7 @@ fn test_batch_insert_reverse_sequential() {
 
 #[test]
 fn test_batch_insert_shared_prefix() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // All keys share a common prefix (tests leaf clustering)
     // Note: Long keys with shared prefixes trigger layer descent
@@ -280,7 +280,7 @@ fn test_batch_insert_shared_prefix() {
 
 #[test]
 fn test_batch_insert_random_keys() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Pseudo-random keys (poor locality)
     let entries: Vec<(Vec<u8>, u64)> = (0..1000)
@@ -299,7 +299,7 @@ fn test_batch_insert_random_keys() {
 
 #[test]
 fn test_batch_insert_short_keys() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Very short keys (1-4 bytes)
     let entries: Vec<(Vec<u8>, u64)> = (0..256).map(|i| (vec![i as u8], i as u64)).collect();
@@ -318,7 +318,7 @@ fn test_batch_insert_short_keys() {
 
 #[test]
 fn test_batch_insert_long_keys() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Keys longer than 8 bytes (require suffix handling)
     let entries: Vec<(Vec<u8>, u64)> = (0..100)
@@ -337,7 +337,7 @@ fn test_batch_insert_long_keys() {
 
 #[test]
 fn test_batch_insert_duplicate_keys_in_batch() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Same key appears multiple times in batch
     let entries: Vec<(Vec<u8>, u64)> = vec![
@@ -403,7 +403,7 @@ fn test_batch_insert_triggers_multiple_splits() {
 
 #[test]
 fn test_batch_insert_large_batch() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     let entries: Vec<(Vec<u8>, u64)> = (0..10000)
         .map(|i| (format!("key{i:08}").into_bytes(), i as u64))
@@ -429,7 +429,7 @@ fn test_batch_insert_large_batch() {
 
 #[test]
 fn test_batch_insert_concurrent_batches() {
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let num_threads = 4;
     let entries_per_thread = 250;
 
@@ -464,7 +464,7 @@ fn test_batch_insert_concurrent_batches() {
 
 #[test]
 fn test_batch_insert_mixed_with_single_inserts() {
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
 
     // Thread 1: Batch inserts
     let tree1 = Arc::clone(&tree);
@@ -498,7 +498,7 @@ fn test_batch_insert_mixed_with_single_inserts() {
 
 #[test]
 fn test_batch_insert_with_guard() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     // Multiple batches under same guard
@@ -520,7 +520,7 @@ fn test_batch_insert_with_guard() {
 
 #[test]
 fn test_batch_insert_then_read_same_guard() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     let entries: Vec<(Vec<u8>, u64)> = (0..50)
@@ -543,7 +543,7 @@ fn test_batch_insert_then_read_same_guard() {
 
 #[test]
 fn test_batch_insert_empty_key() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     let entries = vec![(vec![], 42u64)];
     let result = tree.insert_batch(entries).unwrap();
@@ -557,7 +557,7 @@ fn test_batch_insert_empty_key() {
 
 #[test]
 fn test_batch_insert_same_ikey_different_keylen() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Keys with same first 8 bytes but different lengths
     let entries: Vec<(Vec<u8>, u64)> = vec![
@@ -583,7 +583,7 @@ fn test_batch_insert_same_ikey_different_keylen() {
 
 #[test]
 fn test_batch_result_total() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Insert some initial values
     for i in 0..50 {
@@ -604,7 +604,7 @@ fn test_batch_result_total() {
 
 #[test]
 fn test_batch_result_all_succeeded() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Simple batch that should all succeed
     let entries: Vec<(Vec<u8>, u64)> = (0..10)
@@ -621,10 +621,10 @@ fn test_batch_result_all_succeeded() {
 //  Output Type Verification Tests
 // ============================================================================
 
-/// Verify that MassTree24 (Arc mode) returns Arc<V> in old_values
+/// Verify that MassTree15 (Arc mode) returns Arc<V> in old_values
 #[test]
 fn test_batch_arc_mode_old_value_type() {
-    let tree: MassTree24<String> = MassTree24::new();
+    let tree: MassTree15<String> = MassTree15::new();
 
     // Insert initial value
     tree.insert(b"key", "initial".to_string()).unwrap();

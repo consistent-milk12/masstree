@@ -6,7 +6,7 @@ use std::mem as StdMem;
 
 use super::{INITIAL_CAPACITY, InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar};
 use crate::AllocError;
-use crate::permuter24::Permuter24;
+use crate::permuter::Permuter15;
 
 // ========================================================================
 //  Basic Tests
@@ -455,7 +455,7 @@ fn test_try_assign_in_place_mixed_usage() {
 
 #[test]
 fn test_inline_new() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     assert_eq!(bag.capacity(), 256);
     assert_eq!(bag.used(), 0);
@@ -465,7 +465,7 @@ fn test_inline_new() {
 
 #[test]
 fn test_inline_default() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::default();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::default();
 
     assert_eq!(bag.count(), 0);
     assert_eq!(bag.used(), 0);
@@ -473,7 +473,7 @@ fn test_inline_default() {
 
 #[test]
 fn test_inline_try_assign_basic() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     assert!(bag.try_assign(0, b"hello"));
     assert!(bag.try_assign(5, b"world"));
@@ -487,7 +487,7 @@ fn test_inline_try_assign_basic() {
 
 #[test]
 fn test_inline_try_assign_reuse_slot() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     // Assign longer suffix first
     assert!(bag.try_assign(0, b"hello world"));
@@ -503,7 +503,7 @@ fn test_inline_try_assign_reuse_slot() {
 
 #[test]
 fn test_inline_try_assign_append() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     assert!(bag.try_assign(0, b"first"));
     assert!(bag.try_assign(1, b"second"));
@@ -515,7 +515,7 @@ fn test_inline_try_assign_append() {
 
 #[test]
 fn test_inline_try_assign_fails_when_full() {
-    let bag: InlineSuffixBag<24, 32> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 32> = InlineSuffixBag::new();
 
     // Fill most of the capacity
     assert!(bag.try_assign(0, b"12345678901234567890")); // 20 bytes
@@ -532,7 +532,7 @@ fn test_inline_try_assign_fails_when_full() {
 
 #[test]
 fn test_inline_clear() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     assert!(bag.has_suffix(0));
@@ -547,7 +547,7 @@ fn test_inline_clear() {
 
 #[test]
 fn test_inline_clear_all() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     bag.try_assign(1, b"world");
@@ -562,7 +562,7 @@ fn test_inline_clear_all() {
 
 #[test]
 fn test_inline_get_or_empty() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
 
@@ -572,7 +572,7 @@ fn test_inline_get_or_empty() {
 
 #[test]
 fn test_inline_suffix_equals() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
 
@@ -583,7 +583,7 @@ fn test_inline_suffix_equals() {
 
 #[test]
 fn test_inline_suffix_compare() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
 
@@ -594,7 +594,7 @@ fn test_inline_suffix_compare() {
 
 #[test]
 fn test_inline_drain_to_external() {
-    let bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 64> = InlineSuffixBag::new();
 
     // Fill inline bag
     bag.try_assign(0, b"suffix0");
@@ -602,7 +602,7 @@ fn test_inline_drain_to_external() {
     bag.try_assign(2, b"suffix2");
 
     // Create a permutation with 3 sorted entries (slots 0, 1, 2)
-    let perm = Permuter24::make_sorted(3);
+    let perm = Permuter15::make_sorted(3);
 
     // Drain to external with a new suffix for slot 3
     #[expect(
@@ -628,13 +628,13 @@ fn test_inline_drain_to_external() {
 
 #[test]
 fn test_inline_drain_replaces_slot() {
-    let bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 64> = InlineSuffixBag::new();
 
     bag.try_assign(0, b"old_suffix");
     bag.try_assign(1, b"keep_this");
 
     // Create a permutation with 2 sorted entries (slots 0, 1)
-    let perm = Permuter24::make_sorted(2);
+    let perm = Permuter15::make_sorted(2);
 
     // Replace slot 0's suffix during drain
     #[expect(
@@ -652,7 +652,7 @@ fn test_inline_drain_replaces_slot() {
 
 #[test]
 fn test_inline_drain_to_external_init() {
-    let bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 64> = InlineSuffixBag::new();
 
     // Simulate split initialization: slots 0, 1, 2 filled sequentially
     bag.try_assign(0, b"suffix_0");
@@ -678,7 +678,7 @@ fn test_inline_drain_to_external_init() {
 
 #[test]
 fn test_inline_drain_to_external_init_replaces_slot() {
-    let bag: InlineSuffixBag<24, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 64> = InlineSuffixBag::new();
 
     // Simulate: slots 0, 1 filled, now replacing slot 1
     bag.try_assign(0, b"keep_this");
@@ -698,7 +698,7 @@ fn test_inline_drain_to_external_init_replaces_slot() {
 
 #[test]
 fn test_inline_clone() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
     bag.try_assign(0, b"hello");
     bag.try_assign(5, b"world");
 
@@ -712,7 +712,7 @@ fn test_inline_clone() {
 
 #[test]
 fn test_inline_empty_suffix() {
-    let bag: InlineSuffixBag<24, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
 
     // Empty suffix should work
     assert!(bag.try_assign(0, b""));
@@ -738,8 +738,8 @@ fn test_inline_various_widths() {
 #[test]
 fn test_inline_size_calculation() {
     // Verify the size calculation from the doc comment
-    // InlineSuffixBag<24, 256> - 24 * 4 + 2 + 1 + 256 + 1 (padding) = 356 bytes
-    assert_eq!(StdMem::size_of::<InlineSuffixBag<24, 256>>(), 356);
+    // InlineSuffixBag<15, 256> - 15 * 4 + 2 + 1 + 256 + 1 (padding) = 320 bytes
+    assert_eq!(StdMem::size_of::<InlineSuffixBag<15, 256>>(), 320);
 
     // InlineSuffixBag<15, 128> - 15 * 4 + 2 + 1 + 128 + 1 (padding) = 192 bytes
     assert_eq!(StdMem::size_of::<InlineSuffixBag<15, 128>>(), 192);

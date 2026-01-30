@@ -1,6 +1,6 @@
 use super::{TreeLeafNode, TreePermutation};
-use crate::leaf24::LeafNode24;
-use crate::permuter24::Permuter24;
+use crate::leaf15::LeafNode15;
+use crate::permuter::Permuter15;
 use crate::value::LeafValue;
 
 // ========================================================================
@@ -44,23 +44,23 @@ fn test_permutation_roundtrip<P: TreePermutation>() {
 }
 
 #[test]
-fn test_permuter24_trait_empty() {
-    test_permutation_empty::<Permuter24>();
+fn test_permuter15_trait_empty() {
+    test_permutation_empty::<Permuter15>();
 }
 
 #[test]
-fn test_permuter24_trait_insert() {
-    test_permutation_insert::<Permuter24>();
+fn test_permuter15_trait_insert() {
+    test_permutation_insert::<Permuter15>();
 }
 
 #[test]
-fn test_permuter24_trait_insert_immutable() {
-    test_permutation_insert_immutable::<Permuter24>();
+fn test_permuter15_trait_insert_immutable() {
+    test_permutation_insert_immutable::<Permuter15>();
 }
 
 #[test]
-fn test_permuter24_trait_roundtrip() {
-    test_permutation_roundtrip::<Permuter24>();
+fn test_permuter15_trait_roundtrip() {
+    test_permutation_roundtrip::<Permuter15>();
 }
 
 // ========================================================================
@@ -145,33 +145,33 @@ fn test_leaf_version<L: TreeLeafNode<LeafValue<u64>>>() {
 }
 
 #[test]
-fn test_leafnode24_trait_new() {
-    test_leaf_new::<LeafNode24<LeafValue<u64>>>();
+fn test_leafnode15_trait_new() {
+    test_leaf_new::<LeafNode15<LeafValue<u64>>>();
 }
 
 #[test]
-fn test_leafnode24_trait_permutation() {
-    test_leaf_permutation::<LeafNode24<LeafValue<u64>>>();
+fn test_leafnode15_trait_permutation() {
+    test_leaf_permutation::<LeafNode15<LeafValue<u64>>>();
 }
 
 #[test]
-fn test_leafnode24_trait_ikey() {
-    test_leaf_ikey::<LeafNode24<LeafValue<u64>>>();
+fn test_leafnode15_trait_ikey() {
+    test_leaf_ikey::<LeafNode15<LeafValue<u64>>>();
 }
 
 #[test]
-fn test_leafnode24_trait_keylenx() {
-    test_leaf_keylenx::<LeafNode24<LeafValue<u64>>>();
+fn test_leafnode15_trait_keylenx() {
+    test_leaf_keylenx::<LeafNode15<LeafValue<u64>>>();
 }
 
 #[test]
-fn test_leafnode24_trait_linking() {
-    test_leaf_linking::<LeafNode24<LeafValue<u64>>>();
+fn test_leafnode15_trait_linking() {
+    test_leaf_linking::<LeafNode15<LeafValue<u64>>>();
 }
 
 #[test]
-fn test_leafnode24_trait_version() {
-    test_leaf_version::<LeafNode24<LeafValue<u64>>>();
+fn test_leafnode15_trait_version() {
+    test_leaf_version::<LeafNode15<LeafValue<u64>>>();
 }
 
 // ========================================================================
@@ -182,14 +182,14 @@ fn test_leafnode24_trait_version() {
 fn test_width_constants() {
     // Permutation WIDTH matches leaf WIDTH
     assert_eq!(
-        <Permuter24 as TreePermutation>::WIDTH,
-        <LeafNode24<LeafValue<u64>> as TreeLeafNode<LeafValue<u64>>>::WIDTH
+        <Permuter15 as TreePermutation>::WIDTH,
+        <LeafNode15<LeafValue<u64>> as TreeLeafNode<LeafValue<u64>>>::WIDTH
     );
 
     // Verify actual values
     assert_eq!(
-        <LeafNode24<LeafValue<u64>> as TreeLeafNode<LeafValue<u64>>>::WIDTH,
-        24
+        <LeafNode15<LeafValue<u64>> as TreeLeafNode<LeafValue<u64>>>::WIDTH,
+        15
     );
 }
 
@@ -221,14 +221,14 @@ fn generic_leaf_setup<L: TreeLeafNode<LeafValue<u64>>>(ikey: u64) -> Box<L> {
 }
 
 #[test]
-fn test_generic_perm_fill_24() {
-    let perm: Permuter24 = generic_perm_fill(10);
+fn test_generic_perm_fill_15() {
+    let perm: Permuter15 = generic_perm_fill(10);
     assert_eq!(perm.size(), 10);
 }
 
 #[test]
-fn test_generic_leaf_setup_24() {
-    let leaf: Box<LeafNode24<LeafValue<u64>>> = generic_leaf_setup(42);
+fn test_generic_leaf_setup_15() {
+    let leaf: Box<LeafNode15<LeafValue<u64>>> = generic_leaf_setup(42);
     assert_eq!(leaf.ikey(0), 42);
     assert_eq!(leaf.size(), 1);
 }

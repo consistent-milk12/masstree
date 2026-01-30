@@ -18,7 +18,7 @@ use seize::LocalGuard;
 
 use crate::key::IKEY_SIZE;
 use crate::leaf_trait::{TreeLeafNode, TreePermutation};
-use crate::leaf24::{KSUF_KEYLENX, LAYER_KEYLENX};
+use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::slot::ValueSlot;
 
 use super::cursor_key::CursorKey;

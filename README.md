@@ -13,14 +13,13 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 - High-throughput value-only scans with `scan_values` (skips key materialization)
 - Memory reclamation via hyaline scheme (`seize` crate)
 - Lazy leaf coalescing for deleted entries
-- Two node widths: `MassTree` (WIDTH=24) and `MassTree15` (WIDTH=15)
 - Extremely high-performance inline variant `MassTree15Inline`, this is only usable on
 Copy types.
 
 ## Status
 
 **v0.6.8** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 7/8 benchmarks and
-Rust alternatives on 11/12 workloads. Passes Miri with strict-provenance flag. Concurrent data structures
+Rust alternatives on 12/12 workloads (12T SMT). Passes Miri with strict-provenance flag. Concurrent data structures
 require extensive stress testing, the test suite is comprehensive (998 tests total) but edge cases may remain.
 
 | Feature | Status |
@@ -99,35 +98,40 @@ insert-heavy workloads where TreeIndex performs better.
 
 ## vs Rust Concurrent Maps (12T SMT)
 
-> Source: `runs/run151_read_write_smt.txt`
+> Source: `runs/run158_read_write.txt`
 > **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
 
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **50.29** | 21.11 | 14.35 | 17.60 | **2.38x** |
-| 02_zipfian | **47.95** | 18.60 | 15.34 | 3.31 | **2.58x** |
-| 03_shared_prefix | **26.26** | 14.75 | 13.02 | 16.60 | **1.58x** |
-| 04_high_contention | **77.58** | 17.30 | 18.00 | 1.95 | **4.31x** |
-| 05_large_dataset | **21.06** | 12.61 | 10.45 | 11.31 | **1.67x** |
-| 06_single_hot_key | **14.33** | 4.35 | 7.15 | 2.49 | **2.01x** |
-| 07_mixed_50_50 | **37.37** | 9.42 | 7.20 | 17.17 | **2.18x** |
-| 08_8byte_keys | **60.74** | 32.25 | 17.37 | 21.03 | **1.88x** |
-| 09_pure_read | **56.60** | 29.95 | 21.39 | 19.02 | **1.89x** |
-| 10_remove_heavy | **19.83** | 18.00 | 8.27 | 4.52 | **1.10x** |
-| 13_insert_only_fair | **30.94** | 26.01 | 17.10 | 6.21 | **1.19x** |
-| 14_pure_insert | 9.79 | **13.09** | 10.77 | 2.44 | 0.75x |
+| 01_uniform | **49.85** | 20.64 | 14.14 | 17.73 | **2.42x** |
+| 02_zipfian | **43.39** | 18.38 | 14.98 | 3.03 | **2.36x** |
+| 03_shared_prefix | **24.86** | 15.17 | 12.98 | 16.37 | **1.52x** |
+| 04_high_contention | **76.28** | 16.44 | 17.85 | 1.97 | **4.27x** |
+| 05_large_dataset | **20.79** | 12.44 | 10.10 | 11.22 | **1.67x** |
+| 06_single_hot_key | **10.66** | 4.29 | 6.51 | 2.39 | **1.64x** |
+| 07_mixed_50_50 | **36.60** | 9.89 | 7.20 | 16.89 | **2.17x** |
+| 08_8byte_keys | **59.86** | 32.17 | 17.39 | 20.90 | **1.86x** |
+| 09_pure_read | **56.25** | 29.26 | 20.64 | 19.09 | **1.92x** |
+| 10_remove_heavy | **21.52** | 18.01 | 8.22 | 4.54 | **1.19x** |
+| 13_insert_only_fair | **37.25** | 24.25 | 16.72 | 6.12 | **1.54x** |
+| 14_pure_insert | **14.33** | 13.67 | 10.52 | 2.50 | **1.05x** |
 
-**Single-thread latency (11):** masstree15 achieves **830 µs** median read latency vs tree_index 1.36 ms (**1.64x faster**).
+**Wins 12/12.** Deferred suffix retirement and pre-allocated suffix buffers improved insert
+throughput by 20–46%, flipping `14_pure_insert` from a loss (0.75x in run151) to a win.
 
-**Build time (12):** masstree15 builds at **8.08 Mitem/s** vs skipmap 6.31, tree_index 4.33, indexset 1.86 (**1.28–4.3x faster**).
+**Single-thread latency (11):** masstree15 achieves **829 µs** median read latency vs tree_index 1.39 ms (**1.67x faster**).
+
+**Build time (12):** masstree15 builds at **8.14 Mitem/s** vs skipmap 6.29, tree_index 4.33, indexset 1.81 (**1.29–4.5x faster**).
 
 SMT scaling highlights: High-contention workloads benefit most from hyperthreading, with
-masstree15 reaching **77.58 Mitem/s** (4.31x vs alternatives). Remove-heavy and insert-only
-workloads show diminishing SMT returns as write contention increases.
+masstree15 reaching **76.28 Mitem/s** (4.27x vs alternatives). Insert-heavy workloads
+(`13_insert_only_fair`, `14_pure_insert`) showed the largest gains from moving heap allocation
+and EBR retirement outside the leaf lock critical section.
 
-Note: `06_single_hot_key` masstree15 peaks at 4T (15.05 Mitem/s) and plateaus through 12T
-(14.33 Mitem/s). With only one key contended, additional threads increase optimistic read
-retries without adding useful parallelism.
+Note: `06_single_hot_key` regressed from 14.33 to 10.66 Mitem/s (-26%) compared to run151.
+With only one key contended across 12 threads, the increased leaf size (896→1152 bytes from
+inline suffix capacity doubling) likely worsens cache line sharing. masstree15 still leads
+all alternatives (next best: skipmap at 6.51).
 
 ## High-Impact Workloads (12T SMT)
 
@@ -159,30 +163,56 @@ Key insights:
 - **Prefix queries:** Native `scan_prefix()` vs range simulation (29x faster than tree_index)
 - **Deep trie:** Shared prefix chunks force multi-layer descent; narrowest margin (1.32x)
 
-## Range Scans (6T Physical, Rigorous)
+## Range Scans (6T Physical)
 
-> Source: `runs/run149_range_scan_correctness.txt` (inline-optimized)
+> Source: `runs/run161_range_scan.txt`
 > **Config:** Physical cores only, 100 samples, performance governor
 
-| Benchmark | masstree15_inline | tree_index | MT vs TI | vs run139 |
-|-----------|-------------------|------------|----------|-----------|
-| 01_sequential_full_scan | **30.73** | 15.34 | **2.00x** | -5% |
-| 02_reverse_scan | **23.35** | 15.17 | **1.54x** | -1% |
-| 03_clustered_scan | **30.84** | 15.16 | **2.03x** | -2% |
-| 04_sparse_scan | **30.83** | 15.36 | **2.01x** | -4% |
-| 05_shared_prefix_scan | **26.75** | 15.40 | **1.74x** | +1% |
-| 06_suffix_differ_scan | **23.69** | 16.44 | **1.44x** | +49% |
-| 07_hierarchical_scan | **28.93** | 16.67 | **1.74x** | +66% |
-| 08_adversarial_splits | **30.23** | 9.23 | **3.28x** | +61% |
-| 09_interleaved_scan | **26.98** | 15.07 | **1.79x** | +66% |
-| 10_blink_stress_scan | **29.94** | 15.14 | **1.98x** | +44% |
-| 11_random_keys_scan | **30.53** | 15.35 | **1.99x** | +46% |
-| 12_long_keys_64b_scan | **29.78** | 16.45 | **1.81x** | +55% |
-| 15_full_scan_aggregate | **1.93 G** | 1.10 G | **1.75x** | +13% |
-| 16_insert_heavy | **22.89** | 16.32 | **1.40x** | +1% |
-| 17_hot_spot | **10.26** | 3.05 | **3.37x** | n/a |
+| Benchmark | masstree15_inline | tree_index | MT vs TI |
+|-----------|-------------------|------------|----------|
+| 01_sequential_full_scan | **28.42** | 13.47 | **2.11x** |
+| 02_reverse_scan | **27.09** | 13.59 | **1.99x** |
+| 03_clustered_scan | **29.54** | 13.40 | **2.20x** |
+| 04_sparse_scan | **29.43** | 13.39 | **2.20x** |
+| 05_shared_prefix_scan | **25.49** | 15.17 | **1.68x** |
+| 06_suffix_differ_scan | **22.21** | 15.66 | **1.42x** |
+| 07_hierarchical_scan | **27.12** | 15.62 | **1.74x** |
+| 08_adversarial_splits | **28.71** | 8.40 | **3.42x** |
+| 09_interleaved_scan | **25.42** | 13.55 | **1.88x** |
+| 10_blink_stress_scan | **29.31** | 13.58 | **2.16x** |
+| 11_random_keys_scan | **29.44** | 13.54 | **2.17x** |
+| 12_long_keys_64b_scan | **27.68** | 15.63 | **1.77x** |
+| 15_full_scan_aggregate | **178.1** | 83.36 | **2.14x** |
+| 16_insert_heavy | **26.93** | 19.02 | **1.42x** |
+| 17_hot_spot | **9.51** | 2.99 | **3.18x** |
 
-Note: `17_hot_spot` is sensitive to update semantics. MassTree overwrites existing keys on `insert()`. For `scc::TreeIndex`, the benchmark now emulates overwrite updates via `remove()+insert()` to match semantics (see `benches/range_masstree15_inline.rs`). The `runs/run149_range_scan_correctness.txt` hot-spot result predates this semantic fix.
+**Wins 15/15** vs TreeIndex with margins from 1.42x to 3.42x.
+
+## Range Scans (12T SMT)
+
+> Source: `runs/run161_range_scan.txt`
+> **Config:** 12 threads on 6 physical cores (SMT), 100 samples
+
+| Benchmark | masstree15_inline | tree_index | MT vs TI |
+|-----------|-------------------|------------|----------|
+| 01_sequential_full_scan | **30.38** | 15.27 | **1.99x** |
+| 02_reverse_scan | **28.51** | 15.14 | **1.88x** |
+| 03_clustered_scan | **30.50** | 15.18 | **2.01x** |
+| 04_sparse_scan | **30.37** | 15.11 | **2.01x** |
+| 05_shared_prefix_scan | **26.12** | 21.48 | **1.22x** |
+| 06_suffix_differ_scan | **24.00** | 21.08 | **1.14x** |
+| 07_hierarchical_scan | **27.98** | 21.17 | **1.32x** |
+| 08_adversarial_splits | **29.23** | 10.04 | **2.91x** |
+| 09_interleaved_scan | **26.24** | 15.30 | **1.72x** |
+| 10_blink_stress_scan | **30.14** | 15.23 | **1.98x** |
+| 11_random_keys_scan | **29.70** | 15.17 | **1.96x** |
+| 12_long_keys_64b_scan | **28.25** | 21.33 | **1.32x** |
+| 15_full_scan_aggregate | **176.8** | 113.5 | **1.56x** |
+| 16_insert_heavy | **30.06** | 25.26 | **1.19x** |
+| 17_hot_spot | **9.69** | 4.04 | **2.40x** |
+
+**Wins 15/15** vs TreeIndex. TreeIndex scales better on SMT for shared-prefix and suffix-differ
+workloads but Masstree maintains leadership with margins from 1.14x to 2.91x.
 
 ## Install
 
@@ -283,33 +313,31 @@ for entry in tree.iter(&guard) {
 **Consider alternatives for:**
 
 - Unordered point lookups → `dashmap`
-- Pure insert-only workloads → `scc::TreeIndex`
 - Integer keys only → `congee` (ART-based)
 - Read-heavy with rare writes → `RwLock<BTreeMap>`
 
-## Variant Selection
+## Type Aliases
 
-Two variants are provided with different performance characteristics:
+| Type | Storage | Value Requirement |
+|------|---------|-------------------|
+| `MassTree<V>` | Inline (default) | `V: InlineBits` (Copy + fits in 64 bits) |
+| `MassTree15<V>` | Arc-based | `V: Send + Sync + 'static` |
+| `MassTree15Inline<V>` | True inline | `V: InlineBits` |
 
-| Variant | Best For |
-|---------|----------|
-| `MassTree15` | Range scans, writes, shared-prefix keys, contention |
-| `MassTree` (WIDTH=24) | Random-access reads, single-threaded point ops |
-
-`MassTree15` tends to perform better in our benchmarks due to cheaper u64 atomics and better cache utilization. Consider it for most workloads unless you have uniform random-access patterns.
+`MassTree<V>` is the recommended default for `Copy` types like `u64`, `i32`, `f64`, pointers, etc.
+Use `MassTree15<V>` explicitly when you need to store non-Copy types like `String`.
 
 ```rust
-use masstree::{MassTree, MassTree15, MassTree24Inline, MassTree15Inline};
+use masstree::{MassTree, MassTree15, MassTree15Inline};
 
-// Default: WIDTH=24, Arc-based storage
+// Default: inline storage for Copy types (recommended)
 let tree: MassTree<u64> = MassTree::new();
 
-// WIDTH=15, Arc-based storage (recommended for most workloads)
-let tree15: MassTree15<u64> = MassTree15::new();
+// Arc-based storage for non-Copy types
+let tree_arc: MassTree15<String> = MassTree15::new();
 
-// Inline storage for Copy types (no Arc overhead)
-let inline: MassTree24Inline<u64> = MassTree24Inline::new();
-let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
+// Explicit inline storage (same as MassTree)
+let inline: MassTree15Inline<u64> = MassTree15Inline::new();
 ```
 
 ## How It Works

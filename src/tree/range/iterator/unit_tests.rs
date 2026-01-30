@@ -137,7 +137,7 @@ fn test_rev_single_element() {
     let items: Vec<_> = tree.iter(&guard).rev().collect();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].key(), b"only");
-    assert_eq!(**items[0].value(), 42);
+    assert_eq!(*items[0].value(), 42);
 }
 
 #[test]

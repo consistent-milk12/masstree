@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.6.9"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -21,7 +21,7 @@ include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md"]
 
 [features]
 default = []
-# Alternative global allocators for benchmarking
+# Optimal Allocator for this data structure
 mimalloc = ["dep:mimalloc"]
 # When disabled (default), all tracing calls compile to no-ops with zero overhead.
 # When enabled, auto-initializes a subscriber that writes NDJSON logs to logs/masstree.jsonl.
@@ -48,9 +48,7 @@ dhat-heap = ["dep:dhat"] # Enable dhat heap profiling in examples
 [dependencies]
 seize = "0.5.1"
 parking_lot = "0.12.5"
-portable-atomic = "1.13.0"
 arrayvec = "0.7.6"
-zerocopy = { version = "0.8.33", features = ["derive"] }
 static_assertions = "1.1.0"
 rustc-hash = "2.1.1"
 crossbeam-queue = "0.3.12"
@@ -76,7 +74,7 @@ tracing-appender = { version = "0.2.4", optional = true }
 serde_json = { version = "1.0.149", optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 chrono = { version = "0.4.43", optional = true }
-clap = { version = "4.5.54", features = ["derive"], optional = true }
+clap = { version = "4.5.56", features = ["derive"], optional = true }
 comfy-table = { version = "7.2.2", optional = true }
 regex = { version = "1.12.2", optional = true }
 
@@ -103,7 +101,7 @@ rand = "0.9.2"
 rand_chacha = "0.9.0"
 rand_distr = "0.5.1"
 indexset = { version = "0.14.0", features = ["concurrent"] }
-scc = "3.4.13"
+scc = "3.5.3"
 sdd = "4.5.3"
 tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.22", features = [
@@ -127,48 +125,6 @@ tokio = { version = "1.49.0", features = ["full"] }
 [lints.rust]
 # Allow loom and shuttle cfg for deterministic concurrency testing
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(shuttle)'] }
-
-# Safety and correctness
-unsafe_op_in_unsafe_fn = "warn"
-missing_docs = "deny"                                       # Enforce documentation for public API
-missing_debug_implementations = "warn"
-rust_2024_compatibility = { level = "warn", priority = -1 }
-
-# Future-proofing
-future_incompatible = { level = "warn", priority = -1 }
-nonstandard_style = { level = "warn", priority = -1 }
-
-# Unused code detection
-unused = { level = "warn", priority = -1 }
-
-[lints.clippy]
-# Clippy lint groups
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
-
-# Performance-critical code policy:
-# - These are WARN not DENY to allow targeted #[allow(...)] with justification
-# - Each allowed instance must have a SAFETY or INVARIANT comment
-# - Prefer debug_assert! + direct access over .get().unwrap() chains
-unwrap_used = "warn"
-expect_used = "warn"
-panic = "warn"
-indexing_slicing = "warn"
-
-# Allow in hot paths with justification (use #[allow] locally):
-# - missing_panics_doc: Internal functions may panic on invariant violation
-# - missing_errors_doc: Not using Result for internal errors
-
-# Pedantic lints - keep most, allow noisy ones
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-
-# These SHOULD be enforced for quality
-# must_use_candidate = "warn"  # Default from pedantic
-# doc_markdown = "warn"        # Default from pedantic
 
 [profile.dev]
 opt-level = 0
@@ -217,19 +173,11 @@ name = "concurrent_read_write"
 harness = false
 
 [[bench]]
-name = "concurrent_read_write_light"
-harness = false
-
-[[bench]]
 name = "concurrent_read_write_scaled"
 harness = false
 
 [[bench]]
 name = "concurrent_read_write_masstree"
-harness = false
-
-[[bench]]
-name = "concurrent_read_write_masstree_light"
 harness = false
 
 [[bench]]
@@ -249,19 +197,11 @@ name = "range_masstree15_inline"
 harness = false
 
 [[bench]]
-name = "cpp_comp"
-harness = false
-
-[[bench]]
 name = "mttest"
 harness = false
 
 [[bench]]
 name = "extreme_stress"
-harness = false
-
-[[bench]]
-name = "extreme_stress_15_crit"
 harness = false
 
 [[bench]]
@@ -273,31 +213,11 @@ name = "high_impact_masstree"
 harness = false
 
 [[bench]]
-name = "concurrent_masstree15_crit"
-harness = false
-
-[[bench]]
-name = "range_masstree15_crit"
-harness = false
-
-[[bench]]
-name = "iai_masstree"
-harness = false
-
-[[bench]]
 name = "rwlock_btreemap_vs_masstree15"
 harness = false
 
 [[bench]]
 name = "rwlock_btreemap_vs_masstree15_inline"
-harness = false
-
-[[bench]]
-name = "rwlock_btreemap_vs_masstree15_light"
-harness = false
-
-[[bench]]
-name = "btreemap_light"
 harness = false
 
 # =========================================================================

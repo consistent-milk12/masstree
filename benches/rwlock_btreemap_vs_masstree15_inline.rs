@@ -6,7 +6,7 @@
 //! This variant uses `MassTree15Inline<u64>` which stores values directly inline
 //! (no Arc heap allocation), providing a fairer comparison against BTreeMap.
 //!
-//! Notes:
+//! NOTE:
 //! - This file benchmarks *single-operation* patterns (`get`/`insert`/range scan).
 //! - `RwLock<BTreeMap>` can provide larger atomic critical sections (multi-op
 //!   invariants) that a concurrent map does not replicate without an outer lock.

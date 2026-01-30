@@ -26,14 +26,14 @@
 
 mod common;
 
-use masstree::MassTree24;
+use masstree::MassTree15;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 /// Verify all keys are findable, panic with details if any missing
-fn verify_all_keys<F>(tree: &MassTree24<u64>, key_gen: F, count: usize, test_name: &str)
+fn verify_all_keys<F>(tree: &MassTree15<u64>, key_gen: F, count: usize, test_name: &str)
 where
     F: Fn(usize) -> Vec<u8>,
 {
@@ -74,7 +74,7 @@ fn multilayer_16byte_keys_4_threads() {
     const KEYS_PER_THREAD: usize = 500;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -143,7 +143,7 @@ fn multilayer_24byte_keys_4_threads() {
     const KEYS_PER_THREAD: usize = 500;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -210,7 +210,7 @@ fn multilayer_32byte_keys_4_threads() {
     const KEYS_PER_THREAD: usize = 500;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -277,7 +277,7 @@ fn multilayer_mixed_lengths() {
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 400;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -333,7 +333,7 @@ fn high_thread_8_threads_8byte_keys() {
     const KEYS_PER_THREAD: usize = 500;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -391,7 +391,7 @@ fn high_thread_16_threads_8byte_keys() {
     const KEYS_PER_THREAD: usize = 250;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -438,7 +438,7 @@ fn high_thread_8_threads_24byte_keys() {
     const KEYS_PER_THREAD: usize = 400;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -489,7 +489,7 @@ fn large_volume_10k_keys_4_threads() {
     const KEYS_PER_THREAD: usize = 2500;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -536,7 +536,7 @@ fn large_volume_20k_keys_8_threads() {
     const KEYS_PER_THREAD: usize = 2500;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -587,7 +587,7 @@ fn pattern_sequential_keys_high_splits() {
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -636,7 +636,7 @@ fn pattern_reverse_sequential() {
     const KEYS_PER_THREAD: usize = 500;
     const MAX_KEY: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -684,7 +684,7 @@ fn pattern_pseudorandom_keys() {
     const NUM_THREADS: usize = 4;
     const KEYS_PER_THREAD: usize = 500;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
     let inserted_keys = Arc::new(std::sync::Mutex::new(HashSet::new()));
 
@@ -767,7 +767,7 @@ fn pattern_shared_prefix() {
     const KEYS_PER_THREAD: usize = 500;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -821,7 +821,7 @@ fn mixed_heavy_reads_during_writes() {
     const KEYS_PER_WRITER: usize = 500;
     const TOTAL_KEYS: usize = NUM_WRITERS * KEYS_PER_WRITER;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let write_complete = Arc::new(AtomicUsize::new(0));
     let read_success = Arc::new(AtomicUsize::new(0));
 
@@ -909,7 +909,7 @@ fn mixed_continuous_readwrite() {
     const NUM_THREADS: usize = 8;
     const OPS_PER_THREAD: usize = 500;
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)
@@ -965,7 +965,7 @@ fn repeated_10_runs_4_threads_8byte() {
     common::init_tracing();
 
     for run in 0..10 {
-        let tree = Arc::new(MassTree24::<u64>::new());
+        let tree = Arc::new(MassTree15::<u64>::new());
         let verify_failures = Arc::new(AtomicUsize::new(0));
 
         let handles: Vec<_> = (0..4)
@@ -1009,7 +1009,7 @@ fn repeated_10_runs_4_threads_24byte() {
     common::init_tracing();
 
     for run in 0..10 {
-        let tree = Arc::new(MassTree24::<u64>::new());
+        let tree = Arc::new(MassTree15::<u64>::new());
         let verify_failures = Arc::new(AtomicUsize::new(0));
 
         let handles: Vec<_> = (0..4)
@@ -1053,7 +1053,7 @@ fn repeated_20_runs_8_threads_mixed() {
     common::init_tracing();
 
     for run in 0..20 {
-        let tree = Arc::new(MassTree24::<u64>::new());
+        let tree = Arc::new(MassTree15::<u64>::new());
         let verify_failures = Arc::new(AtomicUsize::new(0));
 
         let handles: Vec<_> = (0..8)
@@ -1109,7 +1109,7 @@ fn extreme_100_runs_stress() {
     common::init_tracing();
 
     for run in 0..100 {
-        let tree = Arc::new(MassTree24::<u64>::new());
+        let tree = Arc::new(MassTree15::<u64>::new());
         let verify_failures = Arc::new(AtomicUsize::new(0));
 
         let handles: Vec<_> = (0..8)
@@ -1163,7 +1163,7 @@ fn extreme_100k_keys() {
     const KEYS_PER_THREAD: usize = 6250;
     const TOTAL_KEYS: usize = NUM_THREADS * KEYS_PER_THREAD; // 100,000
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..NUM_THREADS)

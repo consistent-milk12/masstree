@@ -1,60 +1,4 @@
 //! Shared helpers for benchmarks.
-//!
-//! Goals:
-//! - Avoid per-op heap allocation for keys (use fixed-size arrays where possible).
-//! - Keep key generation deterministic across benches.
-//!
-//! ## Key Generation Functions
-//!
-//! ### General Patterns
-//!
-//! | Function | Pattern | Use Case |
-//! |----------|---------|----------|
-//! | `keys` | Deterministic, varied chunks | General benchmarks |
-//! | `keys_sequential` | Sorted ascending | Sequential scan, best-case B-tree |
-//! | `keys_reverse` | Sorted descending | Reverse scan, insertion stress |
-//! | `keys_clustered` | Hot ranges with gaps | Real-world access patterns |
-//! | `keys_sparse` | Wide gaps between keys | Cache miss stress |
-//!
-//! ### MassTree-Optimized Patterns (where [`MassTree`] should excel)
-//!
-//! | Function | Pattern | Why `MassTree` Wins |
-//! |----------|---------|-------------------|
-//! | `keys_shared_prefix` | First 8B from small bucket space | Smaller buckets = deeper trie stress |
-//! | `keys_shared_prefix_chunks` | Multiple 8B chunks from buckets | Multi-layer prefix sharing |
-//! | `keys_suffix_only_differ` | Only last chunk differs | Suffix mechanism optimized |
-//! | `keys_hierarchical` | Nested namespace keys | Trie naturally handles hierarchy |
-//! | `keys_variable_length` | Mix of 8B, 16B, 24B, 32B | `MassTree` handles any length |
-//! | `string_keys_urls` | URL-like strings | Long keys with shared domains |
-//! | `string_keys_paths` | File path strings | Hierarchical shared prefixes |
-//!
-//! ### Stress Patterns (worst-case scenarios)
-//!
-//! | Function | Pattern | Stress Target |
-//! |----------|---------|---------------|
-//! | `keys_adversarial_splits` | Forces maximum splits | Split propagation |
-//! | `keys_interleaved_ranges` | Alternating hot/cold | Cache thrashing |
-//! | `keys_random_length_simulation` | Unpredictable sizes | Layer transition overhead |
-//! | `keys_blink_stress` | Bit-reversal order | B-link pointer following |
-//!
-//! ### Index/Sampling Helpers
-//!
-//! | Function | Distribution | Use Case |
-//! |----------|--------------|----------|
-//! | `zipfian_indices` | True Zipfian (via `rand_distr`) | Hot-key workloads, configurable skew |
-//! | `skewed_indices` | Power-law approximation | Fast alternative to Zipfian |
-//! | `uniform_indices` | Uniform random | Baseline random access |
-//! | `shuffle` | Fisher-Yates | Randomize slice order |
-//! | `shuffled_indices` | Shuffled sequential | Random lookup order |
-//! | `random_start_indices` | Uniform with margin | Range scan start positions |
-//! | `rw1_keys` | Random i32 pairs | C++ Masstree compatibility |
-//!
-//! ### Scan Helpers
-//!
-//! | Function | Purpose |
-//! |----------|---------|
-//! | `scan_ranges` | Generate overlapping/non-overlapping range pairs |
-//! | `scan_prefixes` | Generate prefix list for prefix scan benchmarks |
 
 #![allow(dead_code, unfulfilled_lint_expectations, missing_docs)]
 #![expect(
@@ -864,19 +808,6 @@ pub fn scan_prefixes(prefix_buckets: u64) -> Vec<Vec<u8>> {
 pub const DEFAULT_WARMUP_ITERS: usize = 1000;
 
 /// Perform explicit warmup by running a closure multiple times.
-///
-/// This should be called before the measured benchmark loop to ensure:
-/// - CPU instruction caches are warm
-/// - Branch predictors are trained
-/// - Memory pages are faulted in
-/// - CPU frequency has ramped up
-///
-/// # Example
-/// ```ignore
-/// warmup(|| {
-///     black_box(tree.get(&keys[0]));
-/// }, 1000);
-/// ```
 #[inline(never)]
 pub fn warmup<F: FnMut()>(mut f: F, iterations: usize) {
     for _ in 0..iterations {

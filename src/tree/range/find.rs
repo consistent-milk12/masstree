@@ -31,7 +31,7 @@ use crate::hints::likely;
 use crate::key::IKEY_SIZE;
 use crate::ksearch::upper_bound_internode_generic;
 use crate::leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
-use crate::leaf24::{KSUF_KEYLENX, LAYER_KEYLENX};
+use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::link::Linker;
 use crate::nodeversion::NodeVersion;
 use crate::prefetch::prefetch_read;
@@ -43,7 +43,8 @@ use super::helper::{
     ForwardScanHelper, KeyIndexedPosition, lower_with_position, lower_with_suffix,
 };
 use super::scan_state::{
-    LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr, ScanStackElement, ScanState,
+    FindResult, LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr, ScanStackElement,
+    ScanState,
 };
 
 // ============================================================================
@@ -304,7 +305,7 @@ pub fn find_next<L, S>(
     cursor_key: &mut CursorKey,
     layer_stack: &mut LayerStack<L>,
     guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshot<S>>)
+) -> FindResult<S>
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
@@ -325,7 +326,7 @@ pub fn find_next_with_duplicate_check<L, S>(
     cursor_key: &mut CursorKey,
     layer_stack: &mut LayerStack<L>,
     guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshot<S>>)
+) -> FindResult<S>
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
@@ -368,7 +369,7 @@ fn find_next_inner<L, S>(
     layer_stack: &mut LayerStack<L>,
     guard: &LocalGuard<'_>,
     needs_duplicate_check: bool,
-) -> (ScanState, Option<ScanSnapshot<S>>)
+) -> FindResult<S>
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
@@ -376,14 +377,14 @@ where
 {
     // SAFETY: Stack should have valid leaf at this point
     if stack.is_null() {
-        return (ScanState::Up, None);
+        return FindResult::transition(ScanState::Up);
     }
 
     let leaf: &L = unsafe { stack.leaf_ref() };
 
     // Check if leaf is deleted (this is cheap - single atomic load)
     if leaf.version().is_deleted() {
-        return (ScanState::Retry, None);
+        return FindResult::transition(ScanState::Retry);
     }
 
     // Get current slot - O(1) via perm.get(ki)
@@ -406,11 +407,15 @@ where
     // This is a cheap check (one u64 comparison) that catches the backward-jump case
     // without requiring per-entry version validation.
     //
+    // OPTIMIZATION: Uses stack.last_ikey() instead of cursor_key.current_ikey()
+    // to avoid potential cache miss on cursor_key access. last_ikey is stored
+    // in the stack element which is already hot in cache.
+    //
     // NOTE: This only checks ikey, not full key with suffix. For exact duplicate
     // detection (same ikey, different suffix), we still need `needs_duplicate_check`.
-    if slot_ikey < cursor_key.current_ikey() {
+    if slot_ikey < stack.last_ikey() {
         // Slot ikey went backwards - leaf was modified, need to retry
-        return (ScanState::Retry, None);
+        return FindResult::transition(ScanState::Retry);
     }
 
     // Check for duplicate only when needed (after Retry)
@@ -439,7 +444,7 @@ where
 
         if is_dup {
             stack.next();
-            return (ScanState::FindNext, None);
+            return FindResult::transition(ScanState::FindNext);
         }
     }
 
@@ -453,7 +458,7 @@ where
         prefetch_read(slot_ptr);
         stack.set_root(slot_ptr);
 
-        return (ScanState::Down, None);
+        return FindResult::transition(ScanState::Down);
     }
 
     // Value slot - prepare for emit
@@ -461,7 +466,7 @@ where
 
     if slot_ptr.is_null() {
         stack.next();
-        return (ScanState::FindNext, None);
+        return FindResult::transition(ScanState::FindNext);
     }
 
     // Clone output while version is validated
@@ -495,10 +500,13 @@ where
 
     cursor_key.mark_key_complete();
 
+    // Update cached ikey after successful read (for next iteration's monotonicity check)
+    stack.set_last_ikey(slot_ikey);
+
     // Advance position for next call
     stack.next();
 
-    (ScanState::Emit, Some(ScanSnapshot::new(output, key_len)))
+    FindResult::emit(ScanSnapshot::new(output, key_len))
 }
 
 // ============================================================================
@@ -603,7 +611,8 @@ where
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
     // CRITICAL: Always verify monotonicity (see find_next_inner for rationale)
-    if slot_ikey < cursor_key.current_ikey() {
+    // OPTIMIZATION: Uses stack.last_ikey() instead of cursor_key.current_ikey()
+    if slot_ikey < stack.last_ikey() {
         return (ScanState::Retry, None);
     }
 
@@ -676,6 +685,9 @@ where
 
     cursor_key.mark_key_complete();
 
+    // Update cached ikey after successful read (for next iteration's monotonicity check)
+    stack.set_last_ikey(slot_ikey);
+
     // Advance position for next call
     stack.next();
 
@@ -740,7 +752,8 @@ where
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
     // CRITICAL: Always verify monotonicity (see find_next_inner for rationale)
-    if slot_ikey < cursor_key.current_ikey() {
+    // OPTIMIZATION: Uses stack.last_ikey() instead of cursor_key.current_ikey()
+    if slot_ikey < stack.last_ikey() {
         return (ScanState::Retry, None);
     }
 
@@ -791,6 +804,9 @@ where
     cursor_key.assign_store_length(key_len);
     cursor_key.mark_key_complete();
 
+    // Update cached ikey after successful read (for next iteration's monotonicity check)
+    stack.set_last_ikey(slot_ikey);
+
     // Advance position for next call
     stack.next();
 
@@ -820,19 +836,6 @@ where
     let version: u32 = stack.version();
 
     // CRITICAL: Split-aware leaf boundary validation (TOCTOU-safe ordering).
-    //
-    // At leaf boundaries we must detect splits in progress. The split protocol
-    // marks the `next` pointer while modifying the B-link chain. Following a
-    // marked `next` can cause the scan to skip the new sibling and later observe
-    // keys out of order.
-    //
-    // TOCTOU-safe protocol (load next BEFORE checking version):
-    // 1. Load next_raw FIRST (captures current next pointer)
-    // 2. Check if marked (split already in progress on this boundary)
-    // 3. Check has_changed_or_locked() AFTER (catches splits that started after step 1)
-    //
-    // This ordering closes the race window: if a split starts after we load next_raw,
-    // the version check will detect it. See Analysis.md for the full analysis.
 
     // Step 1: Load raw next pointer FIRST (may be marked)
     let next_raw: *mut L = leaf.next_raw();
@@ -987,7 +990,7 @@ fn advance_leaf<L, S>(
     stack: &mut ScanStackElement<L, S>,
     cursor_key: &CursorKey,
     _guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshot<S>>)
+) -> FindResult<S>
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
@@ -1004,12 +1007,12 @@ where
     // Step 2: Check if next is marked
     if Linker::is_marked(next_raw) {
         leaf.wait_for_split();
-        return (ScanState::Retry, None);
+        return FindResult::transition(ScanState::Retry);
     }
 
     // Step 3: Validate version AFTER loading next_raw
     if leaf.version().has_changed(version) {
-        return (ScanState::Retry, None);
+        return FindResult::transition(ScanState::Retry);
     }
 
     // Clear mark bit
@@ -1018,7 +1021,7 @@ where
     // Capture prev leaf info for tracing before mutating stack
     if next.is_null() {
         // No more leaves in this layer
-        return (ScanState::Up, None);
+        return FindResult::transition(ScanState::Up);
     }
 
     // Move to next leaf
@@ -1045,7 +1048,7 @@ where
 
     // Check if deleted (use version we already loaded)
     if NodeVersion::is_deleted_version(next_version) {
-        return (ScanState::Retry, None);
+        return FindResult::transition(ScanState::Retry);
     }
 
     // Load permutation
@@ -1057,7 +1060,7 @@ where
 
     stack.update_state(next_version, perm, kx.i);
 
-    (ScanState::FindNext, None)
+    FindResult::transition(ScanState::FindNext)
 }
 
 // ============================================================================
@@ -1213,13 +1216,18 @@ where
 /// 2. Stack root already set to layer pointer by `find_next`
 /// 3. Clear cursor for sublayer scan
 /// 4. Transition to Retry to position in new layer
-pub fn handle_down<L, S>(_stack: &mut ScanStackElement<L, S>, cursor_key: &mut CursorKey)
+pub fn handle_down<L, S>(stack: &mut ScanStackElement<L, S>, cursor_key: &mut CursorKey)
 where
     L: TreeLeafNode<S>,
     S: ValueSlot,
 {
     // Clear cursor key for sublayer (scan from minimum)
     cursor_key.shift_clear();
+
+    // Reset last_ikey for sublayer - sublayer ikeys are independent of parent
+    // Without this, monotonicity check would compare sublayer ikeys against
+    // parent's last_ikey, causing false Retry loops
+    stack.set_last_ikey(0);
 }
 
 /// Handle ascent from exhausted sublayer (Up state).
@@ -1271,6 +1279,11 @@ where
     // Use suffix-aware search to handle keys with same ikey correctly
     let kx: KeyIndexedPosition = lower_with_suffix(cursor_key, leaf, &perm);
     stack.update_state(version, perm, kx.i);
+
+    // Reset last_ikey for parent layer - parent ikeys are independent of sublayer
+    // Without this, monotonicity check would compare parent ikeys against
+    // sublayer's last_ikey, causing false Retry loops
+    stack.set_last_ikey(0);
 
     true
 }

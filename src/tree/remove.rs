@@ -27,7 +27,7 @@ use crate::{
     alloc_trait::NodeAllocatorGeneric,
     key::Key,
     leaf_trait::{LayerCapableLeaf, TreePermutation},
-    leaf24::{KSUF_KEYLENX, LAYER_KEYLENX},
+    leaf15::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::{LockGuard, NodeVersion},
     slot::ValueSlot,
     tree::MassTreeGeneric,

@@ -1,19 +1,4 @@
-//! Concurrent benchmarks for MassTree15 (WIDTH=24)
-//!
-//! Tests concurrent write performance and variance at different thread counts.
-//!
-//! ## Key Metrics
-//!
-//! - Split frequency: WIDTH=24 has 60% more capacity, fewer splits
-//! - Variance: Difference between fastest and slowest runs
-//! - Scaling: Performance at high thread counts (16, 32)
-//!
-//! ## Running
-//!
-//! ```bash
-//! cargo bench --bench concurrent_maps24
-//! cargo bench --bench concurrent_maps24 --features mimalloc
-//! ```
+//! Concurrent benchmarks for MassTree15
 
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::pedantic)]

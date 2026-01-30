@@ -70,7 +70,8 @@ where
         // Handle initial Emit state from initialize_back() if present
         if self.back_state == ScanStateBack::Emit {
             if let Some(snapshot) = self.back_snapshot.take() {
-                let key: &[u8] = self.back_cursor_key.full_key();
+                // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                let key: &[u8] = unsafe { self.back_cursor_key.full_key_unchecked() };
 
                 if !self.start_bound.contains_reverse(key) {
                     self.flags.mark_back_exhausted();
@@ -264,7 +265,8 @@ where
         // Handle initial Emit state from initialize_back() if present
         if self.back_state == ScanStateBack::Emit {
             if let Some(snapshot) = self.back_snapshot.take() {
-                let key: &[u8] = self.back_cursor_key.full_key();
+                // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
+                let key: &[u8] = unsafe { self.back_cursor_key.full_key_unchecked() };
 
                 if !self.start_bound.contains_reverse(key) {
                     self.flags.mark_back_exhausted();

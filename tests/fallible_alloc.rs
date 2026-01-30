@@ -186,10 +186,10 @@ fn test_alloc_result_question_mark_propagation() {
 // ============================================================================
 
 #[test]
-fn test_masstree24_insert_returns_result() {
-    use masstree::MassTree24;
+fn test_masstree15_insert_returns_result() {
+    use masstree::MassTree15;
 
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Insert should return Result
     let result = tree.insert(b"key1", 100u64);
@@ -201,10 +201,10 @@ fn test_masstree24_insert_returns_result() {
 }
 
 #[test]
-fn test_masstree24_many_inserts_succeed() {
-    use masstree::MassTree24;
+fn test_masstree15_many_inserts_succeed() {
+    use masstree::MassTree15;
 
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Many inserts should all succeed under normal memory conditions
     for i in 0..1000u64 {
@@ -218,10 +218,10 @@ fn test_masstree24_many_inserts_succeed() {
 }
 
 #[test]
-fn test_masstree24_long_keys_with_suffixes() {
-    use masstree::MassTree24;
+fn test_masstree15_long_keys_with_suffixes() {
+    use masstree::MassTree15;
 
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Keys longer than 8 bytes require suffix storage
     for i in 0..100u64 {
@@ -237,10 +237,10 @@ fn test_masstree24_long_keys_with_suffixes() {
 }
 
 #[test]
-fn test_masstree_index_insert_returns_result() {
-    use masstree::MassTreeIndex;
+fn test_masstree15inline_insert_returns_result() {
+    use masstree::MassTree15Inline;
 
-    let mut tree: MassTreeIndex<u64> = MassTreeIndex::new();
+    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     // Insert should return Result
     let result = tree.insert(b"key1", 100u64);
@@ -252,7 +252,7 @@ fn test_masstree_index_insert_returns_result() {
 }
 
 #[test]
-fn test_masstree15_insert_returns_result() {
+fn test_masstree15_insert_returns_result_string() {
     use masstree::MassTree15;
 
     let tree: MassTree15<String> = MassTree15::new();
@@ -278,9 +278,9 @@ fn test_split_allocation_before_mark_split() {
     // We can't directly test this without internal access, but we verify
     // that splits work correctly by inserting enough keys to trigger splits.
 
-    use masstree::MassTree24;
+    use masstree::MassTree15;
 
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Insert enough keys to trigger multiple splits (WIDTH=24, so >24 keys)
     for i in 0..100u64 {
@@ -306,9 +306,9 @@ fn test_layer_creation_allocation() {
     // This test verifies that layer creation (for keys with common prefixes)
     // handles allocation correctly.
 
-    use masstree::MassTree24;
+    use masstree::MassTree15;
 
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Insert keys that share prefixes to trigger layer creation
     let prefixes = ["aaaa", "aaab", "aaac", "aaba", "aabb", "abaa", "abab"];
@@ -333,11 +333,11 @@ fn test_layer_creation_allocation() {
 
 #[test]
 fn test_concurrent_inserts_return_results() {
-    use masstree::MassTree24;
+    use masstree::MassTree15;
     use std::sync::Arc;
     use std::thread;
 
-    let tree: Arc<MassTree24<u64>> = Arc::new(MassTree24::new());
+    let tree: Arc<MassTree15<u64>> = Arc::new(MassTree15::new());
     let num_threads = 4;
     let keys_per_thread = 250;
 

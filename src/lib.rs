@@ -11,7 +11,6 @@
 //! - Zero-copy range scans with `scan_ref` and `scan_prefix`
 //! - Memory reclamation via epoch-based deferred cleanup
 //! - Lazy leaf coalescing for deleted entries
-//! - Two node widths: [`MassTree`] (WIDTH=24) and [`MassTree15`] (WIDTH=15)
 //! - high-performance inline variant [`MassTree15Inline`], all benchmark results are based on it.
 //!
 //! ## Variant Selection
@@ -195,7 +194,6 @@ pub fn init_tracing() {
 pub const fn init_tracing() {}
 
 pub mod alloc15;
-pub mod alloc24;
 mod alloc_common;
 pub mod alloc_trait;
 mod error;
@@ -205,14 +203,12 @@ pub mod internode;
 pub mod key;
 pub mod ksearch;
 pub mod leaf15;
-pub mod leaf24;
 pub mod leaf_trait;
 pub mod link;
 pub mod node_pool;
 pub mod nodeversion;
 pub mod ordering;
 pub mod permuter;
-pub mod permuter24;
 pub mod prefetch;
 pub mod ref_value_slot;
 mod retirement;
@@ -236,13 +232,9 @@ pub use alloc_trait::NodeAllocatorGeneric;
 
 // Re-export Permuter types
 pub use permuter::{AtomicPermuter, AtomicPermuter15, Permuter, Permuter15};
-pub use permuter24::{AtomicPermuter24, Permuter24, WIDTH_24};
 
 // Re-export leaf node types
-pub use leaf15::{LeafNode15, WIDTH_15};
-pub use leaf24::{
-    LeafNode24, MODSTATE_DELETED_LAYER, MODSTATE_INSERT, MODSTATE_REMOVE, WIDTH_24 as LEAF24_WIDTH,
-};
+pub use leaf15::{LeafNode15, MODSTATE_DELETED_LAYER, MODSTATE_INSERT, MODSTATE_REMOVE, WIDTH_15};
 
 // Re-export internode and version types (for debugging)
 pub use internode::InternodeNode;
@@ -250,7 +242,6 @@ pub use nodeversion::NodeVersion;
 
 // Re-export allocator types
 pub use alloc15::{SeizeAllocator15, SeizeAllocator15TrueInline};
-pub use alloc24::SeizeAllocator24;
 
 // Re-export inline types for true-inline storage
 pub use inline::bits::InlineBits;
@@ -269,10 +260,7 @@ pub use slot::ValueSlot;
 pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
 pub use tree::{InsertError, RemoveError};
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
-pub use tree::{
-    MassTree, MassTree15, MassTree15Inline, MassTree24, MassTree24Inline, MassTreeGeneric,
-    MassTreeIndex,
-};
+pub use tree::{MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};
 
 // Re-export batch insert types
 pub use tree::{BatchEntry, BatchInsertResult, batch};

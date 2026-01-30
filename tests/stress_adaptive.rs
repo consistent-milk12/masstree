@@ -1,7 +1,7 @@
 //! Stress tests for adaptive insert.
 #![expect(clippy::unwrap_used, clippy::cast_precision_loss)]
 
-use masstree::MassTree24;
+use masstree::MassTree15;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
@@ -24,7 +24,7 @@ const ITERATIONS: usize = 50;
 #[test]
 #[ignore = "long test"]
 fn stress_extreme_contention() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let tree = Arc::new(tree);
     let stop = Arc::new(AtomicBool::new(false));
     let ops = Arc::new(AtomicUsize::new(0));
@@ -77,7 +77,7 @@ fn stress_extreme_contention() {
 /// Test rapid alternation between contended and non-contended patterns.
 #[test]
 fn test_mode_switching() {
-    let tree: MassTree24<u64> = MassTree24::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let tree = Arc::new(tree);
 
     let handles: Vec<_> = (0..THREADS)

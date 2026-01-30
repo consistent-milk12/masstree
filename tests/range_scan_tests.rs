@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
-use masstree::{MassTree, RangeBound};
+use masstree::{MassTree, MassTree15, RangeBound};
 
 const N: usize = 1000;
 const PREFIX_BUCKETS: u64 = 10;
@@ -33,7 +33,7 @@ fn range_single_element_bounds() {
     let all: Vec<_> = tree.iter(&guard).collect();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].key, b"k");
-    assert_eq!(*all[0].value, 1);
+    assert_eq!(all[0].value, 1);
 
     let inc: Vec<_> = tree
         .range(RangeBound::Included(b"k"), RangeBound::Unbounded, &guard)
@@ -97,7 +97,7 @@ fn full_scan_matches_btreemap_sorted() {
 
     for (entry, (k, v)) in scan.iter().zip(btree.iter()) {
         assert_eq!(&entry.key, k);
-        assert_eq!(&*entry.value, v);
+        assert_eq!(&entry.value, v);
     }
 }
 
@@ -608,7 +608,7 @@ fn scan_prefix_exact_8byte_with_layer() {
 
 #[test]
 fn scan_batch_ref_empty_tree() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
 
     let count = tree.scan_batch_ref(
@@ -623,7 +623,7 @@ fn scan_batch_ref_empty_tree() {
 
 #[test]
 fn scan_batch_ref_single_entry() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     tree.insert(b"key1", 42).unwrap();
 
     let guard = tree.guard();
@@ -644,7 +644,7 @@ fn scan_batch_ref_single_entry() {
 
 #[test]
 fn scan_batch_ref_multiple_entries() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..100u64 {
         let key = format!("key{i:03}");
@@ -672,7 +672,7 @@ fn scan_batch_ref_multiple_entries() {
 
 #[test]
 fn scan_batch_ref_range_bounds() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..100u64 {
         let key = format!("key{i:03}");
@@ -698,7 +698,7 @@ fn scan_batch_ref_range_bounds() {
 
 #[test]
 fn scan_batch_ref_early_stop() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..100u64 {
         let key = format!("key{i:03}");
@@ -724,7 +724,7 @@ fn scan_batch_ref_early_stop() {
 /// Critical test: `scan_batch_ref` must produce identical results to `scan_ref`.
 #[test]
 fn scan_batch_ref_vs_scan_ref_consistency() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..1000u64 {
         let key = format!("key{i:05}");
@@ -770,7 +770,7 @@ fn scan_batch_ref_vs_scan_ref_consistency() {
 #[test]
 fn scan_batch_ref_single_layer_keys() {
     // Test with short keys (≤ 8 bytes) - uses optimized single-layer path
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..100u64 {
         let key = format!("k{i:06}"); // 7 bytes
@@ -796,7 +796,7 @@ fn scan_batch_ref_single_layer_keys() {
 /// Test batch scan with keys > 8 bytes (requires layer navigation).
 #[test]
 fn scan_batch_ref_long_keys_with_layers() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     // Create a map of expected keys for verification
     let mut expected: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
@@ -851,7 +851,7 @@ fn scan_batch_ref_long_keys_with_layers() {
 /// Concurrent batch scans should be safe.
 #[test]
 fn scan_batch_ref_concurrent_reads() {
-    let tree = Arc::new(MassTree::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
 
     // Pre-populate
     for i in 0..10000u64 {
@@ -892,7 +892,7 @@ fn scan_batch_ref_concurrent_reads() {
 /// Test `for_each_batch_ref` on [`RangeIter`] directly.
 #[test]
 fn for_each_batch_ref_basic() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..100u64 {
         let key = format!("key{i:03}");
@@ -922,7 +922,7 @@ fn for_each_batch_ref_basic() {
 /// for multi-layer entries (8 null bytes prepended to keys).
 #[test]
 fn scan_ref_long_keys_matches_btreemap() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let mut expected: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
     // Insert multi-layer keys (> 8 bytes triggers layer creation)
@@ -984,7 +984,7 @@ fn scan_ref_long_keys_matches_btreemap() {
 /// Test `scan_ref` with very deep layers (3+ layers).
 #[test]
 fn scan_ref_deep_layers_matches_btreemap() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let mut expected: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
     // 24-byte shared prefix forces 3 layers
@@ -1028,7 +1028,7 @@ fn scan_ref_deep_layers_matches_btreemap() {
 /// Test `scan_ref` with mixed single-layer and multi-layer keys.
 #[test]
 fn scan_ref_mixed_layer_keys() {
-    let tree: MassTree<u64> = MassTree::new();
+    let tree: MassTree15<u64> = MassTree15::new();
     let mut expected: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
     // Mix of short (single layer) and long (multi layer) keys

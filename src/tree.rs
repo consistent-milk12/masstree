@@ -1,7 +1,7 @@
 //! Filepath: src/tree.rs
 //! `MassTree` - A high-performance concurrent trie of B+trees.
 //!
-//! This module provides the main `MassTree<V>` and `MassTreeIndex<V>` types.
+//! This module provides the main `MassTree<V>` type and related type aliases.
 
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
@@ -12,21 +12,18 @@ use crate::error::{AllocError, AllocKind};
 use crate::shard_counter::ShardedCounter;
 
 use crate::alloc15::{SeizeAllocator15, SeizeAllocator15TrueInline};
-use crate::alloc24::SeizeAllocator24;
 use crate::inline::bits::InlineBits;
 use crate::inline::leaf15_true::LeafNode15TrueInline;
 use crate::leaf15::LeafNode15;
-use crate::leaf24::LeafNode24;
 use crate::slot::ValueSlot;
 use crate::slot::true_inline::TrueInlineSlot;
-use crate::value::{LeafValue, LeafValueIndex};
+use crate::value::LeafValue;
 use coalesce::CoalesceQueue;
 use seize::Collector;
 
 mod batch_utils;
 mod coalesce;
 mod generic;
-mod index;
 mod range;
 pub mod remove;
 mod split;
@@ -35,7 +32,6 @@ mod split;
 pub mod test_hooks;
 
 pub use generic::{BatchEntry, BatchInsertResult};
-pub use index::MassTreeIndex;
 pub use range::ReverseScan;
 pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use remove::RemoveError;
@@ -49,9 +45,9 @@ pub use remove::RemoveError;
 /// # Example
 ///
 /// ```rust,ignore
-/// use masstree::MassTree24;
+/// use masstree::MassTree;
 ///
-/// let tree: MassTree24<u64> = MassTree24::new();
+/// let tree: MassTree<u64> = MassTree::new();
 /// let entries = vec![
 ///     (b"key1".to_vec(), 1u64),
 ///     (b"key2".to_vec(), 2u64),
@@ -319,12 +315,21 @@ where
 /// The main [`MassTree`] type alias using WIDTH=15 nodes with Arc-based storage.
 ///
 /// This is a type alias for [`MassTreeGeneric`] with:
-/// - `LeafValue<V>` for Arc-based value storage
-/// - `LeafNode15<LeafValue<V>>` for leaf nodes (15 slots per node)
-/// - `SeizeAllocator15<LeafValue<V>>` for memory management
+/// High-performance inline storage variant for `Copy` types (default tree type).
 ///
-/// VALUES ARE STORED AS `Arc<V>` - each insert allocates. For small `Copy` types
-/// like `u64`, consider [`MassTree15Inline`] which stores values inline.
+/// This is a type alias for [`MassTree15Inline`], providing the best performance
+/// for common use cases with small, `Copy` types like `u64`, `i32`, `*const T`, etc.
+///
+/// **Values are stored directly in leaf nodes** without `Arc` overhead, eliminating
+/// ~30-50ns of heap allocation per insert.
+///
+/// # Type Requirements
+///
+/// `V` must implement [`InlineBits`], which requires:
+/// - `Copy + Send + Sync + 'static`
+/// - Types that fit in 64 bits (u64, i64, f64, *const T, etc.)
+///
+/// For non-Copy types like `String`, use [`MassTree15`] explicitly.
 ///
 /// # Example
 ///
@@ -334,57 +339,34 @@ where
 /// let tree: MassTree<u64> = MassTree::new();
 /// let guard = tree.guard();
 /// tree.insert_with_guard(b"key", 42, &guard).unwrap();
+/// assert_eq!(tree.get_with_guard(b"key", &guard), Some(42)); // Returns u64 directly!
 /// ```
-pub type MassTree<V> =
-    MassTreeGeneric<LeafValue<V>, LeafNode15<LeafValue<V>>, SeizeAllocator15<LeafValue<V>>>;
-
-/// Alias for [`MassTree`] (WIDTH=15, Arc-based storage).
 ///
-/// Provided for backwards compatibility and explicit naming.
-pub type MassTree15<V> = MassTree<V>;
+/// [`InlineBits`]: crate::inline::bits::InlineBits
+pub type MassTree<V> = MassTree15Inline<V>;
 
-/// WIDTH=24 variant with Arc-based storage.
+/// WIDTH=15 variant with Arc-based storage.
 ///
-/// Uses `LeafNode24` with u128 permutation for larger nodes (24 slots).
-/// Higher memory per node but fewer splits for dense workloads.
+/// Use this when you need to store non-`Copy` types like `String`, `Vec<u8>`, etc.
 ///
 /// This is a type alias for [`MassTreeGeneric`] with:
 /// - `LeafValue<V>` for Arc-based value storage
-/// - `LeafNode24<LeafValue<V>>` for leaf nodes (24 slots per node)
-/// - `SeizeAllocator24<LeafValue<V>>` for memory management
-pub type MassTree24<V> =
-    MassTreeGeneric<LeafValue<V>, LeafNode24<LeafValue<V>>, SeizeAllocator24<LeafValue<V>>>;
-
-/// High-performance inline storage variant for `Copy` types.
+/// - `LeafNode15<LeafValue<V>>` for leaf nodes (15 slots per node)
+/// - `SeizeAllocator15<LeafValue<V>>` for memory management
 ///
-/// This is a type alias for [`MassTreeGeneric`] with:
-/// - `LeafValueIndex<V>` for inline value storage (NO heap allocation per insert)
-/// - `LeafNode24<LeafValueIndex<V>>` for leaf nodes (24 slots per node)
-/// - `SeizeAllocator24<LeafValueIndex<V>>` for memory management
-///
-/// **Use this for small, `Copy` types** like `u64`, `i32`, `*const T`, etc.
-/// Values are stored directly in leaf nodes without `Arc` overhead.
-///
-/// # Performance
-///
-/// For `u64` values, this eliminates ~30-50ns of heap allocation overhead per insert,
-/// making it competitive with other inline-storage structures like `scc::TreeIndex`.
+/// VALUES ARE STORED AS `Arc<V>` - each insert allocates.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use masstree::MassTree24Inline;
+/// use masstree::MassTree15;
 ///
-/// let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+/// let tree: MassTree15<String> = MassTree15::new();
 /// let guard = tree.guard();
-/// tree.insert_with_guard(b"key", 42, &guard).unwrap();
-/// assert_eq!(tree.get_with_guard(b"key", &guard), Some(42)); // Returns u64 directly!
+/// tree.insert_with_guard(b"key", "hello".to_string(), &guard).unwrap();
 /// ```
-pub type MassTree24Inline<V> = MassTreeGeneric<
-    LeafValueIndex<V>,
-    LeafNode24<LeafValueIndex<V>>,
-    SeizeAllocator24<LeafValueIndex<V>>,
->;
+pub type MassTree15<V> =
+    MassTreeGeneric<LeafValue<V>, LeafNode15<LeafValue<V>>, SeizeAllocator15<LeafValue<V>>>;
 
 // ============================================================================
 //  True-Inline Type Aliases
@@ -408,8 +390,8 @@ pub type MassTree15Inline<V> =
 //  Constructor implementations for type aliases
 // ============================================================================
 
-impl<V: Send + Sync + 'static> MassTree<V> {
-    /// Create a new empty `MassTree`.
+impl<V: Send + Sync + 'static> MassTree15<V> {
+    /// Create a new empty `MassTree15`.
     #[must_use]
     #[inline(always)]
     pub fn new() -> Self {
@@ -418,39 +400,7 @@ impl<V: Send + Sync + 'static> MassTree<V> {
     }
 }
 
-impl<V: Send + Sync + 'static> Default for MassTree<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<V: Send + Sync + 'static> MassTree24<V> {
-    /// Create a new empty `MassTree24`.
-    #[must_use]
-    #[inline(always)]
-    pub fn new() -> Self {
-        let allocator = SeizeAllocator24::new();
-        Self::with_allocator(allocator)
-    }
-}
-
-impl<V: Send + Sync + 'static> Default for MassTree24<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<V: Copy + Send + Sync + 'static> MassTree24Inline<V> {
-    /// Create a new empty `MassTree24Inline`.
-    #[must_use]
-    #[inline(always)]
-    pub fn new() -> Self {
-        let allocator = SeizeAllocator24::new();
-        Self::with_allocator(allocator)
-    }
-}
-
-impl<V: Copy + Send + Sync + 'static> Default for MassTree24Inline<V> {
+impl<V: Send + Sync + 'static> Default for MassTree15<V> {
     fn default() -> Self {
         Self::new()
     }

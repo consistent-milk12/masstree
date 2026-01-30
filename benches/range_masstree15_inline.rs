@@ -1,69 +1,4 @@
 //! Concurrent range scan stress benchmarks for MassTree15Inline.
-//!
-//! Compares MassTree15Inline and scc::TreeIndex across various key patterns designed
-//! to stress different aspects of concurrent ordered map implementations.
-//!
-//! ## Configuration
-//!
-//! - **Dataset size**: 500,000 keys
-//! - **Ops per thread**: 5,000
-//! - **Thread counts**: 1, 2, 4, 6, 8, 12
-//!
-//! ## Understanding Items/sec (IMPORTANT)
-//!
-//! Divan reports **items/sec** based on `ItemsCount`. The meaning varies by group:
-//!
-//! | Groups | Unit | What It Measures |
-//! |--------|------|------------------|
-//! | 01–12 | **50-row range queries/sec** | Each "item" = one scan visiting up to SCAN_LIMIT entries |
-//! | 14 | **prefix queries/sec** | Each "item" = one `scan_prefix()` call |
-//! | 15 | **keys/sec** | Each "item" = one key visited during full scan |
-//! | 16–17 | **point ops/sec** | Each "item" = one read or write operation |
-//!
-//! **To convert short-scan groups to keys/sec**: multiply by `SCAN_LIMIT` (50).
-//!
-//! ## Key Patterns Tested
-//!
-//! ### General Patterns
-//! - Sequential keys (best-case for range scans)
-//! - Reverse keys (insertion stress)
-//! - Clustered keys (hot ranges with gaps)
-//! - Sparse keys (cache miss stress)
-//!
-//! ### MassTree-Optimized Patterns
-//! - Shared prefix (trie prefix sharing)
-//! - Suffix-only differ (suffix mechanism)
-//! - Hierarchical (namespace:category:id)
-//!
-//! ### Stress Patterns
-//! - Adversarial splits (split propagation)
-//! - Interleaved ranges (cache thrashing)
-//! - B-link stress (fragmented scans)
-//!
-//! ## API Notes
-//!
-//! - **MassTree15Inline**: Uses `scan_values` — optimized batch scan
-//! - **TreeIndex**: Uses `.iter().take()` — lazy iterator
-//!
-//! ## Methodology
-//!
-//! Each benchmark follows a rigorous methodology:
-//! 1. **Workload-matched warmup**: Warmup mirrors measurement scan pattern
-//! 2. **Two-phase barriers**: `warmup_done` + `start` barriers
-//! 3. **Proper barrier placement**: Memory barriers after thread synchronization
-//! 4. **Consistent threads**: All benchmarks use [1, 2, 4, 6, 8, 12] thread counts
-//! 5. **100 samples**: For statistical significance
-//!
-//! ## Running
-//!
-//! ```bash
-//! cargo bench --bench range_masstree15_inline
-//! cargo bench --bench range_masstree15_inline --features mimalloc
-//!
-//! # Specific pattern
-//! cargo bench --bench range_masstree15_inline -- sequential
-//! cargo bench --bench range_masstree15_inline -- hierarchical
-//! ```
 
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::pedantic)]
@@ -98,6 +33,31 @@ const SCAN_LIMIT: usize = 50; // Early termination for partial scans
 /// Warmup iterations per thread before measurement
 const WARMUP_OPS: usize = 500;
 
+/// Base seed for RNG (ensures reproducibility across runs)
+const BASE_SEED: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
+// =============================================================================
+// RNG Helpers (for independent thread randomness)
+// =============================================================================
+
+/// Generate divergent seed for thread t to avoid correlation.
+/// Uses multiplicative hashing to spread seeds across the space.
+const fn thread_seed(base_seed: u64, thread_id: usize) -> u64 {
+    let combined = base_seed.wrapping_add(thread_id as u64);
+    // Mix with golden ratio hash
+    combined.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
+/// Simple LCG step for inline RNG.
+#[inline]
+#[allow(dead_code)]
+const fn lcg_next(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1);
+    *state
+}
+
 /// Standard thread counts for all benchmarks
 const THREAD_COUNTS: [usize; 6] = [1, 2, 4, 6, 8, 12];
 
@@ -124,6 +84,11 @@ fn setup_tree_index<const K: usize>(keys: &[[u8; K]]) -> TreeIndex<[u8; K], u64>
     tree
 }
 
+/// TreeIndex upsert workaround using remove+insert.
+/// NOTE: This adds overhead compared to MassTree's native upsert since TreeIndex
+/// lacks a true upsert operation. The extra remove call on collision means
+/// TreeIndex benchmarks measure remove+insert rather than a single operation.
+/// This is a fairness consideration when comparing results.
 fn tree_index_upsert_sync<const K: usize>(
     tree: &TreeIndex<[u8; K], u64>,
     key: [u8; K],
@@ -316,6 +281,8 @@ mod snapshot_verify_sequential_prefix {
 mod sequential_full_scan {
     use super::*;
 
+    // Both implementations scan from the beginning for fair comparison
+    // (TreeIndex's range() method hangs under concurrent load)
     #[divan::bench(args = THREAD_COUNTS)]
     fn masstree15_inline(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sequential::<8>(N));
@@ -340,7 +307,8 @@ mod sequential_full_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -360,7 +328,8 @@ mod sequential_full_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -381,6 +350,9 @@ mod sequential_full_scan {
             });
     }
 
+    // NOTE: TreeIndex uses iter() from beginning instead of range() with random starts
+    // because TreeIndex's range() method hangs under concurrent load. This means
+    // MassTree gets random start positions while TreeIndex always starts from minimum.
     #[divan::bench(args = THREAD_COUNTS)]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sequential::<8>(N));
@@ -401,7 +373,13 @@ mod sequential_full_scan {
 
                             // === WARMUP PHASE ===
                             for _ in 0..WARMUP_OPS {
-                                let count = tree.iter(&guard).take(SCAN_LIMIT).count();
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 black_box(count);
                             }
                             warmup_done.wait();
@@ -412,7 +390,13 @@ mod sequential_full_scan {
                             pre_measurement_barrier();
 
                             for _ in 0..OPS_PER_THREAD {
-                                let count = tree.iter(&guard).take(SCAN_LIMIT).count();
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 total += count;
                             }
 
@@ -437,6 +421,7 @@ mod sequential_full_scan {
 mod reverse_scan {
     use super::*;
 
+    // Both implementations scan from the beginning for fair comparison
     #[divan::bench(args = THREAD_COUNTS)]
     fn masstree15_inline(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_reverse::<8>(N));
@@ -459,10 +444,16 @@ mod reverse_scan {
                             // === WARMUP PHASE ===
                             for _ in 0..WARMUP_OPS {
                                 let mut count = 0usize;
-                                let _ = tree.iter(&guard).for_each_intra_leaf_batch(|_, _| {
-                                    count += 1;
-                                    count < SCAN_LIMIT
-                                });
+                                tree.scan_values(
+                                    RangeBound::Unbounded,
+                                    RangeBound::Unbounded,
+                                    |v| {
+                                        black_box(v);
+                                        count += 1;
+                                        count < SCAN_LIMIT
+                                    },
+                                    &guard,
+                                );
                                 black_box(count);
                             }
                             warmup_done.wait();
@@ -474,10 +465,16 @@ mod reverse_scan {
 
                             for _ in 0..OPS_PER_THREAD {
                                 let mut count = 0usize;
-                                let _ = tree.iter(&guard).for_each_intra_leaf_batch(|_, _| {
-                                    count += 1;
-                                    count < SCAN_LIMIT
-                                });
+                                tree.scan_values(
+                                    RangeBound::Unbounded,
+                                    RangeBound::Unbounded,
+                                    |v| {
+                                        black_box(v);
+                                        count += 1;
+                                        count < SCAN_LIMIT
+                                    },
+                                    &guard,
+                                );
                                 total += count;
                             }
 
@@ -493,6 +490,8 @@ mod reverse_scan {
             });
     }
 
+    // NOTE: TreeIndex uses iter() from beginning instead of range() with random starts
+    // because TreeIndex's range() method hangs under concurrent load.
     #[divan::bench(args = THREAD_COUNTS)]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_reverse::<8>(N));
@@ -513,7 +512,13 @@ mod reverse_scan {
 
                             // === WARMUP PHASE ===
                             for _ in 0..WARMUP_OPS {
-                                let count = tree.iter(&guard).take(SCAN_LIMIT).count();
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 black_box(count);
                             }
                             warmup_done.wait();
@@ -524,7 +529,13 @@ mod reverse_scan {
                             pre_measurement_barrier();
 
                             for _ in 0..OPS_PER_THREAD {
-                                let count = tree.iter(&guard).take(SCAN_LIMIT).count();
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 total += count;
                             }
 
@@ -553,6 +564,7 @@ mod clustered_scan {
     const KEYS_PER_CLUSTER: usize = N / CLUSTERS;
     const GAP_SIZE: u64 = 10_000;
 
+    // Both implementations scan from the beginning for fair comparison
     #[divan::bench(args = THREAD_COUNTS)]
     fn masstree15_inline(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_clustered::<8>(CLUSTERS, KEYS_PER_CLUSTER, GAP_SIZE));
@@ -577,7 +589,8 @@ mod clustered_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -597,7 +610,8 @@ mod clustered_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -618,6 +632,8 @@ mod clustered_scan {
             });
     }
 
+    // NOTE: TreeIndex uses iter() from beginning instead of range() with random starts
+    // because TreeIndex's range() method hangs under concurrent load.
     #[divan::bench(args = THREAD_COUNTS)]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_clustered::<8>(CLUSTERS, KEYS_PER_CLUSTER, GAP_SIZE));
@@ -638,7 +654,13 @@ mod clustered_scan {
 
                             // === WARMUP PHASE ===
                             for _ in 0..WARMUP_OPS {
-                                let count = tree.iter(&guard).take(SCAN_LIMIT).count();
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 black_box(count);
                             }
                             warmup_done.wait();
@@ -649,7 +671,13 @@ mod clustered_scan {
                             pre_measurement_barrier();
 
                             for _ in 0..OPS_PER_THREAD {
-                                let count = tree.iter(&guard).take(SCAN_LIMIT).count();
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 total += count;
                             }
 
@@ -676,6 +704,7 @@ mod sparse_scan {
 
     const SPACING: u64 = 1000;
 
+    // Both implementations scan from the beginning for fair comparison
     #[divan::bench(args = THREAD_COUNTS)]
     fn masstree15_inline(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sparse::<8>(N, SPACING));
@@ -700,7 +729,8 @@ mod sparse_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -720,7 +750,8 @@ mod sparse_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -741,6 +772,8 @@ mod sparse_scan {
             });
     }
 
+    // NOTE: TreeIndex uses iter() from beginning instead of range() with random starts
+    // because TreeIndex's range() method hangs under concurrent load.
     #[divan::bench(args = THREAD_COUNTS)]
     fn tree_index(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_sparse::<8>(N, SPACING));
@@ -761,7 +794,13 @@ mod sparse_scan {
 
                             // === WARMUP PHASE ===
                             for _ in 0..WARMUP_OPS {
-                                let count = tree.iter(&guard).take(SCAN_LIMIT).count();
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 black_box(count);
                             }
                             warmup_done.wait();
@@ -772,7 +811,13 @@ mod sparse_scan {
                             pre_measurement_barrier();
 
                             for _ in 0..OPS_PER_THREAD {
-                                let count = tree.iter(&guard).take(SCAN_LIMIT).count();
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 total += count;
                             }
 
@@ -823,7 +868,8 @@ mod shared_prefix_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -843,7 +889,8 @@ mod shared_prefix_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -944,7 +991,8 @@ mod suffix_differ_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -964,7 +1012,8 @@ mod suffix_differ_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1070,7 +1119,8 @@ mod hierarchical_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1090,7 +1140,8 @@ mod hierarchical_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1191,7 +1242,8 @@ mod adversarial_splits_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1211,7 +1263,8 @@ mod adversarial_splits_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1320,7 +1373,8 @@ mod interleaved_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1340,7 +1394,8 @@ mod interleaved_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1445,7 +1500,8 @@ mod blink_stress_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1465,7 +1521,8 @@ mod blink_stress_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1566,7 +1623,8 @@ mod random_keys_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1586,7 +1644,8 @@ mod random_keys_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1687,7 +1746,8 @@ mod long_keys_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1707,7 +1767,8 @@ mod long_keys_scan {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1787,21 +1848,27 @@ mod scan_while_insert {
     const INITIAL_N: usize = 450_000;
     const INSERT_N: usize = 25_000;
     const WRITERS: usize = 2;
+    const WRITER_WARMUP_OPS: usize = 100; // Warmup inserts for writers
 
     // Minimum 3 threads: 2 writers + 1 reader
     #[divan::bench(args = [3, 4, 6, 8, 12])]
     fn masstree15_inline(bencher: Bencher, threads: usize) {
         let initial_keys = keys::<8>(INITIAL_N);
         let insert_keys: Vec<_> = keys::<8>(INITIAL_N + INSERT_N)[INITIAL_N..].to_vec();
+        // Extra keys for writer warmup (won't be in tree initially)
+        let warmup_keys: Vec<[u8; 8]> = (0..WRITER_WARMUP_OPS * WRITERS)
+            .map(|i| ((INITIAL_N + INSERT_N + i) as u64).to_be_bytes())
+            .collect();
         let readers = threads - WRITERS;
 
         bencher
             .with_inputs(|| {
                 let tree = Arc::new(setup_masstree15_inline(&initial_keys));
                 let new_keys = Arc::new(insert_keys.clone());
-                (tree, new_keys)
+                let warmup_keys = Arc::new(warmup_keys.clone());
+                (tree, new_keys, warmup_keys)
             })
-            .bench_refs(|(tree, new_keys)| {
+            .bench_refs(|(tree, new_keys, warmup_keys)| {
                 let warmup_done = Arc::new(Barrier::new(threads));
                 let start = Arc::new(Barrier::new(threads));
 
@@ -1813,11 +1880,17 @@ mod scan_while_insert {
                         let start = Arc::clone(&start);
                         let chunk_size = INSERT_N / WRITERS;
                         let chunk: Vec<_> = new_keys[w * chunk_size..(w + 1) * chunk_size].to_vec();
+                        let warmup_chunk: Vec<_> = warmup_keys
+                            [w * WRITER_WARMUP_OPS..(w + 1) * WRITER_WARMUP_OPS]
+                            .to_vec();
                         thread::spawn(move || {
                             let guard = tree.guard();
 
                             // === WARMUP PHASE ===
-                            // Writers do minimal warmup (just sync)
+                            // Writers warm up with actual inserts to prime code paths
+                            for (i, key) in warmup_chunk.iter().enumerate() {
+                                let _ = tree.insert_with_guard(key, i as u64, &guard);
+                            }
                             warmup_done.wait();
 
                             // === MEASUREMENT PHASE ===
@@ -1848,7 +1921,8 @@ mod scan_while_insert {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
@@ -1868,12 +1942,117 @@ mod scan_while_insert {
                                 tree.scan_values(
                                     RangeBound::Unbounded,
                                     RangeBound::Unbounded,
-                                    |_| {
+                                    |v| {
+                                        black_box(v);
                                         count += 1;
                                         count < SCAN_LIMIT
                                     },
                                     &guard,
                                 );
+                                total += count;
+                            }
+
+                            post_measurement_barrier();
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in writer_handles {
+                    h.join().unwrap();
+                }
+                for h in reader_handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [3, 4, 6, 8, 12])]
+    fn tree_index(bencher: Bencher, threads: usize) {
+        let initial_keys = keys::<8>(INITIAL_N);
+        let insert_keys: Vec<_> = keys::<8>(INITIAL_N + INSERT_N)[INITIAL_N..].to_vec();
+        let warmup_keys: Vec<[u8; 8]> = (0..WRITER_WARMUP_OPS * WRITERS)
+            .map(|i| ((INITIAL_N + INSERT_N + i) as u64).to_be_bytes())
+            .collect();
+        let readers = threads - WRITERS;
+
+        bencher
+            .with_inputs(|| {
+                let tree = Arc::new(setup_tree_index(&initial_keys));
+                let new_keys = Arc::new(insert_keys.clone());
+                let warmup_keys = Arc::new(warmup_keys.clone());
+                (tree, new_keys, warmup_keys)
+            })
+            .bench_refs(|(tree, new_keys, warmup_keys)| {
+                let warmup_done = Arc::new(Barrier::new(threads));
+                let start = Arc::new(Barrier::new(threads));
+
+                // Writer threads
+                let writer_handles: Vec<_> = (0..WRITERS)
+                    .map(|w| {
+                        let tree = Arc::clone(tree);
+                        let warmup_done = Arc::clone(&warmup_done);
+                        let start = Arc::clone(&start);
+                        let chunk_size = INSERT_N / WRITERS;
+                        let chunk: Vec<_> = new_keys[w * chunk_size..(w + 1) * chunk_size].to_vec();
+                        let warmup_chunk: Vec<_> = warmup_keys
+                            [w * WRITER_WARMUP_OPS..(w + 1) * WRITER_WARMUP_OPS]
+                            .to_vec();
+                        thread::spawn(move || {
+                            // === WARMUP PHASE ===
+                            for (i, key) in warmup_chunk.iter().enumerate() {
+                                let _ = tree.insert_sync(*key, i as u64);
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            start.wait();
+                            pre_measurement_barrier();
+
+                            for (i, key) in chunk.iter().enumerate() {
+                                let _ = tree.insert_sync(*key, (INITIAL_N + i) as u64);
+                            }
+
+                            post_measurement_barrier();
+                        })
+                    })
+                    .collect();
+
+                // Reader threads
+                let reader_handles: Vec<_> = (0..readers)
+                    .map(|_| {
+                        let tree = Arc::clone(tree);
+                        let warmup_done = Arc::clone(&warmup_done);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let guard = sdd::Guard::new();
+
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
+                                black_box(count);
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            let mut total = 0usize;
+                            start.wait();
+                            pre_measurement_barrier();
+
+                            for _ in 0..OPS_PER_THREAD {
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 total += count;
                             }
 
@@ -2131,7 +2310,7 @@ mod insert_heavy {
                             let guard = tree.guard();
 
                             // === WARMUP PHASE ===
-                            let mut rng_state = t as u64;
+                            let mut rng_state = thread_seed(BASE_SEED, t);
                             for _ in 0..WARMUP_OPS {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -2144,7 +2323,7 @@ mod insert_heavy {
                             start.wait();
                             pre_measurement_barrier();
 
-                            rng_state = t as u64;
+                            rng_state = thread_seed(BASE_SEED + 1, t); // Different seed for measurement phase
                             for (i, key) in keys.iter().enumerate() {
                                 // Simple LCG for deterministic "random"
                                 rng_state =
@@ -2202,7 +2381,7 @@ mod insert_heavy {
                             let guard = sdd::Guard::new();
 
                             // === WARMUP PHASE ===
-                            let mut rng_state = t as u64;
+                            let mut rng_state = thread_seed(BASE_SEED, t);
                             for _ in 0..WARMUP_OPS {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -2215,7 +2394,7 @@ mod insert_heavy {
                             start.wait();
                             pre_measurement_barrier();
 
-                            rng_state = t as u64;
+                            rng_state = thread_seed(BASE_SEED + 1, t); // Different seed for measurement phase
                             for (i, key) in keys.iter().enumerate() {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -2273,7 +2452,7 @@ mod hot_spot {
                             let guard = tree.guard();
 
                             // === WARMUP PHASE ===
-                            let mut rng_state = t as u64;
+                            let mut rng_state = thread_seed(BASE_SEED, t);
                             for _ in 0..WARMUP_OPS {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -2286,7 +2465,7 @@ mod hot_spot {
                             start.wait();
                             pre_measurement_barrier();
 
-                            rng_state = t as u64;
+                            rng_state = thread_seed(BASE_SEED + 1, t); // Different seed for measurement phase
                             for i in 0..OPS {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -2333,7 +2512,7 @@ mod hot_spot {
                             let guard = sdd::Guard::new();
 
                             // === WARMUP PHASE ===
-                            let mut rng_state = t as u64;
+                            let mut rng_state = thread_seed(BASE_SEED, t);
                             for _ in 0..WARMUP_OPS {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -2346,7 +2525,7 @@ mod hot_spot {
                             start.wait();
                             pre_measurement_barrier();
 
-                            rng_state = t as u64;
+                            rng_state = thread_seed(BASE_SEED + 1, t); // Different seed for measurement phase
                             for i in 0..OPS {
                                 rng_state =
                                     rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -2416,15 +2595,20 @@ mod split_inducing_scan {
                             let guard = tree.guard();
 
                             // === WARMUP PHASE ===
-                            // Writers do minimal warmup (just sync)
+                            // Writers do warmup inserts to prime the tree
+                            for (i, key) in chunk.iter().take(WARMUP_OPS).enumerate() {
+                                let _ = tree.insert_with_guard(key, i as u64, &guard);
+                            }
                             warmup_done.wait();
 
                             // === MEASUREMENT PHASE ===
                             start.wait();
                             pre_measurement_barrier();
 
-                            for (i, key) in chunk.iter().enumerate() {
-                                let _ = tree.insert_with_guard(key, i as u64, &guard);
+                            // Continue with remaining keys after warmup
+                            for (i, key) in chunk.iter().skip(WARMUP_OPS).enumerate() {
+                                let _ =
+                                    tree.insert_with_guard(key, (WARMUP_OPS + i) as u64, &guard);
                             }
 
                             post_measurement_barrier();
@@ -2475,6 +2659,107 @@ mod split_inducing_scan {
                                     },
                                     &guard,
                                 );
+                                total += count;
+                            }
+
+                            post_measurement_barrier();
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in writer_handles {
+                    h.join().unwrap();
+                }
+                for h in reader_handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = [3, 4, 6, 8, 12])]
+    fn tree_index(bencher: Bencher, threads: usize) {
+        let initial_keys = keys_sequential::<8>(INITIAL_N);
+        // Sequential keys after initial range - will cause splits
+        let insert_keys: Vec<[u8; 8]> = (INITIAL_N..INITIAL_N + INSERT_N)
+            .map(|i| (i as u64).to_be_bytes())
+            .collect();
+        let readers = threads - WRITERS;
+
+        bencher
+            .with_inputs(|| {
+                let tree = Arc::new(setup_tree_index(&initial_keys));
+                (tree, insert_keys.clone())
+            })
+            .bench_refs(|(tree, new_keys)| {
+                let warmup_done = Arc::new(Barrier::new(threads));
+                let start = Arc::new(Barrier::new(threads));
+
+                // Writer threads - sequential inserts cause leaf splits
+                let writer_handles: Vec<_> = (0..WRITERS)
+                    .map(|w| {
+                        let tree = Arc::clone(tree);
+                        let warmup_done = Arc::clone(&warmup_done);
+                        let start = Arc::clone(&start);
+                        let chunk_size = INSERT_N / WRITERS;
+                        let chunk: Vec<_> = new_keys[w * chunk_size..(w + 1) * chunk_size].to_vec();
+                        thread::spawn(move || {
+                            // === WARMUP PHASE ===
+                            // Writers do warmup inserts to prime the tree
+                            for (i, key) in chunk.iter().take(WARMUP_OPS).enumerate() {
+                                let _ = tree.insert_sync(*key, i as u64);
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            start.wait();
+                            pre_measurement_barrier();
+
+                            // Continue with remaining keys after warmup
+                            for (i, key) in chunk.iter().skip(WARMUP_OPS).enumerate() {
+                                let _ = tree.insert_sync(*key, (WARMUP_OPS + i) as u64);
+                            }
+
+                            post_measurement_barrier();
+                        })
+                    })
+                    .collect();
+
+                // Reader threads - scan during structural modifications
+                let reader_handles: Vec<_> = (0..readers)
+                    .map(|_| {
+                        let tree = Arc::clone(tree);
+                        let warmup_done = Arc::clone(&warmup_done);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let guard = sdd::Guard::new();
+
+                            // === WARMUP PHASE ===
+                            for _ in 0..WARMUP_OPS {
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
+                                black_box(count);
+                            }
+                            warmup_done.wait();
+
+                            // === MEASUREMENT PHASE ===
+                            let mut total = 0usize;
+                            start.wait();
+                            pre_measurement_barrier();
+
+                            for _ in 0..OPS_PER_THREAD {
+                                let count = tree
+                                    .iter(&guard)
+                                    .take(SCAN_LIMIT)
+                                    .inspect(|(_, v)| {
+                                        black_box(*v);
+                                    })
+                                    .count();
                                 total += count;
                             }
 

@@ -17,7 +17,7 @@
 
 mod common;
 
-use masstree::{MassTree15, MassTree24};
+use masstree::MassTree15;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -527,7 +527,7 @@ fn suffix_overflow_concurrent_stress() {
     const KEYS_PER_THREAD: usize = 500;
     const KEY_LEN: usize = 24; // Forces suffix storage (>16 bytes)
 
-    let tree = Arc::new(MassTree24::<u64>::new());
+    let tree = Arc::new(MassTree15::<u64>::new());
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
     let read_errors = Arc::new(AtomicU64::new(0));
 
@@ -627,7 +627,7 @@ fn shared_prefix_suffix_integrity() {
     const ROUNDS: usize = 20;
 
     for round in 0..ROUNDS {
-        let tree = Arc::new(MassTree24::<u64>::new());
+        let tree = Arc::new(MassTree15::<u64>::new());
         let barrier = Arc::new(Barrier::new(NUM_THREADS));
 
         let mut handles = vec![];

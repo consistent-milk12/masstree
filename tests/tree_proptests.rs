@@ -12,7 +12,7 @@
 
 use masstree::RangeBound;
 use masstree::key::MAX_KEY_LENGTH;
-use masstree::tree::{MassTree15, MassTree15Inline, MassTree24, MassTree24Inline, MassTreeIndex};
+use masstree::tree::{MassTree15, MassTree15Inline};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -115,7 +115,7 @@ proptest! {
     /// Every inserted short key should be retrievable.
     #[test]
     fn insert_then_get_returns_value(key in short_key(), value: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         tree.insert(&key, value).unwrap();
 
         let result = tree.get(&key);
@@ -126,7 +126,7 @@ proptest! {
     /// get_ref should return borrowed reference to the same value.
     #[test]
     fn get_ref_returns_borrowed_value(key in short_key(), value: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         tree.insert(&key, value).unwrap();
 
         let guard = tree.guard();
@@ -138,7 +138,7 @@ proptest! {
     /// Inserting duplicate key should return the old value.
     #[test]
     fn insert_duplicate_returns_old_value(key in short_key_nonempty(), v1: u64, v2: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         let old1 = tree.insert(&key, v1).unwrap();
         prop_assert!(old1.is_none(), "First insert should return None");
@@ -160,7 +160,7 @@ proptest! {
     ) {
         prop_assume!(inserted_key != missing_key);
 
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         tree.insert(&inserted_key, value).unwrap();
 
         prop_assert!(tree.get(&missing_key).is_none());
@@ -169,7 +169,7 @@ proptest! {
     /// Long keys (requiring layers) should work.
     #[test]
     fn insert_long_key_works(key in long_key(), value: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         tree.insert(&key, value).unwrap();
 
         let result = tree.get(&key);
@@ -188,7 +188,7 @@ proptest! {
     /// MassTree should behave identically to BTreeMap for insert/get.
     #[test]
     fn differential_insert_get(pairs in key_value_pairs(100)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for (key, value) in pairs {
@@ -219,7 +219,7 @@ proptest! {
     /// Random operation sequences should match BTreeMap behavior.
     #[test]
     fn differential_random_ops(ops in operations(150)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for op in ops {
@@ -285,7 +285,7 @@ proptest! {
     /// All keys survive splits intact.
     #[test]
     fn splits_preserve_all_keys(keys in unique_keys(50)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         // Insert all keys
         for (i, key) in keys.iter().enumerate() {
@@ -310,7 +310,7 @@ proptest! {
     /// Sequential ascending inserts work correctly (right-edge splits).
     #[test]
     fn sequential_ascending_inserts(count in 1usize..100) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for i in 0..count {
             let key = format!("{i:08}");
@@ -330,7 +330,7 @@ proptest! {
     /// Sequential descending inserts work correctly (left-edge splits).
     #[test]
     fn sequential_descending_inserts(count in 1usize..100) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for i in (0..count).rev() {
             let key = format!("{i:08}");
@@ -350,7 +350,7 @@ proptest! {
     /// Interleaved inserts (even then odd) work correctly.
     #[test]
     fn interleaved_inserts(count in 1usize..50) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         // Insert evens first
         for i in (0..count).filter(|x| x % 2 == 0) {
@@ -383,7 +383,7 @@ proptest! {
     /// len() should equal the number of unique keys inserted.
     #[test]
     fn len_equals_unique_key_count(pairs in key_value_pairs(100)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         let mut unique_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
         for (key, value) in pairs {
@@ -401,7 +401,7 @@ proptest! {
     /// is_empty() should be true only when len() == 0.
     #[test]
     fn is_empty_consistent_with_len(pairs in key_value_pairs(20)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         prop_assert!(tree.is_empty());
         prop_assert_eq!(tree.len(), 0);
@@ -426,17 +426,17 @@ proptest! {
 }
 
 // ============================================================================
-//  MassTreeIndex Properties
+//  MassTree15Inline Properties
 // ============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
-    /// MassTreeIndex should behave like MassTree but return V directly.
+    /// MassTree15Inline should behave like MassTree15 but return V directly.
     #[test]
-    fn index_mode_matches_arc_mode(pairs in key_value_pairs(50)) {
-        let tree: MassTree24<u64> = MassTree24::new();
-        let mut index: MassTreeIndex<u64> = MassTreeIndex::new();
+    fn inline_mode_matches_arc_mode(pairs in key_value_pairs(50)) {
+        let tree: MassTree15<u64> = MassTree15::new();
+        let inline: MassTree15Inline<u64> = MassTree15Inline::new();
 
         for (key, value) in pairs {
             if key.len() > SHORT_KEY_LEN {
@@ -444,22 +444,22 @@ proptest! {
             }
 
             let tree_old = tree.insert(&key, value).unwrap().map(|arc| *arc);
-            let index_old = index.insert(&key, value).unwrap();
+            let inline_old = inline.insert(&key, value).unwrap();
 
-            prop_assert_eq!(tree_old, index_old, "Insert mismatch for key {:?}", key);
+            prop_assert_eq!(tree_old, inline_old, "Insert mismatch for key {:?}", key);
         }
 
-        prop_assert_eq!(tree.len(), index.len());
-        prop_assert_eq!(tree.is_empty(), index.is_empty());
+        prop_assert_eq!(tree.len(), inline.len());
+        prop_assert_eq!(tree.is_empty(), inline.is_empty());
     }
 
-    /// Index mode get returns Copy value directly.
+    /// Inline mode get returns Copy value directly.
     #[test]
-    fn index_get_returns_copy(key in valid_key_nonempty(), value: u64) {
-        let mut index: MassTreeIndex<u64> = MassTreeIndex::new();
-        index.insert(&key, value).unwrap();
+    fn inline_get_returns_copy(key in valid_key_nonempty(), value: u64) {
+        let inline: MassTree15Inline<u64> = MassTree15Inline::new();
+        inline.insert(&key, value).unwrap();
 
-        let result: Option<u64> = index.get(&key);
+        let result: Option<u64> = inline.get(&key);
         prop_assert_eq!(result, Some(value));
     }
 }
@@ -480,7 +480,7 @@ proptest! {
     /// Empty key should work.
     #[test]
     fn empty_key_works(value: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(b"", value).unwrap();
         prop_assert_eq!(*tree.get(b"").unwrap(), value);
@@ -490,7 +490,7 @@ proptest! {
     /// Max-length key (8 bytes) should work.
     #[test]
     fn max_length_key_works(key in prop::collection::vec(any::<u8>(), 8..=8), value: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(&key, value).unwrap();
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
@@ -508,7 +508,7 @@ proptest! {
         key.extend(suffix);
         key.truncate(SHORT_KEY_LEN);
 
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         tree.insert(&key, value).unwrap();
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
     }
@@ -530,7 +530,7 @@ proptest! {
         let mut key2 = prefix;
         key2.push(byte2);
 
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         tree.insert(&key1, v1).unwrap();
         tree.insert(&key2, v2).unwrap();
 
@@ -550,7 +550,7 @@ proptest! {
     /// Large number of operations should maintain consistency.
     #[test]
     fn stress_test_many_operations(ops in operations(500)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for op in ops {
@@ -596,7 +596,7 @@ proptest! {
     /// Removing a key should return the old value and make get return None.
     #[test]
     fn remove_returns_old_value(key in short_key_nonempty(), value: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(&key, value).unwrap();
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
@@ -618,7 +618,7 @@ proptest! {
     ) {
         prop_assume!(inserted_key != missing_key);
 
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         tree.insert(&inserted_key, value).unwrap();
 
         let removed = tree.remove(&missing_key).unwrap();
@@ -629,7 +629,7 @@ proptest! {
     /// Insert-remove-insert cycle should work correctly.
     #[test]
     fn insert_remove_insert_cycle(key in short_key_nonempty(), v1: u64, v2: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         // Insert
         tree.insert(&key, v1).unwrap();
@@ -649,7 +649,7 @@ proptest! {
     /// Removing all keys should result in empty tree.
     #[test]
     fn remove_all_keys_makes_empty(keys in unique_keys(30)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         // Insert all
         for (i, key) in keys.iter().enumerate() {
@@ -669,7 +669,7 @@ proptest! {
     /// Remove with long keys (multiple layers) works correctly.
     #[test]
     fn remove_long_key(key in long_key(), value: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(&key, value).unwrap();
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
@@ -682,7 +682,7 @@ proptest! {
     /// Interleaved insert/remove should maintain consistency.
     #[test]
     fn interleaved_insert_remove(keys in unique_keys(40)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         // Insert first half
@@ -724,7 +724,7 @@ proptest! {
     /// scan_ref should return keys in lexicographic order.
     #[test]
     fn scan_returns_sorted_keys(keys in unique_keys(50)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
             tree.insert(key, i as u64).unwrap();
@@ -759,7 +759,7 @@ proptest! {
     /// scan_ref with range should only return keys in range.
     #[test]
     fn scan_respects_bounds(count in 10usize..50) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         // Insert sequential keys
         for i in 0..count {
@@ -797,7 +797,7 @@ proptest! {
         prefix in prop::collection::vec(any::<u8>(), 1..4),
         suffixes in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..4), 5..20)
     ) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         // Insert keys with prefix
         for (i, suffix) in suffixes.iter().enumerate() {
@@ -834,7 +834,7 @@ proptest! {
     /// Early termination in scan should work.
     #[test]
     fn scan_early_termination(count in 20usize..50, stop_at in 1usize..19) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for i in 0..count {
             let key = format!("{i:04}");
@@ -868,7 +868,7 @@ proptest! {
     /// iter() should return all keys in sorted order.
     #[test]
     fn iter_returns_sorted(keys in unique_keys(50)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
             tree.insert(key, i as u64).unwrap();
@@ -892,7 +892,7 @@ proptest! {
     /// iter() count should match len().
     #[test]
     fn iter_count_matches_len(keys in unique_keys(50)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
             tree.insert(key, i as u64).unwrap();
@@ -908,7 +908,7 @@ proptest! {
     /// range() should only return keys in range.
     #[test]
     fn range_respects_bounds(count in 10usize..50) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for i in 0..count {
             let key = format!("{i:04}");
@@ -933,7 +933,7 @@ proptest! {
     /// DoubleEndedIterator: rev() should return keys in reverse order.
     #[test]
     fn iter_rev_returns_reverse_sorted(keys in unique_keys(50)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
             tree.insert(key, i as u64).unwrap();
@@ -957,7 +957,7 @@ proptest! {
     /// Forward and reverse iteration should return same elements.
     #[test]
     fn iter_forward_reverse_same_elements(keys in unique_keys(30)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
             tree.insert(key, i as u64).unwrap();
@@ -986,7 +986,7 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
-    /// MassTree15 should behave identically to MassTree24 for basic ops.
+    /// MassTree15 should behave identically to MassTree15 for basic ops.
     #[test]
     fn masstree15_matches_oracle(pairs in key_value_pairs(80)) {
         let tree: MassTree15<u64> = MassTree15::new();
@@ -1056,10 +1056,10 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
-    /// MassTree24Inline should behave identically to oracle.
+    /// MassTree15Inline should behave identically to oracle.
     #[test]
     fn masstree24_inline_matches_oracle(pairs in key_value_pairs(80)) {
-        let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+        let tree: MassTree15Inline<u64> = MassTree15Inline::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for (key, value) in pairs {
@@ -1105,7 +1105,7 @@ proptest! {
     /// Inline variant remove should work correctly.
     #[test]
     fn inline_remove_works(keys in unique_keys(40)) {
-        let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+        let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
         for (i, key) in keys.iter().enumerate() {
             tree.insert(key, i as u64).unwrap();
@@ -1122,7 +1122,7 @@ proptest! {
     /// Inline variants should handle update correctly (returning old value).
     #[test]
     fn inline_update_returns_old(key in short_key_nonempty(), v1: u64, v2: u64) {
-        let tree: MassTree24Inline<u64> = MassTree24Inline::new();
+        let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
         let old1 = tree.insert(&key, v1).unwrap();
         prop_assert_eq!(old1, None);
@@ -1144,12 +1144,10 @@ proptest! {
     /// Long keys (9-64 bytes) requiring layer descent should work.
     /// Uses differential testing against BTreeMap to verify correctness.
     ///
-    /// This test originally uncovered BugHunt2 (suffix corruption during split).
     /// The bug was fixed by adding `initializing` parameter to `assign_ksuf`.
-    /// See BugHunt2.md for details.
     #[test]
     fn multi_layer_insert_get(keys in unique_long_keys(30)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for (i, key) in keys.iter().enumerate() {
@@ -1173,7 +1171,7 @@ proptest! {
     /// Very long keys (17-64 bytes, 3+ layers) should work.
     #[test]
     fn very_long_keys_work(key in very_long_key(), value: u64) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(&key, value).unwrap();
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
@@ -1186,7 +1184,7 @@ proptest! {
     /// Long key differential testing with insert/remove.
     #[test]
     fn long_key_differential(ops in operations_long_keys(100)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for op in ops {
@@ -1227,7 +1225,7 @@ proptest! {
         let mut key2 = prefix;
         key2.push(suffix2);
 
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(&key1, v1).unwrap();
         tree.insert(&key2, v2).unwrap();
@@ -1240,7 +1238,7 @@ proptest! {
     /// Iteration should work with long keys.
     #[test]
     fn iter_with_long_keys(keys in unique_long_keys(30)) {
-        let tree: MassTree24<u64> = MassTree24::new();
+        let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
             tree.insert(key, i as u64).unwrap();

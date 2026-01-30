@@ -1,32 +1,4 @@
 //! Concurrent read/write benchmarks with 64-byte keys.
-//!
-//! Compares MassTree15Inline against other concurrent ordered maps under mixed
-//! read-write workloads. All benchmarks use 64-byte keys to test multi-layer
-//! traversal performance.
-//!
-//! ## Key Characteristics
-//!
-//! - Various read/write ratios (90-10, 50-50, pure read, pure write)
-//! - 64-byte keys (8 chunks, tests suffix handling)
-//! - Various access patterns: uniform, zipfian, shared prefix
-//!
-//! ## Methodology
-//!
-//! Each benchmark follows a rigorous methodology:
-//! 1. **Workload-matched warmup**: Warmup mirrors measurement read/write ratio
-//! 2. **Independent randomness**: Each thread has independent RNG streams
-//! 3. **Fresh state**: All benchmarks use `.with_inputs()` for fresh tree per sample
-//! 4. **Randomized writes**: Write decisions use pre-shuffled arrays, not modulo
-//! 5. **Consistent threads**: All benchmarks use [1, 2, 4, 6, 8, 12] thread counts
-//! 6. **100 samples**: For statistical significance
-//! 7. **Proper barrier placement**: Memory barriers after thread synchronization
-//!
-//! ## Running
-//!
-//! ```bash
-//! cargo bench --bench concurrent_read_write_masstree
-//! cargo bench --bench concurrent_read_write_masstree -- 01_
-//! ```
 
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::pedantic)]
@@ -126,7 +98,7 @@ fn thread_uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
 
 /// Generate divergent seed for thread t to avoid correlation.
 /// Uses multiplicative hashing to spread seeds across the space.
-fn thread_seed(base_seed: u64, thread_id: usize) -> u64 {
+const fn thread_seed(base_seed: u64, thread_id: usize) -> u64 {
     let combined = base_seed.wrapping_add(thread_id as u64);
     // Mix with golden ratio hash
     combined.wrapping_mul(0x9e3779b97f4a7c15)
@@ -508,8 +480,7 @@ mod large_dataset_read_only {
                             start.wait();
                             pre_measurement_barrier();
 
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[i];
+                            for &idx in indices.iter().take(OPS_PER_THREAD) {
                                 if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
@@ -575,8 +546,10 @@ mod single_hot_key {
                             let guard = tree.guard();
 
                             // === WARMUP PHASE (matches measurement workload) ===
-                            for i in 0..WARMUP_OPS {
-                                if warmup_is_write[i] {
+                            for (i, &is_write) in
+                                warmup_is_write.iter().enumerate().take(WARMUP_OPS)
+                            {
+                                if is_write {
                                     let _ = tree.insert_with_guard(&hot_key, i as u64, &guard);
                                 } else {
                                     black_box(tree.get_with_guard(&hot_key, &guard));
@@ -589,8 +562,10 @@ mod single_hot_key {
                             start.wait();
                             pre_measurement_barrier();
 
-                            for i in 0..OPS_PER_THREAD {
-                                if is_write[i] {
+                            for (i, &should_write) in
+                                is_write.iter().enumerate().take(OPS_PER_THREAD)
+                            {
+                                if should_write {
                                     let _ = tree.insert_with_guard(
                                         &hot_key,
                                         (t * OPS_PER_THREAD + i) as u64,
@@ -834,8 +809,7 @@ mod pure_read {
                             start.wait();
                             pre_measurement_barrier();
 
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[i];
+                            for &idx in indices.iter().take(OPS_PER_THREAD) {
                                 if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
@@ -982,9 +956,7 @@ mod latency_single {
             let mut sum = 0u64;
 
             // Measure with per-op sampling
-            for i in 0..OPS {
-                let idx = indices[i];
-
+            for (i, &idx) in indices.iter().enumerate().take(OPS) {
                 if i % SAMPLE_EVERY == 0 {
                     // Sampled operation - measure latency
                     let start = Instant::now();
@@ -1035,9 +1007,7 @@ mod latency_single {
                 pre_measurement_barrier();
 
                 // Measure with per-op sampling
-                for i in 0..OPS {
-                    let idx = indices[i];
-
+                for (i, &idx) in indices.iter().enumerate().take(OPS) {
                     if i % SAMPLE_EVERY == 0 {
                         let start = Instant::now();
                         let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);

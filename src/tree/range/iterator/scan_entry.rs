@@ -6,7 +6,7 @@
 ///
 /// # Type Parameters
 ///
-/// - `O`: The output type (e.g., `Arc<V>` for `MassTree<V>`, `V` for `MassTree24Inline<V>`)
+/// - `O`: The output type (e.g., `Arc<V>` for `MassTree15<V>`, `V` for `MassTree<V>`/`MassTree15Inline<V>`)
 ///
 /// # Example
 ///
@@ -23,8 +23,8 @@ pub struct ScanEntry<O> {
 
     /// The value output.
     ///
-    /// For `MassTree<V>`: `Arc<V>` (shared reference)
-    /// For `MassTree24Inline<V>`: `V` (copy)
+    /// For `MassTree15<V>`: `Arc<V>` (shared reference)
+    /// For `MassTree<V>` / `MassTree15Inline<V>`: `V` (copy)
     pub value: O,
 }
 

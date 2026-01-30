@@ -1,4 +1,4 @@
-use crate::{LeafNode15, LeafNode24, TreeInternode, ValueSlot};
+use crate::{LeafNode15, TreeInternode, ValueSlot};
 
 pub struct Scalar;
 
@@ -28,32 +28,6 @@ impl Scalar {
     // ============================================================================
     //  Leaf ikey Matching (Scalar)
     // ============================================================================
-
-    /// Find all slots in a leaf where `ikey == target_ikey`.
-    ///
-    /// Returns a bitmask where bit `i` is set if `leaf.ikey(i) == target_ikey`.
-    ///
-    /// # Arguments
-    /// * `target_ikey` - The 8-byte key slice to search for
-    /// * `leaf` - The leaf node to search
-    ///
-    /// # Returns
-    /// A `u32` bitmask with bits set for matching slots (0-23 for WIDTH=24).
-    #[inline(always)]
-    #[must_use]
-    pub fn find_ikey_matches_leaf24<S: ValueSlot>(target_ikey: u64, leaf: &LeafNode24<S>) -> u32 {
-        use crate::leaf24::WIDTH_24;
-
-        let mut mask: u32 = 0;
-
-        for i in 0..WIDTH_24 {
-            if leaf.ikey(i) == target_ikey {
-                mask |= 1 << i;
-            }
-        }
-
-        mask
-    }
 
     /// Find all slots in a [`LeafNode15`] where `ikey == target_ikey`.
     ///

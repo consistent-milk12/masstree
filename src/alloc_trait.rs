@@ -11,7 +11,7 @@
 //!
 //! # Implementors
 //!
-//! - [`SeizeAllocator24<S>`](crate::alloc24::SeizeAllocator24) for `LeafNode24<S>`
+//! - [`SeizeAllocator15<S>`](crate::alloc15::SeizeAllocator15) for `LeafNode15<S>`
 
 use seize::LocalGuard;
 
@@ -40,7 +40,7 @@ use crate::slot::ValueSlot;
 ///
 /// # Implementors
 ///
-/// - [`SeizeAllocator24<S>`](crate::alloc24::SeizeAllocator24) for `L = LeafNode24<S>`
+/// - [`SeizeAllocator15<S>`](crate::alloc15::SeizeAllocator15) for `L = LeafNode15<S>`
 pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     // ========================================================================
     // Leaf Allocation

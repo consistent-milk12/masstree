@@ -163,6 +163,15 @@ where
     /// - `ki == perm.size()`: Leaf exhausted, need to advance or go up
     ki: usize,
 
+    /// Cached ikey for monotonicity check optimization.
+    ///
+    /// Stores the last successfully read slot's ikey to detect backward jumps
+    /// due to concurrent modifications. Avoids loading `cursor_key.ikey` on
+    /// every iteration (potential cache miss).
+    ///
+    /// Updated after each successful slot read in `find_next_inner`.
+    last_ikey: u64,
+
     /// Marker for the slot type.
     _marker: PhantomData<S>,
 }
@@ -181,11 +190,16 @@ where
             version: self.version,
             perm: self.perm,
             ki: self.ki,
+            last_ikey: self.last_ikey,
             _marker: PhantomData,
         }
     }
 }
 
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "Intentionally omit PhantomData and show perm.size() instead of full permutation"
+)]
 impl<L, S> Debug for ScanStackElement<L, S>
 where
     L: TreeLeafNode<S>,
@@ -223,6 +237,7 @@ where
             version: 0,
             perm: L::Perm::empty(),
             ki: 0,
+            last_ikey: 0,
             _marker: PhantomData,
         }
     }
@@ -247,6 +262,7 @@ where
             version,
             perm,
             ki,
+            last_ikey: 0,
             _marker: PhantomData,
         }
     }
@@ -381,6 +397,18 @@ where
     #[allow(dead_code, reason = "Scan stack element API")]
     pub const fn set_ki(&mut self, ki: usize) {
         self.ki = ki;
+    }
+
+    /// Get the cached last ikey for monotonicity check.
+    #[inline(always)]
+    pub const fn last_ikey(&self) -> u64 {
+        self.last_ikey
+    }
+
+    /// Set the cached last ikey after a successful slot read.
+    #[inline(always)]
+    pub const fn set_last_ikey(&mut self, ikey: u64) {
+        self.last_ikey = ikey;
     }
 
     /// Advance to the next logical position.
@@ -641,6 +669,64 @@ impl<S: ValueSlot> ScanSnapshot<S> {
     #[inline(always)]
     pub const fn new(value: S::Output, key_len: usize) -> Self {
         Self { value, key_len }
+    }
+}
+
+// ============================================================================
+//  FindResult - Optimized return type for find operations
+// ============================================================================
+
+/// Result from find operations - optimized for the common non-Emit cases.
+///
+/// Replaces `(ScanState, Option<ScanSnapshot<S>>)` with a discriminated union
+/// that doesn't waste space on `None` for non-Emit states.
+///
+/// # Size Optimization
+///
+/// - Old: `(ScanState, Option<ScanSnapshot<S>>)` = 1 + 1 + `size_of(ScanSnapshot)`
+/// - New: `FindResult<S>` = `max(1, size_of(ScanSnapshot))` with discriminant
+///
+/// For typical `S::Output` sizes (8-16 bytes), this saves ~8 bytes per return.
+pub enum FindResult<S: ValueSlot> {
+    /// Found a value to emit.
+    Emit(ScanSnapshot<S>),
+    /// State transition without payload.
+    Transition(ScanState),
+}
+
+impl<S: ValueSlot> Clone for FindResult<S>
+where
+    S::Output: Clone,
+{
+    fn clone(&self) -> Self {
+        match self {
+            Self::Emit(snap) => Self::Emit(ScanSnapshot::new(snap.value.clone(), snap.key_len)),
+            Self::Transition(state) => Self::Transition(*state),
+        }
+    }
+}
+
+impl<S: ValueSlot> FindResult<S> {
+    /// Create an Emit result with the given snapshot.
+    #[inline(always)]
+    pub const fn emit(snapshot: ScanSnapshot<S>) -> Self {
+        Self::Emit(snapshot)
+    }
+
+    /// Create a state transition result.
+    #[inline(always)]
+    pub const fn transition(state: ScanState) -> Self {
+        debug_assert!(!matches!(state, ScanState::Emit));
+        Self::Transition(state)
+    }
+
+    /// Convert to the legacy tuple format for gradual migration.
+    #[inline(always)]
+    pub fn into_parts(self) -> (ScanState, Option<ScanSnapshot<S>>) {
+        match self {
+            Self::Emit(snap) => (ScanState::Emit, Some(snap)),
+            Self::Transition(state) => (state, None),
+        }
     }
 }
 
