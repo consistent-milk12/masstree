@@ -28,7 +28,7 @@ fn tri1_single_thread() {
         for y in 0..=x {
             let z = x - y;
             let key = (INITIAL_POS + y as u64 * incr).to_be_bytes();
-            tree.insert_with_guard(&key, z as u64, &guard).unwrap();
+            tree.insert_with_guard(&key, z as u64, &guard);
         }
     }
 
@@ -54,7 +54,7 @@ fn tri1_check() {
         for y in 0..=x {
             let z = x - y;
             let key = (INITIAL_POS + y as u64 * incr).to_be_bytes();
-            tree.insert_with_guard(&key, z as u64, &guard).unwrap();
+            tree.insert_with_guard(&key, z as u64, &guard);
         }
     }
 
@@ -117,7 +117,7 @@ fn tri1_stress_overwrites() {
 
     // Write many times to same key
     for i in 0..10_000u64 {
-        tree.insert_with_guard(&key, i, &guard).unwrap();
+        tree.insert_with_guard(&key, i, &guard);
     }
 
     // Should have last value

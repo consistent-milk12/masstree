@@ -375,10 +375,7 @@ where
     ///
     /// Takes ownership of `value` to avoid an unnecessary clone.
     ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - Layer created, value inserted
-    /// * `Err(InsertError::AllocationFailed)` - Could not allocate layer nodes
+    /// Note: Layer allocation is infallible (aborts on OOM like standard Rust).
     #[cold]
     #[rustfmt::skip]
     #[inline(never)]
@@ -394,15 +391,15 @@ where
         key: &mut Key<'_>,
         value: S::Output,
         guard: &LocalGuard<'_>,
-    ) -> Result<(), InsertError> {
+    ) {
         // Mark insert before modifying the node
         lock.mark_insert();
 
-        // Create new layer for the conflicting keys (FALLIBLE)
+        // Create new layer for the conflicting keys (infallible - aborts on OOM)
         //
         // SAFETY: We hold the lock on `leaf`, guard is from this tree's collector
         let layer_ptr: *mut u8 = unsafe {
-            self.try_create_layer_concurrent_generic(leaf, slot, key, value, guard)?
+            self.create_layer_concurrent_generic(leaf, slot, key, value, guard)
         };
 
         // Retire the existing value in the conflict slot
@@ -425,8 +422,6 @@ where
         // Install the layer pointer
         leaf.set_keylenx(slot, LAYER_KEYLENX);
         leaf.set_leaf_value_ptr(slot, layer_ptr);
-
-        Ok(())
     }
 }
 
@@ -830,14 +825,14 @@ where
                     }
 
                     InsertSearchResultGeneric::Conflict { slot } => {
-                        // Handle suffix conflict by creating a new layer (FALLIBLE)
+                        // Handle suffix conflict by creating a new layer
                         // In single-layer mode, this branch is unreachable (search never returns Conflict)
                         debug_assert!(
                             !single_layer_mode,
                             "single-layer search returned Conflict variant"
                         );
 
-                        self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard)?;
+                        self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard);
                         stat!(successful_insert);
                         self.count.increment();
                         return Ok(None);

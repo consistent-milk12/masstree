@@ -15,7 +15,6 @@
 
 use seize::LocalGuard;
 
-use crate::error::AllocResult;
 use crate::leaf_trait::{TreeInternode, TreeLeafNode};
 use crate::nodeversion::NodeVersion;
 use crate::slot::ValueSlot;
@@ -263,28 +262,7 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// - No other shared pointers may reference nodes exclusively through this subtree
     unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, guard: &LocalGuard<'_>);
 
-    // ========================================================================
-    // Fallible Leaf Allocation
-    // ========================================================================
-
-    /// Try to allocate a leaf node, returning an error on failure.
-    ///
-    /// This is the fallible version of `alloc_leaf_direct`. Use this in prod
-    /// code paths that need to handle OOM gracefully.
-    ///
-    /// Impl's must:
-    /// 1. Use fallible allocation (e.g., `std::alloc::alloc` + null check)
-    /// 2. Initialize the node in-place using `L::init_at`
-    ///
-    /// # Errors
-    /// Upon allocation failure
-    #[inline]
-    fn try_alloc_leaf(&self, is_root: bool, is_layer_root: bool) -> AllocResult<*mut L> {
-        // Default: delegate to infallible version (may abort)
-        // Implementations must override for true fallibility
-        Ok(self.alloc_leaf_direct(is_root, is_layer_root))
     }
-}
 
 // ============================================================================
 // Tests

@@ -38,7 +38,7 @@ fn test_suffix_migration_split_into() {
         .collect();
 
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     // All keys must still be findable after splits
@@ -56,8 +56,8 @@ fn test_suffix_migration_split_all_to_right() {
 
     // Insert keys that will trigger split_all_to_right
     // (when new key would be at position 0)
-    tree.insert(b"zzzzzzzz_suffix", 1).unwrap(); // Goes to position 0
-    tree.insert(b"aaaaaaaa_suffix", 2).unwrap(); // Forces split with split_all_to_right
+    tree.insert(b"zzzzzzzz_suffix", 1); // Goes to position 0
+    tree.insert(b"aaaaaaaa_suffix", 2); // Forces split with split_all_to_right
 
     // Verify both findable
     assert_eq!(*tree.get(b"zzzzzzzz_suffix").unwrap(), 1);
@@ -79,13 +79,13 @@ fn test_suffix_migration_various_lengths() {
     ];
 
     for (i, (key, _len)) in test_cases.iter().enumerate() {
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     // Force splits by adding more keys
     for i in 0..10u64 {
         let key = format!("other0{i:02}");
-        tree.insert(key.as_bytes(), 100 + i).unwrap();
+        tree.insert(key.as_bytes(), 100 + i);
     }
 
     // Verify all original keys still findable
@@ -107,7 +107,7 @@ fn test_8_byte_boundary_key() {
 
     // Exactly 8 bytes
     let key8 = b"exactkey"; // 8 bytes
-    tree.insert(key8, 8).unwrap();
+    tree.insert(key8, 8);
 
     let result = tree.get(key8);
     assert!(result.is_some(), "8-byte key not found");
@@ -122,7 +122,7 @@ fn test_16_byte_boundary_key() {
     // Exactly 16 bytes
     let key16 = b"exactly16bytes!!"; // 16 bytes
     assert_eq!(key16.len(), 16);
-    tree.insert(key16, 16).unwrap();
+    tree.insert(key16, 16);
 
     let result = tree.get(key16);
     assert!(result.is_some(), "16-byte key not found");
@@ -137,7 +137,7 @@ fn test_24_byte_boundary_key() {
     // Exactly 24 bytes
     let key24 = b"exactly_24_bytes_here!!!"; // 24 bytes
     assert_eq!(key24.len(), 24);
-    tree.insert(key24, 24).unwrap();
+    tree.insert(key24, 24);
 
     let result = tree.get(key24);
     assert!(result.is_some(), "24-byte key not found");
@@ -153,9 +153,9 @@ fn test_multiple_boundary_keys() {
     let key16 = b"16_bytes_exact!!";
     let key24 = b"24_bytes_key_exactly!!!!";
 
-    tree.insert(key8, 8).unwrap();
-    tree.insert(key16, 16).unwrap();
-    tree.insert(key24, 24).unwrap();
+    tree.insert(key8, 8);
+    tree.insert(key16, 16);
+    tree.insert(key24, 24);
 
     assert_eq!(*tree.get(key8).unwrap(), 8);
     assert_eq!(*tree.get(key16).unwrap(), 16);
@@ -168,9 +168,9 @@ fn test_shared_boundary_prefix() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // Keys sharing first 8 bytes but different lengths
-    tree.insert(b"prefix00", 1).unwrap(); // 8 bytes
-    tree.insert(b"prefix00_more", 2).unwrap(); // 13 bytes
-    tree.insert(b"prefix00_even_more", 3).unwrap(); // 18 bytes
+    tree.insert(b"prefix00", 1); // 8 bytes
+    tree.insert(b"prefix00_more", 2); // 13 bytes
+    tree.insert(b"prefix00_even_more", 3); // 18 bytes
 
     assert_eq!(*tree.get(b"prefix00").unwrap(), 1);
     assert_eq!(*tree.get(b"prefix00_more").unwrap(), 2);
@@ -187,8 +187,8 @@ fn test_prefix_of_other_basic() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // "prefix" is a prefix of "prefix_with_more"
-    tree.insert(b"prefix", 1).unwrap();
-    tree.insert(b"prefix_with_more", 2).unwrap();
+    tree.insert(b"prefix", 1);
+    tree.insert(b"prefix_with_more", 2);
 
     assert_eq!(*tree.get(b"prefix").unwrap(), 1);
     assert_eq!(*tree.get(b"prefix_with_more").unwrap(), 2);
@@ -200,8 +200,8 @@ fn test_prefix_of_other_at_boundary() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // "prefix00" (8 bytes) is prefix of "prefix00suffix"
-    tree.insert(b"prefix00", 1).unwrap();
-    tree.insert(b"prefix00suffix", 2).unwrap();
+    tree.insert(b"prefix00", 1);
+    tree.insert(b"prefix00suffix", 2);
 
     assert_eq!(*tree.get(b"prefix00").unwrap(), 1);
     assert_eq!(*tree.get(b"prefix00suffix").unwrap(), 2);
@@ -218,7 +218,7 @@ fn test_prefix_chain() {
     ];
 
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     for (i, key) in keys.iter().enumerate() {
@@ -234,9 +234,9 @@ fn test_prefix_of_other_in_layer() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // Create suffix keys that trigger layer creation
-    tree.insert(b"prefix00suffix_a", 1).unwrap();
-    tree.insert(b"prefix00suffix_ab", 2).unwrap(); // suffix_a is prefix of suffix_ab
-    tree.insert(b"prefix00suffix_abc", 3).unwrap();
+    tree.insert(b"prefix00suffix_a", 1);
+    tree.insert(b"prefix00suffix_ab", 2); // suffix_a is prefix of suffix_ab
+    tree.insert(b"prefix00suffix_abc", 3);
 
     assert_eq!(*tree.get(b"prefix00suffix_a").unwrap(), 1);
     assert_eq!(*tree.get(b"prefix00suffix_ab").unwrap(), 2);
@@ -249,9 +249,9 @@ fn test_prefix_of_other_reverse_order() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // Insert longer key first
-    tree.insert(b"prefix00suffix_longer", 1).unwrap();
-    tree.insert(b"prefix00suffix", 2).unwrap();
-    tree.insert(b"prefix00", 3).unwrap();
+    tree.insert(b"prefix00suffix_longer", 1);
+    tree.insert(b"prefix00suffix", 2);
+    tree.insert(b"prefix00", 3);
 
     assert_eq!(*tree.get(b"prefix00suffix_longer").unwrap(), 1);
     assert_eq!(*tree.get(b"prefix00suffix").unwrap(), 2);
@@ -268,10 +268,10 @@ fn test_inline_suffix_coexistence() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // 8-byte key (inline, keylenx=8)
-    tree.insert(b"exactkey", 1).unwrap();
+    tree.insert(b"exactkey", 1);
 
     // 16-byte key with same prefix (suffix, keylenx=64)
-    tree.insert(b"exactkey12345678", 2).unwrap();
+    tree.insert(b"exactkey12345678", 2);
 
     // Both must coexist and be findable
     assert_eq!(*tree.get(b"exactkey").unwrap(), 1);
@@ -284,17 +284,17 @@ fn test_inline_lengths_with_suffix() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // Different inline lengths (1-8 bytes)
-    tree.insert(b"a", 1).unwrap();
-    tree.insert(b"ab", 2).unwrap();
-    tree.insert(b"abc", 3).unwrap();
-    tree.insert(b"abcd", 4).unwrap();
-    tree.insert(b"abcde", 5).unwrap();
-    tree.insert(b"abcdef", 6).unwrap();
-    tree.insert(b"abcdefg", 7).unwrap();
-    tree.insert(b"abcdefgh", 8).unwrap();
+    tree.insert(b"a", 1);
+    tree.insert(b"ab", 2);
+    tree.insert(b"abc", 3);
+    tree.insert(b"abcd", 4);
+    tree.insert(b"abcde", 5);
+    tree.insert(b"abcdef", 6);
+    tree.insert(b"abcdefg", 7);
+    tree.insert(b"abcdefgh", 8);
 
     // Same prefix but with suffix
-    tree.insert(b"abcdefgh_suffix", 9).unwrap();
+    tree.insert(b"abcdefgh_suffix", 9);
 
     // All must coexist
     assert_eq!(*tree.get(b"a").unwrap(), 1);
@@ -315,15 +315,15 @@ fn test_no_spurious_layer_creation() {
 
     // Insert inline and suffix keys with same 8-byte prefix
     // These should NOT create a layer (one is inline, one is suffix)
-    tree.insert(b"prefix00", 1).unwrap(); // inline (8 bytes)
-    tree.insert(b"prefix00_suffix", 2).unwrap(); // suffix (15 bytes)
+    tree.insert(b"prefix00", 1); // inline (8 bytes)
+    tree.insert(b"prefix00_suffix", 2); // suffix (15 bytes)
 
     // Both findable
     assert_eq!(*tree.get(b"prefix00").unwrap(), 1);
     assert_eq!(*tree.get(b"prefix00_suffix").unwrap(), 2);
 
     // Insert another suffix key - now we need a layer for suffix conflict
-    tree.insert(b"prefix00_other", 3).unwrap();
+    tree.insert(b"prefix00_other", 3);
 
     // All three still findable
     assert_eq!(*tree.get(b"prefix00").unwrap(), 1);
@@ -348,7 +348,7 @@ fn test_layer_growth_beyond_width() {
     for i in 0..35u64 {
         let mut key = prefix.to_vec();
         key.extend_from_slice(&i.to_be_bytes());
-        tree.insert(&key, i).unwrap();
+        tree.insert(&key, i);
     }
 
     // All keys must be findable
@@ -376,7 +376,7 @@ fn test_layer_growth_random_order() {
     for &i in &order {
         let mut key = prefix.to_vec();
         key.extend_from_slice(&(i as u64).to_be_bytes());
-        tree.insert(&key, i as u64).unwrap();
+        tree.insert(&key, i as u64);
     }
 
     // All keys findable
@@ -399,7 +399,7 @@ fn test_nested_layer_growth() {
     for i in 0..25u64 {
         let mut key = prefix16.to_vec();
         key.extend_from_slice(&i.to_be_bytes());
-        tree.insert(&key, i).unwrap();
+        tree.insert(&key, i);
     }
 
     for i in 0..25u64 {
@@ -419,13 +419,13 @@ fn test_layer_root_becomes_internode() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // Create layer
-    tree.insert(b"prefix00suffix_01", 1).unwrap();
-    tree.insert(b"prefix00suffix_02", 2).unwrap();
+    tree.insert(b"prefix00suffix_01", 1);
+    tree.insert(b"prefix00suffix_02", 2);
 
     // Fill layer until it splits (need >15 keys for WIDTH=15)
     for i in 3..25u64 {
         let key = format!("prefix00suffix_{i:02}");
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
     }
 
     // Verify all keys still findable (layer root is now internode)
@@ -445,7 +445,7 @@ fn test_layer_internode_mixed_operations() {
     // Build up layer with internode root
     for i in 0..20u64 {
         let key = format!("layer___val_{i:04}");
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
     }
 
     // Interleave gets and inserts
@@ -455,7 +455,7 @@ fn test_layer_internode_mixed_operations() {
 
         // Insert more keys
         let new_key = format!("layer___new_{i:04}");
-        tree.insert(new_key.as_bytes(), 100 + i).unwrap();
+        tree.insert(new_key.as_bytes(), 100 + i);
     }
 
     // Verify all keys
@@ -477,11 +477,11 @@ fn test_layer_internode_mixed_operations() {
 fn test_empty_key() {
     let tree: MassTree15<u64> = MassTree15::new();
 
-    tree.insert(b"", 0).unwrap();
+    tree.insert(b"", 0);
     assert_eq!(*tree.get(b"").unwrap(), 0);
 
     // Non-empty key shouldn't conflict
-    tree.insert(b"notempty", 1).unwrap();
+    tree.insert(b"notempty", 1);
     assert_eq!(*tree.get(b"").unwrap(), 0);
     assert_eq!(*tree.get(b"notempty").unwrap(), 1);
 }
@@ -492,7 +492,7 @@ fn test_single_byte_keys() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..=255u8 {
-        tree.insert(&[i], u64::from(i)).unwrap();
+        tree.insert(&[i], u64::from(i));
     }
 
     for i in 0..=255u8 {
@@ -505,7 +505,7 @@ fn test_single_byte_keys() {
 fn test_key_not_found() {
     let tree: MassTree15<u64> = MassTree15::new();
 
-    tree.insert(b"exists", 1).unwrap();
+    tree.insert(b"exists", 1);
 
     assert!(tree.get(b"exists").is_some());
     assert!(tree.get(b"missing").is_none());
@@ -518,10 +518,10 @@ fn test_key_not_found() {
 fn test_update_existing() {
     let tree: MassTree15<u64> = MassTree15::new();
 
-    tree.insert(b"key", 1).unwrap();
+    tree.insert(b"key", 1);
     assert_eq!(*tree.get(b"key").unwrap(), 1);
 
-    let old = tree.insert(b"key", 2).unwrap();
+    let old = tree.insert(b"key", 2);
     assert_eq!(*old.unwrap(), 1);
     assert_eq!(*tree.get(b"key").unwrap(), 2);
 }
@@ -532,7 +532,7 @@ fn test_very_long_key() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     let long_key: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
-    tree.insert(&long_key, 42).unwrap();
+    tree.insert(&long_key, 42);
 
     assert_eq!(*tree.get(&long_key).unwrap(), 42);
 
@@ -549,7 +549,7 @@ fn test_max_key_length() {
 
     // 256 bytes is the maximum key length
     let max_key: Vec<u8> = (0..256).map(|i| (i % 256) as u8).collect();
-    tree.insert(&max_key, 256).unwrap();
+    tree.insert(&max_key, 256);
 
     assert_eq!(*tree.get(&max_key).unwrap(), 256);
 }
@@ -569,7 +569,7 @@ fn test_same_prefix_different_lengths() {
         while key.len() < len {
             key.push(b'x');
         }
-        tree.insert(&key, len as u64).unwrap();
+        tree.insert(&key, len as u64);
     }
 
     // Verify all findable

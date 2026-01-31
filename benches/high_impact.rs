@@ -15,9 +15,9 @@
 //!
 //! ## Methodology Notes
 //!
-//! - **Warmup included in counters**: All benchmarks perform warmup iterations inside
-//!   the timed closure, and these ops are included in the `ItemsCount` counter for
-//!   accurate ops/sec reporting.
+//! - **Warmup excluded from counters**: Warmup iterations happen before measurement
+//!   starts (before `start.wait()`) and are NOT included in the `ItemsCount` counter.
+//!   This ensures accurate ops/sec reporting for measured operations only.
 //! - **Compiler barriers**: Pre/post measurement barriers use `compiler_fence` only
 //!   (no hardware fences) to minimize overhead.
 //! - TreeIndex writes use `remove_sync()+insert_sync()` fallback since it lacks
@@ -189,7 +189,7 @@ mod long_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_masstree15_long(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -213,14 +213,13 @@ mod long_keys {
                                 black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                                    black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
@@ -249,7 +248,7 @@ mod long_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_skipmap_long(keys.as_ref())))
             .bench_local_values(|map| {
@@ -272,14 +271,13 @@ mod long_keys {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    map.insert(keys[idx], i as u64);
+                                    black_box(map.insert(keys[idx], i as u64));
                                 } else if let Some(e) = map.get(&keys[idx]) {
                                     sum = sum.wrapping_add(*e.value());
                                 }
@@ -308,7 +306,7 @@ mod long_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_indexset_long(keys.as_ref())))
             .bench_local_values(|map| {
@@ -331,14 +329,13 @@ mod long_keys {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    map.insert(keys[idx], i as u64);
+                                    black_box(map.insert(keys[idx], i as u64));
                                 } else if let Some(r) = map.get(&keys[idx]) {
                                     sum = sum.wrapping_add(r.get().value);
                                 }
@@ -367,7 +364,7 @@ mod long_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_tree_index_long(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -391,14 +388,13 @@ mod long_keys {
                                 black_box(tree.peek(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    tree_index_upsert_sync_long(&tree, keys[idx], i as u64);
+                                    black_box(tree_index_upsert_sync_long(&tree, keys[idx], i as u64));
                                 } else if let Some(v) = tree.peek(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(*v);
                                 }
@@ -497,7 +493,7 @@ mod multiple_hot_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_masstree15_long(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -521,14 +517,13 @@ mod multiple_hot_keys {
                                 black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                                    black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
@@ -563,7 +558,7 @@ mod multiple_hot_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_skipmap_long(keys.as_ref())))
             .bench_local_values(|map| {
@@ -586,14 +581,13 @@ mod multiple_hot_keys {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    map.insert(keys[idx], i as u64);
+                                    black_box(map.insert(keys[idx], i as u64));
                                 } else if let Some(e) = map.get(&keys[idx]) {
                                     sum = sum.wrapping_add(*e.value());
                                 }
@@ -628,7 +622,7 @@ mod multiple_hot_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_indexset_long(keys.as_ref())))
             .bench_local_values(|map| {
@@ -651,14 +645,13 @@ mod multiple_hot_keys {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    map.insert(keys[idx], i as u64);
+                                    black_box(map.insert(keys[idx], i as u64));
                                 } else if let Some(r) = map.get(&keys[idx]) {
                                     sum = sum.wrapping_add(r.get().value);
                                 }
@@ -693,7 +686,7 @@ mod multiple_hot_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_tree_index_long(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -717,14 +710,13 @@ mod multiple_hot_keys {
                                 black_box(tree.peek(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    tree_index_upsert_sync_long(&tree, keys[idx], i as u64);
+                                    black_box(tree_index_upsert_sync_long(&tree, keys[idx], i as u64));
                                 } else if let Some(v) = tree.peek(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(*v);
                                 }
@@ -824,7 +816,7 @@ mod mixed_operations {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_masstree15_long(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -848,10 +840,9 @@ mod mixed_operations {
                                 black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 match ops[i] {
@@ -861,11 +852,12 @@ mod mixed_operations {
                                         }
                                     }
                                     Op::Insert => {
-                                        let _ =
-                                            tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                                        black_box(
+                                            tree.insert_with_guard(&keys[idx], i as u64, &guard),
+                                        );
                                     }
                                     Op::Remove => {
-                                        let _ = tree.remove_with_guard(&keys[idx], &guard);
+                                        let _ = black_box(tree.remove_with_guard(&keys[idx], &guard));
                                     }
                                 }
                             }
@@ -893,7 +885,7 @@ mod mixed_operations {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_skipmap_long(keys.as_ref())))
             .bench_local_values(|map| {
@@ -916,10 +908,9 @@ mod mixed_operations {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 match ops[i] {
@@ -929,10 +920,10 @@ mod mixed_operations {
                                         }
                                     }
                                     Op::Insert => {
-                                        map.insert(keys[idx], i as u64);
+                                        black_box(map.insert(keys[idx], i as u64));
                                     }
                                     Op::Remove => {
-                                        map.remove(&keys[idx]);
+                                        black_box(map.remove(&keys[idx]));
                                     }
                                 }
                             }
@@ -960,7 +951,7 @@ mod mixed_operations {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_indexset_long(keys.as_ref())))
             .bench_local_values(|map| {
@@ -983,10 +974,9 @@ mod mixed_operations {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 match ops[i] {
@@ -996,10 +986,10 @@ mod mixed_operations {
                                         }
                                     }
                                     Op::Insert => {
-                                        map.insert(keys[idx], i as u64);
+                                        black_box(map.insert(keys[idx], i as u64));
                                     }
                                     Op::Remove => {
-                                        map.remove(&keys[idx]);
+                                        black_box(map.remove(&keys[idx]));
                                     }
                                 }
                             }
@@ -1027,7 +1017,7 @@ mod mixed_operations {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_tree_index_long(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -1051,10 +1041,9 @@ mod mixed_operations {
                                 black_box(tree.peek(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 match ops[i] {
@@ -1064,10 +1053,10 @@ mod mixed_operations {
                                         }
                                     }
                                     Op::Insert => {
-                                        tree_index_upsert_sync_long(&tree, keys[idx], i as u64);
+                                        black_box(tree_index_upsert_sync_long(&tree, keys[idx], i as u64));
                                     }
                                     Op::Remove => {
-                                        tree.remove_sync(&keys[idx]);
+                                        black_box(tree.remove_sync(&keys[idx]));
                                     }
                                 }
                             }
@@ -1200,7 +1189,7 @@ mod variable_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_masstree15_var(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -1224,10 +1213,9 @@ mod variable_keys {
                                 black_box(tree.get_with_guard(keys[idx].as_slice(), &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
@@ -1266,7 +1254,7 @@ mod variable_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_skipmap_var(keys.as_ref())))
             .bench_local_values(|map| {
@@ -1289,14 +1277,13 @@ mod variable_keys {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    map.insert(keys[idx].clone(), i as u64);
+                                    black_box(map.insert(keys[idx].clone(), i as u64));
                                 } else if let Some(e) = map.get(&keys[idx]) {
                                     sum = sum.wrapping_add(*e.value());
                                 }
@@ -1325,7 +1312,7 @@ mod variable_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_indexset_var(keys.as_ref())))
             .bench_local_values(|map| {
@@ -1348,14 +1335,13 @@ mod variable_keys {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    map.insert(keys[idx].clone(), i as u64);
+                                    black_box(map.insert(keys[idx].clone(), i as u64));
                                 } else if let Some(r) = map.get(&keys[idx]) {
                                     sum = sum.wrapping_add(r.get().value);
                                 }
@@ -1384,7 +1370,7 @@ mod variable_keys {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_tree_index_var(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -1408,14 +1394,13 @@ mod variable_keys {
                                 black_box(tree.peek(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    tree_index_upsert_sync_var(&tree, keys[idx].clone(), i as u64);
+                                    black_box(tree_index_upsert_sync_var(&tree, keys[idx].clone(), i as u64));
                                 } else if let Some(v) = tree.peek(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(*v);
                                 }
@@ -1542,7 +1527,7 @@ mod prefix_queries {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (SCANS_PER_THREAD + 50),
+                threads * SCANS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_masstree15_prefix(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -1573,10 +1558,9 @@ mod prefix_queries {
                                 black_box(count);
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut total = 0u64;
-                            start.wait();
                             for i in 0..SCANS_PER_THREAD {
                                 let prefix = &prefixes[base + i];
                                 tree.scan_prefix(
@@ -1609,7 +1593,7 @@ mod prefix_queries {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (SCANS_PER_THREAD + 50),
+                threads * SCANS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_skipmap_prefix(keys.as_ref())))
             .bench_local_values(|map| {
@@ -1635,10 +1619,9 @@ mod prefix_queries {
                                 black_box(count);
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut total = 0u64;
-                            start.wait();
                             for i in 0..SCANS_PER_THREAD {
                                 let (start_key, end_key) = range_bounds[base + i];
                                 for entry in map.range(start_key..end_key) {
@@ -1666,7 +1649,7 @@ mod prefix_queries {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (SCANS_PER_THREAD + 50),
+                threads * SCANS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_tree_index_prefix(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -1693,10 +1676,9 @@ mod prefix_queries {
                                 black_box(count);
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut total = 0u64;
-                            start.wait();
                             for i in 0..SCANS_PER_THREAD {
                                 let (start_key, end_key) = range_bounds[base + i];
                                 tree.range(start_key..end_key, &guard).for_each(|(_, v)| {
@@ -1798,7 +1780,7 @@ mod deep_trie {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_masstree15_deep(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -1822,14 +1804,13 @@ mod deep_trie {
                                 black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                                    black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
@@ -1862,7 +1843,7 @@ mod deep_trie {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_skipmap_deep(keys.as_ref())))
             .bench_local_values(|map| {
@@ -1885,14 +1866,13 @@ mod deep_trie {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    map.insert(keys[idx], i as u64);
+                                    black_box(map.insert(keys[idx], i as u64));
                                 } else if let Some(e) = map.get(&keys[idx]) {
                                     sum = sum.wrapping_add(*e.value());
                                 }
@@ -1925,7 +1905,7 @@ mod deep_trie {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_indexset_deep(keys.as_ref())))
             .bench_local_values(|map| {
@@ -1948,14 +1928,13 @@ mod deep_trie {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    map.insert(keys[idx], i as u64);
+                                    black_box(map.insert(keys[idx], i as u64));
                                 } else if let Some(r) = map.get(&keys[idx]) {
                                     sum = sum.wrapping_add(r.get().value);
                                 }
@@ -1988,7 +1967,7 @@ mod deep_trie {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_tree_index_deep(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -2012,14 +1991,13 @@ mod deep_trie {
                                 black_box(tree.peek(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    tree_index_upsert_sync_long(&tree, keys[idx], i as u64);
+                                    black_box(tree_index_upsert_sync_long(&tree, keys[idx], i as u64));
                                 } else if let Some(v) = tree.peek(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(*v);
                                 }
@@ -2107,7 +2085,7 @@ mod deep_trie_read_only {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_masstree15_deep(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -2129,10 +2107,9 @@ mod deep_trie_read_only {
                                 black_box(tree.get_with_guard(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
@@ -2162,7 +2139,7 @@ mod deep_trie_read_only {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_skipmap_deep(keys.as_ref())))
             .bench_local_values(|map| {
@@ -2183,10 +2160,9 @@ mod deep_trie_read_only {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if let Some(e) = map.get(&keys[idx]) {
@@ -2216,7 +2192,7 @@ mod deep_trie_read_only {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_indexset_deep(keys.as_ref())))
             .bench_local_values(|map| {
@@ -2237,10 +2213,9 @@ mod deep_trie_read_only {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if let Some(r) = map.get(&keys[idx]) {
@@ -2270,7 +2245,7 @@ mod deep_trie_read_only {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_tree_index_deep(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -2292,10 +2267,9 @@ mod deep_trie_read_only {
                                 black_box(tree.peek(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if let Some(v) = tree.peek(&keys[idx], &guard) {
@@ -2427,7 +2401,7 @@ mod variable_keys_arc {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_masstree15_arc(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -2451,10 +2425,9 @@ mod variable_keys_arc {
                                 black_box(tree.get_with_guard(keys[idx].as_ref(), &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
@@ -2494,7 +2467,7 @@ mod variable_keys_arc {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_skipmap_arc(keys.as_ref())))
             .bench_local_values(|map| {
@@ -2517,10 +2490,9 @@ mod variable_keys_arc {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
@@ -2554,7 +2526,7 @@ mod variable_keys_arc {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_indexset_arc(keys.as_ref())))
             .bench_local_values(|map| {
@@ -2577,10 +2549,9 @@ mod variable_keys_arc {
                                 black_box(map.get(&keys[idx]));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
@@ -2614,7 +2585,7 @@ mod variable_keys_arc {
 
         bencher
             .counter(divan::counter::ItemsCount::new(
-                threads * (OPS_PER_THREAD + WARMUP_OPS),
+                threads * OPS_PER_THREAD,
             ))
             .with_inputs(|| Arc::new(setup_tree_index_arc(keys.as_ref())))
             .bench_local_values(|tree| {
@@ -2638,19 +2609,18 @@ mod variable_keys_arc {
                                 black_box(tree.peek(&keys[idx], &guard));
                             }
                             warmup_done.wait();
-
+                            start.wait();
                             pre_measurement_barrier();
                             let mut sum = 0u64;
-                            start.wait();
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
                                     // Cheap Arc clone instead of Vec clone
-                                    tree_index_upsert_sync_arc(
+                                    black_box(tree_index_upsert_sync_arc(
                                         &tree,
                                         Arc::clone(&keys[idx]),
                                         i as u64,
-                                    );
+                                    ));
                                 } else if let Some(v) = tree.peek(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(*v);
                                 }

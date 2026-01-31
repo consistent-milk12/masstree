@@ -26,7 +26,7 @@ fn rscan1_single_thread() {
     // Populate
     for n in 0..N {
         let key = n.to_be_bytes();
-        tree.insert_with_guard(&key, n, &guard).unwrap();
+        tree.insert_with_guard(&key, n, &guard);
     }
 
     // Reverse scan - collect all keys
@@ -68,7 +68,7 @@ fn rscan1_range_descending() {
     // Populate
     for n in 0..N {
         let key = n.to_be_bytes();
-        tree.insert_with_guard(&key, n, &guard).unwrap();
+        tree.insert_with_guard(&key, n, &guard);
     }
 
     // Scan range and collect
@@ -105,7 +105,7 @@ fn rscan1_concurrent() {
         let guard = tree.guard();
         for n in 0..N {
             let key = n.to_be_bytes();
-            tree.insert_with_guard(&key, n, &guard).unwrap();
+            tree.insert_with_guard(&key, n, &guard);
         }
     }
 

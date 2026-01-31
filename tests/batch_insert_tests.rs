@@ -26,7 +26,7 @@ fn test_batch_insert_empty() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     let entries: Vec<(Vec<u8>, u64)> = vec![];
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 0);
     assert_eq!(result.updated, 0);
@@ -40,7 +40,7 @@ fn test_batch_insert_single_entry() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     let entries = vec![(b"hello".to_vec(), 42u64)];
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 1);
     assert_eq!(result.updated, 0);
@@ -59,7 +59,7 @@ fn test_batch_insert_multiple_entries() {
         .map(|i| (format!("key{i:03}").into_bytes(), i as u64))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 100);
     assert_eq!(result.updated, 0);
@@ -80,8 +80,7 @@ fn test_batch_insert_with_updates() {
 
     // Insert initial values
     for i in 0..50 {
-        tree.insert(format!("key{i:03}").as_bytes(), i as u64)
-            .unwrap();
+        tree.insert(format!("key{i:03}").as_bytes(), i as u64);
     }
     assert_eq!(tree.len(), 50);
 
@@ -90,7 +89,7 @@ fn test_batch_insert_with_updates() {
         .map(|i| (format!("key{i:03}").into_bytes(), (i * 10) as u64))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 25); // keys 50-74 are new
     assert_eq!(result.updated, 25); // keys 25-49 are updates
@@ -118,8 +117,7 @@ fn test_batch_insert_all_updates() {
 
     // Insert initial values
     for i in 0..100 {
-        tree.insert(format!("key{i:03}").as_bytes(), i as u64)
-            .unwrap();
+        tree.insert(format!("key{i:03}").as_bytes(), i as u64);
     }
 
     // Batch update all values
@@ -127,7 +125,7 @@ fn test_batch_insert_all_updates() {
         .map(|i| (format!("key{i:03}").into_bytes(), (i + 1000) as u64))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 0);
     assert_eq!(result.updated, 100);
@@ -155,7 +153,7 @@ fn test_batch_insert_masstree15() {
         .map(|i| (i.to_be_bytes().to_vec(), i))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 1000);
     assert_eq!(tree.len(), 1000);
@@ -175,7 +173,7 @@ fn test_batch_insert_inline_u64() {
         .map(|i| (format!("key{i:04}").into_bytes(), i as u64))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 500);
     assert_eq!(tree.len(), 500);
@@ -194,7 +192,7 @@ fn test_batch_insert_inline_with_updates() {
 
     // Insert initial values
     for i in 0..50 {
-        tree.insert(format!("k{i}").as_bytes(), i).unwrap();
+        tree.insert(format!("k{i}").as_bytes(), i);
     }
 
     // Batch insert with overlaps
@@ -202,7 +200,7 @@ fn test_batch_insert_inline_with_updates() {
         .map(|i| (format!("k{i}").into_bytes(), -i))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 50);
     assert_eq!(result.updated, 50);
@@ -227,7 +225,7 @@ fn test_batch_insert_sequential_keys() {
         .map(|i| (i.to_be_bytes().to_vec(), i))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 10000);
     assert_eq!(tree.len(), 10000);
@@ -243,7 +241,7 @@ fn test_batch_insert_reverse_sequential() {
         .map(|i| (i.to_be_bytes().to_vec(), i))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 1000);
     assert_eq!(tree.len(), 1000);
@@ -270,7 +268,7 @@ fn test_batch_insert_shared_prefix() {
         })
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     // With layer descent fallback, all entries should eventually be inserted
     assert_eq!(result.inserted + result.failed, 500);
@@ -291,7 +289,7 @@ fn test_batch_insert_random_keys() {
         })
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 1000);
     assert_eq!(tree.len(), 1000);
@@ -304,7 +302,7 @@ fn test_batch_insert_short_keys() {
     // Very short keys (1-4 bytes)
     let entries: Vec<(Vec<u8>, u64)> = (0..256).map(|i| (vec![i as u8], i as u64)).collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 256);
     assert_eq!(tree.len(), 256);
@@ -328,7 +326,7 @@ fn test_batch_insert_long_keys() {
         })
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     // Some may fail due to layer descent - that's expected
     assert!(result.inserted + result.failed == 100);
@@ -347,7 +345,7 @@ fn test_batch_insert_duplicate_keys_in_batch() {
         (b"unique".to_vec(), 100),
     ];
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     // First insert of "duplicate" succeeds, subsequent ones are updates
     assert_eq!(result.inserted, 2); // "duplicate" (first) + "unique"
@@ -372,7 +370,7 @@ fn test_batch_insert_triggers_single_split() {
         .map(|i| (format!("same_prefix_{i:02}").into_bytes(), i as u64))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted + result.failed, 20);
     assert!(tree.len() >= result.inserted);
@@ -395,7 +393,7 @@ fn test_batch_insert_triggers_multiple_splits() {
         .map(|i| (format!("key{i:04}").into_bytes(), i as u64))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted + result.failed, 200);
     assert!(tree.len() >= result.inserted);
@@ -409,7 +407,7 @@ fn test_batch_insert_large_batch() {
         .map(|i| (format!("key{i:08}").into_bytes(), i as u64))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert!(result.inserted > 0);
     assert_eq!(tree.len(), result.inserted);
@@ -446,7 +444,7 @@ fn test_batch_insert_concurrent_batches() {
                 })
                 .collect();
 
-            tree.insert_batch(entries).unwrap()
+            tree.insert_batch(entries)
         });
         handles.push(handle);
     }
@@ -472,16 +470,14 @@ fn test_batch_insert_mixed_with_single_inserts() {
         let entries: Vec<(Vec<u8>, u64)> = (0..500)
             .map(|i| (format!("batch_{i:04}").into_bytes(), i as u64))
             .collect();
-        tree1.insert_batch(entries).unwrap()
+        tree1.insert_batch(entries)
     });
 
     // Thread 2: Single inserts
     let tree2 = Arc::clone(&tree);
     let handle2 = thread::spawn(move || {
         for i in 0..500 {
-            tree2
-                .insert(format!("single_{i:04}").as_bytes(), i as u64)
-                .unwrap();
+            tree2.insert(format!("single_{i:04}").as_bytes(), i as u64);
         }
     });
 
@@ -510,8 +506,8 @@ fn test_batch_insert_with_guard() {
         .map(|i| (format!("b{i}").into_bytes(), i as u64))
         .collect();
 
-    let result1 = tree.insert_batch_with_guard(batch1, &guard).unwrap();
-    let result2 = tree.insert_batch_with_guard(batch2, &guard).unwrap();
+    let result1 = tree.insert_batch_with_guard(batch1, &guard);
+    let result2 = tree.insert_batch_with_guard(batch2, &guard);
 
     assert_eq!(result1.inserted, 100);
     assert_eq!(result2.inserted, 100);
@@ -527,7 +523,7 @@ fn test_batch_insert_then_read_same_guard() {
         .map(|i| (format!("key{i}").into_bytes(), i as u64))
         .collect();
 
-    let _ = tree.insert_batch_with_guard(entries, &guard).unwrap();
+    let _ = tree.insert_batch_with_guard(entries, &guard);
 
     // Read back with same guard
     for i in 0..50 {
@@ -546,7 +542,7 @@ fn test_batch_insert_empty_key() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     let entries = vec![(vec![], 42u64)];
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 1);
     assert_eq!(tree.len(), 1);
@@ -566,7 +562,7 @@ fn test_batch_insert_same_ikey_different_keylen() {
         (b"abcdef".to_vec(), 3),   // 6 bytes
     ];
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.inserted, 3);
     assert_eq!(tree.len(), 3);
@@ -587,7 +583,7 @@ fn test_batch_result_total() {
 
     // Insert some initial values
     for i in 0..50 {
-        tree.insert(format!("k{i}").as_bytes(), i as u64).unwrap();
+        tree.insert(format!("k{i}").as_bytes(), i as u64);
     }
 
     // Batch with mix of new and existing keys
@@ -595,7 +591,7 @@ fn test_batch_result_total() {
         .map(|i| (format!("k{i}").into_bytes(), (i * 2) as u64))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     // Total should equal input count
     assert_eq!(result.total(), 100);
@@ -611,7 +607,7 @@ fn test_batch_result_all_succeeded() {
         .map(|i| ((i as u64).to_be_bytes().to_vec(), i as u64))
         .collect();
 
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert!(result.all_succeeded());
     assert_eq!(result.failed, 0);
@@ -627,11 +623,11 @@ fn test_batch_arc_mode_old_value_type() {
     let tree: MassTree15<String> = MassTree15::new();
 
     // Insert initial value
-    tree.insert(b"key", "initial".to_string()).unwrap();
+    tree.insert(b"key", "initial".to_string());
 
     // Update via batch
     let entries = vec![(b"key".to_vec(), "updated".to_string())];
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.updated, 1);
     assert_eq!(result.old_values.len(), 1);
@@ -647,11 +643,11 @@ fn test_batch_inline_mode_old_value_type() {
     let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
     // Insert initial value
-    tree.insert(b"key", 100u64).unwrap();
+    tree.insert(b"key", 100u64);
 
     // Update via batch
     let entries = vec![(b"key".to_vec(), 200u64)];
-    let result = tree.insert_batch(entries).unwrap();
+    let result = tree.insert_batch(entries);
 
     assert_eq!(result.updated, 1);
     assert_eq!(result.old_values.len(), 1);

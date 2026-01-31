@@ -37,7 +37,7 @@ use seize::Collector;
 
 use super::{InlineSuffixBag, SuffixBag};
 use crate::alloc_common::BoxAllocator;
-use crate::error::{AllocKind, AllocResult};
+// Note: AllocError/AllocResult removed - allocations are now infallible
 
 /// Utility functions for suffix sidecar operations.
 #[derive(Debug)]
@@ -124,29 +124,26 @@ impl<const WIDTH: usize> SuffixSidecar<WIDTH> {
     /// Returns a raw pointer to avoid aliasing issues, the caller is
     /// responsible for ensuring exclusive access when dereferencing.
     ///
+    /// Aborts on allocation failure (standard Rust OOM behavior).
+    ///
     /// # Safety
     ///
     /// Caller must hold leaf lock. The returned pointer is valid for the
-    /// lifetime of the sidecar (unitl [`Drop`] or the next swap).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AllocError`](crate::alloc_common) if external bag allocation fails.
+    /// lifetime of the sidecar (until [`Drop`] or the next swap).
     #[inline(always)]
-    pub unsafe fn ensure_external(&self) -> AllocResult<*mut SuffixBag<WIDTH>> {
+    pub unsafe fn ensure_external(&self) -> *mut SuffixBag<WIDTH> {
         let ptr: *mut SuffixBag<WIDTH> = self.external.load(Ordering::Acquire);
 
         if !ptr.is_null() {
-            return Ok(ptr);
+            return ptr;
         }
 
-        // Allocate new external bag with tracking
-        let new_external: Box<SuffixBag<WIDTH>> =
-            BoxAllocator::try_box_with_kind(SuffixBag::new(), AllocKind::Suffix)?;
+        // Allocate new external bag (aborts on OOM)
+        let new_external: Box<SuffixBag<WIDTH>> = BoxAllocator::boxed(SuffixBag::new());
         let new_ptr: *mut SuffixBag<WIDTH> = Box::into_raw(new_external);
         self.external.store(new_ptr, Ordering::Release);
 
-        Ok(new_ptr)
+        new_ptr
     }
 
     /// Check if slot has a suffix (inline or external).

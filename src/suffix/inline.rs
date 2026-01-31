@@ -3,9 +3,9 @@ use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering as AtomicOrdering};
 
-use super::{AllocResult, SuffixBag, TreePermutation};
+use super::{SuffixBag, TreePermutation};
 
 const U16_MAX: usize = u16::MAX as usize;
 
@@ -264,17 +264,13 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     /// The inline state becomes "orphaned" metadata after drain, but this is
     /// safe - readers will find the suffix in external storage.
     ///
-    /// # Returns
-    /// * `Ok(bag)` - New external bag with drained suffixes plus new one
-    ///
-    /// # Errors
-    /// Returns `Err(AllocError)` if the external bag allocation fails.
+    /// Aborts on allocation failure (standard Rust OOM behavior).
     pub fn drain_to_external(
         &self,
         perm: &impl TreePermutation,
         new_slot: usize,
         new_suffix: &[u8],
-    ) -> AllocResult<SuffixBag<WIDTH>> {
+    ) -> SuffixBag<WIDTH> {
         // Pass 1: Calculate required capacity and collect slot data
         let mut required_capacity: usize = new_suffix.len();
         let perm_size: usize = perm.size();
@@ -306,8 +302,8 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
             }
         }
 
-        // Try to allocate external bag with capacity
-        let mut external: SuffixBag<WIDTH> = SuffixBag::try_with_capacity(required_capacity)?;
+        // Allocate external bag with capacity (aborts on OOM)
+        let mut external: SuffixBag<WIDTH> = SuffixBag::with_capacity(required_capacity);
 
         // Pass 2: Copy suffixes to external bag using collected data
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
@@ -323,7 +319,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         // The caller must publish the external pointer first, then
         // may optionally clear inline state.
 
-        Ok(external)
+        external
     }
 
     /// Drain inline suffixes to external bag, reusing a pre-allocated buffer.
@@ -369,11 +365,9 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
 
         let mut external: SuffixBag<WIDTH> = SuffixBag::from_vec(buffer);
 
-        #[expect(clippy::expect_used)]
+        // Reserve capacity if needed (aborts on OOM)
         if external.capacity() < required_capacity {
-            external
-                .try_reserve(required_capacity - external.capacity())
-                .expect("OOM: suffix bag reserve failed");
+            external.reserve(required_capacity - external.capacity());
         }
 
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
@@ -396,21 +390,9 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     ///
     /// Same as `drain_to_external` - does NOT clear inline state.
     ///
-    /// # Arguments
-    /// * `new_slot` - Slot index for the new suffix
-    /// * `new_suffix` - The suffix bytes to store
-    ///
-    /// # Returns
-    /// * `Ok(bag)` - New external bag with drained suffixes plus new one
-    ///
-    /// # Errors
-    /// Returns `Err(AllocError)` if the external bag allocation fails.
+    /// Aborts on allocation failure (standard Rust OOM behavior).
     #[cold]
-    pub fn drain_to_external_init(
-        &self,
-        new_slot: usize,
-        new_suffix: &[u8],
-    ) -> AllocResult<SuffixBag<WIDTH>> {
+    pub fn drain_to_external_init(&self, new_slot: usize, new_suffix: &[u8]) -> SuffixBag<WIDTH> {
         // Calculate required capacity
         let mut required_capacity: usize = new_suffix.len();
 
@@ -441,8 +423,8 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
             }
         }
 
-        // Allocate external bag
-        let mut external: SuffixBag<WIDTH> = SuffixBag::try_with_capacity(required_capacity)?;
+        // Allocate external bag (aborts on OOM)
+        let mut external: SuffixBag<WIDTH> = SuffixBag::with_capacity(required_capacity);
 
         // Copy existing suffixes
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
@@ -453,7 +435,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         // Assign new suffix
         external.assign(new_slot, new_suffix);
 
-        Ok(external)
+        external
     }
 
     // ========================================================================

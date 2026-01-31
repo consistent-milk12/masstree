@@ -26,7 +26,7 @@ fn rwsmall24_single_thread() {
     // Pre-populate keys
     for x in 0..NUM_KEYS as u64 {
         let key = x.to_be_bytes();
-        tree.insert_with_guard(&key, x, &guard).unwrap();
+        tree.insert_with_guard(&key, x, &guard);
     }
 
     for n in 0..N {
@@ -55,7 +55,7 @@ fn rwsmall24_concurrent() {
         let guard = tree.guard();
         for x in 0..NUM_KEYS as u64 {
             let key = x.to_be_bytes();
-            tree.insert_with_guard(&key, x, &guard).unwrap();
+            tree.insert_with_guard(&key, x, &guard);
         }
     }
 

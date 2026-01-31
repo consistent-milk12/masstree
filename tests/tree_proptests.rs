@@ -116,7 +116,7 @@ proptest! {
     #[test]
     fn insert_then_get_returns_value(key in short_key(), value: u64) {
         let tree: MassTree15<u64> = MassTree15::new();
-        tree.insert(&key, value).unwrap();
+        tree.insert(&key, value);
 
         let result = tree.get(&key);
         prop_assert!(result.is_some(), "Key {:?} not found after insert", key);
@@ -127,7 +127,7 @@ proptest! {
     #[test]
     fn get_ref_returns_borrowed_value(key in short_key(), value: u64) {
         let tree: MassTree15<u64> = MassTree15::new();
-        tree.insert(&key, value).unwrap();
+        tree.insert(&key, value);
 
         let guard = tree.guard();
         let result = tree.get_ref(&key, &guard);
@@ -140,10 +140,10 @@ proptest! {
     fn insert_duplicate_returns_old_value(key in short_key_nonempty(), v1: u64, v2: u64) {
         let tree: MassTree15<u64> = MassTree15::new();
 
-        let old1 = tree.insert(&key, v1).unwrap();
+        let old1 = tree.insert(&key, v1);
         prop_assert!(old1.is_none(), "First insert should return None");
 
-        let old2 = tree.insert(&key, v2).unwrap();
+        let old2 = tree.insert(&key, v2);
         prop_assert!(old2.is_some(), "Second insert should return old value");
         prop_assert_eq!(*old2.unwrap(), v1);
 
@@ -161,7 +161,7 @@ proptest! {
         prop_assume!(inserted_key != missing_key);
 
         let tree: MassTree15<u64> = MassTree15::new();
-        tree.insert(&inserted_key, value).unwrap();
+        tree.insert(&inserted_key, value);
 
         prop_assert!(tree.get(&missing_key).is_none());
     }
@@ -170,7 +170,7 @@ proptest! {
     #[test]
     fn insert_long_key_works(key in long_key(), value: u64) {
         let tree: MassTree15<u64> = MassTree15::new();
-        tree.insert(&key, value).unwrap();
+        tree.insert(&key, value);
 
         let result = tree.get(&key);
         prop_assert!(result.is_some(), "Long key {:?} not found after insert", key);
@@ -197,7 +197,7 @@ proptest! {
                 continue;
             }
 
-            let tree_old = tree.insert(&key, value).unwrap();
+            let tree_old = tree.insert(&key, value);
             let oracle_old = oracle.insert(key.clone(), value);
 
             prop_assert_eq!(
@@ -229,7 +229,7 @@ proptest! {
                         continue;
                     }
 
-                    let tree_old = tree.insert(&key, value).unwrap();
+                    let tree_old = tree.insert(&key, value);
                     let oracle_old = oracle.insert(key.clone(), value);
 
                     prop_assert_eq!(
@@ -289,7 +289,7 @@ proptest! {
 
         // Insert all keys
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         // Verify all keys are retrievable
@@ -314,7 +314,7 @@ proptest! {
 
         for i in 0..count {
             let key = format!("{i:08}");
-            tree.insert(key.as_bytes(), i as u64).unwrap();
+            tree.insert(key.as_bytes(), i as u64);
         }
 
         prop_assert_eq!(tree.len(), count);
@@ -334,7 +334,7 @@ proptest! {
 
         for i in (0..count).rev() {
             let key = format!("{i:08}");
-            tree.insert(key.as_bytes(), i as u64).unwrap();
+            tree.insert(key.as_bytes(), i as u64);
         }
 
         prop_assert_eq!(tree.len(), count);
@@ -355,13 +355,13 @@ proptest! {
         // Insert evens first
         for i in (0..count).filter(|x| x % 2 == 0) {
             let key = format!("{i:08}");
-            tree.insert(key.as_bytes(), i as u64).unwrap();
+            tree.insert(key.as_bytes(), i as u64);
         }
 
         // Then odds
         for i in (0..count).filter(|x| x % 2 == 1) {
             let key = format!("{i:08}");
-            tree.insert(key.as_bytes(), i as u64).unwrap();
+            tree.insert(key.as_bytes(), i as u64);
         }
 
         prop_assert_eq!(tree.len(), count);
@@ -391,7 +391,7 @@ proptest! {
                 continue;
             }
 
-            tree.insert(&key, value).unwrap();
+            tree.insert(&key, value);
             unique_keys.insert(key);
         }
 
@@ -417,7 +417,7 @@ proptest! {
                 count += 1;
             }
 
-            tree.insert(&key, value).unwrap();
+            tree.insert(&key, value);
 
             prop_assert!(!tree.is_empty());
             prop_assert_eq!(tree.len(), count);
@@ -443,8 +443,8 @@ proptest! {
                 continue;
             }
 
-            let tree_old = tree.insert(&key, value).unwrap().map(|arc| *arc);
-            let inline_old = inline.insert(&key, value).unwrap();
+            let tree_old = tree.insert(&key, value).map(|arc| *arc);
+            let inline_old = inline.insert(&key, value);
 
             prop_assert_eq!(tree_old, inline_old, "Insert mismatch for key {:?}", key);
         }
@@ -457,7 +457,7 @@ proptest! {
     #[test]
     fn inline_get_returns_copy(key in valid_key_nonempty(), value: u64) {
         let inline: MassTree15Inline<u64> = MassTree15Inline::new();
-        inline.insert(&key, value).unwrap();
+        inline.insert(&key, value);
 
         let result: Option<u64> = inline.get(&key);
         prop_assert_eq!(result, Some(value));
@@ -482,7 +482,7 @@ proptest! {
     fn empty_key_works(value: u64) {
         let tree: MassTree15<u64> = MassTree15::new();
 
-        tree.insert(b"", value).unwrap();
+        tree.insert(b"", value);
         prop_assert_eq!(*tree.get(b"").unwrap(), value);
         prop_assert_eq!(tree.len(), 1);
     }
@@ -492,7 +492,7 @@ proptest! {
     fn max_length_key_works(key in prop::collection::vec(any::<u8>(), 8..=8), value: u64) {
         let tree: MassTree15<u64> = MassTree15::new();
 
-        tree.insert(&key, value).unwrap();
+        tree.insert(&key, value);
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
     }
 
@@ -509,7 +509,7 @@ proptest! {
         key.truncate(SHORT_KEY_LEN);
 
         let tree: MassTree15<u64> = MassTree15::new();
-        tree.insert(&key, value).unwrap();
+        tree.insert(&key, value);
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
     }
 
@@ -531,8 +531,8 @@ proptest! {
         key2.push(byte2);
 
         let tree: MassTree15<u64> = MassTree15::new();
-        tree.insert(&key1, v1).unwrap();
-        tree.insert(&key2, v2).unwrap();
+        tree.insert(&key1, v1);
+        tree.insert(&key2, v2);
 
         prop_assert_eq!(*tree.get(&key1).unwrap(), v1);
         prop_assert_eq!(*tree.get(&key2).unwrap(), v2);
@@ -559,7 +559,7 @@ proptest! {
                     if key.len() > SHORT_KEY_LEN {
                         continue;
                     }
-                    tree.insert(&key, value).unwrap();
+                    tree.insert(&key, value);
                     oracle.insert(key, value);
                 }
                 Op::Get(key) => {
@@ -598,7 +598,7 @@ proptest! {
     fn remove_returns_old_value(key in short_key_nonempty(), value: u64) {
         let tree: MassTree15<u64> = MassTree15::new();
 
-        tree.insert(&key, value).unwrap();
+        tree.insert(&key, value);
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
 
         let removed = tree.remove(&key).unwrap();
@@ -619,7 +619,7 @@ proptest! {
         prop_assume!(inserted_key != missing_key);
 
         let tree: MassTree15<u64> = MassTree15::new();
-        tree.insert(&inserted_key, value).unwrap();
+        tree.insert(&inserted_key, value);
 
         let removed = tree.remove(&missing_key).unwrap();
         prop_assert!(removed.is_none());
@@ -632,7 +632,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         // Insert
-        tree.insert(&key, v1).unwrap();
+        tree.insert(&key, v1);
         prop_assert_eq!(*tree.get(&key).unwrap(), v1);
 
         // Remove
@@ -641,7 +641,7 @@ proptest! {
         prop_assert!(tree.get(&key).is_none());
 
         // Re-insert with different value
-        tree.insert(&key, v2).unwrap();
+        tree.insert(&key, v2);
         prop_assert_eq!(*tree.get(&key).unwrap(), v2);
         prop_assert_eq!(tree.len(), 1);
     }
@@ -653,7 +653,7 @@ proptest! {
 
         // Insert all
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
         prop_assert_eq!(tree.len(), keys.len());
 
@@ -671,7 +671,7 @@ proptest! {
     fn remove_long_key(key in long_key(), value: u64) {
         let tree: MassTree15<u64> = MassTree15::new();
 
-        tree.insert(&key, value).unwrap();
+        tree.insert(&key, value);
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
 
         let removed = tree.remove(&key).unwrap();
@@ -687,7 +687,7 @@ proptest! {
 
         // Insert first half
         for (i, key) in keys.iter().take(keys.len() / 2).enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
             oracle.insert(key.clone(), i as u64);
         }
 
@@ -700,7 +700,7 @@ proptest! {
         // Insert second half
         for (i, key) in keys.iter().skip(keys.len() / 2).enumerate() {
             let val = (i + 100) as u64;
-            tree.insert(key, val).unwrap();
+            tree.insert(key, val);
             oracle.insert(key.clone(), val);
         }
 
@@ -727,7 +727,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         let guard = tree.guard();
@@ -764,7 +764,7 @@ proptest! {
         // Insert sequential keys
         for i in 0..count {
             let key = format!("{i:04}");
-            tree.insert(key.as_bytes(), i as u64).unwrap();
+            tree.insert(key.as_bytes(), i as u64);
         }
 
         let guard = tree.guard();
@@ -804,13 +804,13 @@ proptest! {
             let mut key = prefix.clone();
             key.extend(suffix);
             key.truncate(SHORT_KEY_LEN);
-            tree.insert(&key, i as u64).unwrap();
+            tree.insert(&key, i as u64);
         }
 
         // Insert some keys without prefix
         for i in 0..5 {
             let key = vec![0xFF, i as u8]; // Different prefix
-            tree.insert(&key, 100 + i as u64).unwrap();
+            tree.insert(&key, 100 + i as u64);
         }
 
         let guard = tree.guard();
@@ -838,7 +838,7 @@ proptest! {
 
         for i in 0..count {
             let key = format!("{i:04}");
-            tree.insert(key.as_bytes(), i as u64).unwrap();
+            tree.insert(key.as_bytes(), i as u64);
         }
 
         let guard = tree.guard();
@@ -871,7 +871,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         let guard = tree.guard();
@@ -895,7 +895,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         let guard = tree.guard();
@@ -912,7 +912,7 @@ proptest! {
 
         for i in 0..count {
             let key = format!("{i:04}");
-            tree.insert(key.as_bytes(), i as u64).unwrap();
+            tree.insert(key.as_bytes(), i as u64);
         }
 
         let guard = tree.guard();
@@ -936,7 +936,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         let guard = tree.guard();
@@ -960,7 +960,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         let guard = tree.guard();
@@ -997,7 +997,7 @@ proptest! {
                 continue;
             }
 
-            tree.insert(&key, value).unwrap();
+            tree.insert(&key, value);
             oracle.insert(key, value);
         }
 
@@ -1016,7 +1016,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         // Remove half
@@ -1034,7 +1034,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         let guard = tree.guard();
@@ -1067,7 +1067,7 @@ proptest! {
                 continue;
             }
 
-            tree.insert(&key, value).unwrap();
+            tree.insert(&key, value);
             oracle.insert(key, value);
         }
 
@@ -1090,7 +1090,7 @@ proptest! {
                 continue;
             }
 
-            tree.insert(&key, value).unwrap();
+            tree.insert(&key, value);
             oracle.insert(key, value);
         }
 
@@ -1108,7 +1108,7 @@ proptest! {
         let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         for (i, key) in keys.iter().enumerate() {
@@ -1124,10 +1124,10 @@ proptest! {
     fn inline_update_returns_old(key in short_key_nonempty(), v1: u64, v2: u64) {
         let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
-        let old1 = tree.insert(&key, v1).unwrap();
+        let old1 = tree.insert(&key, v1);
         prop_assert_eq!(old1, None);
 
-        let old2 = tree.insert(&key, v2).unwrap();
+        let old2 = tree.insert(&key, v2);
         prop_assert_eq!(old2, Some(v1));
 
         prop_assert_eq!(tree.get(&key), Some(v2));
@@ -1151,7 +1151,7 @@ proptest! {
         let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
             oracle.insert(key.clone(), i as u64);
         }
 
@@ -1173,7 +1173,7 @@ proptest! {
     fn very_long_keys_work(key in very_long_key(), value: u64) {
         let tree: MassTree15<u64> = MassTree15::new();
 
-        tree.insert(&key, value).unwrap();
+        tree.insert(&key, value);
         prop_assert_eq!(*tree.get(&key).unwrap(), value);
 
         let removed = tree.remove(&key).unwrap();
@@ -1190,7 +1190,7 @@ proptest! {
         for op in ops {
             match op {
                 Op::Insert(key, value) | Op::Update(key, value) => {
-                    tree.insert(&key, value).unwrap();
+                    tree.insert(&key, value);
                     oracle.insert(key, value);
                 }
                 Op::Get(key) => {
@@ -1227,8 +1227,8 @@ proptest! {
 
         let tree: MassTree15<u64> = MassTree15::new();
 
-        tree.insert(&key1, v1).unwrap();
-        tree.insert(&key2, v2).unwrap();
+        tree.insert(&key1, v1);
+        tree.insert(&key2, v2);
 
         prop_assert_eq!(*tree.get(&key1).unwrap(), v1);
         prop_assert_eq!(*tree.get(&key2).unwrap(), v2);
@@ -1241,7 +1241,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         for (i, key) in keys.iter().enumerate() {
-            tree.insert(key, i as u64).unwrap();
+            tree.insert(key, i as u64);
         }
 
         let guard = tree.guard();

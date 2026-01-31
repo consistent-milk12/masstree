@@ -28,7 +28,7 @@ fn range_single_element_bounds() {
     let tree: MassTree<u64> = MassTree::new();
     let guard = tree.guard();
 
-    tree.insert(b"k", 1).unwrap();
+    tree.insert(b"k", 1);
 
     let all: Vec<_> = tree.iter(&guard).collect();
     assert_eq!(all.len(), 1);
@@ -64,7 +64,7 @@ fn range_end_bound_stops() {
     let guard = tree.guard();
 
     for (k, v) in [(b"a", 1), (b"b", 2), (b"c", 3), (b"d", 4)] {
-        tree.insert(k, v).unwrap();
+        tree.insert(k, v);
     }
 
     let entries: Vec<_> = tree
@@ -88,7 +88,7 @@ fn full_scan_matches_btreemap_sorted() {
     for i in 0..200u64 {
         // Intentionally scramble insertion order.
         let k = format!("k{:04}", (i * 37) % 200).into_bytes();
-        tree.insert(&k, i).unwrap();
+        tree.insert(&k, i);
         btree.insert(k, i);
     }
 
@@ -113,11 +113,11 @@ fn scan_orders_prefix_key_before_layer_contents() {
     let k1 = [prefix, b"BBBBBBBB"].concat();
     let k2 = [prefix, b"CCCCCCCC"].concat();
 
-    tree.insert(&k1, 1).unwrap();
-    tree.insert(&k2, 2).unwrap();
+    tree.insert(&k1, 1);
+    tree.insert(&k2, 2);
 
     // Insert the exact 8-byte prefix key after the layer exists.
-    tree.insert(prefix, 0).unwrap();
+    tree.insert(prefix, 0);
 
     let keys: Vec<Vec<u8>> = tree.keys(&guard).collect();
     assert_eq!(keys.len(), 3);
@@ -146,8 +146,8 @@ fn scan_multi_layer_conflict_chain_is_sorted() {
     ]
     .concat();
 
-    tree.insert(&k2, 2).unwrap();
-    tree.insert(&k1, 1).unwrap();
+    tree.insert(&k2, 2);
+    tree.insert(&k1, 1);
 
     let keys: Vec<Vec<u8>> = tree.keys(&guard).collect();
     assert_eq!(keys, vec![k1, k2]);
@@ -158,10 +158,10 @@ fn scan_prefix_basic() {
     let tree: MassTree<u64> = MassTree::new();
     let guard = tree.guard();
 
-    tree.insert(b"user:alice", 1).unwrap();
-    tree.insert(b"user:bob", 2).unwrap();
-    tree.insert(b"user:charlie", 3).unwrap();
-    tree.insert(b"admin:root", 4).unwrap();
+    tree.insert(b"user:alice", 1);
+    tree.insert(b"user:bob", 2);
+    tree.insert(b"user:charlie", 3);
+    tree.insert(b"admin:root", 4);
 
     let mut keys: Vec<Vec<u8>> = Vec::new();
     let visited = tree.scan_prefix(
@@ -306,7 +306,7 @@ fn scan_prefix_concurrent_with_inserts() {
     // Pre-populate with some keys outside the scan prefix.
     for i in 0..50u64 {
         let key = format!("other:{i:04}").into_bytes();
-        tree.insert(&key, i).unwrap();
+        tree.insert(&key, i);
     }
 
     // Spawn writers that insert keys with the target prefix.
@@ -500,7 +500,7 @@ fn scan_prefix_layer_descent() {
         let suffix = (i as u64).wrapping_mul(0x517c_c1b7_2722_0a95).to_be_bytes();
         key[8..16].copy_from_slice(&suffix);
 
-        tree.insert(&key, i as u64).unwrap();
+        tree.insert(&key, i as u64);
     }
 
     // Scan with 8-byte prefix (bucket 0)
@@ -562,11 +562,11 @@ fn scan_prefix_exact_8byte_with_layer() {
         let mut key = [0u8; 16];
         key[0..8].copy_from_slice(&prefix);
         key[8..16].copy_from_slice(&i.to_be_bytes());
-        tree.insert(&key, i).unwrap();
+        tree.insert(&key, i);
     }
 
     // Insert exact 8-byte prefix key
-    tree.insert(&prefix, 100).unwrap();
+    tree.insert(&prefix, 100);
 
     // Scan with 8-byte prefix
     let mut keys_found: Vec<Vec<u8>> = Vec::new();
@@ -624,7 +624,7 @@ fn scan_batch_ref_empty_tree() {
 #[test]
 fn scan_batch_ref_single_entry() {
     let tree: MassTree15<u64> = MassTree15::new();
-    tree.insert(b"key1", 42).unwrap();
+    tree.insert(b"key1", 42);
 
     let guard = tree.guard();
     let mut entries = Vec::new();
@@ -648,7 +648,7 @@ fn scan_batch_ref_multiple_entries() {
 
     for i in 0..100u64 {
         let key = format!("key{i:03}");
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -676,7 +676,7 @@ fn scan_batch_ref_range_bounds() {
 
     for i in 0..100u64 {
         let key = format!("key{i:03}");
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -702,7 +702,7 @@ fn scan_batch_ref_early_stop() {
 
     for i in 0..100u64 {
         let key = format!("key{i:03}");
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -728,7 +728,7 @@ fn scan_batch_ref_vs_scan_ref_consistency() {
 
     for i in 0..1000u64 {
         let key = format!("key{i:05}");
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -774,7 +774,7 @@ fn scan_batch_ref_single_layer_keys() {
 
     for i in 0..100u64 {
         let key = format!("k{i:06}"); // 7 bytes
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -803,7 +803,7 @@ fn scan_batch_ref_long_keys_with_layers() {
 
     for i in 0..100u64 {
         let key = format!("long_prefix_key_{i:05}"); // >8 bytes = 21 bytes
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
         expected.insert(key.into_bytes(), i);
     }
 
@@ -856,7 +856,7 @@ fn scan_batch_ref_concurrent_reads() {
     // Pre-populate
     for i in 0..10000u64 {
         let key = format!("key{i:08}");
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
     }
 
     // Concurrent batch scans
@@ -896,7 +896,7 @@ fn for_each_batch_ref_basic() {
 
     for i in 0..100u64 {
         let key = format!("key{i:03}");
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -928,7 +928,7 @@ fn scan_ref_long_keys_matches_btreemap() {
     // Insert multi-layer keys (> 8 bytes triggers layer creation)
     for i in 0..100u64 {
         let key = format!("long_prefix_key_{i:05}"); // 21 bytes
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
         expected.insert(key.into_bytes(), i);
     }
 
@@ -993,7 +993,7 @@ fn scan_ref_deep_layers_matches_btreemap() {
     for i in 0..50u64 {
         let suffix = format!("{i:06}");
         let key = [shared_prefix.as_ref(), suffix.as_bytes()].concat(); // 30 bytes
-        tree.insert(&key, i).unwrap();
+        tree.insert(&key, i);
         expected.insert(key, i);
     }
 
@@ -1035,12 +1035,12 @@ fn scan_ref_mixed_layer_keys() {
     for i in 0..50u64 {
         // Short key (8 bytes = single layer)
         let short_key = format!("short{i:02}");
-        tree.insert(short_key.as_bytes(), i).unwrap();
+        tree.insert(short_key.as_bytes(), i);
         expected.insert(short_key.into_bytes(), i);
 
         // Long key (20+ bytes = multi layer)
         let long_key = format!("this_is_a_long_key_{i:05}");
-        tree.insert(long_key.as_bytes(), i + 1000).unwrap();
+        tree.insert(long_key.as_bytes(), i + 1000);
         expected.insert(long_key.into_bytes(), i + 1000);
     }
 

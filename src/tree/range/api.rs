@@ -150,9 +150,9 @@ where
     ///
     /// ```ignore
     /// let tree = MassTree::<u64>::new();
-    /// tree.insert(b"banana", 2).unwrap();
-    /// tree.insert(b"apple", 1).unwrap();
-    /// tree.insert(b"cherry", 3).unwrap();
+    /// tree.insert(b"banana", 2);
+    /// tree.insert(b"apple", 1);
+    /// tree.insert(b"cherry", 3);
     ///
     /// let first = tree.first().unwrap();
     /// assert_eq!(first.key(), b"apple");
@@ -185,9 +185,9 @@ where
     ///
     /// ```ignore
     /// let tree = MassTree::<u64>::new();
-    /// tree.insert(b"banana", 2).unwrap();
-    /// tree.insert(b"apple", 1).unwrap();
-    /// tree.insert(b"cherry", 3).unwrap();
+    /// tree.insert(b"banana", 2);
+    /// tree.insert(b"apple", 1);
+    /// tree.insert(b"cherry", 3);
     ///
     /// let last = tree.last().unwrap();
     /// assert_eq!(last.key(), b"cherry");

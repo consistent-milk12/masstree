@@ -25,7 +25,7 @@ fn rw4fixed_single_thread() {
     for n in 0..N {
         let key_val = TOP - n;
         let key = key_val.to_be_bytes();
-        tree.insert_with_guard(&key, n + 1, &guard).unwrap();
+        tree.insert_with_guard(&key, n + 1, &guard);
     }
 
     // Get phase - verify all keys

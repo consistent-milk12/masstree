@@ -24,29 +24,28 @@
 //! cache utilization. Consider it for most workloads.
 //!
 //! ```rust
-//! use masstree::{MassTree, MassTree15, MassTree24Inline, MassTree15Inline};
+//! use masstree::{MassTree, MassTree15, MassTree15Inline};
 //!
-//! // Default: WIDTH=24, Arc-based storage
+//! // Default: WIDTH=15 with inline storage (best for Copy types)
 //! let tree: MassTree<u64> = MassTree::new();
 //!
-//! // WIDTH=15, Arc-based storage (recommended for most workloads)
-//! let tree15: MassTree15<u64> = MassTree15::new();
+//! // WIDTH=15, Arc-based storage (for non-Copy types like String)
+//! let tree15: MassTree15<String> = MassTree15::new();
 //!
-//! // Inline storage for Copy types (no Arc overhead)
-//! let inline: MassTree24Inline<u64> = MassTree24Inline::new();
+//! // Explicit inline variant
 //! let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
 //! ```
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```rust,ignore
 //! use masstree::MassTree;
 //!
 //! let tree: MassTree<u64> = MassTree::new();
 //! let guard = tree.guard();
 //!
 //! // Insert
-//! tree.insert_with_guard(b"hello", 123, &guard).unwrap();
+//! tree.insert_with_guard(b"hello", 123, &guard);
 //!
 //! // Point lookup (lock-free)
 //! assert_eq!(tree.get_ref(b"hello", &guard), Some(&123));
@@ -221,7 +220,7 @@ pub mod value;
 #[cfg(feature = "insert-stats")]
 pub mod insert_stats;
 
-pub use error::{AllocError, AllocKind, AllocResult};
+// Note: AllocError/AllocKind/AllocResult removed - allocations are now infallible
 pub use retirement::{BatchedRetire, FlushOnDrop};
 
 // Re-export leaf node traits for generic tree operations

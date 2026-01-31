@@ -51,8 +51,7 @@ fn wd2_concurrent() {
     // Store thread count
     {
         let guard = tree.guard();
-        tree.insert_with_guard(b"n", num_threads as u64, &guard)
-            .unwrap();
+        tree.insert_with_guard(b"n", num_threads as u64, &guard);
     }
 
     let handles: Vec<_> = (0..num_threads)

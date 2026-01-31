@@ -28,7 +28,7 @@ fn conflictscan_single_writer() {
         let guard = tree.guard();
         for n in 0..INITIAL_KEYS {
             let key = n.to_be_bytes();
-            tree.insert_with_guard(&key, n, &guard).unwrap();
+            tree.insert_with_guard(&key, n, &guard);
         }
     }
 
@@ -110,7 +110,7 @@ fn conflictscan_multi_writer() {
         let guard = tree.guard();
         for n in 0..INITIAL_KEYS {
             let key = n.to_be_bytes();
-            tree.insert_with_guard(&key, n, &guard).unwrap();
+            tree.insert_with_guard(&key, n, &guard);
         }
     }
 
@@ -187,7 +187,7 @@ fn conflictscan_range_scan() {
         let guard = tree.guard();
         for n in 0..INITIAL_KEYS {
             let key = n.to_be_bytes();
-            tree.insert_with_guard(&key, n, &guard).unwrap();
+            tree.insert_with_guard(&key, n, &guard);
         }
     }
 

@@ -131,7 +131,7 @@ fn test_rev_empty_tree() {
 #[test]
 fn test_rev_single_element() {
     let tree = MassTree::<u64>::default();
-    tree.insert(b"only", 42).unwrap();
+    tree.insert(b"only", 42);
 
     let guard = tree.guard();
     let items: Vec<_> = tree.iter(&guard).rev().collect();
@@ -143,9 +143,9 @@ fn test_rev_single_element() {
 #[test]
 fn test_rev_multiple_elements() {
     let tree = MassTree::<u64>::default();
-    tree.insert(b"a", 1).unwrap();
-    tree.insert(b"b", 2).unwrap();
-    tree.insert(b"c", 3).unwrap();
+    tree.insert(b"a", 1);
+    tree.insert(b"b", 2);
+    tree.insert(b"c", 3);
 
     let guard = tree.guard();
     let items: Vec<_> = tree.iter(&guard).rev().collect();
@@ -159,7 +159,7 @@ fn test_rev_multiple_elements() {
 fn test_rev_keys_are_descending() {
     let tree = MassTree::<u64>::default();
     for i in 0..10u64 {
-        tree.insert(format!("key{i:02}").as_bytes(), i).unwrap();
+        tree.insert(format!("key{i:02}").as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -174,10 +174,10 @@ fn test_rev_keys_are_descending() {
 #[test]
 fn test_next_and_next_back_meet_in_middle() {
     let tree = MassTree::<u64>::default();
-    tree.insert(b"a", 1).unwrap();
-    tree.insert(b"b", 2).unwrap();
-    tree.insert(b"c", 3).unwrap();
-    tree.insert(b"d", 4).unwrap();
+    tree.insert(b"a", 1);
+    tree.insert(b"b", 2);
+    tree.insert(b"c", 3);
+    tree.insert(b"d", 4);
 
     let guard = tree.guard();
     let mut iter = tree.iter(&guard);
@@ -208,7 +208,7 @@ fn test_alternating_next_next_back() {
     let tree = MassTree::<u64>::default();
     for i in 0..6u64 {
         tree.insert(format!("{}", (b'a' + i as u8) as char).as_bytes(), i)
-            .unwrap();
+            ;
     }
 
     let guard = tree.guard();
@@ -232,9 +232,9 @@ fn test_rev_with_longer_keys() {
     let tree = MassTree::<u64>::default();
 
     // Keys longer than 8 bytes (multi-layer)
-    tree.insert(b"prefix_aaa", 1).unwrap();
-    tree.insert(b"prefix_bbb", 2).unwrap();
-    tree.insert(b"prefix_ccc", 3).unwrap();
+    tree.insert(b"prefix_aaa", 1);
+    tree.insert(b"prefix_bbb", 2);
+    tree.insert(b"prefix_ccc", 3);
 
     let guard = tree.guard();
     let items: Vec<_> = tree.iter(&guard).rev().collect();
@@ -248,7 +248,7 @@ fn test_rev_with_longer_keys() {
 fn test_rev_consistency_with_forward() {
     let tree = MassTree::<u64>::default();
     for i in 0..20u64 {
-        tree.insert(format!("k{i:03}").as_bytes(), i).unwrap();
+        tree.insert(format!("k{i:03}").as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -269,7 +269,7 @@ fn test_double_ended_count_small() {
     // Test with exactly one leaf's worth of elements (15)
     let tree = MassTree::<u64>::default();
     for i in 0..15u64 {
-        tree.insert(format!("key{i:02}").as_bytes(), i).unwrap();
+        tree.insert(format!("key{i:02}").as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -285,7 +285,7 @@ fn test_double_ended_count_two_leaves() {
     // Test with elements spanning two leaves (20 elements)
     let tree = MassTree::<u64>::default();
     for i in 0..20u64 {
-        tree.insert(format!("key{i:02}").as_bytes(), i).unwrap();
+        tree.insert(format!("key{i:02}").as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -300,7 +300,7 @@ fn test_double_ended_count_two_leaves() {
 fn test_double_ended_count_50() {
     let tree = MassTree::<u64>::default();
     for i in 0..50u64 {
-        tree.insert(format!("key{i:02}").as_bytes(), i).unwrap();
+        tree.insert(format!("key{i:02}").as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -318,7 +318,7 @@ fn test_double_ended_count_50() {
 fn test_double_ended_count() {
     let tree = MassTree::<u64>::default();
     for i in 0..100u64 {
-        tree.insert(format!("key{i:03}").as_bytes(), i).unwrap();
+        tree.insert(format!("key{i:03}").as_bytes(), i);
     }
 
     let guard = tree.guard();
@@ -339,11 +339,11 @@ fn test_double_ended_count() {
 #[test]
 fn test_rev_after_partial_forward() {
     let tree = MassTree::<u64>::default();
-    tree.insert(b"1", 1).unwrap();
-    tree.insert(b"2", 2).unwrap();
-    tree.insert(b"3", 3).unwrap();
-    tree.insert(b"4", 4).unwrap();
-    tree.insert(b"5", 5).unwrap();
+    tree.insert(b"1", 1);
+    tree.insert(b"2", 2);
+    tree.insert(b"3", 3);
+    tree.insert(b"4", 4);
+    tree.insert(b"5", 5);
 
     let guard = tree.guard();
     let mut iter = tree.iter(&guard);
@@ -365,9 +365,9 @@ fn test_meeting_detection_odd_count() {
     let tree = MassTree::<u64>::default();
 
     // Odd number of elements
-    tree.insert(b"a", 1).unwrap();
-    tree.insert(b"b", 2).unwrap();
-    tree.insert(b"c", 3).unwrap();
+    tree.insert(b"a", 1);
+    tree.insert(b"b", 2);
+    tree.insert(b"c", 3);
 
     let guard = tree.guard();
     let mut iter = tree.iter(&guard);
@@ -386,8 +386,8 @@ fn test_meeting_detection_even_count() {
     let tree = MassTree::<u64>::default();
 
     // Even number of elements
-    tree.insert(b"a", 1).unwrap();
-    tree.insert(b"b", 2).unwrap();
+    tree.insert(b"a", 1);
+    tree.insert(b"b", 2);
 
     let guard = tree.guard();
     let mut iter = tree.iter(&guard);

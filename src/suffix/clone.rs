@@ -1,4 +1,4 @@
-use super::{INITIAL_CAPACITY, SlotMeta, SuffixBag};
+use super::{SlotMeta, SuffixBag, INITIAL_CAPACITY};
 
 // impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
 //     #[inline(always)]

@@ -37,8 +37,7 @@ fn ycsbk_single_thread() {
         let key = make_ycsb_key(&mut rng);
         let val: u32 = rng.random();
 
-        tree.insert_with_guard(key.as_bytes(), u64::from(val), &guard)
-            .unwrap();
+        tree.insert_with_guard(key.as_bytes(), u64::from(val), &guard);
         keys.push(key);
     }
 

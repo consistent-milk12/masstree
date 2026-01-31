@@ -1,0 +1,413 @@
+Timer precision: 20 ns
+high_impact                    fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ 01_long_keys_128b                         │               │               │               │         │
+│  ├─ indexset                               │               │               │               │         │
+│  │  ├─ 1                     3.771 ms      │ 5.229 ms      │ 4.43 ms       │ 4.455 ms      │ 200     │ 200
+│  │  │                        3.446 Mitem/s │ 2.485 Mitem/s │ 2.933 Mitem/s │ 2.917 Mitem/s │         │
+│  │  ├─ 2                     4.201 ms      │ 7.22 ms       │ 6.28 ms       │ 6.27 ms       │ 200     │ 200
+│  │  │                        6.188 Mitem/s │ 3.6 Mitem/s   │ 4.139 Mitem/s │ 4.146 Mitem/s │         │
+│  │  ├─ 4                     5.034 ms      │ 8.402 ms      │ 6.604 ms      │ 6.651 ms      │ 200     │ 200
+│  │  │                        10.32 Mitem/s │ 6.188 Mitem/s │ 7.873 Mitem/s │ 7.817 Mitem/s │         │
+│  │  ├─ 6                     5.964 ms      │ 8.825 ms      │ 7.149 ms      │ 7.18 ms       │ 200     │ 200
+│  │  │                        13.07 Mitem/s │ 8.837 Mitem/s │ 10.91 Mitem/s │ 10.86 Mitem/s │         │
+│  │  ├─ 8                     7.147 ms      │ 20.79 ms      │ 7.761 ms      │ 7.993 ms      │ 200     │ 200
+│  │  │                        14.54 Mitem/s │ 5 Mitem/s     │ 13.39 Mitem/s │ 13.01 Mitem/s │         │
+│  │  ╰─ 12                    8.638 ms      │ 12.78 ms      │ 10.18 ms      │ 10.18 ms      │ 200     │ 200
+│  │                           18.05 Mitem/s │ 12.19 Mitem/s │ 15.31 Mitem/s │ 15.31 Mitem/s │         │
+│  ├─ masstree15                             │               │               │               │         │
+│  │  ├─ 1                     2.593 ms      │ 4.2 ms        │ 3.273 ms      │ 3.291 ms      │ 200     │ 200
+│  │  │                        5.011 Mitem/s │ 3.095 Mitem/s │ 3.97 Mitem/s  │ 3.949 Mitem/s │         │
+│  │  ├─ 2                     2.762 ms      │ 4.226 ms      │ 3.332 ms      │ 3.376 ms      │ 200     │ 200
+│  │  │                        9.412 Mitem/s │ 6.151 Mitem/s │ 7.803 Mitem/s │ 7.699 Mitem/s │         │
+│  │  ├─ 4                     2.824 ms      │ 4.395 ms      │ 3.146 ms      │ 3.236 ms      │ 200     │ 200
+│  │  │                        18.41 Mitem/s │ 11.83 Mitem/s │ 16.52 Mitem/s │ 16.06 Mitem/s │         │
+│  │  ├─ 6                     2.855 ms      │ 4.307 ms      │ 3.089 ms      │ 3.229 ms      │ 200     │ 200
+│  │  │                        27.31 Mitem/s │ 18.1 Mitem/s  │ 25.25 Mitem/s │ 24.15 Mitem/s │         │
+│  │  ├─ 8                     3.321 ms      │ 5.626 ms      │ 3.641 ms      │ 3.766 ms      │ 200     │ 200
+│  │  │                        31.31 Mitem/s │ 18.48 Mitem/s │ 28.56 Mitem/s │ 27.61 Mitem/s │         │
+│  │  ╰─ 12                    3.583 ms      │ 7.131 ms      │ 4.709 ms      │ 4.738 ms      │ 200     │ 200
+│  │                           43.53 Mitem/s │ 21.87 Mitem/s │ 33.12 Mitem/s │ 32.92 Mitem/s │         │
+│  ├─ skipmap                                │               │               │               │         │
+│  │  ├─ 1                     5.824 ms      │ 8.528 ms      │ 7.672 ms      │ 7.612 ms      │ 200     │ 200
+│  │  │                        2.231 Mitem/s │ 1.524 Mitem/s │ 1.694 Mitem/s │ 1.707 Mitem/s │         │
+│  │  ├─ 2                     6.605 ms      │ 9.64 ms       │ 8.724 ms      │ 8.707 ms      │ 200     │ 200
+│  │  │                        3.936 Mitem/s │ 2.696 Mitem/s │ 2.98 Mitem/s  │ 2.985 Mitem/s │         │
+│  │  ├─ 4                     7.647 ms      │ 10.76 ms      │ 9.11 ms       │ 9.183 ms      │ 200     │ 200
+│  │  │                        6.799 Mitem/s │ 4.832 Mitem/s │ 5.707 Mitem/s │ 5.662 Mitem/s │         │
+│  │  ├─ 6                     8.697 ms      │ 11.63 ms      │ 9.742 ms      │ 9.716 ms      │ 200     │ 200
+│  │  │                        8.968 Mitem/s │ 6.701 Mitem/s │ 8.006 Mitem/s │ 8.027 Mitem/s │         │
+│  │  ├─ 8                     10.02 ms      │ 14.08 ms      │ 10.9 ms       │ 11 ms         │ 200     │ 200
+│  │  │                        10.37 Mitem/s │ 7.381 Mitem/s │ 9.532 Mitem/s │ 9.446 Mitem/s │         │
+│  │  ╰─ 12                    11.17 ms      │ 37.36 ms      │ 13.71 ms      │ 14.31 ms      │ 200     │ 200
+│  │                           13.95 Mitem/s │ 4.174 Mitem/s │ 11.37 Mitem/s │ 10.89 Mitem/s │         │
+│  ╰─ tree_index                             │               │               │               │         │
+│     ├─ 1                     4.929 ms      │ 9.867 ms      │ 5.775 ms      │ 5.939 ms      │ 200     │ 200
+│     │                        2.637 Mitem/s │ 1.317 Mitem/s │ 2.25 Mitem/s  │ 2.188 Mitem/s │         │
+│     ├─ 2                     4.829 ms      │ 10.59 ms      │ 6.125 ms      │ 6.253 ms      │ 200     │ 200
+│     │                        5.383 Mitem/s │ 2.453 Mitem/s │ 4.244 Mitem/s │ 4.157 Mitem/s │         │
+│     ├─ 4                     5.709 ms      │ 8.545 ms      │ 6.285 ms      │ 6.42 ms       │ 200     │ 200
+│     │                        9.106 Mitem/s │ 6.085 Mitem/s │ 8.272 Mitem/s │ 8.098 Mitem/s │         │
+│     ├─ 6                     5.922 ms      │ 9.267 ms      │ 6.512 ms      │ 6.926 ms      │ 200     │ 200
+│     │                        13.17 Mitem/s │ 8.416 Mitem/s │ 11.97 Mitem/s │ 11.26 Mitem/s │         │
+│     ├─ 8                     7.846 ms      │ 9.817 ms      │ 8.365 ms      │ 8.421 ms      │ 200     │ 200
+│     │                        13.25 Mitem/s │ 10.59 Mitem/s │ 12.43 Mitem/s │ 12.34 Mitem/s │         │
+│     ╰─ 12                    8.175 ms      │ 13.31 ms      │ 9.617 ms      │ 9.835 ms      │ 200     │ 200
+│                              19.08 Mitem/s │ 11.71 Mitem/s │ 16.22 Mitem/s │ 15.86 Mitem/s │         │
+├─ 02_multiple_hot_keys                      │               │               │               │         │
+│  ├─ indexset                               │               │               │               │         │
+│  │  ├─ 1                     2.036 ms      │ 2.821 ms      │ 2.197 ms      │ 2.243 ms      │ 200     │ 200
+│  │  │                        5.157 Mitem/s │ 3.72 Mitem/s  │ 4.778 Mitem/s │ 4.679 Mitem/s │         │
+│  │  ├─ 2                     2.295 ms      │ 3.981 ms      │ 3.337 ms      │ 3.273 ms      │ 200     │ 200
+│  │  │                        9.149 Mitem/s │ 5.274 Mitem/s │ 6.292 Mitem/s │ 6.415 Mitem/s │         │
+│  │  ├─ 4                     3.283 ms      │ 5.509 ms      │ 3.932 ms      │ 3.983 ms      │ 200     │ 200
+│  │  │                        12.78 Mitem/s │ 7.622 Mitem/s │ 10.68 Mitem/s │ 10.54 Mitem/s │         │
+│  │  ├─ 6                     4.248 ms      │ 6.592 ms      │ 5.512 ms      │ 5.505 ms      │ 200     │ 200
+│  │  │                        14.83 Mitem/s │ 9.556 Mitem/s │ 11.42 Mitem/s │ 11.44 Mitem/s │         │
+│  │  ├─ 8                     5.405 ms      │ 8.149 ms      │ 6.288 ms      │ 6.316 ms      │ 200     │ 200
+│  │  │                        15.53 Mitem/s │ 10.3 Mitem/s  │ 13.35 Mitem/s │ 13.29 Mitem/s │         │
+│  │  ╰─ 12                    8.064 ms      │ 10.87 ms      │ 9.062 ms      │ 9.101 ms      │ 200     │ 200
+│  │                           15.62 Mitem/s │ 11.58 Mitem/s │ 13.9 Mitem/s  │ 13.84 Mitem/s │         │
+│  ├─ masstree15                             │               │               │               │         │
+│  │  ├─ 1                     1.233 ms      │ 2.178 ms      │ 1.527 ms      │ 1.556 ms      │ 200     │ 200
+│  │  │                        8.511 Mitem/s │ 4.819 Mitem/s │ 6.875 Mitem/s │ 6.743 Mitem/s │         │
+│  │  ├─ 2                     1.396 ms      │ 2.516 ms      │ 1.672 ms      │ 1.702 ms      │ 200     │ 200
+│  │  │                        15.04 Mitem/s │ 8.345 Mitem/s │ 12.55 Mitem/s │ 12.33 Mitem/s │         │
+│  │  ├─ 4                     1.556 ms      │ 2.538 ms      │ 1.745 ms      │ 1.797 ms      │ 200     │ 200
+│  │  │                        26.98 Mitem/s │ 16.54 Mitem/s │ 24.05 Mitem/s │ 23.37 Mitem/s │         │
+│  │  ├─ 6                     1.661 ms      │ 2.736 ms      │ 1.823 ms      │ 1.905 ms      │ 200     │ 200
+│  │  │                        37.91 Mitem/s │ 23.02 Mitem/s │ 34.55 Mitem/s │ 33.07 Mitem/s │         │
+│  │  ├─ 8                     2.036 ms      │ 3.485 ms      │ 2.181 ms      │ 2.23 ms       │ 200     │ 200
+│  │  │                        41.25 Mitem/s │ 24.1 Mitem/s  │ 38.5 Mitem/s  │ 37.66 Mitem/s │         │
+│  │  ╰─ 12                    2.425 ms      │ 4.403 ms      │ 3.069 ms      │ 3.102 ms      │ 200     │ 200
+│  │                           51.93 Mitem/s │ 28.61 Mitem/s │ 41.04 Mitem/s │ 40.6 Mitem/s  │         │
+│  ├─ skipmap                                │               │               │               │         │
+│  │  ├─ 1                     3.166 ms      │ 4.683 ms      │ 3.746 ms      │ 3.761 ms      │ 200     │ 200
+│  │  │                        3.315 Mitem/s │ 2.241 Mitem/s │ 2.802 Mitem/s │ 2.791 Mitem/s │         │
+│  │  ├─ 2                     3.349 ms      │ 5.496 ms      │ 4.891 ms      │ 4.841 ms      │ 200     │ 200
+│  │  │                        6.27 Mitem/s  │ 3.82 Mitem/s  │ 4.293 Mitem/s │ 4.337 Mitem/s │         │
+│  │  ├─ 4                     4.822 ms      │ 6.581 ms      │ 5.642 ms      │ 5.67 ms       │ 200     │ 200
+│  │  │                        8.708 Mitem/s │ 6.381 Mitem/s │ 7.444 Mitem/s │ 7.406 Mitem/s │         │
+│  │  ├─ 6                     5.76 ms       │ 15.32 ms      │ 6.409 ms      │ 6.617 ms      │ 200     │ 200
+│  │  │                        10.93 Mitem/s │ 4.109 Mitem/s │ 9.829 Mitem/s │ 9.519 Mitem/s │         │
+│  │  ├─ 8                     6.637 ms      │ 9.333 ms      │ 7.122 ms      │ 7.16 ms       │ 200     │ 200
+│  │  │                        12.65 Mitem/s │ 8.999 Mitem/s │ 11.79 Mitem/s │ 11.73 Mitem/s │         │
+│  │  ╰─ 12                    7.82 ms       │ 11.05 ms      │ 8.936 ms      │ 9.128 ms      │ 200     │ 200
+│  │                           16.11 Mitem/s │ 11.39 Mitem/s │ 14.09 Mitem/s │ 13.8 Mitem/s  │         │
+│  ╰─ tree_index                             │               │               │               │         │
+│     ├─ 1                     3.07 ms       │ 4.919 ms      │ 3.345 ms      │ 3.398 ms      │ 200     │ 200
+│     │                        3.419 Mitem/s │ 2.134 Mitem/s │ 3.138 Mitem/s │ 3.089 Mitem/s │         │
+│     ├─ 2                     3.482 ms      │ 5.507 ms      │ 4.198 ms      │ 4.219 ms      │ 200     │ 200
+│     │                        6.029 Mitem/s │ 3.813 Mitem/s │ 5.001 Mitem/s │ 4.977 Mitem/s │         │
+│     ├─ 4                     4.421 ms      │ 6.408 ms      │ 4.848 ms      │ 4.93 ms       │ 200     │ 200
+│     │                        9.499 Mitem/s │ 6.554 Mitem/s │ 8.662 Mitem/s │ 8.518 Mitem/s │         │
+│     ├─ 6                     4.947 ms      │ 7.318 ms      │ 6.124 ms      │ 6.041 ms      │ 200     │ 200
+│     │                        12.73 Mitem/s │ 8.608 Mitem/s │ 10.28 Mitem/s │ 10.42 Mitem/s │         │
+│     ├─ 8                     6.759 ms      │ 8.251 ms      │ 7.381 ms      │ 7.391 ms      │ 200     │ 200
+│     │                        12.42 Mitem/s │ 10.17 Mitem/s │ 11.37 Mitem/s │ 11.36 Mitem/s │         │
+│     ╰─ 12                    8.675 ms      │ 11.65 ms      │ 9.549 ms      │ 9.663 ms      │ 200     │ 200
+│                              14.52 Mitem/s │ 10.8 Mitem/s  │ 13.19 Mitem/s │ 13.03 Mitem/s │         │
+├─ 03_mixed_get_insert_remove                │               │               │               │         │
+│  ├─ indexset                               │               │               │               │         │
+│  │  ├─ 1                     4.191 ms      │ 5.478 ms      │ 4.661 ms      │ 4.691 ms      │ 200     │ 200
+│  │  │                        2.504 Mitem/s │ 1.916 Mitem/s │ 2.252 Mitem/s │ 2.238 Mitem/s │         │
+│  │  ├─ 2                     4.53 ms       │ 9.982 ms      │ 9.031 ms      │ 8.52 ms       │ 200     │ 200
+│  │  │                        4.635 Mitem/s │ 2.103 Mitem/s │ 2.325 Mitem/s │ 2.464 Mitem/s │         │
+│  │  ├─ 4                     5.804 ms      │ 11.64 ms      │ 10.26 ms      │ 10.17 ms      │ 200     │ 200
+│  │  │                        7.235 Mitem/s │ 3.607 Mitem/s │ 4.091 Mitem/s │ 4.128 Mitem/s │         │
+│  │  ├─ 6                     6.606 ms      │ 23.98 ms      │ 12.24 ms      │ 12.34 ms      │ 200     │ 200
+│  │  │                        9.535 Mitem/s │ 2.626 Mitem/s │ 5.144 Mitem/s │ 5.104 Mitem/s │         │
+│  │  ├─ 8                     11.87 ms      │ 16.59 ms      │ 14.7 ms       │ 14.64 ms      │ 200     │ 200
+│  │  │                        7.071 Mitem/s │ 5.062 Mitem/s │ 5.712 Mitem/s │ 5.736 Mitem/s │         │
+│  │  ╰─ 12                    19.19 ms      │ 23.62 ms      │ 20.22 ms      │ 20.3 ms       │ 200     │ 200
+│  │                           6.564 Mitem/s │ 5.333 Mitem/s │ 6.23 Mitem/s  │ 6.204 Mitem/s │         │
+│  ├─ masstree15                             │               │               │               │         │
+│  │  ├─ 1                     2.287 ms      │ 4.042 ms      │ 3.146 ms      │ 3.138 ms      │ 200     │ 200
+│  │  │                        4.59 Mitem/s  │ 2.597 Mitem/s │ 3.336 Mitem/s │ 3.345 Mitem/s │         │
+│  │  ├─ 2                     2.36 ms       │ 4.052 ms      │ 3.315 ms      │ 3.346 ms      │ 200     │ 200
+│  │  │                        8.897 Mitem/s │ 5.181 Mitem/s │ 6.334 Mitem/s │ 6.274 Mitem/s │         │
+│  │  ├─ 4                     2.9 ms        │ 4.342 ms      │ 3.376 ms      │ 3.432 ms      │ 200     │ 200
+│  │  │                        14.48 Mitem/s │ 9.67 Mitem/s  │ 12.44 Mitem/s │ 12.23 Mitem/s │         │
+│  │  ├─ 6                     3.115 ms      │ 4.947 ms      │ 3.725 ms      │ 3.728 ms      │ 200     │ 200
+│  │  │                        20.22 Mitem/s │ 12.73 Mitem/s │ 16.9 Mitem/s  │ 16.89 Mitem/s │         │
+│  │  ├─ 8                     3.886 ms      │ 5.48 ms       │ 4.231 ms      │ 4.255 ms      │ 200     │ 200
+│  │  │                        21.61 Mitem/s │ 15.32 Mitem/s │ 19.85 Mitem/s │ 19.74 Mitem/s │         │
+│  │  ╰─ 12                    4.294 ms      │ 8.092 ms      │ 5.639 ms      │ 5.678 ms      │ 200     │ 200
+│  │                           29.33 Mitem/s │ 15.57 Mitem/s │ 22.34 Mitem/s │ 22.18 Mitem/s │         │
+│  ├─ skipmap                                │               │               │               │         │
+│  │  ├─ 1                     5.892 ms      │ 8.709 ms      │ 7.346 ms      │ 7.338 ms      │ 200     │ 200
+│  │  │                        1.781 Mitem/s │ 1.205 Mitem/s │ 1.429 Mitem/s │ 1.43 Mitem/s  │         │
+│  │  ├─ 2                     6.2 ms        │ 10.28 ms      │ 8.619 ms      │ 8.493 ms      │ 200     │ 200
+│  │  │                        3.386 Mitem/s │ 2.042 Mitem/s │ 2.436 Mitem/s │ 2.472 Mitem/s │         │
+│  │  ├─ 4                     8.281 ms      │ 10.66 ms      │ 8.931 ms      │ 8.992 ms      │ 200     │ 200
+│  │  │                        5.071 Mitem/s │ 3.939 Mitem/s │ 4.702 Mitem/s │ 4.67 Mitem/s  │         │
+│  │  ├─ 6                     8.589 ms      │ 13.98 ms      │ 9.699 ms      │ 9.825 ms      │ 200     │ 200
+│  │  │                        7.334 Mitem/s │ 4.506 Mitem/s │ 6.494 Mitem/s │ 6.411 Mitem/s │         │
+│  │  ├─ 8                     10.21 ms      │ 31.34 ms      │ 11.01 ms      │ 11.39 ms      │ 200     │ 200
+│  │  │                        8.226 Mitem/s │ 2.68 Mitem/s  │ 7.629 Mitem/s │ 7.368 Mitem/s │         │
+│  │  ╰─ 12                    11.89 ms      │ 20.19 ms      │ 13.85 ms      │ 14.26 ms      │ 200     │ 200
+│  │                           10.59 Mitem/s │ 6.239 Mitem/s │ 9.092 Mitem/s │ 8.835 Mitem/s │         │
+│  ╰─ tree_index                             │               │               │               │         │
+│     ├─ 1                     4.935 ms      │ 7.437 ms      │ 5.649 ms      │ 5.685 ms      │ 200     │ 200
+│     │                        2.127 Mitem/s │ 1.411 Mitem/s │ 1.858 Mitem/s │ 1.846 Mitem/s │         │
+│     ├─ 2                     5.238 ms      │ 7.57 ms       │ 6.148 ms      │ 6.158 ms      │ 200     │ 200
+│     │                        4.008 Mitem/s │ 2.774 Mitem/s │ 3.415 Mitem/s │ 3.409 Mitem/s │         │
+│     ├─ 4                     6.062 ms      │ 8.398 ms      │ 6.581 ms      │ 6.71 ms       │ 200     │ 200
+│     │                        6.928 Mitem/s │ 5.001 Mitem/s │ 6.381 Mitem/s │ 6.258 Mitem/s │         │
+│     ├─ 6                     6.09 ms       │ 9.38 ms       │ 6.913 ms      │ 7.23 ms       │ 200     │ 200
+│     │                        10.34 Mitem/s │ 6.716 Mitem/s │ 9.112 Mitem/s │ 8.713 Mitem/s │         │
+│     ├─ 8                     7.993 ms      │ 10.58 ms      │ 8.491 ms      │ 8.555 ms      │ 200     │ 200
+│     │                        10.5 Mitem/s  │ 7.939 Mitem/s │ 9.892 Mitem/s │ 9.818 Mitem/s │         │
+│     ╰─ 12                    8.223 ms      │ 12.94 ms      │ 9.819 ms      │ 9.916 ms      │ 200     │ 200
+│                              15.32 Mitem/s │ 9.733 Mitem/s │ 12.83 Mitem/s │ 12.7 Mitem/s  │         │
+├─ 04_variable_long_keys                     │               │               │               │         │
+│  ├─ indexset                               │               │               │               │         │
+│  │  ├─ 1                     6.611 ms      │ 9.041 ms      │ 7.238 ms      │ 7.339 ms      │ 200     │ 200
+│  │  │                        1.966 Mitem/s │ 1.437 Mitem/s │ 1.795 Mitem/s │ 1.771 Mitem/s │         │
+│  │  ├─ 2                     7.076 ms      │ 11.2 ms       │ 9.672 ms      │ 9.559 ms      │ 200     │ 200
+│  │  │                        3.674 Mitem/s │ 2.32 Mitem/s  │ 2.688 Mitem/s │ 2.719 Mitem/s │         │
+│  │  ├─ 4                     9.545 ms      │ 12.24 ms      │ 11.08 ms      │ 11.07 ms      │ 200     │ 200
+│  │  │                        5.447 Mitem/s │ 4.247 Mitem/s │ 4.689 Mitem/s │ 4.695 Mitem/s │         │
+│  │  ├─ 6                     10.49 ms      │ 15.01 ms      │ 11.71 ms      │ 11.87 ms      │ 200     │ 200
+│  │  │                        7.431 Mitem/s │ 5.195 Mitem/s │ 6.658 Mitem/s │ 6.566 Mitem/s │         │
+│  │  ├─ 8                     12.62 ms      │ 16.25 ms      │ 13.79 ms      │ 13.88 ms      │ 200     │ 200
+│  │  │                        8.237 Mitem/s │ 6.396 Mitem/s │ 7.538 Mitem/s │ 7.487 Mitem/s │         │
+│  │  ╰─ 12                    15.7 ms       │ 48.6 ms       │ 18.75 ms      │ 19.05 ms      │ 200     │ 200
+│  │                           9.934 Mitem/s │ 3.209 Mitem/s │ 8.316 Mitem/s │ 8.187 Mitem/s │         │
+│  ├─ masstree15                             │               │               │               │         │
+│  │  ├─ 1                     3.73 ms       │ 6.779 ms      │ 4.434 ms      │ 4.526 ms      │ 200     │ 200
+│  │  │                        3.484 Mitem/s │ 1.917 Mitem/s │ 2.931 Mitem/s │ 2.871 Mitem/s │         │
+│  │  ├─ 2                     3.7 ms        │ 6.836 ms      │ 4.537 ms      │ 4.677 ms      │ 200     │ 200
+│  │  │                        7.025 Mitem/s │ 3.803 Mitem/s │ 5.729 Mitem/s │ 5.558 Mitem/s │         │
+│  │  ├─ 4                     3.931 ms      │ 6.204 ms      │ 4.82 ms       │ 4.873 ms      │ 200     │ 200
+│  │  │                        13.22 Mitem/s │ 8.381 Mitem/s │ 10.78 Mitem/s │ 10.66 Mitem/s │         │
+│  │  ├─ 6                     3.921 ms      │ 6.905 ms      │ 5.062 ms      │ 5.074 ms      │ 200     │ 200
+│  │  │                        19.88 Mitem/s │ 11.29 Mitem/s │ 15.4 Mitem/s  │ 15.36 Mitem/s │         │
+│  │  ├─ 8                     4.761 ms      │ 14.83 ms      │ 5.653 ms      │ 5.761 ms      │ 200     │ 200
+│  │  │                        21.84 Mitem/s │ 7.008 Mitem/s │ 18.39 Mitem/s │ 18.04 Mitem/s │         │
+│  │  ╰─ 12                    4.947 ms      │ 10.98 ms      │ 7 ms          │ 7.026 ms      │ 200     │ 200
+│  │                           31.52 Mitem/s │ 14.19 Mitem/s │ 22.28 Mitem/s │ 22.2 Mitem/s  │         │
+│  ├─ skipmap                                │               │               │               │         │
+│  │  ├─ 1                     9.422 ms      │ 15.82 ms      │ 11.65 ms      │ 11.69 ms      │ 200     │ 200
+│  │  │                        1.379 Mitem/s │ 821.7 Kitem/s │ 1.115 Mitem/s │ 1.111 Mitem/s │         │
+│  │  ├─ 2                     9.782 ms      │ 17.98 ms      │ 13.43 ms      │ 13.17 ms      │ 200     │ 200
+│  │  │                        2.657 Mitem/s │ 1.445 Mitem/s │ 1.935 Mitem/s │ 1.973 Mitem/s │         │
+│  │  ├─ 4                     12.59 ms      │ 19.71 ms      │ 14.26 ms      │ 14.44 ms      │ 200     │ 200
+│  │  │                        4.129 Mitem/s │ 2.637 Mitem/s │ 3.644 Mitem/s │ 3.599 Mitem/s │         │
+│  │  ├─ 6                     12.41 ms      │ 26.46 ms      │ 15.71 ms      │ 15.62 ms      │ 200     │ 200
+│  │  │                        6.281 Mitem/s │ 2.947 Mitem/s │ 4.962 Mitem/s │ 4.993 Mitem/s │         │
+│  │  ├─ 8                     15.24 ms      │ 21.64 ms      │ 16.16 ms      │ 16.33 ms      │ 200     │ 200
+│  │  │                        6.821 Mitem/s │ 4.805 Mitem/s │ 6.434 Mitem/s │ 6.365 Mitem/s │         │
+│  │  ╰─ 12                    17.16 ms      │ 67.93 ms      │ 19.24 ms      │ 20.47 ms      │ 200     │ 200
+│  │                           9.089 Mitem/s │ 2.296 Mitem/s │ 8.104 Mitem/s │ 7.617 Mitem/s │         │
+│  ╰─ tree_index                             │               │               │               │         │
+│     ├─ 1                     7.967 ms      │ 13.18 ms      │ 9.189 ms      │ 9.256 ms      │ 200     │ 200
+│     │                        1.631 Mitem/s │ 986.2 Kitem/s │ 1.414 Mitem/s │ 1.404 Mitem/s │         │
+│     ├─ 2                     8.082 ms      │ 16.83 ms      │ 10.16 ms      │ 10.23 ms      │ 200     │ 200
+│     │                        3.216 Mitem/s │ 1.544 Mitem/s │ 2.558 Mitem/s │ 2.54 Mitem/s  │         │
+│     ├─ 4                     9.11 ms       │ 14.87 ms      │ 11.1 ms       │ 11.31 ms      │ 200     │ 200
+│     │                        5.707 Mitem/s │ 3.494 Mitem/s │ 4.684 Mitem/s │ 4.595 Mitem/s │         │
+│     ├─ 6                     9.279 ms      │ 17.17 ms      │ 13.44 ms      │ 12.94 ms      │ 200     │ 200
+│     │                        8.405 Mitem/s │ 4.54 Mitem/s  │ 5.802 Mitem/s │ 6.025 Mitem/s │         │
+│     ├─ 8                     13.03 ms      │ 25.09 ms      │ 14.71 ms      │ 14.81 ms      │ 200     │ 200
+│     │                        7.98 Mitem/s  │ 4.144 Mitem/s │ 7.068 Mitem/s │ 7.021 Mitem/s │         │
+│     ╰─ 12                    14.3 ms       │ 25.97 ms      │ 19.91 ms      │ 19.98 ms      │ 200     │ 200
+│                              10.9 Mitem/s  │ 6.006 Mitem/s │ 7.833 Mitem/s │ 7.807 Mitem/s │         │
+├─ 05_prefix_queries                         │               │               │               │         │
+│  ├─ masstree15                             │               │               │               │         │
+│  │  ├─ 1                     6.268 ms      │ 11.79 ms      │ 7.798 ms      │ 7.857 ms      │ 200     │ 200
+│  │  │                        87.74 Kitem/s │ 46.61 Kitem/s │ 70.52 Kitem/s │ 69.99 Kitem/s │         │
+│  │  ├─ 2                     6.736 ms      │ 10.44 ms      │ 8.05 ms       │ 8.162 ms      │ 200     │ 200
+│  │  │                        163.2 Kitem/s │ 105.3 Kitem/s │ 136.6 Kitem/s │ 134.7 Kitem/s │         │
+│  │  ├─ 4                     6.85 ms       │ 13.97 ms      │ 8.055 ms      │ 8.371 ms      │ 200     │ 200
+│  │  │                        321.1 Kitem/s │ 157.4 Kitem/s │ 273 Kitem/s   │ 262.7 Kitem/s │         │
+│  │  ├─ 6                     6.701 ms      │ 12.05 ms      │ 7.762 ms      │ 8.309 ms      │ 200     │ 200
+│  │  │                        492.4 Kitem/s │ 273.6 Kitem/s │ 425.1 Kitem/s │ 397.1 Kitem/s │         │
+│  │  ├─ 8                     9.969 ms      │ 11.93 ms      │ 10.68 ms      │ 10.71 ms      │ 200     │ 200
+│  │  │                        441.3 Kitem/s │ 368.6 Kitem/s │ 411.9 Kitem/s │ 410.7 Kitem/s │         │
+│  │  ╰─ 12                    10.88 ms      │ 43.45 ms      │ 12.4 ms       │ 13.38 ms      │ 200     │ 200
+│  │                           606.1 Kitem/s │ 151.8 Kitem/s │ 532.2 Kitem/s │ 493.2 Kitem/s │         │
+│  ├─ skipmap                                │               │               │               │         │
+│  │  ├─ 1                     8.042 ms      │ 15.37 ms      │ 13.11 ms      │ 12.91 ms      │ 200     │ 200
+│  │  │                        68.38 Kitem/s │ 35.77 Kitem/s │ 41.93 Kitem/s │ 42.58 Kitem/s │         │
+│  │  ├─ 2                     9.347 ms      │ 32.41 ms      │ 27.51 ms      │ 25.26 ms      │ 200     │ 200
+│  │  │                        117.6 Kitem/s │ 33.93 Kitem/s │ 39.97 Kitem/s │ 43.53 Kitem/s │         │
+│  │  ├─ 4                     14.64 ms      │ 37.87 ms      │ 29.63 ms      │ 28.97 ms      │ 200     │ 200
+│  │  │                        150.1 Kitem/s │ 58.09 Kitem/s │ 74.23 Kitem/s │ 75.93 Kitem/s │         │
+│  │  ├─ 6                     26.07 ms      │ 39.23 ms      │ 33.66 ms      │ 34.03 ms      │ 200     │ 200
+│  │  │                        126.5 Kitem/s │ 84.1 Kitem/s  │ 98.01 Kitem/s │ 96.96 Kitem/s │         │
+│  │  ├─ 8                     32.13 ms      │ 42.71 ms      │ 38.04 ms      │ 38.03 ms      │ 200     │ 200
+│  │  │                        136.9 Kitem/s │ 103 Kitem/s   │ 115.6 Kitem/s │ 115.6 Kitem/s │         │
+│  │  ╰─ 12                    41.9 ms       │ 64.47 ms      │ 48.41 ms      │ 49.39 ms      │ 200     │ 200
+│  │                           157.4 Kitem/s │ 102.3 Kitem/s │ 136.3 Kitem/s │ 133.6 Kitem/s │         │
+│  ╰─ tree_index                             │               │               │               │         │
+│     ├─ 1                     4.907 ms      │ 48.49 ms      │ 6.499 ms      │ 7.971 ms      │ 200     │ 200
+│     │                        112 Kitem/s   │ 11.34 Kitem/s │ 84.62 Kitem/s │ 68.99 Kitem/s │         │
+│     ├─ 2                     4.84 ms       │ 9.992 ms      │ 6.294 ms      │ 6.504 ms      │ 200     │ 200
+│     │                        227.2 Kitem/s │ 110 Kitem/s   │ 174.7 Kitem/s │ 169.1 Kitem/s │         │
+│     ├─ 4                     5.206 ms      │ 21.1 ms       │ 6.763 ms      │ 7.095 ms      │ 200     │ 200
+│     │                        422.5 Kitem/s │ 104.2 Kitem/s │ 325.2 Kitem/s │ 310 Kitem/s   │         │
+│     ├─ 6                     5.208 ms      │ 25.47 ms      │ 7.739 ms      │ 8.055 ms      │ 200     │ 200
+│     │                        633.6 Kitem/s │ 129.5 Kitem/s │ 426.4 Kitem/s │ 409.6 Kitem/s │         │
+│     ├─ 8                     7.024 ms      │ 17.4 ms       │ 8.136 ms      │ 8.451 ms      │ 200     │ 200
+│     │                        626.4 Kitem/s │ 252.8 Kitem/s │ 540.7 Kitem/s │ 520.6 Kitem/s │         │
+│     ╰─ 12                    7.63 ms       │ 19.85 ms      │ 11.76 ms      │ 11.96 ms      │ 200     │ 200
+│                              865 Kitem/s   │ 332.3 Kitem/s │ 561 Kitem/s   │ 551.7 Kitem/s │         │
+├─ 06_deep_trie_traversal                    │               │               │               │         │
+│  ├─ indexset                               │               │               │               │         │
+│  │  ├─ 1                     4.551 ms      │ 9.274 ms      │ 5.492 ms      │ 5.583 ms      │ 200     │ 200
+│  │  │                        2.856 Mitem/s │ 1.401 Mitem/s │ 2.367 Mitem/s │ 2.328 Mitem/s │         │
+│  │  ├─ 2                     4.941 ms      │ 14.56 ms      │ 7.124 ms      │ 6.896 ms      │ 200     │ 200
+│  │  │                        5.262 Mitem/s │ 1.785 Mitem/s │ 3.649 Mitem/s │ 3.769 Mitem/s │         │
+│  │  ├─ 4                     6.058 ms      │ 11.42 ms      │ 8.019 ms      │ 8.133 ms      │ 200     │ 200
+│  │  │                        8.582 Mitem/s │ 4.55 Mitem/s  │ 6.484 Mitem/s │ 6.393 Mitem/s │         │
+│  │  ├─ 6                     7.803 ms      │ 21.62 ms      │ 9.123 ms      │ 9.249 ms      │ 200     │ 200
+│  │  │                        9.995 Mitem/s │ 3.606 Mitem/s │ 8.549 Mitem/s │ 8.433 Mitem/s │         │
+│  │  ├─ 8                     8.411 ms      │ 12.61 ms      │ 9.819 ms      │ 9.88 ms       │ 200     │ 200
+│  │  │                        12.36 Mitem/s │ 8.242 Mitem/s │ 10.59 Mitem/s │ 10.52 Mitem/s │         │
+│  │  ╰─ 12                    9.823 ms      │ 37.02 ms      │ 13.22 ms      │ 13.47 ms      │ 200     │ 200
+│  │                           15.88 Mitem/s │ 4.213 Mitem/s │ 11.79 Mitem/s │ 11.57 Mitem/s │         │
+│  ├─ masstree15                             │               │               │               │         │
+│  │  ├─ 1                     4.898 ms      │ 12.47 ms      │ 6.377 ms      │ 6.466 ms      │ 200     │ 200
+│  │  │                        2.653 Mitem/s │ 1.041 Mitem/s │ 2.038 Mitem/s │ 2.01 Mitem/s  │         │
+│  │  ├─ 2                     5.071 ms      │ 10.04 ms      │ 7.308 ms      │ 7.365 ms      │ 200     │ 200
+│  │  │                        5.126 Mitem/s │ 2.589 Mitem/s │ 3.557 Mitem/s │ 3.529 Mitem/s │         │
+│  │  ├─ 4                     6.072 ms      │ 11.49 ms      │ 7.634 ms      │ 7.722 ms      │ 200     │ 200
+│  │  │                        8.562 Mitem/s │ 4.523 Mitem/s │ 6.811 Mitem/s │ 6.733 Mitem/s │         │
+│  │  ├─ 6                     5.952 ms      │ 10.91 ms      │ 8.509 ms      │ 8.457 ms      │ 200     │ 200
+│  │  │                        13.1 Mitem/s  │ 7.148 Mitem/s │ 9.166 Mitem/s │ 9.222 Mitem/s │         │
+│  │  ├─ 8                     7.553 ms      │ 14.96 ms      │ 8.966 ms      │ 9.072 ms      │ 200     │ 200
+│  │  │                        13.76 Mitem/s │ 6.95 Mitem/s  │ 11.59 Mitem/s │ 11.46 Mitem/s │         │
+│  │  ╰─ 12                    8.777 ms      │ 37.25 ms      │ 13.5 ms       │ 13.7 ms       │ 200     │ 200
+│  │                           17.77 Mitem/s │ 4.187 Mitem/s │ 11.55 Mitem/s │ 11.38 Mitem/s │         │
+│  ├─ skipmap                                │               │               │               │         │
+│  │  ├─ 1                     8.326 ms      │ 19.82 ms      │ 12.6 ms       │ 12.22 ms      │ 200     │ 200
+│  │  │                        1.561 Mitem/s │ 655.6 Kitem/s │ 1.031 Mitem/s │ 1.063 Mitem/s │         │
+│  │  ├─ 2                     8.886 ms      │ 18.15 ms      │ 13.33 ms      │ 13.21 ms      │ 200     │ 200
+│  │  │                        2.925 Mitem/s │ 1.431 Mitem/s │ 1.949 Mitem/s │ 1.967 Mitem/s │         │
+│  │  ├─ 4                     11.19 ms      │ 26.87 ms      │ 13.81 ms      │ 14.25 ms      │ 200     │ 200
+│  │  │                        4.645 Mitem/s │ 1.935 Mitem/s │ 3.764 Mitem/s │ 3.647 Mitem/s │         │
+│  │  ├─ 6                     11.48 ms      │ 38.84 ms      │ 15.18 ms      │ 15.56 ms      │ 200     │ 200
+│  │  │                        6.79 Mitem/s  │ 2.008 Mitem/s │ 5.136 Mitem/s │ 5.01 Mitem/s  │         │
+│  │  ├─ 8                     13.22 ms      │ 34.21 ms      │ 16.23 ms      │ 16.59 ms      │ 200     │ 200
+│  │  │                        7.864 Mitem/s │ 3.039 Mitem/s │ 6.407 Mitem/s │ 6.266 Mitem/s │         │
+│  │  ╰─ 12                    16.55 ms      │ 40.8 ms       │ 22.43 ms      │ 22.96 ms      │ 200     │ 200
+│  │                           9.421 Mitem/s │ 3.822 Mitem/s │ 6.954 Mitem/s │ 6.792 Mitem/s │         │
+│  ╰─ tree_index                             │               │               │               │         │
+│     ├─ 1                     8.257 ms      │ 12.82 ms      │ 9.631 ms      │ 9.735 ms      │ 200     │ 200
+│     │                        1.574 Mitem/s │ 1.013 Mitem/s │ 1.349 Mitem/s │ 1.335 Mitem/s │         │
+│     ├─ 2                     8.504 ms      │ 11.53 ms      │ 9.58 ms       │ 9.564 ms      │ 200     │ 200
+│     │                        3.057 Mitem/s │ 2.253 Mitem/s │ 2.713 Mitem/s │ 2.718 Mitem/s │         │
+│     ├─ 4                     8.737 ms      │ 19.04 ms      │ 9.874 ms      │ 10.15 ms      │ 200     │ 200
+│     │                        5.951 Mitem/s │ 2.73 Mitem/s  │ 5.266 Mitem/s │ 5.119 Mitem/s │         │
+│     ├─ 6                     8.945 ms      │ 25.85 ms      │ 11.09 ms      │ 11.2 ms       │ 200     │ 200
+│     │                        8.719 Mitem/s │ 3.017 Mitem/s │ 7.029 Mitem/s │ 6.961 Mitem/s │         │
+│     ├─ 8                     11.28 ms      │ 14.7 ms       │ 12.21 ms      │ 12.3 ms       │ 200     │ 200
+│     │                        9.218 Mitem/s │ 7.073 Mitem/s │ 8.511 Mitem/s │ 8.453 Mitem/s │         │
+│     ╰─ 12                    12 ms         │ 21.09 ms      │ 15.46 ms      │ 15.56 ms      │ 200     │ 200
+│                              12.99 Mitem/s │ 7.395 Mitem/s │ 10.08 Mitem/s │ 10.02 Mitem/s │         │
+├─ 07_deep_trie_read_only                    │               │               │               │         │
+│  ├─ indexset                               │               │               │               │         │
+│  │  ├─ 1                     8.002 ms      │ 14.98 ms      │ 9.037 ms      │ 9.218 ms      │ 200     │ 200
+│  │  │                        3.186 Mitem/s │ 1.701 Mitem/s │ 2.821 Mitem/s │ 2.766 Mitem/s │         │
+│  │  ├─ 2                     8.571 ms      │ 20.9 ms       │ 12.66 ms      │ 12.35 ms      │ 200     │ 200
+│  │  │                        5.95 Mitem/s  │ 2.439 Mitem/s │ 4.025 Mitem/s │ 4.128 Mitem/s │         │
+│  │  ├─ 4                     10.24 ms      │ 28.42 ms      │ 13.11 ms      │ 13.39 ms      │ 200     │ 200
+│  │  │                        9.959 Mitem/s │ 3.588 Mitem/s │ 7.78 Mitem/s  │ 7.614 Mitem/s │         │
+│  │  ├─ 6                     12.64 ms      │ 29.72 ms      │ 15.11 ms      │ 15.28 ms      │ 200     │ 200
+│  │  │                        12.1 Mitem/s  │ 5.147 Mitem/s │ 10.12 Mitem/s │ 10.01 Mitem/s │         │
+│  │  ├─ 8                     14.5 ms       │ 18.38 ms      │ 16.34 ms      │ 16.29 ms      │ 200     │ 200
+│  │  │                        14.06 Mitem/s │ 11.09 Mitem/s │ 12.48 Mitem/s │ 12.52 Mitem/s │         │
+│  │  ╰─ 12                    18.33 ms      │ 78.93 ms      │ 21.12 ms      │ 21.96 ms      │ 200     │ 200
+│  │                           16.68 Mitem/s │ 3.876 Mitem/s │ 14.48 Mitem/s │ 13.93 Mitem/s │         │
+│  ├─ masstree15                             │               │               │               │         │
+│  │  ├─ 1                     8.168 ms      │ 13.07 ms      │ 9.632 ms      │ 9.703 ms      │ 200     │ 200
+│  │  │                        3.121 Mitem/s │ 1.949 Mitem/s │ 2.647 Mitem/s │ 2.627 Mitem/s │         │
+│  │  ├─ 2                     8.183 ms      │ 13.8 ms       │ 9.406 ms      │ 9.477 ms      │ 200     │ 200
+│  │  │                        6.231 Mitem/s │ 3.693 Mitem/s │ 5.421 Mitem/s │ 5.38 Mitem/s  │         │
+│  │  ├─ 4                     8.131 ms      │ 13.21 ms      │ 9.964 ms      │ 10.08 ms      │ 200     │ 200
+│  │  │                        12.54 Mitem/s │ 7.718 Mitem/s │ 10.23 Mitem/s │ 10.11 Mitem/s │         │
+│  │  ├─ 6                     8.226 ms      │ 14.69 ms      │ 12.07 ms      │ 11.74 ms      │ 200     │ 200
+│  │  │                        18.59 Mitem/s │ 10.4 Mitem/s  │ 12.66 Mitem/s │ 13.03 Mitem/s │         │
+│  │  ├─ 8                     10.08 ms      │ 42.6 ms       │ 12.34 ms      │ 12.53 ms      │ 200     │ 200
+│  │  │                        20.23 Mitem/s │ 4.787 Mitem/s │ 16.52 Mitem/s │ 16.27 Mitem/s │         │
+│  │  ╰─ 12                    11.8 ms       │ 27.37 ms      │ 17.02 ms      │ 16.85 ms      │ 200     │ 200
+│  │                           25.91 Mitem/s │ 11.17 Mitem/s │ 17.97 Mitem/s │ 18.15 Mitem/s │         │
+│  ├─ skipmap                                │               │               │               │         │
+│  │  ├─ 1                     13.17 ms      │ 23.35 ms      │ 16.38 ms      │ 16.84 ms      │ 200     │ 200
+│  │  │                        1.936 Mitem/s │ 1.091 Mitem/s │ 1.555 Mitem/s │ 1.513 Mitem/s │         │
+│  │  ├─ 2                     12.91 ms      │ 24.66 ms      │ 17.89 ms      │ 17.95 ms      │ 200     │ 200
+│  │  │                        3.947 Mitem/s │ 2.068 Mitem/s │ 2.849 Mitem/s │ 2.84 Mitem/s  │         │
+│  │  ├─ 4                     15.18 ms      │ 25.53 ms      │ 17.83 ms      │ 18.32 ms      │ 200     │ 200
+│  │  │                        6.719 Mitem/s │ 3.994 Mitem/s │ 5.717 Mitem/s │ 5.566 Mitem/s │         │
+│  │  ├─ 6                     16.78 ms      │ 26.71 ms      │ 21.22 ms      │ 21.12 ms      │ 200     │ 200
+│  │  │                        9.116 Mitem/s │ 5.726 Mitem/s │ 7.208 Mitem/s │ 7.243 Mitem/s │         │
+│  │  ├─ 8                     19.38 ms      │ 58.5 ms       │ 21.35 ms      │ 22.01 ms      │ 200     │ 200
+│  │  │                        10.52 Mitem/s │ 3.486 Mitem/s │ 9.55 Mitem/s  │ 9.268 Mitem/s │         │
+│  │  ╰─ 12                    22.55 ms      │ 35.37 ms      │ 28.79 ms      │ 28.96 ms      │ 200     │ 200
+│  │                           13.56 Mitem/s │ 8.65 Mitem/s  │ 10.62 Mitem/s │ 10.56 Mitem/s │         │
+│  ╰─ tree_index                             │               │               │               │         │
+│     ├─ 1                     11.97 ms      │ 18.24 ms      │ 13.21 ms      │ 13.32 ms      │ 200     │ 200
+│     │                        2.129 Mitem/s │ 1.397 Mitem/s │ 1.929 Mitem/s │ 1.913 Mitem/s │         │
+│     ├─ 2                     11.64 ms      │ 17.4 ms       │ 13.8 ms       │ 13.85 ms      │ 200     │ 200
+│     │                        4.381 Mitem/s │ 2.93 Mitem/s  │ 3.694 Mitem/s │ 3.68 Mitem/s  │         │
+│     ├─ 4                     11.96 ms      │ 17 ms         │ 13.74 ms      │ 13.95 ms      │ 200     │ 200
+│     │                        8.526 Mitem/s │ 5.998 Mitem/s │ 7.422 Mitem/s │ 7.31 Mitem/s  │         │
+│     ├─ 6                     12.9 ms       │ 27.54 ms      │ 15.99 ms      │ 16.01 ms      │ 200     │ 200
+│     │                        11.85 Mitem/s │ 5.555 Mitem/s │ 9.563 Mitem/s │ 9.554 Mitem/s │         │
+│     ├─ 8                     15.27 ms      │ 42.93 ms      │ 16.72 ms      │ 16.93 ms      │ 200     │ 200
+│     │                        13.35 Mitem/s │ 4.751 Mitem/s │ 12.19 Mitem/s │ 12.04 Mitem/s │         │
+│     ╰─ 12                    15.67 ms      │ 30.55 ms      │ 19.4 ms       │ 20.41 ms      │ 200     │ 200
+│                              19.51 Mitem/s │ 10.01 Mitem/s │ 15.76 Mitem/s │ 14.98 Mitem/s │         │
+╰─ 08_variable_keys_arc                      │               │               │               │         │
+   ├─ indexset                               │               │               │               │         │
+   │  ├─ 1                     5.254 ms      │ 7.404 ms      │ 6.233 ms      │ 6.244 ms      │ 200     │ 200
+   │  │                        2.473 Mitem/s │ 1.755 Mitem/s │ 2.085 Mitem/s │ 2.081 Mitem/s │         │
+   │  ├─ 2                     5.596 ms      │ 9.085 ms      │ 8.094 ms      │ 7.837 ms      │ 200     │ 200
+   │  │                        4.645 Mitem/s │ 2.861 Mitem/s │ 3.212 Mitem/s │ 3.317 Mitem/s │         │
+   │  ├─ 4                     7.275 ms      │ 9.808 ms      │ 8.331 ms      │ 8.399 ms      │ 200     │ 200
+   │  │                        7.147 Mitem/s │ 5.301 Mitem/s │ 6.241 Mitem/s │ 6.191 Mitem/s │         │
+   │  ├─ 6                     8.039 ms      │ 11.03 ms      │ 9.344 ms      │ 9.375 ms      │ 200     │ 200
+   │  │                        9.702 Mitem/s │ 7.067 Mitem/s │ 8.347 Mitem/s │ 8.319 Mitem/s │         │
+   │  ├─ 8                     9.458 ms      │ 20.73 ms      │ 10.51 ms      │ 10.67 ms      │ 200     │ 200
+   │  │                        10.99 Mitem/s │ 5.016 Mitem/s │ 9.892 Mitem/s │ 9.739 Mitem/s │         │
+   │  ╰─ 12                    11.07 ms      │ 16.88 ms      │ 12.99 ms      │ 13.03 ms      │ 200     │ 200
+   │                           14.09 Mitem/s │ 9.238 Mitem/s │ 12 Mitem/s    │ 11.96 Mitem/s │         │
+   ├─ masstree15                             │               │               │               │         │
+   │  ├─ 1                     3.863 ms      │ 5.697 ms      │ 4.412 ms      │ 4.467 ms      │ 200     │ 200
+   │  │                        3.364 Mitem/s │ 2.281 Mitem/s │ 2.946 Mitem/s │ 2.909 Mitem/s │         │
+   │  ├─ 2                     3.792 ms      │ 5.884 ms      │ 4.397 ms      │ 4.469 ms      │ 200     │ 200
+   │  │                        6.855 Mitem/s │ 4.418 Mitem/s │ 5.912 Mitem/s │ 5.816 Mitem/s │         │
+   │  ├─ 4                     3.938 ms      │ 5.865 ms      │ 4.259 ms      │ 4.353 ms      │ 200     │ 200
+   │  │                        13.2 Mitem/s  │ 8.865 Mitem/s │ 12.2 Mitem/s  │ 11.94 Mitem/s │         │
+   │  ├─ 6                     3.945 ms      │ 6.372 ms      │ 4.353 ms      │ 4.466 ms      │ 200     │ 200
+   │  │                        19.76 Mitem/s │ 12.23 Mitem/s │ 17.91 Mitem/s │ 17.46 Mitem/s │         │
+   │  ├─ 8                     4.898 ms      │ 7.27 ms       │ 5.264 ms      │ 5.272 ms      │ 200     │ 200
+   │  │                        21.22 Mitem/s │ 14.3 Mitem/s  │ 19.75 Mitem/s │ 19.72 Mitem/s │         │
+   │  ╰─ 12                    5.193 ms      │ 9.403 ms      │ 6.258 ms      │ 6.449 ms      │ 200     │ 200
+   │                           30.03 Mitem/s │ 16.58 Mitem/s │ 24.92 Mitem/s │ 24.18 Mitem/s │         │
+   ├─ skipmap                                │               │               │               │         │
+   │  ├─ 1                     7.473 ms      │ 11.38 ms      │ 9.825 ms      │ 9.714 ms      │ 200     │ 200
+   │  │                        1.739 Mitem/s │ 1.142 Mitem/s │ 1.323 Mitem/s │ 1.338 Mitem/s │         │
+   │  ├─ 2                     7.915 ms      │ 13.4 ms       │ 11.44 ms      │ 11.35 ms      │ 200     │ 200
+   │  │                        3.284 Mitem/s │ 1.94 Mitem/s  │ 2.27 Mitem/s  │ 2.289 Mitem/s │         │
+   │  ├─ 4                     11.02 ms      │ 13.8 ms       │ 11.88 ms      │ 11.96 ms      │ 200     │ 200
+   │  │                        4.717 Mitem/s │ 3.767 Mitem/s │ 4.374 Mitem/s │ 4.347 Mitem/s │         │
+   │  ├─ 6                     11.38 ms      │ 16.39 ms      │ 12.67 ms      │ 12.99 ms      │ 200     │ 200
+   │  │                        6.848 Mitem/s │ 4.757 Mitem/s │ 6.151 Mitem/s │ 6 Mitem/s     │         │
+   │  ├─ 8                     13.38 ms      │ 16.9 ms       │ 14.66 ms      │ 14.69 ms      │ 200     │ 200
+   │  │                        7.77 Mitem/s  │ 6.15 Mitem/s  │ 7.09 Mitem/s  │ 7.077 Mitem/s │         │
+   │  ╰─ 12                    15.86 ms      │ 57.28 ms      │ 17.77 ms      │ 18.73 ms      │ 200     │ 200
+   │                           9.834 Mitem/s │ 2.723 Mitem/s │ 8.777 Mitem/s │ 8.328 Mitem/s │         │
+   ╰─ tree_index                             │               │               │               │         │
+      ├─ 1                     6.585 ms      │ 10.59 ms      │ 7.343 ms      │ 7.456 ms      │ 200     │ 200
+      │                        1.974 Mitem/s │ 1.227 Mitem/s │ 1.77 Mitem/s  │ 1.743 Mitem/s │         │
+      ├─ 2                     5.959 ms      │ 9.201 ms      │ 7.867 ms      │ 7.84 ms       │ 200     │ 200
+      │                        4.362 Mitem/s │ 2.825 Mitem/s │ 3.304 Mitem/s │ 3.315 Mitem/s │         │
+      ├─ 4                     7.003 ms      │ 11.08 ms      │ 8.137 ms      │ 8.336 ms      │ 200     │ 200
+      │                        7.424 Mitem/s │ 4.692 Mitem/s │ 6.39 Mitem/s  │ 6.237 Mitem/s │         │
+      ├─ 6                     7.074 ms      │ 11.56 ms      │ 10.03 ms      │ 9.34 ms       │ 200     │ 200
+      │                        11.02 Mitem/s │ 6.744 Mitem/s │ 7.775 Mitem/s │ 8.351 Mitem/s │         │
+      ├─ 8                     10 ms         │ 12.22 ms      │ 10.78 ms      │ 10.82 ms      │ 200     │ 200
+      │                        10.39 Mitem/s │ 8.504 Mitem/s │ 9.647 Mitem/s │ 9.611 Mitem/s │         │
+      ╰─ 12                    10.85 ms      │ 18.93 ms      │ 12.74 ms      │ 13.07 ms      │ 200     │ 200
+                               14.37 Mitem/s │ 8.236 Mitem/s │ 12.23 Mitem/s │ 11.93 Mitem/s │         │

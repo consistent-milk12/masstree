@@ -35,8 +35,7 @@ fn rw1long_single_thread() {
         let fmt: usize = rng.random_range(0..4);
         let key = make_key(fmt, x);
 
-        tree.insert_with_guard(key.as_bytes(), u64::from(x) + 1, &guard)
-            .unwrap();
+        tree.insert_with_guard(key.as_bytes(), u64::from(x) + 1, &guard);
         keys.push((fmt, x));
     }
 

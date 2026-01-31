@@ -5,9 +5,8 @@
 //! When a key is longer than 8 bytes, the first 8 bytes are stored as `ikey0`
 //! and the remaining bytes are stored in a [`SuffixBag`].
 
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
-
-use crate::{AllocError, AllocResult, TreePermutation};
+use crate::TreePermutation;
+// Note: AllocError/AllocResult removed - allocations are now infallible
 
 mod clone;
 mod compact;
@@ -26,11 +25,7 @@ const INITIAL_CAPACITY: usize = 128;
 // ============================================================================
 
 /// Metadata for a single slot's suffix.
-///
-/// Uses zerocopy derives to enable safe transmutation and array casting
-/// during suffix compaction operations.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+#[derive(Clone, Copy, Debug, Default)]
 struct SlotMeta {
     /// Offset into the data buffer (`u32::MAX` if no suffix).
     offset: u32,
@@ -191,34 +186,23 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
         self.suffix_count as usize
     }
 
-    // ========================================================================
-    //  Fallible Operations
-    // ========================================================================
-
-    /// Try to create a new suffix bag with initial capacity.
+    /// Reserve additional capacity for suffix data.
     ///
-    /// # Returns
+    /// # Arguments
     ///
-    /// * `Ok(bag)` - Successfully allocated bag
-    /// * `Err(AllocError)` - Could not allocate capacity
+    /// * `additional` - Number of additional bytes to reserve
     ///
-    /// # Errors
-    ///
-    /// Upon allocation failure.
+    /// Note: Aborts on allocation failure (standard Rust OOM behavior).
     #[inline(always)]
-    pub fn try_with_capacity(capacity: usize) -> AllocResult<Self> {
-        let mut data: Vec<u8> = Vec::new();
-        data.try_reserve(capacity)
-            .map_err(|_| AllocError::for_suffix(capacity))?;
-
-        Ok(Self {
-            slots: [SlotMeta::EMPTY; WIDTH],
-            data,
-            suffix_count: 0,
-        })
+    pub fn reserve(&mut self, additional: usize) {
+        self.data.reserve(additional);
     }
 
-    /// Try to assign a suffix, returning error if allocation fails.
+    // ========================================================================
+    //  Smart Assignment with Compaction
+    // ========================================================================
+
+    /// Assign a suffix with smart space management.
     ///
     /// Attempts to store `suffix` at the given `slot` index. Uses several
     /// optimization strategies in order:
@@ -227,20 +211,22 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     /// 3. Compact in-place to reclaim fragmented space
     /// 4. Grow the buffer if compaction is insufficient
     ///
+    /// Aborts on allocation failure (standard Rust OOM behavior).
+    ///
     /// # Arguments
     ///
     /// * `slot` - Slot index, must be `< WIDTH`
     /// * `suffix` - Suffix bytes to store
     ///
-    /// # Errors
+    /// # Returns
     ///
-    /// Returns [`AllocError`] if buffer growth fails due to memory exhaustion.
+    /// `true` if assignment succeeded without growing, `false` if buffer grew.
     ///
     /// # Panics
     ///
     /// Panics if `suffix.len() > u16::MAX` (65535 bytes).
     #[expect(clippy::indexing_slicing, reason = "Checked access")]
-    pub fn try_assign(&mut self, slot: usize, suffix: &[u8]) -> AllocResult<()> {
+    pub fn try_assign(&mut self, slot: usize, suffix: &[u8]) -> bool {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
         let suffix_len: usize = suffix.len();
@@ -268,7 +254,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
             }
 
             // Count unchanged, slot already had suffix
-            return Ok(());
+            return true;
         }
 
         // Fast Path 2: Append if there's room
@@ -291,7 +277,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
                 };
             }
 
-            return Ok(());
+            return true;
         }
 
         // Slow Path: Need more space, try compacting first
@@ -318,13 +304,11 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
                 };
             }
 
-            return Ok(());
+            return true;
         }
 
-        // Still not enough space - must grow
-        self.data
-            .try_reserve(suffix_len)
-            .map_err(|_| AllocError::for_suffix(suffix_len))?;
+        // Still not enough space - must grow (aborts on OOM)
+        self.data.reserve(suffix_len);
 
         let new_offset: usize = self.data.len();
         self.data.extend_from_slice(suffix);
@@ -342,18 +326,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
             };
         }
 
-        Ok(())
-    }
-
-    /// Try to grow capacity, returning error on allocation failure.
-    ///
-    /// # Errors
-    ///
-    /// Upon allocation failure.
-    pub fn try_reserve(&mut self, additional: usize) -> AllocResult<()> {
-        self.data
-            .try_reserve(additional)
-            .map_err(|_| AllocError::for_suffix(additional))
+        false // Buffer grew
     }
 
     // ========================================================================

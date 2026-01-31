@@ -48,7 +48,7 @@ fn concurrent_remove_read_stress() {
 
     // Pre-populate
     for i in 0..NUM_KEYS {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let barrier = Arc::new(Barrier::new(NUM_READERS + NUM_REMOVERS));
@@ -169,7 +169,7 @@ fn concurrent_remove_permutation_integrity() {
         // Insert keys that will land in the same leaf initially
         // Using sequential keys ensures they go to same/adjacent leaves
         for i in 0..KEYS_PER_ITER {
-            tree.insert(&i.to_be_bytes(), i).unwrap();
+            tree.insert(&i.to_be_bytes(), i);
         }
 
         let barrier = Arc::new(Barrier::new(NUM_THREADS));
@@ -336,7 +336,7 @@ fn concurrent_splits_no_false_negatives() {
 
     // Pre-populate with some keys so tree has structure
     for i in 0..1000u64 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let barrier = Arc::new(Barrier::new(NUM_READERS + NUM_INSERTERS));
@@ -719,7 +719,7 @@ fn range_scan_ordering_during_inserts() {
 
     // Pre-populate
     for i in 0..INITIAL_KEYS {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let barrier = Arc::new(Barrier::new(NUM_SCANNERS + NUM_INSERTERS));
@@ -814,7 +814,7 @@ fn range_scan_during_removes() {
 
     // Pre-populate
     for i in 0..NUM_KEYS {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let barrier = Arc::new(Barrier::new(NUM_SCANNERS + NUM_REMOVERS));
@@ -1034,7 +1034,7 @@ fn long_running_mixed_workload() {
 
     // Pre-populate
     for i in 0..KEY_RANGE / 2 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let mut handles = vec![];

@@ -59,9 +59,6 @@ where
 
     /// Prepare for a leaf split by gathering context and allocating the right sibling.
     ///
-    /// This is the **fallible** phase of split handling. If allocation fails,
-    /// we return `Err(AllocationFailed)` without modifying the tree.
-    ///
     /// # Arguments
     ///
     /// - `left_leaf`: Reference to the leaf being split (caller holds lock)
@@ -72,7 +69,6 @@ where
     /// # Returns
     ///
     /// * `Ok(SplitPreparation)` - Ready to proceed with split
-    /// * `Err(InsertError::AllocationFailed)` - Could not allocate sibling leaf
     /// * `Err(InsertError::SplitFailed)` - Could not calculate split point
     ///
     /// # Split Point Calculation Failure
@@ -83,6 +79,8 @@ where
     /// - Internal permutation state is corrupted
     ///
     /// These represent bugs in the caller or tree corruption, not transient failures.
+    ///
+    /// Note: Allocations are infallible (abort on OOM like standard Rust).
     fn prepare_split(
         &self,
         left_leaf: &L,
@@ -114,15 +112,13 @@ where
         );
 
         // =========================================================================
-        // FALLIBLE POINT: Allocate right sibling BEFORE mark_split
+        // Allocate right sibling BEFORE mark_split
         // =========================================================================
         //
-        // This is the only fallible allocation in the split path (Tier 1).
-        // If this fails, we return Err without modifying the tree.
-        //
+        // Allocation is infallible (aborts on OOM).
         // The leaf is initialized but NOT split-locked yet - that happens in
         // split_into_preallocated() or split_and_insert() after mark_split().
-        let right_leaf_ptr: *mut L = self.allocator.try_alloc_leaf(false, false)?;
+        let right_leaf_ptr: *mut L = self.allocator.alloc_leaf_direct(false, false);
 
         Ok(SplitPreparation {
             split_point,
@@ -224,8 +220,8 @@ where
     ///
     /// # Returns
     ///
-    /// * `Ok(SplitInsertResult)` - Split and insert completed successfully
-    /// * `Err(InsertError::AllocationFailed)` - Could not allocate sibling leaf
+    /// * `Ok(SplitInsertResult)` - Split and insert completed successfully.
+    ///   Note: Allocation is infallible (aborts on OOM like standard Rust).
     /// * `Err(InsertError::SplitFailed)` - Could not calculate split point (see
     ///   [`prepare_split`] for failure conditions)
     ///

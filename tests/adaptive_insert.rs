@@ -43,7 +43,7 @@ fn test_shared_prefix_correctness() {
                     let key = format!("PREFIX00T{tid}I{i:04}");
                     let value = (tid * KEYS_PER_THREAD + i) as u64;
                     // insert() returns Result<Option<S::Output>, InsertError>
-                    tree.insert(key.as_bytes(), value).expect("insert failed");
+                    tree.insert(key.as_bytes(), value);
                 }
             })
         })
@@ -82,7 +82,7 @@ fn test_random_keys_correctness() {
                 for i in 0..KEYS_PER_THREAD {
                     let key = (base + i as u64).to_be_bytes();
                     let value = base + i as u64;
-                    tree.insert(&key, value).expect("insert failed");
+                    tree.insert(&key, value);
                 }
             })
         })
@@ -109,11 +109,11 @@ fn test_mixed_prefix_random() {
                     if i % 2 == 0 {
                         let key = format!("shared__{tid:04}_{i:08}");
                         tree.insert(key.as_bytes(), i as u64)
-                            .expect("insert failed");
+                            ;
                     } else {
                         let key = format!("unique{tid:02}_{i:08}");
                         tree.insert(key.as_bytes(), i as u64)
-                            .expect("insert failed");
+                            ;
                     }
                 }
             })
@@ -139,7 +139,7 @@ fn test_shared_prefix_updates() {
     // Pre-populate
     for i in 0..KEYS {
         let key = format!("prefix__{i:08}");
-        tree.insert(key.as_bytes(), 0u64).expect("insert failed");
+        tree.insert(key.as_bytes(), 0u64);
     }
 
     let handles: Vec<_> = (0..THREADS)
@@ -152,10 +152,8 @@ fn test_shared_prefix_updates() {
                         // Just overwrite with thread-specific value
                         // We're testing that updates work, not atomic increment
                         let new_value = (tid * 1000 + i) as u64;
-                        let result = tree.insert(key.as_bytes(), new_value);
-                        // Should succeed and return Some(old_value)
-                        assert!(result.is_ok());
-                        let old = result.unwrap();
+                        let old = tree.insert(key.as_bytes(), new_value);
+                        // Should return Some(old_value) since key already exists
                         assert!(old.is_some(), "update should return old value");
                     }
                 }
@@ -197,7 +195,7 @@ fn test_batch_shared_prefix() {
                     })
                     .collect();
 
-                let result = tree.insert_batch(entries).expect("batch insert failed");
+                let result = tree.insert_batch(entries);
                 // With short keys, all should succeed (no suffix conflicts)
                 assert_eq!(result.inserted + result.updated, ENTRIES_PER_BATCH);
                 assert_eq!(result.failed, 0, "no failures expected with short keys");
@@ -235,8 +233,7 @@ fn test_batch_long_keys_with_conflicts() {
         })
         .collect();
 
-    let result: BatchInsertResult<Arc<u64>> =
-        tree.insert_batch(entries).expect("batch insert failed");
+    let result: BatchInsertResult<Arc<u64>> = tree.insert_batch(entries);
 
     // At least one operation should succeed (insert or update)
     // Using inserted + updated is more resilient than just inserted

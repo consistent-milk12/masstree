@@ -5,10 +5,10 @@
 
 use std::fmt as StdFmt;
 use std::marker::PhantomData;
-use std::mem as StdMem;
+
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
-use crate::error::{AllocError, AllocKind};
+// Note: AllocError/AllocKind removed - allocations are now infallible
 use crate::shard_counter::ShardedCounter;
 
 use crate::alloc15::{SeizeAllocator15, SeizeAllocator15TrueInline};
@@ -65,33 +65,14 @@ pub mod batch {
 // ============================================================================
 
 /// Errors that can occur during insert operations.
+///
+/// Note: `AllocationFailed` variant removed. Allocations are now infallible
+/// (abort on OOM like standard Rust).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertError {
     /// Leaf node is full and cannot accept more keys.
     /// Caller should trigger a split.
     LeafFull,
-
-    /// Memory allocation failed.
-    ///
-    /// This error is returned when the system cannot allocate memory for:
-    /// - New leaf nodes (during splits or layer creation)
-    /// - Suffix storage (for keys > 8 bytes)
-    /// - Value boxing (for `LeafValueIndex` mode)
-    ///
-    /// Callers should handle this by:
-    /// - Rejecting the current op
-    /// - Triggering memory reclamation
-    /// - Retrying after other ops complete
-    ///
-    /// FIX: Internode allocation during propagation remains infallible in current phase.
-    /// I may work on this later if further OOM issues arise.
-    AllocationFailed {
-        /// Approximate size of the failed allocation in bytes.
-        size: usize,
-
-        /// Kind of allocation that failed.
-        kind: AllocKind,
-    },
 
     /// Split required (generic path).
     /// Leaf is full and needs to be split.
@@ -110,49 +91,10 @@ pub enum InsertError {
     SplitPropagationRequired,
 }
 
-impl InsertError {
-    /// Create an allocation failure error for a type with specified kind.
-    #[inline]
-    #[must_use]
-    pub const fn allocation_failed_typed<T>(kind: AllocKind) -> Self {
-        Self::AllocationFailed {
-            size: StdMem::size_of::<T>(),
-            kind,
-        }
-    }
-
-    /// Create an allocation failure error with explicit size and kind.
-    #[inline]
-    #[must_use]
-    pub const fn allocation_failed(size: usize, kind: AllocKind) -> Self {
-        Self::AllocationFailed { size, kind }
-    }
-
-    /// Create an allocation failure error with explicit size and kind.
-    #[inline]
-    #[must_use]
-    pub const fn is_allocation_failed(&self) -> bool {
-        matches!(self, Self::AllocationFailed { .. })
-    }
-}
-
-impl From<AllocError> for InsertError {
-    fn from(err: AllocError) -> Self {
-        Self::AllocationFailed {
-            size: err.size,
-            kind: err.kind,
-        }
-    }
-}
-
 impl StdFmt::Display for InsertError {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         match self {
             Self::LeafFull => write!(f, "leaf node is full"),
-
-            Self::AllocationFailed { size, kind } => {
-                write!(f, "{kind} allocation of {size} bytes failed")
-            }
 
             Self::SplitRequired => {
                 write!(f, "split required (leaf full)")

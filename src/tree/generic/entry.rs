@@ -33,7 +33,7 @@ use crate::{
     MassTreeGeneric, NodeAllocatorGeneric,
     leaf_trait::LayerCapableLeaf,
     slot::ValueSlot,
-    tree::{InsertError, RemoveError},
+    tree::RemoveError,
     value::traits::LeafValueLoad,
 };
 
@@ -190,33 +190,16 @@ where
     /// ```rust,ignore
     /// let value = tree.entry_with_guard(b"key", &guard).or_insert(42);
     /// ```
+    /// Returns the entry's value if occupied, or inserts the default and returns it.
     #[inline(always)]
-    #[expect(
-        clippy::panic,
-        reason = "Convenience wrapper; use or_try_insert for fallible version"
-    )]
     pub fn or_insert(self, default: S::Value) -> S::Output {
-        match self.or_try_insert(default) {
-            Ok(output) => output,
-
-            Err(e) => panic!("or_insert failed: {e:?}"),
-        }
-    }
-
-    /// Fallible version [`or_insert`](Self::or_insert)
-    ///
-    /// # Errors
-    ///
-    /// Returns error if insertion fails, instead of panicking.
-    #[inline(always)]
-    pub fn or_try_insert(self, default: S::Value) -> Result<S::Output, InsertError> {
         match self {
-            Entry::Occupied(o) => Ok(o.into_value()),
-
-            Entry::Vacant(v) => v.try_insert(default),
+            Entry::Occupied(o) => o.into_value(),
+            Entry::Vacant(v) => v.insert(default),
         }
     }
 
+    /// Returns the entry's value if occupied, or computes and inserts a default.
     #[inline(always)]
     pub fn or_insert_with<F>(self, default: F) -> S::Output
     where
@@ -224,23 +207,11 @@ where
     {
         match self {
             Entry::Occupied(o) => o.into_value(),
-
             Entry::Vacant(v) => v.insert(default()),
         }
     }
 
-    #[inline(always)]
-    pub fn or_try_insert_with<F>(self, default: F) -> Result<S::Output, InsertError>
-    where
-        F: FnOnce() -> S::Value,
-    {
-        match self {
-            Entry::Occupied(o) => Ok(o.into_value()),
-
-            Entry::Vacant(v) => v.try_insert(default()),
-        }
-    }
-
+    /// Returns the entry's value if occupied, or computes a default from the key.
     #[inline(always)]
     pub fn or_insert_with_key<F>(self, default: F) -> S::Output
     where
@@ -248,25 +219,9 @@ where
     {
         match self {
             Entry::Occupied(o) => o.into_value(),
-
             Entry::Vacant(v) => {
                 let value: S::Value = default(v.key());
                 v.insert(value)
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub fn or_try_insert_with_key<F>(self, default: F) -> Result<S::Output, InsertError>
-    where
-        F: FnOnce(&[u8]) -> S::Value,
-    {
-        match self {
-            Entry::Occupied(o) => Ok(o.into_value()),
-
-            Entry::Vacant(v) => {
-                let value: S::Value = default(v.key());
-                v.try_insert(value)
             }
         }
     }
@@ -278,22 +233,8 @@ where
         self.or_insert(Default::default())
     }
 
-    #[expect(
-        clippy::panic,
-        reason = "Convenience wrapper; use try_and_modify for fallible version"
-    )]
+    /// Modifies the value if occupied using the provided function.
     pub fn and_modify<F>(self, f: F) -> Self
-    where
-        F: FnOnce(&S::Output) -> S::Value,
-    {
-        match self.try_and_modify(f) {
-            Ok(entry) => entry,
-
-            Err(e) => panic!("Entry::and_modify failed: {e:?}"),
-        }
-    }
-
-    pub fn try_and_modify<F>(self, f: F) -> Result<Self, InsertError>
     where
         F: FnOnce(&S::Output) -> S::Value,
     {
@@ -303,38 +244,24 @@ where
                 let new_output: S::Output = S::into_output(new_value);
                 let return_output: S::Output = new_output.clone();
 
-                o.tree
-                    .insert_output_with_guard(o.key, new_output, o.guard)?;
+                let _old = o.tree
+                    .insert_output_with_guard(o.key, new_output, o.guard);
                 o.value = return_output;
 
-                Ok(Entry::Occupied(o))
+                Entry::Occupied(o)
             }
 
-            Entry::Vacant(v) => Ok(Entry::Vacant(v)),
+            Entry::Vacant(v) => Entry::Vacant(v),
         }
     }
 
+    /// Inserts a value and returns an `OccupiedEntry`.
     #[inline]
-    #[expect(
-        clippy::panic,
-        reason = "Convenience wrapper; use try_insert_entry for fallible version"
-    )]
     pub fn insert_entry(self, value: S::Value) -> OccupiedEntry<'t, 'e, S, L, A> {
-        match self.try_insert_entry(value) {
-            Ok(occupied) => occupied,
-            Err(e) => panic!("insert_entry failed: {e:?}"),
-        }
-    }
-
-    pub fn try_insert_entry(
-        self,
-        value: S::Value,
-    ) -> Result<OccupiedEntry<'t, 'e, S, L, A>, InsertError> {
         match self {
             Entry::Occupied(mut o) => {
-                o.try_insert(value)?;
-
-                Ok(o)
+                o.insert(value);
+                o
             }
 
             Entry::Vacant(v) => {
@@ -345,14 +272,14 @@ where
                 // Convert to output before insert
                 let output: S::Output = S::into_output(value);
                 let return_output: S::Output = output.clone();
-                tree.insert_output_with_guard(key, output, guard)?;
+                let _old = tree.insert_output_with_guard(key, output, guard);
 
-                Ok(OccupiedEntry {
+                OccupiedEntry {
                     key,
                     value: return_output,
                     tree,
                     guard,
-                })
+                }
             }
         }
     }
@@ -407,44 +334,21 @@ where
     ///
     /// # Returns
     ///
-    /// - `Ok(Some(old))` - Key existed, old value returned
-    /// - `Ok(None)` - Key was deleted concurrently, new value inserted anyway
-    ///
-    /// # Panics
-    ///
-    /// Panics if insertion fails. Use [`try_insert`](Self::try_insert) for
-    /// fallible operation.
+    /// - `Some(old)` - Key existed, old value returned
+    /// - `None` - Key was deleted concurrently, new value inserted anyway
     #[inline(always)]
-    #[expect(
-        clippy::panic,
-        reason = "Convenience wrapper; use try_insert for fallible version"
-    )]
     pub fn insert(&mut self, value: S::Value) -> Option<S::Output> {
-        match self.try_insert(value) {
-            Ok(old) => old,
-
-            Err(e) => panic!("OccupiedEntry::insert failed: {e:?}"),
-        }
-    }
-
-    /// Fallible version of [`insert`](Self::insert).
-    ///
-    /// # Errors
-    ///
-    /// Returns error if insertion fails.
-    #[inline(always)]
-    pub fn try_insert(&mut self, value: S::Value) -> Result<Option<S::Output>, InsertError> {
         // Convert to output before insert
         let output = S::into_output(value);
         let return_output = output.clone();
         let old = self
             .tree
-            .insert_output_with_guard(self.key, output, self.guard)?;
+            .insert_output_with_guard(self.key, output, self.guard);
 
         // Update cached value
         self.value = return_output;
 
-        Ok(old)
+        old
     }
 
     /// Removes the entry from the tree and returns the actually removed value.
@@ -548,39 +452,18 @@ where
     /// If another thread inserted a value for this key between `entry_with_guard()`
     /// and `insert()`, this method will **overwrite** that value. This is
     /// "last-writer-wins" semantics.
-    ///
-    /// # Panics
-    ///
-    /// Panics if insertion fails (allocation error). Use [`try_insert`](Self::try_insert)
-    /// for fallible operation.
     #[inline(always)]
-    #[expect(
-        clippy::panic,
-        reason = "Convenience wrapper; use try_insert for fallible version"
-    )]
     pub fn insert(self, value: S::Value) -> S::Output {
-        match self.try_insert(value) {
-            Ok(output) => output,
-
-            Err(e) => panic!("VacantEntry::insert failed: {e:?}"),
-        }
-    }
-
-    /// Fallible version of [`insert`](Self::insert).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InsertError`] if insertion fails.
-    #[inline(always)]
-    pub fn try_insert(self, value: S::Value) -> Result<S::Output, InsertError> {
         // Convert to output before insert, clone for return value
         let output = S::into_output(value);
         let return_output = output.clone();
 
         // Insert using internal method that accepts S::Output
-        self.tree
-            .insert_output_with_guard(self.key, output, self.guard)?;
-        Ok(return_output)
+        // The return value (old value if any) is ignored since we're in a VacantEntry
+        let _old = self
+            .tree
+            .insert_output_with_guard(self.key, output, self.guard);
+        return_output
     }
 }
 

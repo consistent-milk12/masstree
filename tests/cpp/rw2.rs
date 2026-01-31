@@ -31,8 +31,7 @@ fn rw2_seed(get_frac: f64) {
             // Insert
             let x = offset.wrapping_add(puts).wrapping_mul(C);
             let key = x.to_be_bytes();
-            tree.insert_with_guard(&key, x.wrapping_add(1), &guard)
-                .unwrap();
+            tree.insert_with_guard(&key, x.wrapping_add(1), &guard);
             puts += 1;
         } else {
             // Get

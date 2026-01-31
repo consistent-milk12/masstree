@@ -28,7 +28,7 @@ fn rwsep24_single_thread() {
     // Pre-populate with separated keys
     for n in 0..(32 + NKEYS) {
         let key = (base + n as u64).to_be_bytes();
-        tree.insert_with_guard(&key, n as u64, &guard).unwrap();
+        tree.insert_with_guard(&key, n as u64, &guard);
     }
 
     // Mixed read/write operations
@@ -109,7 +109,7 @@ fn rwsep24_no_contention_scaling() {
 
                 for i in 0..10_000u64 {
                     let key = (base + i).to_be_bytes();
-                    tree.insert_with_guard(&key, i, &guard).unwrap();
+                    tree.insert_with_guard(&key, i, &guard);
                 }
 
                 // Verify our keys

@@ -26,7 +26,7 @@ fn rw3_single_thread() {
     // Put phase: sequential ascending
     for n in 0..N {
         let key = n.to_be_bytes();
-        tree.insert_with_guard(&key, n + 1, &guard).unwrap();
+        tree.insert_with_guard(&key, n + 1, &guard);
     }
 
     // Get phase: verify all
@@ -54,7 +54,7 @@ fn rw3_concurrent() {
                 // Put phase
                 for n in start..end {
                     let key = n.to_be_bytes();
-                    tree.insert_with_guard(&key, n + 1, &guard).unwrap();
+                    tree.insert_with_guard(&key, n + 1, &guard);
                 }
 
                 // Get phase

@@ -35,8 +35,7 @@ fn rw1fixed_single_thread() {
     for _ in 0..N {
         let x: u32 = rng.random_range(0..100_000_000);
         let key = x.to_be_bytes();
-        tree.insert_with_guard(&key, u64::from(x + 1), &guard)
-            .unwrap();
+        tree.insert_with_guard(&key, u64::from(x + 1), &guard);
         keys.push(x);
     }
 

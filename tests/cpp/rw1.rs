@@ -28,8 +28,7 @@ fn rw1_single_thread() {
     for _ in 0..N {
         let x: u64 = rng.random();
         let key = x.to_be_bytes();
-        tree.insert_with_guard(&key, x.wrapping_add(1), &guard)
-            .unwrap();
+        tree.insert_with_guard(&key, x.wrapping_add(1), &guard);
         keys.push(x);
     }
 

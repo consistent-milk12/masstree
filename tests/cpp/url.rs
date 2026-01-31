@@ -42,8 +42,7 @@ fn url_single_thread() {
     let mut urls: Vec<String> = Vec::with_capacity(N);
     for i in 0..N {
         let url = make_url(&mut rng);
-        tree.insert_with_guard(url.as_bytes(), i as u64, &guard)
-            .unwrap();
+        tree.insert_with_guard(url.as_bytes(), i as u64, &guard);
         urls.push(url);
     }
 
@@ -106,8 +105,7 @@ fn url_shared_prefix_stress() {
 
     for i in 0..N {
         let url = format!("{domain}{i}");
-        tree.insert_with_guard(url.as_bytes(), i as u64, &guard)
-            .unwrap();
+        tree.insert_with_guard(url.as_bytes(), i as u64, &guard);
     }
 
     // Verify all present

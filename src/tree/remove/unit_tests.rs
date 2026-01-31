@@ -24,7 +24,7 @@ type TestTree = MassTree15<u64>;
 fn test_remove_single_key() {
     let tree: MassTree15<u64> = MassTree15::new();
 
-    tree.insert(b"key1", 42).unwrap();
+    tree.insert(b"key1", 42);
     assert_eq!(tree.len(), 1);
 
     let removed = tree.remove(b"key1").unwrap();
@@ -36,7 +36,7 @@ fn test_remove_single_key() {
 fn test_remove_nonexistent_key() {
     let tree: MassTree15<u64> = MassTree15::new();
 
-    tree.insert(b"key1", 42).unwrap();
+    tree.insert(b"key1", 42);
 
     let result = tree.remove(b"key2");
     assert!(matches!(result, Ok(None)));
@@ -50,12 +50,12 @@ fn test_remove_updates_count() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..10u64 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
     assert_eq!(tree.len(), 10);
 
     for i in 0..5u64 {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
     assert_eq!(tree.len(), 5);
 
@@ -72,8 +72,8 @@ fn test_remove_updates_count() {
 fn test_remove_returns_old_value() {
     let tree: MassTree15<String> = MassTree15::new();
 
-    tree.insert(b"key", "hello".to_string()).unwrap();
-    tree.insert(b"key", "world".to_string()).unwrap();
+    tree.insert(b"key", "hello".to_string());
+    tree.insert(b"key", "world".to_string());
 
     let removed = tree.remove(b"key").unwrap();
     assert_eq!(removed, Some(Arc::new("world".to_string())));
@@ -84,12 +84,12 @@ fn test_remove_short_key() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // 1-byte key
-    tree.insert(&[42], 1).unwrap();
+    tree.insert(&[42], 1);
     assert_eq!(tree.remove(&[42]).unwrap(), Some(Arc::new(1)));
 
     // 8-byte key (max inline)
     let key8 = [1, 2, 3, 4, 5, 6, 7, 8];
-    tree.insert(&key8, 8).unwrap();
+    tree.insert(&key8, 8);
     assert_eq!(tree.remove(&key8).unwrap(), Some(Arc::new(8)));
 }
 
@@ -99,7 +99,7 @@ fn test_remove_with_suffix() {
 
     // 16-byte key (requires suffix)
     let key16 = b"0123456789ABCDEF";
-    tree.insert(key16, 16).unwrap();
+    tree.insert(key16, 16);
 
     let removed = tree.remove(key16).unwrap();
     assert_eq!(removed, Some(Arc::new(16)));
@@ -113,12 +113,12 @@ fn test_remove_all_keys_empties_tree() {
     let keys: Vec<_> = (0..100u64).map(u64::to_be_bytes).collect();
 
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key, i as u64).unwrap();
+        tree.insert(key, i as u64);
     }
     assert_eq!(tree.len(), 100);
 
     for key in &keys {
-        tree.remove(key).unwrap();
+        let _ = tree.remove(key);
     }
     assert_eq!(tree.len(), 0);
     assert!(tree.is_empty());
@@ -129,7 +129,7 @@ fn test_remove_in_reverse_order() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..50u64 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Remove in reverse order
@@ -146,12 +146,12 @@ fn test_remove_alternating() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     for i in 0..100u64 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Remove even keys
     for i in (0..100u64).step_by(2) {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     assert_eq!(tree.len(), 50);
@@ -166,11 +166,11 @@ fn test_remove_alternating() {
 fn test_remove_and_reinsert_same_key() {
     let tree: MassTree15<u64> = MassTree15::new();
 
-    tree.insert(b"key", 1).unwrap();
-    tree.remove(b"key").unwrap();
+    tree.insert(b"key", 1);
+    let _ = tree.remove(b"key");
 
     // Reinsert with different value
-    tree.insert(b"key", 2).unwrap();
+    tree.insert(b"key", 2);
     assert_eq!(tree.get(b"key"), Some(Arc::new(2)));
 }
 
@@ -180,7 +180,7 @@ fn test_remove_reinsert_cycle() {
     let key = b"test_key";
 
     for i in 0..10u64 {
-        tree.insert(key, i).unwrap();
+        tree.insert(key, i);
         assert_eq!(tree.get(key), Some(Arc::new(i)));
 
         let removed = tree.remove(key).unwrap();
@@ -201,7 +201,7 @@ fn test_remove_empty_key() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // Empty key is valid
-    tree.insert(&[], 0).unwrap();
+    tree.insert(&[], 0);
     let removed = tree.remove(&[]).unwrap();
     assert_eq!(removed, Some(Arc::new(0)));
 }
@@ -210,11 +210,11 @@ fn test_remove_empty_key() {
 fn test_remove_preserves_other_keys() {
     let tree: MassTree15<u64> = MassTree15::new();
 
-    tree.insert(b"aaa", 1).unwrap();
-    tree.insert(b"bbb", 2).unwrap();
-    tree.insert(b"ccc", 3).unwrap();
+    tree.insert(b"aaa", 1);
+    tree.insert(b"bbb", 2);
+    tree.insert(b"ccc", 3);
 
-    tree.remove(b"bbb").unwrap();
+    let _ = tree.remove(b"bbb");
 
     assert_eq!(tree.get(b"aaa"), Some(Arc::new(1)));
     assert!(tree.get(b"bbb").is_none());
@@ -723,8 +723,8 @@ fn test_remove_leaf_updates_parent_child_ptr() {
     let tree: TestTree = TestTree::new();
 
     // Insert keys to create multi-leaf structure
-    tree.insert(&50_u64.to_be_bytes(), 50).unwrap();
-    tree.insert(&150_u64.to_be_bytes(), 150).unwrap();
+    tree.insert(&50_u64.to_be_bytes(), 50);
+    tree.insert(&150_u64.to_be_bytes(), 150);
 
     // Remove key
     let removed = tree.remove(&150_u64.to_be_bytes());
@@ -741,7 +741,7 @@ fn test_remove_leaf_leftmost_not_removed() {
 
     let tree: TestTree = TestTree::new();
 
-    tree.insert(&42_u64.to_be_bytes(), 42).unwrap();
+    tree.insert(&42_u64.to_be_bytes(), 42);
     let removed = tree.remove(&42_u64.to_be_bytes());
     assert!(removed.is_ok());
 
@@ -749,7 +749,7 @@ fn test_remove_leaf_leftmost_not_removed() {
     assert_eq!(tree.len(), 0);
 
     // Can still insert
-    tree.insert(&100_u64.to_be_bytes(), 100).unwrap();
+    tree.insert(&100_u64.to_be_bytes(), 100);
     assert_eq!(tree.get(&100_u64.to_be_bytes()), Some(Arc::new(100)));
 }
 
@@ -762,7 +762,7 @@ fn test_redirect_via_sequential_removal() {
     // Create a multi-leaf tree
     eprintln!("Inserting 50 keys...");
     for i in 0_u64..50 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
     eprintln!("Inserted 50 keys, len = {}", tree.len());
 
@@ -770,7 +770,7 @@ fn test_redirect_via_sequential_removal() {
     eprintln!("Removing keys 0-24...");
     for i in 0_u64..25 {
         eprintln!("  Removing key {}", i);
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
         eprintln!("  Removed key {}, len = {}", i, tree.len());
     }
 
@@ -798,12 +798,12 @@ fn test_redirect_alternating_removal() {
 
     // Insert keys with gaps to create specific tree structure
     for i in (0_u64..100).step_by(2) {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Remove from various positions
     for i in (0_u64..100).step_by(4) {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     // Verify correctness
@@ -831,7 +831,7 @@ fn test_concurrent_remove_and_get() {
 
     // Pre-populate tree
     for i in 0_u64..1000 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let tree_clone = Arc::clone(&tree);
@@ -861,7 +861,7 @@ fn test_concurrent_remove_and_get() {
 
     // Writer thread: remove keys
     for i in (0_u64..1000).step_by(2) {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     done.store(true, Ordering::Relaxed);
@@ -887,7 +887,7 @@ fn test_concurrent_remove_same_keys() {
 
     // Pre-populate
     for i in 0_u64..100 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let mut handles = vec![];
@@ -911,7 +911,7 @@ fn test_concurrent_remove_same_keys() {
     }
 
     for h in handles {
-        h.join().unwrap();
+        let _ = h.join();
     }
 
     // Exactly 100 keys should have been removed total
@@ -932,7 +932,7 @@ fn test_stress_remove_all_concurrent() {
 
     // Pre-populate
     for i in 0..key_count {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let mut handles = vec![];
@@ -947,13 +947,13 @@ fn test_stress_remove_all_concurrent() {
 
         handles.push(thread::spawn(move || {
             for i in start..end {
-                tree_clone.remove(&i.to_be_bytes()).unwrap();
+                let _ = tree_clone.remove(&i.to_be_bytes());
             }
         }));
     }
 
     for h in handles {
-        h.join().unwrap();
+        let _ = h.join();
     }
 
     // Tree should be empty
@@ -984,7 +984,7 @@ fn test_no_infinite_loop_deleted_node() {
 
     // Create a tree with multiple leaves
     for i in 0_u64..100 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let tree_clone = Arc::clone(&tree);
@@ -1005,7 +1005,7 @@ fn test_no_infinite_loop_deleted_node() {
 
     // Remove keys (may trigger coalescing when enabled)
     for i in (0_u64..100).step_by(2) {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     // Wait for reader with timeout
@@ -1025,11 +1025,11 @@ fn test_reader_retry_succeeds_after_coalesce() {
     let tree: TestTree = TestTree::new();
 
     // Insert and remove
-    tree.insert(&42_u64.to_be_bytes(), 42).unwrap();
-    tree.insert(&100_u64.to_be_bytes(), 100).unwrap();
+    tree.insert(&42_u64.to_be_bytes(), 42);
+    tree.insert(&100_u64.to_be_bytes(), 100);
 
     // Remove one key
-    tree.remove(&42_u64.to_be_bytes()).unwrap();
+    let _ = tree.remove(&42_u64.to_be_bytes());
 
     // Get should work (retry if needed internally)
     assert!(tree.get(&42_u64.to_be_bytes()).is_none());
@@ -1044,7 +1044,7 @@ fn test_reader_retry_succeeds_after_coalesce() {
 fn test_miri_remove_single_key() {
     let tree: TestTree = TestTree::new();
 
-    tree.insert(&1_u64.to_be_bytes(), 1).unwrap();
+    tree.insert(&1_u64.to_be_bytes(), 1);
     assert_eq!(
         tree.remove(&1_u64.to_be_bytes()).unwrap(),
         Some(Arc::new(1))
@@ -1057,7 +1057,7 @@ fn test_miri_remove_multiple_keys() {
     let tree: TestTree = TestTree::new();
 
     for i in 0_u64..10 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     for i in 0_u64..10 {
@@ -1102,12 +1102,12 @@ fn test_coalesce_safety_no_infinite_loop() {
 
     // Insert enough keys to create multiple leaves
     for i in 0_u64..50 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Remove all keys to create empty leaves
     for i in 0_u64..50 {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     // Process coalesce - this should complete without hanging
@@ -1126,7 +1126,7 @@ fn test_coalesce_safety_no_infinite_loop() {
     // Insert new keys - this should work correctly
     // (traversal through deleted nodes should follow B-links)
     for i in 100_u64..110 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Verify new keys are accessible
@@ -1147,12 +1147,12 @@ fn test_coalesce_concurrent_with_reads() {
 
     // Insert keys
     for i in 0_u64..100 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Remove some keys to create empty leaves
     for i in 0_u64..50 {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     let tree_reader = Arc::clone(&tree);
@@ -1199,12 +1199,12 @@ fn test_insert_through_deleted_nodes() {
 
     // Create a tree with keys that will span multiple leaves
     for i in 0_u64..30 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Remove middle keys to create empty leaves in the middle
     for i in 10_u64..20 {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     // Process coalesce to mark those leaves as deleted
@@ -1213,7 +1213,7 @@ fn test_insert_through_deleted_nodes() {
 
     // Insert new keys that might traverse through deleted nodes
     for i in 10_u64..20 {
-        tree.insert(&i.to_be_bytes(), i * 10).unwrap();
+        tree.insert(&i.to_be_bytes(), i * 10);
     }
 
     // Verify all keys
@@ -1242,12 +1242,12 @@ fn test_coalesce_multiple_cycles() {
 
         // Insert keys
         for i in 0_u64..50 {
-            tree.insert(&(base + i).to_be_bytes(), base + i).unwrap();
+            tree.insert(&(base + i).to_be_bytes(), base + i);
         }
 
         // Remove all keys
         for i in 0_u64..50 {
-            tree.remove(&(base + i).to_be_bytes()).unwrap();
+            let _ = tree.remove(&(base + i).to_be_bytes());
         }
 
         // Process coalesce
@@ -1278,11 +1278,11 @@ fn test_coalesce_preserves_leftmost_leaf() {
 
     // Insert and remove keys - the leftmost leaf should remain
     for i in 0_u64..10 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     for i in 0_u64..10 {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     // Process coalesce
@@ -1291,7 +1291,7 @@ fn test_coalesce_preserves_leftmost_leaf() {
     // Even after coalesce, we should be able to insert new keys
     // (the leftmost leaf is still there as a valid root)
     for i in 0_u64..10 {
-        tree.insert(&i.to_be_bytes(), i * 2).unwrap();
+        tree.insert(&i.to_be_bytes(), i * 2);
     }
 
     // Verify keys
@@ -1311,29 +1311,29 @@ fn test_coalesce_interleaved_operations() {
 
     // Phase 1: Insert initial keys
     for i in 0_u64..100 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Phase 2: Remove some, coalesce, insert new
     for i in 0_u64..25 {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
     let _ = tree.process_coalesce(&guard);
 
     // Insert in the "gap"
     for i in 0_u64..25 {
-        tree.insert(&i.to_be_bytes(), i + 1000).unwrap();
+        tree.insert(&i.to_be_bytes(), i + 1000);
     }
 
     // Phase 3: Remove different keys, coalesce again
     for i in 50_u64..75 {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
     let _ = tree.process_coalesce(&guard);
 
     // Insert again
     for i in 50_u64..75 {
-        tree.insert(&i.to_be_bytes(), i + 2000).unwrap();
+        tree.insert(&i.to_be_bytes(), i + 2000);
     }
 
     // Verify all keys have correct values
@@ -1381,12 +1381,12 @@ fn test_coalesce_batch_processing() {
 
     // Insert enough keys to create many empty leaves
     for i in 0_u64..200 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Remove all to queue many entries
     for i in 0_u64..200 {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     let initial_pending = tree.pending_coalesce();
@@ -1436,7 +1436,7 @@ fn test_coalesce_concurrent_with_writers() {
 
     // Pre-populate
     for i in 0_u64..100 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Writer thread - continuously insert and remove
@@ -1447,7 +1447,7 @@ fn test_coalesce_concurrent_with_writers() {
         while !stop_writer.load(Ordering::Acquire) {
             // Insert
             let key = counter;
-            tree_writer.insert(&key.to_be_bytes(), key).ok();
+            let _ = tree_writer.insert(&key.to_be_bytes(), key);
 
             // Remove a random-ish key
             let remove_key = (counter % 200) + 100;
@@ -1516,12 +1516,12 @@ fn test_coalesce_with_range_scan() {
 
     // Insert keys with gaps
     for i in (0_u64..100).step_by(2) {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Remove some keys
     for i in (20_u64..40).step_by(2) {
-        tree.remove(&i.to_be_bytes()).unwrap();
+        let _ = tree.remove(&i.to_be_bytes());
     }
 
     // Coalesce
@@ -1558,12 +1558,12 @@ fn test_coalesce_stress_rapid_cycles() {
     for cycle in 0_u64..20 {
         // Insert
         for i in 0_u64..20 {
-            tree.insert(&(cycle * 100 + i).to_be_bytes(), i).unwrap();
+            tree.insert(&(cycle * 100 + i).to_be_bytes(), i);
         }
 
         // Remove
         for i in 0_u64..20 {
-            tree.remove(&(cycle * 100 + i).to_be_bytes()).unwrap();
+            let _ = tree.remove(&(cycle * 100 + i).to_be_bytes());
         }
 
         // Coalesce immediately
@@ -1576,7 +1576,7 @@ fn test_coalesce_stress_rapid_cycles() {
 
     // Should still work for new insertions
     for i in 0_u64..50 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     for i in 0_u64..50 {
@@ -1599,8 +1599,8 @@ fn test_gc_layer_basic_sublayer_cleanup() {
     let key1 = b"prefix00A";
     let key2 = b"prefix00B";
 
-    tree.insert(key1, 1).unwrap();
-    tree.insert(key2, 2).unwrap();
+    tree.insert(key1, 1);
+    tree.insert(key2, 2);
     assert_eq!(tree.len(), 2);
 
     // Verify both keys exist
@@ -1617,7 +1617,7 @@ fn test_gc_layer_basic_sublayer_cleanup() {
     assert!(processed > 0, "Should process the empty sublayer");
 
     // Tree should still be functional - insert new keys
-    tree.insert(key1, 10).unwrap();
+    tree.insert(key1, 10);
     assert_eq!(tree.get(key1), Some(Arc::new(10)));
 }
 
@@ -1637,7 +1637,7 @@ fn test_gc_layer_multiple_sublayers() {
             let mut key = Vec::with_capacity(9);
             key.extend_from_slice(*prefix);
             key.extend_from_slice(*suffix);
-            tree.insert(&key, i as u64).unwrap();
+            tree.insert(&key, i as u64);
         }
     }
     assert_eq!(tree.len(), 9);
@@ -1647,7 +1647,7 @@ fn test_gc_layer_multiple_sublayers() {
         let mut key = Vec::with_capacity(9);
         key.extend_from_slice(b"aaaaaaaa");
         key.extend_from_slice(*suffix);
-        tree.remove(&key).unwrap();
+        let _ = tree.remove(&key);
     }
     assert_eq!(tree.len(), 6);
 
@@ -1659,7 +1659,7 @@ fn test_gc_layer_multiple_sublayers() {
     assert_eq!(tree.get(b"cccccccc2"), Some(Arc::new(1)));
 
     // Can reuse the cleaned-up prefix
-    tree.insert(b"aaaaaaaaX", 99).unwrap();
+    tree.insert(b"aaaaaaaaX", 99);
     assert_eq!(tree.get(b"aaaaaaaaX"), Some(Arc::new(99)));
 }
 
@@ -1676,12 +1676,12 @@ fn test_gc_layer_deep_chain() {
     let key_l2_a = b"level000level001level002A";
     let key_l2_b = b"level000level001level002B";
 
-    tree.insert(key_l2_a, 1).unwrap();
-    tree.insert(key_l2_b, 2).unwrap();
+    tree.insert(key_l2_a, 1);
+    tree.insert(key_l2_b, 2);
     assert_eq!(tree.len(), 2);
 
     // Remove one key - sublayer should NOT be gc'd yet
-    tree.remove(key_l2_a).unwrap();
+    let _ = tree.remove(key_l2_a);
     assert_eq!(tree.len(), 1);
     tree.process_coalesce(&guard);
 
@@ -1689,12 +1689,12 @@ fn test_gc_layer_deep_chain() {
     assert_eq!(tree.get(key_l2_b), Some(Arc::new(2)));
 
     // Remove the last key - now sublayer should be gc'd
-    tree.remove(key_l2_b).unwrap();
+    let _ = tree.remove(key_l2_b);
     assert_eq!(tree.len(), 0);
     tree.process_coalesce(&guard);
 
     // Tree should be empty but functional
-    tree.insert(key_l2_a, 100).unwrap();
+    tree.insert(key_l2_a, 100);
     assert_eq!(tree.get(key_l2_a), Some(Arc::new(100)));
 }
 
@@ -1711,15 +1711,15 @@ fn test_gc_layer_preserves_siblings() {
     let key_b1 = b"prefix_Bkey1";
     let key_b2 = b"prefix_Bkey2";
 
-    tree.insert(key_a1, 1).unwrap();
-    tree.insert(key_a2, 2).unwrap();
-    tree.insert(key_b1, 3).unwrap();
-    tree.insert(key_b2, 4).unwrap();
+    tree.insert(key_a1, 1);
+    tree.insert(key_a2, 2);
+    tree.insert(key_b1, 3);
+    tree.insert(key_b2, 4);
     assert_eq!(tree.len(), 4);
 
     // Remove all keys from sublayer A
-    tree.remove(key_a1).unwrap();
-    tree.remove(key_a2).unwrap();
+    let _ = tree.remove(key_a1);
+    let _ = tree.remove(key_a2);
     assert_eq!(tree.len(), 2);
 
     // Process coalesce - should gc sublayer A but not B
@@ -1730,7 +1730,7 @@ fn test_gc_layer_preserves_siblings() {
     assert_eq!(tree.get(key_b2), Some(Arc::new(4)));
 
     // Can insert new keys into the cleaned-up sublayer A
-    tree.insert(key_a1, 10).unwrap();
+    tree.insert(key_a1, 10);
     assert_eq!(tree.get(key_a1), Some(Arc::new(10)));
 }
 
@@ -1747,12 +1747,12 @@ fn test_gc_layer_concurrent_reads() {
     // Create sublayer
     let key1 = b"sublayer0key1xxx";
     let key2 = b"sublayer0key2xxx";
-    tree.insert(key1, 1).unwrap();
-    tree.insert(key2, 2).unwrap();
+    tree.insert(key1, 1);
+    tree.insert(key2, 2);
 
     // Also insert some non-sublayer keys for readers to find
     for i in 0_u64..10 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let tree_reader = Arc::clone(&tree);
@@ -1770,8 +1770,8 @@ fn test_gc_layer_concurrent_reads() {
     });
 
     // Main thread: remove sublayer keys and gc
-    tree.remove(key1).unwrap();
-    tree.remove(key2).unwrap();
+    let _ = tree.remove(key1);
+    let _ = tree.remove(key2);
 
     let guard = tree.guard();
     tree.process_coalesce(&guard);
@@ -1799,18 +1799,18 @@ fn test_gc_layer_slot_changed() {
     // Create sublayer
     let key1 = b"changedXXkey1";
     let key2 = b"changedXXkey2";
-    tree.insert(key1, 1).unwrap();
-    tree.insert(key2, 2).unwrap();
+    tree.insert(key1, 1);
+    tree.insert(key2, 2);
 
     // Remove one key
-    tree.remove(key1).unwrap();
+    let _ = tree.remove(key1);
 
     // Remove second key - sublayer becomes empty
-    tree.remove(key2).unwrap();
+    let _ = tree.remove(key2);
 
     // Before coalesce runs, insert a new key with the same prefix
     // This might reuse the sublayer or create a new one
-    tree.insert(b"changedXXnewkey", 99).unwrap();
+    tree.insert(b"changedXXnewkey", 99);
 
     // Coalesce should handle this gracefully
     // (the old sublayer entry may be stale)
@@ -1834,14 +1834,14 @@ fn test_gc_layer_stress() {
         let key3 = format!("{prefix}key3");
 
         // Insert
-        tree.insert(key1.as_bytes(), cycle as u64).unwrap();
-        tree.insert(key2.as_bytes(), cycle as u64 + 1).unwrap();
-        tree.insert(key3.as_bytes(), cycle as u64 + 2).unwrap();
+        tree.insert(key1.as_bytes(), cycle as u64);
+        tree.insert(key2.as_bytes(), cycle as u64 + 1);
+        tree.insert(key3.as_bytes(), cycle as u64 + 2);
 
         // Remove all
-        tree.remove(key1.as_bytes()).unwrap();
-        tree.remove(key2.as_bytes()).unwrap();
-        tree.remove(key3.as_bytes()).unwrap();
+        let _ = tree.remove(key1.as_bytes());
+        let _ = tree.remove(key2.as_bytes());
+        let _ = tree.remove(key3.as_bytes());
 
         // Coalesce every 5 cycles
         if cycle % 5 == 4 {
@@ -1856,6 +1856,6 @@ fn test_gc_layer_stress() {
     assert_eq!(tree.len(), 0);
 
     // Should work for new insertions
-    tree.insert(b"finaltest!", 12345).unwrap();
+    tree.insert(b"finaltest!", 12345);
     assert_eq!(tree.get(b"finaltest!"), Some(Arc::new(12345)));
 }

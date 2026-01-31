@@ -140,9 +140,8 @@ fn concurrent_insert_2_threads_overlapping_keys() {
                 for i in 0..NUM_KEYS {
                     // Overlapping key range
                     let key = (i as u64).to_be_bytes();
-                    if tree.insert_with_guard(&key, t as u64, &guard).is_ok() {
-                        success_count.fetch_add(1, Ordering::Relaxed);
-                    }
+                    tree.insert_with_guard(&key, t as u64, &guard);
+                    success_count.fetch_add(1, Ordering::Relaxed);
                 }
             })
         })
@@ -441,11 +440,10 @@ fn stress_concurrent_insert_many_keys() {
     let insert_failures = Arc::new(AtomicUsize::new(0));
     let verify_failures = Arc::new(AtomicUsize::new(0));
 
-    #[expect(clippy::unnecessary_unwrap)]
     let handles: Vec<_> = (0..NUM_THREADS)
         .map(|t| {
             let tree = Arc::clone(&tree);
-            let insert_failures = Arc::clone(&insert_failures);
+            let _insert_failures = Arc::clone(&insert_failures);
             let verify_failures = Arc::clone(&verify_failures);
             thread::spawn(move || {
                 let guard = tree.guard();
@@ -454,17 +452,8 @@ fn stress_concurrent_insert_many_keys() {
                     let key_val = t * 10000 + i;
                     let key = (key_val as u64).to_be_bytes();
 
-                    // Insert
-                    let result = tree.insert_with_guard(&key, i as u64, &guard);
-                    if result.is_err() {
-                        insert_failures.fetch_add(1, Ordering::Relaxed);
-                        tracing::error!(
-                            key = key_val,
-                            thread = t,
-                            error = ?result.unwrap_err(),
-                            "Insert failed"
-                        );
-                    }
+                    // Insert (infallible - aborts on OOM)
+                    tree.insert_with_guard(&key, i as u64, &guard);
 
                     // Immediate verification: can we read back what we just inserted?
                     if tree.get_with_guard(&key, &guard).is_none() {

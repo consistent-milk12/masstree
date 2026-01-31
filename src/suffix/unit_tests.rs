@@ -1,12 +1,12 @@
-#![expect(clippy::expect_used)]
+
 
 use std::cmp::Ordering;
 use std::iter as StdIter;
 use std::mem as StdMem;
 
-use super::{INITIAL_CAPACITY, InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar};
-use crate::AllocError;
+use super::{InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar, INITIAL_CAPACITY};
 use crate::permuter::Permuter15;
+// Note: AllocError removed - allocations are now infallible
 
 // ========================================================================
 //  Basic Tests
@@ -605,13 +605,7 @@ fn test_inline_drain_to_external() {
     let perm = Permuter15::make_sorted(3);
 
     // Drain to external with a new suffix for slot 3
-    #[expect(
-        clippy::expect_used,
-        reason = "test code - panic on failure is intended"
-    )]
-    let external = bag
-        .drain_to_external(&perm, 3, b"new_suffix")
-        .expect("drain_to_external should succeed");
+    let external = bag.drain_to_external(&perm, 3, b"new_suffix");
 
     // Inline bag state is PRESERVED (orphaned inline optimization).
     // This is intentional - clearing inline before external publication
@@ -637,13 +631,7 @@ fn test_inline_drain_replaces_slot() {
     let perm = Permuter15::make_sorted(2);
 
     // Replace slot 0's suffix during drain
-    #[expect(
-        clippy::expect_used,
-        reason = "test code - panic on failure is intended"
-    )]
-    let external = bag
-        .drain_to_external(&perm, 0, b"new_suffix")
-        .expect("drain_to_external should succeed");
+    let external = bag.drain_to_external(&perm, 0, b"new_suffix");
 
     // External should have new suffix for slot 0
     assert_eq!(external.get(0), Some(b"new_suffix".as_slice()));
@@ -660,10 +648,7 @@ fn test_inline_drain_to_external_init() {
     bag.try_assign(2, b"suffix_2");
 
     // Drain to external for slot 3 (slots 0..3 are filled)
-    #[expect(clippy::expect_used, reason = "test code")]
-    let external = bag
-        .drain_to_external_init(3, b"new_suffix_3")
-        .expect("drain_to_external_init should succeed");
+    let external = bag.drain_to_external_init(3, b"new_suffix_3");
 
     // Inline bag state is PRESERVED (orphaned inline optimization).
     // See drain_to_external test for rationale.
@@ -686,10 +671,7 @@ fn test_inline_drain_to_external_init_replaces_slot() {
 
     // Drain with new_slot=1 means slots 0..1 are "filled" (just slot 0)
     // and we're assigning to slot 1
-    #[expect(clippy::expect_used, reason = "test code")]
-    let external = bag
-        .drain_to_external_init(1, b"new_suffix")
-        .expect("drain_to_external_init should succeed");
+    let external = bag.drain_to_external_init(1, b"new_suffix");
 
     // External should have slot 0 preserved and slot 1 with new suffix
     assert_eq!(external.get(0), Some(b"keep_this".as_slice()));
@@ -906,8 +888,8 @@ fn test_try_assign_compacts_before_grow() {
     assert_eq!(old_used, 120); // All data still in buffer
 
     // Try to assign - should compact first (reclaiming 60 bytes)
-    let result: Result<(), AllocError> = bag.try_assign(12, b"newdata!!!");
-    assert!(result.is_ok());
+    // Returns false if buffer grew (which it shouldn't since compaction freed space)
+    let _did_not_grow: bool = bag.try_assign(12, b"newdata!!!");
 
     // After compaction + new assignment: 60 + 10 = 70 bytes
     assert!(bag.used() < old_used); // Compaction happened
@@ -929,8 +911,9 @@ fn test_try_assign_grows_when_compact_insufficient() {
     let old_capacity = bag.capacity();
 
     // Try to assign - compaction won't help, must grow
-    let result: Result<(), AllocError> = bag.try_assign(2, b"newdata!");
-    assert!(result.is_ok());
+    // Returns false because buffer grew
+    let did_grow: bool = !bag.try_assign(2, b"newdata!");
+    assert!(did_grow);
 
     // Capacity should have grown
     assert!(bag.capacity() > old_capacity);
@@ -1009,9 +992,9 @@ fn test_sidecar_drop_inline_only() {
 fn test_sidecar_drop_with_external() {
     let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
 
-    // Force external allocation
+    // Force external allocation (infallible - aborts on OOM)
     // SAFETY: Test-only, no concurrent access
-    let external_ptr = unsafe { sidecar.ensure_external() }.expect("allocation should succeed");
+    let external_ptr = unsafe { sidecar.ensure_external() };
 
     // Write to external bag
     // SAFETY: We have exclusive access in this test
@@ -1021,12 +1004,10 @@ fn test_sidecar_drop_with_external() {
     }
 
     // Verify external is allocated
-    assert!(
-        !sidecar
-            .external
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .is_null()
-    );
+    assert!(!sidecar
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
 
     // Verify we can read from external
     assert_eq!(sidecar.get(0), Some(b"external_suffix_0".as_slice()));
@@ -1045,9 +1026,9 @@ fn test_sidecar_drop_mixed_inline_external() {
     sidecar.inline.try_assign(0, b"inline_0");
     sidecar.inline.try_assign(1, b"inline_1");
 
-    // Force external allocation
+    // Force external allocation (infallible - aborts on OOM)
     // SAFETY: Test-only, no concurrent access
-    let external_ptr = unsafe { sidecar.ensure_external() }.expect("allocation should succeed");
+    let external_ptr = unsafe { sidecar.ensure_external() };
 
     // Write to external bag for different slots
     // SAFETY: We have exclusive access in this test
@@ -1073,16 +1054,14 @@ fn test_sidecar_default() {
     let s1: SuffixSidecar<15> = SuffixSidecar::new();
     let s2: SuffixSidecar<15> = SuffixSidecar::default();
 
-    assert!(
-        s1.external
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .is_null()
-    );
-    assert!(
-        s2.external
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .is_null()
-    );
+    assert!(s1
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
+    assert!(s2
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
     assert_eq!(s1.inline.count(), 0);
     assert_eq!(s2.inline.count(), 0);
 }
@@ -1092,10 +1071,10 @@ fn test_sidecar_default() {
 fn test_sidecar_ensure_external_idempotent() {
     let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
 
-    // SAFETY: Test-only, no concurrent access
-    let ptr1 = unsafe { sidecar.ensure_external() }.expect("first allocation");
-    let ptr2 = unsafe { sidecar.ensure_external() }.expect("second call");
-    let ptr3 = unsafe { sidecar.ensure_external() }.expect("third call");
+    // SAFETY: Test-only, no concurrent access. Allocation is infallible.
+    let ptr1 = unsafe { sidecar.ensure_external() };
+    let ptr2 = unsafe { sidecar.ensure_external() };
+    let ptr3 = unsafe { sidecar.ensure_external() };
 
     // All calls should return the same pointer
     assert_eq!(ptr1, ptr2);

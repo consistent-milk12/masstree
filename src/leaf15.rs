@@ -29,8 +29,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
 use crate::LeafValue;
 use crate::TreeLeafNode;
-use crate::alloc_common::BoxAllocator;
-use crate::error::{AllocKind, AllocResult};
+// Note: AllocError/AllocResult removed - allocations are now infallible
 use crate::internode::InternodeNode;
 use crate::key::IKEY_SIZE;
 use crate::key::Key;
@@ -739,17 +738,12 @@ impl<S: ValueSlot> LeafNode15<S> {
 
     /// Assign a suffix to a slot (infallible).
     ///
-    /// This is the normal path - sidecar allocation has already succeeded
-    /// or will succeed via the panic path. Use [`Self::try_assign_ksuf`] if you
-    /// need to handle allocation failure gracefully.
+    /// This is the normal path. Allocation is infallible and will abort
+    /// on OOM (standard Rust behavior).
     ///
     /// # Safety
     ///
     /// Caller must hold leaf lock. Slot must be valid.
-    ///
-    /// # Panics
-    ///
-    /// Panics if sidecar allocation fails (rare, only on OOM).
     #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
     pub unsafe fn assign_ksuf(
         &self,
@@ -771,7 +765,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Caller holds lock
-        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar_infallible() };
+        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar() };
 
         // try_assign returns bool: true = success, false = no capacity
         if sidecar.inline.try_assign(slot, suffix) {
@@ -802,7 +796,7 @@ impl<S: ValueSlot> LeafNode15<S> {
             "assign_ksuf_slow: caller must hold lock or node must be unpublished"
         );
 
-        // SAFETY: Sidecar exists (ensure_sidecar_infallible was called in fast path)
+        // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
         let sidecar: &SuffixSidecar<WIDTH_15> =
             unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
 
@@ -811,11 +805,9 @@ impl<S: ValueSlot> LeafNode15<S> {
         // Drain inline to a new external bag with the new suffix.
         // NOTE: drain_to_external does NOT clear inline state - this is intentional.
         // The external bag contains all suffixes; inline becomes orphaned metadata.
-        #[expect(clippy::expect_used)]
-        let mut new_bag: SuffixBag<WIDTH_15> = sidecar
-            .inline
-            .drain_to_external(&perm, slot, suffix)
-            .expect("OOM: suffix bag allocation failed");
+        // Allocation is infallible (aborts on OOM).
+        let mut new_bag: SuffixBag<WIDTH_15> =
+            sidecar.inline.drain_to_external(&perm, slot, suffix);
 
         // Merge with existing external suffixes (if any)
         let old_ext: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
@@ -890,7 +882,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Caller holds lock
-        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar_infallible() };
+        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar() };
 
         // FAST PATH: Try inline storage first
         if sidecar.inline.try_assign(slot, suffix) {
@@ -931,17 +923,15 @@ impl<S: ValueSlot> LeafNode15<S> {
             "assign_ksuf_init_slow: caller must hold lock or node must be unpublished"
         );
 
-        // SAFETY: Sidecar exists (ensure_sidecar_infallible was called in fast path)
+        // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
         let sidecar: &SuffixSidecar<WIDTH_15> =
             unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
 
         // Drain inline using sequential slot iteration (0..slot)
         // NOTE: drain_to_external_init does NOT clear inline state.
-        #[expect(clippy::expect_used)]
-        let mut new_bag: SuffixBag<WIDTH_15> = sidecar
-            .inline
-            .drain_to_external_init(slot, suffix)
-            .expect("OOM: suffix bag allocation failed");
+        // Allocation is infallible (aborts on OOM).
+        let mut new_bag: SuffixBag<WIDTH_15> =
+            sidecar.inline.drain_to_external_init(slot, suffix);
 
         // Merge with existing external suffixes (if any)
         let old_ext: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
@@ -971,244 +961,6 @@ impl<S: ValueSlot> LeafNode15<S> {
         // CRITICAL: Publish suffix presence LAST (Release ordering)
         // This is the linearization point for suffix visibility.
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-    }
-
-    /// Try to assign a suffix to a slot, returning error on allocation failure.
-    ///
-    /// This is the fallible version of `assign_ksuf`. It tries inline storage
-    /// first, then falls back to external storage, returning an error if
-    /// allocation fails.
-    ///
-    /// # Safety
-    /// - Caller must hold lock and have called `mark_insert()`
-    /// - `guard` must come from this tree's collector
-    ///
-    /// # Errors
-    /// Returns `Err(AllocError)` if external bag allocation fails.
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
-    )]
-    pub unsafe fn try_assign_ksuf(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) -> AllocResult<()> {
-        if suffix.is_empty() {
-            return Ok(());
-        }
-
-        debug_assert!(
-            slot < WIDTH_15,
-            "try_assign_ksuf: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-        debug_assert!(
-            self.version.is_locked() || self.version.is_unpublished(),
-            "try_assign_ksuf: caller must hold lock or node must be unpublished"
-        );
-
-        // SAFETY: Caller holds lock
-        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar()? };
-
-        // FAST PATH 1: Try inline storage first (no allocation!)
-        if sidecar.inline.try_assign(slot, suffix) {
-            // CRITICAL: Publish suffix presence AFTER bytes are written
-            self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-            return Ok(());
-        }
-
-        // FAST PATH 2: Try external storage in-place (if exists and has room)
-        let ext_ptr: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
-        if !ext_ptr.is_null() {
-            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *ext_ptr };
-            if bag.try_assign_in_place(slot, suffix) {
-                sidecar.inline.clear(slot);
-                self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-                return Ok(());
-            }
-        }
-
-        // SLOW PATH: Drain inline to external and allocate new external bag (fallible)
-        // SAFETY: Caller holds lock
-        unsafe { self.try_assign_ksuf_slow(slot, suffix, guard) }
-    }
-
-    /// Slow path for fallible suffix assignment: allocate/reallocate external bag.
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold lock. Sidecar must already exist.
-    ///
-    /// # Errors
-    /// Returns `Err(AllocError)` if allocation fails.
-    #[cold]
-    #[inline(never)]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    unsafe fn try_assign_ksuf_slow(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) -> AllocResult<()> {
-        debug_assert!(
-            self.version.is_locked() || self.version.is_unpublished(),
-            "try_assign_ksuf_slow: caller must hold lock or node must be unpublished"
-        );
-
-        // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
-        let sidecar: &SuffixSidecar<WIDTH_15> =
-            unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
-
-        let perm = self.permutation();
-
-        // Drain inline to a new external bag with the new suffix (FALLIBLE)
-        let mut new_bag: SuffixBag<WIDTH_15> =
-            sidecar.inline.drain_to_external(&perm, slot, suffix)?;
-
-        // Merge with existing external suffixes (if any)
-        let old_ext: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
-        if !old_ext.is_null() {
-            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
-
-            for i in 0..perm.size() {
-                let s: usize = perm.get(i);
-
-                if s != slot
-                    && let Some(ext_suffix) = old_bag.get(s)
-                {
-                    new_bag.assign(s, ext_suffix);
-                }
-            }
-        }
-
-        // Install new external bag (FALLIBLE: use try_box)
-        let new_ptr: *mut SuffixBag<WIDTH_15> =
-            Box::into_raw(BoxAllocator::try_box_with_kind(new_bag, AllocKind::Suffix)?);
-        sidecar.external.store(new_ptr, WRITE_ORD);
-
-        // Retire old external bag
-        if !old_ext.is_null() {
-            unsafe {
-                guard.defer_retire(old_ext, |ptr, _| {
-                    drop(Box::from_raw(ptr));
-                });
-            }
-        }
-
-        // CRITICAL: Publish suffix presence LAST (Release ordering)
-        self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-        Ok(())
-    }
-
-    /// Fallible version of `assign_ksuf_init` for node initialization.
-    ///
-    /// # Errors
-    /// Returns `AllocResult::Err` if memory allocation fails.
-    ///
-    /// # Safety
-    /// Same as `assign_ksuf_init`.
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
-    )]
-    pub unsafe fn try_assign_ksuf_init(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) -> AllocResult<()> {
-        if suffix.is_empty() {
-            return Ok(());
-        }
-
-        debug_assert!(
-            slot < WIDTH_15,
-            "try_assign_ksuf_init: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-        debug_assert!(
-            self.version.is_locked() || self.version.is_unpublished(),
-            "try_assign_ksuf_init: caller must hold lock or node must be unpublished"
-        );
-
-        // SAFETY: Caller holds lock
-        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar()? };
-
-        // FAST PATH: Try inline storage first
-        if sidecar.inline.try_assign(slot, suffix) {
-            // CRITICAL: Publish suffix presence AFTER bytes are written
-            self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-            return Ok(());
-        }
-
-        // FAST PATH 2: Try external storage in-place (if exists and has room)
-        let ext_ptr: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
-        if !ext_ptr.is_null() {
-            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *ext_ptr };
-            if bag.try_assign_in_place(slot, suffix) {
-                sidecar.inline.clear(slot);
-                self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-                return Ok(());
-            }
-        }
-
-        // SLOW PATH: Drain inline to external (fallible)
-        // SAFETY: Caller holds lock
-        unsafe { self.try_assign_ksuf_init_slow(slot, suffix, guard) }
-    }
-
-    /// Slow path for fallible suffix assignment during initialization.
-    #[cold]
-    #[inline(never)]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    unsafe fn try_assign_ksuf_init_slow(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-    ) -> AllocResult<()> {
-        debug_assert!(
-            self.version.is_locked() || self.version.is_unpublished(),
-            "try_assign_ksuf_init_slow: caller must hold lock or node must be unpublished"
-        );
-
-        // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
-        let sidecar: &SuffixSidecar<WIDTH_15> =
-            unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
-
-        // Drain inline using sequential slot iteration (0..slot) (FALLIBLE)
-        let mut new_bag: SuffixBag<WIDTH_15> =
-            sidecar.inline.drain_to_external_init(slot, suffix)?;
-
-        // Merge with existing external suffixes (if any)
-        let old_ext: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
-        if !old_ext.is_null() {
-            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
-
-            for s in 0..slot {
-                if let Some(ext_suffix) = old_bag.get(s) {
-                    new_bag.assign(s, ext_suffix);
-                }
-            }
-        }
-
-        // Install new external bag (FALLIBLE: use try_box)
-        let new_ptr: *mut SuffixBag<WIDTH_15> =
-            Box::into_raw(BoxAllocator::try_box_with_kind(new_bag, AllocKind::Suffix)?);
-        sidecar.external.store(new_ptr, WRITE_ORD);
-
-        // Retire old external bag
-        if !old_ext.is_null() {
-            unsafe {
-                guard.defer_retire(old_ext, |ptr, _| {
-                    drop(Box::from_raw(ptr));
-                });
-            }
-        }
-
-        // CRITICAL: Publish suffix presence LAST (Release ordering)
-        self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-        Ok(())
     }
 
     /// Clear the suffix from a slot (no allocation needed!).
@@ -2523,7 +2275,7 @@ impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode15<S> {
                 if !sidecar_ptr.is_null() {
                     prefetch_read(sidecar_ptr.cast::<u8>());
                 }
-                let _ = new_leaf.ensure_sidecar_infallible();
+                let _ = new_leaf.ensure_sidecar();
             }
 
             // Move entries to new leaf using RELAXED ordering.
@@ -2644,7 +2396,7 @@ impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode15<S> {
             if !sidecar_ptr.is_null() {
                 prefetch_read(sidecar_ptr.cast::<u8>());
             }
-            let _ = unsafe { new_leaf.ensure_sidecar_infallible() };
+            let _ = unsafe { new_leaf.ensure_sidecar() };
         }
 
         // Move all entries to new leaf using RELAXED ordering.
@@ -2749,7 +2501,7 @@ impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode15<S> {
                 prefetch_read(sidecar_ptr.cast::<u8>());
             }
             // SAFETY: We hold the lock on new_leaf (via split version)
-            let _ = unsafe { new_leaf.ensure_sidecar_infallible() };
+            let _ = unsafe { new_leaf.ensure_sidecar() };
         }
 
         // Determine if insert goes to left or right leaf

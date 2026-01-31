@@ -34,7 +34,7 @@ fn wd3_single_thread() {
         // Insert phase
         for i in 0..NK {
             let key = make_key(prefix, i);
-            tree.insert_with_guard(&key, i, &guard).unwrap();
+            tree.insert_with_guard(&key, i, &guard);
         }
 
         // Verify all present
@@ -77,7 +77,7 @@ fn wd3_concurrent() {
                     // Insert phase
                     for i in 0..NK {
                         let key = make_key(prefix.as_bytes(), i);
-                        tree.insert_with_guard(&key, i, &guard).unwrap();
+                        tree.insert_with_guard(&key, i, &guard);
                     }
 
                     // Verify all present
@@ -127,7 +127,7 @@ fn wd3_with_prefix() {
         // Insert
         for i in 0..1000u64 {
             let key = make_key(prefix, i);
-            tree.insert_with_guard(&key, i, &guard).unwrap();
+            tree.insert_with_guard(&key, i, &guard);
         }
 
         // Verify

@@ -57,13 +57,13 @@ fn test_contains_key() {
     assert!(!tree.contains_key(b""));
 
     // Insert and check
-    tree.insert(b"hello", 42).unwrap();
+    tree.insert(b"hello", 42);
     assert!(tree.contains_key(b"hello"));
     assert!(!tree.contains_key(b"world"));
 
     // Multiple keys
-    tree.insert(b"world", 123).unwrap();
-    tree.insert(b"foo", 456).unwrap();
+    tree.insert(b"world", 123);
+    tree.insert(b"foo", 456);
     assert!(tree.contains_key(b"hello"));
     assert!(tree.contains_key(b"world"));
     assert!(tree.contains_key(b"foo"));
@@ -90,11 +90,11 @@ fn test_contains_key_long_keys() {
 
     assert!(!tree.contains_key(long_key));
 
-    tree.insert(long_key, 1).unwrap();
+    tree.insert(long_key, 1);
     assert!(tree.contains_key(long_key));
     assert!(!tree.contains_key(another_long));
 
-    tree.insert(another_long, 2).unwrap();
+    tree.insert(another_long, 2);
     assert!(tree.contains_key(long_key));
     assert!(tree.contains_key(another_long));
 }
@@ -110,7 +110,7 @@ fn test_first_last_empty() {
 #[test]
 fn test_first_last_single_element() {
     let tree: MassTree<u64> = MassTree::new();
-    tree.insert(b"only", 42).unwrap();
+    tree.insert(b"only", 42);
 
     let first = tree.first().unwrap();
     let last = tree.last().unwrap();
@@ -126,10 +126,10 @@ fn test_first_last_multiple_elements() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Insert in non-sorted order
-    tree.insert(b"banana", 2).unwrap();
-    tree.insert(b"apple", 1).unwrap();
-    tree.insert(b"cherry", 3).unwrap();
-    tree.insert(b"date", 4).unwrap();
+    tree.insert(b"banana", 2);
+    tree.insert(b"apple", 1);
+    tree.insert(b"cherry", 3);
+    tree.insert(b"date", 4);
 
     let first = tree.first().unwrap();
     let last = tree.last().unwrap();
@@ -152,9 +152,9 @@ fn test_first_last_long_keys() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     // Keys > 8 bytes to test multi-layer behavior
-    tree.insert(b"zzz_long_key_that_spans_layers", 3).unwrap();
-    tree.insert(b"aaa_long_key_that_spans_layers", 1).unwrap();
-    tree.insert(b"mmm_long_key_that_spans_layers", 2).unwrap();
+    tree.insert(b"zzz_long_key_that_spans_layers", 3);
+    tree.insert(b"aaa_long_key_that_spans_layers", 1);
+    tree.insert(b"mmm_long_key_that_spans_layers", 2);
 
     let first = tree.first().unwrap();
     let last = tree.last().unwrap();
@@ -169,9 +169,9 @@ fn test_first_last_long_keys() {
 fn test_first_last_after_remove() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"a", 1).unwrap();
-    tree.insert(b"b", 2).unwrap();
-    tree.insert(b"c", 3).unwrap();
+    tree.insert(b"a", 1);
+    tree.insert(b"b", 2);
+    tree.insert(b"c", 3);
 
     assert_eq!(tree.first().unwrap().key(), b"a");
     assert_eq!(tree.last().unwrap().key(), b"c");
@@ -396,7 +396,7 @@ fn test_index_default_trait() {
 fn test_get_after_insert() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"hello", 42).unwrap();
+    tree.insert(b"hello", 42);
 
     let result = tree.get(b"hello");
     assert!(result.is_some());
@@ -407,7 +407,7 @@ fn test_get_after_insert() {
 fn test_get_wrong_key_after_insert() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"hello", 42).unwrap();
+    tree.insert(b"hello", 42);
 
     assert!(tree.get(b"world").is_none());
     assert!(tree.get(b"hell").is_none());
@@ -419,9 +419,9 @@ fn test_get_multiple_keys() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Use the insert API to add multiple keys
-    tree.insert(b"aaa", 100).unwrap();
-    tree.insert(b"bbb", 200).unwrap();
-    tree.insert(b"ccc", 300).unwrap();
+    tree.insert(b"aaa", 100);
+    tree.insert(b"bbb", 200);
+    tree.insert(b"ccc", 300);
 
     // Test retrieval
     assert_eq!(tree.get(b"aaa").unwrap(), 100);
@@ -441,7 +441,7 @@ fn test_get_multiple_keys() {
 fn test_index_get_after_insert() {
     let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
-    tree.insert(b"test", 999).unwrap();
+    tree.insert(b"test", 999);
 
     // Get returns V directly (not Arc<V>)
     let result = tree.get(b"test");
@@ -456,7 +456,7 @@ fn test_index_get_after_insert() {
 fn test_insert_and_get_empty_key() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"", 123).unwrap();
+    tree.insert(b"", 123);
     assert_eq!(tree.get(b"").unwrap(), 123);
 }
 
@@ -466,7 +466,7 @@ fn test_insert_and_get_max_inline_key() {
 
     // Insert 8-byte key (max inline size)
     let key_bytes = b"12345678";
-    tree.insert(key_bytes, 888).unwrap();
+    tree.insert(key_bytes, 888);
 
     assert_eq!(tree.get(key_bytes).unwrap(), 888);
 }
@@ -477,7 +477,7 @@ fn test_insert_and_get_binary_key() {
 
     // Binary key with null bytes
     let key_bytes = &[0x00, 0x01, 0x02, 0x00, 0xFF];
-    tree.insert(key_bytes, 777).unwrap();
+    tree.insert(key_bytes, 777);
 
     assert_eq!(tree.get(key_bytes).unwrap(), 777);
 }
@@ -492,8 +492,7 @@ fn test_insert_into_empty_tree() {
 
     let result = tree.insert(b"hello", 42);
 
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none()); // No old value
+    assert!(result.is_none()); // No old value = new key inserted
     assert!(!tree.is_empty());
     assert_eq!(tree.len(), 1);
 }
@@ -502,7 +501,7 @@ fn test_insert_into_empty_tree() {
 fn test_insert_and_get() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"hello", 42).unwrap();
+    tree.insert(b"hello", 42);
 
     let value = tree.get(b"hello");
     assert!(value.is_some());
@@ -513,9 +512,9 @@ fn test_insert_and_get() {
 fn test_insert_multiple_keys() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"aaa", 100).unwrap();
-    tree.insert(b"bbb", 200).unwrap();
-    tree.insert(b"ccc", 300).unwrap();
+    tree.insert(b"aaa", 100);
+    tree.insert(b"bbb", 200);
+    tree.insert(b"ccc", 300);
 
     assert_eq!(tree.len(), 3);
     assert_eq!(tree.get(b"aaa").unwrap(), 100);
@@ -528,11 +527,11 @@ fn test_insert_updates_existing() {
     let tree: MassTree<u64> = MassTree::new();
 
     // First insert
-    let old = tree.insert(b"key", 100).unwrap();
+    let old = tree.insert(b"key", 100);
     assert!(old.is_none());
 
     // Update
-    let old = tree.insert(b"key", 200).unwrap();
+    let old = tree.insert(b"key", 200);
     assert_eq!(old.unwrap(), 100);
 
     // Verify new value
@@ -544,9 +543,9 @@ fn test_insert_updates_existing() {
 fn test_insert_returns_old_arc() {
     let tree: MassTree15<String> = MassTree15::new();
 
-    tree.insert(b"key", "first".to_string()).unwrap();
+    tree.insert(b"key", "first".to_string());
 
-    let old = tree.insert(b"key", "second".to_string()).unwrap();
+    let old = tree.insert(b"key", "second".to_string());
     assert_eq!(*old.unwrap(), "first");
 }
 
@@ -556,7 +555,7 @@ fn test_insert_ascending_order() {
 
     for i in 0..10 {
         let key = format!("key{i:02}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     assert_eq!(tree.len(), 10);
@@ -574,7 +573,7 @@ fn test_insert_descending_order() {
 
     for i in (0..10).rev() {
         let key = format!("key{i:02}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     assert_eq!(tree.len(), 10);
@@ -592,7 +591,7 @@ fn test_insert_random_order() {
     let keys = ["dog", "cat", "bird", "fish", "ant", "bee"];
 
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     assert_eq!(tree.len(), 6);
@@ -609,15 +608,14 @@ fn test_insert_triggers_split() {
     // Fill the leaf (24 slots for WIDTH=24)
     for i in 0..24 {
         let key = format!("{i:02}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     assert_eq!(tree.len(), 24);
 
     // 25th insert should trigger a split
     let result = tree.insert(b"overflow", 999);
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none()); // New key, no old value
+    assert!(result.is_none()); // New key, no old value
 
     assert_eq!(tree.len(), 25);
 
@@ -642,7 +640,7 @@ fn test_insert_at_capacity() {
     // Insert exactly WIDTH keys (24 for WIDTH=24)
     for i in 0..24 {
         let key = format!("{i:02}");
-        assert!(tree.insert(key.as_bytes(), i as u64).is_ok());
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     assert_eq!(tree.len(), 24);
@@ -663,8 +661,7 @@ fn test_insert_max_key_length() {
 
     // Exactly 8 bytes should work
     let max_key = b"12345678";
-    let result = tree.insert(max_key, 42);
-    assert!(result.is_ok());
+    tree.insert(max_key, 42);
     assert_eq!(tree.get(max_key).unwrap(), 42);
 }
 
@@ -673,7 +670,7 @@ fn test_slot0_reuse_no_predecessor() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Root leaf has no predecessor, so slot 0 should be usable
-    tree.insert(b"first", 1).unwrap();
+    tree.insert(b"first", 1);
 
     // Verify the value was stored
     assert_eq!(tree.get(b"first").unwrap(), 1);
@@ -684,11 +681,11 @@ fn test_slot0_reuse_same_ikey() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Insert key with ikey X
-    tree.insert(b"aaa", 1).unwrap();
+    tree.insert(b"aaa", 1);
 
     // Insert another key with same ikey prefix (within 8 bytes)
     // This should allow slot 0 reuse if needed
-    tree.insert(b"aab", 2).unwrap();
+    tree.insert(b"aab", 2);
 
     assert_eq!(tree.get(b"aaa").unwrap(), 1);
     assert_eq!(tree.get(b"aab").unwrap(), 2);
@@ -699,9 +696,9 @@ fn test_permutation_updates_correctly() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Insert keys in reverse order
-    tree.insert(b"ccc", 3).unwrap();
-    tree.insert(b"bbb", 2).unwrap();
-    tree.insert(b"aaa", 1).unwrap();
+    tree.insert(b"ccc", 3);
+    tree.insert(b"bbb", 2);
+    tree.insert(b"aaa", 1);
 
     // Verify size
     assert_eq!(tree.len(), 3);
@@ -718,8 +715,7 @@ fn test_index_insert_basic() {
 
     let result = tree.insert(b"key", 42);
 
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none());
+    assert!(result.is_none()); // No old value = new key inserted
     assert_eq!(tree.get(b"key"), Some(42));
 }
 
@@ -727,9 +723,9 @@ fn test_index_insert_basic() {
 fn test_index_insert_update() {
     let tree: MassTree15Inline<u64> = MassTree15Inline::new();
 
-    tree.insert(b"key", 100).unwrap();
+    tree.insert(b"key", 100);
 
-    let old = tree.insert(b"key", 200).unwrap();
+    let old = tree.insert(b"key", 200);
 
     assert_eq!(old, Some(100)); // Old value returned directly (not Arc)
     assert_eq!(tree.get(b"key"), Some(200));
@@ -739,7 +735,7 @@ fn test_index_insert_update() {
 fn test_insert_empty_key() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"", 42).unwrap();
+    tree.insert(b"", 42);
 
     assert_eq!(tree.get(b"").unwrap(), 42);
 }
@@ -750,7 +746,7 @@ fn test_insert_max_inline_key() {
 
     let key = b"12345678"; // Exactly 8 bytes
 
-    tree.insert(key, 888).unwrap();
+    tree.insert(key, 888);
 
     assert_eq!(tree.get(key).unwrap(), 888);
 }
@@ -767,7 +763,7 @@ fn test_insert_binary_keys() {
     ];
 
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key, i as u64).unwrap();
+        tree.insert(key, i as u64);
     }
 
     for (i, key) in keys.iter().enumerate() {
@@ -779,10 +775,10 @@ fn test_insert_binary_keys() {
 fn test_insert_similar_keys() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"test", 1).unwrap();
-    tree.insert(b"test1", 2).unwrap();
-    tree.insert(b"test12", 3).unwrap();
-    tree.insert(b"tes", 4).unwrap();
+    tree.insert(b"test", 1);
+    tree.insert(b"test1", 2);
+    tree.insert(b"test12", 3);
+    tree.insert(b"tes", 4);
 
     assert_eq!(tree.get(b"test").unwrap(), 1);
     assert_eq!(tree.get(b"test1").unwrap(), 2);
@@ -803,7 +799,7 @@ fn test_differential_small_sequential() {
 
     for i in 0..10 {
         let key = vec![b'a' + i as u8];
-        let tree_old = tree.insert(&key, i as u64).unwrap();
+        let tree_old = tree.insert(&key, i as u64);
         let oracle_old = oracle.insert(key.clone(), i as u64);
 
         assert_eq!(tree_old, oracle_old, "Insert mismatch for key {key:?}");
@@ -820,7 +816,7 @@ fn test_differential_updates() {
     let key = b"key".to_vec();
 
     for value in [100, 200, 300] {
-        let tree_old = tree.insert(&key, value).unwrap();
+        let tree_old = tree.insert(&key, value);
         let oracle_old = oracle.insert(key.clone(), value);
         assert_eq!(tree_old, oracle_old);
     }
@@ -835,16 +831,16 @@ fn test_differential_interleaved() {
     let tree: MassTree<u64> = MassTree::new();
     let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
-    tree.insert(b"a", 1).unwrap();
+    tree.insert(b"a", 1);
     oracle.insert(b"a".to_vec(), 1);
     assert_eq!(tree.get(b"a"), oracle.get(b"a".as_slice()).copied());
 
-    tree.insert(b"b", 2).unwrap();
+    tree.insert(b"b", 2);
     oracle.insert(b"b".to_vec(), 2);
     assert_eq!(tree.get(b"a"), oracle.get(b"a".as_slice()).copied());
     assert_eq!(tree.get(b"b"), oracle.get(b"b".as_slice()).copied());
 
-    tree.insert(b"a", 10).unwrap();
+    tree.insert(b"a", 10);
     oracle.insert(b"a".to_vec(), 10);
     assert_eq!(tree.get(b"a"), oracle.get(b"a".as_slice()).copied());
 }
@@ -861,7 +857,7 @@ fn test_differential_get_missing() {
         oracle.get(b"missing".as_slice()).copied()
     );
 
-    tree.insert(b"present", 42).unwrap();
+    tree.insert(b"present", 42);
 
     assert_eq!(tree.get(b"missing"), None);
     assert_eq!(tree.get(b"present").unwrap(), 42);
@@ -878,7 +874,7 @@ fn test_insert_100_keys() {
     // Insert 100 unique keys (will trigger multiple splits)
     for i in 0..100 {
         let key = format!("{i:08}"); // 8-byte keys
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     // Verify all keys are retrievable
@@ -900,7 +896,7 @@ fn test_len_multi_level_tree() {
     // Insert enough keys to create multiple levels
     for i in 0..200 {
         let key = format!("{i:08}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     // Verify len() returns correct count
@@ -909,7 +905,7 @@ fn test_len_multi_level_tree() {
     // Insert more and verify again
     for i in 200..500 {
         let key = format!("{i:08}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
     assert_eq!(tree.len(), 500);
 }
@@ -924,7 +920,7 @@ fn test_insert_1000_sequential() {
     // Insert 1000 keys sequentially
     for i in 0..1000 {
         let key = format!("{i:08}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
         oracle.insert(key.into_bytes(), i as u64);
     }
 
@@ -948,7 +944,7 @@ fn test_insert_1000_random() {
         // Mix up the order using modular arithmetic
         let idx = (i * 997) % 1000;
         let key = format!("{idx:08}");
-        tree.insert(key.as_bytes(), idx as u64).unwrap();
+        tree.insert(key.as_bytes(), idx as u64);
         oracle.insert(key.into_bytes(), idx as u64);
     }
 
@@ -974,13 +970,13 @@ fn test_split_preserves_values() {
     ];
 
     for (key, value) in &test_values {
-        tree.insert(key, value.clone()).unwrap();
+        tree.insert(key, value.clone());
     }
 
     // Fill to trigger split
     for i in 0..20 {
         let key = format!("k{i:02}");
-        tree.insert(key.as_bytes(), format!("value{i}")).unwrap();
+        tree.insert(key.as_bytes(), format!("value{i}"));
     }
 
     // Verify original values survived split
@@ -998,13 +994,13 @@ fn test_split_with_updates() {
     // Insert and immediately update some keys
     for i in 0..30 {
         let key = format!("{i:04}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     // Update every other key
     for i in (0..30).step_by(2) {
         let key = format!("{i:04}");
-        let old = tree.insert(key.as_bytes(), (i + 1000) as u64).unwrap();
+        let old = tree.insert(key.as_bytes(), (i + 1000) as u64);
         assert_eq!(old.unwrap(), i as u64);
     }
 
@@ -1023,7 +1019,7 @@ fn test_multiple_splits_create_deeper_tree() {
 
     for i in 0..100 {
         let key = format!("{i:08}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     // Verify all keys accessible
@@ -1043,11 +1039,11 @@ fn test_split_empty_right_edge_case() {
 
     // Fill leaf completely with sequential keys (rightmost optimization)
     for i in 0..24 {
-        tree.insert(&[i as u8], i as u64).unwrap();
+        tree.insert(&[i as u8], i as u64);
     }
 
     // 25th insert at end should trigger split
-    tree.insert(&[24u8], 24).unwrap();
+    tree.insert(&[24u8], 24);
 
     // Verify all keys
     for i in 0..25 {
@@ -1062,7 +1058,7 @@ fn test_split_index_mode() {
 
     for i in 0..50 {
         let key = format!("{i:02}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     for i in 0..50 {
@@ -1078,7 +1074,7 @@ fn test_split_maintains_key_order() {
     // Insert in reverse order
     for i in (0..50).rev() {
         let key = format!("{i:02}");
-        tree.insert(key.as_bytes(), i as u64).unwrap();
+        tree.insert(key.as_bytes(), i as u64);
     }
 
     // Keys should still be retrievable
@@ -1099,10 +1095,10 @@ fn test_layer_creation_same_prefix() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Insert "hello world!" (12 bytes)
-    tree.insert(b"hello world!", 1).unwrap();
+    tree.insert(b"hello world!", 1);
 
     // Insert "hello worm" (10 bytes) - same 8-byte prefix "hello wo"
-    tree.insert(b"hello worm", 2).unwrap();
+    tree.insert(b"hello worm", 2);
 
     // Both should be retrievable
     assert_eq!(tree.get(b"hello world!"), Some(1));
@@ -1117,8 +1113,8 @@ fn test_deep_layer_chain() {
     let key1 = b"aaaaaaaabbbbbbbbXXXXXXXX"; // 24 bytes
     let key2 = b"aaaaaaaabbbbbbbbYYYYYYYY"; // 24 bytes, differs at byte 16
 
-    tree.insert(key1, 1).unwrap();
-    tree.insert(key2, 2).unwrap();
+    tree.insert(key1, 1);
+    tree.insert(key2, 2);
 
     // Should create 2 intermediate twig nodes:
     // Layer 0: ikey="aaaaaaaa" → twig
@@ -1137,8 +1133,8 @@ fn test_layer_with_suffixes() {
     let key1 = b"prefixAArest1"; // 13 bytes
     let key2 = b"prefixAArest2"; // 13 bytes, same first 8, different suffix
 
-    tree.insert(key1, 1).unwrap();
-    tree.insert(key2, 2).unwrap();
+    tree.insert(key1, 1);
+    tree.insert(key2, 2);
 
     assert_eq!(tree.get(key1), Some(1));
     assert_eq!(tree.get(key2), Some(2));
@@ -1150,11 +1146,11 @@ fn test_insert_into_existing_layer() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Create a layer
-    tree.insert(b"hello world!", 1).unwrap();
-    tree.insert(b"hello worm", 2).unwrap();
+    tree.insert(b"hello world!", 1);
+    tree.insert(b"hello worm", 2);
 
     // Insert another key with same prefix, different continuation
-    tree.insert(b"hello wonder", 3).unwrap();
+    tree.insert(b"hello wonder", 3);
 
     assert_eq!(tree.get(b"hello world!"), Some(1));
     assert_eq!(tree.get(b"hello worm"), Some(2));
@@ -1165,11 +1161,11 @@ fn test_insert_into_existing_layer() {
 fn test_update_in_layer() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"hello world!", 1).unwrap();
-    tree.insert(b"hello worm", 2).unwrap();
+    tree.insert(b"hello world!", 1);
+    tree.insert(b"hello worm", 2);
 
     // Update existing key in layer
-    let old = tree.insert(b"hello world!", 100).unwrap();
+    let old = tree.insert(b"hello world!", 100);
     assert_eq!(old, Some(1));
 
     assert_eq!(tree.get(b"hello world!"), Some(100));
@@ -1180,8 +1176,8 @@ fn test_update_in_layer() {
 fn test_get_nonexistent_in_layer() {
     let tree: MassTree<u64> = MassTree::new();
 
-    tree.insert(b"hello world!", 1).unwrap();
-    tree.insert(b"hello worm", 2).unwrap();
+    tree.insert(b"hello world!", 1);
+    tree.insert(b"hello worm", 2);
 
     // Same prefix but different suffix that wasn't inserted
     assert_eq!(tree.get(b"hello worst"), None);
@@ -1196,8 +1192,8 @@ fn test_long_key_insert_and_get() {
     let key1 = b"abcdefghijklmnop"; // 16 bytes
     let key2 = b"zyxwvutsrqponmlk"; // 16 bytes, different prefix
 
-    tree.insert(key1, 100).unwrap();
-    tree.insert(key2, 200).unwrap();
+    tree.insert(key1, 100);
+    tree.insert(key2, 200);
 
     assert_eq!(tree.get(key1), Some(100));
     assert_eq!(tree.get(key2), Some(200));
@@ -1208,10 +1204,10 @@ fn test_mixed_short_and_long_keys() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Mix of short (<=8) and long (>8) keys
-    tree.insert(b"short", 1).unwrap();
-    tree.insert(b"exactly8", 2).unwrap();
-    tree.insert(b"this is longer", 3).unwrap();
-    tree.insert(b"another long key", 4).unwrap();
+    tree.insert(b"short", 1);
+    tree.insert(b"exactly8", 2);
+    tree.insert(b"this is longer", 3);
+    tree.insert(b"another long key", 4);
 
     assert_eq!(tree.get(b"short"), Some(1));
     assert_eq!(tree.get(b"exactly8"), Some(2));
@@ -1238,7 +1234,7 @@ fn test_layer_differential_vs_btreemap() {
     ];
 
     for (i, key) in keys.iter().enumerate() {
-        tree.insert(key, i as u64).unwrap();
+        tree.insert(key, i as u64);
         oracle.insert(key.clone(), i as u64);
     }
 
@@ -1254,17 +1250,17 @@ fn test_layer_count_tracking() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Insert keys that create layers
-    tree.insert(b"hello world!", 1).unwrap();
+    tree.insert(b"hello world!", 1);
     assert_eq!(tree.len(), 1);
 
-    tree.insert(b"hello worm", 2).unwrap();
+    tree.insert(b"hello worm", 2);
     assert_eq!(tree.len(), 2);
 
-    tree.insert(b"hello wonder", 3).unwrap();
+    tree.insert(b"hello wonder", 3);
     assert_eq!(tree.len(), 3);
 
     // Update shouldn't change count
-    tree.insert(b"hello world!", 100).unwrap();
+    tree.insert(b"hello world!", 100);
     assert_eq!(tree.len(), 3);
 }
 
@@ -1284,7 +1280,7 @@ fn test_layer_growth_beyond_width() {
     for i in 0..20u64 {
         let mut key = prefix.to_vec();
         key.extend_from_slice(&i.to_be_bytes());
-        tree.insert(&key, i).unwrap();
+        tree.insert(&key, i);
     }
 
     // All keys must be findable
@@ -1303,14 +1299,14 @@ fn test_layer_root_becomes_internode() {
     let tree: MassTree<u64> = MassTree::new();
 
     // Force layer creation with suffix keys
-    tree.insert(b"prefix00suffix_a", 1).unwrap();
-    tree.insert(b"prefix00suffix_b", 2).unwrap();
+    tree.insert(b"prefix00suffix_a", 1);
+    tree.insert(b"prefix00suffix_b", 2);
 
     // These should go into the layer and eventually trigger split
     // With WIDTH=15, we need >15 keys in the layer to trigger split
     for i in 0..20u64 {
         let key = format!("prefix00suffix_{i:02}");
-        tree.insert(key.as_bytes(), i + 100).unwrap();
+        tree.insert(key.as_bytes(), i + 100);
     }
 
     // Verify initial keys still findable
@@ -1336,7 +1332,7 @@ fn test_layer_split_preserves_all_keys() {
         let mut key = b"testpfx!".to_vec(); // Exactly 8 bytes
         key.extend_from_slice(format!("suffix{i:04}").as_bytes());
         keys_and_values.push((key.clone(), i * 10));
-        tree.insert(&key, i * 10).unwrap();
+        tree.insert(&key, i * 10);
     }
 
     // Verify all keys
@@ -1445,8 +1441,7 @@ fn test_masstree15_insert_and_get() {
 
     // Insert a value
     let result = tree.insert_with_guard(b"hello", 42, &guard);
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none()); // No old value
+    assert!(result.is_none()); // No old value = new key inserted
 
     // Get the value back
     let value = tree.get_with_guard(b"hello", &guard);
@@ -1462,8 +1457,7 @@ fn test_masstree15_multiple_inserts() {
     // Insert multiple values (up to WIDTH=24 without split)
     for i in 0..20u64 {
         let key = format!("key{i:02}");
-        let result = tree.insert_with_guard(key.as_bytes(), i * 10, &guard);
-        assert!(result.is_ok(), "Failed to insert key {i}");
+        tree.insert_with_guard(key.as_bytes(), i * 10, &guard);
     }
 
     assert_eq!(tree.len(), 20);
@@ -1483,11 +1477,11 @@ fn test_masstree15_update_existing() {
     let guard = tree.guard();
 
     // Insert initial value
-    tree.insert_with_guard(b"key", 100, &guard).unwrap();
+    tree.insert_with_guard(b"key", 100, &guard);
     assert_eq!(*tree.get_with_guard(b"key", &guard).unwrap(), 100);
 
     // Update the value
-    let old = tree.insert_with_guard(b"key", 200, &guard).unwrap();
+    let old = tree.insert_with_guard(b"key", 200, &guard);
     assert!(old.is_some());
     assert_eq!(*old.unwrap(), 100);
 
@@ -1512,8 +1506,7 @@ fn test_masstree_insert_and_get() {
 
     // Insert a value
     let result = tree.insert_with_guard(b"hello", 42, &guard);
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none());
+    assert!(result.is_none()); // No old value = new key inserted
 
     // Get the value back
     let value = tree.get_with_guard(b"hello", &guard);
@@ -1530,18 +1523,13 @@ fn test_masstree15_split_triggers() {
     // Insert 24 keys (should all succeed, filling the root leaf)
     for i in 0..24u64 {
         let key = format!("key{i:02}");
-        let result = tree.insert_with_guard(key.as_bytes(), i, &guard);
-        assert!(result.is_ok(), "Failed to insert key {i}: {result:?}");
+        tree.insert_with_guard(key.as_bytes(), i, &guard);
     }
 
     assert_eq!(tree.len(), 24);
 
     // The 25th key should succeed by triggering a split
-    let result = tree.insert_with_guard(b"key24", 24, &guard);
-    assert!(
-        result.is_ok(),
-        "25th insert should succeed with split: {result:?}"
-    );
+    tree.insert_with_guard(b"key24", 24, &guard);
     assert_eq!(tree.len(), 25);
 
     // Verify we can read the 25th key back
@@ -1567,8 +1555,7 @@ fn test_masstree15_many_splits() {
     // Insert 100 keys (should trigger multiple splits)
     for i in 0..100u64 {
         let key = format!("key{i:03}");
-        let result = tree.insert_with_guard(key.as_bytes(), i, &guard);
-        assert!(result.is_ok(), "Failed to insert key {i}: {result:?}");
+        tree.insert_with_guard(key.as_bytes(), i, &guard);
     }
 
     assert_eq!(tree.len(), 100);
@@ -1594,8 +1581,7 @@ fn test_masstree15_sequential_u64_limited() {
 
     for i in 0u64..KEY_COUNT {
         let key = i.to_be_bytes();
-        let result = tree.insert_with_guard(&key, i, &guard);
-        assert!(result.is_ok(), "Failed to insert key {i}: {result:?}");
+        tree.insert_with_guard(&key, i, &guard);
     }
 
     assert_eq!(tree.len(), KEY_COUNT as usize);
@@ -1621,8 +1607,7 @@ fn test_masstree15_internode_splits_stress() {
 
     for i in 0u64..KEY_COUNT {
         let key = i.to_be_bytes();
-        let result = tree.insert_with_guard(&key, i, &guard);
-        assert!(result.is_ok(), "Failed to insert key {i}: {result:?}");
+        tree.insert_with_guard(&key, i, &guard);
     }
 
     assert_eq!(tree.len(), KEY_COUNT as usize);
@@ -1645,8 +1630,8 @@ fn test_proptest_regression_two_keys() {
     let key1: &[u8] = &[52, 0];
     let key2: &[u8] = &[52];
 
-    tree.insert(key1, 0).unwrap();
-    tree.insert(key2, 1).unwrap();
+    tree.insert(key1, 0);
+    tree.insert(key2, 1);
 
     // Verify both keys exist
     let result1 = tree.get(key1);
@@ -1666,7 +1651,7 @@ fn test_proptest_regression_nine_zeros() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     let key: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0];
-    tree.insert(key, 42).unwrap();
+    tree.insert(key, 42);
 
     let result = tree.get(key);
     assert!(result.is_some(), "9-byte key not found!");
@@ -1684,8 +1669,8 @@ fn test_two_suffix_keys_same_prefix() {
     let key1: &[u8] = b"prefix0000000000";
     let key2: &[u8] = b"prefix0000000001";
 
-    tree.insert(key1, 1).unwrap();
-    tree.insert(key2, 2).unwrap();
+    tree.insert(key1, 1);
+    tree.insert(key2, 2);
 
     // Both should be retrievable
     let result1 = tree.get(key1);
@@ -1707,7 +1692,7 @@ fn test_many_suffix_keys_same_prefix() {
     // 20 keys with same 8-byte prefix "prefix00"
     for i in 0..20u64 {
         let key = format!("prefix00{i:08}"); // 16 bytes each
-        tree.insert(key.as_bytes(), i).unwrap();
+        tree.insert(key.as_bytes(), i);
 
         // Immediately verify this key
         let result = tree.get(key.as_bytes());
@@ -1739,8 +1724,8 @@ fn test_masstree15_basic() {
 
     assert!(tree.is_empty());
 
-    tree.insert(b"hello", 123).unwrap();
-    tree.insert(b"world", 456).unwrap();
+    tree.insert(b"hello", 123);
+    tree.insert(b"world", 456);
 
     assert_eq!(tree.len(), 2);
     assert_eq!(*tree.get(b"hello").unwrap(), 123);
@@ -1755,7 +1740,7 @@ fn test_masstree15_splits() {
 
     for i in 0u64..100 {
         let key = i.to_be_bytes();
-        tree.insert_with_guard(&key, i, &guard).unwrap();
+        tree.insert_with_guard(&key, i, &guard);
     }
 
     assert_eq!(tree.len(), 100);
@@ -1776,7 +1761,7 @@ fn test_masstree15_remove() {
 
     for i in 0u64..50 {
         let key = i.to_be_bytes();
-        tree.insert_with_guard(&key, i, &guard).unwrap();
+        tree.insert_with_guard(&key, i, &guard);
     }
 
     // Remove half
@@ -1803,7 +1788,7 @@ fn test_masstree15_inline() {
 
     for i in 0u64..100 {
         let key = i.to_be_bytes();
-        tree.insert_with_guard(&key, i, &guard).unwrap();
+        tree.insert_with_guard(&key, i, &guard);
     }
 
     assert_eq!(tree.len(), 100);
@@ -1825,7 +1810,7 @@ fn test_masstree15_concurrent() {
                 let guard = tree.guard();
                 for i in 0u64..100 {
                     let key = (t * 1000 + i).to_be_bytes();
-                    tree.insert_with_guard(&key, t * 1000 + i, &guard).unwrap();
+                    tree.insert_with_guard(&key, t * 1000 + i, &guard);
                 }
             })
         })
@@ -1847,7 +1832,7 @@ fn test_correct_guard_works() {
     let tree: MassTree15<u64> = MassTree15::new();
     let guard = tree.guard();
     // Should not panic - guard is from the correct tree
-    tree.insert_with_guard(b"key", 42, &guard).unwrap();
+    tree.insert_with_guard(b"key", 42, &guard);
     assert_eq!(tree.get(b"key"), Some(Arc::new(42)));
 }
 
@@ -1868,7 +1853,7 @@ fn test_wrong_guard_panics_on_insert() {
 fn test_wrong_guard_panics_on_remove() {
     let tree1: MassTree15<u64> = MassTree15::new();
     let tree2: MassTree15<u64> = MassTree15::new();
-    tree1.insert(b"key", 42).unwrap();
+    tree1.insert(b"key", 42);
     let wrong_guard = tree2.guard();
     // Should panic in debug builds - guard is from wrong tree
     let _ = tree1.remove_with_guard(b"key", &wrong_guard);
@@ -1904,14 +1889,14 @@ fn test_inline_key_with_layer_pointer() {
 
     // Two keys with same first 8 bytes but different suffixes → creates layer pointer
     // "hello wo" is the shared 8-byte ikey
-    tree.insert(b"hello woAAAA", 1).unwrap();
-    tree.insert(b"hello woBBBB", 2).unwrap();
+    tree.insert(b"hello woAAAA", 1);
+    tree.insert(b"hello woBBBB", 2);
 
     // Now insert inline keys with the same ikey prefix
     // These must be handled correctly despite the layer pointer in the leaf
-    tree.insert(b"hello wo", 3).unwrap(); // Exactly 8 bytes
-    tree.insert(b"hello w", 4).unwrap(); // 7 bytes
-    tree.insert(b"hello", 5).unwrap(); // 5 bytes
+    tree.insert(b"hello wo", 3); // Exactly 8 bytes
+    tree.insert(b"hello w", 4); // 7 bytes
+    tree.insert(b"hello", 5); // 5 bytes
 
     // Verify all keys are retrievable
     assert_eq!(tree.get(b"hello woAAAA"), Some(1));
@@ -1954,10 +1939,10 @@ fn test_inline_keys_same_ikey_different_lengths() {
 
     // All these keys have the same ikey (zero-padded to 8 bytes)
     // but different keylenx values (1, 2, 3, 8)
-    tree.insert(b"a", 1).unwrap();
-    tree.insert(b"aa", 2).unwrap();
-    tree.insert(b"aaa", 3).unwrap();
-    tree.insert(b"aaaaaaaa", 8).unwrap(); // Exactly 8 bytes
+    tree.insert(b"a", 1);
+    tree.insert(b"aa", 2);
+    tree.insert(b"aaa", 3);
+    tree.insert(b"aaaaaaaa", 8); // Exactly 8 bytes
 
     // Verify retrieval
     assert_eq!(tree.get(b"a"), Some(1));
@@ -2057,7 +2042,7 @@ fn test_from_iterator_duplicate_keys() {
 #[test]
 fn test_extend_basic() {
     let mut tree: MassTree<u64> = MassTree::new();
-    tree.insert(b"existing", 0).unwrap();
+    tree.insert(b"existing", 0);
 
     tree.extend([(b"a", 1u64), (b"b", 2u64), (b"c", 3u64)]);
 
@@ -2071,7 +2056,7 @@ fn test_extend_basic() {
 #[test]
 fn test_extend_overwrites_existing() {
     let mut tree: MassTree<u64> = MassTree::new();
-    tree.insert(b"key", 100).unwrap();
+    tree.insert(b"key", 100);
 
     tree.extend([(b"key", 200u64)]);
 
@@ -2083,7 +2068,7 @@ fn test_extend_overwrites_existing() {
 #[test]
 fn test_extend_empty_iterator() {
     let mut tree: MassTree<u64> = MassTree::new();
-    tree.insert(b"existing", 42).unwrap();
+    tree.insert(b"existing", 42);
 
     let empty: Vec<(&[u8], u64)> = vec![];
     tree.extend(empty);

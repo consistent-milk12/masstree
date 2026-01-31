@@ -31,7 +31,7 @@ fn wd1_single_pair() {
 
         for n in 0..N {
             let key = n.to_be_bytes();
-            writer_tree.insert_with_guard(&key, n + 1, &guard).unwrap();
+            writer_tree.insert_with_guard(&key, n + 1, &guard);
             writer_pos_clone.store(n, Ordering::Release);
 
             // Yield occasionally

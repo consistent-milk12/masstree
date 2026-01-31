@@ -471,6 +471,12 @@ impl Coalesce {
     {
         use crate::leaf15::LAYER_KEYLENX;
 
+        // Use bounded retries instead of blocking lock() to prevent potential hangs.
+        // If parent is persistently locked (e.g., concurrent heavy operations), we
+        // leave the sublayer marked deleted_layer but don't retire it. This is a
+        // bounded memory leak but prevents hangs and ensures safety (no dangling ptr).
+        const MAX_LOCK_RETRIES: u32 = 1000;
+
         // SAFETY: leaf_ptr is valid and locked (we hold `lock`).
         let leaf: &L = unsafe { &*leaf_ptr };
 
@@ -491,11 +497,6 @@ impl Coalesce {
         // and protected by the guard. We released sublayer lock before acquiring parent.
         let parent_leaf: &L = unsafe { &*(ctx.parent_leaf.cast::<L>()) };
 
-        // Use bounded retries instead of blocking lock() to prevent potential hangs.
-        // If parent is persistently locked (e.g., concurrent heavy operations), we
-        // leave the sublayer marked deleted_layer but don't retire it. This is a
-        // bounded memory leak but prevents hangs and ensures safety (no dangling ptr).
-        const MAX_LOCK_RETRIES: u32 = 1000;
         let mut parent_lock = None;
         for _ in 0..MAX_LOCK_RETRIES {
             if let Some(lock) = parent_leaf.version().try_lock() {

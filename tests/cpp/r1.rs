@@ -128,7 +128,7 @@ fn r1_hot_keys() {
     let hot_keys: Vec<u64> = (0..100).collect();
     for &x in &hot_keys {
         let key = make_key10(x);
-        tree.insert_with_guard(&key, x + 1, &guard).unwrap();
+        tree.insert_with_guard(&key, x + 1, &guard);
     }
 
     // Read them many times

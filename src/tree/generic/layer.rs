@@ -4,11 +4,11 @@
 
 use std::ptr as StdPtr;
 
-use crate::tree::InsertError;
+// Note: InsertError no longer used here - allocations are infallible
 
 use super::{
-    Key, LAYER_KEYLENX, LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric,
-    Ordering, TreePermutation, ValueSlot,
+    Key, LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, Ordering,
+    TreePermutation, ValueSlot, LAYER_KEYLENX,
 };
 
 impl<S, L, A> MassTreeGeneric<S, L, A>
@@ -97,43 +97,33 @@ where
     /// Called when two keys share the same 8-byte ikey but have different suffixes.
     /// Creates a twig chain if needed, ending in a leaf with both keys.
     ///
-    /// # Fallible Allocation
-    ///
-    /// All leaf allocations (twigs and final leaf) use `try_alloc_leaf`.
-    /// If any allocation fails, previously allocated nodes are NOT freed
-    /// (they're tracked by the allocator and will be freed on tree drop).
-    /// We return `Err(AllocationFailed)` immediately.
-    ///
     /// # Algorithm
     ///
     /// 1. Extract existing key's suffix and value from conflict slot
     /// 2. While both keys have matching ikeys AND both have more bytes:
-    ///    - **Fallible:** Create intermediate twig layer node
+    ///    - Create intermediate twig layer node
     ///    - Chain twig nodes together via layer pointers
-    /// 3. **Fallible:** Create final leaf with both keys (now diverged)
+    /// 3. Create final leaf with both keys (now diverged)
     /// 4. Link twig chain to final leaf
     /// 5. Return head of chain (or final leaf if no chain)
+    ///
+    /// Aborts on allocation failure (standard Rust OOM behavior).
     ///
     /// # Safety
     ///
     /// - Caller must hold the lock on `parent_leaf`
     /// - Caller must have called `lock.mark_insert()` before calling this
     /// - `guard` must come from this tree's collector
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(ptr)` - Pointer to head of layer chain (twig or final leaf)
-    /// * `Err(InsertError::AllocationFailed)` - Allocation failed
     #[cold]
     #[inline(never)]
-    pub(super) unsafe fn try_create_layer_concurrent_generic(
+    pub(super) unsafe fn create_layer_concurrent_generic(
         &self,
         parent_leaf: &L,
         conflict_slot: usize,
         new_key: &mut Key<'_>,
         new_value: S::Output,
         guard: &LocalGuard<'_>,
-    ) -> Result<*mut u8, InsertError> {
+    ) -> *mut u8 {
         // STEP: 1 - Extract existing key's suffix and value
         let existing_suffix: &[u8] = parent_leaf.ksuf(conflict_slot).unwrap_or(&[]);
         let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
@@ -157,8 +147,8 @@ where
         let mut twig_tail: *mut L = StdPtr::null_mut();
 
         while (cmp == Ordering::Equal) && existing_key.has_suffix() && new_key.has_suffix() {
-            // FALLIBLE: Allocate twig node
-            let twig_ptr: *mut L = self.allocator.try_alloc_leaf(false, true)?;
+            // Allocate twig node (aborts on OOM)
+            let twig_ptr: *mut L = self.allocator.alloc_leaf_direct(false, true);
 
             // Initialize twig with matching ikey in slot 0
             // SAFETY: twig_ptr is valid, we just allocated it
@@ -186,9 +176,8 @@ where
             cmp = existing_key.compare(new_key.ikey(), new_key.current_len());
         }
 
-        //  FALLIBLE: Operation
-        //  STEP: 5 - Allocate final leaf
-        let final_ptr: *mut L = self.allocator.try_alloc_leaf(false, true)?;
+        // STEP: 5 - Allocate final leaf (aborts on OOM)
+        let final_ptr: *mut L = self.allocator.alloc_leaf_direct(false, true);
 
         // Assign both entries to the final leaf
         //  SAFETY: final_ptr is valid, guard is from caller
@@ -216,6 +205,6 @@ where
             },
         );
 
-        Ok(result_ptr)
+        result_ptr
     }
 }

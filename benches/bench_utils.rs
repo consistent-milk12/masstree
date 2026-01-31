@@ -12,7 +12,7 @@
     clippy::expect_used
 )]
 
-use std::sync::atomic::{Ordering as AtomicOrdering, compiler_fence, fence};
+use std::sync::atomic::{Ordering as AtomicOrdering, fence};
 
 use arrayvec::ArrayVec;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
@@ -839,22 +839,22 @@ pub fn warmup_with_indices<F: FnMut(usize)>(
     fence(AtomicOrdering::SeqCst);
 }
 
-/// Compiler barrier before measurement.
+/// Memory barrier before measurement.
 ///
-/// Prevents the compiler from reordering measured code before this point.
-/// Uses `compiler_fence` only (no hardware fence) to minimize overhead.
+/// Prevents both compiler and CPU from reordering measured code before this point.
+/// Uses full `fence` for cross-platform correctness (ARM, RISC-V need hardware fence).
 #[inline]
 pub fn pre_measurement_barrier() {
-    compiler_fence(AtomicOrdering::SeqCst);
+    fence(AtomicOrdering::SeqCst);
 }
 
-/// Compiler barrier after measurement.
+/// Memory barrier after measurement.
 ///
-/// Prevents the compiler from reordering measured code after this point.
-/// Uses `compiler_fence` only (no hardware fence) to minimize overhead.
+/// Prevents both compiler and CPU from reordering measured code after this point.
+/// Uses full `fence` for cross-platform correctness (ARM, RISC-V need hardware fence).
 #[inline]
 pub fn post_measurement_barrier() {
-    compiler_fence(AtomicOrdering::SeqCst);
+    fence(AtomicOrdering::SeqCst);
 }
 
 /// Helper to run a benchmark with proper setup.

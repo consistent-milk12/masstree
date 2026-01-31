@@ -43,8 +43,7 @@ fn rw2fixed_impl(get_frac: f64) {
             // Insert
             let x = offset.wrapping_add(puts as u32).wrapping_mul(MULTIPLIER) % 100_000_000;
             let key = x.to_be_bytes();
-            tree.insert_with_guard(&key, u64::from(x + 1), &guard)
-                .unwrap();
+            tree.insert_with_guard(&key, u64::from(x + 1), &guard);
             puts += 1;
         }
     }

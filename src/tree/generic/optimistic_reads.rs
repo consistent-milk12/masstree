@@ -574,7 +574,7 @@ where
     ///
     /// ```ignore
     /// let tree = MassTree::<u64>::new();
-    /// tree.insert(b"hello", 42).unwrap();
+    /// tree.insert(b"hello", 42);
     ///
     /// assert!(tree.contains_key(b"hello"));
     /// assert!(!tree.contains_key(b"world"));

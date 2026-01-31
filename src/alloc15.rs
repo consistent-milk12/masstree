@@ -33,7 +33,7 @@ use crate::node_pool;
 use crate::nodeversion::NodeVersion;
 use crate::slot::ValueSlot;
 use crate::slot::true_inline::TrueInlineSlot;
-use crate::{AllocError, AllocResult};
+// Note: AllocError/AllocResult removed - allocations are now infallible
 
 // =============================================================================
 // Iterative Tree Traversal
@@ -452,11 +452,21 @@ macro_rules! impl_seize_allocator15 {
 
             #[inline]
             fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut $leaf {
-                self.try_alloc_leaf(is_root, is_layer_root)
-                    .unwrap_or_else(|_| {
-                        let layout = Layout::new::<$leaf>();
-                        StdAlloc::handle_alloc_error(layout)
-                    })
+                let layout = Layout::new::<$leaf>();
+                let raw_ptr = node_pool::pool_alloc(layout);
+
+                if raw_ptr.is_null() {
+                    StdAlloc::handle_alloc_error(layout);
+                }
+
+                let ptr: *mut $leaf = raw_ptr.cast();
+
+                // SAFETY: ptr is valid, properly aligned, and we have exclusive access
+                unsafe {
+                    <$leaf>::init_at(ptr, is_root || is_layer_root);
+                }
+
+                ptr
             }
 
             #[inline]
@@ -515,29 +525,7 @@ macro_rules! impl_seize_allocator15 {
                 ptr
             }
 
-            #[inline]
-            fn try_alloc_leaf(
-                &self,
-                is_root: bool,
-                is_layer_root: bool,
-            ) -> AllocResult<*mut $leaf> {
-                let layout = Layout::new::<$leaf>();
-                let raw_ptr = node_pool::pool_alloc(layout);
-
-                if raw_ptr.is_null() {
-                    return Err(AllocError::for_leaf::<$leaf>());
-                }
-
-                let ptr: *mut $leaf = raw_ptr.cast();
-
-                // SAFETY: ptr is valid, properly aligned, and we have exclusive access
-                unsafe {
-                    <$leaf>::init_at(ptr, is_root || is_layer_root);
-                }
-
-                Ok(ptr)
-            }
-        }
+                    }
     };
 }
 

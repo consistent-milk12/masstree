@@ -27,7 +27,7 @@ fn palma_sequential_insert() {
     // Sequential inserts
     for i in 0..PALM_N {
         let key = i.to_be_bytes();
-        tree.insert_with_guard(&key, i + 1, &guard).unwrap();
+        tree.insert_with_guard(&key, i + 1, &guard);
     }
 
     // Verify sample
@@ -47,7 +47,7 @@ fn palmb_batched_reads() {
     let read_range = PALM_N / 10; // palmb reads from smaller range
     for i in 0..read_range {
         let key = i.to_be_bytes();
-        tree.insert_with_guard(&key, i + 1, &guard).unwrap();
+        tree.insert_with_guard(&key, i + 1, &guard);
     }
 
     // Batched reads with sorting (cache-friendly pattern)
@@ -122,7 +122,7 @@ fn palm_concurrent_read() {
         let read_range = PALM_N / 10;
         for i in 0..read_range {
             let key = i.to_be_bytes();
-            tree.insert_with_guard(&key, i + 1, &guard).unwrap();
+            tree.insert_with_guard(&key, i + 1, &guard);
         }
     }
 

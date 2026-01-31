@@ -957,7 +957,7 @@ where
     /// let guard = tree.guard();
     /// let mut sum = 0u64;
     /// tree.iter(&guard).for_each_values_batch(|value| {
-    ///     sum += *value; // Dereference Arc<u64> to get u64
+    ///     sum += value; // value is u64 directly (MassTree uses inline storage)
     ///     true
     /// });
     /// ```

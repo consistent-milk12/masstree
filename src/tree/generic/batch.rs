@@ -25,7 +25,7 @@ use seize::LocalGuard;
 
 use crate::{
     Linker, MassTreeGeneric, NodeAllocatorGeneric, key::Key, leaf_trait::LayerCapableLeaf,
-    nodeversion::LockGuard, slot::ValueSlot, tree::InsertError,
+    nodeversion::LockGuard, slot::ValueSlot,
 };
 
 use super::{InsertSearchResultGeneric, TreePermutation};
@@ -295,7 +295,7 @@ where
     ///     (b"key3".to_vec(), 3u64),
     /// ];
     ///
-    /// let result = tree.insert_batch(entries).unwrap();
+    /// let result = tree.insert_batch(entries);
     /// assert_eq!(result.inserted, 3);
     /// assert_eq!(result.updated, 0);
     /// ```
@@ -313,11 +313,10 @@ where
     /// retried after a split. For `Arc<V>`, cloning is cheap (refcount bump).
     /// For `Copy` types in `Inline` mode, cloning is also cheap.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns `Err` only for unrecoverable errors. Individual entry failures
-    /// are tracked in the result's `failed` count.
-    pub fn insert_batch<I>(&self, entries: I) -> Result<BatchInsertResult<S::Output>, InsertError>
+    /// Panics on internal tree corruption (should not happen in normal operation).
+    pub fn insert_batch<I>(&self, entries: I) -> BatchInsertResult<S::Output>
     where
         I: IntoIterator<Item = (Vec<u8>, S::Value)>,
     {
@@ -339,14 +338,14 @@ where
     ///
     /// A `BatchInsertResult` with insertion statistics.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns `Err` only for unrecoverable errors.
+    /// Panics on internal tree corruption.
     pub fn insert_batch_with_guard<I>(
         &self,
         entries: I,
         guard: &LocalGuard<'_>,
-    ) -> Result<BatchInsertResult<S::Output>, InsertError>
+    ) -> BatchInsertResult<S::Output>
     where
         I: IntoIterator<Item = (Vec<u8>, S::Value)>,
     {
@@ -357,7 +356,7 @@ where
             .collect();
 
         if batch.is_empty() {
-            return Ok(BatchInsertResult::new());
+            return BatchInsertResult::new();
         }
 
         // Sort by ikey for cache locality and leaf clustering
@@ -381,11 +380,6 @@ where
     ///
     /// A `BatchInsertResult` with insertion statistics.
     ///
-    /// # Errors
-    ///
-    /// Currently this function always succeeds. The `Result` return type is
-    /// reserved for future error conditions (e.g., memory allocation failures).
-    ///
     /// # Note
     ///
     /// The entries slice will be sorted by ikey in place.
@@ -393,9 +387,9 @@ where
         &self,
         entries: &mut [BatchEntry<S>],
         guard: &LocalGuard<'_>,
-    ) -> Result<BatchInsertResult<S::Output>, InsertError> {
+    ) -> BatchInsertResult<S::Output> {
         if entries.is_empty() {
-            return Ok(BatchInsertResult::new());
+            return BatchInsertResult::new();
         }
 
         // Sort by ikey for cache locality
@@ -418,10 +412,6 @@ where
     ///
     /// Entries must be sorted by ikey before calling this method.
     #[expect(
-        clippy::unnecessary_wraps,
-        reason = "Result kept for API consistency and future error handling"
-    )]
-    #[expect(
         clippy::indexing_slicing,
         reason = "Index bounds are checked in the while condition"
     )]
@@ -429,7 +419,7 @@ where
         &self,
         batch: &[BatchEntry<S>],
         guard: &LocalGuard<'_>,
-    ) -> Result<BatchInsertResult<S::Output>, InsertError> {
+    ) -> BatchInsertResult<S::Output> {
         let mut result = BatchInsertResult::with_capacity(batch.len() / 4);
         let mut index = 0;
 
@@ -533,8 +523,9 @@ where
                             result.record_insert();
                         }
                     }
-                    Err(_) => {
-                        result.record_failure();
+                    Err(e) => {
+                        // Internal errors indicate bugs - should not happen in normal operation
+                        panic!("Batch insert failed unexpectedly: {e:?}. This indicates a bug.");
                     }
                 }
                 index += 1;
@@ -543,7 +534,7 @@ where
             }
         }
 
-        Ok(result)
+        result
     }
 
     /// Insert as many entries as possible into a locked leaf.

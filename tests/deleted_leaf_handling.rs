@@ -16,7 +16,7 @@ fn test_get_during_coalesce() {
 
     // Insert keys that will span multiple leaves after splits
     for i in 0u64..100 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     // Verify key 50 exists before test
@@ -122,7 +122,7 @@ fn stress_get_during_coalesce() {
 
     // Pre-populate with keys 0..1000
     for i in 0u64..1000 {
-        tree.insert(&i.to_be_bytes(), i).unwrap();
+        tree.insert(&i.to_be_bytes(), i);
     }
 
     let barrier = Arc::new(Barrier::new(num_threads));

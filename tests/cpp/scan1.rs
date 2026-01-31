@@ -22,7 +22,7 @@ fn scan1_single_thread() {
     // Populate with sequential keys
     for n in 0..N {
         let key = n.to_be_bytes();
-        tree.insert_with_guard(&key, n, &guard).unwrap();
+        tree.insert_with_guard(&key, n, &guard);
     }
 
     // Full scan
@@ -56,7 +56,7 @@ fn scan1_range() {
     // Populate
     for n in 0..N {
         let key = n.to_be_bytes();
-        tree.insert_with_guard(&key, n, &guard).unwrap();
+        tree.insert_with_guard(&key, n, &guard);
     }
 
     // Scan range [100, 200)
@@ -89,7 +89,7 @@ fn scan1_concurrent_read() {
         let guard = tree.guard();
         for n in 0..N {
             let key = n.to_be_bytes();
-            tree.insert_with_guard(&key, n, &guard).unwrap();
+            tree.insert_with_guard(&key, n, &guard);
         }
     }
 
@@ -131,7 +131,7 @@ fn scan1_concurrent_with_writes() {
         let guard = tree.guard();
         for n in 0..N {
             let key = n.to_be_bytes();
-            tree.insert_with_guard(&key, n, &guard).unwrap();
+            tree.insert_with_guard(&key, n, &guard);
         }
     }
 

@@ -27,7 +27,7 @@ fn splitremove_sequential() {
     // Insert sequential keys (will cause many splits)
     for n in 0..N {
         let key = n.to_be_bytes();
-        tree.insert_with_guard(&key, n, &guard).unwrap();
+        tree.insert_with_guard(&key, n, &guard);
     }
 
     // Remove every other key
@@ -64,7 +64,7 @@ fn splitremove_concurrent_insert_remove() {
 
         for n in 0..N {
             let key = n.to_be_bytes();
-            insert_tree.insert_with_guard(&key, n, &guard).unwrap();
+            insert_tree.insert_with_guard(&key, n, &guard);
             insert_count.store(n + 1, Ordering::Release);
         }
 
@@ -122,7 +122,7 @@ fn splitremove_random() {
         let guard = tree.guard();
         for n in 0..N {
             let key = n.to_be_bytes();
-            tree.insert_with_guard(&key, n, &guard).unwrap();
+            tree.insert_with_guard(&key, n, &guard);
         }
     }
 
@@ -174,8 +174,7 @@ fn splitremove_reinsert() {
         // Insert
         for n in 0u64..1000 {
             let key = n.to_be_bytes();
-            tree.insert_with_guard(&key, n + cycle * 1000, &guard)
-                .unwrap();
+            tree.insert_with_guard(&key, n + cycle * 1000, &guard);
         }
 
         // Verify

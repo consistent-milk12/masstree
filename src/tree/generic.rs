@@ -1026,14 +1026,14 @@ where
     ///
     /// # Returns
     ///
-    /// * `Ok(None)` - New key inserted
-    /// * `Ok(Some(old))` - Key existed, old value returned
-    /// * `Err(InsertError)` - Insert failed (key too long)
+    /// * `None` - New key inserted
+    /// * `Some(old)` - Key existed, old value returned
     ///
-    /// # Errors
-    /// If insert fails.
+    /// # Panics
+    ///
+    /// Panics on internal tree corruption (should not happen in normal operation).
     #[inline]
-    pub fn insert(&self, key: &[u8], value: S::Value) -> Result<Option<S::Output>, InsertError> {
+    pub fn insert(&self, key: &[u8], value: S::Value) -> Option<S::Output> {
         let guard = self.guard();
         self.insert_with_guard(key, value, &guard)
     }
@@ -1050,39 +1050,55 @@ where
     ///
     /// # Returns
     ///
-    /// * `Ok(None)` - New key inserted
-    /// * `Ok(Some(old))` - Key existed, old value returned
-    /// * `Err(InsertError)` - Insert failed (key too long)
+    /// * `None` - New key inserted
+    /// * `Some(old)` - Key existed, old value returned
     ///
-    /// # Errors
-    /// If insert fails.
+    /// # Panics
+    ///
+    /// Panics on internal tree corruption (should not happen in normal operation).
     pub fn insert_with_guard(
         &self,
         key: &[u8],
         value: S::Value,
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<S::Output>, InsertError> {
+    ) -> Option<S::Output> {
         self.verify_guard(guard);
         let mut key: Key<'_> = Key::new(key);
         let output: <S as ValueSlot>::Output = S::into_output(value);
 
-        self.insert_concurrent_generic(&mut key, output, guard)
+        // Internal errors indicate bugs, not recoverable conditions
+        match self.insert_concurrent_generic(&mut key, output, guard) {
+            Ok(result) => result,
+            Err(e) => {
+                // SplitFailed indicates tree corruption or internal bug
+                panic!("Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation.");
+            }
+        }
     }
 
     /// Internal: Insert with a pre-created output value
     ///
     /// Used by entry API to avoid double traversal, the output is created
     /// before insertion so it can be cloned and returned without re-fetching.
+    ///
+    /// # Panics
+    ///
+    /// Panics on internal tree corruption.
     pub(crate) fn insert_output_with_guard(
         &self,
         key: &[u8],
         output: S::Output,
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<S::Output>, InsertError> {
+    ) -> Option<S::Output> {
         self.verify_guard(guard);
 
         let mut key: Key<'_> = Key::new(key);
-        self.insert_concurrent_generic(&mut key, output, guard)
+        match self.insert_concurrent_generic(&mut key, output, guard) {
+            Ok(result) => result,
+            Err(e) => {
+                panic!("Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation.");
+            }
+        }
     }
 
     // ========================================================================
@@ -1329,7 +1345,6 @@ where
     ///
     /// assert_eq!(tree.len(), 3);
     /// ```
-    #[expect(clippy::expect_used, reason = "Allocation failure")]
     fn from_iter<I>(iter: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -1339,9 +1354,8 @@ where
         let guard: LocalGuard<'_> = tree.guard();
 
         for (key, value) in iter {
-            // Panic on allocation failure, matches std collection behavor
-            tree.insert_with_guard(key.as_ref(), value, &guard)
-                .expect("MassTree::from_iter: allocation failed");
+            // Inserts are infallible (abort on OOM like std collections)
+            tree.insert_with_guard(key.as_ref(), value, &guard);
         }
 
         drop(guard);
@@ -1361,11 +1375,9 @@ where
 {
     /// Extends the tree with key-value pairs from an iterator.
     ///
-    /// # Failure Behavior
+    /// # Allocation
     ///
-    /// Allocation failures are silently skipped. The [`Extend`] trait returns `()`,
-    /// so errors cannot be propagated. If you need to detect failures,
-    /// use [`insert_batch()`](Self::insert_batch) which returns [`Result`].
+    /// Allocations are infallible (abort on OOM like std collections).
     ///
     /// # Upsert Semantics
     ///
@@ -1377,7 +1389,7 @@ where
     /// use masstree::MassTree;
     ///
     /// let mut tree: MassTree<u64> = MassTree::new();
-    /// tree.insert(b"existing", 0).unwrap();
+    /// tree.insert(b"existing", 0);
     ///
     /// // Can use byte literals directly, &[u8; N] implements AsRef<[u8]>
     /// tree.extend([

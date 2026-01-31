@@ -34,7 +34,7 @@ fn w1_single_thread() {
     for _ in 0..N {
         let x: u64 = rng.random();
         let key = make_key10(x);
-        tree.insert_with_guard(&key, x + 1, &guard).unwrap();
+        tree.insert_with_guard(&key, x + 1, &guard);
     }
 }
 
@@ -86,7 +86,7 @@ fn w1_sequential_keys() {
 
     for i in 0..N as u64 {
         let key = make_key10(i);
-        tree.insert_with_guard(&key, i + 1, &guard).unwrap();
+        tree.insert_with_guard(&key, i + 1, &guard);
     }
 
     // Verify sample

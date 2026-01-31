@@ -4,7 +4,7 @@ use masstree::{MassTree15Inline, RangeBound};
 use seize::LocalGuard;
 
 #[test]
-#[expect(clippy::indexing_slicing, clippy::unwrap_used)]
+#[expect(clippy::indexing_slicing)]
 fn masstree15_inline_no_leak_with_long_keys() {
     fn make_key(i: u64) -> [u8; 64] {
         let mut key = [0u8; 64];
@@ -25,7 +25,7 @@ fn masstree15_inline_no_leak_with_long_keys() {
 
     for i in 0..20 {
         let key = make_key(i);
-        tree.insert_with_guard(&key, i, &guard).unwrap();
+        tree.insert_with_guard(&key, i, &guard);
     }
 
     drop(guard);
@@ -40,7 +40,7 @@ fn masstree15_inline_no_leak_with_long_keys() {
 
 /// Test basic `for_each` scan on inline tree.
 #[test]
-#[expect(clippy::unwrap_used)]
+
 fn inline_scan_for_each() {
     let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
@@ -48,7 +48,7 @@ fn inline_scan_for_each() {
     // Insert some values
     for i in 0u64..20 {
         let key = i.to_be_bytes();
-        tree.insert_with_guard(&key, i * 10, &guard).unwrap();
+        tree.insert_with_guard(&key, i * 10, &guard);
     }
 
     // Scan using for_each
@@ -71,7 +71,7 @@ fn inline_scan_for_each() {
 
 /// Test intra-leaf batch scan on inline tree.
 #[test]
-#[expect(clippy::unwrap_used)]
+
 fn inline_scan_intra_leaf_batch() {
     let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
@@ -79,7 +79,7 @@ fn inline_scan_intra_leaf_batch() {
     // Insert enough values to span multiple leaves
     for i in 0u64..100 {
         let key = i.to_be_bytes();
-        tree.insert_with_guard(&key, i * 100, &guard).unwrap();
+        tree.insert_with_guard(&key, i * 100, &guard);
     }
 
     // Scan using for_each_intra_leaf_batch
@@ -102,14 +102,14 @@ fn inline_scan_intra_leaf_batch() {
 
 /// Test intra-leaf batch scan with early stop.
 #[test]
-#[expect(clippy::unwrap_used)]
+
 fn inline_scan_batch_early_stop() {
     let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     for i in 0u64..50 {
         let key = i.to_be_bytes();
-        tree.insert_with_guard(&key, i, &guard).unwrap();
+        tree.insert_with_guard(&key, i, &guard);
     }
 
     // Stop after 10 entries
@@ -125,14 +125,14 @@ fn inline_scan_batch_early_stop() {
 
 /// Test intra-leaf batch scan with range bounds.
 #[test]
-#[expect(clippy::unwrap_used)]
+
 fn inline_scan_batch_range() {
     let tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = tree.guard();
 
     for i in 0u64..100 {
         let key = i.to_be_bytes();
-        tree.insert_with_guard(&key, i, &guard).unwrap();
+        tree.insert_with_guard(&key, i, &guard);
     }
 
     // Range scan from 25 to 75
@@ -162,7 +162,7 @@ fn inline_scan_batch_range() {
 
 /// Test intra-leaf batch scan with multi-layer keys (keys > 8 bytes).
 #[test]
-#[expect(clippy::unwrap_used, clippy::indexing_slicing)]
+#[expect(clippy::indexing_slicing)]
 fn inline_scan_batch_multi_layer() {
     // Helper to create keys that will create layers (> 8 bytes with common prefix)
     let make_key = |i: u64| -> Vec<u8> {
@@ -179,7 +179,7 @@ fn inline_scan_batch_multi_layer() {
 
     for i in 0u64..30 {
         let key = make_key(i);
-        tree.insert_with_guard(&key, i * 11, &guard).unwrap();
+        tree.insert_with_guard(&key, i * 11, &guard);
     }
 
     // Scan all entries

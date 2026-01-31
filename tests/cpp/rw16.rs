@@ -45,7 +45,7 @@ fn rw16_single_thread() {
         let x: i32 = rng.random();
         let key = make_key16(x);
         let val = make_val16(x);
-        tree.insert_with_guard(&key, val, &guard).unwrap();
+        tree.insert_with_guard(&key, val, &guard);
         keys.push(x);
     }
 
@@ -110,7 +110,7 @@ fn rw16_sequential_keys() {
 
     (0..N as i32).for_each(|i| {
         let key = make_key16(i);
-        tree.insert_with_guard(&key, i as u64, &guard).unwrap();
+        tree.insert_with_guard(&key, i as u64, &guard);
     });
 
     // Verify all
