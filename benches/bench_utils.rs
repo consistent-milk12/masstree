@@ -50,16 +50,16 @@ pub fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=128).contains(&K), "key size must be 8..=128");
 
-    let chunks = K / 8;
-    let mut out = Vec::with_capacity(n);
+    let chunks: usize = K / 8;
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(n);
 
     for i in 0..n {
-        let mut key = [0u8; K];
+        let mut key: [u8; K] = [0u8; K];
 
         for c in 0..chunks {
-            let v = (i as u64).wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()]);
-            let bytes = v.to_be_bytes();
-            let start = c * 8;
+            let v: u64 = (i as u64).wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()]);
+            let bytes: [u8; _] = v.to_be_bytes();
+            let start: usize = c * 8;
 
             key[start..start + 8].copy_from_slice(&bytes);
         }
@@ -91,18 +91,19 @@ pub fn keys_shared_prefix<const K: usize>(n: usize, prefix_buckets: u64) -> Vec<
     );
     assert!(prefix_buckets > 0, "prefix_buckets must be > 0");
 
-    let chunks = K / 8;
-    let mut out = Vec::with_capacity(n);
+    let chunks: usize = K / 8;
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(n);
     for i in 0..n {
-        let mut key = [0u8; K];
+        let mut key: [u8; K] = [0u8; K];
 
-        let prefix = ((i as u64) % prefix_buckets).to_be_bytes();
+        let prefix: [u8; _] = ((i as u64) % prefix_buckets).to_be_bytes();
         key[0..8].copy_from_slice(&prefix);
 
         for c in 1..chunks {
-            let v = (i as u64).wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()]);
-            let bytes = v.to_be_bytes();
-            let start = c * 8;
+            let v: u64 = (i as u64).wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()]);
+            let bytes: [u8; _] = v.to_be_bytes();
+            let start: usize = c * 8;
+
             key[start..start + 8].copy_from_slice(&bytes);
         }
 
@@ -132,18 +133,19 @@ pub fn keys_shared_prefix_chunks<const K: usize>(
     assert!((16..=128).contains(&K), "key size must be 16..=128");
     assert!(prefix_buckets > 0, "prefix_buckets must be > 0");
 
-    let chunks = K / 8;
+    let chunks: usize = K / 8;
     assert!(
         (1..chunks).contains(&prefix_chunks),
         "prefix_chunks must be in 1..chunks"
     );
 
-    let mut out = Vec::with_capacity(n);
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(n);
+
     for i in 0..n {
-        let mut key = [0u8; K];
+        let mut key: [u8; K] = [0u8; K];
 
         for c in 0..chunks {
-            let v = if c < prefix_chunks {
+            let v: u64 = if c < prefix_chunks {
                 // Keep each prefix chunk in a small bucket-space.
                 // Using a per-chunk multiplier helps avoid "all prefix chunks identical"
                 // when prefix_buckets > 1, while still keeping collisions high.
@@ -152,8 +154,10 @@ pub fn keys_shared_prefix_chunks<const K: usize>(
                 // Ensure remaining chunks vary with `i` so keys remain distinct.
                 (i as u64).wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()])
             };
-            let bytes = v.to_be_bytes();
-            let start = c * 8;
+
+            let bytes: [u8; _] = v.to_be_bytes();
+            let start: usize = c * 8;
+
             key[start..start + 8].copy_from_slice(&bytes);
         }
 
@@ -172,13 +176,15 @@ pub fn keys_shared_prefix_chunks<const K: usize>(
 /// For true Zipfian distribution, use [`zipfian_indices`] instead.
 #[must_use]
 pub fn skewed_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
+    assert!(n > 0, "n must be > 0");
+
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let max_idx: f64 = (n - 1) as f64;
+
     (0..count)
         .map(|_| {
             let u: f64 = rng.random();
-            ((n as f64).powf(1.0 - u) - 1.0)
-                .max(0.0)
-                .min((n - 1) as f64) as usize
+            ((n as f64).powf(1.0 - u) - 1.0).clamp(0.0, max_idx) as usize
         })
         .collect()
 }
@@ -197,7 +203,7 @@ pub fn zipfian_indices(n: usize, count: usize, s: f64, seed: u64) -> Vec<usize> 
     assert!(s > 0.0, "s must be > 0 for Zipf distribution");
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let zipf = Zipf::new(n as f64, s).expect("invalid Zipf parameters");
+    let zipf: Zipf<f64> = Zipf::new(n as f64, s).expect("invalid Zipf parameters");
 
     (0..count)
         .map(|_| {
@@ -211,6 +217,8 @@ pub fn zipfian_indices(n: usize, count: usize, s: f64, seed: u64) -> Vec<usize> 
 /// Uniform random indices.
 #[must_use]
 pub fn uniform_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
+    assert!(n > 0, "n must be > 0");
+
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     (0..count).map(|_| rng.random_range(0..n)).collect()
 }
@@ -234,8 +242,9 @@ pub fn shuffle<T>(slice: &mut [T], seed: u64) {
 #[must_use]
 pub fn random_start_indices(key_count: usize, ops_count: usize, seed: u64) -> Vec<usize> {
     // Reserve room at the end so scans don't immediately hit end-of-tree
-    let max_start = key_count.saturating_sub(100).max(1);
+    let max_start: usize = key_count.saturating_sub(100).max(1);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
     (0..ops_count)
         .map(|_| rng.random_range(0..max_start))
         .collect()
@@ -247,7 +256,8 @@ pub fn random_start_indices(key_count: usize, ops_count: usize, seed: u64) -> Ve
 pub fn rw1_keys(n: usize, seed: u64) -> (Vec<i32>, Vec<i32>) {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let keys: Vec<i32> = (0..n).map(|_| rng.random()).collect();
-    let values: Vec<i32> = keys.iter().map(|k| k.wrapping_add(1)).collect();
+    let values: Vec<i32> = keys.iter().map(|k: &i32| k.wrapping_add(1)).collect();
+
     (keys, values)
 }
 
@@ -273,14 +283,16 @@ pub fn keys_sequential<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=128).contains(&K), "key size must be 8..=128");
 
-    let mut out = Vec::with_capacity(n);
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(n);
+
     for i in 0..n {
-        let mut key = [0u8; K];
-        // Put the index in the last 8 bytes for proper sorting
-        let bytes = (i as u64).to_be_bytes();
+        let mut key: [u8; K] = [0u8; K];
+        let bytes: [u8; _] = (i as u64).to_be_bytes();
+
         key[K - 8..].copy_from_slice(&bytes);
         out.push(key);
     }
+
     out
 }
 
@@ -293,11 +305,13 @@ pub fn keys_reverse<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=128).contains(&K), "key size must be 8..=128");
 
-    let mut out = Vec::with_capacity(n);
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(n);
+
     for i in 0..n {
-        let mut key = [0u8; K];
-        let val = (n - 1 - i) as u64;
-        let bytes = val.to_be_bytes();
+        let mut key: [u8; K] = [0u8; K];
+        let val: u64 = (n - 1 - i) as u64;
+        let bytes: [u8; _] = val.to_be_bytes();
+
         key[K - 8..].copy_from_slice(&bytes);
         out.push(key);
     }
@@ -321,17 +335,23 @@ pub fn keys_clustered<const K: usize>(
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=128).contains(&K), "key size must be 8..=128");
 
-    let mut out = Vec::with_capacity(clusters * keys_per_cluster);
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(clusters * keys_per_cluster);
+
     for cluster in 0..clusters {
-        let base = (cluster as u64) * (keys_per_cluster as u64 + gap_size);
+        // Use saturating arithmetic to prevent overflow
+        let cluster_stride: u64 = (keys_per_cluster as u64).saturating_add(gap_size);
+        let base: u64 = (cluster as u64).saturating_mul(cluster_stride);
+
         for i in 0..keys_per_cluster {
-            let mut key = [0u8; K];
-            let val = base + i as u64;
-            let bytes = val.to_be_bytes();
+            let mut key: [u8; K] = [0u8; K];
+            let val: u64 = base.saturating_add(i as u64);
+            let bytes: [u8; _] = val.to_be_bytes();
+
             key[K - 8..].copy_from_slice(&bytes);
             out.push(key);
         }
     }
+
     out
 }
 
@@ -347,14 +367,18 @@ pub fn keys_sparse<const K: usize>(n: usize, spacing: u64) -> Vec<[u8; K]> {
     assert!((8..=128).contains(&K), "key size must be 8..=128");
     assert!(spacing > 0, "spacing must be > 0");
 
-    let mut out = Vec::with_capacity(n);
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(n);
+
     for i in 0..n {
-        let mut key = [0u8; K];
-        let val = (i as u64) * spacing;
-        let bytes = val.to_be_bytes();
+        let mut key: [u8; K] = [0u8; K];
+        // Use saturating_mul to prevent overflow for large n * spacing
+        let val: u64 = (i as u64).saturating_mul(spacing);
+        let bytes: [u8; _] = val.to_be_bytes();
+
         key[K - 8..].copy_from_slice(&bytes);
         out.push(key);
     }
+
     out
 }
 
@@ -373,26 +397,27 @@ pub fn keys_suffix_only_differ<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((16..=128).contains(&K), "key size must be 16..=128");
 
-    let chunks = K / 8;
-    let mut out = Vec::with_capacity(n);
+    let chunks: usize = K / 8;
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(n);
 
     // Fixed prefix for all keys
     let prefix_value: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
     for i in 0..n {
-        let mut key = [0u8; K];
+        let mut key: [u8; K] = [0u8; K];
 
         // All prefix chunks are identical
         for c in 0..(chunks - 1) {
-            let bytes = prefix_value.to_be_bytes();
-            let start = c * 8;
+            let bytes: [u8; _] = prefix_value.to_be_bytes();
+            let start: usize = c * 8;
+
             key[start..start + 8].copy_from_slice(&bytes);
         }
 
         // Only the last chunk varies
-        let suffix = (i as u64).to_be_bytes();
-        key[K - 8..].copy_from_slice(&suffix);
+        let suffix: [u8; _] = (i as u64).to_be_bytes();
 
+        key[K - 8..].copy_from_slice(&suffix);
         out.push(key);
     }
     out
@@ -418,30 +443,31 @@ pub fn keys_hierarchical<const K: usize>(
         "key size must be 24..=128 for hierarchical keys"
     );
 
-    let mut out = Vec::with_capacity(namespaces * categories_per_ns * items_per_cat);
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(namespaces * categories_per_ns * items_per_cat);
 
     for ns in 0..namespaces {
         for cat in 0..categories_per_ns {
             for item in 0..items_per_cat {
-                let mut key = [0u8; K];
+                let mut key: [u8; K] = [0u8; K];
 
                 // Chunk 0: namespace
-                let ns_bytes = (ns as u64).to_be_bytes();
+                let ns_bytes: [u8; _] = (ns as u64).to_be_bytes();
                 key[0..8].copy_from_slice(&ns_bytes);
 
                 // Chunk 1: category
-                let cat_bytes = (cat as u64).to_be_bytes();
+                let cat_bytes: [u8; _] = (cat as u64).to_be_bytes();
                 key[8..16].copy_from_slice(&cat_bytes);
 
                 // Chunk 2: item ID
-                let item_bytes = (item as u64).to_be_bytes();
+                let item_bytes: [u8; _] = (item as u64).to_be_bytes();
                 key[16..24].copy_from_slice(&item_bytes);
 
                 // Remaining chunks: padding with combined hash
-                let combined = ((ns as u64) << 32) | ((cat as u64) << 16) | (item as u64);
+                let combined: u64 = ((ns as u64) << 32) | ((cat as u64) << 16) | (item as u64);
+
                 for c in 3..(K / 8) {
-                    let v = combined.wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()]);
-                    let start = c * 8;
+                    let v: u64 = combined.wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()]);
+                    let start: usize = c * 8;
                     key[start..start + 8].copy_from_slice(&v.to_be_bytes());
                 }
 
@@ -473,24 +499,25 @@ pub struct VariableLengthKeys {
 #[must_use]
 pub fn keys_variable_length(n: usize, seed: u64) -> VariableLengthKeys {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut keys = Vec::with_capacity(n);
-    let mut distribution = [0usize; 4];
+    let mut keys: Vec<ArrayVec<u8, 32>> = Vec::with_capacity(n);
+    let mut distribution: [usize; 4] = [0usize; 4];
 
-    let sizes = [8, 16, 24, 32];
+    let sizes: [usize; 4] = [8, 16, 24, 32];
 
     for i in 0..n {
-        let size_idx = rng.random_range(0..4);
-        let size = sizes[size_idx];
+        let size_idx: usize = rng.random_range(0..4);
+        let size: usize = sizes[size_idx];
         distribution[size_idx] += 1;
 
         let mut key = ArrayVec::<u8, 32>::new();
         // Pre-fill with zeros to the target size
         key.extend(std::iter::repeat_n(0u8, size));
-        let chunks = size / 8;
+        let chunks: usize = size / 8;
 
         for c in 0..chunks {
-            let v = (i as u64).wrapping_mul(MULTIPLIERS[c]);
-            let start = c * 8;
+            let v: u64 = (i as u64).wrapping_mul(MULTIPLIERS[c]);
+            let start: usize = c * 8;
+
             key[start..start + 8].copy_from_slice(&v.to_be_bytes());
         }
 
@@ -511,14 +538,14 @@ pub fn keys_variable_length(n: usize, seed: u64) -> VariableLengthKeys {
 /// Format: `https://domain{i%domains}.com/path/{category}/{id}`
 #[must_use]
 pub fn string_keys_urls(n: usize, domains: usize) -> Vec<String> {
-    let mut keys = Vec::with_capacity(n);
+    let mut keys: Vec<String> = Vec::with_capacity(n);
 
-    let categories = ["products", "users", "orders", "api", "static", "images"];
+    let categories: [&str; 6] = ["products", "users", "orders", "api", "static", "images"];
 
     for i in 0..n {
-        let domain = i % domains;
-        let category = categories[i % categories.len()];
-        let id = i / domains;
+        let domain: usize = i % domains;
+        let category: &str = categories[i % categories.len()];
+        let id: usize = i / domains;
 
         keys.push(format!(
             "https://example{domain:04}.com/{category}/item{id:08x}"
@@ -535,19 +562,19 @@ pub fn string_keys_urls(n: usize, domains: usize) -> Vec<String> {
 /// Format: `/home/user{u}/projects/proj{p}/src/module{m}/file{f}.rs`
 #[must_use]
 pub fn string_keys_paths(n: usize, users: usize, projects_per_user: usize) -> Vec<String> {
-    let mut keys = Vec::with_capacity(n);
+    let mut keys: Vec<String> = Vec::with_capacity(n);
 
-    let modules = [
+    let modules: [&str; 8] = [
         "core", "util", "api", "db", "cache", "net", "auth", "config",
     ];
-    let extensions = ["rs", "toml", "md", "json", "yaml"];
+    let extensions: [&str; 5] = ["rs", "toml", "md", "json", "yaml"];
 
     for i in 0..n {
-        let user = i % users;
-        let project = (i / users) % projects_per_user;
-        let module = modules[i % modules.len()];
-        let file_id = i / (users * projects_per_user);
-        let ext = extensions[i % extensions.len()];
+        let user: usize = i % users;
+        let project: usize = (i / users) % projects_per_user;
+        let module: &str = modules[i % modules.len()];
+        let file_id: usize = i / (users * projects_per_user);
+        let ext: &str = extensions[i % extensions.len()];
 
         keys.push(format!(
             "/home/user{user:03}/projects/project{project:02}/src/{module}/file{file_id:06}.{ext}"
@@ -570,26 +597,32 @@ pub fn keys_adversarial_splits<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=128).contains(&K), "key size must be 8..=128");
 
-    let mut out = Vec::with_capacity(n);
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(n);
 
     // Phase 1: Sequential keys to fill initial structure
-    let phase1_count = n / 2;
+    let phase1_count: usize = n / 2;
+
     for i in 0..phase1_count {
-        let mut key = [0u8; K];
+        let mut key: [u8; K] = [0u8; K];
+
         // Multiply by 2 to leave gaps
-        let val = (i as u64) * 2;
-        let bytes = val.to_be_bytes();
+        let val: u64 = (i as u64) * 2;
+        let bytes: [u8; _] = val.to_be_bytes();
+
         key[K - 8..].copy_from_slice(&bytes);
         out.push(key);
     }
 
     // Phase 2: Insert keys in the gaps to force splits
-    let phase2_count = n - phase1_count;
+    let phase2_count: usize = n - phase1_count;
+
     for i in 0..phase2_count {
-        let mut key = [0u8; K];
+        let mut key: [u8; K] = [0u8; K];
+
         // Insert odd numbers to land between existing keys
-        let val = (i as u64) * 2 + 1;
-        let bytes = val.to_be_bytes();
+        let val: u64 = (i as u64) * 2 + 1;
+        let bytes: [u8; _] = val.to_be_bytes();
+
         key[K - 8..].copy_from_slice(&bytes);
         out.push(key);
     }
@@ -614,16 +647,17 @@ pub fn keys_interleaved_ranges<const K: usize>(
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((8..=128).contains(&K), "key size must be 8..=128");
 
-    let total_keys = hot_ranges * keys_per_range;
-    let mut out = Vec::with_capacity(total_keys);
+    let total_keys: usize = hot_ranges * keys_per_range;
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(total_keys);
 
     // Generate keys but interleave them: key 0 from range 0, key 0 from range 1, ...
     for key_idx in 0..keys_per_range {
         for range_idx in 0..hot_ranges {
-            let mut key = [0u8; K];
-            let base = (range_idx as u64) * (keys_per_range as u64 + cold_gap);
-            let val = base + key_idx as u64;
-            let bytes = val.to_be_bytes();
+            let mut key: [u8; K] = [0u8; K];
+            let base: u64 = (range_idx as u64) * (keys_per_range as u64 + cold_gap);
+            let val: u64 = base + key_idx as u64;
+            let bytes: [u8; _] = val.to_be_bytes();
+
             key[K - 8..].copy_from_slice(&bytes);
             out.push(key);
         }
@@ -642,23 +676,23 @@ pub fn keys_random_length_simulation<const K: usize>(n: usize, seed: u64) -> Vec
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
     assert!((16..=128).contains(&K), "key size must be 16..=128");
 
-    let chunks = K / 8;
+    let chunks: usize = K / 8;
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut out = Vec::with_capacity(n);
+    let mut out: Vec<[u8; K]> = Vec::with_capacity(n);
 
     for i in 0..n {
         // Determine "effective length" for this key (1 to chunks)
-        let effective_chunks = rng.random_range(1..=chunks);
+        let effective_chunks: usize = rng.random_range(1..=chunks);
 
-        let mut key = [0u8; K];
+        let mut key: [u8; K] = [0u8; K];
 
         for c in 0..chunks {
             if c < effective_chunks {
-                let v = (i as u64).wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()]);
-                let start = c * 8;
+                let v: u64 = (i as u64).wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()]);
+                let start: usize = c * 8;
+
                 key[start..start + 8].copy_from_slice(&v.to_be_bytes());
             }
-            // else: leave as zeros (simulating shorter key)
         }
 
         out.push(key);
@@ -682,28 +716,32 @@ pub fn keys_blink_stress<const K: usize>(n: usize) -> Vec<[u8; K]> {
     if n == 0 {
         return Vec::new();
     }
+
     if n == 1 {
-        let mut key = [0u8; K];
+        let mut key: [u8; K] = [0u8; K];
         key[K - 8..].copy_from_slice(&0u64.to_be_bytes());
         return vec![key];
     }
 
     // Generate sequential keys
     let mut keys: Vec<[u8; K]> = Vec::with_capacity(n);
+
     for i in 0..n {
-        let mut key = [0u8; K];
+        let mut key: [u8; K] = [0u8; K];
+
         key[K - 8..].copy_from_slice(&(i as u64).to_be_bytes());
         keys.push(key);
     }
 
     // Reorder using bit-reversal permutation for maximum split stress
     // This interleaves keys so that consecutive insertions land in different leaves
-    let bits = (n as f64).log2().ceil() as u32;
-    let mut reordered = Vec::with_capacity(n);
+    // Use integer arithmetic to avoid precision loss for large n
+    let bits: u32 = usize::BITS - n.saturating_sub(1).leading_zeros();
+    let mut reordered: Vec<[u8; K]> = Vec::with_capacity(n);
 
     for i in 0..n {
-        let reversed = (i as u32).reverse_bits() >> (32 - bits);
-        let idx = (reversed as usize).min(n - 1);
+        let reversed: u32 = (i as u32).reverse_bits() >> (32 - bits);
+        let idx: usize = (reversed as usize).min(n - 1);
         reordered.push(keys[idx]);
     }
 
@@ -744,16 +782,19 @@ pub fn scan_ranges<const K: usize>(
         "total_keys must be >= num_ranges to have non-empty ranges"
     );
 
-    let range_size = total_keys / num_ranges;
+    let range_size: u64 = (total_keys / num_ranges) as u64;
 
     // Non-overlapping ranges
-    let mut non_overlapping = Vec::with_capacity(num_ranges);
-    for r in 0..num_ranges {
-        let start_val = (r * range_size) as u64;
-        let end_val = ((r + 1) * range_size - 1) as u64;
+    let mut non_overlapping: Vec<([u8; K], [u8; K])> = Vec::with_capacity(num_ranges);
 
-        let mut start_key = [0u8; K];
-        let mut end_key = [0u8; K];
+    for r in 0..num_ranges {
+        // Cast before multiply to prevent overflow
+        let start_val: u64 = (r as u64) * range_size;
+        let end_val: u64 = ((r + 1) as u64) * range_size - 1;
+
+        let mut start_key: [u8; K] = [0u8; K];
+        let mut end_key: [u8; K] = [0u8; K];
+
         start_key[K - 8..].copy_from_slice(&start_val.to_be_bytes());
         end_key[K - 8..].copy_from_slice(&end_val.to_be_bytes());
 
@@ -761,13 +802,15 @@ pub fn scan_ranges<const K: usize>(
     }
 
     // Overlapping ranges (each overlaps with neighbor by 50%)
-    let mut overlapping = Vec::with_capacity(num_ranges);
+    let mut overlapping: Vec<([u8; K], [u8; K])> = Vec::with_capacity(num_ranges);
     for r in 0..num_ranges {
-        let start_val = (r * range_size / 2) as u64;
-        let end_val = start_val + range_size as u64;
+        // Cast before multiply to prevent overflow
+        let start_val: u64 = (r as u64) * (range_size / 2);
+        let end_val: u64 = start_val + range_size;
 
-        let mut start_key = [0u8; K];
-        let mut end_key = [0u8; K];
+        let mut start_key: [u8; K] = [0u8; K];
+        let mut end_key: [u8; K] = [0u8; K];
+
         start_key[K - 8..].copy_from_slice(&start_val.to_be_bytes());
         end_key[K - 8..].copy_from_slice(&end_val.to_be_bytes());
 
@@ -783,16 +826,16 @@ pub fn scan_ranges<const K: usize>(
 /// Includes 4 additional prefixes that won't match anything (for miss testing).
 #[must_use]
 pub fn scan_prefixes(prefix_buckets: u64) -> Vec<Vec<u8>> {
-    let mut prefixes = Vec::with_capacity(prefix_buckets as usize + 4);
+    let mut prefixes: Vec<Vec<u8>> = Vec::with_capacity(prefix_buckets as usize + 4);
 
     for bucket in 0..prefix_buckets {
-        let prefix = bucket.to_be_bytes().to_vec();
+        let prefix: Vec<u8> = bucket.to_be_bytes().to_vec();
         prefixes.push(prefix);
     }
 
     // Also add some prefixes that won't match anything
     for i in 0..4 {
-        let no_match = (prefix_buckets + i + 1000).to_be_bytes().to_vec();
+        let no_match: Vec<u8> = (prefix_buckets + i + 1000).to_be_bytes().to_vec();
         prefixes.push(no_match);
     }
 
@@ -912,7 +955,7 @@ impl BenchmarkRunner {
         pre_measurement_barrier();
 
         // Run benchmark
-        let result = bench_fn();
+        let result: R = bench_fn();
 
         // Barrier after measurement
         post_measurement_barrier();
