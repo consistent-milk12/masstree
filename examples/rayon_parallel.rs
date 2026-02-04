@@ -5,11 +5,13 @@
 //! bulk operations, comparing performance against [`scc::TreeIndex`].
 //!
 //! Key patterns:
-//! - Parallel bulk insert
-//! - Parallel bulk lookup
-//! - Parallel processing with thread-local guards
+//! - **Chunked parallel processing** (amortizes guard overhead - RECOMMENDED)
+//! - Parallel bulk insert and lookup
 //! - Map-reduce patterns
 //! - Performance comparison with [`TreeIndex`]
+//!
+//! **IMPORTANT**: Always use `par_chunks` to amortize guard creation overhead.
+//! Creating a guard per-iteration is an anti-pattern that hurts performance.
 //!
 //! Run with: `cargo run --example rayon_parallel --release`
 
@@ -45,21 +47,25 @@ fn main() {
     println!("╚══════════════════════════════════════════════════════════════════╝\n");
 
     let n = 1_000_000u64;
+    let chunk_size = 1000usize; // Amortize guard overhead across 1000 operations
 
     // -------------------------------------------------------------------------
-    // Parallel Bulk Insert Comparison
+    // Parallel Bulk Insert Comparison (CHUNKED - recommended pattern)
     // -------------------------------------------------------------------------
     println!("┌─────────────────────────────────────────────────────────────────┐");
-    println!("│ Parallel Bulk Insert ({n} entries)                         │");
+    println!("│ Parallel Bulk Insert ({n} entries, chunked)                │");
     println!("└─────────────────────────────────────────────────────────────────┘");
 
-    // MassTree15Inline
+    // MassTree15Inline - using par_chunks to amortize guard overhead
     let masstree: Arc<MassTree15Inline<u64>> = Arc::new(MassTree15Inline::new());
+    let keys: Vec<u64> = (0..n).collect();
     let start = Instant::now();
-    (0..n).into_par_iter().for_each(|i| {
-        let key = make_key(i);
-        let guard = masstree.guard();
-        let _ = masstree.insert_with_guard(&key, i, &guard);
+    keys.par_chunks(chunk_size).for_each(|chunk| {
+        let guard = masstree.guard(); // One guard per chunk!
+        for &i in chunk {
+            let key = make_key(i);
+            let _ = masstree.insert_with_guard(&key, i, &guard);
+        }
     });
     let masstree_insert = start.elapsed();
     println!(
@@ -71,9 +77,11 @@ fn main() {
     // TreeIndex
     let treeindex: Arc<TreeIndex<[u8; KEY_SIZE], u64>> = Arc::new(TreeIndex::new());
     let start = Instant::now();
-    (0..n).into_par_iter().for_each(|i| {
-        let key = make_key(i);
-        let _ = treeindex.insert_sync(key, i);
+    keys.par_chunks(chunk_size).for_each(|chunk| {
+        for &i in chunk {
+            let key = make_key(i);
+            let _ = treeindex.insert_sync(key, i);
+        }
     });
     let treeindex_insert = start.elapsed();
     println!(
@@ -90,20 +98,25 @@ fn main() {
     );
 
     // -------------------------------------------------------------------------
-    // Parallel Bulk Lookup Comparison
+    // Parallel Bulk Lookup Comparison (CHUNKED)
     // -------------------------------------------------------------------------
     println!("┌─────────────────────────────────────────────────────────────────┐");
-    println!("│ Parallel Bulk Lookup ({n} entries)                         │");
+    println!("│ Parallel Bulk Lookup ({n} entries, chunked)                │");
     println!("└─────────────────────────────────────────────────────────────────┘");
 
-    // MassTree15Inline
+    // MassTree15Inline - chunked lookups
     let start = Instant::now();
-    let masstree_found: u64 = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i);
+    let masstree_found: u64 = keys
+        .par_chunks(chunk_size)
+        .map(|chunk| {
             let guard = masstree.guard();
-            u64::from(masstree.get_with_guard(&key, &guard).is_some())
+            chunk
+                .iter()
+                .map(|&i| {
+                    let key = make_key(i);
+                    u64::from(masstree.get_with_guard(&key, &guard).is_some())
+                })
+                .sum::<u64>()
         })
         .sum();
     let masstree_lookup = start.elapsed();
@@ -114,13 +127,18 @@ fn main() {
         masstree_found
     );
 
-    // TreeIndex
+    // TreeIndex - chunked for fair comparison
     let start = Instant::now();
-    let treeindex_found: u64 = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i);
-            u64::from(treeindex.peek_with(&key, |_, _| ()).is_some())
+    let treeindex_found: u64 = keys
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|&i| {
+                    let key = make_key(i);
+                    u64::from(treeindex.peek_with(&key, |_, _| ()).is_some())
+                })
+                .sum::<u64>()
         })
         .sum();
     let treeindex_lookup = start.elapsed();
@@ -139,27 +157,30 @@ fn main() {
     );
 
     // -------------------------------------------------------------------------
-    // Mixed Read/Write Workload (90% read, 10% write)
+    // Mixed Read/Write Workload (90% read, 10% write) - CHUNKED
     // -------------------------------------------------------------------------
     println!("┌─────────────────────────────────────────────────────────────────┐");
-    println!("│ Mixed Workload: 90% Read, 10% Write (500k ops)                  │");
+    println!("│ Mixed Workload: 90% Read, 10% Write (500k ops, chunked)         │");
     println!("└─────────────────────────────────────────────────────────────────┘");
 
     let ops = 500_000u64;
+    let op_indices: Vec<u64> = (0..ops).collect();
 
-    // MassTree15Inline
+    // MassTree15Inline - chunked mixed workload
     let start = Instant::now();
-    let _: u64 = (0..ops)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i % n);
+    let _: u64 = op_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
             let guard = masstree.guard();
-            if i % 10 == 0 {
-                let _ = masstree.insert_with_guard(&key, i + 1_000_000, &guard);
-            } else {
-                let _ = masstree.get_with_guard(&key, &guard);
+            for &i in chunk {
+                let key = make_key(i % n);
+                if i % 10 == 0 {
+                    let _ = masstree.insert_with_guard(&key, i + 1_000_000, &guard);
+                } else {
+                    let _ = masstree.get_with_guard(&key, &guard);
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let masstree_mixed = start.elapsed();
@@ -169,20 +190,22 @@ fn main() {
         ops as f64 / masstree_mixed.as_secs_f64() / 1_000_000.0
     );
 
-    // TreeIndex - need to handle insert specially (it can fail if key exists)
+    // TreeIndex - chunked for fair comparison
     let start = Instant::now();
-    let _: u64 = (0..ops)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i % n);
-            if i % 10 == 0 {
-                // TreeIndex insert fails if key exists, so remove first
-                treeindex.remove_sync(&key);
-                let _ = treeindex.insert_sync(key, i + 1_000_000);
-            } else {
-                let _ = treeindex.peek_with(&key, |_, _| ());
+    let _: u64 = op_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            for &i in chunk {
+                let key = make_key(i % n);
+                if i % 10 == 0 {
+                    // TreeIndex insert fails if key exists, so remove first
+                    treeindex.remove_sync(&key);
+                    let _ = treeindex.insert_sync(key, i + 1_000_000);
+                } else {
+                    let _ = treeindex.peek_with(&key, |_, _| ());
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let treeindex_mixed = start.elapsed();
@@ -200,32 +223,42 @@ fn main() {
     );
 
     // -------------------------------------------------------------------------
-    // Parallel Map-Reduce (sum all values)
+    // Parallel Map-Reduce (sum all values) - CHUNKED
     // -------------------------------------------------------------------------
     println!("┌─────────────────────────────────────────────────────────────────┐");
-    println!("│ Parallel Map-Reduce: Sum All Values                             │");
+    println!("│ Parallel Map-Reduce: Sum All Values (chunked)                   │");
     println!("└─────────────────────────────────────────────────────────────────┘");
 
-    // MassTree15Inline
+    // MassTree15Inline - chunked reduce
     let start = Instant::now();
-    let masstree_sum: u64 = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i);
+    let masstree_sum: u64 = keys
+        .par_chunks(chunk_size)
+        .map(|chunk| {
             let guard = masstree.guard();
-            masstree.get_with_guard(&key, &guard).unwrap_or(0)
+            chunk
+                .iter()
+                .map(|&i| {
+                    let key = make_key(i);
+                    masstree.get_with_guard(&key, &guard).unwrap_or(0)
+                })
+                .sum::<u64>()
         })
         .sum();
     let masstree_reduce = start.elapsed();
     println!("  MassTree15Inline: {masstree_reduce:>8.2?}  sum = {masstree_sum}");
 
-    // TreeIndex
+    // TreeIndex - chunked for fair comparison
     let start = Instant::now();
-    let treeindex_sum: u64 = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i);
-            treeindex.peek_with(&key, |_, v| *v).unwrap_or(0)
+    let treeindex_sum: u64 = keys
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|&i| {
+                    let key = make_key(i);
+                    treeindex.peek_with(&key, |_, v| *v).unwrap_or(0)
+                })
+                .sum::<u64>()
         })
         .sum();
     let treeindex_reduce = start.elapsed();
@@ -239,7 +272,7 @@ fn main() {
     );
 
     // =========================================================================
-    // HIGH CONTENTION SCENARIOS
+    // HIGH CONTENTION SCENARIOS (chunked for fair comparison)
     // =========================================================================
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║              HIGH CONTENTION SCENARIOS (MassTree shines)         ║");
@@ -254,28 +287,33 @@ fn main() {
 
     let hot_keys = 100u64;
     let hot_ops = 500_000u64;
+    let hot_indices: Vec<u64> = (0..hot_ops).collect();
 
     // Pre-populate hot keys in both structures
-    for i in 0..hot_keys {
-        let key = make_key(i);
+    {
         let guard = masstree.guard();
-        let _ = masstree.insert_with_guard(&key, i, &guard);
-        let _ = treeindex.insert_sync(key, i);
+        for i in 0..hot_keys {
+            let key = make_key(i);
+            let _ = masstree.insert_with_guard(&key, i, &guard);
+            let _ = treeindex.insert_sync(key, i);
+        }
     }
 
-    // MassTree
+    // MassTree - chunked
     let start = Instant::now();
-    let _: u64 = (0..hot_ops)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i % hot_keys);
+    let _: u64 = hot_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
             let guard = masstree.guard();
-            if i % 10 == 0 {
-                let _ = masstree.insert_with_guard(&key, i, &guard);
-            } else {
-                let _ = masstree.get_with_guard(&key, &guard);
+            for &i in chunk {
+                let key = make_key(i % hot_keys);
+                if i % 10 == 0 {
+                    let _ = masstree.insert_with_guard(&key, i, &guard);
+                } else {
+                    let _ = masstree.get_with_guard(&key, &guard);
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let masstree_hot = start.elapsed();
@@ -285,19 +323,21 @@ fn main() {
         hot_ops as f64 / masstree_hot.as_secs_f64() / 1_000_000.0
     );
 
-    // TreeIndex
+    // TreeIndex - chunked
     let start = Instant::now();
-    let _: u64 = (0..hot_ops)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i % hot_keys);
-            if i % 10 == 0 {
-                treeindex.remove_sync(&key);
-                let _ = treeindex.insert_sync(key, i);
-            } else {
-                let _ = treeindex.peek_with(&key, |_, _| ());
+    let _: u64 = hot_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            for &i in chunk {
+                let key = make_key(i % hot_keys);
+                if i % 10 == 0 {
+                    treeindex.remove_sync(&key);
+                    let _ = treeindex.insert_sync(key, i);
+                } else {
+                    let _ = treeindex.peek_with(&key, |_, _| ());
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let treeindex_hot = start.elapsed();
@@ -323,18 +363,20 @@ fn main() {
 
     let single_key = make_key(42);
 
-    // MassTree
+    // MassTree - chunked
     let start = Instant::now();
-    let _: u64 = (0..hot_ops)
-        .into_par_iter()
-        .map(|i| {
+    let _: u64 = hot_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
             let guard = masstree.guard();
-            if i % 20 == 0 {
-                let _ = masstree.insert_with_guard(&single_key, i, &guard);
-            } else {
-                let _ = masstree.get_with_guard(&single_key, &guard);
+            for &i in chunk {
+                if i % 20 == 0 {
+                    let _ = masstree.insert_with_guard(&single_key, i, &guard);
+                } else {
+                    let _ = masstree.get_with_guard(&single_key, &guard);
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let masstree_single = start.elapsed();
@@ -344,18 +386,20 @@ fn main() {
         hot_ops as f64 / masstree_single.as_secs_f64() / 1_000_000.0
     );
 
-    // TreeIndex
+    // TreeIndex - chunked
     let start = Instant::now();
-    let _: u64 = (0..hot_ops)
-        .into_par_iter()
-        .map(|i| {
-            if i % 20 == 0 {
-                treeindex.remove_sync(&single_key);
-                let _ = treeindex.insert_sync(single_key, i);
-            } else {
-                let _ = treeindex.peek_with(&single_key, |_, _| ());
+    let _: u64 = hot_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            for &i in chunk {
+                if i % 20 == 0 {
+                    treeindex.remove_sync(&single_key);
+                    let _ = treeindex.insert_sync(single_key, i);
+                } else {
+                    let _ = treeindex.peek_with(&single_key, |_, _| ());
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let treeindex_single = start.elapsed();
@@ -383,34 +427,38 @@ fn main() {
     let hot_portion = total_keys / 5; // 20% of keys
 
     // Pre-populate
-    for i in 0..total_keys {
-        let key = make_key(i);
+    {
         let guard = masstree.guard();
-        let _ = masstree.insert_with_guard(&key, i, &guard);
-        let _ = treeindex.insert_sync(key, i);
+        for i in 0..total_keys {
+            let key = make_key(i);
+            let _ = masstree.insert_with_guard(&key, i, &guard);
+            let _ = treeindex.insert_sync(key, i);
+        }
     }
 
-    // MassTree - Zipfian access
+    // MassTree - Zipfian access, chunked
     let start = Instant::now();
-    let _: u64 = (0..hot_ops)
-        .into_par_iter()
-        .map(|i| {
-            // 80% chance to hit hot keys (0..hot_portion), 20% cold
-            let key_idx = if i % 5 == 0 {
-                // 20% cold access
-                hot_portion + (i % (total_keys - hot_portion))
-            } else {
-                // 80% hot access
-                i % hot_portion
-            };
-            let key = make_key(key_idx);
+    let _: u64 = hot_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
             let guard = masstree.guard();
-            if i % 10 == 0 {
-                let _ = masstree.insert_with_guard(&key, i, &guard);
-            } else {
-                let _ = masstree.get_with_guard(&key, &guard);
+            for &i in chunk {
+                // 80% chance to hit hot keys (0..hot_portion), 20% cold
+                let key_idx = if i % 5 == 0 {
+                    // 20% cold access
+                    hot_portion + (i % (total_keys - hot_portion))
+                } else {
+                    // 80% hot access
+                    i % hot_portion
+                };
+                let key = make_key(key_idx);
+                if i % 10 == 0 {
+                    let _ = masstree.insert_with_guard(&key, i, &guard);
+                } else {
+                    let _ = masstree.get_with_guard(&key, &guard);
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let masstree_zipf = start.elapsed();
@@ -420,24 +468,26 @@ fn main() {
         hot_ops as f64 / masstree_zipf.as_secs_f64() / 1_000_000.0
     );
 
-    // TreeIndex - Zipfian access
+    // TreeIndex - Zipfian access, chunked
     let start = Instant::now();
-    let _: u64 = (0..hot_ops)
-        .into_par_iter()
-        .map(|i| {
-            let key_idx = if i % 5 == 0 {
-                hot_portion + (i % (total_keys - hot_portion))
-            } else {
-                i % hot_portion
-            };
-            let key = make_key(key_idx);
-            if i % 10 == 0 {
-                treeindex.remove_sync(&key);
-                let _ = treeindex.insert_sync(key, i);
-            } else {
-                let _ = treeindex.peek_with(&key, |_, _| ());
+    let _: u64 = hot_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            for &i in chunk {
+                let key_idx = if i % 5 == 0 {
+                    hot_portion + (i % (total_keys - hot_portion))
+                } else {
+                    i % hot_portion
+                };
+                let key = make_key(key_idx);
+                if i % 10 == 0 {
+                    treeindex.remove_sync(&key);
+                    let _ = treeindex.insert_sync(key, i);
+                } else {
+                    let _ = treeindex.peek_with(&key, |_, _| ());
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let treeindex_zipf = start.elapsed();
@@ -463,20 +513,23 @@ fn main() {
 
     let write_keys = 1000u64;
     let write_ops = 200_000u64;
+    let write_indices: Vec<u64> = (0..write_ops).collect();
 
-    // MassTree
+    // MassTree - chunked
     let start = Instant::now();
-    let _: u64 = (0..write_ops)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i % write_keys);
+    let _: u64 = write_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
             let guard = masstree.guard();
-            if i % 2 == 0 {
-                let _ = masstree.insert_with_guard(&key, i, &guard);
-            } else {
-                let _ = masstree.get_with_guard(&key, &guard);
+            for &i in chunk {
+                let key = make_key(i % write_keys);
+                if i % 2 == 0 {
+                    let _ = masstree.insert_with_guard(&key, i, &guard);
+                } else {
+                    let _ = masstree.get_with_guard(&key, &guard);
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let masstree_write = start.elapsed();
@@ -486,19 +539,21 @@ fn main() {
         write_ops as f64 / masstree_write.as_secs_f64() / 1_000_000.0
     );
 
-    // TreeIndex
+    // TreeIndex - chunked
     let start = Instant::now();
-    let _: u64 = (0..write_ops)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i % write_keys);
-            if i % 2 == 0 {
-                treeindex.remove_sync(&key);
-                let _ = treeindex.insert_sync(key, i);
-            } else {
-                let _ = treeindex.peek_with(&key, |_, _| ());
+    let _: u64 = write_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            for &i in chunk {
+                let key = make_key(i % write_keys);
+                if i % 2 == 0 {
+                    treeindex.remove_sync(&key);
+                    let _ = treeindex.insert_sync(key, i);
+                } else {
+                    let _ = treeindex.peek_with(&key, |_, _| ());
+                }
             }
-            1
+            chunk.len() as u64
         })
         .sum();
     let treeindex_write = start.elapsed();
@@ -523,15 +578,21 @@ fn main() {
     println!("└─────────────────────────────────────────────────────────────────┘");
 
     let read_only_ops = 1_000_000u64;
+    let read_indices: Vec<u64> = (0..read_only_ops).collect();
 
-    // MassTree
+    // MassTree - chunked
     let start = Instant::now();
-    let found: u64 = (0..read_only_ops)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i % hot_keys);
+    let found: u64 = read_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
             let guard = masstree.guard();
-            u64::from(masstree.get_with_guard(&key, &guard).is_some())
+            chunk
+                .iter()
+                .map(|&i| {
+                    let key = make_key(i % hot_keys);
+                    u64::from(masstree.get_with_guard(&key, &guard).is_some())
+                })
+                .sum::<u64>()
         })
         .sum();
     let masstree_readonly = start.elapsed();
@@ -542,13 +603,18 @@ fn main() {
         found
     );
 
-    // TreeIndex
+    // TreeIndex - chunked
     let start = Instant::now();
-    let found: u64 = (0..read_only_ops)
-        .into_par_iter()
-        .map(|i| {
-            let key = make_key(i % hot_keys);
-            u64::from(treeindex.peek_with(&key, |_, _| ()).is_some())
+    let found: u64 = read_indices
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|&i| {
+                    let key = make_key(i % hot_keys);
+                    u64::from(treeindex.peek_with(&key, |_, _| ()).is_some())
+                })
+                .sum::<u64>()
         })
         .sum();
     let treeindex_readonly = start.elapsed();
@@ -600,18 +666,24 @@ fn main() {
     println!("Tree size: {}\n", tree.len());
 
     // -------------------------------------------------------------------------
-    // Parallel Filter and Collect
+    // Parallel Filter and Collect (chunked)
     // -------------------------------------------------------------------------
     println!("--- Parallel Filter and Collect ---\n");
 
+    let filter_indices: Vec<u64> = (0..500_000).collect();
     let start = Instant::now();
-    let filtered: Vec<(String, u64)> = (0..500_000)
-        .into_par_iter()
-        .filter_map(|i| {
-            let key = format!("chunk/{i:07}");
+    let filtered: Vec<(String, u64)> = filter_indices
+        .par_chunks(1000)
+        .flat_map(|chunk| {
             let guard = tree.guard();
-            tree.get_with_guard(key.as_bytes(), &guard)
-                .and_then(|v| if v > 400_000 { Some((key, v)) } else { None })
+            chunk
+                .iter()
+                .filter_map(|&i| {
+                    let key = format!("chunk/{i:07}");
+                    tree.get_with_guard(key.as_bytes(), &guard)
+                        .and_then(|v| if v > 400_000 { Some((key, v)) } else { None })
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
     let elapsed = start.elapsed();

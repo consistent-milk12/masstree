@@ -34,12 +34,17 @@ fn main() {
 
     // Insert some key-value pairs
     // Keys are byte slices, values are your type
-    tree.insert_with_guard(b"users/alice", 100, &guard).unwrap();
-    tree.insert_with_guard(b"users/bob", 200, &guard).unwrap();
-    tree.insert_with_guard(b"users/charlie", 300, &guard)
-        .unwrap();
-    tree.insert_with_guard(b"posts/1", 1001, &guard).unwrap();
-    tree.insert_with_guard(b"posts/2", 1002, &guard).unwrap();
+    // insert_with_guard returns Option<Arc<V>> - the old value if key existed
+    let old = tree.insert_with_guard(b"users/alice", 100, &guard);
+    println!("First insert of users/alice: old={old:?}"); // None - no previous value
+
+    let old = tree.insert_with_guard(b"users/bob", 200, &guard);
+    assert!(old.is_none()); // New key, no old value
+
+    // Insert is infallible - always succeeds
+    tree.insert_with_guard(b"users/charlie", 300, &guard);
+    tree.insert_with_guard(b"posts/1", 1001, &guard);
+    tree.insert_with_guard(b"posts/2", 1002, &guard);
 
     println!("Inserted 5 entries");
     println!("Tree size: {}\n", tree.len());
@@ -126,22 +131,29 @@ fn main() {
     // =========================================================================
     println!("--- Example 4: Updates and Removals ---\n");
 
-    // Update existing key (returns old value)
-    let old = tree.insert_with_guard(b"users/alice", 150, &guard).unwrap();
-    println!("Updated users/alice: old={old:?}");
-
-    if let Some(new_val) = tree.get_ref(b"users/alice", &guard) {
-        println!("New value: {new_val}");
+    // Update existing key - insert_with_guard returns the OLD value when key exists
+    match tree.insert_with_guard(b"users/alice", 150, &guard) {
+        Some(old_value) => println!("Updated users/alice: old={old_value}, new=150"),
+        None => println!("Inserted new key users/alice"),
     }
 
-    // Remove a key
-    let removed = tree.remove_with_guard(b"users/bob", &guard).unwrap();
-    println!("Removed users/bob: {removed:?}");
+    if let Some(new_val) = tree.get_ref(b"users/alice", &guard) {
+        println!("Verified new value: {new_val}");
+    }
+
+    // Remove a key - returns Result<Option<Arc<V>>, RemoveError>
+    // The Result handles concurrent modification; Option indicates if key existed
+    match tree.remove_with_guard(b"users/bob", &guard) {
+        Ok(Some(removed)) => println!("Removed users/bob: value was {removed}"),
+        Ok(None) => println!("users/bob not found (nothing to remove)"),
+        Err(e) => println!("Remove encountered concurrent modification: {e:?}"),
+    }
     println!("Tree size after removal: {}", tree.len());
 
-    // Verify removal
+    // Verify removal - should return None
     let not_found = tree.get_ref(b"users/bob", &guard);
-    println!("users/bob after removal: {not_found:?}");
+    assert!(not_found.is_none());
+    println!("users/bob after removal: None (as expected)");
 
     println!();
 
@@ -154,16 +166,10 @@ fn main() {
     let inline_tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = inline_tree.guard();
 
-    // Insert operations work the same way
-    inline_tree
-        .insert_with_guard(b"counter/a", 1, &guard)
-        .unwrap();
-    inline_tree
-        .insert_with_guard(b"counter/b", 2, &guard)
-        .unwrap();
-    inline_tree
-        .insert_with_guard(b"counter/c", 3, &guard)
-        .unwrap();
+    // Insert operations work the same way (returns old value or None for new keys)
+    inline_tree.insert_with_guard(b"counter/a", 1, &guard);
+    inline_tree.insert_with_guard(b"counter/b", 2, &guard);
+    inline_tree.insert_with_guard(b"counter/c", 3, &guard);
 
     // get_with_guard returns the value directly (no Arc) for Inline variants
     if let Some(value) = inline_tree.get_with_guard(b"counter/a", &guard) {
@@ -190,12 +196,8 @@ fn main() {
     let simple_tree: MassTree15<String> = MassTree15::new();
 
     // These methods create guards internally - simpler but more overhead per call
-    simple_tree
-        .insert(b"greeting", "Hello, World!".to_string())
-        .unwrap();
-    simple_tree
-        .insert(b"farewell", "Goodbye!".to_string())
-        .unwrap();
+    simple_tree.insert(b"greeting", "Hello, World!".to_string());
+    simple_tree.insert(b"farewell", "Goodbye!".to_string());
 
     // get() returns Option<Arc<V>>
     if let Some(greeting) = simple_tree.get(b"greeting") {
@@ -205,8 +207,10 @@ fn main() {
     println!("Simple tree size: {}", simple_tree.len());
     println!("Is empty: {}", simple_tree.is_empty());
 
-    // Remove with auto-guard
-    simple_tree.remove(b"farewell").unwrap();
+    // Remove with auto-guard - returns Result<Option<Arc<V>>, RemoveError>
+    if let Ok(Some(_)) = simple_tree.remove(b"farewell") {
+        println!("Removed 'farewell'");
+    }
     println!("After removal: {}", simple_tree.len());
 
     println!();
@@ -221,8 +225,7 @@ fn main() {
 
     for i in 0..10u64 {
         let key = format!("item/{i:03}");
-        tree.insert_with_guard(key.as_bytes(), i * 10, &guard)
-            .unwrap();
+        tree.insert_with_guard(key.as_bytes(), i * 10, &guard);
     }
 
     // Collect all entries into a Vec
@@ -254,14 +257,10 @@ fn main() {
     // URLs, file paths, UUIDs all work well
 
     // URL-like keys
-    tree.insert_with_guard(b"/api/v1/users/123", 1, &guard)
-        .unwrap();
-    tree.insert_with_guard(b"/api/v1/users/456", 2, &guard)
-        .unwrap();
-    tree.insert_with_guard(b"/api/v1/posts/789", 3, &guard)
-        .unwrap();
-    tree.insert_with_guard(b"/api/v2/users/123", 4, &guard)
-        .unwrap();
+    tree.insert_with_guard(b"/api/v1/users/123", 1, &guard);
+    tree.insert_with_guard(b"/api/v1/users/456", 2, &guard);
+    tree.insert_with_guard(b"/api/v1/posts/789", 3, &guard);
+    tree.insert_with_guard(b"/api/v2/users/123", 4, &guard);
 
     println!("All v1 users:");
     tree.scan_prefix(
@@ -279,7 +278,7 @@ fn main() {
 
     for i in [100u64, 50, 200, 75, 150] {
         let key = i.to_be_bytes();
-        int_tree.insert_with_guard(&key, i as u32, &guard).unwrap();
+        int_tree.insert_with_guard(&key, i as u32, &guard);
     }
 
     println!("\nInteger keys in sorted order:");

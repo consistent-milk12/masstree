@@ -12,11 +12,17 @@
 //! - Ability to invalidate all sessions for a user
 //! - Background cleanup of expired sessions
 //!
+//! **Design Note**: This example uses efficient dual-indexing:
+//! - Primary index: `session:{session_id}` -> `Session` (full session data)
+//! - User index: `user:{user_id}:{session_id}` -> `()` (empty marker, just for lookup)
+//!
+//! This avoids storing duplicate session data in both indexes.
+//!
 //! Run with: `cargo run --example session_store --release`
 
 #![expect(clippy::unwrap_used)]
 
-use masstree::MassTree15;
+use masstree::{MassTree15, MassTree15Inline};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -111,11 +117,18 @@ fn generate_session_id() -> SessionId {
 /// Thread-safe session store backed by [`MassTree`]
 ///
 /// Key format:
-/// - Primary index: `session:{session_id}` -> Session
-/// - User index: `user:{user_id}:{session_id}` -> `session_id` (for user lookups)
+/// - Primary index: `session:{session_id}` -> `Session` (full session data)
+/// - User index: `user:{user_id}:{session_id}` -> `()` (empty marker for user lookups)
+///
+/// This design avoids storing duplicate session data. The user index only stores
+/// markers to enable efficient prefix scans for "all sessions for user X".
 struct SessionStore {
-    /// Main session storage
+    /// Main session storage: session:{session_id} -> Session
     sessions: MassTree15<Session>,
+
+    /// User index: user:{user_id}:{session_id} -> () (marker only)
+    /// Using MassTree15Inline<()> since we don't need to store any data
+    user_index: MassTree15Inline<()>,
 
     /// Statistics
     active_sessions: AtomicU64,
@@ -130,6 +143,7 @@ impl SessionStore {
     fn new(default_ttl_secs: u64) -> Self {
         Self {
             sessions: MassTree15::new(),
+            user_index: MassTree15Inline::new(),
             active_sessions: AtomicU64::new(0),
             total_created: AtomicU64::new(0),
             total_expired: AtomicU64::new(0),
@@ -148,19 +162,21 @@ impl SessionStore {
             user_agent,
         );
 
-        let guard = self.sessions.guard();
+        // Use separate guards for each tree (they have different collectors)
+        let session_guard = self.sessions.guard();
+        let user_guard = self.user_index.guard();
 
-        // Store in primary index
+        // Store full session in primary index
         let primary_key = format!("session:{session_id}");
         let _ = self
             .sessions
-            .insert_with_guard(primary_key.as_bytes(), session.clone(), &guard);
+            .insert_with_guard(primary_key.as_bytes(), session, &session_guard);
 
-        // Store in user index for reverse lookup
+        // Store only a marker in user index (no duplicate session data!)
         let user_key = format!("user:{user_id}:{session_id}");
         let _ = self
-            .sessions
-            .insert_with_guard(user_key.as_bytes(), session, &guard);
+            .user_index
+            .insert_with_guard(user_key.as_bytes(), (), &user_guard);
 
         self.active_sessions.fetch_add(1, Ordering::Relaxed);
         self.total_created.fetch_add(1, Ordering::Relaxed);
@@ -176,7 +192,8 @@ impl SessionStore {
         match self.sessions.get_with_guard(key.as_bytes(), &guard) {
             Some(session) if !session.is_expired() => Some(session),
             Some(_) => {
-                // Expired session - clean it up
+                // Expired session - clean it up lazily
+                drop(guard); // Release guard before calling invalidate
                 self.invalidate_session(session_id);
                 None
             }
@@ -190,6 +207,9 @@ impl SessionStore {
     }
 
     /// Update session data
+    ///
+    /// Note: This clones the session to update it. For high-frequency updates,
+    /// consider using interior mutability (e.g., RwLock inside Session).
     fn update_session_data(&self, session_id: &str, key: &str, value: &str) -> bool {
         self.get_session(session_id).is_some_and(|session| {
             let mut updated = (*session).clone();
@@ -198,17 +218,11 @@ impl SessionStore {
 
             let guard = self.sessions.guard();
 
-            // Update primary index
+            // Only update primary index - user index just has markers
             let primary_key = format!("session:{session_id}");
-            let _ =
-                self.sessions
-                    .insert_with_guard(primary_key.as_bytes(), updated.clone(), &guard);
-
-            // Update user index
-            let user_key = format!("user:{}:{session_id}", session.user_id);
             let _ = self
                 .sessions
-                .insert_with_guard(user_key.as_bytes(), updated, &guard);
+                .insert_with_guard(primary_key.as_bytes(), updated, &guard);
 
             true
         })
@@ -222,20 +236,26 @@ impl SessionStore {
 
     /// Invalidate (delete) a specific session
     fn invalidate_session(&self, session_id: &str) -> bool {
-        let guard = self.sessions.guard();
+        let session_guard = self.sessions.guard();
         let primary_key = format!("session:{session_id}");
 
         // First get the session to find the user_id
         self.sessions
-            .get_with_guard(primary_key.as_bytes(), &guard)
+            .get_with_guard(primary_key.as_bytes(), &session_guard)
             .is_some_and(|session| {
-                let user_key = format!("user:{}:{session_id}", session.user_id);
+                let user_id = session.user_id;
+                let user_key = format!("user:{user_id}:{session_id}");
 
-                // Remove from both indexes
+                // Remove from primary index
                 let _ = self
                     .sessions
-                    .remove_with_guard(primary_key.as_bytes(), &guard);
-                let _ = self.sessions.remove_with_guard(user_key.as_bytes(), &guard);
+                    .remove_with_guard(primary_key.as_bytes(), &session_guard);
+
+                // Remove from user index (separate guard)
+                let user_guard = self.user_index.guard();
+                let _ = self
+                    .user_index
+                    .remove_with_guard(user_key.as_bytes(), &user_guard);
 
                 self.active_sessions.fetch_sub(1, Ordering::Relaxed);
                 true
@@ -244,19 +264,26 @@ impl SessionStore {
 
     /// Invalidate all sessions for a user (e.g., on password change or logout-all)
     fn invalidate_user_sessions(&self, user_id: UserId) -> usize {
-        let guard = self.sessions.guard();
+        let user_guard = self.user_index.guard();
         let prefix = format!("user:{user_id}:");
 
-        // Collect all session IDs for this user
+        // Collect all session IDs for this user from the user index
+        // The key format is "user:{user_id}:{session_id}", so we extract session_id from the key
         let mut session_ids = Vec::new();
-        self.sessions.scan_prefix(
+        self.user_index.scan_prefix(
             prefix.as_bytes(),
-            |_, session| {
-                session_ids.push(session.id.clone());
+            |key, _| {
+                // Extract session_id from key: "user:{user_id}:{session_id}"
+                if let Ok(key_str) = std::str::from_utf8(key)
+                    && let Some(session_id) = key_str.strip_prefix(&prefix)
+                {
+                    session_ids.push(session_id.to_string());
+                }
                 true
             },
-            &guard,
+            &user_guard,
         );
+        drop(user_guard); // Release before calling invalidate_session
 
         // Invalidate each session
         let count = session_ids.len();
@@ -269,21 +296,32 @@ impl SessionStore {
 
     /// Get all active sessions for a user
     fn get_user_sessions(&self, user_id: UserId) -> Vec<Arc<Session>> {
-        let guard = self.sessions.guard();
+        let user_guard = self.user_index.guard();
+        let session_guard = self.sessions.guard();
         let prefix = format!("user:{user_id}:");
 
         let mut sessions = Vec::new();
-        self.sessions.scan_prefix(
-            prefix.as_bytes(),
-            |_, session| {
-                // session is &Arc<Session>, clone() gives Arc<Session>
-                if !session.is_expired() {
-                    sessions.push(session);
-                }
 
+        // Scan user index to get session IDs, then look up full sessions
+        self.user_index.scan_prefix(
+            prefix.as_bytes(),
+            |key, _| {
+                // Extract session_id from key, then look up full session
+                if let Ok(key_str) = std::str::from_utf8(key)
+                    && let Some(session_id) = key_str.strip_prefix(&prefix)
+                {
+                    let session_key = format!("session:{session_id}");
+                    if let Some(session) = self
+                        .sessions
+                        .get_with_guard(session_key.as_bytes(), &session_guard)
+                        && !session.is_expired()
+                    {
+                        sessions.push(session);
+                    }
+                }
                 true
             },
-            &guard,
+            &user_guard,
         );
 
         sessions
@@ -305,6 +343,7 @@ impl SessionStore {
             },
             &guard,
         );
+        drop(guard); // Release before calling invalidate_session
 
         // Invalidate all expired sessions
         let count = expired_sessions.len();
@@ -312,8 +351,11 @@ impl SessionStore {
             self.invalidate_session(&session_id);
         }
 
-        // Process coalesce queue
-        self.sessions.process_coalesce(&guard);
+        // Process coalesce queues for both trees
+        let session_guard = self.sessions.guard();
+        let user_guard = self.user_index.guard();
+        self.sessions.process_coalesce(&session_guard);
+        self.user_index.process_coalesce(&user_guard);
 
         self.total_expired
             .fetch_add(count as u64, Ordering::Relaxed);
@@ -323,11 +365,12 @@ impl SessionStore {
     /// Get store statistics
     fn stats(&self) -> String {
         format!(
-            "Active: {}, Total Created: {}, Total Expired: {}, Tree Size: {}",
+            "Active: {}, Total Created: {}, Total Expired: {}, Sessions: {}, User Index: {}",
             self.active_sessions.load(Ordering::Relaxed),
             self.total_created.load(Ordering::Relaxed),
             self.total_expired.load(Ordering::Relaxed),
-            self.sessions.len() / 2, // Divide by 2 because we store 2 entries per session
+            self.sessions.len(),
+            self.user_index.len(),
         )
     }
 }

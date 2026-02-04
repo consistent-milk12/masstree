@@ -459,7 +459,6 @@ impl NodeCleaner {
     /// (parent not found or lock coupling failed - do not retire the leaf).
     #[cold]
     #[inline(never)]
-    #[expect(clippy::too_many_lines)]
     pub fn remove_leaf_from_parent_for_coalesce<S, L, A>(
         allocator: &A,
         guard: &LocalGuard<'_>,
@@ -603,22 +602,11 @@ impl NodeCleaner {
 
             // Parent is empty (nkeys == 0) and not root
             let child0: *mut u8 = parent.child(0);
-            if child0.is_null() {
-                // No remaining child - this can happen if we removed the last child.
-                // The parent is now an empty non-root internode. We still mark it
-                // deleted but there's nothing to propagate up as replacement.
-                parent_lock.mark_deleted();
-                unsafe {
-                    allocator.retire_internode_erased(parent_ptr, guard);
-                }
-                drop(parent_lock);
-                return true;
-            }
 
             // Step 10: Collapse empty parent
-            // The parent has exactly one child (child[0]). We'll mark the parent
-            // deleted and continue walking up, installing child[0] as the replacement
-            // in the grandparent.
+            // Mark deleted and retire, then continue walking up to update grandparent.
+            // If child[0] is non-null, it becomes the replacement in grandparent.
+            // If child[0] is null, grandparent's child pointer is set to null.
             parent_lock.mark_deleted();
 
             // SAFETY: parent_ptr is a valid internode that we hold locked (parent_lock).
