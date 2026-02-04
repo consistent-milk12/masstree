@@ -30,11 +30,8 @@ use std::fmt::{self as StdFmt, Debug, Formatter};
 use seize::LocalGuard;
 
 use crate::{
-    MassTreeGeneric, NodeAllocatorGeneric,
-    leaf_trait::LayerCapableLeaf,
-    slot::ValueSlot,
-    tree::RemoveError,
-    value::traits::LeafValueLoad,
+    MassTreeGeneric, NodeAllocatorGeneric, leaf_trait::LayerCapableLeaf, slot::ValueSlot,
+    tree::RemoveError, value::traits::LeafValueLoad,
 };
 
 /// Result type for [`OccupiedEntry::try_remove_entry`].
@@ -244,8 +241,7 @@ where
                 let new_output: S::Output = S::into_output(new_value);
                 let return_output: S::Output = new_output.clone();
 
-                let _old = o.tree
-                    .insert_output_with_guard(o.key, new_output, o.guard);
+                let _old = o.tree.insert_output_with_guard(o.key, new_output, o.guard);
                 o.value = return_output;
 
                 Entry::Occupied(o)

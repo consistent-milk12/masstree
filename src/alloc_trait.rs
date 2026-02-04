@@ -12,6 +12,7 @@
 //! # Implementors
 //!
 //! - [`SeizeAllocator15<S>`](crate::alloc15::SeizeAllocator15) for `LeafNode15<S>`
+//! - [`SeizeAllocator15TrueInline<V>`](crate::alloc15::SeizeAllocator15TrueInline) for `LeafNode15TrueInline<V>`
 
 use seize::LocalGuard;
 
@@ -40,6 +41,7 @@ use crate::slot::ValueSlot;
 /// # Implementors
 ///
 /// - [`SeizeAllocator15<S>`](crate::alloc15::SeizeAllocator15) for `L = LeafNode15<S>`
+/// - [`SeizeAllocator15TrueInline<V>`](crate::alloc15::SeizeAllocator15TrueInline) for `L = LeafNode15TrueInline<V>`
 pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     // ========================================================================
     // Leaf Allocation
@@ -56,11 +58,6 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// # Returns
     ///
     /// A raw mutable pointer to the allocated node with valid provenance.
-    ///
-    /// # Note
-    ///
-    /// Uses interior mutability (`parking_lot::Mutex`) so this can be called
-    /// from concurrent code paths with only `&self`.
     fn alloc_leaf(&self, node: Box<L>) -> *mut L;
 
     /// Allocate a leaf node directly without going through Box.
@@ -138,11 +135,6 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     ///
     /// - The caller must pass a valid `Box::into_raw().cast()` pointer
     /// - The caller must cast the result back to the correct internode type
-    ///
-    /// # Note
-    ///
-    /// Uses interior mutability (`parking_lot::Mutex`) so this can be called
-    /// from concurrent code paths with only `&self`.
     fn alloc_internode_erased(&self, node_ptr: *mut u8) -> *mut u8;
 
     /// Allocate an internode directly without going through Box.
@@ -261,8 +253,7 @@ pub trait NodeAllocatorGeneric<S: ValueSlot, L: TreeLeafNode<S>>: Send + Sync {
     /// - `root_ptr` must point to a valid leaf or internode
     /// - No other shared pointers may reference nodes exclusively through this subtree
     unsafe fn retire_subtree_root(&self, root_ptr: *mut u8, guard: &LocalGuard<'_>);
-
-    }
+}
 
 // ============================================================================
 // Tests

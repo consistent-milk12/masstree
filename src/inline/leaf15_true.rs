@@ -1243,8 +1243,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             unsafe { &*self.inline_ksuf.get() };
 
         // Aborts on OOM (standard Rust behavior).
-        let mut new_bag: SuffixBag<WIDTH_15> = inline
-            .drain_to_external(&perm, slot, suffix);
+        let mut new_bag: SuffixBag<WIDTH_15> = inline.drain_to_external(&perm, slot, suffix);
 
         let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
@@ -1437,8 +1436,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             unsafe { &*self.inline_ksuf.get() };
 
         // Drain inline using sequential slot iteration (0..slot)
-        let mut new_bag: SuffixBag<WIDTH_15> = inline
-            .drain_to_external_init(slot, suffix);
+        let mut new_bag: SuffixBag<WIDTH_15> = inline.drain_to_external_init(slot, suffix);
 
         let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {

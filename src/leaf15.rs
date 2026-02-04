@@ -930,8 +930,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         // Drain inline using sequential slot iteration (0..slot)
         // NOTE: drain_to_external_init does NOT clear inline state.
         // Allocation is infallible (aborts on OOM).
-        let mut new_bag: SuffixBag<WIDTH_15> =
-            sidecar.inline.drain_to_external_init(slot, suffix);
+        let mut new_bag: SuffixBag<WIDTH_15> = sidecar.inline.drain_to_external_init(slot, suffix);
 
         // Merge with existing external suffixes (if any)
         let old_ext: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);

@@ -108,12 +108,10 @@ fn test_mixed_prefix_random() {
                 for i in 0..KEYS_PER_THREAD {
                     if i % 2 == 0 {
                         let key = format!("shared__{tid:04}_{i:08}");
-                        tree.insert(key.as_bytes(), i as u64)
-                            ;
+                        tree.insert(key.as_bytes(), i as u64);
                     } else {
                         let key = format!("unique{tid:02}_{i:08}");
-                        tree.insert(key.as_bytes(), i as u64)
-                            ;
+                        tree.insert(key.as_bytes(), i as u64);
                     }
                 }
             })

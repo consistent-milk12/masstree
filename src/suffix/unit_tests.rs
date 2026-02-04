@@ -1,10 +1,8 @@
-
-
 use std::cmp::Ordering;
 use std::iter as StdIter;
 use std::mem as StdMem;
 
-use super::{InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar, INITIAL_CAPACITY};
+use super::{INITIAL_CAPACITY, InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar};
 use crate::permuter::Permuter15;
 // Note: AllocError removed - allocations are now infallible
 
@@ -1004,10 +1002,12 @@ fn test_sidecar_drop_with_external() {
     }
 
     // Verify external is allocated
-    assert!(!sidecar
-        .external
-        .load(std::sync::atomic::Ordering::Relaxed)
-        .is_null());
+    assert!(
+        !sidecar
+            .external
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .is_null()
+    );
 
     // Verify we can read from external
     assert_eq!(sidecar.get(0), Some(b"external_suffix_0".as_slice()));
@@ -1054,14 +1054,16 @@ fn test_sidecar_default() {
     let s1: SuffixSidecar<15> = SuffixSidecar::new();
     let s2: SuffixSidecar<15> = SuffixSidecar::default();
 
-    assert!(s1
-        .external
-        .load(std::sync::atomic::Ordering::Relaxed)
-        .is_null());
-    assert!(s2
-        .external
-        .load(std::sync::atomic::Ordering::Relaxed)
-        .is_null());
+    assert!(
+        s1.external
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .is_null()
+    );
+    assert!(
+        s2.external
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .is_null()
+    );
     assert_eq!(s1.inline.count(), 0);
     assert_eq!(s2.inline.count(), 0);
 }

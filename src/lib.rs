@@ -195,7 +195,6 @@ pub const fn init_tracing() {}
 pub mod alloc15;
 mod alloc_common;
 pub mod alloc_trait;
-mod error;
 pub mod hints;
 pub mod inline;
 pub mod internode;

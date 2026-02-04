@@ -207,8 +207,7 @@ fn test_next_and_next_back_meet_in_middle() {
 fn test_alternating_next_next_back() {
     let tree = MassTree::<u64>::default();
     for i in 0..6u64 {
-        tree.insert(format!("{}", (b'a' + i as u8) as char).as_bytes(), i)
-            ;
+        tree.insert(format!("{}", (b'a' + i as u8) as char).as_bytes(), i);
     }
 
     let guard = tree.guard();

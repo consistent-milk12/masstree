@@ -7,8 +7,8 @@ use std::ptr as StdPtr;
 // Note: InsertError no longer used here - allocations are infallible
 
 use super::{
-    Key, LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric, Ordering,
-    TreePermutation, ValueSlot, LAYER_KEYLENX,
+    Key, LAYER_KEYLENX, LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric,
+    Ordering, TreePermutation, ValueSlot,
 };
 
 impl<S, L, A> MassTreeGeneric<S, L, A>

@@ -1071,7 +1071,9 @@ where
             Ok(result) => result,
             Err(e) => {
                 // SplitFailed indicates tree corruption or internal bug
-                panic!("Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation.");
+                panic!(
+                    "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
+                );
             }
         }
     }
@@ -1096,7 +1098,9 @@ where
         match self.insert_concurrent_generic(&mut key, output, guard) {
             Ok(result) => result,
             Err(e) => {
-                panic!("Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation.");
+                panic!(
+                    "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
+                );
             }
         }
     }

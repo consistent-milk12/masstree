@@ -524,8 +524,7 @@ macro_rules! impl_seize_allocator15 {
 
                 ptr
             }
-
-                    }
+        }
     };
 }
 
