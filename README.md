@@ -20,7 +20,7 @@ Copy types.
 
 **v0.7.1** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 7/8 benchmarks and
 Rust alternatives on 12/12 workloads (12T SMT). Passes Miri with strict-provenance flag. Concurrent data structures
-require extensive stress testing, the test suite is comprehensive (998 tests total) but edge cases may remain.
+require extensive stress testing, the test suite is comprehensive (978 tests total) but edge cases may remain.
 
 | Feature | Status |
 |---------|--------|
