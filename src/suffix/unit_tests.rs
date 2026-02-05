@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::iter as StdIter;
 use std::mem as StdMem;
 
-use super::{INITIAL_CAPACITY, InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar};
+use super::{InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar, INITIAL_CAPACITY};
 use crate::permuter::Permuter15;
 // Note: AllocError removed - allocations are now infallible
 
@@ -12,7 +12,7 @@ use crate::permuter::Permuter15;
 
 #[test]
 fn test_new_suffix_bag() {
-    let bag: SuffixBag<15> = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     assert_eq!(bag.count(), 0);
     assert!(bag.capacity() >= INITIAL_CAPACITY);
@@ -21,7 +21,7 @@ fn test_new_suffix_bag() {
 
 #[test]
 fn test_with_capacity() {
-    let bag: SuffixBag<15> = SuffixBag::with_capacity(256);
+    let bag: SuffixBag = SuffixBag::with_capacity(256);
 
     assert!(bag.capacity() >= 256);
     assert_eq!(bag.count(), 0);
@@ -29,7 +29,7 @@ fn test_with_capacity() {
 
 #[test]
 fn test_default() {
-    let bag: SuffixBag<15> = SuffixBag::default();
+    let bag: SuffixBag = SuffixBag::default();
 
     assert_eq!(bag.count(), 0);
 }
@@ -40,7 +40,7 @@ fn test_default() {
 
 #[test]
 fn test_assign_and_get() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
     bag.assign(5, b"world");
@@ -55,7 +55,7 @@ fn test_assign_and_get() {
 
 #[test]
 fn test_empty_suffix() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"");
 
@@ -65,7 +65,7 @@ fn test_empty_suffix() {
 
 #[test]
 fn test_get_or_empty() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
 
@@ -75,7 +75,7 @@ fn test_get_or_empty() {
 
 #[test]
 fn test_overwrite_suffix() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
     assert_eq!(bag.get(0), Some(b"hello".as_slice()));
@@ -93,7 +93,7 @@ fn test_overwrite_suffix() {
 
 #[test]
 fn test_clear_suffix() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
     assert!(bag.has_suffix(0));
@@ -106,7 +106,7 @@ fn test_clear_suffix() {
 
 #[test]
 fn test_clear_already_empty() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     // Clearing an empty slot should not panic
     bag.clear(0);
@@ -120,7 +120,7 @@ fn test_clear_already_empty() {
 
 #[test]
 fn test_compact() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     // Add several suffixes
     bag.assign(0, b"aaaa");
@@ -144,7 +144,7 @@ fn test_compact() {
 
 #[test]
 fn test_compact_empty() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     // Compact with no active slots should work
     let reclaimed: usize = bag.compact(StdIter::empty());
@@ -155,7 +155,7 @@ fn test_compact_empty() {
 
 #[test]
 fn test_compact_all() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"test");
     bag.assign(1, b"data");
@@ -186,7 +186,7 @@ fn test_compact_with_permuter() {
         }
     }
 
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"keep0");
     bag.assign(1, b"drop1");
     bag.assign(2, b"keep2");
@@ -218,7 +218,7 @@ fn test_compact_with_exclude() {
         }
     }
 
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"keep");
     bag.assign(1, b"exclude");
     bag.assign(2, b"keep2");
@@ -241,7 +241,7 @@ fn test_compact_with_exclude() {
 
 #[test]
 fn test_growth() {
-    let mut bag: SuffixBag<15> = SuffixBag::with_capacity(16);
+    let mut bag: SuffixBag = SuffixBag::with_capacity(16);
 
     // Fill past capacity
     for i in 0..15 {
@@ -259,7 +259,7 @@ fn test_growth() {
 
 #[test]
 fn test_long_suffix() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     let long_suffix: Vec<u8> = vec![b'x'; 1000];
     bag.assign(0, &long_suffix);
@@ -273,7 +273,7 @@ fn test_long_suffix() {
 
 #[test]
 fn test_suffix_equals() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
 
@@ -285,7 +285,7 @@ fn test_suffix_equals() {
 
 #[test]
 fn test_suffix_compare() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
 
@@ -301,42 +301,15 @@ fn test_suffix_compare() {
 
 #[test]
 fn test_clone() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"hello");
     bag.assign(5, b"world");
 
-    let cloned: SuffixBag<15> = bag.clone();
+    let cloned: SuffixBag = bag.clone();
 
     assert_eq!(cloned.get(0), Some(b"hello".as_slice()));
     assert_eq!(cloned.get(5), Some(b"world".as_slice()));
     assert_eq!(cloned.count(), 2);
-}
-
-// ========================================================================
-//  Width Variants Tests
-// ========================================================================
-
-#[test]
-fn test_width_7() {
-    let mut bag: SuffixBag<7> = SuffixBag::new();
-
-    bag.assign(0, b"test0");
-    bag.assign(6, b"test6");
-
-    assert_eq!(bag.get(0), Some(b"test0".as_slice()));
-    assert_eq!(bag.get(6), Some(b"test6".as_slice()));
-    assert_eq!(bag.count(), 2);
-}
-
-#[test]
-fn test_width_3() {
-    let mut bag: SuffixBag<3> = SuffixBag::new();
-
-    bag.assign(0, b"a");
-    bag.assign(1, b"b");
-    bag.assign(2, b"c");
-
-    assert_eq!(bag.count(), 3);
 }
 
 // ========================================================================
@@ -345,7 +318,7 @@ fn test_width_3() {
 
 #[test]
 fn test_try_assign_in_place_fresh_bag() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     // Fresh bag has capacity, should succeed
     assert!(bag.try_assign_in_place(0, b"hello"));
@@ -354,7 +327,7 @@ fn test_try_assign_in_place_fresh_bag() {
 
 #[test]
 fn test_try_assign_in_place_reuse_slot() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     // Assign a longer suffix first
     bag.assign(0, b"hello world");
@@ -370,7 +343,7 @@ fn test_try_assign_in_place_reuse_slot() {
 
 #[test]
 fn test_try_assign_in_place_append() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     // Assign to slot 0
     assert!(bag.try_assign_in_place(0, b"first"));
@@ -385,7 +358,7 @@ fn test_try_assign_in_place_append() {
 #[test]
 fn test_try_assign_in_place_fails_when_full() {
     // Create a bag with very small capacity
-    let mut bag: SuffixBag<15> = SuffixBag::with_capacity(10);
+    let mut bag: SuffixBag = SuffixBag::with_capacity(10);
 
     // First assignment should succeed
     assert!(bag.try_assign_in_place(0, b"12345"));
@@ -401,7 +374,7 @@ fn test_try_assign_in_place_fails_when_full() {
 
 #[test]
 fn test_try_assign_in_place_same_length() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
     let used_before: usize = bag.used();
@@ -414,7 +387,7 @@ fn test_try_assign_in_place_same_length() {
 
 #[test]
 fn test_try_assign_in_place_longer_suffix_needs_append() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hi");
     let used_before: usize = bag.used();
@@ -429,7 +402,7 @@ fn test_try_assign_in_place_longer_suffix_needs_append() {
 
 #[test]
 fn test_try_assign_in_place_mixed_usage() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     // Fill several slots
     for i in 0..5 {
@@ -453,17 +426,27 @@ fn test_try_assign_in_place_mixed_usage() {
 
 #[test]
 fn test_inline_new() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
-    assert_eq!(bag.capacity(), 256);
+    #[cfg(not(feature = "large-suffix-capacity"))]
+    {
+        assert_eq!(bag.capacity(), 256);
+        assert_eq!(bag.remaining(), 256);
+    }
+
+    #[cfg(feature = "large-suffix-capacity")]
+    {
+        assert_eq!(bag.capacity(), 512);
+        assert_eq!(bag.remaining(), 512);
+    }
+
     assert_eq!(bag.used(), 0);
-    assert_eq!(bag.remaining(), 256);
     assert_eq!(bag.count(), 0);
 }
 
 #[test]
 fn test_inline_default() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::default();
+    let bag: InlineSuffixBag = InlineSuffixBag::default();
 
     assert_eq!(bag.count(), 0);
     assert_eq!(bag.used(), 0);
@@ -471,7 +454,7 @@ fn test_inline_default() {
 
 #[test]
 fn test_inline_try_assign_basic() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     assert!(bag.try_assign(0, b"hello"));
     assert!(bag.try_assign(5, b"world"));
@@ -485,7 +468,7 @@ fn test_inline_try_assign_basic() {
 
 #[test]
 fn test_inline_try_assign_reuse_slot() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     // Assign longer suffix first
     assert!(bag.try_assign(0, b"hello world"));
@@ -501,7 +484,7 @@ fn test_inline_try_assign_reuse_slot() {
 
 #[test]
 fn test_inline_try_assign_append() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     assert!(bag.try_assign(0, b"first"));
     assert!(bag.try_assign(1, b"second"));
@@ -512,25 +495,8 @@ fn test_inline_try_assign_append() {
 }
 
 #[test]
-fn test_inline_try_assign_fails_when_full() {
-    let bag: InlineSuffixBag<15, 32> = InlineSuffixBag::new();
-
-    // Fill most of the capacity
-    assert!(bag.try_assign(0, b"12345678901234567890")); // 20 bytes
-    assert!(bag.try_assign(1, b"1234567890")); // 10 bytes, total 30
-
-    // This should fail - only 2 bytes remaining
-    assert!(!bag.try_assign(2, b"abc"));
-
-    // First two slots should still be valid
-    assert_eq!(bag.get(0), Some(b"12345678901234567890".as_slice()));
-    assert_eq!(bag.get(1), Some(b"1234567890".as_slice()));
-    assert_eq!(bag.get(2), None);
-}
-
-#[test]
 fn test_inline_clear() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     assert!(bag.has_suffix(0));
@@ -545,7 +511,7 @@ fn test_inline_clear() {
 
 #[test]
 fn test_inline_clear_all() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     bag.try_assign(1, b"world");
@@ -560,7 +526,7 @@ fn test_inline_clear_all() {
 
 #[test]
 fn test_inline_get_or_empty() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
 
@@ -570,7 +536,7 @@ fn test_inline_get_or_empty() {
 
 #[test]
 fn test_inline_suffix_equals() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
 
@@ -581,7 +547,7 @@ fn test_inline_suffix_equals() {
 
 #[test]
 fn test_inline_suffix_compare() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
 
@@ -592,7 +558,7 @@ fn test_inline_suffix_compare() {
 
 #[test]
 fn test_inline_drain_to_external() {
-    let bag: InlineSuffixBag<15, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     // Fill inline bag
     bag.try_assign(0, b"suffix0");
@@ -620,7 +586,7 @@ fn test_inline_drain_to_external() {
 
 #[test]
 fn test_inline_drain_replaces_slot() {
-    let bag: InlineSuffixBag<15, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     bag.try_assign(0, b"old_suffix");
     bag.try_assign(1, b"keep_this");
@@ -638,7 +604,7 @@ fn test_inline_drain_replaces_slot() {
 
 #[test]
 fn test_inline_drain_to_external_init() {
-    let bag: InlineSuffixBag<15, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     // Simulate split initialization: slots 0, 1, 2 filled sequentially
     bag.try_assign(0, b"suffix_0");
@@ -661,7 +627,7 @@ fn test_inline_drain_to_external_init() {
 
 #[test]
 fn test_inline_drain_to_external_init_replaces_slot() {
-    let bag: InlineSuffixBag<15, 64> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     // Simulate: slots 0, 1 filled, now replacing slot 1
     bag.try_assign(0, b"keep_this");
@@ -678,7 +644,7 @@ fn test_inline_drain_to_external_init_replaces_slot() {
 
 #[test]
 fn test_inline_clone() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
     bag.try_assign(0, b"hello");
     bag.try_assign(5, b"world");
 
@@ -692,7 +658,7 @@ fn test_inline_clone() {
 
 #[test]
 fn test_inline_empty_suffix() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     // Empty suffix should work
     assert!(bag.try_assign(0, b""));
@@ -702,27 +668,15 @@ fn test_inline_empty_suffix() {
 }
 
 #[test]
-fn test_inline_various_widths() {
-    // Test with different WIDTH parameters
-    let bag7: InlineSuffixBag<7, 128> = InlineSuffixBag::new();
-    bag7.try_assign(0, b"test");
-    bag7.try_assign(6, b"last");
-    assert_eq!(bag7.get(0), Some(b"test".as_slice()));
-    assert_eq!(bag7.get(6), Some(b"last".as_slice()));
-
-    let bag15: InlineSuffixBag<15, 128> = InlineSuffixBag::new();
-    bag15.try_assign(14, b"slot14");
-    assert_eq!(bag15.get(14), Some(b"slot14".as_slice()));
-}
-
-#[test]
 fn test_inline_size_calculation() {
-    // Verify the size calculation from the doc comment
-    // InlineSuffixBag<15, 256> - 15 * 4 + 2 + 1 + 256 + 1 (padding) = 320 bytes
-    assert_eq!(StdMem::size_of::<InlineSuffixBag<15, 256>>(), 320);
+    // InlineSuffixBag layout: 15 * 4 (slots) + 2 (size) + 1 (count) + 1 (pad) + CAPACITY
+    // Default (256):  64 + 256 = 320 bytes
+    // Large (512):    64 + 512 = 576 bytes
+    #[cfg(not(feature = "large-suffix-capacity"))]
+    assert_eq!(StdMem::size_of::<InlineSuffixBag>(), 320);
 
-    // InlineSuffixBag<15, 128> - 15 * 4 + 2 + 1 + 128 + 1 (padding) = 192 bytes
-    assert_eq!(StdMem::size_of::<InlineSuffixBag<15, 128>>(), 192);
+    #[cfg(feature = "large-suffix-capacity")]
+    assert_eq!(StdMem::size_of::<InlineSuffixBag>(), 576);
 }
 
 // ============================================================================
@@ -731,7 +685,7 @@ fn test_inline_size_calculation() {
 
 #[test]
 fn test_suffix_count_assign_clear() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
     assert_eq!(bag.count(), 0);
 
     bag.assign(0, b"hello");
@@ -757,7 +711,7 @@ fn test_suffix_count_assign_clear() {
 
 #[test]
 fn test_suffix_count_try_assign_in_place() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
     assert_eq!(bag.count(), 0);
 
     assert!(bag.try_assign_in_place(0, b"hello"));
@@ -777,7 +731,7 @@ fn test_suffix_count_try_assign_in_place() {
 
 #[test]
 fn test_suffix_count_after_compact() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"hello");
     bag.assign(1, b"world");
     bag.assign(2, b"test");
@@ -801,7 +755,7 @@ fn test_suffix_count_after_compact() {
 
 #[test]
 fn test_suffix_count_clone() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"hello");
     bag.assign(1, b"world");
     bag.clear(1); // Clear but don't compact - garbage in data
@@ -817,7 +771,7 @@ fn test_suffix_count_clone() {
 
 #[test]
 fn test_inline_suffix_count_try_assign() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
     assert_eq!(bag.count(), 0);
 
     assert!(bag.try_assign(0, b"hello"));
@@ -833,7 +787,7 @@ fn test_inline_suffix_count_try_assign() {
 
 #[test]
 fn test_inline_suffix_count_clear() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     bag.try_assign(1, b"world");
@@ -852,7 +806,7 @@ fn test_inline_suffix_count_clear() {
 
 #[test]
 fn test_inline_suffix_count_clear_all() {
-    let bag: InlineSuffixBag<15, 256> = InlineSuffixBag::new();
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
 
     bag.try_assign(0, b"hello");
     bag.try_assign(1, b"world");
@@ -869,7 +823,7 @@ fn test_inline_suffix_count_clear_all() {
 #[test]
 fn test_try_assign_compacts_before_grow() {
     // Create a bag with INITIAL_CAPACITY to avoid capacity changes from compaction
-    let mut bag: SuffixBag<15> = SuffixBag::with_capacity(INITIAL_CAPACITY);
+    let mut bag: SuffixBag = SuffixBag::with_capacity(INITIAL_CAPACITY);
 
     // Fill most of it
     for i in 0..12 {
@@ -900,7 +854,7 @@ fn test_try_assign_compacts_before_grow() {
 
 #[test]
 fn test_try_assign_grows_when_compact_insufficient() {
-    let mut bag: SuffixBag<15> = SuffixBag::with_capacity(16);
+    let mut bag: SuffixBag = SuffixBag::with_capacity(16);
 
     // Fill completely with no garbage
     bag.assign(0, b"12345678"); // 8 bytes
@@ -924,7 +878,7 @@ fn test_try_assign_grows_when_compact_insufficient() {
 
 #[test]
 fn test_clone_compacts_garbage() {
-    let mut bag: SuffixBag<15> = SuffixBag::new();
+    let mut bag: SuffixBag = SuffixBag::new();
 
     // Add and remove several suffixes to create garbage
     bag.assign(0, b"aaaaaaaaaa"); // 10 bytes
@@ -937,7 +891,7 @@ fn test_clone_compacts_garbage() {
     let original_used: usize = bag.used();
     assert!(original_used >= 35); // At least all the data written
 
-    let cloned: SuffixBag<15> = bag.clone();
+    let cloned: SuffixBag = bag.clone();
 
     // Clone should only have active data
     assert_eq!(cloned.used(), 15); // 5 (slot 0) + 10 (slot 2)
@@ -949,8 +903,8 @@ fn test_clone_compacts_garbage() {
 
 #[test]
 fn test_clone_empty_bag() {
-    let bag: SuffixBag<15> = SuffixBag::new();
-    let cloned: SuffixBag<15> = bag;
+    let bag: SuffixBag = SuffixBag::new();
+    let cloned: SuffixBag = bag;
 
     assert_eq!(cloned.count(), 0);
     assert_eq!(cloned.used(), 0);
@@ -964,7 +918,7 @@ fn test_clone_empty_bag() {
 /// Miri will detect any memory leaks or invalid drops.
 #[test]
 fn test_sidecar_drop_inline_only() {
-    let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+    let sidecar: SuffixSidecar = SuffixSidecar::new();
 
     // Add a few inline suffixes
     sidecar.inline.try_assign(0, b"hello");
@@ -988,7 +942,7 @@ fn test_sidecar_drop_inline_only() {
 /// Miri will detect any memory leaks or double-frees.
 #[test]
 fn test_sidecar_drop_with_external() {
-    let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+    let sidecar: SuffixSidecar = SuffixSidecar::new();
 
     // Force external allocation (infallible - aborts on OOM)
     // SAFETY: Test-only, no concurrent access
@@ -1002,12 +956,10 @@ fn test_sidecar_drop_with_external() {
     }
 
     // Verify external is allocated
-    assert!(
-        !sidecar
-            .external
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .is_null()
-    );
+    assert!(!sidecar
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
 
     // Verify we can read from external
     assert_eq!(sidecar.get(0), Some(b"external_suffix_0".as_slice()));
@@ -1020,7 +972,7 @@ fn test_sidecar_drop_with_external() {
 /// Exercises the full Drop path.
 #[test]
 fn test_sidecar_drop_mixed_inline_external() {
-    let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+    let sidecar: SuffixSidecar = SuffixSidecar::new();
 
     // Add inline suffixes
     sidecar.inline.try_assign(0, b"inline_0");
@@ -1051,19 +1003,17 @@ fn test_sidecar_drop_mixed_inline_external() {
 /// Test sidecar default and new are equivalent.
 #[test]
 fn test_sidecar_default() {
-    let s1: SuffixSidecar<15> = SuffixSidecar::new();
-    let s2: SuffixSidecar<15> = SuffixSidecar::default();
+    let s1: SuffixSidecar = SuffixSidecar::new();
+    let s2: SuffixSidecar = SuffixSidecar::default();
 
-    assert!(
-        s1.external
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .is_null()
-    );
-    assert!(
-        s2.external
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .is_null()
-    );
+    assert!(s1
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
+    assert!(s2
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
     assert_eq!(s1.inline.count(), 0);
     assert_eq!(s2.inline.count(), 0);
 }
@@ -1071,7 +1021,7 @@ fn test_sidecar_default() {
 /// Test `ensure_external` is idempotent (returns same pointer on repeated calls).
 #[test]
 fn test_sidecar_ensure_external_idempotent() {
-    let sidecar: SuffixSidecar<15> = SuffixSidecar::new();
+    let sidecar: SuffixSidecar = SuffixSidecar::new();
 
     // SAFETY: Test-only, no concurrent access. Allocation is infallible.
     let ptr1 = unsafe { sidecar.ensure_external() };

@@ -57,7 +57,7 @@ fn external_suffix_bag_freed_on_drop() {
     let leaf = LeafNode15TrueInline::<u64>::new_with_root(false);
 
     // Manually set external_ksuf to simulate allocation
-    let bag: Box<SuffixBag<WIDTH_15>> = Box::default();
+    let bag: Box<SuffixBag> = Box::default();
     let ptr = Box::into_raw(bag);
     leaf.external_ksuf.store(ptr, AtomicOrdering::Relaxed);
 

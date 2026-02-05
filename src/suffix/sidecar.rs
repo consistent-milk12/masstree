@@ -50,11 +50,8 @@ impl SideCarUtils {
     ///
     /// # Safety
     ///
-    /// `ptr` must be a valid [`SuffixBag<WIDTH>`] pointer that was allocated via [`Box`].
-    pub unsafe fn retire_suffix_bag<const WIDTH: usize>(
-        ptr: *mut SuffixBag<WIDTH>,
-        _collector: &Collector,
-    ) {
+    /// `ptr` must be a valid [`SuffixBag`] pointer that was allocated via [`Box`].
+    pub unsafe fn retire_suffix_bag(ptr: *mut SuffixBag, _collector: &Collector) {
         // SAFETY: Caller guarantees ptr is a valid Box-allocated `SuffixBag`
         unsafe { drop(Box::from_raw(ptr)) };
     }
@@ -68,21 +65,21 @@ impl SideCarUtils {
 /// # Memory Layout
 ///
 /// ```text
-/// SuffixSidecar<15> = 328 bytes
-/// ├── inline: InlineSuffixBag<15, 256>  // 320 bytes
+/// SuffixSidecar = 328 bytes
+/// ├── inline: InlineSuffixBag  // 320 bytes
 /// └── external: AtomicPtr<SuffixBag>    // 8 bytes
 /// ```
 #[derive(Debug)]
 #[repr(C)]
-pub struct SuffixSidecar<const WIDTH: usize> {
+pub struct SuffixSidecar {
     /// Inline suffix storage (256 bytes capacity)
-    pub(crate) inline: InlineSuffixBag<WIDTH, 256>,
+    pub(crate) inline: InlineSuffixBag,
 
     /// External overflow for large suffixes.
-    pub(crate) external: AtomicPtr<SuffixBag<WIDTH>>,
+    pub(crate) external: AtomicPtr<SuffixBag>,
 }
 
-impl<const WIDTH: usize> SuffixSidecar<WIDTH> {
+impl SuffixSidecar {
     /// Create a new empty sidecar.
     #[must_use]
     pub fn new() -> Self {
@@ -109,7 +106,7 @@ impl<const WIDTH: usize> SuffixSidecar<WIDTH> {
         }
 
         // Check external
-        let external: *mut SuffixBag<WIDTH> = self.external.load(Ordering::Acquire);
+        let external: *mut SuffixBag = self.external.load(Ordering::Acquire);
 
         if external.is_null() {
             None
@@ -131,16 +128,16 @@ impl<const WIDTH: usize> SuffixSidecar<WIDTH> {
     /// Caller must hold leaf lock. The returned pointer is valid for the
     /// lifetime of the sidecar (until [`Drop`] or the next swap).
     #[inline(always)]
-    pub unsafe fn ensure_external(&self) -> *mut SuffixBag<WIDTH> {
-        let ptr: *mut SuffixBag<WIDTH> = self.external.load(Ordering::Acquire);
+    pub unsafe fn ensure_external(&self) -> *mut SuffixBag {
+        let ptr: *mut SuffixBag = self.external.load(Ordering::Acquire);
 
         if !ptr.is_null() {
             return ptr;
         }
 
         // Allocate new external bag (aborts on OOM)
-        let new_external: Box<SuffixBag<WIDTH>> = BoxAllocator::boxed(SuffixBag::new());
-        let new_ptr: *mut SuffixBag<WIDTH> = Box::into_raw(new_external);
+        let new_external: Box<SuffixBag> = BoxAllocator::boxed(SuffixBag::new());
+        let new_ptr: *mut SuffixBag = Box::into_raw(new_external);
         self.external.store(new_ptr, Ordering::Release);
 
         new_ptr
@@ -153,7 +150,7 @@ impl<const WIDTH: usize> SuffixSidecar<WIDTH> {
             return true;
         }
 
-        let external: *mut SuffixBag<WIDTH> = self.external.load(Ordering::Acquire);
+        let external: *mut SuffixBag = self.external.load(Ordering::Acquire);
 
         if external.is_null() {
             false
@@ -164,13 +161,13 @@ impl<const WIDTH: usize> SuffixSidecar<WIDTH> {
     }
 }
 
-impl<const WIDTH: usize> Default for SuffixSidecar<WIDTH> {
+impl Default for SuffixSidecar {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const WIDTH: usize> Drop for SuffixSidecar<WIDTH> {
+impl Drop for SuffixSidecar {
     fn drop(&mut self) {
         // SAFETY: When external bags are swapped (via drain_to_external), the old
         // bag is retired via BatchedRetire::defer_custom, and a new bag is stored
@@ -186,7 +183,7 @@ impl<const WIDTH: usize> Drop for SuffixSidecar<WIDTH> {
         // So when Drop runs, self.external is either:
         // - null (no external ever created), or
         // - the most recent bag (all previous ones were retired separately)
-        let external: *mut SuffixBag<WIDTH> = self.external.load(Ordering::Acquire);
+        let external: *mut SuffixBag = self.external.load(Ordering::Acquire);
 
         if !external.is_null() {
             // SAFETY: We own this external bag exclusively during drop.
@@ -201,9 +198,9 @@ impl<const WIDTH: usize> Drop for SuffixSidecar<WIDTH> {
 // SAFETY: `SuffixSIdecar` is `Send` if `SuffixBag` is `Send`.
 // The `AtomicPtr` provides thread-safe access to the external bag.
 // Concurrent access is serialized by the leaf lock.
-unsafe impl<const WIDTH: usize> Send for SuffixSidecar<WIDTH> {}
+unsafe impl Send for SuffixSidecar {}
 
 // SAFETY: `SuffixSidecar` is `Sync` if `SuffixBag` is `Sync`.
 // Read access is safe without synchronization (immutable after publication).
 // Write access requires the leaf lock.
-unsafe impl<const WIDTH: usize> Sync for SuffixSidecar<WIDTH> {}
+unsafe impl Sync for SuffixSidecar {}

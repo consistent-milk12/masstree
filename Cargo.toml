@@ -9,11 +9,11 @@ license = "MIT"
 repository = "https://github.com/consistent-milk12/masstree"
 documentation = "https://docs.rs/masstree"
 keywords = [
-	"data-structures",
-	"concurrent",
-	"ordered-map",
-	"range-scans",
-	"trie",
+  "data-structures",
+  "concurrent",
+  "ordered-map",
+  "range-scans",
+  "trie",
 ]
 categories = ["data-structures", "concurrency", "database-implementations"]
 readme = "README.md"
@@ -33,17 +33,22 @@ serde = ["dep:serde"]
 memcomparable = ["dep:memcomparable", "dep:serde"]
 # Enable CLI tools (divan_parser, criterion_summary). Not needed for library usage.
 bins = [
-	"dep:serde_json",
-	"serde",
-	"dep:chrono",
-	"dep:clap",
-	"dep:comfy-table",
-	"dep:regex",
+  "dep:serde_json",
+  "serde",
+  "dep:chrono",
+  "dep:clap",
+  "dep:comfy-table",
+  "dep:regex",
 ]
 true-inline = [] # Enable true-inline value storage
 debug-routing = [] # Enable routing debug output for bug investigation
+no-prefetch = [] # Disable all software prefetching for A/B benchmarking
 insert-stats = [] # Enable insert retry statistics collection
 dhat-heap = ["dep:dhat"] # Enable dhat heap profiling in examples
+# Use 512-byte inline suffix capacity instead of 256-byte default.
+# Trade-off: Fewer heap allocations for long keys, but -44% on deep_trie workloads.
+# Only enable for workloads without multi-layer key prefixes.
+large-suffix-capacity = []
 
 [dependencies]
 seize = "0.5.1"
@@ -63,9 +68,9 @@ libc = "0.2.180"
 # "attributes" enables #[instrument] for function-level tracing
 tracing = { version = "0.1.44", features = ["attributes"], optional = true }
 tracing-subscriber = { version = "0.3.22", features = [
-	"env-filter",
-	"fmt",
-	"json",
+  "env-filter",
+  "fmt",
+  "json",
 ], optional = true }
 tracing-appender = { version = "0.2.4", optional = true }
 
@@ -105,15 +110,15 @@ scc = "3.5.3"
 sdd = "4.5.3"
 tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.22", features = [
-	"env-filter",
-	"fmt",
-	"json",
-	"parking_lot",
+  "env-filter",
+  "fmt",
+  "json",
+  "parking_lot",
 ] }
 criterion = { version = "0.8.1", features = [
-	"html_reports",
-	"csv_output",
-	"real_blackbox",
+  "html_reports",
+  "csv_output",
+  "real_blackbox",
 ] }
 iai-callgrind = "0.16.1"
 

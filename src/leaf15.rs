@@ -178,7 +178,7 @@ pub struct LeafNode15<S: ValueSlot> {
 
     /// Suffix storage sidecar (heap-allocated, lazy).
     /// NULL when no suffixes have been assigned.
-    suffix_sidecar: AtomicPtr<SuffixSidecar<WIDTH_15>>,
+    suffix_sidecar: AtomicPtr<SuffixSidecar>,
 
     /// Next leaf with mark bit in LSB for split coordination.
     next: AtomicPtr<Self>,
@@ -662,7 +662,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Get the suffix sidecar pointer (may be null if no suffixes assigned).
     #[must_use]
     #[inline(always)]
-    pub fn sidecar_ptr(&self) -> *mut SuffixSidecar<WIDTH_15> {
+    pub fn sidecar_ptr(&self) -> *mut SuffixSidecar {
         self.suffix_sidecar.load(READ_ORD)
     }
 
@@ -701,7 +701,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
 
         // Load sidecar pointer with Acquire to synchronize with allocation
-        let sidecar: *mut SuffixSidecar<WIDTH_15> =
+        let sidecar: *mut SuffixSidecar =
             self.suffix_sidecar.load(AtomicOrdering::Acquire);
 
         // DEFENSIVE: Handle null sidecar gracefully instead of UB
@@ -765,7 +765,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Caller holds lock
-        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar() };
+        let sidecar: &SuffixSidecar = unsafe { &*self.ensure_sidecar() };
 
         // try_assign returns bool: true = success, false = no capacity
         if sidecar.inline.try_assign(slot, suffix) {
@@ -797,7 +797,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
-        let sidecar: &SuffixSidecar<WIDTH_15> =
+        let sidecar: &SuffixSidecar =
             unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
 
         let perm = self.permutation();
@@ -806,14 +806,14 @@ impl<S: ValueSlot> LeafNode15<S> {
         // NOTE: drain_to_external does NOT clear inline state - this is intentional.
         // The external bag contains all suffixes; inline becomes orphaned metadata.
         // Allocation is infallible (aborts on OOM).
-        let mut new_bag: SuffixBag<WIDTH_15> =
+        let mut new_bag: SuffixBag =
             sidecar.inline.drain_to_external(&perm, slot, suffix);
 
         // Merge with existing external suffixes (if any)
-        let old_ext: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
+        let old_ext: *mut SuffixBag = sidecar.external.load(RELAXED);
         if !old_ext.is_null() {
             // SAFETY: old_ext is non-null
-            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
+            let old_bag: &SuffixBag = unsafe { &*old_ext };
 
             for i in 0..perm.size() {
                 let s: usize = perm.get(i);
@@ -827,7 +827,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
 
         // Install new external bag (Release ordering for publication)
-        let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
+        let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
         sidecar.external.store(new_ptr, WRITE_ORD);
 
         // CRITICAL: Publish suffix presence LAST (Release ordering)
@@ -845,8 +845,8 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// - `ptr` must have come from `assign_ksuf` on this leaf type
     /// - `guard` must be from this tree's collector
     pub unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
-        let typed: *mut SuffixBag<WIDTH_15> = ptr.cast();
-        // SAFETY: ptr came from Box::into_raw of a SuffixBag<WIDTH_15>
+        let typed: *mut SuffixBag = ptr.cast();
+        // SAFETY: ptr came from Box::into_raw of a SuffixBag
         unsafe {
             guard.defer_retire(typed, |ptr, _| {
                 drop(Box::from_raw(ptr));
@@ -882,7 +882,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Caller holds lock
-        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*self.ensure_sidecar() };
+        let sidecar: &SuffixSidecar = unsafe { &*self.ensure_sidecar() };
 
         // FAST PATH: Try inline storage first
         if sidecar.inline.try_assign(slot, suffix) {
@@ -892,9 +892,9 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
 
         // FAST PATH 2: Try external storage in-place (if exists and has room)
-        let ext_ptr: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
+        let ext_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
         if !ext_ptr.is_null() {
-            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *ext_ptr };
+            let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
             if bag.try_assign_in_place(slot, suffix) {
                 // NOTE: Do NOT clear inline - suffix immutability invariant means
                 // any existing inline data for this slot is still valid (there isn't any
@@ -924,18 +924,18 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
-        let sidecar: &SuffixSidecar<WIDTH_15> =
+        let sidecar: &SuffixSidecar =
             unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
 
         // Drain inline using sequential slot iteration (0..slot)
         // NOTE: drain_to_external_init does NOT clear inline state.
         // Allocation is infallible (aborts on OOM).
-        let mut new_bag: SuffixBag<WIDTH_15> = sidecar.inline.drain_to_external_init(slot, suffix);
+        let mut new_bag: SuffixBag = sidecar.inline.drain_to_external_init(slot, suffix);
 
         // Merge with existing external suffixes (if any)
-        let old_ext: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
+        let old_ext: *mut SuffixBag = sidecar.external.load(RELAXED);
         if !old_ext.is_null() {
-            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
+            let old_bag: &SuffixBag = unsafe { &*old_ext };
 
             for s in 0..slot {
                 if let Some(ext_suffix) = old_bag.get(s) {
@@ -945,7 +945,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
 
         // Install new external bag (Release ordering for publication)
-        let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
+        let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
         sidecar.external.store(new_ptr, WRITE_ORD);
 
         // Retire old external bag
@@ -985,21 +985,21 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // Only clear if sidecar exists
-        let sidecar_ptr: *mut SuffixSidecar<WIDTH_15> =
+        let sidecar_ptr: *mut SuffixSidecar =
             self.suffix_sidecar.load(AtomicOrdering::Acquire);
         if !sidecar_ptr.is_null() {
             // SAFETY: sidecar_ptr is non-null, we hold the lock
-            let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*sidecar_ptr };
+            let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
 
             // Clear from inline storage
             sidecar.inline.clear(slot);
 
             // Clear from external storage (if exists)
-            let ext_ptr: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
+            let ext_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
             if !ext_ptr.is_null() {
                 // SAFETY: ext_ptr is non-null and came from Box::into_raw.
                 // We hold the lock, so we can mutate in place.
-                let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *ext_ptr };
+                let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
                 bag.clear(slot);
             }
         }
@@ -1116,22 +1116,22 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // Only compact if sidecar exists with external storage
-        let sidecar_ptr: *mut SuffixSidecar<WIDTH_15> =
+        let sidecar_ptr: *mut SuffixSidecar =
             self.suffix_sidecar.load(AtomicOrdering::Acquire);
         if sidecar_ptr.is_null() {
             return 0;
         }
 
         // SAFETY: sidecar_ptr is non-null, we hold the lock
-        let sidecar: &SuffixSidecar<WIDTH_15> = unsafe { &*sidecar_ptr };
+        let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
 
-        let bag_ptr: *mut SuffixBag<WIDTH_15> = sidecar.external.load(RELAXED);
+        let bag_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
         if bag_ptr.is_null() {
             return 0;
         }
 
         // SAFETY: bag_ptr is non-null, we hold the lock (exclusive access)
-        let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *bag_ptr };
+        let bag: &mut SuffixBag = unsafe { &mut *bag_ptr };
         let perm: Permuter = self.permutation();
 
         // In-place compaction: no clone, no allocation, no retirement needed
@@ -2929,7 +2929,7 @@ impl<S: ValueSlot> Drop for LeafNode15<S> {
         }
 
         // Drop suffix sidecar if present (sidecar's Drop handles external bag)
-        let sidecar_ptr: *mut SuffixSidecar<WIDTH_15> = self.suffix_sidecar.load(RELAXED);
+        let sidecar_ptr: *mut SuffixSidecar = self.suffix_sidecar.load(RELAXED);
         if !sidecar_ptr.is_null() {
             // SAFETY: sidecar_ptr came from Box::into_raw in ensure_sidecar.
             // We own it exclusively during drop.

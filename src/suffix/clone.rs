@@ -1,17 +1,6 @@
-use super::{INITIAL_CAPACITY, SlotMeta, SuffixBag};
+use super::{SlotMeta, SuffixBag, INITIAL_CAPACITY, WIDTH};
 
-// impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
-//     #[inline(always)]
-//     fn clone(&self) -> Self {
-//         Self {
-//             slots: self.slots,
-//             data: self.data.clone(),
-//             suffix_count: self.suffix_count,
-//         }
-//     }
-// }
-
-impl<const WIDTH: usize> Clone for SuffixBag<WIDTH> {
+impl Clone for SuffixBag {
     /// Clone with compaction, only copies active suffix data.
     ///
     /// This avoids copying dead/garbage data from the original buffer.

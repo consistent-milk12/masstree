@@ -1,11 +1,27 @@
-use std::array as StdArray;
 use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering as AtomicOrdering};
 
 use super::{SuffixBag, TreePermutation};
+
+/// Number of slots (matches WIDTH_15 leaf node).
+const WIDTH: usize = 15;
+
+/// Inline suffix data capacity.
+///
+/// Default: 256 bytes (better cache locality for deep_trie workloads).
+/// With `large-suffix-capacity` feature: 512 bytes (fewer heap allocations).
+///
+/// Trade-off documented in `CurrentStatus.md:461-513`:
+/// - 256 bytes: 896-byte true-inline leaves, better L1 cache efficiency
+/// - 512 bytes: 1152-byte true-inline leaves, -44% on deep_trie benchmarks
+#[cfg(not(feature = "large-suffix-capacity"))]
+const CAPACITY: usize = 256;
+
+#[cfg(feature = "large-suffix-capacity")]
+const CAPACITY: usize = 512;
 
 const U16_MAX: usize = u16::MAX as usize;
 
@@ -105,28 +121,22 @@ impl Default for InlineSlotMeta {
 /// # Design
 ///
 /// - Embedded in the leaf node (no heap allocation)
-/// - Fixed capacity determined at compile time
+/// - Fixed capacity: 256 bytes for data, 15 slots
 /// - Append-only with slot reuse when new suffix fits in old space
 /// - When full, caller must drain to external `SuffixBag`
 ///
 /// # Memory Layout
 ///
 /// ```text
-/// InlineSuffixBag<WIDTH=24, CAPACITY=256> (360 bytes total)
-/// ├── slots: [AtomicU32; 24]   // 96 bytes (4 bytes each)
-/// ├── size: AtomicU16          // 2 bytes
-/// ├── suffix_count: AtomicU8   // 1 byte
-/// ├── _pad: u8                 // 1 byte padding
-/// ├── data: UnsafeCell<[u8; 256]>  // 256 bytes
-/// └── (4 bytes padding for alignment)
+/// InlineSuffixBag (320 bytes total)
+/// ├── slots: [AtomicU32; 15]        // 60 bytes (4 bytes each)
+/// ├── size: AtomicU16               // 2 bytes
+/// ├── suffix_count: AtomicU8        // 1 byte
+/// ├── _pad: u8                      // 1 byte padding
+/// └── data: UnsafeCell<[u8; 256]>   // 256 bytes
 /// ```
-///
-/// # Type Parameters
-///
-/// * `WIDTH` - Number of slots (must match the leaf node's WIDTH)
-/// * `CAPACITY` - Fixed capacity in bytes for suffix data
 #[repr(C)]
-pub struct InlineSuffixBag<const WIDTH: usize, const CAPACITY: usize> {
+pub struct InlineSuffixBag {
     /// Per-slot metadata: packed (offset, length) pairs.
     /// Accessed atomically for concurrent read/write safety.
     slots: [AtomicU32; WIDTH],
@@ -151,9 +161,9 @@ pub struct InlineSuffixBag<const WIDTH: usize, const CAPACITY: usize> {
 // - slots use AtomicU32 for thread-safe access
 // - size/suffix_count use atomics (writers hold lock)
 // - data is protected by OCC protocol (readers validate version after read)
-unsafe impl<const WIDTH: usize, const CAPACITY: usize> Sync for InlineSuffixBag<WIDTH, CAPACITY> {}
+unsafe impl Sync for InlineSuffixBag {}
 
-impl<const WIDTH: usize, const CAPACITY: usize> Debug for InlineSuffixBag<WIDTH, CAPACITY> {
+impl Debug for InlineSuffixBag {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("InlineSuffixBag")
             .field("size", &self.size.load(RELAXED))
@@ -163,10 +173,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> Debug for InlineSuffixBag<WIDTH,
     }
 }
 
-impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY> {
-    /// Compile-time assertion that WIDTH fits in u8 for `suffix_count`.
-    const ASSERT_WIDTH_FITS_U8: () = assert!(WIDTH <= 255, "WIDTH must be <= 255 to fit in u8");
-
+impl InlineSuffixBag {
     // ========================================================================
     //  Constructor
     // ========================================================================
@@ -175,11 +182,24 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     #[must_use]
     #[inline(always)]
     pub fn new() -> Self {
-        // Force compile-time evaluation of WIDTH assertion
-        let () = Self::ASSERT_WIDTH_FITS_U8;
-
         Self {
-            slots: StdArray::from_fn(|_| AtomicU32::new(InlineSlotMeta::EMPTY_PACKED)),
+            slots: [
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
+            ],
             size: AtomicU16::new(0),
             suffix_count: AtomicU8::new(0),
             _pad: 0,
@@ -214,7 +234,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     //  Capacity & Size
     // ========================================================================
 
-    /// Return the fixed capacity of this inline bag.
+    /// Return the fixed capacity of this inline bag (256 bytes).
     #[must_use]
     #[inline(always)]
     pub const fn capacity(&self) -> usize {
@@ -270,7 +290,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         perm: &impl TreePermutation,
         new_slot: usize,
         new_suffix: &[u8],
-    ) -> SuffixBag<WIDTH> {
+    ) -> SuffixBag {
         // Pass 1: Calculate required capacity and collect slot data
         let mut required_capacity: usize = new_suffix.len();
         let perm_size: usize = perm.size();
@@ -303,7 +323,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         }
 
         // Allocate external bag with capacity (aborts on OOM)
-        let mut external: SuffixBag<WIDTH> = SuffixBag::with_capacity(required_capacity);
+        let mut external: SuffixBag = SuffixBag::with_capacity(required_capacity);
 
         // Pass 2: Copy suffixes to external bag using collected data
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
@@ -333,7 +353,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         new_slot: usize,
         new_suffix: &[u8],
         buffer: Vec<u8>,
-    ) -> SuffixBag<WIDTH> {
+    ) -> SuffixBag {
         // Pass 1: Calculate required capacity and collect slot data.
         let mut required_capacity: usize = new_suffix.len();
         let perm_size: usize = perm.size();
@@ -363,7 +383,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
             }
         }
 
-        let mut external: SuffixBag<WIDTH> = SuffixBag::from_vec(buffer);
+        let mut external: SuffixBag = SuffixBag::from_vec(buffer);
 
         // Reserve capacity if needed (aborts on OOM)
         if external.capacity() < required_capacity {
@@ -392,7 +412,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     ///
     /// Aborts on allocation failure (standard Rust OOM behavior).
     #[cold]
-    pub fn drain_to_external_init(&self, new_slot: usize, new_suffix: &[u8]) -> SuffixBag<WIDTH> {
+    pub fn drain_to_external_init(&self, new_slot: usize, new_suffix: &[u8]) -> SuffixBag {
         // Calculate required capacity
         let mut required_capacity: usize = new_suffix.len();
 
@@ -424,7 +444,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
         }
 
         // Allocate external bag (aborts on OOM)
-        let mut external: SuffixBag<WIDTH> = SuffixBag::with_capacity(required_capacity);
+        let mut external: SuffixBag = SuffixBag::with_capacity(required_capacity);
 
         // Copy existing suffixes
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
@@ -446,7 +466,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     ///
     /// # Panics
     ///
-    /// Panics in debug mode if `slot >= WIDTH`.
+    /// Panics in debug mode if `slot >= 15`.
     #[must_use]
     #[inline(always)]
     pub fn has_suffix(&self, slot: usize) -> bool {
@@ -463,7 +483,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     ///
     /// # Panics
     ///
-    /// Panics in debug mode if `slot >= WIDTH`.
+    /// Panics in debug mode if `slot >= 15`.
     #[must_use]
     #[inline(always)]
     pub fn get(&self, slot: usize) -> Option<&[u8]> {
@@ -528,7 +548,7 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     ///
     /// # Panics
     ///
-    /// Panics if `slot >= WIDTH` or if suffix length exceeds `u16::MAX`.
+    /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
     #[inline]
     pub fn try_assign(&self, slot: usize, suffix: &[u8]) -> bool {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
@@ -664,24 +684,40 @@ impl<const WIDTH: usize, const CAPACITY: usize> InlineSuffixBag<WIDTH, CAPACITY>
     }
 }
 
-impl<const WIDTH: usize, const CAPACITY: usize> Default for InlineSuffixBag<WIDTH, CAPACITY> {
+impl Default for InlineSuffixBag {
     #[inline(always)]
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const WIDTH: usize, const CAPACITY: usize> Clone for InlineSuffixBag<WIDTH, CAPACITY> {
+impl Clone for InlineSuffixBag {
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "from_fn iterates 0..WIDTH, index always in bounds"
+        reason = "Iterating 0..WIDTH, index always in bounds"
     )]
     fn clone(&self) -> Self {
         // SAFETY: Clone is typically called under exclusive access or during init
         let data: [u8; CAPACITY] = unsafe { *self.data.get() };
         Self {
-            slots: StdArray::from_fn(|i| AtomicU32::new(self.slots[i].load(RELAXED))),
+            slots: [
+                AtomicU32::new(self.slots[0].load(RELAXED)),
+                AtomicU32::new(self.slots[1].load(RELAXED)),
+                AtomicU32::new(self.slots[2].load(RELAXED)),
+                AtomicU32::new(self.slots[3].load(RELAXED)),
+                AtomicU32::new(self.slots[4].load(RELAXED)),
+                AtomicU32::new(self.slots[5].load(RELAXED)),
+                AtomicU32::new(self.slots[6].load(RELAXED)),
+                AtomicU32::new(self.slots[7].load(RELAXED)),
+                AtomicU32::new(self.slots[8].load(RELAXED)),
+                AtomicU32::new(self.slots[9].load(RELAXED)),
+                AtomicU32::new(self.slots[10].load(RELAXED)),
+                AtomicU32::new(self.slots[11].load(RELAXED)),
+                AtomicU32::new(self.slots[12].load(RELAXED)),
+                AtomicU32::new(self.slots[13].load(RELAXED)),
+                AtomicU32::new(self.slots[14].load(RELAXED)),
+            ],
             size: AtomicU16::new(self.size.load(RELAXED)),
             suffix_count: AtomicU8::new(self.suffix_count.load(RELAXED)),
             _pad: 0,

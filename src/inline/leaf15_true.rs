@@ -47,12 +47,6 @@ pub const WIDTH_15: usize = 15;
 
 /// Inline suffix bag capacity in bytes.
 ///
-/// 256 bytes is the default capacity, balancing suffix storage against
-/// leaf size (896 bytes). Larger capacity (512) reduces heap allocations
-/// but increases leaf size to 1152 bytes, hurting cache efficiency on
-/// deep trie workloads (-44% regression on multi-layer traversal).
-const INLINE_KSUF_CAPACITY: usize = 256;
-
 /// Special keylenx value indicating key has a suffix.
 pub const KSUF_KEYLENX: u8 = 64;
 
@@ -130,8 +124,8 @@ pub struct LeafNode15TrueInline<V: InlineBits> {
     // ========================================================================
     // Suffix and link pointers (same as LeafNode15)
     // ========================================================================
-    inline_ksuf: UnsafeCell<InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY>>,
-    external_ksuf: AtomicPtr<SuffixBag<WIDTH_15>>,
+    inline_ksuf: UnsafeCell<InlineSuffixBag>,
+    external_ksuf: AtomicPtr<SuffixBag>,
     next: AtomicPtr<Self>,
     prev: AtomicPtr<Self>,
     parent: AtomicPtr<u8>,
@@ -140,12 +134,20 @@ pub struct LeafNode15TrueInline<V: InlineBits> {
 }
 
 // Verify exact leaf size on 64-bit targets to catch accidental layout drift.
-// Expected: 1152 bytes after inline capacity increase to 512 (was 896 at 256).
+// Size depends on inline suffix capacity (configurable via `large-suffix-capacity` feature):
+// - Default (256 bytes): 896-byte leaves (14 cache lines)
+// - Large (512 bytes):  1152-byte leaves (18 cache lines)
 const _: () = {
-    #[cfg(target_pointer_width = "64")]
+    #[cfg(all(target_pointer_width = "64", not(feature = "large-suffix-capacity")))]
     assert!(
         std::mem::size_of::<LeafNode15TrueInline<u64>>() == 896,
         "Unexpected leaf size: expected 896 bytes (inline capacity 256)"
+    );
+
+    #[cfg(all(target_pointer_width = "64", feature = "large-suffix-capacity"))]
+    assert!(
+        std::mem::size_of::<LeafNode15TrueInline<u64>>() == 1152,
+        "Unexpected leaf size: expected 1152 bytes (inline capacity 512)"
     );
 };
 
@@ -1117,7 +1119,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     /// Load external suffix bag pointer (reader).
     #[must_use]
     #[inline(always)]
-    pub fn external_ksuf_ptr(&self) -> *mut SuffixBag<WIDTH_15> {
+    pub fn external_ksuf_ptr(&self) -> *mut SuffixBag {
         self.external_ksuf.load(READ_ORD)
     }
 
@@ -1137,17 +1139,17 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     ///
     /// Caller must hold leaf lock.
     #[inline]
-    pub unsafe fn ensure_external_ksuf(&self) -> *mut SuffixBag<WIDTH_15> {
-        let ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(READ_ORD);
+    pub unsafe fn ensure_external_ksuf(&self) -> *mut SuffixBag {
+        let ptr: *mut SuffixBag = self.external_ksuf.load(READ_ORD);
 
         if !ptr.is_null() {
             return ptr;
         }
 
         // Caller holds lock, no race possible
-        let new_bag: Box<SuffixBag<WIDTH_15>> = BoxAllocator::boxed(SuffixBag::new());
+        let new_bag: Box<SuffixBag> = BoxAllocator::boxed(SuffixBag::new());
 
-        let ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(new_bag);
+        let ptr: *mut SuffixBag = Box::into_raw(new_bag);
         self.external_ksuf.store(ptr, WRITE_ORD);
 
         ptr
@@ -1164,13 +1166,13 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         // SAFETY: Reader access, concurrent writes require lock
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
         if let Some(suffix) = inline.get(slot) {
             return Some(suffix);
         }
 
-        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf_ptr();
+        let ext_ptr: *mut SuffixBag = self.external_ksuf_ptr();
         if ext_ptr.is_null() {
             return None;
         }
@@ -1206,7 +1208,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         );
 
         // SAFETY: We hold the lock
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
 
         if inline.try_assign(slot, suffix) {
@@ -1214,10 +1216,10 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             return StdPtr::null_mut();
         }
 
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+        let old_ext: *mut SuffixBag = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             // SAFETY: old_ext is non-null
-            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
+            let bag: &mut SuffixBag = unsafe { &mut *old_ext };
             if bag.try_assign_in_place(slot, suffix) {
                 inline.clear(slot);
                 self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -1239,16 +1241,16 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8]) -> *mut u8 {
         let perm = self.permutation();
         // SAFETY: Caller holds lock
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
 
         // Aborts on OOM (standard Rust behavior).
-        let mut new_bag: SuffixBag<WIDTH_15> = inline.drain_to_external(&perm, slot, suffix);
+        let mut new_bag: SuffixBag = inline.drain_to_external(&perm, slot, suffix);
 
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+        let old_ext: *mut SuffixBag = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
             // SAFETY: old_ext is non-null
-            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
+            let old_bag: &SuffixBag = unsafe { &*old_ext };
 
             for i in 0..perm.size() {
                 let s: usize = perm.get(i);
@@ -1260,7 +1262,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             }
         }
 
-        let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
+        let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
         self.external_ksuf.store(new_ptr, WRITE_ORD);
 
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -1293,7 +1295,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         );
 
         // SAFETY: We hold the lock
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
 
         // Fast path 1: inline storage has room — prealloc is wasted (dropped)
@@ -1303,9 +1305,9 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         // Fast path 2: external bag has room in-place — prealloc is wasted
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+        let old_ext: *mut SuffixBag = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
-            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
+            let bag: &mut SuffixBag = unsafe { &mut *old_ext };
             if bag.try_assign_in_place(slot, suffix) {
                 inline.clear(slot);
                 self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -1342,17 +1344,17 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     ) -> *mut u8 {
         let perm = self.permutation();
         // SAFETY: Caller holds lock
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
 
         // Drain inline to external using pre-allocated buffer.
-        let mut new_bag: SuffixBag<WIDTH_15> =
+        let mut new_bag: SuffixBag =
             inline.drain_to_external_with_vec(&perm, slot, suffix, buffer);
 
         // Merge from old external bag (if any).
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+        let old_ext: *mut SuffixBag = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
-            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
+            let old_bag: &SuffixBag = unsafe { &*old_ext };
             for i in 0..perm.size() {
                 let s: usize = perm.get(i);
                 if s != slot
@@ -1363,7 +1365,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             }
         }
 
-        let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
+        let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
         self.external_ksuf.store(new_ptr, WRITE_ORD);
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
 
@@ -1377,8 +1379,8 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     /// - `ptr` must have come from `assign_ksuf` on this leaf type
     /// - `guard` must be from this tree's collector
     pub unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
-        let typed: *mut SuffixBag<WIDTH_15> = ptr.cast();
-        // SAFETY: ptr came from Box::into_raw of a SuffixBag<WIDTH_15>
+        let typed: *mut SuffixBag = ptr.cast();
+        // SAFETY: ptr came from Box::into_raw of a SuffixBag
         unsafe {
             guard.defer_retire(typed, |ptr, _| {
                 drop(Box::from_raw(ptr));
@@ -1404,7 +1406,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         );
 
         // SAFETY: We hold the lock
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
 
         if inline.try_assign(slot, suffix) {
@@ -1412,9 +1414,9 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             return;
         }
 
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+        let old_ext: *mut SuffixBag = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
-            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *old_ext };
+            let bag: &mut SuffixBag = unsafe { &mut *old_ext };
             if bag.try_assign_in_place(slot, suffix) {
                 inline.clear(slot);
                 self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -1432,15 +1434,15 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     #[expect(clippy::indexing_slicing)]
     unsafe fn assign_ksuf_init_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         // SAFETY: Caller holds lock
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
 
         // Drain inline using sequential slot iteration (0..slot)
-        let mut new_bag: SuffixBag<WIDTH_15> = inline.drain_to_external_init(slot, suffix);
+        let mut new_bag: SuffixBag = inline.drain_to_external_init(slot, suffix);
 
-        let old_ext: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+        let old_ext: *mut SuffixBag = self.external_ksuf.load(RELAXED);
         if !old_ext.is_null() {
-            let old_bag: &SuffixBag<WIDTH_15> = unsafe { &*old_ext };
+            let old_bag: &SuffixBag = unsafe { &*old_ext };
 
             for s in 0..slot {
                 if let Some(ext_suffix) = old_bag.get(s) {
@@ -1449,7 +1451,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
             }
         }
 
-        let new_ptr: *mut SuffixBag<WIDTH_15> = Box::into_raw(Box::new(new_bag));
+        let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
         self.external_ksuf.store(new_ptr, WRITE_ORD);
 
         if !old_ext.is_null() {
@@ -1480,14 +1482,14 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         );
 
         // SAFETY: We hold the lock
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
         inline.clear(slot);
 
-        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+        let ext_ptr: *mut SuffixBag = self.external_ksuf.load(RELAXED);
         if !ext_ptr.is_null() {
             // SAFETY: We hold the lock
-            let bag: &mut SuffixBag<WIDTH_15> = unsafe { &mut *ext_ptr };
+            let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
             bag.clear(slot);
         }
 
@@ -1505,13 +1507,13 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         // SAFETY: Reader access
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
         if inline.suffix_equals(slot, suffix) {
             return true;
         }
 
-        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf_ptr();
+        let ext_ptr: *mut SuffixBag = self.external_ksuf_ptr();
         if ext_ptr.is_null() {
             return false;
         }
@@ -1531,13 +1533,13 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         // SAFETY: Reader access
-        let inline: &InlineSuffixBag<WIDTH_15, INLINE_KSUF_CAPACITY> =
+        let inline: &InlineSuffixBag =
             unsafe { &*self.inline_ksuf.get() };
         if let Some(cmp) = inline.suffix_compare(slot, suffix) {
             return Some(cmp);
         }
 
-        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf_ptr();
+        let ext_ptr: *mut SuffixBag = self.external_ksuf_ptr();
         if ext_ptr.is_null() {
             return None;
         }
@@ -2715,7 +2717,7 @@ impl<V: InlineBits> Drop for LeafNode15TrueInline<V> {
     /// - Values: [`TrueInlineSlot::NEEDS_RETIREMENT = false`], no cleanup needed
     fn drop(&mut self) {
         // Free external suffix bag if allocated
-        let ext_ptr: *mut SuffixBag<WIDTH_15> = self.external_ksuf.load(RELAXED);
+        let ext_ptr: *mut SuffixBag = self.external_ksuf.load(RELAXED);
 
         if !ext_ptr.is_null() {
             // SAFETY: ext_ptr came from [`Box::into_raw`] in `assign_ksuf` or

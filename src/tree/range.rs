@@ -46,6 +46,7 @@ mod find_rev;
 mod helper;
 mod iterator;
 mod scan_state;
+mod traversal;
 
 // Re-export public types
 pub use iterator::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};

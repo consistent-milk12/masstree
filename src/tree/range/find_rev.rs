@@ -2,7 +2,7 @@
 //  Reverse Scan Helper Types
 // ============================================================================
 
-use crate::{TreeInternode, ksearch::upper_bound_internode_generic, leaf15::KSUF_KEYLENX};
+use crate::leaf15::KSUF_KEYLENX;
 
 use std::cmp::Ordering;
 use std::ptr as StdPtr;
@@ -10,16 +10,17 @@ use std::ptr as StdPtr;
 use seize::LocalGuard;
 
 use crate::hints::unlikely;
+use crate::nodeversion::NodeVersion;
+use crate::prefetch::prefetch_read;
 use crate::{
     TreeLeafNode, TreePermutation, ValueSlot,
     key::IKEY_SIZE,
     leaf15::LAYER_KEYLENX,
-    nodeversion::NodeVersion,
-    prefetch::prefetch_read,
     tree::range::{
         cursor_key::CursorKey,
         helper::ReverseScanHelper,
         scan_state::{BackStackElement, LayerContext, LayerStack, ScanSnapshot, ScanStateBack},
+        traversal::reach_leaf_for_scan,
     },
 };
 
@@ -119,7 +120,7 @@ impl ReverseScan {
 
             // Reach target leaf
             let mut leaf_ptr: *mut L =
-                Self::reach_leaf_for_scan::<L, S>(current_root, cursor_key, guard);
+                reach_leaf_for_scan::<L, S>(current_root, cursor_key, guard);
 
             // CRITICAL: Check null BEFORE calling stable_reverse
             if leaf_ptr.is_null() {
@@ -458,78 +459,6 @@ impl ReverseScan {
             value: output,
             key_len,
         })
-    }
-
-    /// Traverse from layer root to target leaf.
-    ///
-    /// Similar to `reach_leaf_concurrent_generic` but uses cursor key's ikey.
-    ///
-    /// # Note
-    ///
-    /// The `guard` parameter ensures pointer validity through lifetime binding.
-    #[inline]
-    fn reach_leaf_for_scan<L, S>(
-        start: *const u8,
-        cursor_key: &CursorKey,
-        _guard: &LocalGuard<'_>,
-    ) -> *mut L
-    where
-        L: TreeLeafNode<S>,
-        S: ValueSlot,
-    {
-        if start.is_null() {
-            return StdPtr::null_mut();
-        }
-
-        let target_ikey: u64 = cursor_key.current_ikey();
-        let mut node: *const u8 = start;
-
-        loop {
-            // SAFETY: node is valid, both node types have NodeVersion as first field
-            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
-
-            // Get stable version (spins if dirty)
-            let v: u32 = version.stable();
-
-            if version.is_leaf() {
-                // Reached a leaf
-                return node.cast_mut().cast::<L>();
-            }
-
-            // It's an internode - traverse down
-            // SAFETY: !is_leaf() confirmed above
-            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
-
-            // Binary search for child
-            let child_idx: usize =
-                upper_bound_internode_generic::<L::Internode>(target_ikey, inode);
-            let child: *mut u8 = inode.child(child_idx);
-
-            // Prefetch child node
-            prefetch_read(child);
-
-            if child.is_null() {
-                // Concurrent split in progress - retry from start
-                node = start;
-                continue;
-            }
-
-            // Check if internode changed during our read
-            if inode.version().has_changed(v) {
-                // Version changed - check for split
-                if inode.version().has_split(v) {
-                    // Key might have escaped to sibling - retry from start
-                    node = start;
-                    continue;
-                }
-                // Just retry this internode
-                continue;
-            }
-
-            // Descend to child
-            node = child;
-        }
     }
 
     // ========================================================================
@@ -1020,7 +949,7 @@ impl ReverseScan {
         // Iterative retry loop (avoids recursion)
         for _retry in 0..MAX_REPOSITION_RETRIES {
             // Traverse from root to leaf
-            let mut leaf_ptr: *mut L = Self::reach_leaf_for_scan::<L, S>(root, cursor_key, guard);
+            let mut leaf_ptr: *mut L = reach_leaf_for_scan::<L, S>(root, cursor_key, guard);
 
             // Check for empty tree / layer
             if leaf_ptr.is_null() {

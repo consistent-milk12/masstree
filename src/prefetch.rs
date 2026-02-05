@@ -11,6 +11,11 @@
 //! - **`aarch64`**: Uses inline `PRFM` instruction (stable, no feature gates)
 //! - **Other**: No-op (safe fallback)
 //!
+//! # Feature Flags
+//!
+//! - **`no-prefetch`**: Disables all software prefetching, making all functions no-ops.
+//!   Use this for A/B benchmarking to measure the actual benefit of prefetching.
+//!
 //! # Usage
 //!
 //! ```ignore
@@ -42,13 +47,24 @@
 /// - Over-prefetching can pollute the cache; use judiciously
 /// - The prefetch distance should match your access pattern
 /// - No null check is performed to avoid branch overhead in hot paths
+///
+/// # Feature Flags
+///
+/// When `no-prefetch` feature is enabled, this function is a no-op.
 #[inline(always)]
 pub fn prefetch_read<T>(ptr: *const T) {
+    // When no-prefetch is enabled, all prefetch calls become no-ops for A/B benchmarking
+    #[cfg(feature = "no-prefetch")]
+    {
+        let _ = ptr;
+        return;
+    }
+
     // NOTE: No null check. Prefetch instructions are no-ops for null/invalid
     // addresses on x86_64 and aarch64. Removing the branch improves performance
     // in tight loops where prefetch is called frequently.
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(not(feature = "no-prefetch"), target_arch = "x86_64"))]
     {
         // SAFETY: _mm_prefetch is always safe to call.
         // It's a hint that may be ignored by the CPU.
@@ -58,7 +74,7 @@ pub fn prefetch_read<T>(ptr: *const T) {
         }
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(not(feature = "no-prefetch"), target_arch = "aarch64"))]
     {
         // Use inline asm instead of unstable std::arch::aarch64::_prefetch.
         // PRFM PLDL1KEEP, [ptr] - Prefetch for load, L1 cache, keep in cache.
@@ -72,8 +88,12 @@ pub fn prefetch_read<T>(ptr: *const T) {
         }
     }
 
-    // No-op on unsupported architectures
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    // No-op on unsupported architectures (or when no-prefetch is enabled)
+    #[cfg(not(any(
+        feature = "no-prefetch",
+        target_arch = "x86_64",
+        target_arch = "aarch64"
+    )))]
     {
         let _ = ptr;
     }
@@ -90,9 +110,19 @@ pub fn prefetch_read<T>(ptr: *const T) {
 /// - Large sequential scans that won't revisit data
 /// - Bulk operations where cache pollution is a concern
 /// - For repeated access patterns, prefer [`prefetch_read`]
+///
+/// # Feature Flags
+///
+/// When `no-prefetch` feature is enabled, this function is a no-op.
 #[inline(always)]
 pub fn prefetch_read_nta<T>(ptr: *const T) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(feature = "no-prefetch")]
+    {
+        let _ = ptr;
+        return;
+    }
+
+    #[cfg(all(not(feature = "no-prefetch"), target_arch = "x86_64"))]
     {
         // SAFETY: _mm_prefetch is always safe to call.
         // _MM_HINT_NTA = non-temporal access, minimizes cache pollution.
@@ -101,7 +131,7 @@ pub fn prefetch_read_nta<T>(ptr: *const T) {
         }
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(not(feature = "no-prefetch"), target_arch = "aarch64"))]
     {
         // PRFM PLDL1STRM - Prefetch for load, L1 cache, streaming (non-temporal).
         // SAFETY: PRFM is always safe - it's a hint that doesn't fault.
@@ -114,7 +144,11 @@ pub fn prefetch_read_nta<T>(ptr: *const T) {
         }
     }
 
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(any(
+        feature = "no-prefetch",
+        target_arch = "x86_64",
+        target_arch = "aarch64"
+    )))]
     {
         let _ = ptr;
     }
@@ -130,12 +164,22 @@ pub fn prefetch_read_nta<T>(ptr: *const T) {
 ///
 /// Use this when you're about to modify data at the pointer location.
 /// For read-only traversal, prefer [`prefetch_read`].
+///
+/// # Feature Flags
+///
+/// When `no-prefetch` feature is enabled, this function is a no-op.
 #[inline(always)]
 pub fn prefetch_write<T>(ptr: *mut T) {
+    #[cfg(feature = "no-prefetch")]
+    {
+        let _ = ptr;
+        return;
+    }
+
     // NOTE: No null check. Prefetch instructions are no-ops for null/invalid
     // addresses on x86_64 and aarch64.
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(not(feature = "no-prefetch"), target_arch = "x86_64"))]
     {
         // SAFETY: _mm_prefetch is always safe to call.
         // _MM_HINT_ET0 prefetches into exclusive state, avoiding a later
@@ -146,7 +190,7 @@ pub fn prefetch_write<T>(ptr: *mut T) {
         }
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(not(feature = "no-prefetch"), target_arch = "aarch64"))]
     {
         // Use inline asm instead of unstable std::arch::aarch64::_prefetch.
         // PRFM PSTL1KEEP, [ptr] - Prefetch for store, L1 cache, keep in cache.
@@ -160,7 +204,11 @@ pub fn prefetch_write<T>(ptr: *mut T) {
         }
     }
 
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(any(
+        feature = "no-prefetch",
+        target_arch = "x86_64",
+        target_arch = "aarch64"
+    )))]
     {
         let _ = ptr;
     }

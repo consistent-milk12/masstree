@@ -34,10 +34,10 @@
 use std::mem as StdMem;
 
 use super::{LeafNode15, WIDTH_15};
-use crate::LeafValue;
 use crate::nodeversion::NodeVersion;
 use crate::permuter::AtomicPermuter15;
 use crate::suffix::SuffixSidecar;
+use crate::LeafValue;
 
 // ============================================================================
 //  Size and Alignment Assertions
@@ -48,7 +48,7 @@ use crate::suffix::SuffixSidecar;
 /// Note: These assertions assume `target_pointer_width = 64`.
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
+    use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8};
 
     // LeafNode15 should be exactly 448 bytes (7 cache lines) with sidecar design
     assert!(StdMem::size_of::<LeafNode15<LeafValue<u64>>>() == 448);
@@ -62,7 +62,7 @@ const _: () = {
     assert!(StdMem::size_of::<[AtomicU64; WIDTH_15]>() == 120);
     assert!(StdMem::size_of::<[AtomicU8; WIDTH_15]>() == 15);
     assert!(StdMem::size_of::<[AtomicPtr<u8>; WIDTH_15]>() == 120);
-    assert!(StdMem::size_of::<AtomicPtr<SuffixSidecar<WIDTH_15>>>() == 8);
+    assert!(StdMem::size_of::<AtomicPtr<SuffixSidecar>>() == 8);
 };
 
 // ============================================================================

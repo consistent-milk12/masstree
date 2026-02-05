@@ -17,6 +17,9 @@ pub use inline::InlineSuffixBag;
 
 pub use sidecar::{SideCarUtils, SuffixSidecar};
 
+/// Number of slots (matches WIDTH_15 leaf node).
+const WIDTH: usize = 15;
+
 /// Initial capacity for suffix storage (matches C++ `INITIAL_KSUF_CAPACITY`).
 const INITIAL_CAPACITY: usize = 128;
 
@@ -74,15 +77,15 @@ pub trait PermutationProvider {
 
 /// Contiguous storage for key suffixes.
 ///
-/// Each leaf node can have at most `WIDTH` suffixes (one per slot).
+/// Each leaf node can have at most 15 suffixes (one per slot).
 /// Suffixes are stored contiguously in a growable buffer.
 ///
 /// # Memory Layout
 ///
 /// ```text
 /// SuffixBag {
-///     slots: [(offset, len); WIDTH],  // Per-slot metadata
-///     data: [u8],                      // Contiguous suffix bytes
+///     slots: [(offset, len); 15],  // Per-slot metadata
+///     data: [u8],                   // Contiguous suffix bytes
 /// }
 /// ```
 ///
@@ -93,12 +96,8 @@ pub trait PermutationProvider {
 /// 2. Allocate new buffer with 2x capacity (at least needed size)
 /// 3. Copy only active suffixes (garbage collection)
 /// 4. Assign new suffix
-///
-/// # Type Parameters
-///
-/// * `WIDTH` - Number of slots (must match the leaf node's WIDTH)
 #[derive(Debug)]
-pub struct SuffixBag<const WIDTH: usize> {
+pub struct SuffixBag {
     /// Per-slot metadata: (offset, length) pairs.
     slots: [SlotMeta; WIDTH],
 
@@ -109,10 +108,7 @@ pub struct SuffixBag<const WIDTH: usize> {
     suffix_count: u8,
 }
 
-impl<const WIDTH: usize> SuffixBag<WIDTH> {
-    /// Compile-time assert that WIDTH fits in u8 for `suffix_count`.
-    const ASSERT_WIDTH_FITS_U8: () = assert!(WIDTH <= 255, "WDITH mst be <= 255 to fit in u8");
-
+impl SuffixBag {
     // ========================================================================
     //  Constructor
     // ========================================================================
@@ -121,9 +117,6 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     #[must_use]
     #[inline(always)]
     pub fn new() -> Self {
-        // Force compile-time evaluation of WIDTH assertion
-        let () = Self::ASSERT_WIDTH_FITS_U8;
-
         Self {
             slots: [SlotMeta::EMPTY; WIDTH],
             data: Vec::with_capacity(INITIAL_CAPACITY),
@@ -135,9 +128,6 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     #[must_use]
     #[inline(always)]
     pub fn with_capacity(capacity: usize) -> Self {
-        // Force compile-time evaluation of WIDTH assertion
-        let () = Self::ASSERT_WIDTH_FITS_U8;
-
         Self {
             slots: [SlotMeta::EMPTY; WIDTH],
             data: Vec::with_capacity(capacity),
@@ -149,7 +139,6 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     #[must_use]
     #[inline(always)]
     pub fn from_vec(data: Vec<u8>) -> Self {
-        let () = Self::ASSERT_WIDTH_FITS_U8;
         debug_assert!(data.is_empty(), "from_vec expects empty Vec");
 
         Self {
@@ -215,7 +204,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// # Arguments
     ///
-    /// * `slot` - Slot index, must be `< WIDTH`
+    /// * `slot` - Slot index, must be `< 15`
     /// * `suffix` - Suffix bytes to store
     ///
     /// # Returns
@@ -337,7 +326,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// # Panics
     ///
-    /// Panics if `slot >= WIDTH`.
+    /// Panics if `slot >= 15`.
     #[must_use]
     #[inline(always)]
     #[expect(
@@ -353,7 +342,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// # Panics
     ///
-    /// Panics if `slot >= WIDTH`.
+    /// Panics if `slot >= 15`.
     #[must_use]
     #[inline(always)]
     #[expect(
@@ -386,7 +375,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// # Panics
     ///
-    /// Panics if `slot >= WIDTH`.
+    /// Panics if `slot >= 15`.
     #[must_use]
     #[inline(always)]
     pub fn get_or_empty(&self, slot: usize) -> &[u8] {
@@ -433,7 +422,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// # Panics
     ///
-    /// Panics if `slot >= WIDTH` or if suffix length exceeds `u16::MAX`.
+    /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
     #[inline]
     #[expect(
         clippy::indexing_slicing,
@@ -503,7 +492,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// # Panics
     ///
-    /// Panics if `slot >= WIDTH` or if suffix length exceeds `u16::MAX`.
+    /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
     #[inline]
     #[expect(
         clippy::indexing_slicing,
@@ -549,7 +538,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     ///
     /// # Panics
     ///
-    /// Panics if `slot >= WIDTH`.
+    /// Panics if `slot >= 15`.
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
@@ -594,7 +583,7 @@ impl<const WIDTH: usize> SuffixBag<WIDTH> {
     }
 }
 
-impl<const WIDTH: usize> Default for SuffixBag<WIDTH> {
+impl Default for SuffixBag {
     #[inline(always)]
     fn default() -> Self {
         Self::new()

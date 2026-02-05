@@ -4,7 +4,7 @@
 
 use arrayvec::ArrayVec;
 
-use super::{PermutationProvider, SlotMeta, SuffixBag};
+use super::{PermutationProvider, SlotMeta, SuffixBag, WIDTH};
 
 /// Entry for tracking suffix during compaction.
 /// Stores (`slot_index`, `original_offset`, `length`).
@@ -15,7 +15,7 @@ struct CompactEntry {
     len: u16,
 }
 
-impl<const WIDTH: usize> SuffixBag<WIDTH> {
+impl SuffixBag {
     /// Compact in-place by moving data within the existing buffer.
     ///
     /// This is a true in-place compaction that:
