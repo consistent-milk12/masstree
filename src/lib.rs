@@ -13,29 +13,6 @@
 //! - Lazy leaf coalescing for deleted entries
 //! - high-performance inline variant [`MassTree15Inline`], all benchmark results are based on it.
 //!
-//! ## Variant Selection
-//!
-//! | Variant | Best For |
-//! |---------|----------|
-//! | [`MassTree15`] | Range scans, writes, shared-prefix keys, contention |
-//! | [`MassTree`] (WIDTH=24) | Random-access reads, single-threaded point ops |
-//!
-//! [`MassTree15`] tends to perform better due to cheaper u64 atomics and better
-//! cache utilization. Consider it for most workloads.
-//!
-//! ```rust
-//! use masstree::{MassTree, MassTree15, MassTree15Inline};
-//!
-//! // Default: WIDTH=15 with inline storage (best for Copy types)
-//! let tree: MassTree<u64> = MassTree::new();
-//!
-//! // WIDTH=15, Arc-based storage (for non-Copy types like String)
-//! let tree15: MassTree15<String> = MassTree15::new();
-//!
-//! // Explicit inline variant
-//! let inline15: MassTree15Inline<u64> = MassTree15Inline::new();
-//! ```
-//!
 //! ## Quick Start
 //!
 //! ```rust,ignore
