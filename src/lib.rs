@@ -8,10 +8,10 @@
 //! - Ordered map for byte keys (lexicographic ordering)
 //! - Lock-free reads with version validation
 //! - Concurrent inserts and deletes with fine-grained leaf locking
-//! - Zero-copy range scans with `scan_ref` and `scan_prefix`
+//! - Range scans with `scan` and `scan_prefix`
 //! - Memory reclamation via epoch-based deferred cleanup
 //! - Lazy leaf coalescing for deleted entries
-//! - high-performance inline variant [`MassTree15Inline`], all benchmark results are based on it.
+//! - High-performance inline variant [`MassTree15Inline`] (the default `MassTree` alias)
 //!
 //! ## Quick Start
 //!
@@ -24,15 +24,15 @@
 //! // Insert
 //! tree.insert_with_guard(b"hello", 123, &guard);
 //!
-//! // Point lookup (lock-free)
-//! assert_eq!(tree.get_ref(b"hello", &guard), Some(&123));
+//! // Point lookup (lock-free, returns copy for inline storage)
+//! assert_eq!(tree.get_with_guard(b"hello", &guard), Some(123));
 //!
 //! // Remove
 //! tree.remove_with_guard(b"hello", &guard).unwrap();
 //!
-//! // Range scan (zero-copy)
+//! // Range scan
 //! use masstree::RangeBound;
-//! tree.scan_ref(RangeBound::Included(b"a"), RangeBound::Excluded(b"z"), |key, value| {
+//! tree.scan(RangeBound::Included(b"a"), RangeBound::Excluded(b"z"), |key, value| {
 //!     println!("{:?} -> {}", key, value);
 //!     true // continue scanning
 //! }, &guard);

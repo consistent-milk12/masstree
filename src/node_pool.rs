@@ -290,15 +290,15 @@ pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
 /// first-allocation overhead. This fills the freelist so the hot path
 /// never needs to call the allocator.
 ///
-/// # Common size classes for Masstree
+/// # Common size classes for Masstree (sidecar-era)
 ///
-/// - 8 cache lines (512 bytes): `InternodeNode`
-/// - 12 cache lines (768 bytes): `LeafNode15`
+/// - 5 cache lines (320 bytes): `InternodeNode`
+/// - 7 cache lines (448 bytes): `LeafNode15`
 pub fn warmup_pool() {
-    // Size classes commonly used by Masstree nodes
+    // Size classes commonly used by Masstree nodes (sidecar-era layout)
     const WARMUP_SIZES: &[usize] = &[
-        8 * CACHE_LINE,  // 512 bytes - InternodeNode
-        12 * CACHE_LINE, // 768 bytes - LeafNode15
+        5 * CACHE_LINE, // 320 bytes - InternodeNode
+        7 * CACHE_LINE, // 448 bytes - LeafNode15
     ];
 
     for &size in WARMUP_SIZES {

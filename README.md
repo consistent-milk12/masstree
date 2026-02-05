@@ -18,7 +18,7 @@ Copy types.
 
 ## Status
 
-**v0.7.3** — Core feature complete.
+**v0.7.4** — Core feature complete.
 
 | Feature | Status |
 |---------|--------|
@@ -35,13 +35,14 @@ Copy types.
 
 | Benchmark | Rust | C++ | Ratio |
 |-----------|------|-----|-------|
-| **rw4** (reverse-seq) | 59.00 | 48.14 | **123%** |
-| **same** (10 hot keys) | 3.56 | 2.09 | **170%** |
-| **rw2g98** (98% reads) | 25.81 | 23.04 | **112%** |
-| **uscale** (random 140M) | 11.05 | 10.58 | **104%** |
-| **wscale** (wide random) | 9.56 | 9.03 | **106%** |
-| **rw1** (random insert+read) | 11.01 | 11.23 | 98% |
-| **rw3** (forward-seq) | 40.54 | 50.34 | 81% |
+| **rw3** (forward-seq) | 70.50 | 45.34 | **156%** |
+| **highcontention** (500 keys, 64B) | 78.04 | 58.62 | **133%** |
+| **rw4** (reverse-seq) | 56.14 | 43.24 | **130%** |
+| **rw1** (random insert+read) | 10.11 | 8.16 | **124%** |
+| **same** (10 hot keys) | 2.57 | 2.07 | **124%** |
+| **uscale** (random 140M) | 10.77 | 8.81 | **122%** |
+| **rw2g98** (98% reads) | 24.71 | 20.70 | **119%** |
+| **wscale** (wide random) | 9.00 | 8.12 | **111%** |
 
 ## vs Rust Concurrent Maps (12T SMT)
 
@@ -132,7 +133,7 @@ hot key patterns, mixed operations, prefix queries, and deep trie traversal.
 
 ```toml
 [dependencies]
-masstree = { version = "0.7.3", features = ["mimalloc"] }
+masstree = { version = "0.7.4", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).
@@ -151,15 +152,15 @@ let guard = tree.guard();
 tree.insert_with_guard(b"hello", 123, &guard).unwrap();
 tree.insert_with_guard(b"world", 456, &guard).unwrap();
 
-// Point lookup
-assert_eq!(tree.get_ref(b"hello", &guard), Some(&123));
+// Point lookup (returns copy for inline storage)
+assert_eq!(tree.get_with_guard(b"hello", &guard), Some(123));
 
 // Remove
 tree.remove_with_guard(b"hello", &guard).unwrap();
-assert_eq!(tree.get_ref(b"hello", &guard), None);
+assert_eq!(tree.get_with_guard(b"hello", &guard), None);
 
-// Range scan (zero-copy)
-tree.scan_ref(b"a"..b"z", |key, value| {
+// Range scan
+tree.scan(b"a"..b"z", |key, value| {
     println!("{:?} -> {}", key, value);
     true // continue scanning
 }, &guard);
