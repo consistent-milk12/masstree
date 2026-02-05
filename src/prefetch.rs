@@ -52,6 +52,8 @@
 ///
 /// When `no-prefetch` feature is enabled, this function is a no-op.
 #[inline(always)]
+#[expect(clippy::nursery)]
+#[expect(clippy::needless_return)]
 pub fn prefetch_read<T>(ptr: *const T) {
     // When no-prefetch is enabled, all prefetch calls become no-ops for A/B benchmarking
     #[cfg(feature = "no-prefetch")]
@@ -115,6 +117,7 @@ pub fn prefetch_read<T>(ptr: *const T) {
 ///
 /// When `no-prefetch` feature is enabled, this function is a no-op.
 #[inline(always)]
+#[expect(clippy::needless_return, clippy::nursery)]
 pub fn prefetch_read_nta<T>(ptr: *const T) {
     #[cfg(feature = "no-prefetch")]
     {
@@ -169,6 +172,7 @@ pub fn prefetch_read_nta<T>(ptr: *const T) {
 ///
 /// When `no-prefetch` feature is enabled, this function is a no-op.
 #[inline(always)]
+#[expect(clippy::needless_return, clippy::nursery)]
 pub fn prefetch_write<T>(ptr: *mut T) {
     #[cfg(feature = "no-prefetch")]
     {

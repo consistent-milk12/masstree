@@ -1,4 +1,4 @@
-use super::{SlotMeta, SuffixBag, INITIAL_CAPACITY, WIDTH};
+use super::{INITIAL_CAPACITY, SlotMeta, SuffixBag, WIDTH};
 
 impl Clone for SuffixBag {
     /// Clone with compaction, only copies active suffix data.

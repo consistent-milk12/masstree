@@ -17,7 +17,7 @@ pub use inline::InlineSuffixBag;
 
 pub use sidecar::{SideCarUtils, SuffixSidecar};
 
-/// Number of slots (matches WIDTH_15 leaf node).
+/// Number of slots (matches `WIDTH_15` leaf node).
 const WIDTH: usize = 15;
 
 /// Initial capacity for suffix storage (matches C++ `INITIAL_KSUF_CAPACITY`).

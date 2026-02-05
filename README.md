@@ -13,14 +13,12 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 - High-throughput value-only scans with `scan_values` (skips key materialization)
 - Memory reclamation via hyaline scheme (`seize` crate)
 - Lazy leaf coalescing for deleted entries
-- Extremely high-performance inline variant `MassTree15Inline`, this is only usable on
+- High-performance inline variant `MassTree15Inline`, this is only usable on
 Copy types.
 
 ## Status
 
-**v0.7.2** — Major performance enhancements. Core feature complete. Beats C++ Masstree on 7/8 benchmarks and
-Rust alternatives on 12/12 workloads (12T SMT). Passes Miri with strict-provenance flag. Concurrent data structures
-require extensive stress testing, the test suite is comprehensive (978 tests total) but edge cases may remain.
+**v0.7.3** — Core feature complete.
 
 | Feature | Status |
 |---------|--------|
@@ -35,26 +33,6 @@ require extensive stress testing, the test suite is comprehensive (978 tests tot
 
 ## vs C++ Masstree (12T, 10s)
 
-Results vary between runs and hardware configurations. The `same` benchmark
-(10 hot keys, 12 threads) consistently shows the largest improvement over C++,
-achieving **1.7x higher throughput** under extreme contention. Possible factors:
-
-- **Hyaline memory reclamation** — Unlike the C++ epoch-based reclamation (EBR),
-  Hyaline (via `seize` crate) allows readers to avoid quiescent state registration
-- **Lazy coalescing** — Empty leaves are queued for deferred cleanup rather than
-  removed inline, avoiding lock-coupling issues during removes
-- **Sharded length counter** — 16 cache-line-aligned shards for `len()` tracking
-  (C++ doesn't track global count)
-
-Note: The optimistic read protocol (version-based OCC) is the original Masstree design,
-not a divergence. One minor divergence: `has_changed()` uses `> (LOCK_BIT | INSERTING_BIT)`
-instead of C++'s `> lock_bit`, ignoring both bits 0-1. This is safe because version
-*counters* (VINSERT/VSPLIT) are the source of truth, INSERTING_BIT is only set while
-modifications are in-flight and not yet visible to readers. See `src/nodeversion.rs:643-673`
-for the full safety argument.
-
-The forward-sequential gap (rw3) narrowed from 57% to 81% but remains under investigation.
-
 | Benchmark | Rust | C++ | Ratio |
 |-----------|------|-----|-------|
 | **rw4** (reverse-seq) | 59.00 | 48.14 | **123%** |
@@ -64,37 +42,6 @@ The forward-sequential gap (rw3) narrowed from 57% to 81% but remains under inve
 | **wscale** (wide random) | 9.56 | 9.03 | **106%** |
 | **rw1** (random insert+read) | 11.01 | 11.23 | 98% |
 | **rw3** (forward-seq) | 40.54 | 50.34 | 81% |
-
-## vs Rust Concurrent Maps (6T Physical, Rigorous)
-
-> Source: `runs/run150_read_write_correctness.txt`
-> **Config:** Physical cores only, 200 samples, performance governor.
-
-This can be considered the current baseline.
-
-Note: MassTree's `insert()` has upsert semantics, it updates existing keys and returns the old
-value. TreeIndex's `insert()` fails on existing keys, requiring a `remove()+insert()` fallback.
-Pure insert benchmarks (13, 14) use fresh keys only, providing a fairer comparison for
-insert-heavy workloads where TreeIndex performs better.
-
-| Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
-|-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **28.03** | 13.93 | 8.78 | 12.23 | **2.01x** |
-| 02_zipfian | **30.89** | 11.63 | 9.90 | 4.20 | **2.66x** |
-| 03_shared_prefix | **15.57** | 8.48 | 7.66 | 11.80 | **1.32x** |
-| 04_high_contention | **59.10** | 14.78 | 12.94 | 3.47 | **4.00x** |
-| 05_large_dataset | **13.76** | 8.98 | 6.71 | 7.68 | **1.53x** |
-| 06_single_hot_key | **18.02** | 4.50 | 5.94 | 4.04 | **3.03x** |
-| 07_mixed_50_50 | **25.99** | 5.67 | 5.13 | 12.12 | **2.14x** |
-| 08_8byte_keys | **43.67** | 21.52 | 11.86 | 16.95 | **2.03x** |
-| 09_pure_read | **42.10** | 22.88 | 13.70 | 13.31 | **1.84x** |
-| 10_remove_heavy | **15.02** | 11.62 | 5.07 | 3.93 | **1.29x** |
-| 13_insert_only_fair | **22.49** | 17.77 | 10.37 | 5.42 | **1.27x** |
-| 14_pure_insert | 9.93 | **11.42** | 8.13 | 2.17 | 0.87x |
-
-**Single-thread latency:** masstree15 achieves **836 µs** median read latency vs tree_index 1.35 ms (**1.61x faster**).
-
-**Build time:** masstree15 builds at **8.46 Mitem/s** vs skipmap 6.17, tree_index 4.35, indexset 1.86 (**1.37–4.6x faster**).
 
 ## vs Rust Concurrent Maps (12T SMT)
 
@@ -116,23 +63,6 @@ insert-heavy workloads where TreeIndex performs better.
 | 13_insert_only_fair | **37.25** | 24.25 | 16.72 | 6.12 | **1.54x** |
 | 14_pure_insert | **14.33** | 13.67 | 10.52 | 2.50 | **1.05x** |
 
-**Wins 12/12.** Deferred suffix retirement and pre-allocated suffix buffers improved insert
-throughput by 20–46%, flipping `14_pure_insert` from a loss (0.75x in run151) to a win.
-
-**Single-thread latency (11):** masstree15 achieves **829 µs** median read latency vs tree_index 1.39 ms (**1.67x faster**).
-
-**Build time (12):** masstree15 builds at **8.14 Mitem/s** vs skipmap 6.29, tree_index 4.33, indexset 1.81 (**1.29–4.5x faster**).
-
-SMT scaling highlights: High-contention workloads benefit most from hyperthreading, with
-masstree15 reaching **76.28 Mitem/s** (4.27x vs alternatives). Insert-heavy workloads
-(`13_insert_only_fair`, `14_pure_insert`) showed the largest gains from moving heap allocation
-and EBR retirement outside the leaf lock critical section.
-
-Note: `06_single_hot_key` regressed from 14.33 to 10.66 Mitem/s (-26%) compared to run151.
-With only one key contended across 12 threads, the increased leaf size (896→1152 bytes from
-inline suffix capacity doubling) likely worsens cache line sharing. masstree15 still leads
-all alternatives (next best: skipmap at 6.51).
-
 ## High-Impact Workloads (12T SMT)
 
 > Source: `runs/run154_high_impact_twig_optimization.txt`
@@ -151,17 +81,6 @@ hot key patterns, mixed operations, prefix queries, and deep trie traversal.
 | 06_deep_trie_traversal | **18.16** | 13.77 | 11.16 | 8.84 | **1.32x** |
 | 07_deep_trie_read_only | **27.90** | 15.05 | 17.35 | 15.28 | **1.61x** |
 | 08_variable_keys_arc | **29.56** | 11.13 | 11.55 | 8.46 | **2.56x** |
-
-**Wins 8/8** with margins from 1.32x to 3.03x.
-
-Key insights:
-
-- **Long keys (128B):** Unique prefixes test suffix handling; Masstree stores suffixes inline
-- **Variable keys (64-256B):** Masstree takes `&[u8]` slices; others `clone()` `Vec<u8>`
-- **Multiple hot keys:** OCC reads excel under localized contention (8 keys, 80% access)
-- **Mixed ops (70/20/10):** `seize`-based reclamation handles concurrent deletes well
-- **Prefix queries:** Native `scan_prefix()` vs range simulation (29x faster than tree_index)
-- **Deep trie:** Shared prefix chunks force multi-layer descent; narrowest margin (1.32x)
 
 ## Range Scans (6T Physical)
 
@@ -186,8 +105,6 @@ Key insights:
 | 16_insert_heavy | **26.93** | 19.02 | **1.42x** |
 | 17_hot_spot | **9.51** | 2.99 | **3.18x** |
 
-**Wins 15/15** vs TreeIndex with margins from 1.42x to 3.42x.
-
 ## Range Scans (12T SMT)
 
 > Source: `runs/run161_range_scan.txt`
@@ -211,14 +128,11 @@ Key insights:
 | 16_insert_heavy | **30.06** | 25.26 | **1.19x** |
 | 17_hot_spot | **9.69** | 4.04 | **2.40x** |
 
-**Wins 15/15** vs TreeIndex. TreeIndex scales better on SMT for shared-prefix and suffix-differ
-workloads but Masstree maintains leadership with margins from 1.14x to 2.91x.
-
 ## Install
 
 ```toml
 [dependencies]
-masstree = { version = "0.7.2", features = ["mimalloc"] }
+masstree = { version = "0.7.3", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).
@@ -358,11 +272,11 @@ Keys with shared prefixes share upper layers, making lookups efficient for hiera
 The `examples/` directory contains comprehensive usage examples:
 
 ```bash
-cargo run --example basic_usage --release      # Core API walkthrough
-cargo run --example rayon_parallel --release   # Parallel processing with Rayon
-cargo run --example tokio_async --release      # Async integration with Tokio
-cargo run --example url_cache --release        # Real-world URL cache
-cargo run --example session_store --release    # Concurrent session store
+cargo run --example basic_usage --features mimalloc --release      # Core API walkthrough
+cargo run --example rayon_parallel --features mimalloc --release   # Parallel processing with Rayon
+cargo run --example tokio_async --features mimalloc --release      # Async integration with Tokio
+cargo run --example url_cache --features mimalloc --release        # Real-world URL cache
+cargo run --example session_store --features mimalloc --release    # Concurrent session store
 ```
 
 ### Rayon Integration

@@ -701,8 +701,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         }
 
         // Load sidecar pointer with Acquire to synchronize with allocation
-        let sidecar: *mut SuffixSidecar =
-            self.suffix_sidecar.load(AtomicOrdering::Acquire);
+        let sidecar: *mut SuffixSidecar = self.suffix_sidecar.load(AtomicOrdering::Acquire);
 
         // DEFENSIVE: Handle null sidecar gracefully instead of UB
         //
@@ -806,8 +805,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         // NOTE: drain_to_external does NOT clear inline state - this is intentional.
         // The external bag contains all suffixes; inline becomes orphaned metadata.
         // Allocation is infallible (aborts on OOM).
-        let mut new_bag: SuffixBag =
-            sidecar.inline.drain_to_external(&perm, slot, suffix);
+        let mut new_bag: SuffixBag = sidecar.inline.drain_to_external(&perm, slot, suffix);
 
         // Merge with existing external suffixes (if any)
         let old_ext: *mut SuffixBag = sidecar.external.load(RELAXED);
@@ -985,8 +983,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // Only clear if sidecar exists
-        let sidecar_ptr: *mut SuffixSidecar =
-            self.suffix_sidecar.load(AtomicOrdering::Acquire);
+        let sidecar_ptr: *mut SuffixSidecar = self.suffix_sidecar.load(AtomicOrdering::Acquire);
         if !sidecar_ptr.is_null() {
             // SAFETY: sidecar_ptr is non-null, we hold the lock
             let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
@@ -1116,8 +1113,7 @@ impl<S: ValueSlot> LeafNode15<S> {
         );
 
         // Only compact if sidecar exists with external storage
-        let sidecar_ptr: *mut SuffixSidecar =
-            self.suffix_sidecar.load(AtomicOrdering::Acquire);
+        let sidecar_ptr: *mut SuffixSidecar = self.suffix_sidecar.load(AtomicOrdering::Acquire);
         if sidecar_ptr.is_null() {
             return 0;
         }

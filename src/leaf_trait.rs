@@ -489,8 +489,8 @@ pub trait TreeLeafNode<S: ValueSlot>: Sized + Send + Sync + 'static {
     /// non-default inline capacity.
     ///
     /// Configurable via `large-suffix-capacity` feature:
-    /// - Default: 256 bytes (better cache locality for deep_trie workloads)
-    /// - Large: 512 bytes (fewer heap allocations, -44% on deep_trie)
+    /// - Default: 256 bytes (better cache locality for `deep_trie` workloads)
+    /// - Large: 512 bytes (fewer heap allocations, -44% on `deep_trie`)
     #[cfg(not(feature = "large-suffix-capacity"))]
     const INLINE_KSUF_CAPACITY: usize = 256;
 

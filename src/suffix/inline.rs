@@ -2,21 +2,17 @@ use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering as AtomicOrdering};
 
 use super::{SuffixBag, TreePermutation};
 
-/// Number of slots (matches WIDTH_15 leaf node).
+/// Number of slots (matches `WIDTH_15` leaf node).
 const WIDTH: usize = 15;
 
 /// Inline suffix data capacity.
 ///
-/// Default: 256 bytes (better cache locality for deep_trie workloads).
+/// Default: 256 bytes (better cache locality for `deep_trie` workloads).
 /// With `large-suffix-capacity` feature: 512 bytes (fewer heap allocations).
-///
-/// Trade-off documented in `CurrentStatus.md:461-513`:
-/// - 256 bytes: 896-byte true-inline leaves, better L1 cache efficiency
-/// - 512 bytes: 1152-byte true-inline leaves, -44% on deep_trie benchmarks
 #[cfg(not(feature = "large-suffix-capacity"))]
 const CAPACITY: usize = 256;
 
@@ -181,7 +177,7 @@ impl InlineSuffixBag {
     /// Create an empty inline suffix bag.
     #[must_use]
     #[inline(always)]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             slots: [
                 AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
@@ -693,10 +689,6 @@ impl Default for InlineSuffixBag {
 
 impl Clone for InlineSuffixBag {
     #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Iterating 0..WIDTH, index always in bounds"
-    )]
     fn clone(&self) -> Self {
         // SAFETY: Clone is typically called under exclusive access or during init
         let data: [u8; CAPACITY] = unsafe { *self.data.get() };

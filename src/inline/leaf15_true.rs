@@ -1166,8 +1166,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         // SAFETY: Reader access, concurrent writes require lock
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
         if let Some(suffix) = inline.get(slot) {
             return Some(suffix);
         }
@@ -1208,8 +1207,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         );
 
         // SAFETY: We hold the lock
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
 
         if inline.try_assign(slot, suffix) {
             self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -1241,8 +1239,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8]) -> *mut u8 {
         let perm = self.permutation();
         // SAFETY: Caller holds lock
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
 
         // Aborts on OOM (standard Rust behavior).
         let mut new_bag: SuffixBag = inline.drain_to_external(&perm, slot, suffix);
@@ -1295,8 +1292,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         );
 
         // SAFETY: We hold the lock
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
 
         // Fast path 1: inline storage has room — prealloc is wasted (dropped)
         if inline.try_assign(slot, suffix) {
@@ -1344,12 +1340,10 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     ) -> *mut u8 {
         let perm = self.permutation();
         // SAFETY: Caller holds lock
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
 
         // Drain inline to external using pre-allocated buffer.
-        let mut new_bag: SuffixBag =
-            inline.drain_to_external_with_vec(&perm, slot, suffix, buffer);
+        let mut new_bag: SuffixBag = inline.drain_to_external_with_vec(&perm, slot, suffix, buffer);
 
         // Merge from old external bag (if any).
         let old_ext: *mut SuffixBag = self.external_ksuf.load(RELAXED);
@@ -1406,8 +1400,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         );
 
         // SAFETY: We hold the lock
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
 
         if inline.try_assign(slot, suffix) {
             self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
@@ -1434,8 +1427,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
     #[expect(clippy::indexing_slicing)]
     unsafe fn assign_ksuf_init_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         // SAFETY: Caller holds lock
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
 
         // Drain inline using sequential slot iteration (0..slot)
         let mut new_bag: SuffixBag = inline.drain_to_external_init(slot, suffix);
@@ -1482,8 +1474,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         );
 
         // SAFETY: We hold the lock
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
         inline.clear(slot);
 
         let ext_ptr: *mut SuffixBag = self.external_ksuf.load(RELAXED);
@@ -1507,8 +1498,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         // SAFETY: Reader access
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
         if inline.suffix_equals(slot, suffix) {
             return true;
         }
@@ -1533,8 +1523,7 @@ impl<V: InlineBits> LeafNode15TrueInline<V> {
         }
 
         // SAFETY: Reader access
-        let inline: &InlineSuffixBag =
-            unsafe { &*self.inline_ksuf.get() };
+        let inline: &InlineSuffixBag = unsafe { &*self.inline_ksuf.get() };
         if let Some(cmp) = inline.suffix_compare(slot, suffix) {
             return Some(cmp);
         }

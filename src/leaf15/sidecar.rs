@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering as AtomicOrdering;
 
-use crate::{alloc_common::BoxAllocator, suffix::SuffixSidecar, LeafNode15, ValueSlot};
+use crate::{LeafNode15, ValueSlot, alloc_common::BoxAllocator, suffix::SuffixSidecar};
 
 impl<S> LeafNode15<S>
 where

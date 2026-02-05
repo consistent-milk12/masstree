@@ -123,11 +123,11 @@ fn generate_session_id() -> SessionId {
 /// This design avoids storing duplicate session data. The user index only stores
 /// markers to enable efficient prefix scans for "all sessions for user X".
 struct SessionStore {
-    /// Main session storage: session:{session_id} -> Session
+    /// Main session storage: `session:{session_id} -> Session`
     sessions: MassTree15<Session>,
 
-    /// User index: user:{user_id}:{session_id} -> () (marker only)
-    /// Using MassTree15Inline<()> since we don't need to store any data
+    /// User index: `user:{user_id}:{session_id} -> ()` (marker only)
+    /// Using [`MassTree15Inline<()>`] since we don't need to store any data
     user_index: MassTree15Inline<()>,
 
     /// Statistics
@@ -209,7 +209,7 @@ impl SessionStore {
     /// Update session data
     ///
     /// Note: This clones the session to update it. For high-frequency updates,
-    /// consider using interior mutability (e.g., RwLock inside Session).
+    /// consider using interior mutability (e.g., `RwLock` inside Session).
     fn update_session_data(&self, session_id: &str, key: &str, value: &str) -> bool {
         self.get_session(session_id).is_some_and(|session| {
             let mut updated = (*session).clone();
@@ -272,7 +272,7 @@ impl SessionStore {
         let mut session_ids = Vec::new();
         self.user_index.scan_prefix(
             prefix.as_bytes(),
-            |key, _| {
+            |key, ()| {
                 // Extract session_id from key: "user:{user_id}:{session_id}"
                 if let Ok(key_str) = std::str::from_utf8(key)
                     && let Some(session_id) = key_str.strip_prefix(&prefix)
@@ -305,12 +305,13 @@ impl SessionStore {
         // Scan user index to get session IDs, then look up full sessions
         self.user_index.scan_prefix(
             prefix.as_bytes(),
-            |key, _| {
+            |key, ()| {
                 // Extract session_id from key, then look up full session
                 if let Ok(key_str) = std::str::from_utf8(key)
                     && let Some(session_id) = key_str.strip_prefix(&prefix)
                 {
                     let session_key = format!("session:{session_id}");
+
                     if let Some(session) = self
                         .sessions
                         .get_with_guard(session_key.as_bytes(), &session_guard)
@@ -319,6 +320,7 @@ impl SessionStore {
                         sessions.push(session);
                     }
                 }
+
                 true
             },
             &user_guard,

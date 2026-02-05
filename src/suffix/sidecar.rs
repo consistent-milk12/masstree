@@ -82,7 +82,7 @@ pub struct SuffixSidecar {
 impl SuffixSidecar {
     /// Create a new empty sidecar.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             inline: InlineSuffixBag::new(),
             external: AtomicPtr::new(StdPtr::null_mut()),

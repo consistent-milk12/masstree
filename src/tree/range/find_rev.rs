@@ -119,8 +119,7 @@ impl ReverseScan {
             stack.set_root(current_root);
 
             // Reach target leaf
-            let mut leaf_ptr: *mut L =
-                reach_leaf_for_scan::<L, S>(current_root, cursor_key, guard);
+            let mut leaf_ptr: *mut L = reach_leaf_for_scan::<L, S>(current_root, cursor_key, guard);
 
             // CRITICAL: Check null BEFORE calling stable_reverse
             if leaf_ptr.is_null() {
