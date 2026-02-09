@@ -4,7 +4,6 @@
 //! are stored in leaf nodes. The trait is implemented for existing types:
 //!
 //! - [`LeafValue<V>`]: Arc-based storage (default mode)
-//! - [`LeafValueIndex`]: Inline storage (index mode)
 //!
 //! # Design: Value vs Output
 //! The trait distinguishes between:
@@ -20,7 +19,6 @@
 //! | Node    | Slot Type           | Output Type | Allocation      |
 //! |---------|---------------------|-------------|-----------------|
 //! | Default | `LeafValue<V>`      | `Arc<V>`    | Once per insert |
-//! | Index   | `LeafValueIndex<V>` | `V`         | None (copy)     |
 
 use std::mem as StdMem;
 use std::sync::Arc;
@@ -28,7 +26,7 @@ use std::sync::Arc;
 pub mod true_inline;
 
 // Note: AllocError/AllocResult removed - allocations are now infallible
-use crate::value::{LeafValue, LeafValueIndex};
+use crate::value::LeafValue;
 
 // ============================================================================
 //  ValueSlot Trait
@@ -85,7 +83,7 @@ pub trait ValueSlot: Default + Sized {
     /// The type returned from get operations and carried across retries.
     ///
     /// - For [`LeafValue<V>`]: [`Arc<V>`] (cheap clone via refcount)
-    /// - For [`LeafValueIndex<V>`]: `V` (direct copy)
+    /// - For [`TrueInlineSlot<V>`]: `V` (direct copy)
     ///
     /// Must be [`Clone`] to support returning values from optimistic reads.
     type Output: Clone;
@@ -101,7 +99,7 @@ pub trait ValueSlot: Default + Sized {
     /// across any retries (splits, layer creation).
     ///
     /// - For [`LeafValue<V>`]: `Arc::new(value)`
-    /// - For [`LeafValueIndex<V>`]: `value` (identity)
+    /// - For [`TrueInlineSlot<V>`]: `value` (identity)
     fn into_output(value: Self::Value) -> Self::Output;
 
     /// Create a slot from an output handle.
@@ -111,7 +109,7 @@ pub trait ValueSlot: Default + Sized {
     /// - Moving existing values during layer creation
     ///
     /// - For [`LeafValue<V>`]: Wraps the Arc directly (no allocation)
-    /// - For [`LeafValueIndex<V>`]: Wraps the value directly
+    /// - For [`TrueInlineSlot<V>`]: Wraps the value directly
     fn from_output(output: Self::Output) -> Self;
 
     // ========================================================================
@@ -136,7 +134,7 @@ pub trait ValueSlot: Default + Sized {
     /// Returns `Some(Output)` if slot contains a value, `None` otherwise.
     ///
     /// - For `LeafValue<V>`: Returns `Some(Arc::clone(&arc))`
-    /// - For `LeafValueIndex<V>`: Returns `Some(value)` (copy)
+    /// - For `TrueInlineSlot<V>`: Returns `Some(value)` (copy)
     fn try_get(&self) -> Option<Self::Output>;
 
     /// Try to get the layer pointer.
@@ -189,7 +187,7 @@ pub trait ValueSlot: Default + Sized {
     /// # Safety
     ///
     /// - `ptr` must be non-null and have been created by the corresponding
-    ///   storage method (`assign_arc` for `LeafValue`, `assign_inline` for `LeafValueIndex`)
+    ///   storage method (`assign_arc` for `LeafValue`)
     /// - `ptr` must not have been already cleaned up
     /// - Caller must ensure no concurrent access to this pointer
     unsafe fn cleanup_value_ptr(ptr: *mut u8);
@@ -205,7 +203,7 @@ pub trait ValueSlot: Default + Sized {
     /// `cleanup_value_ptr` to clean it up.
     ///
     /// - For `LeafValue<V>`: `Arc::into_raw(Arc::clone(&output))`
-    /// - For `LeafValueIndex<V>`: `Box::into_raw(Box::new(output))`
+    /// - For `TrueInlineSlot<V>`: Encodes value as bits (no allocation)
     fn output_to_raw(output: &Self::Output) -> *mut u8;
 
     /// Reconstruct an output from a raw pointer.
@@ -226,7 +224,7 @@ pub trait ValueSlot: Default + Sized {
     /// More efficient when the output is no longer needed.
     ///
     /// - For `LeafValue<V>`: `Arc::into_raw(output)` directly
-    /// - For `LeafValueIndex<V>`: `Box::into_raw(Box::new(output))`
+    /// - For `TrueInlineSlot<V>`: Encodes value as bits (no allocation)
     fn output_consume_to_raw(output: Self::Output) -> *mut u8;
 
     /// Clean up a raw pointer created by `output_to_raw`.
@@ -235,7 +233,7 @@ pub trait ValueSlot: Default + Sized {
     /// allocated when converting an output to a raw pointer.
     ///
     /// - For `LeafValue<V>`: Decrements Arc refcount (drops the cloned Arc)
-    /// - For `LeafValueIndex<V>`: Drops the Box
+    /// - For `TrueInlineSlot<V>`: No-op (no allocation to free)
     ///
     /// # Safety
     ///
@@ -360,129 +358,6 @@ impl<V> ValueSlot for LeafValue<V> {
         // SAFETY: Caller guarantees ptr came from output_to_raw (Arc::into_raw)
         unsafe {
             drop(Arc::from_raw(ptr.cast::<V>()));
-        }
-    }
-}
-
-// ============================================================================
-//  ValueSlot impl for LeafValueIndex<V: Copy> (Inline Mode)
-// ============================================================================
-//
-// NOTE: We use Box<V> for storage instead of pointer-punning because:
-// - `get_ref()` returns `&V`, which requires V to exist at a valid memory address
-// - Pointer-punning stores the value IN the pointer bits, with no backing memory
-// - Dereferencing a punned pointer causes SIGSEGV
-//
-// Future optimization: Add `get_copy()` API that returns V by value, then
-// pointer-punning could be used for that path while keeping `get_ref()` working.
-
-impl<V: Copy> ValueSlot for LeafValueIndex<V> {
-    // Explicitly set for clarity (matches default)
-    const NEEDS_RETIREMENT: bool = true;
-
-    type Value = V;
-    type Output = V; // Returns V directly, no Arc!
-
-    #[inline(always)]
-    fn into_output(value: V) -> V {
-        value // Identity - no allocation at this stage
-    }
-
-    #[inline(always)]
-    fn from_output(output: V) -> Self {
-        Self::Value(output)
-    }
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty)
-    }
-
-    #[inline(always)]
-    fn is_value(&self) -> bool {
-        matches!(self, Self::Value(_))
-    }
-
-    #[inline(always)]
-    fn is_layer(&self) -> bool {
-        matches!(self, Self::Layer(_))
-    }
-
-    #[inline(always)]
-    fn try_get(&self) -> Option<V> {
-        match self {
-            Self::Value(v) => Some(*v),
-
-            _ => None,
-        }
-    }
-
-    #[inline(always)]
-    fn try_layer(&self) -> Option<*mut u8> {
-        match self {
-            Self::Layer(ptr) => Some(*ptr),
-
-            _ => None,
-        }
-    }
-
-    #[inline(always)]
-    fn layer(ptr: *mut u8) -> Self {
-        Self::Layer(ptr)
-    }
-
-    #[inline(always)]
-    fn set_layer(&mut self, ptr: *mut u8) {
-        *self = Self::Layer(ptr);
-    }
-
-    #[inline(always)]
-    fn swap_output(&mut self, new_output: V) -> Option<V> {
-        debug_assert!(
-            !self.is_layer(),
-            "swap_output called on Layer slot; layer pointer would be lost"
-        );
-
-        let old: Self = StdMem::replace(self, Self::Value(new_output));
-        match old {
-            Self::Value(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn cleanup_value_ptr(ptr: *mut u8) {
-        // SAFETY: Caller guarantees ptr came from Box::into_raw
-        unsafe {
-            drop(Box::from_raw(ptr.cast::<V>()));
-        }
-    }
-
-    #[inline(always)]
-    fn output_to_raw(output: &V) -> *mut u8 {
-        // Box the value to get a stable pointer that can be dereferenced.
-        // This is required for `get_ref()` to work (returns &V).
-        Box::into_raw(Box::new(*output)).cast::<u8>()
-    }
-
-    #[inline(always)]
-    unsafe fn output_from_raw(ptr: *const u8) -> V {
-        // SAFETY: Caller guarantees ptr is valid V pointer from Box::into_raw.
-        // V is Copy, so we just read the value (don't consume the Box).
-        unsafe { *ptr.cast::<V>() }
-    }
-
-    #[inline(always)]
-    fn output_consume_to_raw(output: V) -> *mut u8 {
-        // Box the value to get a stable pointer.
-        Box::into_raw(Box::new(output)).cast::<u8>()
-    }
-
-    #[inline(always)]
-    unsafe fn cleanup_output_raw(ptr: *mut u8) {
-        // SAFETY: Caller guarantees ptr came from output_to_raw (Box::into_raw)
-        unsafe {
-            drop(Box::from_raw(ptr.cast::<V>()));
         }
     }
 }

@@ -24,11 +24,3 @@ pub const CAS_FAILURE: Ordering = Ordering::Acquire;
 /// Ordering for relaxed loads (within locked region).
 /// Safe because lock provides synchronization.
 pub const RELAXED: Ordering = Ordering::Relaxed;
-
-/// Ordering for version `stable()` spin.
-/// Must see dirty bit updates.
-pub const VERSION_ORD: Ordering = Ordering::Acquire;
-
-/// Ordering for version unlock (clear dirty + increment).
-/// Must be visible to waiting readers.
-pub const UNLOCK_ORD: Ordering = Ordering::Release;

@@ -612,7 +612,7 @@ pub struct ScanSnapshotPtr<V> {
     /// Typed pointer to the value data.
     ///
     /// - For `LeafValue<V>`: Points to Arc<V>'s data
-    /// - For `LeafValueIndex<V>`: Points to Box<V>'s data
+    /// - For `TrueInlineSlot<V>`: Stored as atomic bits (no stable pointer)
     pub value_ptr: *const V,
 
     /// The key length at current layer (same as [`ScanSnapshot`]).

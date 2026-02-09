@@ -451,7 +451,7 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
 ///
 /// # Type Parameters
 ///
-/// - `S`: The slot type (e.g., `LeafValue<V>` or `LeafValueIndex<V>`)
+/// - `S`: The slot type (e.g., `LeafValue<V>` or `TrueInlineSlot<V>`)
 ///
 /// # Associated Types
 ///

@@ -5,6 +5,26 @@
 //! [`NodeVersion`] combines lock state, version counters, and metadata flags
 //! in a single `u32`. Readers use optimistic validation, writers acquire locks.
 //!
+//! # Synchronization Architecture
+//!
+//! Masstree uses a **dual synchronization model**:
+//!
+//! ## 1. `NodeVersion` (this module) — OCC at Node Level
+//! - **Version counters** (VINSERT/VSPLIT) detect structural changes
+//! - **Dirty flags** (INSERTING/SPLITTING) signal "modification in flight"
+//! - Readers: `stable()` → read → `has_changed()` validation
+//! - Writers: `lock()` → `mark_insert()` → modify → `drop(guard)`
+//!
+//! ## 2. Permutation (leaf15.rs) — Atomic Publish at Slot Level
+//! - **Permutation store (Release)** is the linearization point for new slots
+//! - Slot data (ikey, keylenx, value) written with Relaxed ordering
+//! - Readers load permutation (Acquire) to see all prior slot writes
+//!
+//! ## How They Work Together
+//! - `NodeVersion` gates access (readers wait for clean state via `stable()`)
+//! - Permutation publishes slot contents atomically
+//! - Both are necessary: version for change detection, permutation for slot visibility
+//!
 //! # Concurrency Model
 //! 1. Readers: Call `stable()` to get version, perform read, call `has_changed()`
 //! 2. Writers: Call `lock()` to get a [`LockGuard`], modify node, let guard drop.
@@ -97,10 +117,20 @@ impl Backoff {
     /// Uses [`StdHint::spin_loop()`] which maps to the x86 `PAUSE` instruction,
     /// improving performance on hyper-threaded CPUs by hinting that we're in
     /// a spin-wait loop.
+    ///
+    /// Includes a compiler fence after spinning to match C++ `relax_fence()`
+    /// which uses `asm volatile("pause" : : : "memory")`. The `"memory"` clobber
+    /// acts as a compiler barrier preventing reordering around the pause.
+    #[inline(always)]
     fn spin(&mut self) {
         for _ in 0..=self.count {
             StdHint::spin_loop();
         }
+
+        // Single compiler fence after all spins.
+        // Matches C++ "memory" clobber semantics while reducing fence overhead.
+        // The fence prevents compiler from reordering loads/stores across the spin.
+        StdAtomic::compiler_fence(Ordering::SeqCst);
 
         // Double count, cap at 15: 0 -> 1 -> 3 -> 7 -> 15 -> 15
         // Matches C++ backoff_fence_function (compiler.hh:141).
@@ -228,7 +258,7 @@ impl LockGuard<'_> {
     ///
     /// # Idempotent
     /// Multiple calls have no additional effect.
-    #[inline]
+    #[inline(always)]
     pub fn mark_insert(&mut self) {
         // Skip if already set (idempotent)
         if (self.locked_value & INSERTING_BIT) != 0 {
@@ -264,7 +294,7 @@ impl LockGuard<'_> {
     ///
     /// # Memory Ordering
     /// Uses [`Ordering::Release`] followed by [`Ordering::Acquire`] fence.
-    #[inline]
+    #[inline(always)]
     pub fn mark_split(&mut self) {
         // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version().value.load(Ordering::Relaxed);
@@ -478,7 +508,30 @@ impl NodeVersion {
     /// # Returns
     /// A version value with no dirty bits set.
     #[must_use]
+    #[inline(always)]
     pub fn stable(&self) -> u32 {
+        // Fast path: single load, no allocation.
+        // In uncontended workloads (90%+ of reads), we avoid allocating Backoff.
+        let value: u32 = self.value.load(Ordering::Relaxed);
+
+        if (value & DIRTY_MASK) == 0 {
+            // Acquire fence after successful read - matches C++ acquire_fence()
+            // This establishes synchronizes-with relationship with writer's Release.
+            StdAtomic::fence(Ordering::Acquire);
+            return value;
+        }
+
+        // Slow path: contention detected, delegate to cold function
+        self.stable_contended()
+    }
+
+    /// Slow path for [`stable()`] when contention is detected.
+    ///
+    /// This is marked `#[cold]` to hint to the compiler that it's rarely taken,
+    /// improving branch prediction and instruction cache usage on the fast path.
+    #[cold]
+    #[inline(never)]
+    fn stable_contended(&self) -> u32 {
         // Number of backoff iterations before yielding the CPU.
         // Tuned for sub-microsecond lock hold times on modern CPUs.
         // Higher values (8 vs 2) reduce yield_now() context switch overhead
@@ -820,7 +873,40 @@ impl NodeVersion {
     /// # Reference
     /// C++ `nodeversion.hh:87-109` - `lock()` template method
     #[must_use = "releasing a lock without using the guard is a logic error"]
+    #[inline(always)]
     pub fn lock(&self) -> LockGuard<'_> {
+        // Fast path: try to acquire immediately without backoff allocation.
+        // In uncontended cases, this avoids Backoff::new() overhead.
+        let value: u32 = self.value.load(Ordering::Relaxed);
+
+        if (value & LOCK_BIT) == 0 {
+            let locked: u32 = value | LOCK_BIT;
+
+            if self
+                .value
+                .compare_exchange_weak(value, locked, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return LockGuard {
+                    version: StdPtr::from_ref(self),
+                    locked_value: locked,
+                    _lifetime: PhantomData,
+                    _marker: PhantomData,
+                };
+            }
+        }
+
+        // Slow path: contention detected
+        self.lock_contended()
+    }
+
+    /// Slow path for [`lock()`] when contention is detected.
+    ///
+    /// This is marked `#[cold]` to hint to the compiler that it's rarely taken,
+    /// improving branch prediction and instruction cache usage on the fast path.
+    #[cold]
+    #[inline(never)]
+    fn lock_contended(&self) -> LockGuard<'_> {
         let mut backoff = Backoff::new();
 
         loop {
@@ -875,6 +961,7 @@ impl NodeVersion {
     /// # Reference
     /// C++ `nodeversion.hh:111-127` - `try_lock()` template method
     #[must_use]
+    #[inline(always)]
     pub fn try_lock(&self) -> Option<LockGuard<'_>> {
         let value: u32 = self.value.load(Ordering::Relaxed);
 
@@ -927,21 +1014,27 @@ impl NodeVersion {
     /// ```
     #[must_use]
     pub fn try_lock_for(&self, timeout: Duration) -> Option<LockGuard<'_>> {
+        // Number of lock attempts before checking the deadline.
+        // Instant::now() can be expensive (VDSO/syscall), so we amortize
+        // the cost by trying multiple times before checking time.
+        const ATTEMPTS_BEFORE_TIME_CHECK: u32 = 8;
+
         let deadline = Instant::now() + timeout;
         let mut backoff = Backoff::new();
 
         loop {
-            // Try to acquire.
-            if let Some(guard) = self.try_lock() {
-                return Some(guard);
+            // Try multiple times before checking the clock
+            for _ in 0..ATTEMPTS_BEFORE_TIME_CHECK {
+                if let Some(guard) = self.try_lock() {
+                    return Some(guard);
+                }
+                backoff.spin();
             }
 
-            // Check timeout.
+            // Check timeout after batch of attempts
             if Instant::now() >= deadline {
                 return None;
             }
-
-            backoff.spin();
         }
     }
 

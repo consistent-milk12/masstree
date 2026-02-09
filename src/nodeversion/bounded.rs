@@ -12,7 +12,7 @@ impl NodeVersion {
     /// - Context switch overhead exceeds spin time
     /// - Insert-heavy patterns target the same leaf repeatedly
     ///
-    /// # Alogrithm
+    /// # Algorithm
     ///
     /// 1. Try to acquire the lock with `try_lock()`
     /// 2. If failed, spin with exponential backoff (up to 16 iterations)
@@ -31,9 +31,9 @@ impl NodeVersion {
     ///
     /// # Memory Ordering
     ///
-    /// Uses [`Acqure`](std::sync::atomic::Ordering::Acquire) ordering on successful lock
+    /// Uses [`Acquire`](std::sync::atomic::Ordering::Acquire) ordering on successful lock
     /// acquisition.
-    #[must_use = "releasing a lock without suing the guard is a logic error"]
+    #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock_bounded(&self) -> LockGuard<'_> {
         let mut backoff = Backoff::new();
         let mut spin_count: u32 = 0;
@@ -51,7 +51,7 @@ impl NodeVersion {
                 // This reduces cache line contention compared to tight polling
                 backoff.spin();
             } else {
-                // Fallback: yield after bounded spining.
+                // Fallback: yield after bounded spinning.
                 // This prevents starvation under sustained contention
                 StdThread::yield_now();
                 spin_count = 0;

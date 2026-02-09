@@ -1554,7 +1554,193 @@ use super::scan_state::ScanSnapshotPtr;
 /// Faster than standard `find_prev` for single-layer data by eliminating
 /// branch mispredictions from layer pointer checks.
 #[inline]
-#[allow(dead_code)] // Kept for future single-layer optimization path
+pub fn find_prev_single_layer<L, S>(
+    stack: &mut BackStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    helper: &mut ReverseScanHelper,
+    guard: &LocalGuard<'_>,
+    needs_duplicate_check: bool,
+) -> (ScanStateBack, Option<ScanSnapshot<S>>)
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+    S::Output: Clone,
+{
+    // Check for null leaf (layer exhausted in single-layer mode)
+    let leaf_ptr: *mut L = stack.get_leaf_ptr();
+    if leaf_ptr.is_null() {
+        return (ScanStateBack::FindPrev, None);
+    }
+
+    let ki: isize = stack.get_ki();
+
+    // Fast path: leaf exhausted (ki went negative)
+    if ki < 0 {
+        return advance_prev_leaf_single_layer_snapshot(stack, cursor_key, guard);
+    }
+
+    // SAFETY: leaf_ptr is valid (null checked above)
+    let leaf: &L = unsafe { &*leaf_ptr };
+
+    // Check if leaf is deleted (cheap - single atomic load)
+    if leaf.version().is_deleted() {
+        return (ScanStateBack::Retry, None);
+    }
+
+    let perm: L::Perm = *stack.get_perm_ref();
+    let perm_size: usize = perm.size();
+
+    // Defensive: ki might be >= size due to concurrent deletion
+    if ki.unsigned_abs() >= perm_size {
+        return advance_prev_leaf_single_layer_snapshot(stack, cursor_key, guard);
+    }
+
+    // Get current slot
+    let slot: usize = perm.get(ki.unsigned_abs());
+    let slot_ikey: u64 = leaf.ikey_relaxed(slot);
+    let slot_keylenx: u8 = leaf.keylenx(slot);
+
+    // Check for duplicate only when needed (after Retry)
+    if needs_duplicate_check
+        && ReverseScanHelper::is_duplicate_reverse(
+            cursor_key,
+            slot_ikey,
+            slot_keylenx,
+            helper.upper_bound,
+        )
+    {
+        stack.set_ki(ki - 1);
+        return (ScanStateBack::FindPrev, None);
+    }
+
+    // DEFENSIVE: If we encounter a suffix key or layer pointer, signal fallback
+    // Single-layer mode only handles inline keys (keylenx 0-8)
+    // Don't modify cursor state - let multi-layer path handle this slot from scratch
+    if slot_keylenx >= KSUF_KEYLENX {
+        // Both suffix keys and layer pointers need multi-layer handling
+        return (ScanStateBack::Down, None);
+    }
+
+    // Value slot - prepare for emit
+    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+
+    if slot_ptr.is_null() {
+        stack.set_ki(ki - 1);
+        return (ScanStateBack::FindPrev, None);
+    }
+
+    // Inline keys have keylenx 0-8 representing the actual length
+    let key_len: usize = slot_keylenx as usize;
+    cursor_key.assign_store_ikey(slot_ikey);
+    cursor_key.assign_store_length(key_len);
+    cursor_key.mark_key_complete();
+
+    // Clear upper_bound after successful emit
+    helper.mark_key_complete();
+
+    // Advance position for next call (go backwards)
+    stack.set_ki(ki - 1);
+
+    // SAFETY: slot_ptr is valid, we checked it's non-null above
+    let output: S::Output = unsafe { S::output_from_raw(slot_ptr) };
+
+    (
+        ScanStateBack::Emit,
+        Some(ScanSnapshot {
+            value: output,
+            key_len,
+        }),
+    )
+}
+
+/// Advance to previous leaf in single-layer mode (snapshot version).
+///
+/// Simplified version that doesn't handle Up transitions (no layer stack).
+#[inline(always)]
+fn advance_prev_leaf_single_layer_snapshot<L, S>(
+    stack: &mut BackStackElement<L, S>,
+    cursor_key: &mut CursorKey,
+    _guard: &LocalGuard<'_>,
+) -> (ScanStateBack, Option<ScanSnapshot<S>>)
+where
+    L: TreeLeafNode<S>,
+    S: ValueSlot,
+{
+    let leaf_ptr: *mut L = stack.get_leaf_ptr();
+
+    if leaf_ptr.is_null() {
+        return (ScanStateBack::FindPrev, None);
+    }
+
+    let leaf: &L = unsafe { &*leaf_ptr };
+    let version: u32 = stack.get_version();
+
+    // Check if version changed (concurrent modification)
+    if leaf.version().has_changed(version) {
+        return (ScanStateBack::Retry, None);
+    }
+
+    // Update cursor with current leaf's bound before moving
+    let ikey_bound: u64 = leaf.ikey_bound();
+    cursor_key.assign_store_ikey(ikey_bound);
+    cursor_key.assign_store_length(0);
+
+    // Get previous leaf
+    let prev: *mut L = leaf.prev();
+
+    if prev.is_null() {
+        // No more leaves - scan exhausted (no Up in single-layer)
+        stack.set_leaf(StdPtr::null_mut());
+        return (ScanStateBack::FindPrev, None);
+    }
+
+    // Move to previous leaf
+    stack.set_leaf(prev);
+
+    // SAFETY: prev is non-null
+    let prev_leaf: &L = unsafe { &*prev };
+
+    // Prefetch the previous leaf's data
+    prev_leaf.prefetch();
+
+    // Prefetch prev-prev leaf for 2-way pipelining
+    let prev_prev: *mut L = prev_leaf.prev();
+
+    if !prev_prev.is_null() {
+        let prev_prev_leaf: &L = unsafe { &*prev_prev };
+        prev_prev_leaf.prefetch();
+    }
+
+    // Get stable version
+    let prev_version: u32 = prev_leaf.version().stable();
+
+    if NodeVersion::is_deleted_version(prev_version) {
+        return (ScanStateBack::Retry, None);
+    }
+
+    // Load permutation and start from last slot
+    let perm: L::Perm = prev_leaf.permutation();
+    let size: usize = perm.size();
+    let ki: isize = if size > 0 {
+        (size - 1).cast_signed()
+    } else {
+        -1
+    };
+
+    stack.update_state(prev_version, perm, ki);
+
+    (ScanStateBack::FindPrev, None)
+}
+
+/// Fast path for reverse iteration on single-layer trees (raw pointer version).
+///
+/// Same as [`find_prev_single_layer`] but returns raw pointer instead of
+/// loading the value. Used by batch iterators that handle values directly.
+#[inline]
+#[allow(
+    dead_code,
+    reason = "Available for batch reverse iteration optimization"
+)]
 pub fn find_prev_single_layer_ptr<L, S>(
     stack: &mut BackStackElement<L, S>,
     cursor_key: &mut CursorKey,
@@ -1654,7 +1840,10 @@ where
 ///
 /// Simplified version that doesn't handle Up transitions (no layer stack).
 #[inline(always)]
-#[allow(dead_code)] // Called by find_prev_single_layer_ptr (also dead)
+#[allow(
+    dead_code,
+    reason = "Available for batch reverse iteration optimization"
+)]
 fn advance_prev_leaf_single_layer<L, S>(
     stack: &mut BackStackElement<L, S>,
     cursor_key: &mut CursorKey,

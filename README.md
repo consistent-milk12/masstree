@@ -231,13 +231,25 @@ for entry in tree.iter(&guard) {
 - Integer keys only → `congee` (ART-based)
 - Read-heavy with rare writes → `RwLock<BTreeMap>`
 
-## Type Aliases
+## Which Tree Type Should I Use?
 
-| Type | Storage | Value Requirement |
-|------|---------|-------------------|
-| `MassTree<V>` | Inline (default) | `V: InlineBits` (Copy + fits in 64 bits) |
-| `MassTree15<V>` | Arc-based | `V: Send + Sync + 'static` |
-| `MassTree15Inline<V>` | True inline | `V: InlineBits` |
+| Type | Value Requirement | `get_ref()` | Best For |
+|------|-------------------|-------------|----------|
+| `MassTree<V>` | `V: InlineBits` (Copy + ≤64 bits) | Nope | `u64`, `i32`, `f64`, small tuples |
+| `MassTree15<V>` | `V: Send + Sync + 'static` | Yes| `String`, `Vec`, custom structs |
+| `MassTree15Inline<V>` | `V: InlineBits` | Nope | Same as `MassTree<V>` (explicit alias) |
+
+### `MassTree<V>` (Default, True-Inline)
+
+- Values stored directly in leaf nodes (zero allocation per insert)
+- Returns `V` by copy: `get_with_guard() → Option<V>`
+- Use `scan()` for range iteration
+
+### `MassTree15<V>` (Arc-Based)
+
+- Values wrapped in `Arc<V>` (heap allocation per insert)
+- Returns references: `get_ref() → Option<&V>`
+- Use `scan_ref()` for zero-copy range iteration
 
 `MassTree<V>` is the recommended default for `Copy` types like `u64`, `i32`, `f64`, pointers, etc.
 Use `MassTree15<V>` explicitly when you need to store non-Copy types like `String`.

@@ -101,62 +101,6 @@ pub fn prefetch_read<T>(ptr: *const T) {
     }
 }
 
-/// Prefetch data for reading with non-temporal hint (streaming access).
-///
-/// Unlike [`prefetch_read`], this hints that the data will only be used once
-/// and shouldn't pollute the cache hierarchy. Use for streaming scans where
-/// data won't be revisited.
-///
-/// # When to Use
-///
-/// - Large sequential scans that won't revisit data
-/// - Bulk operations where cache pollution is a concern
-/// - For repeated access patterns, prefer [`prefetch_read`]
-///
-/// # Feature Flags
-///
-/// When `no-prefetch` feature is enabled, this function is a no-op.
-#[inline(always)]
-#[expect(clippy::needless_return, clippy::nursery)]
-pub fn prefetch_read_nta<T>(ptr: *const T) {
-    #[cfg(feature = "no-prefetch")]
-    {
-        let _ = ptr;
-        return;
-    }
-
-    #[cfg(all(not(feature = "no-prefetch"), target_arch = "x86_64"))]
-    {
-        // SAFETY: _mm_prefetch is always safe to call.
-        // _MM_HINT_NTA = non-temporal access, minimizes cache pollution.
-        unsafe {
-            std::arch::x86_64::_mm_prefetch(ptr.cast::<i8>(), std::arch::x86_64::_MM_HINT_NTA);
-        }
-    }
-
-    #[cfg(all(not(feature = "no-prefetch"), target_arch = "aarch64"))]
-    {
-        // PRFM PLDL1STRM - Prefetch for load, L1 cache, streaming (non-temporal).
-        // SAFETY: PRFM is always safe - it's a hint that doesn't fault.
-        unsafe {
-            std::arch::asm!(
-                "prfm pldl1strm, [{ptr}]",
-                ptr = in(reg) ptr,
-                options(nostack, preserves_flags),
-            );
-        }
-    }
-
-    #[cfg(not(any(
-        feature = "no-prefetch",
-        target_arch = "x86_64",
-        target_arch = "aarch64"
-    )))]
-    {
-        let _ = ptr;
-    }
-}
-
 /// Prefetch data for writing into all cache levels.
 ///
 /// Similar to [`prefetch_read`], but hints that we intend to write
@@ -229,7 +173,6 @@ mod tests {
         // Prefetch instructions are no-ops for null pointers on x86_64/aarch64.
         // Should not panic or crash.
         prefetch_read::<u64>(StdPtr::null());
-        prefetch_read_nta::<u64>(StdPtr::null());
         prefetch_write::<u64>(StdPtr::null_mut());
     }
 
@@ -240,15 +183,6 @@ mod tests {
 
         // Should not panic
         prefetch_read(ptr);
-    }
-
-    #[test]
-    fn test_prefetch_read_nta_valid_pointer() {
-        let value: u64 = 42;
-        let ptr = &raw const value;
-
-        // Should not panic
-        prefetch_read_nta(ptr);
     }
 
     #[test]
@@ -267,16 +201,6 @@ mod tests {
         // Prefetch multiple cache lines
         for i in (0..16).step_by(8) {
             prefetch_read(&raw const array[i]);
-        }
-    }
-
-    #[test]
-    fn test_prefetch_nta_streaming() {
-        let array: [u64; 64] = [0; 64];
-
-        // Simulate streaming access pattern with non-temporal prefetch
-        for i in (0..64).step_by(8) {
-            prefetch_read_nta(&raw const array[i]);
         }
     }
 }

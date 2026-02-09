@@ -61,6 +61,16 @@
 //!
 //! - Keys must be 0-256 bytes. Longer keys will panic.
 //! - Keys are byte slices (`&[u8]`), not generic types.
+//!
+//! ### `MassTree<V>` (Default, True-Inline)
+//! - Values stored directly in leaf nodes (zero allocation per insert)
+//! - Returns `V` by copy: `get_with_guard() → Option<V>`
+//! - Use `scan()` for range iteration
+//!
+//! ### `MassTree15<V>` (Arc-Based)
+//! - Values wrapped in `Arc<V>` (heap allocation per insert)
+//! - Returns references: `get_ref() → Option<&V>`
+//! - Use `scan_ref()` for zero-copy range iteration
 
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]
@@ -169,35 +179,39 @@ pub fn init_tracing() {
 #[cfg(not(feature = "tracing"))]
 pub const fn init_tracing() {}
 
+// Core public API
 pub mod alloc15;
-mod alloc_common;
 pub mod alloc_trait;
-pub mod hints;
 pub mod inline;
 pub mod internode;
 pub mod key;
-pub mod ksearch;
 pub mod leaf15;
 pub mod leaf_trait;
-pub mod link;
-pub mod node_pool;
 pub mod nodeversion;
-pub mod ordering;
 pub mod permuter;
-pub mod prefetch;
 pub mod ref_value_slot;
-mod retirement;
-mod shard_counter;
 pub mod slot;
 pub mod suffix;
 pub mod tree;
 pub mod value;
 
+// Internal implementation details
+mod alloc_common;
+pub(crate) mod hints;
+pub(crate) mod ksearch;
+pub(crate) mod link;
+pub(crate) mod node_pool;
+pub(crate) mod ordering;
+pub(crate) mod prefetch;
+mod retirement;
+mod shard_counter;
+
 #[cfg(feature = "insert-stats")]
+#[allow(dead_code)]
 pub mod insert_stats;
 
 // Note: AllocError/AllocKind/AllocResult removed - allocations are now infallible
-pub use retirement::{BatchedRetire, FlushOnDrop};
+pub use retirement::BatchedRetire;
 
 // Re-export leaf node traits for generic tree operations
 pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
@@ -224,10 +238,10 @@ pub use inline::leaf15_true::LeafNode15TrueInline;
 pub use slot::true_inline::TrueInlineSlot;
 
 // Re-export value types
-pub use value::{InsertTarget, LeafValue, LeafValueIndex, SplitPoint};
+pub use value::{InsertTarget, LeafValue, SplitPoint};
 
-// Re-export link utilities
-pub use link::Linker;
+// Re-export link utilities (internal - use crate:: paths)
+pub(crate) use link::Linker;
 
 // Re-export main types for convenience
 pub use ref_value_slot::RefValueSlot;

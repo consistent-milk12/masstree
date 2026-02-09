@@ -44,7 +44,6 @@ use crate::prefetch::{prefetch_read, prefetch_write};
 use crate::slot::ValueSlot;
 use crate::suffix::{SuffixBag, SuffixSidecar};
 use crate::value::InsertTarget;
-use crate::value::LeafValueIndex;
 use crate::value::SplitPoint;
 use crate::{Linker, Permuter};
 use seize::Guard;
@@ -489,7 +488,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     pub fn prefetch_for_search(&self) {
         let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
 
-        // SAFETY: Offsets are within LeafNode15 bounds (768 bytes total).
+        // SAFETY: Offsets are within LeafNode15 bounds (448 bytes total).
         // Prefetch is a hint - invalid addresses cause no fault.
         unsafe {
             prefetch_read(self_ptr.add(64)); // CL1: permutation
@@ -523,7 +522,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     pub fn prefetch_for_search_adaptive(&self, size: usize) {
         let self_ptr: *const u8 = StdPtr::from_ref(self).cast::<u8>();
 
-        // SAFETY: Offsets are within LeafNode15 bounds (768 bytes total).
+        // SAFETY: Offsets are within LeafNode15 bounds (448 bytes total).
         // Prefetch is a hint - invalid addresses cause no fault.
         unsafe {
             // CL 1: permutation - always needed for slot ordering
@@ -2914,7 +2913,7 @@ impl<S: ValueSlot> Drop for LeafNode15<S> {
             let keylenx: u8 = self.keylenx[slot].load(RELAXED);
             if keylenx < LAYER_KEYLENX {
                 // SAFETY: ptr came from the slot type's storage method
-                // (Arc::into_raw for LeafValue, Box::into_raw for LeafValueIndex).
+                // (Arc::into_raw for LeafValue).
                 // We only cleanup non-layer slots (keylenx < LAYER_KEYLENX).
                 unsafe {
                     S::cleanup_value_ptr(ptr);
@@ -3026,100 +3025,12 @@ impl<V: Send + Sync + 'static> LayerCapableLeaf<LeafValue<V>> for LeafNode15<Lea
     }
 }
 
-// =============================================================================
-// LayerCapableLeaf Implementation for LeafValueIndex (Inline Mode)
-// =============================================================================
-
-impl<V: Copy + Send + Sync + 'static> LayerCapableLeaf<LeafValueIndex<V>>
-    for LeafNode15<LeafValueIndex<V>>
-{
-    #[inline]
-    fn try_clone_output(&self, slot: usize) -> Option<V> {
-        debug_assert!(
-            slot < WIDTH_15,
-            "try_clone_output: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-
-        // Check for layer pointer - layer pointers are NOT values
-        if self.keylenx(slot) >= LAYER_KEYLENX {
-            return None;
-        }
-
-        let ptr: *mut u8 = self.leaf_value_ptr(slot);
-        if ptr.is_null() {
-            return None;
-        }
-
-        // SAFETY:
-        // - ptr is non-null (checked above)
-        // - ptr is not a layer pointer (keylenx < LAYER_KEYLENX, checked above)
-        // - ptr came from Box::into_raw during insert
-        // - V is Copy, so we just read the value
-        // - Caller ensures slot is stable (lock or version validation)
-        unsafe { Some(*ptr.cast::<V>()) }
-    }
-
-    unsafe fn assign_from_key_arc(
-        &self,
-        slot: usize,
-        key: &Key<'_>,
-        value: Option<V>,
-        guard: &LocalGuard<'_>,
-    ) {
-        debug_assert!(
-            slot < WIDTH_15,
-            "assign_from_key_arc: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-
-        // Calculate inline length (0-8 bytes)
-        // current_len() returns the remaining key length at current layer
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "current_len() capped at slice length, min(8) ensures <= 8"
-        )]
-        let inline_len: u8 = key.current_len().min(8) as u8;
-
-        // INVARIANT: value must be Some for layer creation
-        // Conflict case always has a value, not a layer pointer.
-        // If this panics, caller incorrectly identified a layer pointer as a conflict.
-        #[expect(
-            clippy::expect_used,
-            reason = "invariant: source slot must contain value"
-        )]
-        let v: V = value.expect(
-            "assign_from_key_arc: value cannot be None (source slot was not a value); \
-             this indicates a bug in conflict detection",
-        );
-
-        // Store ikey (8 bytes, big-endian encoded)
-        self.set_ikey(slot, key.ikey());
-
-        // Store value as boxed raw pointer
-        // NOTE: Value ownership transfers to the slot.
-        let ptr: *mut u8 = Box::into_raw(Box::new(v)).cast::<u8>();
-        self.set_leaf_value_ptr(slot, ptr);
-
-        // Set keylenx and suffix based on whether key has remaining bytes
-        if key.has_suffix() {
-            // Key has suffix bytes beyond the 8-byte ikey
-            self.set_keylenx(slot, KSUF_KEYLENX);
-
-            // Store suffix in suffix bag
-            // SAFETY: Caller guarantees guard is from this tree's collector
-            unsafe { self.assign_ksuf(slot, key.suffix(), guard) };
-        } else {
-            // Inline key (0-8 bytes total, no suffix)
-            self.set_keylenx(slot, inline_len);
-        }
-    }
-}
-
 // ============================================================================
 //  Compile-Time Layout Assertions
 // ============================================================================
 //
 // See `layout` submodule for comprehensive compile-time assertions that verify:
-// - Exact size (768 bytes, 12 cache lines)
+// - Exact size (448 bytes, 7 cache lines)
 // - Cache-line alignment (64 bytes)
 // - Field offsets for hot-path optimization
 // - Cache line boundary constraints

@@ -22,7 +22,6 @@
 use clap::Parser;
 use core_affinity::CoreId;
 use masstree::MassTree15Inline;
-use masstree::node_pool;
 use serde::Serialize;
 use std::fs;
 use std::io::Write;
@@ -527,7 +526,6 @@ fn bench_rw1(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                node_pool::warmup_pool();
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
@@ -652,7 +650,6 @@ fn bench_rw2(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                node_pool::warmup_pool();
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
                 let offset = rng.rand();
@@ -776,7 +773,6 @@ fn bench_rw3(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                node_pool::warmup_pool();
 
                 barrier.wait();
 
@@ -888,7 +884,6 @@ fn bench_rw4(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                node_pool::warmup_pool();
 
                 barrier.wait();
 
@@ -997,7 +992,6 @@ fn bench_same(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                node_pool::warmup_pool();
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
@@ -1086,7 +1080,6 @@ fn bench_uscale(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                node_pool::warmup_pool();
                 // C++: seed = kvtest_first_seed + client.id() (NOT % 48)
                 let seed = KvRandom::FIRST_SEED + tid as u64;
                 let mut rng = KvRandom::new(seed);
@@ -1169,7 +1162,6 @@ fn bench_wscale(
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
-                node_pool::warmup_pool();
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 

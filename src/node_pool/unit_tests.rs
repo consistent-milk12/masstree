@@ -10,7 +10,7 @@ fn test_size_class_computation() {
     let layout2: Layout = Layout::from_size_align(65, 8).unwrap();
     assert_eq!(size_class(layout2), Some(2));
 
-    // 768 bytes = 12 cache lines (LeafNode15 size)
+    // 768 bytes = 12 cache lines
     let layout12: Layout = Layout::from_size_align(768, 64).unwrap();
     assert_eq!(size_class(layout12), Some(12));
 

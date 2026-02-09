@@ -46,7 +46,7 @@ pub struct SideCarUtils;
 impl SideCarUtils {
     /// Cleanup function for retiring external suffix bags.
     ///
-    /// Used with `BatchedRetire::defer_custom` for safe deferred reclamation.
+    /// Used with `guard.defer_retire` for safe deferred reclamation.
     ///
     /// # Safety
     ///
@@ -170,14 +170,14 @@ impl Default for SuffixSidecar {
 impl Drop for SuffixSidecar {
     fn drop(&mut self) {
         // SAFETY: When external bags are swapped (via drain_to_external), the old
-        // bag is retired via BatchedRetire::defer_custom, and a new bag is stored
+        // bag is retired via guard.defer_retire, and a new bag is stored
         // in self.external. This Drop only ever sees the current (most recent)
         // external bag, never the old one that was retired.
         //
         // The sequence during swap is:
         // 1. Create new external bag with all suffixes
         // 2. atomic_swap() stores new ptr, returns old ptr
-        // 3. Old ptr is retired via BatchedRetire (deferred drop)
+        // 3. Old ptr is retired via defer_retire (deferred drop)
         // 4. self.external now holds new ptr
         //
         // So when Drop runs, self.external is either:

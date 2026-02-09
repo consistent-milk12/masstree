@@ -51,25 +51,4 @@ impl Linker {
     pub fn is_marked<T>(p: *mut T) -> bool {
         p.addr() & MARK_BIT != 0
     }
-
-    /// Check for split and return cleaned pointer if safe.
-    ///
-    /// Combines `is_marked` + `unmark_ptr` for the common scan pattern.
-    ///
-    /// # Arguments
-    ///
-    /// * `next_raw` - Raw `next` pointer from leaf node
-    ///
-    /// # Returns
-    ///
-    /// * `Some(ptr)` - Unmarked pointer, safe to follow after version check
-    /// * `None` - Split detected, caller should wait and retry
-    #[inline(always)]
-    pub fn check_split<T>(next_raw: *mut T) -> Option<*mut T> {
-        if Self::is_marked(next_raw) {
-            return None;
-        }
-
-        Some(Self::unmark_ptr(next_raw))
-    }
 }

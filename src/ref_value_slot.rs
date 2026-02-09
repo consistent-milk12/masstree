@@ -4,7 +4,7 @@
 //! True-inline storage cannot, as values are stored as bits in atomic integers.
 
 use crate::slot::ValueSlot;
-use crate::value::{LeafValue, LeafValueIndex};
+use crate::value::LeafValue;
 
 // ============================================================================
 //  RefValueSlot Marker Trait
@@ -41,9 +41,6 @@ pub trait RefValueSlot: ValueSlot {}
 
 /// Arc-based storage supports references (value stored at Arc's heap allocation).
 impl<V> RefValueSlot for LeafValue<V> {}
-
-/// Box-based storage supports references (value stored at Box's heap allocation).
-impl<V: Copy> RefValueSlot for LeafValueIndex<V> {}
 
 // NOTE: TrueInlineSlot<V> intentionally does NOT implement RefValueSlot.
 // This is what prevents get_ref/scan_ref/ref iterators from compiling for true-inline.

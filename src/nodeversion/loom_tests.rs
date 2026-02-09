@@ -141,7 +141,11 @@ impl LoomNodeVersion {
     }
 
     fn has_changed(&self, old: u32) -> bool {
-        (old ^ self.value.load(Ordering::Acquire)) > LOCK_BIT
+        // Match production semantics: ignore both LOCK_BIT and INSERTING_BIT.
+        // C++ uses `> LOCK_BIT` (ignores bit 0 only), but the Rust implementation
+        // intentionally also ignores INSERTING_BIT (bit 1) because version COUNTERS
+        // (VINSERT/VSPLIT) are the source of truth for detecting changes.
+        (old ^ self.value.load(Ordering::Acquire)) > (LOCK_BIT | INSERTING_BIT)
     }
 }
 

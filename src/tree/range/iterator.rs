@@ -119,7 +119,7 @@ use super::cursor_key::CursorKey;
 use super::find::{
     find_initial, find_next, find_next_with_duplicate_check, find_retry, handle_down, handle_up,
 };
-use super::find_rev::ReverseScan;
+use super::find_rev::{ReverseScan, find_prev_single_layer};
 use super::helper::ReverseScanHelper;
 use super::scan_state::{
     BackStackElement, LayerContext, LayerStack, ScanSnapshot, ScanStackElement, ScanState,
@@ -215,8 +215,8 @@ where
     /// This field is **only** used for the first entry case in `advance_no_alloc_ref`,
     /// where we convert the `ScanSnapshot` from `initialize()` to a raw pointer.
     ///
-    /// For `LeafValueIndex<V>` (Copy types), `output_to_raw` allocates a Box
-    /// to provide a stable pointer. This field tracks that allocation so we
+    /// For pointer-backed storage, `output_to_raw` allocates to provide
+    /// a stable pointer. This field tracks that allocation so we
     /// can clean it up when:
     /// - Advancing to the next entry (previous pointer no longer needed)
     /// - Dropping the iterator
@@ -837,6 +837,50 @@ where
                 }
 
                 ScanStateBack::FindPrev => {
+                    // ================================================================
+                    // Single-layer fast path (keys ≤ 8 bytes)
+                    // ================================================================
+                    if self.flags.single_layer_mode() {
+                        let needs_dup_check = self.flags.back_needs_duplicate_check();
+                        if needs_dup_check {
+                            self.flags.clear_back_duplicate_check();
+                        }
+
+                        let (new_state, snapshot) = find_prev_single_layer(
+                            &mut self.back_stack,
+                            &mut self.back_cursor_key,
+                            &mut self.back_helper,
+                            self.guard,
+                            needs_dup_check,
+                        );
+
+                        self.back_state = new_state;
+                        self.back_snapshot = snapshot;
+
+                        match new_state {
+                            ScanStateBack::FindPrev => {
+                                // Check for exhausted (null stack in single-layer = done)
+                                if self.back_stack.get_leaf_ptr().is_null() {
+                                    self.flags.mark_back_exhausted();
+                                    return None;
+                                }
+                            }
+                            ScanStateBack::Down => {
+                                // Encountered suffix key or layer pointer - fall back to
+                                // multi-layer mode and re-process this slot with find_prev
+                                self.flags.disable_single_layer_mode();
+                                self.back_state = ScanStateBack::FindPrev;
+                                // Don't require duplicate check - slot hasn't been emitted
+                            }
+                            _ => {}
+                        }
+
+                        continue;
+                    }
+
+                    // ================================================================
+                    // Multi-layer path (full feature set)
+                    // ================================================================
                     // OPTIMIZATION: Only check for duplicates after a Retry,
                     // not in normal reverse iteration
                     let (new_state, snapshot) = if self.flags.back_needs_duplicate_check() {
@@ -864,6 +908,9 @@ where
                 }
 
                 ScanStateBack::Down => {
+                    // Disable single-layer mode when descending into sublayer
+                    self.flags.disable_single_layer_mode();
+
                     // Handle sublayer descent
                     ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
 

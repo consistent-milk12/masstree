@@ -3,8 +3,6 @@
 //! This module provides helper functions for allocating and initializing
 //! nodes. Allocations are infallible (abort on OOM like standard Rust).
 
-#![allow(dead_code)]
-
 use core::alloc::Layout;
 use core::ptr as CorePtr;
 use std::alloc as StdAlloc;
@@ -38,6 +36,7 @@ impl GenericAllocator {
     /// Returns a properly aligned, zero-initialized pointer on success.
     /// Aborts on allocation failure (standard Rust OOM behavior).
     #[inline(always)]
+    #[allow(dead_code, reason = "utility function used in tests")]
     pub fn alloc_zeroed<T>() -> *mut T {
         let layout: Layout = Layout::new::<T>();
 
@@ -58,6 +57,7 @@ impl GenericAllocator {
     /// - `ptr` must not have been deallocated yet.
     /// - `ptr` must not be used after this call.
     #[inline(always)]
+    #[allow(dead_code, reason = "utility function used in tests")]
     pub unsafe fn dealloc<T>(ptr: *mut T) {
         let layout: Layout = Layout::new::<T>();
 
