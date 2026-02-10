@@ -21,11 +21,9 @@ use std::ptr as StdPtr;
 
 use seize::Collector;
 
-use crate::inline::bits::InlineBits;
-use crate::inline::leaf15_true::LeafNode15TrueInline;
 use crate::internode::InternodeNode;
 use crate::leaf15::LeafNode15;
-use crate::slot::ValueSlot;
+use crate::policy::LeafPolicy;
 
 // ============================================================================
 //  Constants
@@ -262,13 +260,15 @@ pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
 //  Capture-Free Reclaimers (for `guard.defer_retire()`)
 // ============================================================================
 
+/// Reclaim a `LeafNode15<P>` — runs Drop, returns memory to pool.
+///
 /// # Safety
 ///
-/// `ptr` must point to a valid `LeafNode15<S>`.
+/// `ptr` must point to a valid `LeafNode15<P>`.
 #[inline]
-pub unsafe fn reclaim_leaf15<S: ValueSlot>(ptr: *mut LeafNode15<S>, _collector: &Collector) {
+pub unsafe fn reclaim_leaf15<P: LeafPolicy>(ptr: *mut LeafNode15<P>, _collector: &Collector) {
     unsafe { StdPtr::drop_in_place(ptr) };
-    unsafe { pool_dealloc(ptr.cast(), Layout::new::<LeafNode15<S>>()) };
+    unsafe { pool_dealloc(ptr.cast(), Layout::new::<LeafNode15<P>>()) };
 }
 
 /// # Safety
@@ -278,18 +278,6 @@ pub unsafe fn reclaim_leaf15<S: ValueSlot>(ptr: *mut LeafNode15<S>, _collector: 
 pub unsafe fn reclaim_internode(ptr: *mut InternodeNode, _collector: &Collector) {
     unsafe { StdPtr::drop_in_place(ptr) };
     unsafe { pool_dealloc(ptr.cast(), Layout::new::<InternodeNode>()) };
-}
-
-/// # Safety
-///
-/// `ptr` must point to a valid `LeafNode15TrueInline<V>`.
-#[inline]
-pub unsafe fn reclaim_leaf15_true_inline<V: InlineBits>(
-    ptr: *mut LeafNode15TrueInline<V>,
-    _collector: &Collector,
-) {
-    unsafe { StdPtr::drop_in_place(ptr) };
-    unsafe { pool_dealloc(ptr.cast(), Layout::new::<LeafNode15TrueInline<V>>()) };
 }
 
 // ============================================================================

@@ -8,15 +8,16 @@ use std::{
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
-    BatchedRetire, Linker, MassTreeGeneric, NodeAllocatorGeneric, TreeInternode, TreePermutation,
+    BatchedRetire, Linker, MassTreeGeneric, TreeAllocator, TreePermutation,
     hints::{likely, unlikely},
+    internode::InternodeNode,
     key::Key,
-    leaf_trait::LayerCapableLeaf,
-    leaf15::{KSUF_KEYLENX, LAYER_KEYLENX},
+    leaf_trait::{LayerCapableLeaf, TreeLeafNode},
+    leaf15::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode15},
     nodeversion::{LockGuard, NodeVersion},
+    policy::LeafPolicy,
     prefetch::prefetch_read,
     shard_counter::ShardedCounter,
-    slot::ValueSlot,
     tree::{
         InsertError, InsertSearchResultGeneric,
         coalesce::{Coalesce, CoalesceQueue},
@@ -24,7 +25,6 @@ use crate::{
         remove::NodeCleaner,
         split::Propagation,
     },
-    value::traits::LeafValueLoad,
 };
 
 use super::remove::RemoveError;
@@ -40,13 +40,10 @@ mod split;
 // Re-export batch types
 pub use batch::{BatchEntry, BatchInsertResult};
 
-impl<S, L, A> MassTreeGeneric<S, L, A>
+impl<P, A> MassTreeGeneric<P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Create a new empty `MassTreeGeneric` with the given allocator.
     ///
@@ -75,7 +72,7 @@ where
     #[must_use]
     pub fn with_allocator_batch_size(allocator: A, batch_size: Option<usize>) -> Self {
         // Create root leaf directly in allocator memory (bypasses Box for pool allocators).
-        let root_ptr: *mut L = allocator.alloc_leaf_direct(true, false);
+        let root_ptr: *mut LeafNode15<P> = allocator.alloc_leaf_direct(true, false);
 
         let collector: Collector =
             batch_size.map_or_else(Collector::new, |size| Collector::new().batch_size(size));
@@ -192,7 +189,7 @@ where
     #[inline]
     pub fn process_coalesce(&self, guard: &LocalGuard<'_>) -> usize {
         self.verify_guard(guard);
-        Coalesce::process_all::<S, L, A>(&self.coalesce_queue, &self.allocator, guard)
+        Coalesce::process_all::<P, A>(&self.coalesce_queue, &self.allocator, guard)
     }
 
     /// Process up to `limit` pending empty leaf removals.
@@ -207,7 +204,7 @@ where
     #[inline]
     pub fn process_coalesce_batch(&self, guard: &LocalGuard<'_>, limit: usize) -> usize {
         self.verify_guard(guard);
-        Coalesce::process_batch::<S, L, A>(&self.coalesce_queue, &self.allocator, guard, limit)
+        Coalesce::process_batch::<P, A>(&self.coalesce_queue, &self.allocator, guard, limit)
     }
 
     // ========================================================================
@@ -238,7 +235,7 @@ where
     #[inline(always)]
     #[expect(
         clippy::cast_ptr_alignment,
-        reason = "root_ptr points to L or L::Internode, both have NodeVersion \
+        reason = "root_ptr points to L or InternodeNode, both have NodeVersion \
                   as first field with proper alignment"
     )]
     #[expect(
@@ -317,14 +314,14 @@ where
     /// Reference to the leaf node that contains or should contain the key.
     #[inline(always)]
     #[allow(dead_code, reason = "traversal helper for future features")]
-    pub(crate) fn reach_leaf_generic(&self, key: &Key<'_>) -> &L {
+    pub(crate) fn reach_leaf_generic(&self, key: &Key<'_>) -> &LeafNode15<P> {
         let root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 
         // SAFETY: root_ptr always points to a valid node.
-        // NodeVersion is the first field of both L and L::Internode.
+        // NodeVersion is the first field of both L and InternodeNode.
         #[expect(
             clippy::cast_ptr_alignment,
-            reason = "root points to L or L::Internode, both properly aligned"
+            reason = "root points to L or InternodeNode, both properly aligned"
         )]
         let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
         // SAFETY: version_ptr is valid per comment above
@@ -332,10 +329,10 @@ where
 
         if is_leaf {
             // SAFETY: is_leaf() confirmed this is a leaf node
-            unsafe { &*(root.cast::<L>()) }
+            unsafe { &*(root.cast::<LeafNode15<P>>()) }
         } else {
             // SAFETY: !is_leaf() confirmed this is an internode
-            let internode: &L::Internode = unsafe { &*(root.cast::<L::Internode>()) };
+            let internode: &InternodeNode = unsafe { &*(root.cast::<InternodeNode>()) };
             self.reach_leaf_via_internode_generic(internode, key)
         }
     }
@@ -348,9 +345,12 @@ where
         clippy::unused_self,
         reason = "Method signature matches reach_leaf pattern"
     )]
-    fn reach_leaf_via_internode_generic(&self, mut inode: &L::Internode, key: &Key<'_>) -> &L {
+    fn reach_leaf_via_internode_generic(
+        &self,
+        mut inode: &InternodeNode,
+        key: &Key<'_>,
+    ) -> &LeafNode15<P> {
         use crate::ksearch::upper_bound_internode_generic;
-        use crate::leaf_trait::TreeInternode;
         use crate::prefetch::prefetch_read;
 
         let target_ikey: u64 = key.ikey();
@@ -358,8 +358,9 @@ where
         loop {
             // Find child index using generic search
             let child_idx: usize =
-                upper_bound_internode_generic::<L::Internode>(target_ikey, inode);
-            let child_ptr: *mut u8 = inode.child(child_idx);
+                upper_bound_internode_generic::<InternodeNode>(target_ikey, inode);
+            // SAFETY: Dead-code traversal helper, no concurrent retirement.
+            let child_ptr: *mut u8 = unsafe { inode.child_unguarded(child_idx) };
 
             // Prefetch child node (hides memory latency for next iteration)
             prefetch_read(child_ptr);
@@ -369,8 +370,9 @@ where
             if !inode.children_are_leaves() {
                 // Child is an internode - prefetch its first child (grandchild)
                 // SAFETY: children_are_leaves() is false, so child is an internode
-                let child_inode: &L::Internode = unsafe { &*(child_ptr.cast::<L::Internode>()) };
-                let grandchild_ptr: *mut u8 = child_inode.child(0);
+                let child_inode: &InternodeNode = unsafe { &*(child_ptr.cast::<InternodeNode>()) };
+                // SAFETY: Dead-code traversal helper, no concurrent retirement.
+                let grandchild_ptr: *mut u8 = unsafe { child_inode.child_unguarded(0) };
                 prefetch_read(grandchild_ptr);
             }
 
@@ -378,19 +380,19 @@ where
             // SAFETY: All children have NodeVersion as first field, properly aligned
             #[expect(
                 clippy::cast_ptr_alignment,
-                reason = "child_ptr points to L or L::Internode, both properly aligned"
+                reason = "child_ptr points to L or InternodeNode, both properly aligned"
             )]
             // SAFETY: child_ptr points to valid node with NodeVersion as first field
             let child_version: &NodeVersion = unsafe { &*(child_ptr.cast::<NodeVersion>()) };
 
             if child_version.is_leaf() {
                 // SAFETY: is_leaf() confirms this is a leaf
-                return unsafe { &*(child_ptr.cast::<L>()) };
+                return unsafe { &*(child_ptr.cast::<LeafNode15<P>>()) };
             }
 
             // Descend to child internode
             // SAFETY: !is_leaf() confirms InternodeNode
-            inode = unsafe { &*(child_ptr.cast::<L::Internode>()) };
+            inode = unsafe { &*(child_ptr.cast::<InternodeNode>()) };
         }
     }
 
@@ -401,7 +403,7 @@ where
         clippy::needless_pass_by_ref_mut,
         reason = "Returns &mut L which requires &mut self for lifetime"
     )]
-    pub(crate) fn reach_leaf_mut_generic(&mut self, key: &Key<'_>) -> &mut L {
+    pub(crate) fn reach_leaf_mut_generic(&mut self, key: &Key<'_>) -> &mut LeafNode15<P> {
         use crate::ksearch::upper_bound_internode_generic;
         use crate::prefetch::prefetch_read;
 
@@ -410,7 +412,7 @@ where
         // SAFETY: root_ptr always points to a valid node.
         #[expect(
             clippy::cast_ptr_alignment,
-            reason = "root points to L or L::Internode, both properly aligned"
+            reason = "root points to L or InternodeNode, both properly aligned"
         )]
         let version_ptr: *const NodeVersion = root.cast::<NodeVersion>();
         // SAFETY: version_ptr is valid per comment above
@@ -418,14 +420,15 @@ where
 
         if is_leaf {
             // SAFETY: is_leaf() confirmed this is a leaf
-            unsafe { &mut *(root.cast::<L>()) }
+            unsafe { &mut *(root.cast::<LeafNode15<P>>()) }
         } else {
             // SAFETY: !is_leaf() confirmed this is an internode
-            let internode: &L::Internode = unsafe { &*(root.cast::<L::Internode>()) };
+            let internode: &InternodeNode = unsafe { &*(root.cast::<InternodeNode>()) };
 
             let ikey: u64 = key.ikey();
-            let child_idx: usize = upper_bound_internode_generic::<L::Internode>(ikey, internode);
-            let start_ptr: *mut u8 = internode.child(child_idx);
+            let child_idx: usize = upper_bound_internode_generic::<InternodeNode>(ikey, internode);
+            // SAFETY: Dead-code traversal helper, no concurrent retirement.
+            let start_ptr: *mut u8 = unsafe { internode.child_unguarded(child_idx) };
 
             // Prefetch child node
             prefetch_read(start_ptr);
@@ -434,7 +437,7 @@ where
 
             if children_are_leaves {
                 // SAFETY: children_are_leaves() guarantees child is a leaf
-                unsafe { &mut *start_ptr.cast::<L>() }
+                unsafe { &mut *start_ptr.cast::<LeafNode15<P>>() }
             } else {
                 // Iterative traversal for deeper trees
                 // SAFETY: The returned pointer is valid for the tree's lifetime
@@ -449,29 +452,30 @@ where
     ///
     /// The returned pointer is valid for as long as the tree's allocations remain valid.
     #[allow(dead_code, reason = "traversal helper for future features")]
-    fn reach_leaf_mut_iterative_generic(mut current: *mut u8, ikey: u64) -> *mut L {
+    fn reach_leaf_mut_iterative_generic(mut current: *mut u8, ikey: u64) -> *mut LeafNode15<P> {
         use crate::ksearch::upper_bound_internode_generic;
-        use crate::leaf_trait::TreeInternode;
         use crate::prefetch::prefetch_read;
 
         loop {
             // SAFETY: current is a valid internode pointer from traversal
-            let internode: &L::Internode = unsafe { &*(current.cast::<L::Internode>()) };
-            let child_idx: usize = upper_bound_internode_generic::<L::Internode>(ikey, internode);
-            let child_ptr: *mut u8 = internode.child(child_idx);
+            let internode: &InternodeNode = unsafe { &*(current.cast::<InternodeNode>()) };
+            let child_idx: usize = upper_bound_internode_generic::<InternodeNode>(ikey, internode);
+            // SAFETY: Dead-code traversal helper, no concurrent retirement.
+            let child_ptr: *mut u8 = unsafe { internode.child_unguarded(child_idx) };
 
             // Prefetch child node
             prefetch_read(child_ptr);
 
             if internode.children_are_leaves() {
                 // SAFETY: children_are_leaves() guarantees child is a leaf
-                return child_ptr.cast::<L>();
+                return child_ptr.cast::<LeafNode15<P>>();
             }
 
             // Child is an internode - prefetch its first child (grandchild)
             // SAFETY: !children_are_leaves() so child is an internode
-            let child_inode: &L::Internode = unsafe { &*(child_ptr.cast::<L::Internode>()) };
-            let grandchild_ptr: *mut u8 = child_inode.child(0);
+            let child_inode: &InternodeNode = unsafe { &*(child_ptr.cast::<InternodeNode>()) };
+            // SAFETY: Dead-code traversal helper, no concurrent retirement.
+            let grandchild_ptr: *mut u8 = unsafe { child_inode.child_unguarded(0) };
             prefetch_read(grandchild_ptr);
 
             current = child_ptr;
@@ -487,14 +491,15 @@ where
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
             let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
+            // SAFETY: Dead-code traversal helper, no concurrent retirement of parent pointers.
             let parent = if version.is_leaf() {
                 // SAFETY: version.is_leaf() confirmed
-                let leaf: &L = unsafe { &*(node.cast::<L>()) };
-                leaf.parent()
+                let leaf: &LeafNode15<P> = unsafe { &*(node.cast::<LeafNode15<P>>()) };
+                unsafe { leaf.parent_unguarded() }
             } else {
                 // SAFETY: !version.is_leaf() confirmed
-                let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
-                inode.parent()
+                let inode: &InternodeNode = unsafe { &*(node.cast::<InternodeNode>()) };
+                unsafe { inode.parent_unguarded() }
             };
 
             if parent.is_null() {
@@ -516,14 +521,15 @@ where
         #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
         let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
+        // SAFETY: Dead-code traversal helper, no concurrent retirement of parent pointers.
         let parent: *mut u8 = if version.is_leaf() {
             // SAFETY: version.is_leaf() confirmed
-            let leaf: &L = unsafe { &*(node.cast::<L>()) };
-            leaf.parent()
+            let leaf: &LeafNode15<P> = unsafe { &*(node.cast::<LeafNode15<P>>()) };
+            unsafe { leaf.parent_unguarded() }
         } else {
             // SAFETY: !version.is_leaf() confirmed
-            let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
-            inode.parent()
+            let inode: &InternodeNode = unsafe { &*(node.cast::<InternodeNode>()) };
+            unsafe { inode.parent_unguarded() }
         };
 
         if parent.is_null() {
@@ -558,10 +564,9 @@ where
         start: *const u8,
         key: &Key<'_>,
         _is_sublayer: bool,
-        _guard: &LocalGuard<'_>,
-    ) -> *mut L {
+        guard: &LocalGuard<'_>,
+    ) -> *mut LeafNode15<P> {
         use crate::ksearch::upper_bound_internode_generic;
-        use crate::leaf_trait::TreeInternode;
         use crate::prefetch::prefetch_read;
 
         let target_ikey: u64 = key.ikey();
@@ -594,7 +599,15 @@ where
                 let version: &NodeVersion = unsafe { &*(n[sense].cast::<NodeVersion>()) };
                 v[sense] = version.stable();
 
-                if version.is_root() {
+                // Break on root OR deleted node. A deleted sublayer root has
+                // ROOT_BIT cleared by SPLIT_UNLOCK_MASK (mark_deleted sets
+                // SPLITTING_BIT, and LockGuard::drop clears ROOT_BIT for
+                // splitting nodes). Without this check, a reader that enters
+                // a deleted sublayer with null parent spins forever since
+                // is_root() is false and maybe_parent_one_step returns self.
+                // The caller handles deleted nodes downstream via
+                // deleted_layer() / handle_deleted_leaf recovery paths.
+                if version.is_root() || version.is_deleted() {
                     break;
                 }
 
@@ -634,12 +647,12 @@ where
                     // and handle by unshifting key and restarting from main root.
                     // We cannot handle deleted_layer here because `start` is fixed
                     // to the sublayer root, causing an infinite loop if we retry.
-                    return n[sense].cast_mut().cast::<L>();
+                    return n[sense].cast_mut().cast::<LeafNode15<P>>();
                 }
 
                 // It's an internode - traverse down
                 // SAFETY: !is_leaf() confirmed above
-                let inode: &L::Internode = unsafe { &*(n[sense].cast::<L::Internode>()) };
+                let inode: &InternodeNode = unsafe { &*(n[sense].cast::<InternodeNode>()) };
 
                 // ============================================================
                 // OPTIMIZATION: Prefetch internode's ikeys BEFORE search
@@ -653,14 +666,14 @@ where
                 // First cache line (64 bytes) contains version + first ~7 ikeys
                 // Second cache line contains remaining ikeys
                 prefetch_read(
-                    StdPtr::from_ref::<L::Internode>(inode)
+                    StdPtr::from_ref::<InternodeNode>(inode)
                         .cast::<u8>()
                         .wrapping_add(64),
                 );
 
                 // Binary/linear search for child pointer
                 let child_idx: usize =
-                    upper_bound_internode_generic::<L::Internode>(target_ikey, inode);
+                    upper_bound_internode_generic::<InternodeNode>(target_ikey, inode);
 
                 // DEBUG: Trace routing path
                 #[cfg(feature = "debug-routing")]
@@ -687,7 +700,7 @@ where
 
                 // Read child into the OTHER buffer (sense ^ 1)
                 let other: usize = sense ^ 1;
-                let child: *mut u8 = inode.child(child_idx);
+                let child: *mut u8 = inode.child(child_idx, guard);
                 n[other] = child.cast_const();
 
                 // Null child means concurrent split in progress (rare)
@@ -704,9 +717,9 @@ where
                 if !inode.children_are_leaves() {
                     // Child is an internode - prefetch its ikeys (second cache line)
                     // SAFETY: children_are_leaves() is false, so child is an internode
-                    let child_inode: &L::Internode = unsafe { &*(child.cast::<L::Internode>()) };
+                    let child_inode: &InternodeNode = unsafe { &*(child.cast::<InternodeNode>()) };
                     prefetch_read(
-                        StdPtr::from_ref::<L::Internode>(child_inode)
+                        StdPtr::from_ref::<InternodeNode>(child_inode)
                             .cast::<u8>()
                             .wrapping_add(64),
                     );
@@ -718,7 +731,7 @@ where
                     // but added 2-3% overhead from the conditional logic and nkeys_relaxed().
                     //
                     // Prefetch is safe even for null/invalid pointers (no-op on x86/ARM)
-                    let grandchild_ptr: *mut u8 = child_inode.child(0);
+                    let grandchild_ptr: *mut u8 = child_inode.child(0, guard);
                     prefetch_read(grandchild_ptr);
                 }
 
@@ -790,9 +803,9 @@ where
     /// }
     /// ```
     #[inline]
-    fn stable_last_key_compare(leaf: &L, key: &Key<'_>, mut version: u32) -> Ordering {
+    fn stable_last_key_compare(leaf: &LeafNode15<P>, key: &Key<'_>, mut version: u32) -> Ordering {
         loop {
-            let perm: L::Perm = leaf.permutation();
+            let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
             let n: usize = perm.size();
 
             // If empty, return Greater (key should look elsewhere)
@@ -831,11 +844,11 @@ where
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_generic<'a>(
         &'a self,
-        mut leaf: &'a L,
+        mut leaf: &'a LeafNode15<P>,
         key: &Key<'_>,
         old_version: u32,
-        _guard: &LocalGuard<'_>,
-    ) -> (&'a L, u32) {
+        guard: &LocalGuard<'_>,
+    ) -> (&'a LeafNode15<P>, u32) {
         let key_ikey: u64 = key.ikey();
         let mut version: u32 = leaf.version().stable();
 
@@ -858,7 +871,7 @@ where
 
         // Walk B-link chain to find correct leaf (common case: not deleted)
         while likely(!leaf.version().is_deleted()) {
-            let next_raw: *mut L = leaf.next_raw();
+            let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
 
             // Check for marked pointer (split in progress OR deleted node)
             if Linker::is_marked(next_raw) {
@@ -870,13 +883,13 @@ where
                 continue;
             }
 
-            let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
+            let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
             if next_ptr.is_null() {
                 break;
             }
 
             // SAFETY: next_ptr protected by guard
-            let next: &L = unsafe { &*next_ptr };
+            let next: &LeafNode15<P> = unsafe { &*next_ptr };
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
@@ -914,27 +927,27 @@ where
     ///
     /// # Provenance
     ///
-    /// This function takes and returns `*mut L` to preserve mutable provenance
+    /// This function takes and returns `*mut LeafNode15<P>` to preserve mutable provenance
     /// throughout the B-link walk. This is required for Miri/Stacked Borrows
     /// compliance: pointers that will eventually be freed via `Box::from_raw`
     /// must maintain their mutable provenance.
     ///
     /// # Returns
     ///
-    /// - `(*mut L, false)` - Found the correct leaf
-    /// - `(*mut L, true)` - Exceeded hop limit, caller should retry from root
+    /// - `(*mut LeafNode15<P>, false)` - Found the correct leaf
+    /// - `(*mut LeafNode15<P>, true)` - Exceeded hop limit, caller should retry from root
     #[expect(clippy::unused_self, reason = "API Consistency")]
     fn advance_to_key_by_bound_generic(
         &self,
-        mut leaf_ptr: *mut L,
+        mut leaf_ptr: *mut LeafNode15<P>,
         key: &Key<'_>,
-        _guard: &LocalGuard<'_>,
-    ) -> (*mut L, bool) {
+        guard: &LocalGuard<'_>,
+    ) -> (*mut LeafNode15<P>, bool) {
         let key_ikey: u64 = key.ikey();
         let mut hops: usize = 0;
 
         // SAFETY: leaf_ptr is valid, protected by guard
-        let mut leaf: &L = unsafe { &*leaf_ptr };
+        let mut leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
         // Wait for any in-progress split to complete
         let version = leaf.version();
@@ -951,8 +964,8 @@ where
             // Check if current leaf was deleted (e.g., by coalescing) - rare
             // If so, follow B-link to successor and continue from there
             if unlikely(leaf.version().is_deleted()) {
-                let next_raw: *mut L = leaf.next_raw();
-                let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
+                let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
+                let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
                 if next_ptr.is_null() {
                     // Deleted leaf has no successor - return it, caller will
                     // detect the deleted state and retry from root
@@ -965,7 +978,7 @@ where
                 continue;
             }
 
-            let next_raw: *mut L = leaf.next_raw();
+            let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
             if Linker::is_marked(next_raw) {
                 leaf.wait_for_split();
                 // After wait_for_split returns, re-check: either the split
@@ -974,13 +987,13 @@ where
                 continue;
             }
 
-            let next_ptr: *mut L = Linker::unmark_ptr(next_raw);
+            let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
             if next_ptr.is_null() {
                 break;
             }
 
             // SAFETY: next_ptr is valid
-            let next: &L = unsafe { &*next_ptr };
+            let next: &LeafNode15<P> = unsafe { &*next_ptr };
 
             // OPTIMIZATION: Prefetch next->next while we compare ikey_bound.
             // This hides memory latency for the next B-link hop (~50-100ns L3 hit).
@@ -993,8 +1006,8 @@ where
             // We don't prefetch ikey0 here because:
             // 1. The B-link loop only checks ikey_bound, not individual keys
             // 2. prefetch_for_search() will fetch ikeys when we land on the final leaf
-            let next_next_raw: *mut L = next.next_raw();
-            let next_next_ptr: *mut L = Linker::unmark_ptr(next_next_raw);
+            let next_next_raw: *mut LeafNode15<P> = next.next_raw(guard);
+            let next_next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_next_raw);
             let prefetch_base: *const u8 = next_next_ptr.cast::<u8>();
             prefetch_read(prefetch_base);
             prefetch_read(prefetch_base.wrapping_add(64));
@@ -1033,7 +1046,7 @@ where
     ///
     /// Panics on internal tree corruption (should not happen in normal operation).
     #[inline]
-    pub fn insert(&self, key: &[u8], value: S::Value) -> Option<S::Output> {
+    pub fn insert(&self, key: &[u8], value: P::Value) -> Option<P::Output> {
         let guard = self.guard();
         self.insert_with_guard(key, value, &guard)
     }
@@ -1059,12 +1072,12 @@ where
     pub fn insert_with_guard(
         &self,
         key: &[u8],
-        value: S::Value,
+        value: P::Value,
         guard: &LocalGuard<'_>,
-    ) -> Option<S::Output> {
+    ) -> Option<P::Output> {
         self.verify_guard(guard);
         let mut key: Key<'_> = Key::new(key);
-        let output: <S as ValueSlot>::Output = S::into_output(value);
+        let output: <P as LeafPolicy>::Output = P::into_output(value);
 
         // Internal errors indicate bugs, not recoverable conditions
         match self.insert_concurrent_generic(&mut key, output, guard) {
@@ -1089,9 +1102,9 @@ where
     pub(crate) fn insert_output_with_guard(
         &self,
         key: &[u8],
-        output: S::Output,
+        output: P::Output,
         guard: &LocalGuard<'_>,
-    ) -> Option<S::Output> {
+    ) -> Option<P::Output> {
         self.verify_guard(guard);
 
         let mut key: Key<'_> = Key::new(key);
@@ -1131,7 +1144,7 @@ where
     ///
     /// Returns `RemoveError::RetryLimitExceeded` if the operation cannot
     /// complete after the retry limit (extremely rare, indicates contention).
-    pub fn remove(&self, key: &[u8]) -> Result<Option<S::Output>, RemoveError> {
+    pub fn remove(&self, key: &[u8]) -> Result<Option<P::Output>, RemoveError> {
         let guard = self.guard();
         self.remove_with_guard(key, &guard)
     }
@@ -1147,7 +1160,7 @@ where
         &self,
         key: &[u8],
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<S::Output>, RemoveError> {
+    ) -> Result<Option<P::Output>, RemoveError> {
         self.verify_guard(guard);
         NodeCleaner::remove_concurrent_generic(self, key, guard)
     }
@@ -1172,25 +1185,24 @@ where
     #[expect(clippy::too_many_arguments, reason = "Internals")]
     fn assign_slot_generic(
         &self,
-        leaf: &L,
+        leaf: &LeafNode15<P>,
         lock: &mut LockGuard<'_>,
         slot: usize,
         key: &Key<'_>,
-        value: &S::Output,
+        value: &P::Output,
         guard: &LocalGuard<'_>,
         pre_allocated: Option<Vec<u8>>,
     ) -> *mut u8 {
         // DEBUG: Verify membership invariant at commit point.
         // If prev exists (non-leftmost leaf), key must be >= ikey_bound.
         debug_assert!(
-            leaf.prev().is_null() || key.ikey() >= leaf.ikey_bound(),
+            leaf.prev(guard).is_null() || key.ikey() >= leaf.ikey_bound(),
             "INSERT INVARIANT VIOLATION: key {:016x} < leaf.ikey_bound {:016x}",
             key.ikey(),
             leaf.ikey_bound()
         );
 
         let ikey: u64 = key.ikey();
-        let value_ptr: *mut u8 = S::output_to_raw(value);
 
         // Mark insert dirty
         lock.mark_insert();
@@ -1199,7 +1211,7 @@ where
         // The permutation update (Release) is the linearization point,
         // so these intermediate stores don't need memory barriers.
         leaf.set_ikey_relaxed(slot, ikey);
-        leaf.set_leaf_value_ptr_relaxed(slot, value_ptr);
+        leaf.store_value_relaxed(slot, value);
 
         // Handle suffix keys correctly
         if key.has_suffix() {
@@ -1298,10 +1310,9 @@ where
         &'t self,
         key: &'e [u8],
         guard: &'e LocalGuard<'t>,
-    ) -> Entry<'t, 'e, S, L, A>
+    ) -> Entry<'t, 'e, P, A>
     where
-        L: LeafValueLoad<S>,
-        S::Output: Clone,
+        P::Output: Clone,
     {
         self.verify_guard(guard);
         Entry::new(self, key, guard)
@@ -1312,13 +1323,10 @@ where
 //  Standard Collection Traits (FromIterator, Extend)
 // ============================================================================
 
-impl<S, L, A, K, V> FromIterator<(K, V)> for MassTreeGeneric<S, L, A>
+impl<P, A, K, V> FromIterator<(K, V)> for MassTreeGeneric<P, A>
 where
-    S: ValueSlot<Value = V>,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L> + Default,
+    P: LeafPolicy<Value = V>,
+    A: TreeAllocator<P> + Default,
     K: AsRef<[u8]>,
 {
     /// Creates a tree from an iterator of key-value pairs.
@@ -1368,13 +1376,10 @@ where
     }
 }
 
-impl<S, L, A, K, V> Extend<(K, V)> for MassTreeGeneric<S, L, A>
+impl<P, A, K, V> Extend<(K, V)> for MassTreeGeneric<P, A>
 where
-    S: ValueSlot<Value = V>,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy<Value = V>,
+    A: TreeAllocator<P>,
     K: AsRef<[u8]>,
 {
     /// Extends the tree with key-value pairs from an iterator.

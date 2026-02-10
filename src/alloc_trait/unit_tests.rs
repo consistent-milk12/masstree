@@ -1,26 +1,25 @@
-use super::{NodeAllocatorGeneric, TreeLeafNode, ValueSlot};
-use crate::alloc15::SeizeAllocator15;
+use super::TreeAllocator;
+use crate::alloc15::SeizeAllocator;
 use crate::leaf15::LeafNode15;
-use crate::value::LeafValue;
+use crate::policy::{ArcPolicy, LeafPolicy};
 
 // ========================================================================
 // Generic Test Helpers
 // ========================================================================
 
 /// Test that we can allocate a leaf via the generic trait.
-fn test_generic_alloc_leaf<S, L, A>(alloc: &A)
+fn test_generic_alloc_leaf<P, A>(alloc: &A)
 where
-    S: ValueSlot + Send + Sync + 'static,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
-    let leaf: Box<L> = L::new_boxed();
-    let ptr: *mut L = alloc.alloc_leaf(leaf);
+    let leaf: Box<LeafNode15<P>> = LeafNode15::<P>::new_boxed();
+    let ptr: *mut LeafNode15<P> = alloc.alloc_leaf(leaf);
     assert!(!ptr.is_null());
 
     // Verify leaf is accessible
     unsafe {
-        let leaf_ref: &L = &*ptr;
+        let leaf_ref: &LeafNode15<P> = &*ptr;
         assert!(leaf_ref.is_empty());
     }
 
@@ -31,14 +30,13 @@ where
 }
 
 /// Test that tracking a leaf works via the generic trait.
-fn test_generic_track_leaf<S, L, A>(alloc: &A)
+fn test_generic_track_leaf<P, A>(alloc: &A)
 where
-    S: ValueSlot + Send + Sync + 'static,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
-    let leaf: Box<L> = L::new_boxed();
-    let ptr: *mut L = Box::into_raw(leaf);
+    let leaf: Box<LeafNode15<P>> = LeafNode15::<P>::new_boxed();
+    let ptr: *mut LeafNode15<P> = Box::into_raw(leaf);
     alloc.track_leaf(ptr);
     // track_leaf is a no-op for seize allocator (tree traversal handles cleanup).
     // For standalone allocations in tests, we must manually deallocate.
@@ -47,19 +45,19 @@ where
 }
 
 // ========================================================================
-// SeizeAllocator15 Tests
+// SeizeAllocator Tests
 // ========================================================================
 
 #[test]
 fn test_seize_allocator15_generic_alloc() {
-    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
-    test_generic_alloc_leaf::<LeafValue<u64>, LeafNode15<LeafValue<u64>>, _>(&alloc);
+    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    test_generic_alloc_leaf::<ArcPolicy<u64>, _>(&alloc);
 }
 
 #[test]
 fn test_seize_allocator15_generic_track() {
-    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
-    test_generic_track_leaf::<LeafValue<u64>, LeafNode15<LeafValue<u64>>, _>(&alloc);
+    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    test_generic_track_leaf::<ArcPolicy<u64>, _>(&alloc);
 }
 
 // ========================================================================
@@ -67,11 +65,10 @@ fn test_seize_allocator15_generic_track() {
 // ========================================================================
 
 /// Verify that the trait enables fully generic code.
-fn generic_tree_setup<S, L, A>(_alloc: &mut A) -> bool
+fn generic_tree_setup<P, A>(_alloc: &mut A) -> bool
 where
-    S: ValueSlot + Send + Sync + 'static,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     // This compiles, proving generic code can use the trait
     true
@@ -79,11 +76,7 @@ where
 
 #[test]
 fn test_generic_code_compiles() {
-    let mut alloc15: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
+    let mut alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
 
-    assert!(generic_tree_setup::<
-        LeafValue<u64>,
-        LeafNode15<LeafValue<u64>>,
-        _,
-    >(&mut alloc15));
+    assert!(generic_tree_setup::<ArcPolicy<u64>, _>(&mut alloc));
 }

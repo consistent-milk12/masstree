@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.7.5"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -21,8 +21,10 @@ include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md"]
 
 [features]
 default = []
-# Optimal Allocator for this data structure
+# Optimal Allocator for this data structure based on current benchmarks.
+# Even though the original implementation prefers tcmalloc.
 mimalloc = ["dep:mimalloc"]
+
 # When disabled (default), all tracing calls compile to no-ops with zero overhead.
 # When enabled, auto-initializes a subscriber that writes NDJSON logs to logs/masstree.jsonl.
 # Respects RUST_LOG env var (default: info). Set MASSTREE_LOG_CONSOLE=0 to disable console.
@@ -31,9 +33,15 @@ debug-routing = []                                                          # En
 no-prefetch = []                                                            # Disable all software prefetching for A/B benchmarking
 insert-stats = []                                                           # Enable insert retry statistics collection
 
-# Use 512-byte inline suffix capacity instead of 256-byte default.
-# Only enable for workloads without multi-layer key prefixes.
-large-suffix-capacity = []
+# Use 256-byte inline suffix bags (vs 512-byte default).
+# Reduces embedded leaf size: 1152 → 896 bytes. Also reduces sidecar heap
+# allocation size when `sidecar-suffix` is enabled.
+small-suffix-capacity = []
+
+# Use sidecar (pointer-indirect) suffix storage for InlinePolicy instead of embedded.
+# Shrinks InlinePolicy leaves: 1152 → 576 bytes (better cache for short-key/read-heavy workloads).
+# Tradeoff: adds a pointer chase on every suffix read (worse for string-key workloads).
+sidecar-suffix = []
 
 [dependencies]
 seize = "0.5.1"
@@ -42,8 +50,6 @@ static_assertions = "1.1.0"
 rustc-hash = "2.1.1"
 crossbeam-queue = "0.3.12"
 
-# Optional allocators (enabled via features)
-# NOTE: mimalloc is the optimal allocator for this data structure based on benchmarks.
 mimalloc = { version = "0.1.48", optional = true }
 
 # Optional tracing (enabled via features) - zero overhead when disabled
@@ -93,6 +99,7 @@ criterion = { version = "0.8.2", features = [
 rayon = "1.11.0"
 core_affinity = "0.8.3"
 tokio = { version = "1.49.0", features = ["full"] }
+dhat = "0.3.3"
 
 [lints.rust]
 # Allow loom and shuttle cfg for deterministic concurrency testing
@@ -150,6 +157,14 @@ harness = false
 
 [[bench]]
 name = "concurrent_read_write_masstree"
+harness = false
+
+[[bench]]
+name = "concurrent_read_write_masstree_arc"
+harness = false
+
+[[bench]]
+name = "concurrent_read_write_masstree_arc_ref"
 harness = false
 
 [[bench]]

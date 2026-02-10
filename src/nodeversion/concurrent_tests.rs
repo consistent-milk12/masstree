@@ -6,8 +6,8 @@
 #![expect(clippy::expect_used, reason = "fail fast with meaningful reason")]
 
 use super::*;
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 

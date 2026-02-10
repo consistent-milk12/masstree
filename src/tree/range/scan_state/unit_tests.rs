@@ -1,6 +1,11 @@
 use super::{LayerContext, LayerStack, NonNull, ScanSnapshotPtr, ScanState};
+use crate::leaf15::LeafNode15;
+use crate::policy::ArcPolicy;
 use arrayvec::ArrayVec;
 use std::ptr as StdPtr;
+
+type P = ArcPolicy<u64>;
+type Leaf = LeafNode15<P>;
 
 // Note: These tests use mock types since we can't easily construct
 // real LeafNode24 in unit tests. Integration tests  test with real types.
@@ -38,9 +43,9 @@ fn test_scan_state_debug() {
 #[test]
 fn test_layer_context_creation() {
     let root: *const u8 = StdPtr::without_provenance(0x1000);
-    let leaf: *mut u8 = StdPtr::without_provenance_mut(0x2000);
+    let leaf: *mut Leaf = StdPtr::without_provenance_mut(0x2000);
 
-    let ctx: LayerContext<u8> = LayerContext::new(root, leaf);
+    let ctx: LayerContext<P> = LayerContext::new(root, leaf);
 
     assert_eq!(ctx.root, root);
     assert_eq!(ctx.leaf_ptr(), leaf);
@@ -49,7 +54,7 @@ fn test_layer_context_creation() {
 #[test]
 #[expect(clippy::unwrap_used)]
 fn test_layer_stack_operations() {
-    let mut stack: LayerStack<u8> = ArrayVec::new();
+    let mut stack: LayerStack<P> = ArrayVec::new();
 
     assert!(stack.is_empty());
 
@@ -68,7 +73,10 @@ fn test_layer_stack_operations() {
     // Pop
     let ctx = stack.pop().unwrap();
     assert_eq!(ctx.root, StdPtr::without_provenance(0x3000));
-    assert_eq!(ctx.leaf_ptr(), StdPtr::without_provenance_mut(0x4000));
+    assert_eq!(
+        ctx.leaf_ptr(),
+        StdPtr::without_provenance_mut::<Leaf>(0x4000)
+    );
 
     assert_eq!(stack.len(), 1);
 
@@ -82,7 +90,7 @@ fn test_layer_stack_operations() {
 
 #[test]
 fn test_layer_stack_capacity() {
-    let mut stack: LayerStack<u8> = ArrayVec::new();
+    let mut stack: LayerStack<P> = ArrayVec::new();
 
     // ArrayVec has fixed capacity of 6
     assert_eq!(stack.capacity(), 6);
@@ -130,8 +138,8 @@ fn test_nonnull_niche_optimization() {
     // due to niche optimization
     use std::mem::size_of;
     assert_eq!(
-        size_of::<Option<NonNull<u8>>>(),
-        size_of::<*mut u8>(),
+        size_of::<Option<NonNull<Leaf>>>(),
+        size_of::<*mut Leaf>(),
         "NonNull niche optimization should make Option<NonNull> same size as raw pointer"
     );
 }

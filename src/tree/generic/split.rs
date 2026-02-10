@@ -1,11 +1,12 @@
 use std::ptr as StdPtr;
 
 use crate::leaf_trait::{SplitInsertData, SplitInsertResult};
+use crate::leaf15::LeafNode15;
 use crate::{SplitPoint, nodeversion::LockGuard};
 
 use super::{
-    AtomicOrdering, InsertError, LayerCapableLeaf, LocalGuard, MassTreeGeneric,
-    NodeAllocatorGeneric, Propagation, ValueSlot,
+    AtomicOrdering, InsertError, LeafPolicy, LocalGuard, MassTreeGeneric, Propagation,
+    TreeAllocator,
 };
 
 // ============================================================================
@@ -30,13 +31,10 @@ struct SplitPreparation {
     right_leaf_ptr: *mut u8,
 }
 
-impl<S, L, A> MassTreeGeneric<S, L, A>
+impl<P, A> MassTreeGeneric<P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     // ========================================================================
     // Helper Methods
@@ -50,9 +48,10 @@ where
     ///
     /// Uses `Acquire` ordering to synchronize with `Release` stores in root updates.
     #[inline]
-    fn check_is_main_root(&self, leaf_ptr: *mut L, root_flag_set: bool) -> bool {
+    fn check_is_main_root(&self, leaf_ptr: *mut LeafNode15<P>, root_flag_set: bool) -> bool {
         root_flag_set && {
-            let current_root: *const L = self.root_ptr.load(AtomicOrdering::Acquire).cast();
+            let current_root: *const LeafNode15<P> =
+                self.root_ptr.load(AtomicOrdering::Acquire).cast();
             StdPtr::eq(current_root, leaf_ptr)
         }
     }
@@ -83,8 +82,8 @@ where
     /// Note: Allocations are infallible (abort on OOM like standard Rust).
     fn prepare_split(
         &self,
-        left_leaf: &L,
-        left_leaf_ptr: *mut L,
+        left_leaf: &LeafNode15<P>,
+        left_leaf_ptr: *mut LeafNode15<P>,
         logical_pos: usize,
         ikey: u64,
     ) -> Result<SplitPreparation, InsertError> {
@@ -100,7 +99,8 @@ where
         // SPLIT_UNLOCK_MASK clears ROOT_BIT on unlock. We must capture both
         // booleans separately BEFORE marking.
         let root_flag_set: bool = left_leaf.version().is_root();
-        let parent_is_null: bool = left_leaf.parent().is_null();
+        // SAFETY: Called under lock - no concurrent retirement.
+        let parent_is_null: bool = unsafe { left_leaf.parent_unguarded() }.is_null();
 
         let is_main_root: bool = self.check_is_main_root(left_leaf_ptr, root_flag_set);
         let is_layer_root: bool = root_flag_set && parent_is_null && !is_main_root;
@@ -118,7 +118,7 @@ where
         // Allocation is infallible (aborts on OOM).
         // The leaf is initialized but NOT split-locked yet - that happens in
         // split_into_preallocated() or split_and_insert() after mark_split().
-        let right_leaf_ptr: *mut L = self.allocator.alloc_leaf_direct(false, false);
+        let right_leaf_ptr: *mut LeafNode15<P> = self.allocator.alloc_leaf_direct(false, false);
 
         Ok(SplitPreparation {
             split_point,
@@ -145,15 +145,15 @@ where
     )]
     fn execute_propagation(
         &self,
-        left_leaf_ptr: *mut L,
+        left_leaf_ptr: *mut LeafNode15<P>,
         lock: LockGuard<'_>,
-        right_leaf_ptr: *mut L,
+        right_leaf_ptr: *mut LeafNode15<P>,
         split_ikey: u64,
         is_main_root: bool,
         is_layer_root: bool,
         guard: &LocalGuard<'_>,
     ) {
-        let result = Propagation::make_split_leaf::<S, L, A>(
+        let result = Propagation::make_split_leaf::<P, A>(
             &self.root_ptr,
             &self.allocator,
             left_leaf_ptr,
@@ -238,15 +238,15 @@ where
     /// `leaf::split_into()` atomic insert.
     pub(crate) fn handle_leaf_split_and_insert_generic(
         &self,
-        left_leaf_ptr: *mut L,
+        left_leaf_ptr: *mut LeafNode15<P>,
         mut lock: LockGuard<'_>,
         logical_pos: usize,
-        insert_data: SplitInsertData<'_>,
+        insert_data: &SplitInsertData<'_, P>,
         guard: &LocalGuard<'_>,
     ) -> Result<SplitInsertResult, InsertError> {
         // SAFETY: Caller guarantees left_leaf_ptr is valid and we hold the lock,
         // preventing concurrent modification. The guard protects against deallocation.
-        let left_leaf: &L = unsafe { &*left_leaf_ptr };
+        let left_leaf: &LeafNode15<P> = unsafe { &*left_leaf_ptr };
 
         // =========================================================================
         // FALLIBLE PHASE: Prepare split context and allocate right sibling
@@ -254,7 +254,7 @@ where
         let prep: SplitPreparation =
             self.prepare_split(left_leaf, left_leaf_ptr, logical_pos, insert_data.ikey)?;
 
-        let right_leaf_ptr: *mut L = prep.right_leaf_ptr.cast();
+        let right_leaf_ptr: *mut LeafNode15<P> = prep.right_leaf_ptr.cast();
 
         // =========================================================================
         // PAST POINT OF NO RETURN: mark_split() and beyond

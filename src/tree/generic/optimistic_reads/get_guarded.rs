@@ -1,22 +1,18 @@
 use seize::LocalGuard;
 use std::ptr as StdPtr;
 
+use crate::leaf15::LeafNode15;
 use crate::{
-    MassTreeGeneric, NodeAllocatorGeneric, NodeVersion, TreePermutation, ValueSlot,
+    LeafPolicy, MassTreeGeneric, NodeVersion, TreeAllocator,
     hints::unlikely,
     key::Key,
-    leaf_trait::LayerCapableLeaf,
     tree::generic::optimistic_reads::{LookupResult, search_leaf_multi_layer},
-    value::traits::LeafValueLoad,
 };
 
-impl<S, L, A> MassTreeGeneric<S, L, A>
+impl<P, A> MassTreeGeneric<P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Get a value by key, returning a clone of the output.
     ///
@@ -33,7 +29,7 @@ where
     /// * `Some(output)` - The value if found
     /// * `None` - If the key was not found
     #[inline(always)]
-    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<S::Output> {
+    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<P::Output> {
         let mut key: Key<'_> = Key::new(key);
 
         // Find root
@@ -64,19 +60,19 @@ where
         key: &Key<'_>,
         layer_root: *const u8,
         guard: &LocalGuard<'_>,
-    ) -> Option<S::Output> {
+    ) -> Option<P::Output> {
         let target_ikey: u64 = key.ikey();
 
         #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
         let search_keylenx: u8 = key.current_len() as u8;
 
         // Navigate from root to leaf
-        let mut leaf_ptr: *mut L =
+        let mut leaf_ptr: *mut LeafNode15<P> =
             self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
 
         'leaf_loop: loop {
             // SAFETY: leaf_ptr protected by guard
-            let leaf: &L = unsafe { &*leaf_ptr };
+            let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
             // Handle deleted leaf (concurrent coalesce)
             if leaf.version().is_deleted() {
@@ -93,7 +89,7 @@ where
                 v
             } else {
                 // Leaf is locked, try B-link escape
-                if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
+                if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey, guard) {
                     leaf_ptr = next_ptr;
 
                     continue 'leaf_loop;
@@ -105,7 +101,7 @@ where
             };
 
             // Early too-right check
-            if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+            if !leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound() {
                 // Reload root to get latest pointer after concurrent modifications
                 leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
 
@@ -113,35 +109,26 @@ where
             }
 
             'search_loop: loop {
-                let perm: L::Perm = leaf.permutation();
+                let perm = leaf.permutation();
                 let size: usize = perm.size();
-                let mut found_ptr: *mut u8 = StdPtr::null_mut();
 
-                // Simple linear search - store pointer directly (no redundant read)
+                // Simple linear search - store slot index directly
+                let mut found_slot: Option<usize> = None;
                 for i in 0..size {
                     let slot: usize = perm.get(i);
 
                     // Use Relaxed ordering - permutation() Acquire already synchronizes
                     if (leaf.ikey_relaxed(slot) == target_ikey)
                         && (leaf.keylenx(slot) == search_keylenx)
+                        && !leaf.is_value_empty(slot)
                     {
-                        let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                        if !ptr.is_null() {
-                            found_ptr = ptr;
-
-                            break;
-                        }
+                        found_slot = Some(slot);
+                        break;
                     }
                 }
 
                 // Read output before version validation (OCC pattern)
-                // SAFETY: ptr came from valid slot, guard protects from deallocation
-                let output: Option<S::Output> = if found_ptr.is_null() {
-                    None
-                } else {
-                    Some(unsafe { S::output_from_raw(found_ptr) })
-                };
+                let output: Option<P::Output> = found_slot.and_then(|s| leaf.load_value(s));
 
                 // Version validation after all reads (common case: unchanged)
                 // Store version reference once to avoid repeated method calls
@@ -178,7 +165,7 @@ where
                     continue 'search_loop;
                 }
 
-                if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
+                if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey, guard) {
                     leaf_ptr = next_ptr;
 
                     continue 'leaf_loop;
@@ -187,7 +174,7 @@ where
                 // Fallback too-right check
                 //
                 // NOTE: This is defense-in-depth; the early check above catches most cases.
-                if unlikely(!leaf.prev().is_null() && target_ikey < leaf.ikey_bound()) {
+                if unlikely(!leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound()) {
                     leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
 
                     continue 'leaf_loop;
@@ -213,27 +200,78 @@ where
         key: &mut Key<'_>,
         initial_root: *const u8,
         guard: &LocalGuard<'_>,
-    ) -> Option<S::Output> {
+    ) -> Option<P::Output> {
         let mut layer_root: *const u8 = initial_root;
         let mut in_sublayer: bool = false;
 
+        // DEBUG: detect infinite loops during concurrent gc_layer debugging
+        #[cfg(debug_assertions)]
+        let mut layer_iters: u32 = 0;
+
         'layer_loop: loop {
+            #[cfg(debug_assertions)]
+            {
+                layer_iters += 1;
+                if layer_iters > 500 {
+                    eprintln!(
+                        "[DEBUG] layer_loop iter={layer_iters}, \
+                         in_sublayer={in_sublayer}, layer_root={layer_root:?}"
+                    );
+                    if layer_iters > 1000 {
+                        eprintln!("[DEBUG] ABORTING: infinite layer_loop detected");
+                        return None;
+                    }
+                }
+            }
+
             layer_root = self.maybe_parent_generic(layer_root);
 
-            let mut leaf_ptr: *mut L =
+            let mut leaf_ptr: *mut LeafNode15<P> =
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
+            // DEBUG: detect infinite loops
+            #[cfg(debug_assertions)]
+            let mut leaf_iters: u32 = 0;
+
             'leaf_loop: loop {
+                #[cfg(debug_assertions)]
+                {
+                    leaf_iters += 1;
+                    if leaf_iters > 500 {
+                        eprintln!(
+                            "[DEBUG] leaf_loop iter={leaf_iters}, leaf_ptr={leaf_ptr:?}, \
+                             in_sublayer={in_sublayer}"
+                        );
+                        if leaf_iters > 1000 {
+                            eprintln!("[DEBUG] ABORTING: infinite leaf_loop");
+                            return None;
+                        }
+                    }
+                }
+
                 // OPTIM: Compute ikey once per leaf iteration.
                 //
                 // key.shift() mutates on layer descent, so this must be per-iteration.
                 let target_ikey: u64 = key.ikey();
 
                 // SAFETY: leaf_ptr protected by guard
-                let leaf: &L = unsafe { &*leaf_ptr };
+                let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
                 // Handle deleted leaf (concurrent coalesce) - rare condition
                 if unlikely(leaf.version().is_deleted()) {
+                    // If entire sublayer was GC'd (deleted_layer modstate), restart
+                    // from tree root. handle_deleted_leaf cannot recover from this:
+                    // the sublayer root has no B-link successor and
+                    // reach_leaf_concurrent_generic returns the same deleted node,
+                    // causing an infinite leaf_loop.
+                    if in_sublayer && leaf.deleted_layer() {
+                        key.unshift_all();
+                        layer_root = self.load_root_ptr_generic(guard);
+                        in_sublayer = false;
+
+                        continue 'layer_loop;
+                    }
+
                     leaf_ptr = self.handle_deleted_leaf(leaf, layer_root, key, in_sublayer, guard);
 
                     continue 'leaf_loop;
@@ -244,7 +282,7 @@ where
                     leaf.prefetch_for_search();
                     v
                 } else {
-                    if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
+                    if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey, guard) {
                         leaf_ptr = next_ptr;
 
                         continue 'leaf_loop;
@@ -256,7 +294,7 @@ where
                 };
 
                 // Early too-right check
-                if !leaf.prev().is_null() && target_ikey < leaf.ikey_bound() {
+                if !leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound() {
                     // Reload root to get latest pointer after concurrent modifications
                     leaf_ptr =
                         self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
@@ -264,7 +302,32 @@ where
                     continue 'leaf_loop;
                 }
 
+                // DEBUG: detect search_loop infinite loops
+                #[cfg(debug_assertions)]
+                let mut search_iters: u32 = 0;
+
                 'search_loop: loop {
+                    #[cfg(debug_assertions)]
+                    {
+                        search_iters += 1;
+                        if search_iters > 500 {
+                            let dl = leaf.deleted_layer();
+                            let ver = leaf.version();
+                            eprintln!(
+                                "[DEBUG] search_loop iter={search_iters}, \
+                                 deleted_layer={dl}, version_val={}, \
+                                 is_deleted={}, is_dirty={}",
+                                ver.value(),
+                                ver.is_deleted(),
+                                ver.is_dirty()
+                            );
+                            if search_iters > 1000 {
+                                eprintln!("[DEBUG] ABORTING: infinite search_loop");
+                                return None;
+                            }
+                        }
+                    }
+
                     // Check for GC'd sublayer - must restart from root
                     if leaf.deleted_layer() {
                         key.unshift_all();
@@ -275,7 +338,7 @@ where
                     }
 
                     // target_ikey already computed at start of 'leaf_loop
-                    let result: LookupResult = search_leaf_multi_layer::<S, L>(leaf, key);
+                    let result: LookupResult = search_leaf_multi_layer::<P>(leaf, key);
 
                     // Store version reference once for all validation checks below
                     let ver: &NodeVersion = leaf.version();
@@ -284,13 +347,10 @@ where
                         LookupResult::ValueSlot(slot) => {
                             // Read pointer and extract output BEFORE version validation
                             // Store pointer directly - no redundant read via try_load_output
-                            let ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-                            // SAFETY: ptr came from valid slot, guard protects from deallocation
-                            let output: Option<S::Output> = if ptr.is_null() {
+                            let output: Option<P::Output> = if leaf.is_value_empty(slot) {
                                 None
                             } else {
-                                Some(unsafe { S::output_from_raw(ptr) })
+                                leaf.load_value(slot)
                             };
 
                             if unlikely(ver.has_changed(version)) {
@@ -375,7 +435,8 @@ where
                                 continue 'search_loop;
                             }
 
-                            if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey) {
+                            if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey, guard)
+                            {
                                 leaf_ptr = next_ptr;
 
                                 continue 'leaf_loop;
@@ -385,7 +446,9 @@ where
                             // we descended to a leaf that's to the right of where the key should be.
                             // Recovery requires restart from layer root (can't safely walk left).
                             // NOTE: This is defense-in-depth; the early check above catches most cases.
-                            if unlikely(!leaf.prev().is_null() && target_ikey < leaf.ikey_bound()) {
+                            if unlikely(
+                                !leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound(),
+                            ) {
                                 leaf_ptr = self.reach_leaf_concurrent_generic(
                                     layer_root,
                                     key,

@@ -11,13 +11,11 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 // Note: AllocError/AllocKind removed - allocations are now infallible
 use crate::shard_counter::ShardedCounter;
 
-use crate::alloc15::{SeizeAllocator15, SeizeAllocator15TrueInline};
+use crate::alloc_trait::TreeAllocator;
+use crate::alloc15::SeizeAllocator;
 use crate::inline::bits::InlineBits;
-use crate::inline::leaf15_true::LeafNode15TrueInline;
 use crate::leaf15::LeafNode15;
-use crate::slot::ValueSlot;
-use crate::slot::true_inline::TrueInlineSlot;
-use crate::value::LeafValue;
+use crate::policy::{ArcPolicy, InlinePolicy, LeafPolicy};
 use coalesce::CoalesceQueue;
 use seize::Collector;
 
@@ -121,34 +119,21 @@ impl std::error::Error for InsertError {}
 //  MassTreeGeneric - Generic over Leaf Type
 // ============================================================================
 
-use crate::alloc_trait::NodeAllocatorGeneric;
-use crate::leaf_trait::TreeLeafNode;
-
 /// A high-performance generic trie of B+trees.
 ///
-/// This is the generic version that abstracts over the leaf node type.
-/// Use `MassTree<V>` for the standard WIDTH=24 implementation.
+/// This is the generic version parameterized over leaf policy and allocator.
+/// Use `MassTree<V>` for the standard inline storage implementation.
 ///
 /// # Type Parameters
 ///
-/// - `V` - The value type to store
-/// - `L` - Leaf node type (must implement [`TreeLeafNode`])
-/// - `A` - Allocator type (must implement [`NodeAllocatorGeneric`])
+/// - `P` - Leaf policy (determines value storage: `ArcPolicy<V>` or `InlinePolicy<V>`)
+/// - `A` - Allocator type (must implement [`TreeAllocator<P>`])
 ///
-/// # Example
-///
-/// ```ignore
-/// use masstree::{MassTreeGeneric, LeafNode24, SeizeAllocator24};
-///
-/// // Create a WIDTH=24 tree explicitly
-/// let tree: MassTreeGeneric<u64, LeafNode24<_>, SeizeAllocator24<_>> =
-///     MassTreeGeneric::new();
-/// ```
-pub struct MassTreeGeneric<S, L, A>
+/// The leaf type is always `LeafNode15<P>` — derived from the policy.
+pub struct MassTreeGeneric<P, A>
 where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Memory reclamation collector for safe concurrent access.
     collector: Collector,
@@ -176,23 +161,22 @@ where
     ///
     /// When leaves become empty after key removal, they are queued here
     /// for background cleanup rather than being removed inline.
-    coalesce_queue: CoalesceQueue<L>,
+    coalesce_queue: CoalesceQueue<LeafNode15<P>>,
 
-    /// Marker to indicate slot and leaf types.
-    _marker: PhantomData<(S, L)>,
+    /// Marker to indicate policy type.
+    _marker: PhantomData<P>,
 }
 
-impl<S, L, A> StdFmt::Debug for MassTreeGeneric<S, L, A>
+impl<P, A> StdFmt::Debug for MassTreeGeneric<P, A>
 where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("MassTreeGeneric")
             .field("root_ptr", &self.root_ptr.load(AtomicOrdering::Relaxed))
             .field("count", &self.count.load())
-            .field("width", &L::WIDTH)
+            .field("width", &LeafNode15::<P>::WIDTH)
             .field("pending_coalesce", &self.coalesce_queue.len())
             .finish_non_exhaustive()
     }
@@ -214,11 +198,10 @@ pub(crate) enum InsertSearchResultGeneric {
     Layer { slot: usize },
 }
 
-impl<S, L, A> Drop for MassTreeGeneric<S, L, A>
+impl<P, A> Drop for MassTreeGeneric<P, A>
 where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     fn drop(&mut self) {
         // No concurrent access is possible here (Drop requires unique access).
@@ -254,9 +237,6 @@ where
 //  Type Aliases for MassTreeGeneric
 // ============================================================================
 
-/// The main [`MassTree`] type alias using WIDTH=15 nodes with Arc-based storage.
-///
-/// This is a type alias for [`MassTreeGeneric`] with:
 /// High-performance inline storage variant for `Copy` types (default tree type).
 ///
 /// This is a type alias for [`MassTree15Inline`], providing the best performance
@@ -287,14 +267,7 @@ where
 /// [`InlineBits`]: crate::inline::bits::InlineBits
 pub type MassTree<V> = MassTree15Inline<V>;
 
-/// WIDTH=15 variant with Arc-based storage.
-///
-/// Use this when you need to store non-`Copy` types like `String`, `Vec<u8>`, etc.
-///
-/// This is a type alias for [`MassTreeGeneric`] with:
-/// - `LeafValue<V>` for Arc-based value storage
-/// - `LeafNode15<LeafValue<V>>` for leaf nodes (15 slots per node)
-/// - `SeizeAllocator15<LeafValue<V>>` for memory management
+/// Arc-based storage for non-Copy types (String, Vec<u8>, etc.).
 ///
 /// VALUES ARE STORED AS `Arc<V>` - each insert allocates.
 ///
@@ -307,26 +280,15 @@ pub type MassTree<V> = MassTree15Inline<V>;
 /// let guard = tree.guard();
 /// tree.insert_with_guard(b"key", "hello".to_string(), &guard).unwrap();
 /// ```
-pub type MassTree15<V> =
-    MassTreeGeneric<LeafValue<V>, LeafNode15<LeafValue<V>>, SeizeAllocator15<LeafValue<V>>>;
+pub type MassTree15<V> = MassTreeGeneric<ArcPolicy<V>, SeizeAllocator<ArcPolicy<V>>>;
 
-// ============================================================================
-//  True-Inline Type Aliases
-// ============================================================================
-
-/// [`MassTree`] with **true-inline** value storage for types implementing [`InlineBits`].
+/// True-inline storage for Copy types (u64, i32, *const T, etc.).
 ///
 /// Values are stored directly in `[AtomicU64; 15]` arrays within leaf nodes—no heap
 /// allocation per insert. Best for small types like `u64`, `i32`, tuples fitting in 64 bits.
 ///
-/// ## Breaking changes from previous versions:
-/// - `V` now requires `InlineBits` instead of just `Copy`
-/// - `get_ref()` is **not available** (values stored as atomic bits, not at stable addresses)
-/// - Use `get()` which returns `Option<V>` (the value is `Copy`)
-///
 /// [`InlineBits`]: crate::inline::bits::InlineBits
-pub type MassTree15Inline<V> =
-    MassTreeGeneric<TrueInlineSlot<V>, LeafNode15TrueInline<V>, SeizeAllocator15TrueInline<V>>;
+pub type MassTree15Inline<V> = MassTreeGeneric<InlinePolicy<V>, SeizeAllocator<InlinePolicy<V>>>;
 
 // ============================================================================
 //  Constructor implementations for type aliases
@@ -337,8 +299,7 @@ impl<V: Send + Sync + 'static> MassTree15<V> {
     #[must_use]
     #[inline(always)]
     pub fn new() -> Self {
-        let allocator = SeizeAllocator15::new();
-        Self::with_allocator(allocator)
+        Self::with_allocator(SeizeAllocator::new())
     }
 }
 
@@ -348,17 +309,12 @@ impl<V: Send + Sync + 'static> Default for MassTree15<V> {
     }
 }
 
-// ============================================================================
-//  True-Inline Constructors
-// ============================================================================
-
 impl<V: InlineBits> MassTree15Inline<V> {
     /// Create a new empty `MassTree15Inline`.
     #[must_use]
     #[inline(always)]
     pub fn new() -> Self {
-        let allocator = SeizeAllocator15TrueInline::new();
-        Self::with_allocator(allocator)
+        Self::with_allocator(SeizeAllocator::new())
     }
 }
 
@@ -377,5 +333,4 @@ impl<V: InlineBits> Default for MassTree15Inline<V> {
 #[expect(clippy::cast_possible_truncation, reason = "reasonable in tests")]
 #[expect(clippy::cast_sign_loss, reason = "reasonable in tests")]
 #[expect(clippy::items_after_statements, reason = "doesn't matter in tests")]
-#[expect(clippy::type_complexity, reason = "doesn't matter in tests")]
 mod unit_tests;

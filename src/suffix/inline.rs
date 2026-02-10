@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering as AtomicOrdering};
 
 use super::{SuffixBag, TreePermutation};
 
@@ -11,13 +11,13 @@ const WIDTH: usize = 15;
 
 /// Inline suffix data capacity.
 ///
-/// Default: 256 bytes (better cache locality for `deep_trie` workloads).
-/// With `large-suffix-capacity` feature: 512 bytes (fewer heap allocations).
-#[cfg(not(feature = "large-suffix-capacity"))]
-const CAPACITY: usize = 256;
-
-#[cfg(feature = "large-suffix-capacity")]
+/// Default: 512 bytes (fewer heap allocations, better insert throughput).
+/// With `small-suffix-capacity` feature: 256 bytes (smaller sidecar heap allocation).
+#[cfg(not(feature = "small-suffix-capacity"))]
 const CAPACITY: usize = 512;
+
+#[cfg(feature = "small-suffix-capacity")]
+const CAPACITY: usize = 256;
 
 const U16_MAX: usize = u16::MAX as usize;
 

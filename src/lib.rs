@@ -82,7 +82,6 @@
 // The memory is always properly aligned before casting.
 #![allow(clippy::cast_ptr_alignment)]
 
-// Global allocator selection (enabled via features)
 #[cfg(feature = "mimalloc")]
 use mimalloc::MiMalloc;
 
@@ -190,7 +189,6 @@ pub mod leaf_trait;
 pub mod nodeversion;
 pub mod permuter;
 pub mod ref_value_slot;
-pub mod slot;
 pub mod suffix;
 pub mod tree;
 pub mod value;
@@ -202,6 +200,7 @@ pub(crate) mod ksearch;
 pub(crate) mod link;
 pub(crate) mod node_pool;
 pub(crate) mod ordering;
+pub(crate) mod policy;
 pub(crate) mod prefetch;
 mod retirement;
 mod shard_counter;
@@ -217,7 +216,7 @@ pub use retirement::BatchedRetire;
 pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
 
 // Re-export allocator trait for generic tree operations
-pub use alloc_trait::NodeAllocatorGeneric;
+pub use alloc_trait::TreeAllocator;
 
 // Re-export Permuter types
 pub use permuter::{AtomicPermuter, AtomicPermuter15, Permuter, Permuter15};
@@ -230,12 +229,10 @@ pub use internode::InternodeNode;
 pub use nodeversion::NodeVersion;
 
 // Re-export allocator types
-pub use alloc15::{SeizeAllocator15, SeizeAllocator15TrueInline};
+pub use alloc15::SeizeAllocator;
 
-// Re-export inline types for true-inline storage
+// Re-export inline types
 pub use inline::bits::InlineBits;
-pub use inline::leaf15_true::LeafNode15TrueInline;
-pub use slot::true_inline::TrueInlineSlot;
 
 // Re-export value types
 pub use value::{InsertTarget, LeafValue, SplitPoint};
@@ -244,8 +241,8 @@ pub use value::{InsertTarget, LeafValue, SplitPoint};
 pub(crate) use link::Linker;
 
 // Re-export main types for convenience
-pub use ref_value_slot::RefValueSlot;
-pub use slot::ValueSlot;
+pub use policy::LeafPolicy;
+pub use ref_value_slot::RefLeafPolicy;
 pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
 pub use tree::{InsertError, RemoveError};
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};

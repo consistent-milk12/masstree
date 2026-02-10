@@ -6,18 +6,18 @@ use std::ptr as StdPtr;
 
 // Note: InsertError no longer used here - allocations are infallible
 
+use crate::leaf_trait::TreeLeafNode;
+use crate::leaf15::LeafNode15;
+
 use super::{
-    Key, LAYER_KEYLENX, LayerCapableLeaf, LocalGuard, MassTreeGeneric, NodeAllocatorGeneric,
-    Ordering, TreePermutation, ValueSlot,
+    Key, LAYER_KEYLENX, LayerCapableLeaf, LeafPolicy, LocalGuard, MassTreeGeneric, Ordering,
+    TreeAllocator, TreePermutation,
 };
 
-impl<S, L, A> MassTreeGeneric<S, L, A>
+impl<P, A> MassTreeGeneric<P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Assign two entries to the final layer leaf in sorted order.
     ///
@@ -34,16 +34,16 @@ where
     #[expect(clippy::unused_self, reason = "API Consistency")]
     unsafe fn assign_final_layer_entries(
         &self,
-        final_ptr: *mut L,
+        final_ptr: *mut LeafNode15<P>,
         existing_key: &Key<'_>,
-        existing_output: Option<S::Output>,
+        existing_output: Option<P::Output>,
         new_key: &Key<'_>,
-        new_arc: Option<S::Output>,
+        new_arc: Option<P::Output>,
         cmp: Ordering,
         guard: &LocalGuard<'_>,
     ) {
         // SAFETY: final_ptr is valid per caller contract
-        let final_leaf: &L = unsafe { &*final_ptr };
+        let final_leaf: &LeafNode15<P> = unsafe { &*final_ptr };
 
         match cmp {
             Ordering::Less => {
@@ -51,8 +51,8 @@ where
                 // existing goes in slot 0, new goes in slot 1
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
-                    final_leaf.assign_from_key_arc(0, existing_key, existing_output, guard);
-                    final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
+                    final_leaf.assign_from_key(0, existing_key, existing_output, guard);
+                    final_leaf.assign_from_key(1, new_key, new_arc, guard);
                 }
             }
 
@@ -61,8 +61,8 @@ where
                 // new goes in slot 0, existing goes in slot 1
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
-                    final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
-                    final_leaf.assign_from_key_arc(1, existing_key, existing_output, guard);
+                    final_leaf.assign_from_key(0, new_key, new_arc, guard);
+                    final_leaf.assign_from_key(1, existing_key, existing_output, guard);
                 }
             }
 
@@ -74,22 +74,24 @@ where
                     // existing is shorter or equal length -> existing first
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
-                        final_leaf.assign_from_key_arc(0, existing_key, existing_output, guard);
-                        final_leaf.assign_from_key_arc(1, new_key, new_arc, guard);
+                        final_leaf.assign_from_key(0, existing_key, existing_output, guard);
+                        final_leaf.assign_from_key(1, new_key, new_arc, guard);
                     }
                 } else {
                     // new is shorter -> new first
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
-                        final_leaf.assign_from_key_arc(0, new_key, new_arc, guard);
-                        final_leaf.assign_from_key_arc(1, existing_key, existing_output, guard);
+                        final_leaf.assign_from_key(0, new_key, new_arc, guard);
+                        final_leaf.assign_from_key(1, existing_key, existing_output, guard);
                     }
                 }
             }
         }
 
         // Set permutation: final leaf now has exactly 2 entries in slots 0 and 1
-        final_leaf.set_permutation(<L::Perm as TreePermutation>::make_sorted(2));
+        final_leaf.set_permutation(
+            <<LeafNode15<P> as TreeLeafNode<P>>::Perm as TreePermutation>::make_sorted(2),
+        );
     }
 
     /// Create a new layer for suffix conflict (generic version).
@@ -118,16 +120,16 @@ where
     #[inline(never)]
     pub(super) unsafe fn create_layer_concurrent_generic(
         &self,
-        parent_leaf: &L,
+        parent_leaf: &LeafNode15<P>,
         conflict_slot: usize,
         new_key: &mut Key<'_>,
-        new_value: S::Output,
+        new_value: P::Output,
         guard: &LocalGuard<'_>,
     ) -> *mut u8 {
         // STEP: 1 - Extract existing key's suffix and value
         let existing_suffix: &[u8] = parent_leaf.ksuf(conflict_slot).unwrap_or(&[]);
         let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
-        let existing_output: Option<S::Output> = parent_leaf.try_clone_output(conflict_slot);
+        let existing_output: Option<P::Output> = parent_leaf.try_clone_output(conflict_slot);
 
         debug_assert!(
             existing_output.is_some(),
@@ -143,18 +145,20 @@ where
         let mut cmp: Ordering = existing_key.compare(new_key.ikey(), new_key.current_len());
 
         // STEP: 4 - Create twig chain while ikeys match and both have more bytes
-        let mut twig_head: Option<*mut L> = None;
-        let mut twig_tail: *mut L = StdPtr::null_mut();
+        let mut twig_head: Option<*mut LeafNode15<P>> = None;
+        let mut twig_tail: *mut LeafNode15<P> = StdPtr::null_mut();
 
         while (cmp == Ordering::Equal) && existing_key.has_suffix() && new_key.has_suffix() {
             // Allocate twig node (aborts on OOM)
-            let twig_ptr: *mut L = self.allocator.alloc_leaf_direct(false, true);
+            let twig_ptr: *mut LeafNode15<P> = self.allocator.alloc_leaf_direct(false, true);
 
             // Initialize twig with matching ikey in slot 0
             // SAFETY: twig_ptr is valid, we just allocated it
             unsafe {
                 (*twig_ptr).set_ikey(0, existing_key.ikey());
-                (*twig_ptr).set_permutation(<L::Perm as TreePermutation>::make_sorted(1));
+                (*twig_ptr).set_permutation(
+                    <<LeafNode15<P> as TreeLeafNode<P>>::Perm as TreePermutation>::make_sorted(1),
+                );
             }
 
             // Link to previous twig in chain
@@ -162,7 +166,7 @@ where
                 // SAFETY: twig_tail is valid from previous iteration
                 unsafe {
                     (*twig_tail).set_keylenx(0, LAYER_KEYLENX);
-                    (*twig_tail).set_leaf_value_ptr(0, twig_ptr.cast::<u8>());
+                    (*twig_tail).store_layer(0, twig_ptr.cast::<u8>());
                 }
             } else {
                 twig_head = Some(twig_ptr);
@@ -177,7 +181,7 @@ where
         }
 
         // STEP: 5 - Allocate final leaf (aborts on OOM)
-        let final_ptr: *mut L = self.allocator.alloc_leaf_direct(false, true);
+        let final_ptr: *mut LeafNode15<P> = self.allocator.alloc_leaf_direct(false, true);
 
         // Assign both entries to the final leaf
         //  SAFETY: final_ptr is valid, guard is from caller
@@ -196,10 +200,10 @@ where
         // STEP: 6 - Link twig chain to final leaf
         let result_ptr: *mut u8 = twig_head.map_or_else(
             || final_ptr.cast::<u8>(),
-            |head: *mut L| {
+            |head: *mut LeafNode15<P>| {
                 unsafe {
                     (*twig_tail).set_keylenx(0, LAYER_KEYLENX);
-                    (*twig_tail).set_leaf_value_ptr(0, final_ptr.cast::<u8>());
+                    (*twig_tail).store_layer(0, final_ptr.cast::<u8>());
                 }
                 head.cast::<u8>()
             },

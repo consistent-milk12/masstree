@@ -39,10 +39,11 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use seize::LocalGuard;
 
-use crate::NodeAllocatorGeneric;
-use crate::leaf_trait::{LayerCapableLeaf, TreeInternode};
+use crate::TreeAllocator;
+use crate::internode::InternodeNode;
+use crate::leaf15::LeafNode15;
 use crate::nodeversion::LockGuard;
-use crate::slot::ValueSlot;
+use crate::policy::LeafPolicy;
 use crate::tree::InsertError;
 
 use super::parent_locking::ParentLocking;
@@ -93,23 +94,20 @@ impl Propagation {
         clippy::too_many_arguments,
         reason = "Split propagation requires full context"
     )]
-    pub fn make_split_leaf<'op, S, L, A>(
+    pub fn make_split_leaf<'op, P, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
-        left_leaf_ptr: *mut L,
+        left_leaf_ptr: *mut LeafNode15<P>,
         left_lock: LockGuard<'_>,
-        right_leaf_ptr: *mut L,
+        right_leaf_ptr: *mut LeafNode15<P>,
         split_ikey: u64,
         is_main_root: bool,
         is_layer_root: bool,
         guard: &'op LocalGuard<'op>,
     ) -> Result<(), InsertError>
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-        A: NodeAllocatorGeneric<S, L>,
+        P: LeafPolicy,
+        A: TreeAllocator<P>,
     {
         // DEBUG: Trace leaf split
         #[cfg(feature = "debug-routing")]
@@ -124,7 +122,7 @@ impl Propagation {
         // 1. Reclamation guard prevents deallocation while we hold it
         // 2. Leaf is locked, preventing structural modification
         let left_lock: LockGuard<'op> = unsafe { ctx.unify_guard(left_lock) };
-        let result: Result<(), InsertError> = Self::propagation_loop::<S, L, A>(
+        let result: Result<(), InsertError> = Self::propagation_loop::<P, A>(
             root_ptr,
             allocator,
             &ctx,
@@ -149,7 +147,7 @@ impl Propagation {
     /// Returns `InsertError::SplitFailed` only if main root CAS fails.
     #[expect(clippy::too_many_lines, reason = "Complex state machine with tracing")]
     #[expect(clippy::too_many_arguments, reason = "State passed explicitly")]
-    fn propagation_loop<'op, S, L, A>(
+    fn propagation_loop<'op, P, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
         ctx: &PropagationContext<'op>,
@@ -162,11 +160,8 @@ impl Propagation {
         mut at_leaf_level: bool,
     ) -> Result<(), InsertError>
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-        A: NodeAllocatorGeneric<S, L>,
+        P: LeafPolicy,
+        A: TreeAllocator<P>,
     {
         // CRITICAL: Uncomment iteration tracking if debugging infinite loops
         // let mut iterations: usize = 0;
@@ -180,13 +175,13 @@ impl Propagation {
             // CRITICAL: Uncomment to detect runaway propagation (tree corruption)
             // iterations += 1;
             // if iterations > MAX_PROPAGATION_ITERATIONS {
-            //     Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+            //     Self::unlock_right_for_split::<P>(right_ptr, at_leaf_level);
             //     drop(left_lock);
             //     panic!("Propagation: exceeded max iterations - tree likely corrupted");
             // }
 
             // Get left's parent pointer
-            let left_parent: *mut u8 = Self::get_parent::<S, L>(left_ptr, at_leaf_level);
+            let left_parent: *mut u8 = Self::get_parent::<P>(left_ptr, at_leaf_level);
 
             // =========================================================
             // STEP 1: Check for root cases (layer root FIRST, then main)
@@ -194,7 +189,7 @@ impl Propagation {
 
             // 1a. LAYER ROOT (check BEFORE main root)
             if left_parent.is_null() && is_layer_root {
-                Self::promote_layer_root::<S, L, A>(
+                Self::promote_layer_root::<P, A>(
                     allocator,
                     left_ptr,
                     right_ptr,
@@ -203,14 +198,14 @@ impl Propagation {
                 );
 
                 // Unlock right (split-locked), then left (RAII via drop)
-                Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+                Self::unlock_right_for_split::<P>(right_ptr, at_leaf_level);
                 drop(left_lock); // RAII: auto-unlock
                 return Ok(());
             }
 
             // 1b. MAIN TREE ROOT
             if left_parent.is_null() && is_main_root {
-                let result: Result<(), InsertError> = Self::create_main_root::<S, L, A>(
+                let result: Result<(), InsertError> = Self::create_main_root::<P, A>(
                     root_ptr,
                     allocator,
                     left_ptr,
@@ -219,7 +214,7 @@ impl Propagation {
                     at_leaf_level,
                 );
 
-                Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+                Self::unlock_right_for_split::<P>(right_ptr, at_leaf_level);
                 drop(left_lock); // RAII: auto-unlock
                 return result;
             }
@@ -227,7 +222,7 @@ impl Propagation {
             // CRITICAL: NULL parent on non-root indicates tree corruption
             // Uncomment if debugging parent pointer issues
             // if left_parent.is_null() {
-            //     Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+            //     Self::unlock_right_for_split::<P>(right_ptr, at_leaf_level);
             //     drop(left_lock);
             //     panic!("Propagation: NULL parent on non-root");
             // }
@@ -239,7 +234,7 @@ impl Propagation {
             // This is TRUE hand-over-hand: we hold left_lock while
             // acquiring parent_lock. Both are LockGuard<'op> with RAII.
 
-            let parent: &L::Internode = unsafe { &*left_parent.cast::<L::Internode>() };
+            let parent: &InternodeNode = unsafe { &*left_parent.cast::<InternodeNode>() };
 
             // SAFETY: parent is valid (reclamation guard protects for 'op)
             // Use lock_node_yielding to reduce contention under high thread counts
@@ -254,7 +249,7 @@ impl Propagation {
             // The parent pointer could have changed if another thread
             // split the parent and moved our child.
 
-            let current_left_parent: *mut u8 = Self::get_parent::<S, L>(left_ptr, at_leaf_level);
+            let current_left_parent: *mut u8 = Self::get_parent::<P>(left_ptr, at_leaf_level);
 
             if current_left_parent != left_parent {
                 // Parent pointer changed - release parent lock and retry with backoff
@@ -269,7 +264,7 @@ impl Propagation {
             // =========================================================
 
             let child_idx: usize =
-                if let Some(idx) = ParentLocking::validate_membership::<S, L>(parent, left_ptr) {
+                if let Some(idx) = ParentLocking::validate_membership(parent, left_ptr) {
                     // Success: reset backoff for next potential retry
                     backoff = 1;
                     idx
@@ -277,7 +272,7 @@ impl Propagation {
                     // CRITICAL: Uncomment to prevent livelock on persistent stale parent
                     // stale_parent_retries += 1;
                     // if stale_parent_retries > MAX_STALE_PARENT_RETRIES {
-                    //     Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+                    //     Self::unlock_right_for_split::<P>(right_ptr, at_leaf_level);
                     //     drop(parent_lock);
                     //     drop(left_lock);
                     //     return Err(InsertError::SplitFailed);
@@ -326,10 +321,10 @@ impl Propagation {
                 }
 
                 // Set right sibling's parent pointer
-                Self::set_parent::<S, L>(right_ptr, left_parent, at_leaf_level);
+                Self::set_parent::<P>(right_ptr, left_parent, at_leaf_level);
 
                 // Unlock order: right → parent → left (RAII via drop)
-                Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+                Self::unlock_right_for_split::<P>(right_ptr, at_leaf_level);
                 drop(parent_lock); // RAII: auto-unlock
                 drop(left_lock); // RAII: auto-unlock
 
@@ -350,11 +345,13 @@ impl Propagation {
                 StdPtr::eq(current_root, left_parent)
             };
 
-            let parent_is_layer_root: bool =
-                !parent_is_main_root && parent.parent().is_null() && parent.is_root();
+            // SAFETY: Called under lock - no concurrent retirement.
+            let parent_is_layer_root: bool = !parent_is_main_root
+                && unsafe { parent.parent_unguarded() }.is_null()
+                && parent.is_root();
 
             // Create split-locked sibling directly in pool
-            let parent_sibling_ptr: *mut L::Internode = allocator
+            let parent_sibling_ptr: *mut InternodeNode = allocator
                 .alloc_internode_direct_for_split(parent.version(), parent.height())
                 .cast();
 
@@ -400,7 +397,7 @@ impl Propagation {
             }
 
             // Update children's parent pointers in sibling
-            Self::update_sibling_children_parents::<S, L>(parent, parent_sibling_ptr);
+            Self::update_sibling_children_parents::<P>(parent, parent_sibling_ptr);
 
             // Set current right's parent based on which side it went
             let right_new_parent: *mut u8 = if child_went_left {
@@ -408,7 +405,7 @@ impl Propagation {
             } else {
                 parent_sibling_ptr.cast()
             };
-            Self::set_parent::<S, L>(right_ptr, right_new_parent, at_leaf_level);
+            Self::set_parent::<P>(right_ptr, right_new_parent, at_leaf_level);
 
             // =========================================================
             // STEP 7: TRUE Hand-over-hand transition (v3 RAII)
@@ -426,7 +423,7 @@ impl Propagation {
             //   (because both have unified lifetime 'op)
 
             // Unlock current right sibling (it's fully installed now)
-            Self::unlock_right_for_split::<S, L>(right_ptr, at_leaf_level);
+            Self::unlock_right_for_split::<P>(right_ptr, at_leaf_level);
 
             // Unlock current left (we're moving up)
             // IMPORTANT: This unlocks the OLD left, not the parent!
@@ -468,17 +465,15 @@ impl Propagation {
     /// # Safety
     /// `ptr` must point to a valid node matching `is_leaf`.
     #[inline]
-    fn get_parent<S, L>(ptr: *mut u8, is_leaf: bool) -> *mut u8
+    fn get_parent<P>(ptr: *mut u8, is_leaf: bool) -> *mut u8
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
+        P: LeafPolicy,
     {
+        // SAFETY: Called under lock or during propagation where nodes are locked.
         if is_leaf {
-            unsafe { (*ptr.cast::<L>()).parent() }
+            unsafe { (*ptr.cast::<LeafNode15<P>>()).parent_unguarded() }
         } else {
-            unsafe { (*ptr.cast::<L::Internode>()).parent() }
+            unsafe { (*ptr.cast::<InternodeNode>()).parent_unguarded() }
         }
     }
 
@@ -487,19 +482,16 @@ impl Propagation {
     /// # Safety
     /// `ptr` must point to a valid, locked node matching `is_leaf`.
     #[inline]
-    fn set_parent<S, L>(ptr: *mut u8, parent: *mut u8, is_leaf: bool)
+    fn set_parent<P>(ptr: *mut u8, parent: *mut u8, is_leaf: bool)
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
+        P: LeafPolicy,
     {
         if is_leaf {
             // SAFETY: Caller guarantees ptr is valid leaf
-            unsafe { (*ptr.cast::<L>()).set_parent(parent) };
+            unsafe { (*ptr.cast::<LeafNode15<P>>()).set_parent(parent) };
         } else {
             // SAFETY: Caller guarantees ptr is valid internode
-            unsafe { (*ptr.cast::<L::Internode>()).set_parent(parent) };
+            unsafe { (*ptr.cast::<InternodeNode>()).set_parent(parent) };
         }
     }
 
@@ -510,19 +502,16 @@ impl Propagation {
     /// - Clears `LOCK_BIT`, `SPLITTING_BIT`, `INSERTING_BIT`
     /// - Uses proper fence before version store
     #[inline]
-    fn unlock_right_for_split<S, L>(ptr: *mut u8, is_leaf: bool)
+    fn unlock_right_for_split<P>(ptr: *mut u8, is_leaf: bool)
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
+        P: LeafPolicy,
     {
         if is_leaf {
             // SAFETY: ptr points to a valid split-locked leaf
-            unsafe { (*ptr.cast::<L>()).version().unlock_for_split() };
+            unsafe { (*ptr.cast::<LeafNode15<P>>()).version().unlock_for_split() };
         } else {
             // SAFETY: ptr points to a valid split-locked internode
-            unsafe { (*ptr.cast::<L::Internode>()).version().unlock_for_split() };
+            unsafe { (*ptr.cast::<InternodeNode>()).version().unlock_for_split() };
         }
     }
 
@@ -533,19 +522,17 @@ impl Propagation {
     /// # Safety
     /// - `parent` must be locked
     /// - `sibling_ptr` must be valid and split-locked
-    fn update_sibling_children_parents<S, L>(parent: &L::Internode, sibling_ptr: *mut L::Internode)
+    fn update_sibling_children_parents<P>(parent: &InternodeNode, sibling_ptr: *mut InternodeNode)
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
+        P: LeafPolicy,
     {
-        let sibling: &L::Internode = unsafe { &*sibling_ptr };
+        let sibling: &InternodeNode = unsafe { &*sibling_ptr };
         let nkeys: usize = sibling.nkeys();
 
         if parent.children_are_leaves() {
             for i in 0..=nkeys {
-                let child: *mut u8 = sibling.child(i);
+                // SAFETY: Sibling is split-locked, children are valid.
+                let child: *mut u8 = unsafe { sibling.child_unguarded(i) };
 
                 // Children at valid indices should never be null in a well-formed internode.
                 debug_assert!(
@@ -554,12 +541,13 @@ impl Propagation {
                 );
 
                 unsafe {
-                    (*child.cast::<L>()).set_parent(sibling_ptr.cast());
+                    (*child.cast::<LeafNode15<P>>()).set_parent(sibling_ptr.cast());
                 }
             }
         } else {
             for i in 0..=nkeys {
-                let child: *mut u8 = sibling.child(i);
+                // SAFETY: Sibling is split-locked, children are valid.
+                let child: *mut u8 = unsafe { sibling.child_unguarded(i) };
 
                 debug_assert!(
                     !child.is_null(),
@@ -567,7 +555,7 @@ impl Propagation {
                 );
 
                 unsafe {
-                    (*child.cast::<L::Internode>()).set_parent(sibling_ptr.cast());
+                    (*child.cast::<InternodeNode>()).set_parent(sibling_ptr.cast());
                 }
             }
         }
@@ -575,28 +563,25 @@ impl Propagation {
 
     #[cold]
     #[inline(never)]
-    fn promote_layer_root<S, L, A>(
+    fn promote_layer_root<P, A>(
         allocator: &A,
         left_ptr: *mut u8,
         right_ptr: *mut u8,
         split_ikey: u64,
         is_leaf: bool,
     ) where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-        A: NodeAllocatorGeneric<S, L>,
+        P: LeafPolicy,
+        A: TreeAllocator<P>,
     {
         if is_leaf {
-            RootCreation::promote_layer_root_leaves::<S, L, A>(
+            RootCreation::promote_layer_root_leaves::<P, A>(
                 allocator,
                 left_ptr.cast(),
                 right_ptr.cast(),
                 split_ikey,
             );
         } else {
-            RootCreation::promote_layer_root_internodes::<S, L, A>(
+            RootCreation::promote_layer_root_internodes::<P, A>(
                 allocator,
                 left_ptr.cast(),
                 right_ptr.cast(),
@@ -607,7 +592,7 @@ impl Propagation {
 
     #[cold]
     #[inline(never)]
-    fn create_main_root<S, L, A>(
+    fn create_main_root<P, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
         left_ptr: *mut u8,
@@ -616,14 +601,11 @@ impl Propagation {
         is_leaf: bool,
     ) -> Result<(), InsertError>
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-        A: NodeAllocatorGeneric<S, L>,
+        P: LeafPolicy,
+        A: TreeAllocator<P>,
     {
         if is_leaf {
-            RootCreation::create_root_from_leaves::<S, L, A>(
+            RootCreation::create_root_from_leaves::<P, A>(
                 root_ptr,
                 allocator,
                 left_ptr.cast(),
@@ -632,7 +614,7 @@ impl Propagation {
             )
             .map(|_| ())
         } else {
-            RootCreation::create_root_from_internodes::<S, L, A>(
+            RootCreation::create_root_from_internodes::<P, A>(
                 root_ptr,
                 allocator,
                 left_ptr.cast(),

@@ -5,9 +5,8 @@
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::iter::FusedIterator;
 
-use crate::alloc_trait::NodeAllocatorGeneric;
-use crate::leaf_trait::{LayerCapableLeaf, TreeLeafNode};
-use crate::slot::ValueSlot;
+use crate::alloc_trait::TreeAllocator;
+use crate::policy::LeafPolicy;
 
 use super::RangeIter;
 
@@ -16,20 +15,18 @@ use super::RangeIter;
 // ============================================================================
 
 /// Iterator adapter that yields only keys.
-pub struct KeysIter<'a, 'g, S, L, A>
+pub struct KeysIter<'a, 'g, P, A>
 where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
-    pub(super) inner: RangeIter<'a, 'g, S, L, A>,
+    pub(super) inner: RangeIter<'a, 'g, P, A>,
 }
 
-impl<S, L, A> Debug for KeysIter<'_, '_, S, L, A>
+impl<P, A> Debug for KeysIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("KeysIter")
@@ -38,13 +35,10 @@ where
     }
 }
 
-impl<S, L, A> Iterator for KeysIter<'_, '_, S, L, A>
+impl<P, A> Iterator for KeysIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     type Item = Vec<u8>;
 
@@ -59,13 +53,10 @@ where
     }
 }
 
-impl<S, L, A> FusedIterator for KeysIter<'_, '_, S, L, A>
+impl<P, A> FusedIterator for KeysIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
 }
 
@@ -74,20 +65,18 @@ where
 // ============================================================================
 
 /// Iterator adapter that yields only values.
-pub struct ValuesIter<'a, 'g, S, L, A>
+pub struct ValuesIter<'a, 'g, P, A>
 where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
-    pub(super) inner: RangeIter<'a, 'g, S, L, A>,
+    pub(super) inner: RangeIter<'a, 'g, P, A>,
 }
 
-impl<S, L, A> Debug for ValuesIter<'_, '_, S, L, A>
+impl<P, A> Debug for ValuesIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("ValuesIter")
@@ -96,15 +85,12 @@ where
     }
 }
 
-impl<S, L, A> Iterator for ValuesIter<'_, '_, S, L, A>
+impl<P, A> Iterator for ValuesIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
-    type Item = S::Output;
+    type Item = P::Output;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -117,12 +103,9 @@ where
     }
 }
 
-impl<S, L, A> FusedIterator for ValuesIter<'_, '_, S, L, A>
+impl<P, A> FusedIterator for ValuesIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
 }

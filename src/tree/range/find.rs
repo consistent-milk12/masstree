@@ -29,12 +29,13 @@ use seize::LocalGuard;
 
 use crate::hints::likely;
 use crate::key::IKEY_SIZE;
-use crate::leaf_trait::{TreeLeafNode, TreePermutation};
+use crate::leaf_trait::TreeLeafNode;
+use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::link::Linker;
 use crate::nodeversion::NodeVersion;
+use crate::policy::LeafPolicy;
 use crate::prefetch::prefetch_read;
-use crate::slot::ValueSlot;
 use crate::tree::range::iterator::RangeBound;
 
 use super::cursor_key::CursorKey;
@@ -88,24 +89,23 @@ use super::traversal::reach_leaf_for_scan;
 /// # C++ Reference
 ///
 /// Corresponds to `scanstackelt::find_initial` in `masstree_scan.hh`.
-pub fn find_initial<L, S>(
+pub fn find_initial<P>(
     root: *const u8,
-    stack: &mut ScanStackElement<L, S>,
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    _layer_stack: &mut LayerStack<L>,
+    _layer_stack: &mut LayerStack<P>,
     emit_equal: bool,
     guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshot<S>>)
+) -> (ScanState, Option<ScanSnapshot<P>>)
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-    S::Output: Clone,
+    P: LeafPolicy,
+    P::Output: Clone,
 {
     // Initialize stack with root
     stack.set_root(root);
 
     // Reach the target leaf
-    let leaf_ptr: *mut L = reach_leaf_for_scan::<L, S>(root, cursor_key, guard);
+    let leaf_ptr: *mut LeafNode15<P> = reach_leaf_for_scan::<P>(root, cursor_key, guard);
 
     if leaf_ptr.is_null() {
         // Empty tree
@@ -115,7 +115,7 @@ where
     stack.set_leaf(leaf_ptr);
 
     // SAFETY: leaf_ptr is valid (non-null checked above, guard protects it)
-    let leaf: &L = unsafe { &*leaf_ptr };
+    let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
     // Get stable version
     let version: u32 = leaf.version().stable();
@@ -127,7 +127,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = leaf.permutation();
+    let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
     // Find lower bound position
     let kx: KeyIndexedPosition = lower_with_position(cursor_key, leaf, &perm);
@@ -136,7 +136,7 @@ where
     let (next_state, snapshot) = kx.p.map_or_else(
         || (ScanState::FindNext, None),
         |slot| {
-            handle_initial_match::<L, S>(
+            handle_initial_match::<P>(
                 leaf, slot, cursor_key, stack, emit_equal, version, &perm, kx.i,
             )
         },
@@ -165,20 +165,19 @@ where
 /// Handle an exact ikey match in `find_initial`.
 #[expect(clippy::too_many_arguments, reason = "Internals")]
 #[inline(always)]
-fn handle_initial_match<L, S>(
-    leaf: &L,
+fn handle_initial_match<P>(
+    leaf: &LeafNode15<P>,
     slot: usize,
     cursor_key: &mut CursorKey,
-    stack: &mut ScanStackElement<L, S>,
+    stack: &mut ScanStackElement<P>,
     emit_equal: bool,
     _version: u32,
-    _perm: &L::Perm,
+    _perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     _pos: usize,
-) -> (ScanState, Option<ScanSnapshot<S>>)
+) -> (ScanState, Option<ScanSnapshot<P>>)
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-    S::Output: Clone,
+    P: LeafPolicy,
+    P::Output: Clone,
 {
     let keylenx: u8 = leaf.keylenx(slot);
 
@@ -193,9 +192,9 @@ where
         // because we want to scan all keys under this layer pointer.
         // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates at end
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
         cursor_key.assign_store_ikey(slot_ikey);
-        // Prefetch layer root before descending (hide memory latency)
+        // Prefetch layer root before descending
         prefetch_read(layer_ptr);
         stack.set_root(layer_ptr);
         return (ScanState::Down, None);
@@ -209,10 +208,8 @@ where
 
             if ForwardScanHelper::initial_ksuf_match(cmp, emit_equal) {
                 // Match - prepare for emit
-                let value_ptr = leaf.leaf_value_ptr(slot);
-                if !value_ptr.is_null() {
-                    // SAFETY: We've validated version, ptr is valid
-                    let output: S::Output = unsafe { S::output_from_raw(value_ptr) };
+                // Use if-let to eliminate TOCTOU race between is_value_empty and load_value
+                if let Some(output) = leaf.load_value(slot) {
                     let key_len = IKEY_SIZE + stored_suffix.len();
 
                     // Store key data in cursor for duplicate filtering
@@ -232,10 +229,8 @@ where
     // Inline key (keylenx 0-8)
     if emit_equal {
         // Exact match allowed
-        let value_ptr = leaf.leaf_value_ptr(slot);
-        if !value_ptr.is_null() {
-            // SAFETY: We've validated version, ptr is valid
-            let output: S::Output = unsafe { S::output_from_raw(value_ptr) };
+        // Use if-let to eliminate TOCTOU race between is_value_empty and load_value
+        if let Some(output) = leaf.load_value(slot) {
             let key_len = keylenx as usize;
 
             // Store key data in cursor
@@ -300,16 +295,15 @@ where
 ///
 /// Corresponds to `scanstackelt::find_next` in `masstree_scan.hh`.
 #[inline]
-pub fn find_next<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn find_next<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     guard: &LocalGuard<'_>,
-) -> FindResult<S>
+) -> FindResult<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-    S::Output: Clone,
+    P: LeafPolicy,
+    P::Output: Clone,
 {
     // OPTIMIZATION: Skip duplicate check in normal forward iteration.
     // Duplicates only occur after Retry states (version conflict), so the
@@ -321,16 +315,15 @@ where
 ///
 /// Called after a Retry state to skip already-emitted entries.
 #[inline]
-pub fn find_next_with_duplicate_check<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn find_next_with_duplicate_check<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     guard: &LocalGuard<'_>,
-) -> FindResult<S>
+) -> FindResult<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-    S::Output: Clone,
+    P: LeafPolicy,
+    P::Output: Clone,
 {
     find_next_inner(stack, cursor_key, layer_stack, guard, true)
 }
@@ -359,28 +352,27 @@ where
 /// # Code Duplication Note
 ///
 /// This function is intentionally duplicated as [`find_next_inner_ptr`] for zero-copy
-/// scans. The key difference: this version calls `S::output_from_raw()` which clones
+/// scans. The key difference: this version calls `P::output_from_raw()` which clones
 /// Arc values (2 atomic ops), while the `_ptr` variant returns raw pointers directly.
 /// Combining via generics/traits would add overhead on the hot path.
 #[inline]
-fn find_next_inner<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+fn find_next_inner<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     guard: &LocalGuard<'_>,
     needs_duplicate_check: bool,
-) -> FindResult<S>
+) -> FindResult<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-    S::Output: Clone,
+    P: LeafPolicy,
+    P::Output: Clone,
 {
     // SAFETY: Stack should have valid leaf at this point
     if stack.is_null() {
         return FindResult::transition(ScanState::Up);
     }
 
-    let leaf: &L = unsafe { stack.leaf_ref() };
+    let leaf: &LeafNode15<P> = unsafe { stack.leaf_ref() };
 
     // Check if leaf is deleted (this is cheap - single atomic load)
     if leaf.version().is_deleted() {
@@ -450,28 +442,24 @@ where
 
     // Handle layer pointer - descend into sublayer
     if slot_keylenx >= LAYER_KEYLENX {
-        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
         layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
         cursor_key.assign_store_ikey(slot_ikey);
 
         // Prefetch layer root before descending (hide memory latency)
-        prefetch_read(slot_ptr);
-        stack.set_root(slot_ptr);
+        prefetch_read(layer_ptr);
+        stack.set_root(layer_ptr);
 
         return FindResult::transition(ScanState::Down);
     }
 
     // Value slot - prepare for emit
-    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-
-    if slot_ptr.is_null() {
+    // Use let-else to eliminate TOCTOU race between is_value_empty and load_value
+    let Some(output) = leaf.load_value(slot) else {
+        // Concurrent modification removed value - skip this slot, OCC will retry
         stack.next();
         return FindResult::transition(ScanState::FindNext);
-    }
-
-    // Clone output while version is validated
-    // SAFETY: Version validated, pointer is valid
-    let output: S::Output = unsafe { S::output_from_raw(slot_ptr) };
+    };
 
     // Compute key length - only read suffix NOW if needed
     let key_len: usize = if slot_keylenx == KSUF_KEYLENX {
@@ -516,7 +504,7 @@ where
 /// Find the next entry, returning a raw pointer instead of cloning.
 ///
 /// This is the zero-copy variant of [`find_next`] for use with `scan_ref`.
-/// Instead of calling `S::output_from_raw` (which clones Arc values),
+/// Instead of calling `P::output_from_raw` (which clones Arc values),
 /// it returns the raw pointer directly.
 ///
 /// # Safety
@@ -527,15 +515,14 @@ where
 ///
 /// Callers must dereference immediately within the same guard scope.
 #[inline]
-pub fn find_next_ptr<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn find_next_ptr<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
+) -> (ScanState, Option<ScanSnapshotPtr<P::Value>>)
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     find_next_inner_ptr(stack, cursor_key, layer_stack, guard, false)
 }
@@ -544,15 +531,14 @@ where
 ///
 /// Zero-copy variant of [`find_next_with_duplicate_check`].
 #[inline]
-pub fn find_next_with_duplicate_check_ptr<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn find_next_with_duplicate_check_ptr<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
+) -> (ScanState, Option<ScanSnapshotPtr<P::Value>>)
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     find_next_inner_ptr(stack, cursor_key, layer_stack, guard, true)
 }
@@ -560,7 +546,7 @@ where
 /// Inner implementation for zero-copy [`find_next`].
 ///
 /// Nearly identical to [`find_next_inner`] but:
-/// - Does NOT call `S::output_from_raw` (no Arc clone)
+/// - Does NOT call `P::output_from_raw` (no Arc clone)
 /// - Returns `ScanSnapshotPtr` with raw pointer instead
 ///
 /// This eliminates 2 atomic operations per entry (increment + decrement).
@@ -576,23 +562,22 @@ where
 ///
 /// Callers must dereference immediately within the same guard scope.
 #[inline]
-fn find_next_inner_ptr<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+fn find_next_inner_ptr<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     guard: &LocalGuard<'_>,
     needs_duplicate_check: bool,
-) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
+) -> (ScanState, Option<ScanSnapshotPtr<P::Value>>)
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     // SAFETY: Stack should have valid leaf at this point
     if stack.is_null() {
         return (ScanState::Up, None);
     }
 
-    let leaf: &L = unsafe { stack.leaf_ref() };
+    let leaf: &LeafNode15<P> = unsafe { stack.leaf_ref() };
 
     // Check if leaf is deleted (this is cheap - single atomic load)
     if leaf.version().is_deleted() {
@@ -644,24 +629,23 @@ where
 
     // Handle layer pointer - descend into sublayer
     if slot_keylenx >= LAYER_KEYLENX {
-        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
         layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
         cursor_key.assign_store_ikey(slot_ikey);
-        // Prefetch layer root before descending (hide memory latency)
-        prefetch_read(slot_ptr);
-        stack.set_root(slot_ptr);
+        // Prefetch layer root before descending
+        prefetch_read(layer_ptr);
+        stack.set_root(layer_ptr);
         return (ScanState::Down, None);
     }
 
     // Value slot - prepare for emit (NO CLONING)
-    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-    if slot_ptr.is_null() {
+    if leaf.is_value_empty(slot) {
         stack.next();
         return (ScanState::FindNext, None);
     }
 
-    // KEY DIFFERENCE: We do NOT call S::output_from_raw here!
-    // The caller will dereference the pointer directly.
+    // Load raw pointer for zero-copy return — caller will dereference.
+    let slot_ptr: *mut u8 = leaf.load_value_raw(slot);
 
     // Compute key length - only read suffix NOW if needed
     let key_len: usize = if slot_keylenx == KSUF_KEYLENX {
@@ -717,15 +701,15 @@ where
 /// Uses `#[inline]` to let the compiler decide based on call-site context.
 /// The function is medium-sized; forcing inlining could cause I-cache pressure.
 #[inline]
-pub fn find_next_single_layer_ptr<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+#[expect(clippy::cast_possible_truncation)]
+pub fn find_next_single_layer_ptr<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
     guard: &LocalGuard<'_>,
     needs_duplicate_check: bool,
-) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
+) -> (ScanState, Option<ScanSnapshotPtr<P::Value>>)
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     // SAFETY: Stack should have valid leaf at this point
     if stack.is_null() {
@@ -733,7 +717,7 @@ where
         return (ScanState::FindNext, None);
     }
 
-    let leaf: &L = unsafe { stack.leaf_ref() };
+    let leaf: &LeafNode15<P> = unsafe { stack.leaf_ref() };
 
     // Check if leaf is deleted (cheap - single atomic load)
     if leaf.version().is_deleted() {
@@ -771,32 +755,36 @@ where
         }
     }
 
-    // DEFENSIVE: If we encounter a layer pointer, signal fallback
-    // This shouldn't happen for truly single-layer data, but can occur
-    // when single_layer_mode was set based on bounds, not actual keys
-    if slot_keylenx >= LAYER_KEYLENX {
-        // CRITICAL: Store the slot ikey to cursor before returning Down.
-        // This ensures shift_clear() in handle_down preserves the ikey in the buffer.
-        // Without this, the full_key() would have null bytes at the parent layer offset.
-        cursor_key.assign_store_ikey(slot_ikey);
+    // Single-layer fast path only supports inline keys (0..=8).
+    // Fallback for any longer encoding and let the multi-layer path re-process.
+    if slot_keylenx > IKEY_SIZE as u8 {
+        // For real layer pointers, preserve prefetch/cursor behavior to keep
+        // fallback cost low and deterministic.
+        if slot_keylenx >= LAYER_KEYLENX {
+            // CRITICAL: Store the slot ikey to cursor before returning Down.
+            // This ensures shift_clear() in handle_down preserves the ikey in the buffer.
+            // Without this, the full_key() would have null bytes at the parent layer offset.
+            cursor_key.assign_store_ikey(slot_ikey);
 
-        // Prefetch the layer pointer for the caller
-        let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-        prefetch_read(layer_ptr);
+            // Prefetch the layer pointer for the caller
+            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+            prefetch_read(layer_ptr);
+        }
 
         // NOTE: We do NOT set stack.root here because the caller needs to
         // push the current (parent) context to layer_stack BEFORE setting root.
-        // The caller will handle: push layer_stack, then set root, then call handle_down.
-
+        // The caller will disable single-layer mode and re-process this slot.
         return (ScanState::Down, None);
     }
 
     // Value slot - prepare for emit
-    let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-    if slot_ptr.is_null() {
+    if leaf.is_value_empty(slot) {
         stack.next();
         return (ScanState::FindNext, None);
     }
+
+    // Load raw pointer for zero-copy return.
+    let slot_ptr: *mut u8 = leaf.load_value_raw(slot);
 
     // Single-layer keys are always ≤ 8 bytes, no suffix handling
     let key_len: usize = slot_keylenx as usize;
@@ -823,22 +811,21 @@ where
 /// The guard parameter (prefixed `_`) ensures pointer validity through lifetime
 /// binding even though it's not directly used in this function.
 #[inline(always)]
-fn advance_leaf_single_layer<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+fn advance_leaf_single_layer<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &CursorKey,
-    _guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
+    guard: &LocalGuard<'_>,
+) -> (ScanState, Option<ScanSnapshotPtr<P::Value>>)
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
-    let leaf: &L = unsafe { stack.leaf_ref() };
+    let leaf: &LeafNode15<P> = unsafe { stack.leaf_ref() };
     let version: u32 = stack.version();
 
     // CRITICAL: Split-aware leaf boundary validation (TOCTOU-safe ordering).
 
     // Step 1: Load raw next pointer FIRST (may be marked)
-    let next_raw: *mut L = leaf.next_raw();
+    let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
 
     // Step 2: Check if next is marked (split in progress on this boundary)
     if Linker::is_marked(next_raw) {
@@ -853,7 +840,7 @@ where
     }
 
     // Clear mark bit (safe_next equivalent, but we already loaded raw)
-    let next: *mut L = next_raw.map_addr(|addr| addr & !1);
+    let next: *mut LeafNode15<P> = next_raw.map_addr(|addr| addr & !1);
 
     if next.is_null() {
         // No more leaves - scan exhausted (no Up in single-layer)
@@ -866,17 +853,17 @@ where
     stack.set_leaf(next);
 
     // SAFETY: next is non-null and protected by guard
-    let next_leaf: &L = unsafe { &*next };
+    let next_leaf: &LeafNode15<P> = unsafe { &*next };
 
     // Prefetch the next leaf's data arrays
     next_leaf.prefetch();
 
     // Prefetch next-next leaf for 3-way pipelining
     // Full prefetch (6 cache lines) instead of just CL0
-    let next_next: *mut L = next_leaf.safe_next();
+    let next_next: *mut LeafNode15<P> = next_leaf.safe_next(guard);
     if !next_next.is_null() {
         // SAFETY: next_next is non-null and derived from a valid leaf's B-link
-        let next_next_leaf: &L = unsafe { &*next_next };
+        let next_next_leaf: &LeafNode15<P> = unsafe { &*next_next };
         next_next_leaf.prefetch();
     }
 
@@ -889,7 +876,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = next_leaf.permutation();
+    let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison
     let kx = lower_with_suffix(cursor_key, next_leaf, &perm);
@@ -905,23 +892,22 @@ where
 /// The guard parameter (prefixed `_`) ensures pointer validity through lifetime
 /// binding even though it's not directly used in this function.
 #[inline]
-pub fn advance_leaf_ptr<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn advance_leaf_ptr<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &CursorKey,
-    _guard: &LocalGuard<'_>,
-) -> (ScanState, Option<ScanSnapshotPtr<S::Value>>)
+    guard: &LocalGuard<'_>,
+) -> (ScanState, Option<ScanSnapshotPtr<P::Value>>)
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
-    let leaf: &L = unsafe { stack.leaf_ref() };
+    let leaf: &LeafNode15<P> = unsafe { stack.leaf_ref() };
     let version: u32 = stack.version();
 
     // CRITICAL: Split-aware leaf boundary validation (TOCTOU-safe ordering).
     // See advance_leaf_single_layer for the full rationale.
 
     // Step 1: Load raw next pointer FIRST
-    let next_raw: *mut L = leaf.next_raw();
+    let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
 
     // Step 2: Check if next is marked
     if Linker::is_marked(next_raw) {
@@ -935,7 +921,7 @@ where
     }
 
     // Clear mark bit
-    let next: *mut L = next_raw.map_addr(|addr| addr & !1);
+    let next: *mut LeafNode15<P> = next_raw.map_addr(|addr| addr & !1);
 
     if next.is_null() {
         // No more leaves in this layer
@@ -946,17 +932,17 @@ where
     stack.set_leaf(next);
 
     // SAFETY: next is non-null and protected by guard
-    let next_leaf: &L = unsafe { &*next };
+    let next_leaf: &LeafNode15<P> = unsafe { &*next };
 
     // Prefetch the next leaf's data arrays
     next_leaf.prefetch();
 
     // Prefetch next-next leaf for 3-way pipelining
     // Full prefetch (6 cache lines) instead of just CL0
-    let next_next: *mut L = next_leaf.safe_next();
+    let next_next: *mut LeafNode15<P> = next_leaf.safe_next(guard);
     if !next_next.is_null() {
         // SAFETY: next_next is non-null and derived from a valid leaf's B-link
-        let next_next_leaf: &L = unsafe { &*next_next };
+        let next_next_leaf: &LeafNode15<P> = unsafe { &*next_next };
         next_next_leaf.prefetch();
     }
 
@@ -969,7 +955,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = next_leaf.permutation();
+    let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison
     let kx: KeyIndexedPosition = lower_with_suffix(cursor_key, next_leaf, &perm);
@@ -986,23 +972,22 @@ where
 /// The guard parameter (prefixed `_`) ensures pointer validity through lifetime
 /// binding even though it's not directly used in this function.
 #[inline]
-fn advance_leaf<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+fn advance_leaf<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &CursorKey,
-    _guard: &LocalGuard<'_>,
-) -> FindResult<S>
+    guard: &LocalGuard<'_>,
+) -> FindResult<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
-    let leaf: &L = unsafe { stack.leaf_ref() };
+    let leaf: &LeafNode15<P> = unsafe { stack.leaf_ref() };
     let version: u32 = stack.version();
 
     // CRITICAL: Split-aware leaf boundary validation (TOCTOU-safe ordering).
     // See advance_leaf_single_layer for the full rationale.
 
     // Step 1: Load raw next pointer FIRST
-    let next_raw: *mut L = leaf.next_raw();
+    let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
 
     // Step 2: Check if next is marked
     if Linker::is_marked(next_raw) {
@@ -1016,7 +1001,7 @@ where
     }
 
     // Clear mark bit
-    let next: *mut L = next_raw.map_addr(|addr| addr & !1);
+    let next: *mut LeafNode15<P> = next_raw.map_addr(|addr| addr & !1);
 
     // Capture prev leaf info for tracing before mutating stack
     if next.is_null() {
@@ -1028,7 +1013,7 @@ where
     stack.set_leaf(next);
 
     // SAFETY: next is non-null and protected by guard
-    let next_leaf: &L = unsafe { &*next };
+    let next_leaf: &LeafNode15<P> = unsafe { &*next };
 
     // Prefetch the next leaf's data arrays (ikey0, keylenx, leaf_values)
     // This brings multiple cache lines into L1/L2 before we iterate
@@ -1036,10 +1021,10 @@ where
 
     // Prefetch next-next leaf for 3-way pipelining
     // Full prefetch (6 cache lines) instead of just CL0
-    let next_next: *mut L = next_leaf.safe_next();
+    let next_next: *mut LeafNode15<P> = next_leaf.safe_next(guard);
     if !next_next.is_null() {
         // SAFETY: next_next is non-null and derived from a valid leaf's B-link
-        let next_next_leaf: &L = unsafe { &*next_next };
+        let next_next_leaf: &LeafNode15<P> = unsafe { &*next_next };
         next_next_leaf.prefetch();
     }
 
@@ -1052,7 +1037,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = next_leaf.permutation();
+    let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = next_leaf.permutation();
 
     // Reposition using full key comparison (like C++ `helper.lower(ka, this)`).
     // This ensures we skip past any keys <= cursor_key.
@@ -1086,17 +1071,16 @@ where
 /// # Returns
 ///
 /// Next state (usually `FindNext` to continue iteration).
-pub fn find_retry<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn find_retry<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &CursorKey,
     guard: &LocalGuard<'_>,
 ) -> ScanState
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     // Re-reach leaf from current root
-    let leaf_ptr: *mut L = reach_leaf_for_scan::<L, S>(stack.root(), cursor_key, guard);
+    let leaf_ptr: *mut LeafNode15<P> = reach_leaf_for_scan::<P>(stack.root(), cursor_key, guard);
 
     if leaf_ptr.is_null() {
         // Layer is empty
@@ -1106,7 +1090,7 @@ where
     stack.set_leaf(leaf_ptr);
 
     // SAFETY: leaf_ptr is non-null and protected by guard
-    let leaf: &L = unsafe { &*leaf_ptr };
+    let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
     // Get stable version
     let version: u32 = leaf.version().stable();
@@ -1117,7 +1101,7 @@ where
     }
 
     // Load permutation
-    let perm: L::Perm = leaf.permutation();
+    let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
     // Find position using suffix-aware search
     // This ensures we find the correct position when keys share the same ikey
@@ -1143,10 +1127,9 @@ where
 /// 2. Stack root already set to layer pointer by `find_next`
 /// 3. Clear cursor for sublayer scan
 /// 4. Transition to Retry to position in new layer
-pub fn handle_down<L, S>(stack: &mut ScanStackElement<L, S>, cursor_key: &mut CursorKey)
+pub fn handle_down<P>(stack: &mut ScanStackElement<P>, cursor_key: &mut CursorKey)
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     // Clear cursor key for sublayer (scan from minimum)
     cursor_key.shift_clear();
@@ -1171,15 +1154,14 @@ where
 /// # Returns
 ///
 /// `true` if there's a parent layer to return to, `false` if scan is complete.
-pub fn handle_up<L, S>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn handle_up<P>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     _guard: &LocalGuard<'_>,
 ) -> bool
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     // Pop parent context
     let Some(parent) = layer_stack.pop() else {
@@ -1196,11 +1178,11 @@ where
 
     // Refresh parent leaf state
     // SAFETY: parent.leaf is protected by guard
-    let leaf: &L = unsafe { parent.leaf.as_ref() };
+    let leaf: &LeafNode15<P> = unsafe { parent.leaf.as_ref() };
 
     let version: u32 = leaf.version().stable();
 
-    let perm: L::Perm = leaf.permutation();
+    let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
     // Find position (cursor has len=9, will skip past the layer pointer)
     // Use suffix-aware search to handle keys with same ikey correctly
@@ -1266,22 +1248,21 @@ pub enum LeafBatchResult {
 /// - State machine dispatch per entry
 /// - Redundant leaf/version checks
 #[inline]
-pub fn process_leaf_batch_ptr<L, S, F>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn process_leaf_batch_ptr<P, F>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     end_bound: &RangeBound<'_>,
     visitor: &mut F,
     count: &mut usize,
 ) -> LeafBatchResult
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-    F: FnMut(&[u8], &S::Value) -> bool,
+    P: LeafPolicy,
+    F: FnMut(&[u8], &P::Value) -> bool,
 {
     // Cache leaf pointer to avoid borrow conflicts
-    let leaf_ptr: *const L = stack.leaf_ptr();
-    let leaf: &L = unsafe { &*leaf_ptr };
+    let leaf_ptr: *const LeafNode15<P> = stack.leaf_ptr();
+    let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
     let perm = stack.perm();
     let perm_size = perm.size();
     let cached_version = stack.version();
@@ -1303,17 +1284,16 @@ where
         // Check for layer pointer - must handle via state machine
         if slot_keylenx >= LAYER_KEYLENX {
             // Set up for layer descent
-            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
             layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
             cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(slot_ptr);
-            stack.set_root(slot_ptr);
+            prefetch_read(layer_ptr);
+            stack.set_root(layer_ptr);
             return LeafBatchResult::LayerEncountered;
         }
 
-        // Get value pointer
-        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-        if slot_ptr.is_null() {
+        // Check value slot
+        if leaf.is_value_empty(slot) {
             stack.next();
             continue;
         }
@@ -1343,8 +1323,8 @@ where
             return LeafBatchResult::EndBoundExceeded;
         }
 
-        // SAFETY: Guard protects value pointer, slot is valid within permutation
-        let value_ref: &S::Value = unsafe { &*slot_ptr.cast::<S::Value>() };
+        // SAFETY: Guard protects value, slot is valid (non-empty, in permutation)
+        let value_ref: &P::Value = unsafe { &*leaf.load_value_ptr(slot) };
 
         *count += 1;
         stack.next();
@@ -1364,25 +1344,24 @@ where
 
 /// Process remaining entries in current leaf, returning values by copy.
 ///
-/// This is the variant of [`process_leaf_batch_ptr`] that works for ALL `ValueSlot`
-/// types, including true-inline storage. Instead of returning `&S::Value` references
-/// (which requires pointer-backed storage), it returns `S::Output` by value.
+/// This is the variant of [`process_leaf_batch_ptr`] that works for ALL `LeafPolicy`
+/// types, including true-inline storage. Instead of returning `&P::Value` references
+/// (which requires pointer-backed storage), it returns `P::Output` by value.
 ///
 /// # Key Differences from `process_leaf_batch_ptr`
 ///
 /// | Aspect | `process_leaf_batch_ptr` | `process_leaf_batch` |
 /// |--------|--------------------------|----------------------|
-/// | Visitor signature | `FnMut(&[u8], &S::Value)` | `FnMut(&[u8], S::Output)` |
-/// | Value access | `&*slot_ptr.cast()` (deref) | `S::output_from_raw()` |
-/// | Storage support | `RefValueSlot` only | All `ValueSlot` types |
+/// | Visitor signature | `FnMut(&[u8], &P::Value)` | `FnMut(&[u8], P::Output)` |
+/// | Value access | `&*slot_ptr.cast()` (deref) | `leaf.load_value(slot)` |
+/// | Storage support | `RefLeafPolicy` only | All `LeafPolicy` types |
 /// | Use case | Zero-copy for Arc/Box | Universal, works with inline |
 ///
 /// # Performance for Inline Storage
 ///
-/// For true-inline storage (`TrueInlineSlot<V>`), this avoids the encode/decode
-/// dance that would occur with pointer dereference (which is UB for inline anyway).
-/// The `output_from_raw` call for inline simply decodes the value bits from the
-/// pointer address.
+/// For true-inline storage (`InlinePolicy<V>`), `ValueArray::load()` directly
+/// reads the `AtomicU64` bits and reconstructs the value. No pointer
+/// indirection or intermediate conversion needed.
 ///
 /// # Algorithm
 ///
@@ -1390,27 +1369,26 @@ where
 /// 1. Read slot data `(ikey, keylenx, value_ptr)`
 /// 2. If layer pointer → return [`LeafBatchResult::LayerEncountered`]
 /// 3. If null value → skip
-/// 4. Build key and call visitor with `S::output_from_raw()`
+/// 4. Build key and call visitor with loaded value
 /// 5. Check end bound
 /// 6. Validate version (OCC) after batch
 #[inline]
-pub fn process_leaf_batch<L, S, F>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn process_leaf_batch<P, F>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     end_bound: &RangeBound<'_>,
     visitor: &mut F,
     count: &mut usize,
 ) -> LeafBatchResult
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-    F: FnMut(&[u8], S::Output) -> bool,
+    P: LeafPolicy,
+    F: FnMut(&[u8], P::Output) -> bool,
 {
     // Cache leaf pointer to avoid borrow conflicts
-    let leaf_ptr: *const L = stack.leaf_ptr();
+    let leaf_ptr: *const LeafNode15<P> = stack.leaf_ptr();
     // SAFETY: leaf_ptr is valid - protected by guard in caller
-    let leaf: &L = unsafe { &*leaf_ptr };
+    let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
     let perm = stack.perm();
     let perm_size = perm.size();
     let cached_version = stack.version();
@@ -1431,17 +1409,16 @@ where
         // Check for layer pointer - must handle via state machine
         if slot_keylenx >= LAYER_KEYLENX {
             // Set up for layer descent
-            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
             layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
             cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(slot_ptr);
-            stack.set_root(slot_ptr);
+            prefetch_read(layer_ptr);
+            stack.set_root(layer_ptr);
             return LeafBatchResult::LayerEncountered;
         }
 
-        // Get value pointer (for inline: returns encoded value bits as pointer)
-        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-        if slot_ptr.is_null() {
+        // Check value slot
+        if leaf.is_value_empty(slot) {
             stack.next();
             continue;
         }
@@ -1471,13 +1448,13 @@ where
             return LeafBatchResult::EndBoundExceeded;
         }
 
-        // Get value via output_from_raw - works for all storage types:
-        // - Arc-based: increments refcount, returns Arc<V>
-        // - Box-based: copies the value, returns V
-        // - Inline: decodes bits from pointer address, returns V
-        //
-        // SAFETY: Guard protects the value, slot is valid (non-null, in permutation)
-        let output: S::Output = unsafe { S::output_from_raw(slot_ptr) };
+        // Load value via typed API — works for all storage types.
+        // Use let-else to eliminate TOCTOU race between is_value_empty and load_value
+        let Some(output) = leaf.load_value(slot) else {
+            // Concurrent modification removed value - skip this slot
+            stack.next();
+            continue;
+        };
 
         *count += 1;
         stack.next();
@@ -1528,22 +1505,21 @@ where
 /// 5. Call visitor with value only (no key)
 /// 6. Validate version (OCC) after batch
 #[inline]
-pub fn process_leaf_batch_values<L, S, F>(
-    stack: &mut ScanStackElement<L, S>,
+pub fn process_leaf_batch_values<P, F>(
+    stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<L>,
+    layer_stack: &mut LayerStack<P>,
     end_bound_ikey: Option<u64>,
     visitor: &mut F,
     count: &mut usize,
 ) -> LeafBatchResult
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
-    F: FnMut(S::Output) -> bool,
+    P: LeafPolicy,
+    F: FnMut(P::Output) -> bool,
 {
-    let leaf_ptr: *const L = stack.leaf_ptr();
+    let leaf_ptr: *const LeafNode15<P> = stack.leaf_ptr();
     // SAFETY: leaf_ptr is valid - protected by guard in caller
-    let leaf: &L = unsafe { &*leaf_ptr };
+    let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
     let perm = stack.perm();
     let perm_size = perm.size();
     let cached_version = stack.version();
@@ -1560,12 +1536,12 @@ where
 
         // Handle layer pointer - must use state machine
         if slot_keylenx >= LAYER_KEYLENX {
-            let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
             layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
             // Still need to track ikey for layer navigation
             cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(slot_ptr);
-            stack.set_root(slot_ptr);
+            prefetch_read(layer_ptr);
+            stack.set_root(layer_ptr);
             return LeafBatchResult::LayerEncountered;
         }
 
@@ -1577,9 +1553,8 @@ where
             return LeafBatchResult::EndBoundExceeded;
         }
 
-        // Get value pointer
-        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
-        if slot_ptr.is_null() {
+        // Check value slot
+        if leaf.is_value_empty(slot) {
             stack.next();
             continue;
         }
@@ -1589,9 +1564,13 @@ where
         // Skip: cursor_key.assign_store_suffix(suffix);
         // Skip: cursor_key.assign_store_length(...);
 
-        // Get value directly
-        // SAFETY: Guard protects value, slot is valid (non-null, in permutation)
-        let output: S::Output = unsafe { S::output_from_raw(slot_ptr) };
+        // Load value via typed API.
+        // Use let-else to eliminate TOCTOU race between is_value_empty and load_value
+        let Some(output) = leaf.load_value(slot) else {
+            // Concurrent modification removed value - skip this slot
+            stack.next();
+            continue;
+        };
 
         *count += 1;
         stack.next();

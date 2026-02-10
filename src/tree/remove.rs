@@ -19,17 +19,17 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 
 use seize::LocalGuard;
 
-use crate::BatchedRetire;
 use crate::ksearch::upper_bound_internode_generic;
+use crate::leaf15::LeafNode15;
 use crate::tree::coalesce::SublayerContext;
 use crate::{
-    TreeInternode,
-    alloc_trait::NodeAllocatorGeneric,
+    TreeInternode, TreeLeafNode,
+    alloc_trait::TreeAllocator,
+    internode::InternodeNode,
     key::Key,
-    leaf_trait::{LayerCapableLeaf, TreePermutation},
     leaf15::{KSUF_KEYLENX, LAYER_KEYLENX},
     nodeversion::{LockGuard, NodeVersion},
-    slot::ValueSlot,
+    policy::LeafPolicy,
     tree::MassTreeGeneric,
 };
 
@@ -95,19 +95,16 @@ enum RemoveSearchResult {
 ///
 /// This enum separates the search/lock phase from the actual removal,
 /// enabling cleaner control flow in the main remove loop.
-enum RemoveLockResult<'t, 'g, S, L, A>
+enum RemoveLockResult<'t, 'g, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Key not found in this layer.
     NotFound,
 
     /// Key found and cursor is ready for removal.
-    Ready(RemoveCursor<'t, 'g, S, L, A>),
+    Ready(RemoveCursor<'t, 'g, P, A>),
 
     /// Need to descend into sublayer.
     DescendLayer {
@@ -215,19 +212,16 @@ enum LockedParentResult<'a> {
 /// - The guard (`'g`)
 /// - The leaf is accessed through the lock
 #[derive(Debug)]
-pub struct RemoveCursor<'t, 'g, S, L, A>
+pub struct RemoveCursor<'t, 'g, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Reference to the tree for allocation and root access.
-    tree: &'t MassTreeGeneric<S, L, A>,
+    tree: &'t MassTreeGeneric<P, A>,
 
     /// The locked leaf node. Lock is held for the lifetime of the cursor.
-    leaf: *mut L,
+    leaf: *mut LeafNode15<P>,
 
     /// The lock guard — this is the persistent state matching C++ `v_`.
     lock: LockGuard<'t>,
@@ -238,21 +232,18 @@ where
     /// Physical slot index (0..WIDTH).
     kp: usize,
 
-    /// Context for sublayer cleanup (parent leaf + slot).
-    /// Used when the sublayer becomes empty to clear the parent's layer slot.
-    layer_context: Option<LayerContext>,
+    /// Context chain for sublayer cleanup (parent leaf + slot at each layer).
+    /// Accumulated during layer descent so `gc_layer` can cascade up twig chains.
+    layer_contexts: Vec<LayerContext>,
 
     /// Guard for memory reclamation.
     guard: &'g LocalGuard<'g>,
 }
 
-impl<'t, 'g, S, L, A> RemoveCursor<'t, 'g, S, L, A>
+impl<'t, 'g, P, A> RemoveCursor<'t, 'g, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Create a new remove cursor with the lock already held.
     ///
@@ -263,17 +254,17 @@ where
     /// * `lock` - The lock guard (takes ownership)
     /// * `ki` - Logical position in permutation
     /// * `kp` - Physical slot index
-    /// * `layer_context` - Parent info for sublayer cleanup
+    /// * `layer_contexts` - Parent info chain for sublayer cleanup
     /// * `guard` - Guard for memory reclamation
     #[inline(always)]
     #[expect(clippy::too_many_arguments, reason = "Complex state management")]
     const fn new(
-        tree: &'t MassTreeGeneric<S, L, A>,
-        leaf: *mut L,
+        tree: &'t MassTreeGeneric<P, A>,
+        leaf: *mut LeafNode15<P>,
         lock: LockGuard<'t>,
         ki: usize,
         kp: usize,
-        layer_context: Option<LayerContext>,
+        layer_contexts: Vec<LayerContext>,
         guard: &'g LocalGuard<'g>,
     ) -> Self {
         Self {
@@ -282,7 +273,7 @@ where
             lock,
             ki,
             kp,
-            layer_context,
+            layer_contexts,
             guard,
         }
     }
@@ -307,28 +298,18 @@ where
     /// # Returns
     /// The removed value (if any).
     #[must_use]
-    pub fn finish_remove(mut self) -> Option<S::Output> {
+    pub fn finish_remove(mut self) -> Option<P::Output> {
         // =====================================================================
-        // Phase 1: Read-only extraction (safe before mark_insert)
+        // Phase 1: Read-only checks (safe before mark_insert)
         // =====================================================================
         //
         // Note: We access the leaf via direct pointer dereference throughout this
         // function to avoid borrow conflicts with self.lock.mark_insert().
 
         // SAFETY: leaf is valid and locked by us
-        let leaf: &L = unsafe { &*self.leaf };
+        let leaf: &LeafNode15<P> = unsafe { &*self.leaf };
 
-        // Step 1: Extract the value pointer
-        let value_ptr: *mut u8 = leaf.leaf_value_ptr(self.kp);
-
-        // Step 2: Clone the value for return (before retirement)
-        let value: Option<S::Output> = if value_ptr.is_null() {
-            None
-        } else {
-            leaf.try_clone_output(self.kp)
-        };
-
-        // Step 3: Capture keylenx before mutations (for suffix check)
+        // Capture keylenx before mutations (for suffix check)
         let slot_keylenx: u8 = leaf.keylenx(self.kp);
 
         // =====================================================================
@@ -351,16 +332,21 @@ where
         // Phase 3: Mutations (safe now that INSERTING_BIT is set)
         // =====================================================================
 
-        // Step 4: Null the value pointer FIRST
+        // Step 1: Take the value with ownership transfer.
         //
-        // This is a defense-in-depth measure. If a reader somehow slips through
+        // Uses `take_value` which atomically swaps the slot to null and returns
+        // the value WITHOUT incrementing Arc's refcount (for ArcPolicy). This
+        // correctly transfers ownership from the slot to the caller.
+        //
+        // This also serves as defense-in-depth: if a reader somehow slips through
         // (e.g., already past stable() before we set INSERTING_BIT), they will
-        // see a null pointer and skip this slot in their search loop.
-        //
-        // The get path checks: `if !ptr.is_null() { ... }`
-        leaf.set_leaf_value_ptr(self.kp, StdPtr::null_mut());
+        // see an empty slot and skip it in their search loop.
+        let value: Option<P::Output> = leaf.take_value(self.kp);
 
-        // Step 5: Clear suffix if present
+        // Step 2: Clear keylenx (take_value only clears the value pointer)
+        leaf.set_keylenx(self.kp, 0);
+
+        // Step 3: Clear suffix if present
         //
         // Now safe because:
         // 1. INSERTING_BIT is set - new readers will spin
@@ -371,25 +357,10 @@ where
             unsafe { leaf.clear_ksuf(self.kp, self.guard) };
         }
 
-        // Step 6: Update permutation - remove slot at logical position
-        let mut new_perm: L::Perm = leaf.permutation();
+        // Step 4: Update permutation - remove slot at logical position
+        let mut new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
         new_perm.remove(self.ki);
         leaf.set_permutation(new_perm);
-
-        // Step 7: Schedule value retirement (only for pointer-backed nodes)
-        //
-        // Moved after permutation update so the slot is no longer visible
-        // when we schedule retirement. This is safer for the reclamation path.
-        //
-        // For true-inline nodes (NEEDS_RETIREMENT = false), this is a no-op
-        // and the compiler will eliminate this entire block.
-        if !value_ptr.is_null() && S::NEEDS_RETIREMENT {
-            // Use batched retirement to amortize coordination overhead
-            // SAFETY: value_ptr is valid (from leaf.leaf_value_ptr()), guard protects reclamation.
-            unsafe {
-                BatchedRetire::defer_value::<S>(value_ptr, self.guard);
-            }
-        }
 
         // Step 8: Decrement entry count
         self.tree.dec_count();
@@ -406,16 +377,20 @@ where
 
             let ikey_bound: u64 = leaf.ikey_bound();
 
-            // Convert layer context for coalesce queue
-            let sublayer_ctx = self.layer_context.map(|ctx| SublayerContext {
-                parent_leaf: ctx.parent_leaf.cast_const(),
-                parent_slot: ctx.parent_slot,
-            });
+            // Convert layer context chain for coalesce queue
+            let sublayer_ctxs: Vec<SublayerContext> = self
+                .layer_contexts
+                .iter()
+                .map(|ctx| SublayerContext {
+                    parent_leaf: ctx.parent_leaf.cast_const(),
+                    parent_slot: ctx.parent_slot,
+                })
+                .collect();
 
             // Schedule for cleanup (coalesce will handle leftmost and sublayer cases)
             self.tree
                 .coalesce_queue
-                .schedule(self.leaf, ikey_bound, sublayer_ctx);
+                .schedule(self.leaf, ikey_bound, sublayer_ctxs);
         }
 
         // Lock drops here, which:
@@ -459,19 +434,16 @@ impl NodeCleaner {
     /// (parent not found or lock coupling failed - do not retire the leaf).
     #[cold]
     #[inline(never)]
-    pub fn remove_leaf_from_parent_for_coalesce<S, L, A>(
+    pub fn remove_leaf_from_parent_for_coalesce<P, A>(
         allocator: &A,
         guard: &LocalGuard<'_>,
-        leaf_ptr: *mut L,
+        leaf_ptr: *mut LeafNode15<P>,
         leaf_lock: LockGuard<'_>, // Consumed - ownership transferred to lock coupling
         ikey_bound: u64,
     ) -> bool
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-        A: NodeAllocatorGeneric<S, L>,
+        P: LeafPolicy,
+        A: TreeAllocator<P>,
     {
         let mut current: *mut u8 = leaf_ptr.cast();
         let mut current_ikey: u64 = ikey_bound;
@@ -482,7 +454,7 @@ impl NodeCleaner {
             // Step 1: Lock parent while current is locked
             // SAFETY: current is valid and locked; we hold current_lock.
             let parent_result: LockedParentResult<'_> =
-                unsafe { Self::locked_parent_generic::<S, L>(current) };
+                unsafe { Self::locked_parent_generic::<P>(current) };
 
             let (mut parent_lock, parent_ptr) = match parent_result {
                 LockedParentResult::Locked(lock, ptr) => (lock, ptr),
@@ -512,7 +484,7 @@ impl NodeCleaner {
             // SAFETY: parent_ptr is a valid internode pointer returned by locked_parent_generic.
             // The function only returns Locked variant with valid internode pointers.
             // We hold parent_lock which guarantees exclusive access.
-            let parent: &L::Internode = unsafe { &*parent_ptr.cast::<L::Internode>() };
+            let parent: &InternodeNode = unsafe { &*parent_ptr.cast::<InternodeNode>() };
 
             // Step 2: Mark parent as being modified
             parent_lock.mark_insert();
@@ -526,13 +498,13 @@ impl NodeCleaner {
             let mut kp: usize = upper_bound_internode_generic(current_ikey, parent);
 
             // Step 4: Validate child is at expected position
-            if parent.child(kp) != current {
+            if TreeInternode::child(parent, kp) != current {
                 // Child not at expected position - search for it linearly.
                 // This can happen if concurrent operations changed the parent structure.
                 let nkeys: usize = parent.nkeys();
                 let mut found_kp: Option<usize> = None;
                 for i in 0..=nkeys {
-                    if parent.child(i) == current {
+                    if TreeInternode::child(parent, i) == current {
                         found_kp = Some(i);
                         break;
                     }
@@ -561,14 +533,14 @@ impl NodeCleaner {
                     // SAFETY: repl is a valid node pointer (the replacement child).
                     // parent_ptr is valid and we hold parent_lock.
                     unsafe {
-                        Self::set_parent_erased::<S, L>(repl, parent_ptr);
+                        Self::set_parent_erased::<P>(repl, parent_ptr);
                     }
                     false
                 }
                 _ => kp > 0,
             };
             if should_shift {
-                Self::shift_internode_down_generic::<L::Internode>(parent, kp);
+                Self::shift_internode_down_generic::<InternodeNode>(parent, kp);
             }
 
             // Step 7: Handle redirect if leftmost child removed
@@ -583,9 +555,9 @@ impl NodeCleaner {
             //
             // The redirect walks up ancestors updating separator keys from old_ikey
             // to new_ikey (the first key of the new leftmost child).
-            if (kp <= 1) && (parent.nkeys() > 0) && parent.child(0).is_null() {
+            if (kp <= 1) && (parent.nkeys() > 0) && TreeInternode::child(parent, 0).is_null() {
                 let new_ikey: u64 = parent.ikey(0);
-                Self::redirect_ikey_bounds_generic::<S, L>(parent_ptr, current_ikey, new_ikey);
+                Self::redirect_ikey_bounds_generic::<P>(parent_ptr, current_ikey, new_ikey);
                 current_ikey = new_ikey;
             }
 
@@ -601,7 +573,7 @@ impl NodeCleaner {
             }
 
             // Parent is empty (nkeys == 0) and not root
-            let child0: *mut u8 = parent.child(0);
+            let child0: *mut u8 = TreeInternode::child(parent, 0);
 
             // Step 10: Collapse empty parent
             // Mark deleted and retire, then continue walking up to update grandparent.
@@ -644,17 +616,14 @@ impl NodeCleaner {
     ///
     /// # Errors
     /// If fails to properly remove
-    pub fn remove_concurrent_generic<S, L, A>(
-        tree: &MassTreeGeneric<S, L, A>,
+    pub fn remove_concurrent_generic<P, A>(
+        tree: &MassTreeGeneric<P, A>,
         key_bytes: &[u8],
         guard: &LocalGuard<'_>,
-    ) -> Result<Option<S::Output>, RemoveError>
+    ) -> Result<Option<P::Output>, RemoveError>
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-        A: NodeAllocatorGeneric<S, L>,
+        P: LeafPolicy,
+        A: TreeAllocator<P>,
     {
         let mut key = Key::new(key_bytes);
         let mut retry_count: usize = 0;
@@ -662,8 +631,8 @@ impl NodeCleaner {
         // Track layer descent for multi-layer keys
         let mut layer_root: *mut u8 = tree.root_ptr.load(AtomicOrdering::Acquire);
 
-        // Track parent layer context for gc_layer cleanup
-        let mut layer_context: Option<LayerContext> = None;
+        // Track parent layer context chain for gc_layer cleanup
+        let mut layer_contexts: Vec<LayerContext> = Vec::new();
 
         'layer_loop: loop {
             'retry_loop: loop {
@@ -673,17 +642,17 @@ impl NodeCleaner {
                 retry_count += 1;
 
                 // Step 1: Navigate to target leaf
-                let leaf_ptr: *mut L =
+                let leaf_ptr: *mut LeafNode15<P> =
                     tree.reach_leaf_concurrent_generic(layer_root, &key, false, guard);
                 // SAFETY: reach_leaf_concurrent_generic returns a valid leaf pointer
-                let leaf: &L = unsafe { &*leaf_ptr };
+                let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
                 // Step 2: Get stable version and search for slot
                 let version: u32 = leaf.version().stable();
-                let perm: L::Perm = leaf.permutation();
+                let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
                 let search_result: RemoveSearchResult =
-                    Self::search_for_remove_generic::<S, L>(leaf, &key, &perm);
+                    Self::search_for_remove_generic::<P>(leaf, &key, &perm);
 
                 // Step 3: Version validation before locking
                 if leaf.version().has_changed(version) {
@@ -703,7 +672,7 @@ impl NodeCleaner {
                             leaf_ptr,
                             ki,
                             &key,
-                            layer_context,
+                            &mut layer_contexts,
                             guard,
                         );
 
@@ -721,7 +690,7 @@ impl NodeCleaner {
                                 parent_leaf,
                                 parent_slot,
                             } => {
-                                layer_context = Some(LayerContext {
+                                layer_contexts.push(LayerContext {
                                     parent_leaf,
                                     parent_slot,
                                 });
@@ -735,7 +704,7 @@ impl NodeCleaner {
                             RemoveLockResult::RestartFromRoot => {
                                 key.unshift_all();
                                 layer_root = tree.root_ptr.load(AtomicOrdering::Acquire);
-                                layer_context = None;
+                                layer_contexts.clear();
                                 continue 'layer_loop;
                             }
                         }
@@ -749,7 +718,7 @@ impl NodeCleaner {
                             return Ok(None);
                         }
 
-                        layer_context = Some(LayerContext {
+                        layer_contexts.push(LayerContext {
                             parent_leaf: leaf_ptr.cast::<u8>(),
                             parent_slot: slot,
                         });
@@ -777,16 +746,13 @@ impl NodeCleaner {
     /// 3. If ikey matches, check keylenx and suffix
     /// 4. Return position if exact match found
     #[inline(always)]
-    fn search_for_remove_generic<S, L>(
-        leaf: &L,
+    fn search_for_remove_generic<P>(
+        leaf: &LeafNode15<P>,
         key: &Key<'_>,
-        perm: &L::Perm,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     ) -> RemoveSearchResult
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
+        P: LeafPolicy,
     {
         let target_ikey: u64 = key.ikey();
         let size: usize = perm.size();
@@ -811,7 +777,7 @@ impl NodeCleaner {
                 // This is a layer pointer
                 if key.has_suffix() {
                     // Key continues - need to descend
-                    let layer_ptr: *mut u8 = leaf.leaf_value_ptr(kp);
+                    let layer_ptr: *mut u8 = leaf.load_layer_raw(kp);
                     return RemoveSearchResult::DescendLayer {
                         layer_ptr,
                         slot: kp,
@@ -864,23 +830,20 @@ impl NodeCleaner {
     /// - `Retry`: Version changed, retry from `reach_leaf`
     /// - `RestartFromRoot`: Leaf is `deleted_layer`, restart with unshifted key
     #[inline]
-    fn lock_and_verify_for_remove<'t, 'g, S, L, A>(
-        tree: &'t MassTreeGeneric<S, L, A>,
-        leaf_ptr: *mut L,
+    fn lock_and_verify_for_remove<'t, 'g, P, A>(
+        tree: &'t MassTreeGeneric<P, A>,
+        leaf_ptr: *mut LeafNode15<P>,
         ki: usize,
         key: &Key<'_>,
-        layer_context: Option<LayerContext>,
+        layer_contexts: &mut Vec<LayerContext>,
         guard: &'g LocalGuard<'g>,
-    ) -> RemoveLockResult<'t, 'g, S, L, A>
+    ) -> RemoveLockResult<'t, 'g, P, A>
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-        A: NodeAllocatorGeneric<S, L>,
+        P: LeafPolicy,
+        A: TreeAllocator<P>,
     {
         // SAFETY: leaf_ptr is valid from reach_leaf_concurrent_generic
-        let leaf: &L = unsafe { &*leaf_ptr };
+        let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
         // Step 1: Lock the leaf
         let lock: LockGuard<'_> = leaf.version().lock();
@@ -892,7 +855,7 @@ impl NodeCleaner {
         }
 
         // Step 3: Re-verify after lock (key might have moved)
-        let new_perm: L::Perm = leaf.permutation();
+        let new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
         if new_perm.size() <= ki {
             // Slot was removed by concurrent delete
             drop(lock);
@@ -913,7 +876,7 @@ impl NodeCleaner {
         if slot_keylenx >= LAYER_KEYLENX {
             // This is a layer pointer, not a value - need to descend
             drop(lock);
-            let lp: *mut u8 = leaf.leaf_value_ptr(new_kp);
+            let lp: *mut u8 = leaf.load_layer_raw(new_kp);
 
             // Check if sublayer is deleted before descending
             if !Self::is_sublayer_valid(lp) {
@@ -928,7 +891,15 @@ impl NodeCleaner {
         }
 
         // Step 5: Key found, create cursor for removal
-        let cursor = RemoveCursor::new(tree, leaf_ptr, lock, ki, new_kp, layer_context, guard);
+        let cursor = RemoveCursor::new(
+            tree,
+            leaf_ptr,
+            lock,
+            ki,
+            new_kp,
+            std::mem::take(layer_contexts),
+            guard,
+        );
 
         RemoveLockResult::Ready(cursor)
     }
@@ -1037,12 +1008,9 @@ impl NodeCleaner {
     #[cold]
     #[inline(never)]
     #[expect(clippy::cast_sign_loss)]
-    fn redirect_ikey_bounds_generic<S, L>(start_internode: *mut u8, old_ikey: u64, new_ikey: u64)
+    fn redirect_ikey_bounds_generic<P>(start_internode: *mut u8, old_ikey: u64, new_ikey: u64)
     where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
+        P: LeafPolicy,
     {
         let mut current: *mut u8 = start_internode;
 
@@ -1058,7 +1026,7 @@ impl NodeCleaner {
             // Step 1: Lock parent (current is still locked)
             // SAFETY: current is a valid internode pointer
             let parent_result: LockedParentResult<'_> =
-                unsafe { Self::locked_parent_generic::<S, L>(current) };
+                unsafe { Self::locked_parent_generic::<P>(current) };
 
             // Check if we reached root or hit retry exhaustion
             let (parent_lock, parent_ptr) = match parent_result {
@@ -1089,7 +1057,7 @@ impl NodeCleaner {
             }
 
             // SAFETY: parent_ptr is valid and point to an internode
-            let parent: &L::Internode = unsafe { &*(parent_ptr.cast::<L::Internode>()) };
+            let parent: &InternodeNode = unsafe { &*(parent_ptr.cast::<InternodeNode>()) };
 
             // Step 3: Find position of current node in parent
             #[expect(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
@@ -1099,7 +1067,7 @@ impl NodeCleaner {
 
             // Validate current is at expected position
             debug_assert_eq!(
-                parent.child(kp as usize),
+                TreeInternode::child(parent, kp as usize),
                 current,
                 "redirect: current not found at expected position kp={kp} for old_ikey={old_ikey:#x}"
             );
@@ -1119,7 +1087,8 @@ impl NodeCleaner {
             // Continue if:
             // - kp == 0: we're at the leftmost position, may need to update higher
             // - kp == 1 && child[0] is null: leftmost child was removed, may need to update higher
-            let should_continue: bool = (kp == 0) || ((kp == 1) && parent.child(0).is_null());
+            let should_continue: bool =
+                (kp == 0) || ((kp == 1) && TreeInternode::child(parent, 0).is_null());
 
             if !should_continue {
                 // Done - drop the lock and return
@@ -1133,25 +1102,19 @@ impl NodeCleaner {
     ///
     /// # Safety
     /// `node_ptr` must point to a valid leaf or internode.
-    unsafe fn get_parent_erased<S, L>(node_ptr: *mut u8) -> *mut u8
-    where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-    {
+    unsafe fn get_parent_erased<P: LeafPolicy>(node_ptr: *mut u8) -> *mut u8 {
         // SAFETY: Caller guarantees node_ptr points to valid leaf or internode.
         #[expect(clippy::cast_ptr_alignment)]
         let version: &NodeVersion = unsafe { &*(node_ptr.cast::<NodeVersion>()) };
 
         if version.is_leaf() {
             // SAFETY: version.is_leaf() confirmed node is a leaf.
-            let leaf: &L = unsafe { &*(node_ptr.cast::<L>()) };
-            leaf.parent()
+            let leaf: &LeafNode15<P> = unsafe { &*(node_ptr.cast::<LeafNode15<P>>()) };
+            TreeLeafNode::parent(leaf)
         } else {
             // SAFETY: !version.is_leaf() confirmed node is an internode.
-            let inode: &L::Internode = unsafe { &*(node_ptr.cast::<L::Internode>()) };
-            inode.parent()
+            let inode: &InternodeNode = unsafe { &*(node_ptr.cast::<InternodeNode>()) };
+            TreeInternode::parent(inode)
         }
     }
 
@@ -1200,17 +1163,13 @@ impl NodeCleaner {
     ///     return static_cast<internode<P>*>(p);
     /// }
     /// ```
-    unsafe fn locked_parent_generic<'a, S, L>(current_ptr: *mut u8) -> LockedParentResult<'a>
-    where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-    {
+    unsafe fn locked_parent_generic<'a, P: LeafPolicy>(
+        current_ptr: *mut u8,
+    ) -> LockedParentResult<'a> {
         for _ in 0..MAX_PARENT_RETRIES {
             // Step 1: Read parent pointer
             // SAFETY: current_ptr is valid (guaranteed by caller of unsafe fn).
-            let parent_ptr: *mut u8 = unsafe { Self::get_parent_erased::<S, L>(current_ptr) };
+            let parent_ptr: *mut u8 = unsafe { Self::get_parent_erased::<P>(current_ptr) };
 
             // Step 2: Check if we've reached root
             if parent_ptr.is_null() {
@@ -1219,12 +1178,12 @@ impl NodeCleaner {
 
             // Step 3: Lock the parent (must be an internode)
             // SAFETY: parent_ptr is non-null and points to an internode.
-            let parent: &L::Internode = unsafe { &*(parent_ptr.cast::<L::Internode>()) };
+            let parent: &InternodeNode = unsafe { &*(parent_ptr.cast::<InternodeNode>()) };
             let parent_lock: LockGuard<'_> = parent.version().lock();
 
             // Step 4: Validate parent hasn't changed (could change due to split/collapse)
             // SAFETY: current_ptr is still valid, re-reading parent to validate.
-            let current_parent: *mut u8 = unsafe { Self::get_parent_erased::<S, L>(current_ptr) };
+            let current_parent: *mut u8 = unsafe { Self::get_parent_erased::<P>(current_ptr) };
 
             if current_parent == parent_ptr {
                 // Parent is still valid and locked
@@ -1257,24 +1216,18 @@ impl NodeCleaner {
     /// - `node_ptr` must point to a valid leaf or internode
     /// - The node's type must match what [`NodeVersion::is_leaf`] reports
     #[inline(always)]
-    unsafe fn set_parent_erased<S, L>(node_ptr: *mut u8, new_parent: *mut u8)
-    where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-    {
+    unsafe fn set_parent_erased<P: LeafPolicy>(node_ptr: *mut u8, new_parent: *mut u8) {
         // SAFETY: Caller guarantees node_ptr points to valid leaf or internode.
         #[expect(clippy::cast_ptr_alignment, reason = "Checked by caller")]
         let version: &NodeVersion = unsafe { &*(node_ptr.cast::<NodeVersion>()) };
 
         if version.is_leaf() {
             // SAFETY: version.is_leaf() confirmed node is a leaf.
-            let leaf: &L = unsafe { &*(node_ptr.cast::<L>()) };
+            let leaf: &LeafNode15<P> = unsafe { &*(node_ptr.cast::<LeafNode15<P>>()) };
             leaf.set_parent(new_parent);
         } else {
             // SAFETY: !version.is_leaf() confirmed node is an internode.
-            let inode: &L::Internode = unsafe { &*(node_ptr.cast::<L::Internode>()) };
+            let inode: &InternodeNode = unsafe { &*(node_ptr.cast::<InternodeNode>()) };
             inode.set_parent(new_parent);
         }
     }

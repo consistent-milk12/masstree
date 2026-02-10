@@ -9,8 +9,8 @@
 //! NOTE: Loom tests use loom's own atomic types, so we create a simplified
 //! version of the lock to test the core CAS semantics.
 
-use loom::sync::Arc;
 use loom::sync::atomic::{AtomicU32, Ordering};
+use loom::sync::Arc;
 use loom::thread;
 use std::marker::PhantomData;
 

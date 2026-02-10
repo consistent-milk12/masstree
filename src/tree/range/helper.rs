@@ -17,9 +17,10 @@ use std::cmp::Ordering;
 use seize::LocalGuard;
 
 use crate::key::IKEY_SIZE;
-use crate::leaf_trait::{TreeLeafNode, TreePermutation};
+use crate::leaf_trait::TreeLeafNode;
+use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
-use crate::slot::ValueSlot;
+use crate::policy::LeafPolicy;
 
 use super::cursor_key::CursorKey;
 
@@ -124,12 +125,13 @@ impl ForwardScanHelper {
     /// but kept for API completeness and potential future use.
     #[inline(always)]
     #[allow(dead_code, reason = "Forward scan helper API")]
-    pub fn advance<L, S>(leaf: &L) -> *mut L
+    pub fn advance<P>(leaf: &LeafNode15<P>) -> *mut LeafNode15<P>
     where
-        L: TreeLeafNode<S>,
-        S: ValueSlot,
+        P: LeafPolicy,
     {
-        leaf.safe_next()
+        // SAFETY: Leaf pointer is valid, called during OCC read where
+        // version validation catches concurrent modifications.
+        unsafe { leaf.safe_next_unguarded() }
     }
 
     /// Wait for a stable version (spin until not dirty).
@@ -137,10 +139,9 @@ impl ForwardScanHelper {
     /// Used when repositioning after a version change.
     #[inline(always)]
     #[allow(dead_code, reason = "Forward scan helper API")]
-    pub fn stable<L, S>(leaf: &L) -> u32
+    pub fn stable<P>(leaf: &LeafNode15<P>) -> u32
     where
-        L: TreeLeafNode<S>,
-        S: ValueSlot,
+        P: LeafPolicy,
     {
         leaf.version().stable()
     }
@@ -260,14 +261,13 @@ impl ForwardScanHelper {
 /// Corresponds to the lower bound logic in `find_initial` and `find_next`
 /// from `masstree_scan.hh`.
 #[inline]
-pub fn lower_with_position<L, S>(
+pub fn lower_with_position<P>(
     cursor_key: &CursorKey,
-    leaf: &L,
-    perm: &L::Perm,
+    leaf: &LeafNode15<P>,
+    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
 ) -> KeyIndexedPosition
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     let size: usize = perm.size();
     let search_ikey: u64 = cursor_key.current_ikey();
@@ -320,14 +320,13 @@ where
 ///
 /// `KeyIndexedPosition` with accurate position considering suffixes.
 #[inline]
-pub fn lower_with_suffix<L, S>(
+pub fn lower_with_suffix<P>(
     cursor_key: &CursorKey,
-    leaf: &L,
-    perm: &L::Perm,
+    leaf: &LeafNode15<P>,
+    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
 ) -> KeyIndexedPosition
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     let base_pos: KeyIndexedPosition = lower_with_position(cursor_key, leaf, perm);
 
@@ -405,15 +404,14 @@ where
 /// where cursor <= slot.
 #[cold]
 #[inline(never)]
-fn find_position_after_inline<L, S>(
+fn find_position_after_inline<P>(
     cursor_key: &CursorKey,
-    leaf: &L,
-    perm: &L::Perm,
+    leaf: &LeafNode15<P>,
+    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     start_i: usize,
 ) -> KeyIndexedPosition
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     let size: usize = perm.size();
     let search_ikey: u64 = cursor_key.current_ikey();
@@ -454,15 +452,14 @@ where
 /// we need to skip past any remaining slots with the same ikey.
 #[cold]
 #[inline(never)]
-fn find_position_after_suffix<L, S>(
+fn find_position_after_suffix<P>(
     cursor_key: &CursorKey,
-    leaf: &L,
-    perm: &L::Perm,
+    leaf: &LeafNode15<P>,
+    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     start_i: usize,
 ) -> KeyIndexedPosition
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     let size: usize = perm.size();
     let search_ikey: u64 = cursor_key.current_ikey();
@@ -584,30 +581,30 @@ impl ReverseScanHelper {
     /// The returned pointer is only valid while the guard is held and
     /// version validation has not failed.
     #[inline(always)]
-    pub fn retreat<L, S>(leaf: &L) -> *mut L
+    pub fn retreat<P>(leaf: &LeafNode15<P>) -> *mut LeafNode15<P>
     where
-        L: TreeLeafNode<S>,
-        S: ValueSlot,
+        P: LeafPolicy,
     {
-        leaf.prev()
+        // SAFETY: Leaf pointer is valid, called during OCC read where
+        // version validation catches concurrent modifications.
+        unsafe { leaf.prev_unguarded() }
     }
 
-    pub fn stable_reverse<L, S>(
-        leaf: &mut *mut L,
+    pub fn stable_reverse<P>(
+        leaf: &mut *mut LeafNode15<P>,
         cursor_key: &CursorKey,
-        _guard: &LocalGuard<'_>,
+        guard: &LocalGuard<'_>,
     ) -> u32
     where
-        L: TreeLeafNode<S>,
-        S: ValueSlot,
+        P: LeafPolicy,
     {
         loop {
             // SAFETY: leaf pointer is valid, protected by guard
-            let current: &L = unsafe { &**leaf };
+            let current: &LeafNode15<P> = unsafe { &**leaf };
             let v: u32 = current.version().stable();
 
             // Check if we need to advance forward due to concurrent insert
-            let next_ptr: *mut L = current.safe_next();
+            let next_ptr: *mut LeafNode15<P> = current.safe_next(guard);
 
             if next_ptr.is_null() {
                 return v;
@@ -671,10 +668,14 @@ impl ReverseScanHelper {
     ///
     /// Position as `isize` which can be -1 (before first slot).
     #[inline]
-    pub fn lower_reverse<L, S>(self, cursor_key: &CursorKey, leaf: &L, perm: &L::Perm) -> isize
+    pub fn lower_reverse<P>(
+        self,
+        cursor_key: &CursorKey,
+        leaf: &LeafNode15<P>,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    ) -> isize
     where
-        L: TreeLeafNode<S>,
-        S: ValueSlot,
+        P: LeafPolicy,
     {
         if self.upper_bound {
             return perm.size().cast_signed() - 1;
@@ -682,11 +683,13 @@ impl ReverseScanHelper {
 
         let kx: KeyIndexedPosition = lower_with_position(cursor_key, leaf, perm);
 
-        // C++ pattern: kx.i - (kx.p < 0)
+        // C++ pattern: `kx.i - (kx.p < 0)`.
+        // In this Rust port, `p == None` means "no exact match".
+        // So we subtract 1 only when `p` is missing.
         if kx.p.is_some() {
-            kx.i.cast_signed() - 1
-        } else {
             kx.i.cast_signed()
+        } else {
+            kx.i.cast_signed() - 1
         }
     }
 

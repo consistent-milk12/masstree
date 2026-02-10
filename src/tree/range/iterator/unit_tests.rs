@@ -244,6 +244,106 @@ fn test_rev_with_longer_keys() {
 }
 
 #[test]
+fn test_rev_exact_layer_boundary_key_not_skipped() {
+    let tree = MassTree::<u64>::default();
+
+    // Exact 24-byte key (3 full 8-byte layers).
+    let mut k_exact = vec![0u8; 24];
+    k_exact[23] = 163;
+
+    // Longer keys sharing the exact key as prefix (forces layer pointer path).
+    let mut k_long1 = k_exact.clone();
+    k_long1.extend([129, 173]);
+
+    let mut k_long2 = k_exact.clone();
+    k_long2.extend([
+        169, 103, 242, 227, 80, 214, 1, 125, 187, 127, 159, 159, 22, 107, 44,
+    ]);
+
+    // Immediate predecessor in lexicographic order.
+    let mut k_prev = vec![0u8; 24];
+    k_prev[23] = 151;
+    k_prev.extend([206, 4, 204]);
+
+    for (i, key) in [
+        k_prev.clone(),
+        k_exact.clone(),
+        k_long1.clone(),
+        k_long2.clone(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        tree.insert(&key, i as u64);
+    }
+
+    assert_eq!(tree.get(&k_prev), Some(0));
+    assert_eq!(tree.get(&k_exact), Some(1));
+    assert_eq!(tree.get(&k_long1), Some(2));
+    assert_eq!(tree.get(&k_long2), Some(3));
+
+    let guard = tree.guard();
+    let forward: Vec<Vec<u8>> = tree.iter(&guard).map(|e| e.key().to_vec()).collect();
+    assert_eq!(
+        forward,
+        vec![
+            k_prev.clone(),
+            k_exact.clone(),
+            k_long1.clone(),
+            k_long2.clone()
+        ]
+    );
+
+    let got: Vec<Vec<u8>> = tree.iter(&guard).rev().map(|e| e.key().to_vec()).collect();
+    let expected = vec![k_long2, k_long1, k_exact, k_prev];
+
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn test_rev_boundary_with_included_and_excluded_end() {
+    let tree = MassTree::<u64>::default();
+
+    let mut k_exact = vec![0u8; 24];
+    k_exact[23] = 163;
+
+    let mut k_long = k_exact.clone();
+    k_long.extend([129, 173]);
+
+    let mut k_prev = vec![0u8; 24];
+    k_prev[23] = 151;
+    k_prev.extend([206, 4, 204]);
+
+    tree.insert(&k_prev, 1);
+    tree.insert(&k_exact, 2);
+    tree.insert(&k_long, 3);
+
+    let guard = tree.guard();
+
+    let included: Vec<Vec<u8>> = tree
+        .range(
+            RangeBound::Unbounded,
+            RangeBound::Included(k_exact.as_slice()),
+            &guard,
+        )
+        .rev()
+        .map(|e| e.key().to_vec())
+        .collect();
+    assert_eq!(included, vec![k_exact.clone(), k_prev.clone()]);
+
+    let excluded: Vec<Vec<u8>> = tree
+        .range(
+            RangeBound::Unbounded,
+            RangeBound::Excluded(k_exact.as_slice()),
+            &guard,
+        )
+        .rev()
+        .map(|e| e.key().to_vec())
+        .collect();
+    assert_eq!(excluded, vec![k_prev]);
+}
+
+#[test]
 fn test_rev_consistency_with_forward() {
     let tree = MassTree::<u64>::default();
     for i in 0..20u64 {

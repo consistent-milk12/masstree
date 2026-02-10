@@ -18,7 +18,7 @@ Copy types.
 
 ## Status
 
-**v0.7.4** — Core feature complete.
+**v0.8.0** — Core feature complete.
 
 | Feature | Status |
 |---------|--------|
@@ -35,34 +35,34 @@ Copy types.
 
 | Benchmark | Rust | C++ | Ratio |
 |-----------|------|-----|-------|
-| **rw3** (forward-seq) | 70.50 | 45.34 | **156%** |
+| **rw3** (forward-seq) | 70.62 | 45.34 | **156%** |
+| **same** (10 hot keys) | 2.82 | 2.07 | **136%** |
+| **rw4** (reverse-seq) | 58.52 | 43.24 | **135%** |
 | **highcontention** (500 keys, 64B) | 78.04 | 58.62 | **133%** |
-| **rw4** (reverse-seq) | 56.14 | 43.24 | **130%** |
-| **rw1** (random insert+read) | 10.11 | 8.16 | **124%** |
-| **same** (10 hot keys) | 2.57 | 2.07 | **124%** |
-| **uscale** (random 140M) | 10.77 | 8.81 | **122%** |
-| **rw2g98** (98% reads) | 24.71 | 20.70 | **119%** |
-| **wscale** (wide random) | 9.00 | 8.12 | **111%** |
+| **rw1** (random insert+read) | 9.70 | 8.16 | **119%** |
+| **rw2g98** (98% reads) | 24.10 | 20.70 | **116%** |
+| **uscale** (random 140M) | 10.11 | 8.81 | **115%** |
+| **wscale** (wide random) | 8.93 | 8.12 | **110%** |
 
 ## vs Rust Concurrent Maps (12T SMT)
 
-> Source: `runs/run158_read_write.txt`
+> Source: `runs/run174_read_write.txt`
 > **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
 
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **49.85** | 20.64 | 14.14 | 17.73 | **2.42x** |
-| 02_zipfian | **43.39** | 18.38 | 14.98 | 3.03 | **2.36x** |
-| 03_shared_prefix | **24.86** | 15.17 | 12.98 | 16.37 | **1.52x** |
-| 04_high_contention | **76.28** | 16.44 | 17.85 | 1.97 | **4.27x** |
-| 05_large_dataset | **20.79** | 12.44 | 10.10 | 11.22 | **1.67x** |
-| 06_single_hot_key | **10.66** | 4.29 | 6.51 | 2.39 | **1.64x** |
-| 07_mixed_50_50 | **36.60** | 9.89 | 7.20 | 16.89 | **2.17x** |
-| 08_8byte_keys | **59.86** | 32.17 | 17.39 | 20.90 | **1.86x** |
-| 09_pure_read | **56.25** | 29.26 | 20.64 | 19.09 | **1.92x** |
-| 10_remove_heavy | **21.52** | 18.01 | 8.22 | 4.54 | **1.19x** |
-| 13_insert_only_fair | **37.25** | 24.25 | 16.72 | 6.12 | **1.54x** |
-| 14_pure_insert | **14.33** | 13.67 | 10.52 | 2.50 | **1.05x** |
+| 01_uniform | **34.85** | 14.61 | 10.15 | 13.71 | **2.39x** |
+| 02_zipfian | **34.32** | 15.21 | 11.88 | 3.39 | **2.26x** |
+| 03_shared_prefix | **23.21** | 14.25 | 9.75 | 14.13 | **1.63x** |
+| 04_high_contention | **58.77** | 21.67 | 17.04 | 2.00 | **2.71x** |
+| 05_large_dataset | **15.20** | 10.05 | 8.28 | 8.29 | **1.51x** |
+| 06_single_hot_key | **11.43** | 5.56 | 6.17 | 2.40 | **1.85x** |
+| 07_mixed_50_50 | **31.72** | 8.73 | 6.38 | 14.13 | **2.24x** |
+| 08_8byte_keys | **48.53** | 25.27 | 15.02 | 19.33 | **1.92x** |
+| 09_pure_read | **41.04** | 26.29 | 19.03 | 16.91 | **1.56x** |
+| 10_remove_heavy | **20.17** | 16.97 | 7.35 | 4.37 | **1.19x** |
+| 13_insert_only_fair | **31.78** | 23.45 | 14.68 | 5.89 | **1.36x** |
+| 14_pure_insert | **13.20** | 12.64 | 9.62 | 2.51 | **1.04x** |
 
 ## High-Impact Workloads (12T SMT)
 
@@ -133,7 +133,7 @@ hot key patterns, mixed operations, prefix queries, and deep trie traversal.
 
 ```toml
 [dependencies]
-masstree = { version = "0.7.4", features = ["mimalloc"] }
+masstree = { version = "0.8.0", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

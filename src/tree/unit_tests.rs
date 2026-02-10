@@ -3,7 +3,7 @@
 
 use super::{InsertError, MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};
 use crate::nodeversion::NodeVersion;
-use crate::value::LeafValue;
+use crate::policy::InlinePolicy;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
@@ -232,7 +232,7 @@ fn concurrent_insert_then_get_does_not_lose_key() {
         }
 
         // SAFETY: node points at a leaf.
-        let mut leaf_ptr: *mut LeafNode15<LeafValue<u64>> = node.cast();
+        let mut leaf_ptr: *mut LeafNode15<InlinePolicy<u64>> = node.cast();
         let mut leaf_steps: usize = 0;
 
         while !leaf_ptr.is_null() {
@@ -241,17 +241,17 @@ fn concurrent_insert_then_get_does_not_lose_key() {
 
             // SAFETY: leaf_ptr is protected by the guard and leaf nodes are never freed
             // while guarded.
-            let leaf: &LeafNode15<LeafValue<u64>> = unsafe { &*leaf_ptr };
+            let leaf: &LeafNode15<InlinePolicy<u64>> = unsafe { &*leaf_ptr };
             let _ = leaf.version().stable();
 
             let perm = leaf.permutation();
+
             for i in 0..perm.size() {
                 let slot = perm.get(i);
-                if leaf.ikey(slot) == ikey && leaf.keylenx(slot) == 8 {
-                    let ptr = leaf.leaf_value_ptr(slot);
-                    if !ptr.is_null() {
-                        return true;
-                    }
+
+                if leaf.ikey(slot) == ikey && leaf.keylenx(slot) == 8 && !leaf.is_value_empty(slot)
+                {
+                    return true;
                 }
             }
 
@@ -1351,16 +1351,13 @@ fn test_layer_split_preserves_all_keys() {
 
 #[test]
 fn test_masstree_generic_new_is_empty() {
-    use crate::alloc15::SeizeAllocator15;
-    use crate::leaf15::LeafNode15;
+    use crate::alloc15::SeizeAllocator;
+    use crate::policy::ArcPolicy;
 
     // Create via with_allocator
-    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
-    let tree: MassTreeGeneric<
-        LeafValue<u64>,
-        LeafNode15<LeafValue<u64>>,
-        SeizeAllocator15<LeafValue<u64>>,
-    > = MassTreeGeneric::with_allocator(alloc);
+    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let tree: MassTreeGeneric<ArcPolicy<u64>, SeizeAllocator<ArcPolicy<u64>>> =
+        MassTreeGeneric::with_allocator(alloc);
 
     assert!(tree.is_empty());
     assert_eq!(tree.len(), 0);
@@ -1368,15 +1365,12 @@ fn test_masstree_generic_new_is_empty() {
 
 #[test]
 fn test_masstree_generic_debug() {
-    use crate::alloc15::SeizeAllocator15;
-    use crate::leaf15::LeafNode15;
+    use crate::alloc15::SeizeAllocator;
+    use crate::policy::ArcPolicy;
 
-    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
-    let tree: MassTreeGeneric<
-        LeafValue<u64>,
-        LeafNode15<LeafValue<u64>>,
-        SeizeAllocator15<LeafValue<u64>>,
-    > = MassTreeGeneric::with_allocator(alloc);
+    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let tree: MassTreeGeneric<ArcPolicy<u64>, SeizeAllocator<ArcPolicy<u64>>> =
+        MassTreeGeneric::with_allocator(alloc);
 
     let debug_str = format!("{tree:?}");
     assert!(debug_str.contains("MassTreeGeneric"));
@@ -1385,15 +1379,12 @@ fn test_masstree_generic_debug() {
 
 #[test]
 fn test_masstree_generic_guard() {
-    use crate::alloc15::SeizeAllocator15;
-    use crate::leaf15::LeafNode15;
+    use crate::alloc15::SeizeAllocator;
+    use crate::policy::ArcPolicy;
 
-    let alloc: SeizeAllocator15<LeafValue<u64>> = SeizeAllocator15::new();
-    let tree: MassTreeGeneric<
-        LeafValue<u64>,
-        LeafNode15<LeafValue<u64>>,
-        SeizeAllocator15<LeafValue<u64>>,
-    > = MassTreeGeneric::with_allocator(alloc);
+    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let tree: MassTreeGeneric<ArcPolicy<u64>, SeizeAllocator<ArcPolicy<u64>>> =
+        MassTreeGeneric::with_allocator(alloc);
 
     // Just verify guard creation doesn't panic
     let _guard = tree.guard();
@@ -1406,9 +1397,8 @@ fn test_masstree_generic_guard() {
 fn _assert_masstree_generic_send_sync()
 where
     MassTreeGeneric<
-        LeafValue<u64>,
-        crate::leaf15::LeafNode15<LeafValue<u64>>,
-        crate::alloc15::SeizeAllocator15<LeafValue<u64>>,
+        crate::policy::ArcPolicy<u64>,
+        crate::alloc15::SeizeAllocator<crate::policy::ArcPolicy<u64>>,
     >: Send + Sync,
 {
 }

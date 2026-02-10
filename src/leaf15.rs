@@ -1,35 +1,35 @@
 //! Filepath: src/leaf15.rs
 //!
-//! Leaf node for [`crate::MassTree`] with WIDTH=15 (15 slots).
+//! Unified leaf node for [`crate::MassTree`] with WIDTH=15 (15 slots).
 //!
-//! This module provides [`LeafNode15`], a leaf node using 15 slots with a u64
-//! permutation field ([`AtomicPermuter15`]).
+//! This module provides [`LeafNode15<P>`], a leaf node parameterized over a
+//! [`LeafPolicy`] that determines how values and suffixes are stored.
 //!
 //! # Design
 //!
 //! The 15-slot design requires 4 bits per slot (values 0-14).
 //! Total: 4 (size) + 15×4 (slots) = 64 bits, fitting in u64.
 //!
-//! # Naming Convention
+//! # Policies
 //!
-//! The "15" in `LeafNode15` refers to the slot count (WIDTH=15), matching the
-//! internode width. See `leaf24.rs` for the WIDTH=24 variant.
+//! | Policy | Leaf Size | Cache Lines | Use Case |
+//! |--------|-----------|-------------|----------|
+//! | `ArcPolicy<V>` | 448 bytes | 7 | General-purpose, non-Copy values |
+//! | `InlinePolicy<V>` (default) | 1152 bytes | 18 | Embedded suffix, zero-indirection |
+//! | `InlinePolicy<V>` + `small-suffix-capacity` | 896 bytes | 14 | Smaller embedded suffix |
+//! | `InlinePolicy<V>` + `sidecar-suffix` | 576 bytes | 9 | Compact leaves, pointer-indirect |
 
 use seize::LocalGuard;
-use static_assertions::const_assert_eq;
 use std::array as StdArray;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
-use std::marker::PhantomData;
+use std::hint as StdHint;
 use std::mem as StdMem;
 use std::ptr as StdPtr;
-use std::sync::Arc;
-use std::sync::atomic::{self as StdAtomic, Ordering as AtomicOrdering};
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
+use std::sync::atomic as StdAtomic;
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering as AtomicOrdering};
 
-use crate::LeafValue;
-use crate::TreeLeafNode;
-// Note: AllocError/AllocResult removed - allocations are now infallible
+use crate::Linker;
 use crate::internode::InternodeNode;
 use crate::key::IKEY_SIZE;
 use crate::key::Key;
@@ -37,20 +37,17 @@ use crate::ksearch::scalar::Scalar;
 use crate::leaf_trait::LayerCapableLeaf;
 use crate::leaf_trait::SplitInsertData;
 use crate::leaf_trait::SplitInsertResult;
+use crate::leaf_trait::TreeLeafNode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use crate::permuter::{AtomicPermuter15, Permuter15};
-use crate::prefetch::{prefetch_read, prefetch_write};
-use crate::slot::ValueSlot;
-use crate::suffix::{SuffixBag, SuffixSidecar};
+use crate::policy::{LeafPolicy, RetireHandle, SlotKind, SlotState, SuffixStore, ValueArray};
+use crate::prefetch::prefetch_read;
 use crate::value::InsertTarget;
 use crate::value::SplitPoint;
-use crate::{Linker, Permuter};
 use seize::Guard;
 
 mod layout;
-mod sidecar;
-mod value_traits;
 
 #[cfg(test)]
 mod unit_tests;
@@ -94,107 +91,54 @@ pub const MODSTATE_DELETED_LAYER: u8 = 2;
 /// Empty nodes can be reused by insert or cleaned up by background task.
 pub const MODSTATE_EMPTY: u8 = 3;
 
-/// Leaf node with 15 slots using u64 permutation.
+/// B-link leaf node with 15 slots, parameterized over [`LeafPolicy`].
 ///
-/// # Concurrency Model
+/// `P` controls value storage (Arc vs inline), suffix storage (sidecar vs
+/// embedded), and whether value retirement is needed. All structural
+/// operations are implemented once regardless of policy.
 ///
-/// Uses optimistic concurrency control (OCC) via [`NodeVersion`] for readers,
-/// and lock-based writes. The [`AtomicPermuter15`] permutation field enables
-/// lock-free slot ordering updates.
+/// # Layout
 ///
-/// # Memory Layout (448 bytes, 7 cache lines)
-///
-/// With the suffix sidecar design, suffix storage is heap-allocated
-/// lazily, reducing the base node size by 42%.
-///
-/// ```text
-/// Offset   Size   Field
-/// ------   ----   -----
-/// 0        4B     version (NodeVersion)
-/// 4        1B     modstate
-/// 5        55B    _pad0 (cache line isolation)
-/// 64       8B     permutation (AtomicPermuter15)
-/// 72       56B    _pad1 (cache line isolation)
-/// 128      120B   ikey0[15] (15 × 8B)
-/// 248      15B    keylenx[15]
-/// 263      1B     implicit padding
-/// 264      120B   leaf_values[15] (15 × 8B)
-/// 384      8B     suffix_sidecar (AtomicPtr, lazy)
-/// 392      8B     next
-/// 400      8B     prev
-/// 408      8B     parent
-/// 416      32B    tail padding (align to 64B)
-/// ```
+/// `repr(C, align(64))`: cache-line aligned. Fields are ordered to isolate
+/// contention — version (CL0) and permutation (CL1) live on separate cache
+/// lines. Size: 448B with `ArcPolicy`, 896B with `InlinePolicy`.
 #[repr(C, align(64))]
-pub struct LeafNode15<S: ValueSlot> {
-    // ========================================================================
-    // Cache Line 0: Version + metadata (read-heavy, rarely written)
-    // ========================================================================
-    /// Version for optimistic concurrency control.
+pub struct LeafNode15<P: LeafPolicy> {
+    // — Cache Line 0: read-heavy, rarely written —
+    /// OCC version word.
     version: NodeVersion,
-
-    /// Modification state for coordinating insert/remove operations.
-    /// - 0 = `MODSTATE_INSERT` (default, normal operation)
-    /// - 1 = `MODSTATE_REMOVE` (being removed)
-    /// - 2 = `MODSTATE_DELETED_LAYER` (sublayer was gc'd)
-    /// - 3 = `MODSTATE_EMPTY` (all keys removed, can be reused)
+    /// Lifecycle state: INSERT(0) / REMOVE(1) / DELETED_LAYER(2) / EMPTY(3).
     modstate: AtomicU8,
-
-    /// Padding to fill cache line 0 and separate version from permutation.
-    ///
-    /// **Purpose**: Eliminate false sharing between `version` and `permutation`.
-    /// - `version` is CAS'd during splits (infrequent)
-    /// - `permutation` is CAS'd on every CAS insert (frequent)
     _pad0: [u8; 55],
 
-    // ========================================================================
-    // Cache Line 1: Permutation (CAS-heavy, isolated for performance)
-    // ========================================================================
-    /// Permutation using u64 for 15-slot support.
-    /// Store is linearization point for new slot visibility.
+    // — Cache Line 1: CAS-heavy, isolated —
+    /// Logical→physical slot mapping. CAS is the insert linearization point.
     permutation: AtomicPermuter15,
-
-    /// Padding to fill cache line 1.
-    /// u64 = 8 bytes, so need 64 - 8 = 56 bytes padding.
     _pad1: [u8; 56],
 
-    // ========================================================================
-    // Cache Lines 2+: Keys and values (read during search, written on insert)
-    // ========================================================================
-    /// 8-byte keys for each slot.
+    // — Cache Lines 2+: keys —
+    /// First 8 bytes of each key.
     ikey0: [AtomicU64; WIDTH_15],
-
-    /// Key length/type for each slot.
-    /// Values 0-8: inline key length
-    /// Value 64: has suffix
-    /// Value ≥128: is layer
+    /// Key discriminator: 0–8 = inline length, 64 = has suffix, ≥128 = layer.
     keylenx: [AtomicU8; WIDTH_15],
 
-    /// Values/layer pointers for each slot.
-    /// Stores `Arc<V>` raw pointer or layer pointer as `*mut u8`.
-    /// Type is determined by keylenx: if < `LAYER_KEYLENX` → `Arc<V>`, else → layer node.
-    leaf_values: [AtomicPtr<u8>; WIDTH_15],
+    // — Policy-specific storage —
+    /// Terminal values / layer pointers (layout determined by `P::Values`).
+    values: P::Values,
+    /// Key suffix storage (layout determined by `P::Suffix`).
+    suffix: P::Suffix,
 
-    /// Suffix storage sidecar (heap-allocated, lazy).
-    /// NULL when no suffixes have been assigned.
-    suffix_sidecar: AtomicPtr<SuffixSidecar>,
-
-    /// Next leaf with mark bit in LSB for split coordination.
+    // — Navigation —
+    /// Next leaf (LSB = split mark).
     next: AtomicPtr<Self>,
-
     /// Previous leaf.
     prev: AtomicPtr<Self>,
-
     /// Parent internode.
     parent: AtomicPtr<u8>,
-
-    /// Phantom for slot type.
-    _marker: PhantomData<S>,
 }
 
-impl<S: ValueSlot> StdFmt::Debug for LeafNode15<S> {
+impl<P: LeafPolicy> StdFmt::Debug for LeafNode15<P> {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
-        // SAFETY: Debug impl - parent pointer is stable during formatting.
         f.debug_struct("LeafNode15")
             .field("size", &self.size())
             .field("is_root", &self.version.is_root())
@@ -206,11 +150,7 @@ impl<S: ValueSlot> StdFmt::Debug for LeafNode15<S> {
     }
 }
 
-// Compile-time layout verification.
-// LeafNode15 must be cache-line aligned (64 bytes) for optimal performance.
-const_assert_eq!(StdMem::align_of::<LeafNode15<LeafValue<u64>>>(), 64);
-
-impl<S: ValueSlot> LeafNode15<S> {
+impl<P: LeafPolicy> LeafNode15<P> {
     // ============================================================================
     //  Constructor Methods
     // ============================================================================
@@ -231,18 +171,17 @@ impl<S: ValueSlot> LeafNode15<S> {
             _pad1: [0; 56],
             ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             keylenx: StdArray::from_fn(|_| AtomicU8::new(0)),
-            leaf_values: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-            suffix_sidecar: AtomicPtr::new(StdPtr::null_mut()), // Lazy allocation
+            values: P::Values::new(),
+            suffix: P::Suffix::new(),
             next: AtomicPtr::new(StdPtr::null_mut()),
             prev: AtomicPtr::new(StdPtr::null_mut()),
             parent: AtomicPtr::new(StdPtr::null_mut()),
-            _marker: PhantomData,
         }
     }
 
     /// Initialize a leaf node directly at the given pointer.
     ///
-    /// This avoids stack allocation and copy by writing directly to the destination.
+    /// Avoids stack allocation and copy by writing directly to the destination.
     /// Used by pool allocators for maximum performance.
     ///
     /// # Safety
@@ -256,11 +195,13 @@ impl<S: ValueSlot> LeafNode15<S> {
         // - We have exclusive access to the memory
         // - All writes are to properly aligned fields
         unsafe {
-            // Zero the entire struct first (most fields are zero-initialized)
+            // Zero the entire struct first (most fields are zero-initialized).
+            // For ArcPolicy, zero = null pointers (empty slots).
+            // For InlinePolicy, zero = null tags (empty slots) + zero bits.
+            // For SidecarSuffix, zero = null sidecar pointer (both policies).
             StdPtr::write_bytes(ptr, 0, 1);
 
-            // Now write the non-zero fields
-            let node = &mut *ptr;
+            let node: &mut LeafNode15<P> = &mut *ptr;
 
             // Version: leaf node, optionally root
             StdPtr::write(&raw mut node.version, NodeVersion::new(true));
@@ -273,6 +214,12 @@ impl<S: ValueSlot> LeafNode15<S> {
 
             // Permutation: empty
             StdPtr::write(&raw mut node.permutation, AtomicPermuter15::new());
+
+            // NOTE: values and suffix fields are correctly zero-initialized:
+            // - ArcValueArray: all AtomicPtr null (zero)
+            // - InlineValueArray: all AtomicPtr null + all AtomicU64 zero
+            // - SidecarSuffix: AtomicPtr null (zero) — no-op init:
+            P::Suffix::init_at_zero(StdPtr::addr_of_mut!((*ptr).suffix));
         }
     }
 
@@ -291,15 +238,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// Convert this leaf into a layer root.
-    ///
-    /// Sets up the node to serve as the root of a sub-layer:
-    /// - Sets parent pointer to null
-    /// - Marks version as root
-    ///
-    /// NOTE: This matches `LeafNode::make_layer_root` in `src/leaf/layer.rs`.
-    ///
-    /// SAFETY: Caller must ensure this node is not currently part of another tree
-    /// structure, or that appropriate synchronization is in place.
     #[inline(always)]
     pub fn make_layer_root(&self) {
         self.set_parent(StdPtr::null_mut());
@@ -307,15 +245,486 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// Create a new leaf node configured as a layer root.
-    ///
-    /// Used when creating sublayers for keys longer than 8 bytes.
     #[inline]
     #[must_use]
     pub fn new_layer_root() -> Box<Self> {
         let node: Box<Self> = Self::new();
         node.make_layer_root();
-
         node
+    }
+
+    /// Inherent alias for [`TreeLeafNode::new_boxed`].
+    ///
+    /// Allows calling `LeafNode15::<P>::new_boxed()` without importing the trait.
+    #[inline(always)]
+    #[must_use]
+    pub fn new_boxed() -> Box<Self> {
+        Self::new()
+    }
+
+    /// Inherent alias for [`TreeLeafNode::new_root_boxed`].
+    ///
+    /// Allows calling `LeafNode15::<P>::new_root_boxed()` without importing the trait.
+    #[inline(always)]
+    #[must_use]
+    pub fn new_root_boxed() -> Box<Self> {
+        Self::new_root()
+    }
+
+    /// Inherent alias for [`TreeLeafNode::new_layer_root_boxed`].
+    ///
+    /// Allows calling `LeafNode15::<P>::new_layer_root_boxed()` without importing the trait.
+    #[inline(always)]
+    #[must_use]
+    pub fn new_layer_root_boxed() -> Box<Self> {
+        Self::new_layer_root()
+    }
+
+    /// Node width (number of slots). Matches [`TreeLeafNode::WIDTH`].
+    pub const WIDTH: usize = WIDTH_15;
+
+    // ========================================================================
+    //  Value Operations (delegate to P::Values)
+    // ========================================================================
+
+    /// Load the terminal value at a slot.
+    #[inline(always)]
+    pub fn load_value(&self, slot: usize) -> Option<P::Output> {
+        self.values.load(slot)
+    }
+
+    /// Store a terminal value at a slot.
+    #[inline(always)]
+    pub fn store_value(&self, slot: usize, output: &P::Output) {
+        self.values.store(slot, output);
+    }
+
+    /// Store a terminal value with Relaxed ordering.
+    #[inline(always)]
+    pub fn store_value_relaxed(&self, slot: usize, output: &P::Output) {
+        self.values.store_relaxed(slot, output);
+    }
+
+    /// Update an existing terminal value in place, returning a retire handle.
+    #[inline(always)]
+    pub fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle {
+        self.values.update_in_place(slot, output)
+    }
+
+    /// Take the terminal value from a slot, leaving it empty.
+    #[inline(always)]
+    pub fn take_value(&self, slot: usize) -> Option<P::Output> {
+        self.values.take(slot)
+    }
+
+    /// Load the layer pointer at a slot.
+    #[inline(always)]
+    pub fn load_layer(&self, slot: usize) -> *mut u8 {
+        self.values.load_layer(slot)
+    }
+
+    /// Store a layer pointer at a slot.
+    ///
+    /// Caller must also set `keylenx >= LAYER_KEYLENX`.
+    #[inline(always)]
+    pub fn store_layer(&self, slot: usize, ptr: *mut u8) {
+        self.values.store_layer(slot, ptr);
+    }
+
+    /// Take the value at a slot when converting it to a layer pointer.
+    #[inline(always)]
+    pub fn take_value_for_layer(&self, slot: usize) -> RetireHandle {
+        P::take_value_for_layer(&self.values, slot)
+    }
+
+    /// Prefetch the value at a slot to hide memory latency.
+    ///
+    /// For Arc: prefetches the heap allocation behind the pointer.
+    /// For inline: no-op (value is already in the leaf's cache lines).
+    #[inline(always)]
+    pub fn prefetch_value(&self, slot: usize) {
+        P::prefetch_value(&self.values, slot);
+    }
+
+    /// Load the typed value pointer at a slot.
+    ///
+    /// Returns a `*const P::Value` pointing to the underlying data.
+    /// For Arc: returns the pointer to the heap-allocated `V`.
+    /// For inline: not meaningful (compile-time prevented by `RefPolicy` gating).
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure the slot contains a terminal value, not a layer.
+    #[inline(always)]
+    pub unsafe fn load_value_ptr(&self, slot: usize) -> *const P::Value {
+        unsafe { P::load_value_ptr(&self.values, slot) }
+    }
+
+    /// Check if a slot is empty (no value, no layer).
+    #[inline(always)]
+    pub fn is_slot_empty(&self, slot: usize) -> bool {
+        self.values.is_empty(slot)
+    }
+
+    /// Check if a slot has no value stored.
+    ///
+    /// Alias for [`is_slot_empty`](Self::is_slot_empty). Phase 3 tree code
+    /// uses this name for clarity in value-centric contexts.
+    #[inline(always)]
+    pub fn is_value_empty(&self, slot: usize) -> bool {
+        self.is_slot_empty(slot)
+    }
+
+    /// Update an existing terminal value in place (alias).
+    ///
+    /// Alias for [`update_value_in_place`](Self::update_value_in_place).
+    /// Phase 3 tree code uses this shorter name.
+    #[inline(always)]
+    pub fn update_in_place(&self, slot: usize, value: &P::Output) -> RetireHandle {
+        self.update_value_in_place(slot, value)
+    }
+
+    /// Load the raw layer pointer at a slot.
+    ///
+    /// Alias for [`load_layer`](Self::load_layer). Phase 3 tree code uses
+    /// this name to communicate that the return type is a raw `*mut u8`.
+    #[inline(always)]
+    pub fn load_layer_raw(&self, slot: usize) -> *mut u8 {
+        self.load_layer(slot)
+    }
+
+    /// Load the raw value pointer at a slot without interpretation.
+    #[inline(always)]
+    pub fn load_value_raw(&self, slot: usize) -> *mut u8 {
+        self.values.load_raw(slot)
+    }
+
+    /// Clear a slot's value and keylenx.
+    #[inline(always)]
+    pub fn clear_slot(&self, slot: usize) {
+        debug_assert!(slot < WIDTH_15, "clear_slot: slot out of bounds");
+        self.values.clear(slot);
+        self.keylenx[slot].store(0, WRITE_ORD);
+    }
+
+    /// Clear a slot's value, keylenx, and permutation entry.
+    ///
+    /// Atomically removes the slot from the visible permutation and clears
+    /// its data. Used during remove operations.
+    #[inline(always)]
+    pub fn clear_slot_and_permutation(&self, slot: usize) {
+        debug_assert!(
+            slot < WIDTH_15,
+            "clear_slot_and_permutation: slot out of bounds"
+        );
+        let mut perm: Permuter15 = self.permutation();
+        perm.remove_slot(slot);
+        self.set_permutation(perm);
+        self.clear_slot(slot);
+    }
+
+    // ========================================================================
+    //  Slot Classification
+    // ========================================================================
+
+    /// Classify a slot's contents, extracting the value if present.
+    #[inline(always)]
+    pub fn classify_slot(&self, slot: usize) -> SlotKind<P::Output> {
+        debug_assert!(slot < WIDTH_15, "classify_slot: slot out of bounds");
+
+        let klx: u8 = self.keylenx[slot].load(READ_ORD);
+
+        if klx >= LAYER_KEYLENX {
+            // Layer pointer
+            let ptr: *mut u8 = self.values.load_layer(slot);
+            return SlotKind::Layer(ptr);
+        }
+
+        // Terminal value or empty — delegate to value array
+        self.values
+            .load(slot)
+            .map_or_else(|| SlotKind::Empty, SlotKind::Value)
+    }
+
+    /// Lightweight slot classification without value extration.
+    #[inline(always)]
+    pub fn classify_slot_light(&self, slot: usize) -> SlotState {
+        debug_assert!(slot < WIDTH_15, "classify_slot_light: slot out of bounds");
+
+        let klx: u8 = self.keylenx[slot].load(READ_ORD);
+
+        if klx >= LAYER_KEYLENX {
+            let ptr: *mut u8 = self.values.load_layer(slot);
+            return SlotState::Layer(ptr);
+        }
+
+        if self.values.is_empty(slot) {
+            SlotState::Empty
+        } else {
+            SlotState::Value
+        }
+    }
+
+    // ========================================================================
+    //  Value Move (for split operations)
+    // ========================================================================
+
+    /// Move a slot's value from this leaf to another leaf.
+    #[inline(always)]
+    pub fn move_value_to(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
+        self.values.move_slot(&dst.values, src_slot, dst_slot);
+    }
+
+    /// Clear a slot's value storage (without touching keylenx).
+    #[inline(always)]
+    pub fn clear_value(&self, slot: usize) {
+        self.values.clear(slot);
+    }
+
+    // ========================================================================
+    //  Suffix Read Operations (OCC-safe, no lock required)
+    // ========================================================================
+
+    /// Get the suffix bytes for a slot.
+    #[must_use]
+    #[inline(always)]
+    pub fn ksuf(&self, slot: usize) -> Option<&[u8]> {
+        debug_assert!(slot < WIDTH_15, "ksuf: slot {slot} out of bounds");
+
+        if !self.has_ksuf(slot) {
+            return None;
+        }
+
+        self.suffix.get(slot)
+    }
+
+    /// Get the suffix bytes for a slot, or an empty slice if none.
+    #[must_use]
+    #[inline(always)]
+    pub fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
+        self.ksuf(slot).unwrap_or(&[])
+    }
+
+    /// Check if a slot's suffix equals the given bytes.
+    #[must_use]
+    #[inline(always)]
+    pub fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
+        debug_assert!(slot < WIDTH_15, "ksuf_equals: slot {slot} out of bounds");
+
+        self.ksuf(slot)
+            .map_or_else(|| suffix.is_empty(), |stored: &[u8]| stored == suffix)
+    }
+
+    /// Compare a slot's suffix with the given bytes.
+    #[must_use]
+    #[inline(always)]
+    pub fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering> {
+        debug_assert!(slot < WIDTH_15, "ksuf_compare: slot {slot} out of bounds");
+
+        self.ksuf(slot).map(|stored| stored.cmp(suffix))
+    }
+
+    /// Check if a slot's full key matches the given ikey + suffix.
+    #[must_use]
+    #[inline(always)]
+    pub fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
+        debug_assert!(slot < WIDTH_15, "ksuf_matches: slot {slot} out of bounds");
+
+        if self.ikey(slot) != ikey {
+            return false;
+        }
+
+        if suffix.is_empty() {
+            !self.has_ksuf(slot)
+        } else {
+            self.ksuf_equals(slot, suffix)
+        }
+    }
+
+    /// Match a slot against a key suffix, returning a result code.
+    ///
+    /// Returns:
+    /// - `MATCH_RESULT_EXACT` (1): exact key match
+    /// - `MATCH_RESULT_MISMATCH` (0): same ikey, different full key
+    /// - `MATCH_RESULT_LAYER` (-8): slot is a layer pointer
+    #[must_use]
+    #[inline(always)]
+    pub fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
+        debug_assert!(
+            slot < WIDTH_15,
+            "ksuf_match_result: slot {slot} out of bounds"
+        );
+
+        let stored_keylenx: u8 = self.keylenx(slot);
+
+        if Self::keylenx_is_layer(stored_keylenx) {
+            return MATCH_RESULT_LAYER;
+        }
+
+        if stored_keylenx != KSUF_KEYLENX {
+            if stored_keylenx == keylenx && suffix.is_empty() {
+                return MATCH_RESULT_EXACT;
+            }
+
+            return MATCH_RESULT_MISMATCH;
+        }
+
+        if suffix.is_empty() {
+            return MATCH_RESULT_MISMATCH;
+        }
+
+        i32::from(self.ksuf_equals(slot, suffix))
+    }
+
+    // ========================================================================
+    //  Suffix Write Operations (lock required)
+    // ========================================================================
+
+    /// Assign a suffix to a slot.
+    ///
+    /// # Safety
+    /// - Caller must hold the leaf lock.
+    /// - `guard` must come from this tree's collector.
+    #[inline(always)]
+    pub unsafe fn assign_ksuf(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &LocalGuard<'_>,
+    ) -> *mut u8 {
+        debug_assert!(slot < WIDTH_15, "assign_ksuf: slot {slot} out of bounds");
+        debug_assert!(
+            self.version.is_locked() || self.version.is_unpublished(),
+            "assign_ksuf: caller must hold lock or node must be unpublished"
+        );
+
+        if suffix.is_empty() {
+            return StdPtr::null_mut();
+        }
+
+        let perm: Permuter15 = self.permutation();
+
+        // Delegate to suffix store — it handles inline/external/drain logic.
+        // SAFETY: Caller holds lock.
+        let retire_ptr: *mut u8 = unsafe { self.suffix.assign(slot, suffix, &perm, guard) };
+
+        // CRITICAL: Publish suffix presence AFTER bytes are written.
+        // Readers check keylenx with Acquire, which synchronizes with this
+        // Release store, ensuring suffix bytes are visible.
+        self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+
+        retire_ptr
+    }
+
+    /// Assign a suffix during node initialization (sequential slots 0..slot).
+    ///
+    /// Unlike `assign_ksuf`, this does not return a retire pointer because
+    /// the suffix store handles retirement internally during init.
+    ///
+    /// # Safety
+    /// Same as `assign_ksuf`.
+    #[inline(always)]
+    pub unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+        debug_assert!(
+            slot < WIDTH_15,
+            "assign_ksuf_init: slot {slot} out of bounds"
+        );
+        debug_assert!(
+            self.version.is_locked() || self.version.is_unpublished(),
+            "assign_ksuf_init: caller must hold lock or node must be unpublished"
+        );
+
+        if suffix.is_empty() {
+            return;
+        }
+
+        // SAFETY: Caller holds lock.
+        unsafe { self.suffix.assign_init(slot, suffix, guard) };
+
+        // Publish suffix presence.
+        self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+    }
+
+    /// Assign a suffix using a pre-allocated buffer.
+    ///
+    /// # Safety
+    /// Same as `assign_ksuf`.
+    #[inline(always)]
+    pub unsafe fn assign_ksuf_prealloc(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &LocalGuard<'_>,
+        prealloc: Vec<u8>,
+    ) -> *mut u8 {
+        debug_assert!(
+            slot < WIDTH_15,
+            "assign_ksuf_prealloc: slot {slot} out of bounds"
+        );
+        debug_assert!(
+            self.version.is_locked() || self.version.is_unpublished(),
+            "assign_ksuf_prealloc: caller must hold lock or node must be unpublished"
+        );
+
+        if suffix.is_empty() {
+            return StdPtr::null_mut();
+        }
+
+        let perm: Permuter15 = self.permutation();
+
+        // SAFETY: Caller holds lock.
+        let retire_ptr: *mut u8 = unsafe {
+            self.suffix
+                .assign_prealloc(slot, suffix, &perm, guard, prealloc)
+        };
+
+        self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
+
+        retire_ptr
+    }
+
+    /// Retire a suffix bag pointer returned by `assign_ksuf`.
+    ///
+    /// # Safety
+    /// `ptr` must have come from `assign_ksuf` and must not be null.
+    #[inline(always)]
+    pub unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // SAFETY: Delegate to suffix store's static retire method.
+        unsafe { P::Suffix::retire_bag_ptr(ptr, guard) };
+    }
+
+    /// Clear a slot's suffix.
+    ///
+    /// # Safety
+    /// Caller must hold the leaf lock.
+    #[inline(always)]
+    pub unsafe fn clear_ksuf(&self, slot: usize, guard: &LocalGuard<'_>) {
+        debug_assert!(slot < WIDTH_15, "clear_ksuf: slot {slot} out of bounds");
+        debug_assert!(
+            self.version.is_locked(),
+            "clear_ksuf: caller must hold lock"
+        );
+
+        // SAFETY: Caller holds lock.
+        unsafe { self.suffix.clear(slot, guard) };
+
+        self.keylenx[slot].store(0, WRITE_ORD);
+    }
+
+    /// Check if external (overflow) suffix storage has been allocated.
+    #[inline(always)]
+    pub fn has_external_ksuf(&self) -> bool {
+        self.suffix.has_external()
+    }
+
+    /// Pre-allocate external overflow storage.
+    ///
+    /// # Safety
+    /// Caller must hold the leaf lock.
+    #[inline(always)]
+    pub unsafe fn ensure_external_ksuf(&self) -> *mut crate::suffix::SuffixBag {
+        // SAFETY: Caller holds lock.
+        unsafe { self.suffix.ensure_external() }
     }
 
     // ============================================================================
@@ -359,7 +768,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Get the ikey at the given physical slot using Relaxed ordering.
     ///
     /// # Safety Justification
-    ///
     /// Safe to use Relaxed when:
     /// 1. Caller has already loaded permutation with Acquire ordering, which
     ///    synchronizes with the writer's Release fence after modifications
@@ -397,12 +805,9 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Set the ikey at the given physical slot using Relaxed ordering.
     ///
     /// # Safety Preconditions
-    ///
     /// Only safe when writing to a node that is:
     /// - Not yet visible to other threads (during split setup), AND
     /// - Protected by version lock on the source node
-    ///
-    /// See `set_keylenx_relaxed` for ordering justification.
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
@@ -416,15 +821,7 @@ impl<S: ValueSlot> LeafNode15<S> {
 
     /// Prefetch the ikey at the given slot into CPU cache.
     ///
-    /// This is used during linear search to hide memory latency by
-    /// prefetching future ikeys while processing current ones.
-    ///
-    /// # Arguments
-    ///
-    /// * `slot` - Physical slot index `(0..WIDTH_15)`
-    ///
     /// # Safety
-    ///
     /// The slot must be in range `[0, WIDTH_15)`. No bounds check in release mode.
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "Caller ensures slot is valid")]
@@ -434,108 +831,44 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// Prefetch leaf node data for range scans.
-    ///
-    /// Brings the node's key arrays (`ikey0`, `keylenx`) and value pointers
-    /// (`leaf_values`) into CPU cache before they're accessed, reducing memory
-    /// latency during sequential scanning.
-    ///
-    /// # Memory Layout (WIDTH=15)
-    ///
-    /// ```text
-    /// Offset   Size    Field
-    /// ------   ----    -----
-    /// 0        64B     Cache line 0: version + modstate + padding
-    /// 64       64B     Cache line 1: permutation + padding
-    /// 128      120B    ikey0 (15 × 8B, ~2 cache lines)
-    /// 248      15B     keylenx (15 × 1B)
-    /// 264      120B    leaf_values (15 × 8B, ~2 cache lines)
-    /// ```
-    ///
-    /// # C++ Reference
-    ///
-    /// Matches C++ `leaf::prefetch()` pattern from `masstree_scan.hh:195, 299`.
     #[inline(always)]
     pub fn prefetch(&self) {
         let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
-
-        // Prefetch ikey0 array (starts at offset 128, spans 2 cache lines)
-        // Skip cache lines 0-1 (version/permutation) - already accessed
-        // SAFETY: self_ptr is derived from a valid reference, and offsets are within struct bounds.
+        // SAFETY: self_ptr is derived from a valid reference, offsets are within struct bounds.
         unsafe {
-            prefetch_read(self_ptr.add(128)); // CL2: ikey0[0..7]
-            prefetch_read(self_ptr.add(192)); // CL3: ikey0[8..14] + keylenx[0..6]
-
-            // Prefetch leaf_values array (starts at offset 264, spans 2 cache lines)
-            prefetch_read(self_ptr.add(256)); // CL4: keylenx[7..14] + leaf_values[0..5]
-            prefetch_read(self_ptr.add(320)); // CL5: leaf_values[6..14]
+            prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0)));
+            prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0) + 64));
+            prefetch_read(self_ptr.add(StdMem::offset_of!(Self, values)));
+            prefetch_read(self_ptr.add(StdMem::offset_of!(Self, values) + 64));
         }
     }
 
-    /// Prefetch ikey0 and permutation for point lookups.
-    ///
-    /// Lighter-weight than [`Self::prefetch`] - only fetches the cache lines
-    /// needed for the search loop (permutation + ikeys). Call this before
-    /// `version.stable()` to hide memory latency during version spin-wait.
-    ///
-    /// # Memory Layout (WIDTH=15)
-    ///
-    /// ```text
-    /// Cache Line 1 (64-127):   permutation (8B) + padding - needed for slot ordering
-    /// Cache Line 2 (128-191):  ikey0[0..7] - first 8 ikeys (64B)
-    /// Cache Line 3 (192-247):  ikey0[8..14] - remaining 7 ikeys (56B)
-    /// ```
+    /// Prefetch for point lookup (permutation + keys only).
     #[inline(always)]
     pub fn prefetch_for_search(&self) {
         let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
 
-        // SAFETY: Offsets are within LeafNode15 bounds (448 bytes total).
-        // Prefetch is a hint - invalid addresses cause no fault.
         unsafe {
-            prefetch_read(self_ptr.add(64)); // CL1: permutation
-            prefetch_read(self_ptr.add(128)); // CL2: ikey0[0..7]
-            prefetch_read(self_ptr.add(192)); // CL3: ikey0[8..14]
+            prefetch_read(self_ptr.add(StdMem::offset_of!(Self, permutation)));
+            prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0)));
+            prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0) + 64));
         }
     }
 
-    /// Prefetch ikey0 and permutation adaptively based on node size.
-    ///
-    /// This is a size-aware variant of [`Self::prefetch_for_search`] that
-    /// avoids unnecessary prefetch instructions for small nodes.
-    ///
-    /// # When to Use
-    ///
-    /// - Use `prefetch_for_search()` in tight loops where branch overhead matters
-    /// - Use `prefetch_for_search_adaptive()` when node sizes vary widely
-    ///
-    /// # Memory Layout (WIDTH=15)
-    ///
-    /// ```text
-    /// Cache Line 1 (64-127):   permutation (8B) + padding
-    /// Cache Line 2 (128-191):  ikey0[0..=7] (8 keys, 64B)
-    /// Cache Line 3 (192-255):  ikey0[8..=14] (7 keys, 56B)
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `size` - Number of keys in the node (from permutation)
+    /// Size-aware prefetch: only fetch cache lines that will be accessed.
     #[inline(always)]
     pub fn prefetch_for_search_adaptive(&self, size: usize) {
         let self_ptr: *const u8 = StdPtr::from_ref(self).cast::<u8>();
 
-        // SAFETY: Offsets are within LeafNode15 bounds (448 bytes total).
-        // Prefetch is a hint - invalid addresses cause no fault.
         unsafe {
-            // CL 1: permutation - always needed for slot ordering
-            prefetch_read(self_ptr.add(64));
+            prefetch_read(self_ptr.add(StdMem::offset_of!(Self, permutation)));
 
-            // CL 2: ikey0[0..=7] - needed if we have any keys
             if size > 0 {
-                prefetch_read(self_ptr.add(128));
+                prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0)));
             }
 
-            // CL 3: ikey0[8..=14] - only needed if size > 8
             if size > 8 {
-                prefetch_read(self_ptr.add(192));
+                prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0) + 64));
             }
         }
     }
@@ -553,28 +886,6 @@ impl<S: ValueSlot> LeafNode15<S> {
         self.keylenx[slot].load(READ_ORD)
     }
 
-    /// Get the keylenx at the given physical slot using Relaxed ordering.
-    ///
-    /// # Safety Preconditions
-    ///
-    /// Only safe when:
-    /// - Caller holds version lock (no concurrent writers), OR
-    /// - Node is not yet published (during split setup)
-    ///
-    /// The lock or unpublished state provides synchronization; Acquire ordering
-    /// is not needed for data being copied to a not-yet-visible node.
-    #[must_use]
-    #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot from Permuter15, valid by construction"
-    )]
-    pub(crate) fn keylenx_relaxed(&self, slot: usize) -> u8 {
-        debug_assert!(slot < WIDTH_15, "keylenx_relaxed: slot out of bounds");
-
-        self.keylenx[slot].load(RELAXED)
-    }
-
     /// Set the keylenx at the given physical slot.
     #[inline(always)]
     #[expect(
@@ -588,16 +899,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// Set the keylenx at the given physical slot using Relaxed ordering.
-    ///
-    /// # Safety Preconditions
-    ///
-    /// Only safe when writing to a node that is:
-    /// - Not yet visible to other threads (during split setup), AND
-    /// - Protected by version lock on the source node
-    ///
-    /// The final `set_permutation(Release)` and `set_next(Release)` in
-    /// `link_sibling` establish happens-before with readers that Acquire-load
-    /// those fields.
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
@@ -654,553 +955,11 @@ impl<S: ValueSlot> LeafNode15<S> {
         keylenx == KSUF_KEYLENX
     }
 
-    // ============================================================================
-    //  Suffix Storage Methods
-    // ============================================================================
-
-    /// Get the suffix sidecar pointer (may be null if no suffixes assigned).
+    /// Search all 15 ikeys for matches with target, returning a bitmask.
     #[must_use]
     #[inline(always)]
-    pub fn sidecar_ptr(&self) -> *mut SuffixSidecar {
-        self.suffix_sidecar.load(READ_ORD)
-    }
-
-    /// Check if this leaf has suffix storage allocated.
-    #[must_use]
-    #[inline(always)]
-    pub fn has_sidecar(&self) -> bool {
-        !self.sidecar_ptr().is_null()
-    }
-
-    /// Get suffix for slot, if present.
-    ///
-    /// Returns [`None`] if:
-    /// - Slot does not have [`KSUF_KEYLENX`] set
-    /// - Sidecar is null (invariant violation, but handled gracefully)
-    ///
-    /// # Concurrency
-    ///
-    /// Safe to call concurrently with writers IF:
-    /// 1. Caller obtained version via `stable()` (ensures no DIRTY bits)
-    /// 2. Caller will validate via `has_changed()` after use
-    ///
-    /// The `INSERTING_BIT` must be set by writers before any suffix mutations.
-    ///
-    /// Hot Path: Called during every key comparison for suffix keys.
-    /// Uses `#[inline(always)]` to ensure no function call overhead.
-    #[inline(always)]
-    pub fn ksuf(&self, slot: usize) -> Option<&[u8]> {
-        // Fast path: check keylenx first (most keys don't have suffixes)
-        //
-        // Note: We use Acquire here to synchronize with the writer's Release
-        // store to keylenx that publishes the suffix. This is the primary
-        // publication edge for suffix visibility.
-        if !self.has_ksuf(slot) {
-            return None;
-        }
-
-        // Load sidecar pointer with Acquire to synchronize with allocation
-        let sidecar: *mut SuffixSidecar = self.suffix_sidecar.load(AtomicOrdering::Acquire);
-
-        // DEFENSIVE: Handle null sidecar gracefully instead of UB
-        //
-        // This should never happen if writers follow the protocol:
-        // 1. Allocate sidecar
-        // 2. Write suffix bytes
-        // 3. Store sidecar pointer (Release)
-        // 4. Store keylenx = KSUF_KEYLENX (Release)
-        //
-        // But if invariants are violated (e.g., due to a bug elsewhere),
-        // returning None is safer than dereferencing null.
-        if sidecar.is_null() {
-            // In debug builds, we want to catch this as it indicates a bug
-            debug_assert!(
-                false,
-                "KSUF_KEYLENX set but sidecar is null - publication invariant violated"
-            );
-            return None;
-        }
-
-        // SAFETY: Sidecar is valid (non-null, allocated by us)
-        // The Acquire load above synchronizes with the writer's Release store
-        unsafe { &*sidecar }.get(slot)
-    }
-
-    /// Get suffix for slot, returning empty slice if none.
-    ///
-    /// Hot path: Uses `#[inline(always)]` for search performance.
-    #[inline(always)]
-    pub fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
-        self.ksuf(slot).unwrap_or(&[])
-    }
-
-    /// Assign a suffix to a slot (infallible).
-    ///
-    /// This is the normal path. Allocation is infallible and will abort
-    /// on OOM (standard Rust behavior).
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold leaf lock. Slot must be valid.
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    pub unsafe fn assign_ksuf(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        _guard: &LocalGuard<'_>,
-    ) -> *mut u8 {
-        if suffix.is_empty() {
-            return StdPtr::null_mut();
-        }
-
-        debug_assert!(
-            slot < WIDTH_15,
-            "assign_ksuf: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-        debug_assert!(
-            self.version.is_locked() || self.version.is_unpublished(),
-            "assign_ksuf: caller must hold lock or node must be unpublished"
-        );
-
-        // SAFETY: Caller holds lock
-        let sidecar: &SuffixSidecar = unsafe { &*self.ensure_sidecar() };
-
-        // try_assign returns bool: true = success, false = no capacity
-        if sidecar.inline.try_assign(slot, suffix) {
-            // CRITICAL: Publish suffix presence AFTER bytes are written
-            self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-            return StdPtr::null_mut();
-        }
-
-        // Overflow to external
-        // SAFETY: Caller holds lock
-        unsafe { self.assign_ksuf_slow(slot, suffix) }
-    }
-
-    /// Slow path for suffix assignment: drain inline to external bag.
-    ///
-    /// Returns the old external bag pointer for deferred retirement, or null.
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold lock. Sidecar must already exist.
-    /// Caller must have called `mark_insert()` before any mutations.
-    #[cold]
-    #[inline(never)]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    unsafe fn assign_ksuf_slow(&self, slot: usize, suffix: &[u8]) -> *mut u8 {
-        debug_assert!(
-            self.version.is_locked() || self.version.is_unpublished(),
-            "assign_ksuf_slow: caller must hold lock or node must be unpublished"
-        );
-
-        // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
-        let sidecar: &SuffixSidecar =
-            unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
-
-        let perm = self.permutation();
-
-        // Drain inline to a new external bag with the new suffix.
-        // NOTE: drain_to_external does NOT clear inline state - this is intentional.
-        // The external bag contains all suffixes; inline becomes orphaned metadata.
-        // Allocation is infallible (aborts on OOM).
-        let mut new_bag: SuffixBag = sidecar.inline.drain_to_external(&perm, slot, suffix);
-
-        // Merge with existing external suffixes (if any)
-        let old_ext: *mut SuffixBag = sidecar.external.load(RELAXED);
-        if !old_ext.is_null() {
-            // SAFETY: old_ext is non-null
-            let old_bag: &SuffixBag = unsafe { &*old_ext };
-
-            for i in 0..perm.size() {
-                let s: usize = perm.get(i);
-
-                if s != slot
-                    && let Some(ext_suffix) = old_bag.get(s)
-                {
-                    new_bag.assign(s, ext_suffix);
-                }
-            }
-        }
-
-        // Install new external bag (Release ordering for publication)
-        let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
-        sidecar.external.store(new_ptr, WRITE_ORD);
-
-        // CRITICAL: Publish suffix presence LAST (Release ordering)
-        // This is the linearization point for suffix visibility.
-        self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-
-        // Return old pointer for deferred retirement OUTSIDE the lock.
-        old_ext.cast()
-    }
-
-    /// Retire a suffix bag pointer returned by [`assign_ksuf`](Self::assign_ksuf).
-    ///
-    /// # Safety
-    ///
-    /// - `ptr` must have come from `assign_ksuf` on this leaf type
-    /// - `guard` must be from this tree's collector
-    pub unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
-        let typed: *mut SuffixBag = ptr.cast();
-        // SAFETY: ptr came from Box::into_raw of a SuffixBag
-        unsafe {
-            guard.defer_retire(typed, |ptr, _| {
-                drop(Box::from_raw(ptr));
-            });
-        }
-    }
-
-    /// Assign a suffix during node initialization (e.g., splits).
-    ///
-    /// Unlike `assign_ksuf`, this assumes slots `0..slot` are already filled
-    /// sequentially and doesn't rely on the permutation.
-    ///
-    /// # Safety
-    /// - Caller must hold lock or node must be unpublished
-    /// - `guard` must come from this tree's collector
-    /// - Slots 0..slot must already be filled sequentially
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
-    )]
-    pub unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
-        if suffix.is_empty() {
-            return;
-        }
-
-        debug_assert!(
-            slot < WIDTH_15,
-            "assign_ksuf_init: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-        debug_assert!(
-            self.version.is_locked() || self.version.is_unpublished(),
-            "assign_ksuf_init: caller must hold lock or node must be unpublished"
-        );
-
-        // SAFETY: Caller holds lock
-        let sidecar: &SuffixSidecar = unsafe { &*self.ensure_sidecar() };
-
-        // FAST PATH: Try inline storage first
-        if sidecar.inline.try_assign(slot, suffix) {
-            // CRITICAL: Publish suffix presence AFTER bytes are written
-            self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-            return;
-        }
-
-        // FAST PATH 2: Try external storage in-place (if exists and has room)
-        let ext_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
-        if !ext_ptr.is_null() {
-            let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
-            if bag.try_assign_in_place(slot, suffix) {
-                // NOTE: Do NOT clear inline - suffix immutability invariant means
-                // any existing inline data for this slot is still valid (there isn't any
-                // for a new slot, and we don't update existing suffixes).
-                self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-                return;
-            }
-        }
-
-        // SLOW PATH: Drain inline to external
-        // SAFETY: Caller holds lock
-        unsafe { self.assign_ksuf_init_slow(slot, suffix, guard) };
-    }
-
-    /// Slow path for suffix assignment during initialization.
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold lock. Sidecar must already exist.
-    #[cold]
-    #[inline(never)]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    unsafe fn assign_ksuf_init_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
-        debug_assert!(
-            self.version.is_locked() || self.version.is_unpublished(),
-            "assign_ksuf_init_slow: caller must hold lock or node must be unpublished"
-        );
-
-        // SAFETY: Sidecar exists (ensure_sidecar was called in fast path)
-        let sidecar: &SuffixSidecar =
-            unsafe { &*self.suffix_sidecar.load(AtomicOrdering::Acquire) };
-
-        // Drain inline using sequential slot iteration (0..slot)
-        // NOTE: drain_to_external_init does NOT clear inline state.
-        // Allocation is infallible (aborts on OOM).
-        let mut new_bag: SuffixBag = sidecar.inline.drain_to_external_init(slot, suffix);
-
-        // Merge with existing external suffixes (if any)
-        let old_ext: *mut SuffixBag = sidecar.external.load(RELAXED);
-        if !old_ext.is_null() {
-            let old_bag: &SuffixBag = unsafe { &*old_ext };
-
-            for s in 0..slot {
-                if let Some(ext_suffix) = old_bag.get(s) {
-                    new_bag.assign(s, ext_suffix);
-                }
-            }
-        }
-
-        // Install new external bag (Release ordering for publication)
-        let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
-        sidecar.external.store(new_ptr, WRITE_ORD);
-
-        // Retire old external bag
-        if !old_ext.is_null() {
-            unsafe {
-                guard.defer_retire(old_ext, |ptr, _| {
-                    drop(Box::from_raw(ptr));
-                });
-            }
-        }
-
-        // CRITICAL: Publish suffix presence LAST (Release ordering)
-        // This is the linearization point for suffix visibility.
-        self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
-    }
-
-    /// Clear the suffix from a slot (no allocation needed!).
-    ///
-    /// Marks the slot as empty in both inline and external storage within the
-    /// sidecar. No cloning required.
-    ///
-    /// # Safety
-    /// - Caller must hold lock and have called `mark_insert()`
-    /// - `guard` must come from this tree's collector (unused but kept for API compat)
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
-    )]
-    pub unsafe fn clear_ksuf(&self, slot: usize, _guard: &LocalGuard<'_>) {
-        debug_assert!(
-            slot < WIDTH_15,
-            "clear_ksuf: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-        debug_assert!(
-            self.version.is_locked(),
-            "clear_ksuf: caller must hold lock"
-        );
-
-        // Only clear if sidecar exists
-        let sidecar_ptr: *mut SuffixSidecar = self.suffix_sidecar.load(AtomicOrdering::Acquire);
-        if !sidecar_ptr.is_null() {
-            // SAFETY: sidecar_ptr is non-null, we hold the lock
-            let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
-
-            // Clear from inline storage
-            sidecar.inline.clear(slot);
-
-            // Clear from external storage (if exists)
-            let ext_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
-            if !ext_ptr.is_null() {
-                // SAFETY: ext_ptr is non-null and came from Box::into_raw.
-                // We hold the lock, so we can mutate in place.
-                let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
-                bag.clear(slot);
-            }
-        }
-
-        self.keylenx[slot].store(0, WRITE_ORD);
-    }
-
-    /// Check if a slot's suffix equals the given suffix.
-    #[must_use]
-    #[inline(always)]
-    pub fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
-        debug_assert!(
-            slot < WIDTH_15,
-            "ksuf_equals: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-
-        self.ksuf(slot)
-            .map_or_else(|| suffix.is_empty(), |stored: &[u8]| stored == suffix)
-    }
-
-    /// Compare a slot's suffix with the given suffix.
-    #[must_use]
-    #[inline]
-    pub fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering> {
-        debug_assert!(
-            slot < WIDTH_15,
-            "ksuf_compare: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-
-        self.ksuf(slot).map(|stored| stored.cmp(suffix))
-    }
-
-    /// Check if a slot's key matches the given key.
-    #[must_use]
-    #[inline(always)]
-    pub fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
-        debug_assert!(
-            slot < WIDTH_15,
-            "ksuf_matches: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-
-        if self.ikey(slot) != ikey {
-            return false;
-        }
-
-        if suffix.is_empty() {
-            !self.has_ksuf(slot)
-        } else {
-            self.ksuf_equals(slot, suffix)
-        }
-    }
-
-    /// Match result for layer-aware key comparison.
-    ///
-    /// Returns:
-    /// * [`MATCH_RESULT_EXACT`] (1) - Exact match
-    /// * [`MATCH_RESULT_MISMATCH`] (0) - Same ikey but different key
-    /// * [`MATCH_RESULT_LAYER`] (-8) - Slot is a layer pointer
-    #[must_use]
-    #[inline(always)]
-    pub fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
-        debug_assert!(
-            slot < WIDTH_15,
-            "ksuf_match_result: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-
-        let stored_keylenx: u8 = self.keylenx(slot);
-
-        if Self::keylenx_is_layer(stored_keylenx) {
-            return MATCH_RESULT_LAYER;
-        }
-
-        if !self.has_ksuf(slot) {
-            if stored_keylenx == keylenx && suffix.is_empty() {
-                return MATCH_RESULT_EXACT;
-            }
-
-            return MATCH_RESULT_MISMATCH;
-        }
-
-        if suffix.is_empty() {
-            return MATCH_RESULT_MISMATCH;
-        }
-
-        i32::from(self.ksuf_equals(slot, suffix))
-    }
-
-    /// Compact external suffix storage in-place.
-    ///
-    /// Note: Inline storage doesn't need compaction (fixed size, no fragmentation).
-    /// This only compacts the external bag if it exists.
-    ///
-    /// # Algorithm
-    ///
-    /// Uses true in-place compaction via `copy_within` (memmove):
-    /// - No cloning of the `SuffixBag`
-    /// - No heap allocation during compaction
-    /// - Stack-allocated [`ArrayVec`] for bookkeeping
-    ///
-    /// # Safety
-    ///
-    /// - Caller must hold lock (ensures exclusive access)
-    /// - The `_guard` parameter is kept for API compatibility but unused
-    ///   since we no longer need to retire the old bag
-    #[inline(always)]
-    pub unsafe fn compact_ksuf(
-        &self,
-        exclude_slot: Option<usize>,
-        _guard: &LocalGuard<'_>,
-    ) -> usize {
-        debug_assert!(
-            self.version.is_locked(),
-            "compact_ksuf: caller must hold lock"
-        );
-
-        // Only compact if sidecar exists with external storage
-        let sidecar_ptr: *mut SuffixSidecar = self.suffix_sidecar.load(AtomicOrdering::Acquire);
-        if sidecar_ptr.is_null() {
-            return 0;
-        }
-
-        // SAFETY: sidecar_ptr is non-null, we hold the lock
-        let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
-
-        let bag_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
-        if bag_ptr.is_null() {
-            return 0;
-        }
-
-        // SAFETY: bag_ptr is non-null, we hold the lock (exclusive access)
-        let bag: &mut SuffixBag = unsafe { &mut *bag_ptr };
-        let perm: Permuter = self.permutation();
-
-        // In-place compaction: no clone, no allocation, no retirement needed
-        bag.compact_with_permuter(&perm, exclude_slot)
-    }
-
-    // ============================================================================
-    //  Value Accessors
-    // ============================================================================
-
-    /// Load leaf value pointer at the given slot.
-    #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot from Permuter15; valid by construction"
-    )]
-    pub fn leaf_value_ptr(&self, slot: usize) -> *mut u8 {
-        debug_assert!(slot < WIDTH_15, "leaf_value_ptr: slot out of bounds");
-
-        self.leaf_values[slot].load(READ_ORD)
-    }
-
-    /// Store leaf value pointer at the given slot.
-    #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot from Permuter15; valid by construction"
-    )]
-    pub fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
-        debug_assert!(slot < WIDTH_15, "set_leaf_value_ptr: slot out of bounds");
-
-        self.leaf_values[slot].store(ptr, WRITE_ORD);
-    }
-
-    /// Store leaf value pointer at the given slot using Relaxed ordering.
-    ///
-    /// # Safety Preconditions
-    ///
-    /// Only safe when writing to a node that is:
-    /// - Not yet visible to other threads (during split setup), AND
-    /// - Protected by version lock on the source node
-    ///
-    /// See `set_keylenx_relaxed` for ordering justification.
-    #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot from Permuter15; valid by construction"
-    )]
-    pub(crate) fn set_leaf_value_ptr_relaxed(&self, slot: usize, ptr: *mut u8) {
-        debug_assert!(
-            slot < WIDTH_15,
-            "set_leaf_value_ptr_relaxed: slot out of bounds"
-        );
-
-        self.leaf_values[slot].store(ptr, RELAXED);
-    }
-
-    /// Take the leaf value pointer, leaving null in the slot.
-    #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot from Permuter15; valid by construction"
-    )]
-    pub fn take_leaf_value_ptr(&self, slot: usize) -> *mut u8 {
-        debug_assert!(slot < WIDTH_15, "take_leaf_value_ptr: slot out of bounds");
-
-        self.leaf_values[slot].swap(StdPtr::null_mut(), RELAXED)
-    }
-
-    /// Check if a slot is empty (value pointer is null).
-    #[inline(always)]
-    #[must_use]
-    pub fn is_slot_empty(&self, slot: usize) -> bool {
-        self.leaf_value_ptr(slot).is_null()
+    pub fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
+        Scalar::find_ikey_matches_leaf15(target_ikey, self)
     }
 
     // ============================================================================
@@ -1222,12 +981,7 @@ impl<S: ValueSlot> LeafNode15<S> {
 
     /// Store permutation with Relaxed ordering.
     ///
-    /// Use this when the caller already holds the node lock. The lock's
-    /// Release fence on unlock provides the necessary synchronization,
-    /// so we can skip the Release store here.
-    ///
     /// # Safety
-    ///
     /// Caller must hold the lock on this node. Using Relaxed without the
     /// lock would create a data race with concurrent readers.
     #[inline(always)]
@@ -1242,35 +996,6 @@ impl<S: ValueSlot> LeafNode15<S> {
         self.permutation.load_raw(READ_ORD)
     }
 
-    /// Atomically claim a slot for CAS insert.
-    ///
-    /// # Errors
-    /// Returns error if CAS fails
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
-    pub fn cas_slot_value(
-        &self,
-        slot: usize,
-        expected: *mut u8,
-        new_value: *mut u8,
-    ) -> Result<(), *mut u8> {
-        debug_assert!(slot < WIDTH_15, "cas_slot_value: slot out of bounds");
-
-        match self.leaf_values[slot].compare_exchange(expected, new_value, CAS_SUCCESS, CAS_FAILURE)
-        {
-            Ok(_) => Ok(()),
-            Err(actual) => Err(actual),
-        }
-    }
-
-    /// Load the current value pointer at a slot.
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
-    pub fn load_slot_value(&self, slot: usize) -> *mut u8 {
-        debug_assert!(slot < WIDTH_15, "load_slot_value: slot out of bounds");
-        self.leaf_values[slot].load(READ_ORD)
-    }
-
     /// Store key metadata (`ikey`, `keylenx`) for a CAS insert attempt.
     ///
     /// # Safety
@@ -1278,7 +1003,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     ///   the slot still belongs to the CAS attempt (i.e. `leaf_values[slot]` still equals the
     ///   claimed pointer).
     ///
-    /// Note: writing key metadata *before* claiming the slot is not safe in this design because
+    /// NOTE: writing key metadata *before* claiming the slot is not safe in this design because
     /// multiple concurrent CAS attempts can overwrite each other's metadata before publish.
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
@@ -1317,9 +1042,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     // ============================================================================
 
     /// Get the next leaf pointer, masking the mark bit.
-    ///
-    /// Uses guard protection to ensure the load participates in seize's
-    /// total order, making it safe on all architectures.
     #[must_use]
     #[inline(always)]
     pub fn safe_next(&self, guard: &impl Guard) -> *mut Self {
@@ -1330,7 +1052,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Get the next leaf pointer without guard protection.
     ///
     /// # Safety
-    ///
     /// Caller must ensure the next pointer's target won't be retired during use.
     #[must_use]
     #[inline(always)]
@@ -1352,7 +1073,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Get the raw next pointer without guard protection.
     ///
     /// # Safety
-    ///
     /// Caller must ensure the next pointer's target won't be retired during use.
     #[must_use]
     #[inline(always)]
@@ -1376,10 +1096,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Set the next leaf pointer using Relaxed ordering.
     ///
     /// # Safety Preconditions
-    ///
     /// Only safe when writing to a node that is not yet visible to other threads
-    /// (e.g., during split setup before `link_sibling` publishes it).
-    ///
     /// The subsequent `set_next(Release)` in `link_sibling` ensures visibility.
     #[inline(always)]
     pub(crate) fn set_next_relaxed(&self, next: *mut Self) {
@@ -1397,7 +1114,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Unmark the next pointer.
     ///
     /// # Safety Note
-    ///
     /// Uses unguarded load internally since we're modifying our own field
     /// during a locked operation, not traversing to a different node.
     #[inline(always)]
@@ -1413,9 +1129,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Spins until the next pointer is unmarked, the version is stable,
     /// OR the node is marked as deleted.
     ///
-    /// # Note
-    ///
-    /// A marked next pointer can mean either:
+    /// NOTE: A marked next pointer can mean either:
     /// 1. A split is in progress (will be unmarked when split completes)
     /// 2. An unlink is in progress (leaf being deleted, may stay marked)
     ///
@@ -1446,17 +1160,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// CAS-based lock of the next pointer for split linking.
-    ///
-    /// Marks the next pointer (LSB) to signal a split is in progress.
-    /// Other threads seeing a marked pointer will wait via `wait_for_split`.
-    ///
-    /// Reference: C++ `btree_leaflink.hh:39-56` (`lock_next`)
-    ///
-    /// # Returns
-    /// The unmarked old next pointer (may be null).
-    ///
-    /// # Ordering
-    /// Uses CAS with AcqRel/Acquire ordering to ensure visibility.
     fn lock_next(&self) -> *mut Self {
         loop {
             let next: *mut Self = self.next.load(READ_ORD);
@@ -1474,15 +1177,12 @@ impl<S: ValueSlot> LeafNode15<S> {
                 .compare_exchange(next, marked, CAS_SUCCESS, CAS_FAILURE)
             {
                 Ok(_) => {
-                    // Return UNMARKED old next (may be null). We intentionally mark even
-                    // `NULL` next pointers to avoid two concurrent splits both "seeing"
-                    // `NULL` and racing to publish different siblings, orphaning one.
                     return next;
                 }
+
                 Err(_) => {
                     // CAS failed: someone else updated next, retry immediately.
-                    // This is a fast CAS that typically succeeds on first try.
-                    std::hint::spin_loop();
+                    StdHint::spin_loop();
                 }
             }
         }
@@ -1490,24 +1190,12 @@ impl<S: ValueSlot> LeafNode15<S> {
 
     /// Unlink this leaf from the B-link doubly-linked chain.
     ///
-    /// This is the inverse of `link_sibling`. Used when removing
-    /// an empty leaf from the tree.
-    ///
-    /// # Algorithm (from C++ `btree_leaflink.hh:76-96`)
-    ///
-    /// 1. Lock our next pointer via CAS marking
-    /// 2. CAS prev->next from self to marked(self) to signal unlinking
-    /// 3. Update next->prev = prev
-    /// 4. Release fence for visibility
-    /// 5. Store prev->next = next (unmarked), completing the unlink
-    ///
     /// # Preconditions
     ///
     /// - Self is locked (caller holds version lock)
     /// - Self has a predecessor (`prev` is non-null)
     ///
     /// # Safety
-    ///
     /// - Caller must hold the version lock on this leaf
     /// - `self.prev()` must be non-null (not the leftmost leaf)
     /// - The prev and next pointers must be valid leaves
@@ -1518,10 +1206,6 @@ impl<S: ValueSlot> LeafNode15<S> {
 
         // Step 2: CAS prev->next from self to marked(self)
         // This signals to prev that we're unlinking
-        //
-        // IMPORTANT: We must re-read prev on each iteration because if prev splits,
-        // a new node becomes our predecessor and we need to CAS on that node instead.
-        // (This matches the C++ implementation in btree_leaflink.hh:86-91)
         let self_ptr: *mut Self = StdPtr::from_ref(self).cast_mut();
         let marked_self: *mut Self = Linker::mark_ptr(self_ptr);
 
@@ -1551,9 +1235,8 @@ impl<S: ValueSlot> LeafNode15<S> {
                         // SAFETY: prev is valid
                         unsafe { (*prev).wait_for_split() };
                     }
-                    // Otherwise, prev->next doesn't point to us - prev may have split
-                    // and our new prev is the split sibling. Loop and re-read prev.
-                    std::hint::spin_loop();
+
+                    StdHint::spin_loop();
                 }
             }
         }
@@ -1573,9 +1256,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// Get the previous leaf pointer.
-    ///
-    /// Uses guard protection to ensure the load participates in seize's
-    /// total order, making it safe on all architectures.
     #[must_use]
     #[inline(always)]
     pub fn prev(&self, guard: &impl Guard) -> *mut Self {
@@ -1585,7 +1265,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Get the previous leaf pointer without guard protection.
     ///
     /// # Safety
-    ///
     /// Caller must ensure the prev pointer's target won't be retired during use.
     #[must_use]
     #[inline(always)]
@@ -1602,10 +1281,7 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Set the previous leaf pointer using Relaxed ordering.
     ///
     /// # Safety Preconditions
-    ///
     /// Only safe when writing to a node that is not yet visible to other threads
-    /// (e.g., during split setup before `link_sibling` publishes it).
-    ///
     /// The subsequent `set_next(Release)` in `link_sibling` ensures visibility.
     #[inline(always)]
     pub(crate) fn set_prev_relaxed(&self, prev: *mut Self) {
@@ -1629,7 +1305,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Get the parent pointer without guard protection.
     ///
     /// # Safety
-    ///
     /// Caller must ensure the parent pointer's target won't be retired during use.
     #[must_use]
     #[inline(always)]
@@ -1666,17 +1341,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// Check if this layer has been deleted (garbage collected).
-    ///
-    /// This is distinct from `version.is_deleted()`:
-    /// - `is_deleted()` means the node itself is removed from the tree
-    /// - `deleted_layer()` means the sublayer this node was root of has been gc'd
-    ///
-    /// When `deleted_layer()` is true, readers should reset their key position
-    /// (`unshift_all`) and retry from the main tree root.
-    ///
-    /// # C++ Reference
-    ///
-    /// Matches `leaf::deleted_layer()` in `masstree_struct.hh:456-458`.
     #[must_use]
     #[inline(always)]
     pub fn deleted_layer(&self) -> bool {
@@ -1684,27 +1348,12 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// Mark this layer as deleted (for `gc_layer`).
-    ///
-    /// Called when garbage collecting an empty sublayer. The parent's slot
-    /// that pointed to this sublayer will be cleared, and this leaf is marked
-    /// so concurrent readers know to retry from the tree root.
-    ///
-    /// # C++ Reference
-    ///
-    /// Matches setting `modstate_ = modstate_deleted_layer` in C++.
     #[inline(always)]
     pub fn mark_deleted_layer(&self) {
         self.set_modstate(MODSTATE_DELETED_LAYER);
     }
 
     /// Mark this node as being in remove mode.
-    ///
-    /// Called at the start of a remove operation to prevent suffix allocation
-    /// during the remove process.
-    ///
-    /// # C++ Reference
-    ///
-    /// Matches the modstate transition in `finish_remove` (`masstree_remove.hh:162-166`).
     #[inline(always)]
     pub fn mark_remove(&self) {
         self.set_modstate(MODSTATE_REMOVE);
@@ -1722,9 +1371,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     // ============================================================================
 
     /// Check if this leaf is in empty state (modstate == `MODSTATE_EMPTY`).
-    ///
-    /// Empty state means the leaf had all its keys removed and is available
-    /// for reuse by insert or cleanup by the coalescing background task.
     #[must_use]
     #[inline(always)]
     pub fn is_empty_state(&self) -> bool {
@@ -1732,22 +1378,12 @@ impl<S: ValueSlot> LeafNode15<S> {
     }
 
     /// Mark this leaf as empty (all keys removed).
-    ///
-    /// Called when the last key is removed from a leaf. The leaf remains
-    /// in the tree structure but is marked for potential reuse or cleanup.
-    ///
-    /// Empty leaves can be:
-    /// - Reused by insert operations (saves allocation)
-    /// - Cleaned up by background coalescing task
     #[inline(always)]
     pub fn mark_empty(&self) {
         self.set_modstate(MODSTATE_EMPTY);
     }
 
     /// Clear empty state, returning to normal insert mode.
-    ///
-    /// Called when an empty leaf is being reused for a new insert.
-    /// This resets the modstate to allow normal operation.
     #[inline(always)]
     pub fn clear_empty_state(&self) {
         self.set_modstate(MODSTATE_INSERT);
@@ -1760,7 +1396,6 @@ impl<S: ValueSlot> LeafNode15<S> {
     /// Check if slot 0 can be reused for a new key.
     ///
     /// # Safety
-    ///
     /// Called under exclusive lock - uses unguarded prev load.
     #[must_use]
     #[inline(always)]
@@ -1773,63 +1408,461 @@ impl<S: ValueSlot> LeafNode15<S> {
         self.ikey_bound() == new_ikey
     }
 
-    // ============================================================================
-    //  Slot Clearing (for gc_layer)
-    // ============================================================================
+    // ========================================================================
+    //  Split Operations
+    // ========================================================================
 
-    /// Clear a slot completely, removing any value or layer pointer.
+    /// Calculate the optimal split point for this leaf.
     ///
-    /// This is used by `gc_layer` when cleaning up an empty sublayer.
-    /// The parent leaf's slot that pointed to the sublayer is cleared.
-    ///
-    /// # Memory Ordering
-    ///
-    /// Uses Release ordering to ensure the clear is visible to subsequent readers.
-    /// The permutation should be updated separately to remove this slot from
-    /// the logical ordering.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure:
-    /// - The leaf is locked
-    /// - The slot is valid (0..WIDTH)
-    /// - Any value/layer at this slot has been or will be properly retired
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing)]
-    pub fn clear_slot(&self, slot: usize) {
-        debug_assert!(slot < WIDTH_15, "clear_slot: slot out of bounds");
+    /// Includes sequential access optimization (forward and reverse)
+    /// and equal-ikey adjustment to maintain routing invariants.
+    pub fn calculate_split_point(&self, insert_pos: usize, insert_ikey: u64) -> Option<SplitPoint> {
+        let perm = self.permutation();
+        let size = perm.size();
 
-        // Clear keylenx to 0 (marks slot as empty for searches)
-        self.keylenx[slot].store(0, WRITE_ORD);
+        if size == 0 {
+            return None;
+        }
 
-        // Clear the value pointer
-        self.leaf_values[slot].store(StdPtr::null_mut(), WRITE_ORD);
+        // Check for forward-sequential pattern: appending to rightmost leaf.
+        // SAFETY: Called during insert with lock held, unguarded access is safe.
+        //
+        // Guard: skip this optimization when the last existing entry shares
+        // insert_ikey. A forward-sequential split would set split_ikey = insert_ikey,
+        // routing lookups for that ikey to the right leaf while the matching
+        // entry remains stranded on the left. Fall through to midpoint split
+        // which places both entries on the same side.
+        if insert_pos == size && unsafe { self.next_raw_unguarded() }.is_null() {
+            let last_slot = perm.get(size - 1);
+            if self.ikey(last_slot) != insert_ikey {
+                return Some(SplitPoint {
+                    pos: size,
+                    split_ikey: insert_ikey,
+                });
+            }
+        }
 
-        // Note: ikey is NOT cleared - it's only meaningful when keylenx > 0
-        // Note: suffix is NOT cleared - it's only meaningful when keylenx indicates suffix
+        // Check for reverse-sequential pattern: prepending to leftmost leaf.
+        // SAFETY: Called during insert with lock held, unguarded access is safe.
+        //
+        // Guard: skip when split_ikey would equal insert_ikey (same stranding issue).
+        if insert_pos == 0 && unsafe { self.prev_unguarded() }.is_null() && size > 1 {
+            let split_slot = perm.get(1);
+            let split_ikey = self.ikey(split_slot);
+            if split_ikey != insert_ikey {
+                return Some(SplitPoint { pos: 1, split_ikey });
+            }
+        }
+
+        // Default: midpoint split
+        let mut split_pos: usize = size / 2;
+
+        if split_pos == 0 {
+            split_pos = 1;
+        }
+
+        // Equal-ikey adjustment: keep equal ikeys together in the same leaf.
+        while split_pos > 0 && split_pos < size {
+            let left_slot = perm.get(split_pos - 1);
+            let right_slot = perm.get(split_pos);
+            let left_ikey = self.ikey(left_slot);
+            let right_ikey = self.ikey(right_slot);
+
+            if left_ikey == right_ikey {
+                match insert_ikey.cmp(&left_ikey) {
+                    Ordering::Equal => {
+                        split_pos += 1;
+                    }
+                    Ordering::Less | Ordering::Greater => {
+                        split_pos -= 1;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Post-adjustment guard: when insert_pos == split_pos, the new entry
+        // lands at slot 0 of the right leaf, making split_ikey = insert_ikey.
+        // If the last left entry also has ikey == insert_ikey, lookups for that
+        // ikey route right while the existing entry is stranded on the left.
+        //
+        // Fix: move the boundary left so all entries with insert_ikey end up
+        // on the right side. Left entries then have strictly smaller ikeys.
+        if insert_pos == split_pos && split_pos > 0 {
+            let last_left_slot = perm.get(split_pos - 1);
+            if self.ikey(last_left_slot) == insert_ikey {
+                split_pos -= 1;
+                while split_pos > 0 {
+                    let check_slot = perm.get(split_pos - 1);
+                    if self.ikey(check_slot) != insert_ikey {
+                        break;
+                    }
+                    split_pos -= 1;
+                }
+            }
+        }
+
+        if split_pos == 0 || split_pos >= size {
+            return None;
+        }
+
+        let split_slot = perm.get(split_pos);
+        let split_ikey = self.ikey(split_slot);
+
+        Some(SplitPoint {
+            pos: split_pos,
+            split_ikey,
+        })
     }
 
-    /// Clear a slot and update permutation atomically.
+    /// Split entries from position `split_pos..size` into a new leaf.
     ///
-    /// This is a convenience method that:
-    /// 1. Clears the slot contents
-    /// 2. Removes the slot from the permutation
+    /// Returns the split key (first ikey of right leaf) and which leaf
+    /// should receive a subsequent insert.
     ///
     /// # Safety
     ///
-    /// The caller must ensure the leaf is locked.
-    #[inline(always)]
-    pub fn clear_slot_and_permutation(&self, slot: usize) {
-        // Clear the slot
-        self.clear_slot(slot);
+    /// - Caller holds the lock on `self`.
+    /// - `new_leaf_ptr` is valid, properly aligned, and points to an
+    ///   initialized (via `new_with_root(false)` or `init_at`) but empty leaf.
+    /// - `new_leaf_ptr` is not yet visible to other threads.
+    pub unsafe fn split_into_preallocated(
+        &self,
+        split_pos: usize,
+        new_leaf_ptr: *mut Self,
+        guard: &LocalGuard<'_>,
+    ) -> (u64, InsertTarget) {
+        let split_version = NodeVersion::new_for_split(&self.version);
 
-        // Remove from permutation.
-        // Use remove_slot() which finds the logical position of the physical slot.
-        // The previous code used remove(slot) which is WRONG: remove() expects a
-        // logical position, not a physical slot index.
-        let mut perm = self.permutation();
-        perm.remove_slot(slot);
-        self.set_permutation(perm);
+        // SAFETY: new_leaf is not yet visible to other threads.
+        unsafe {
+            StdPtr::write(
+                StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
+                split_version,
+            );
+        }
+
+        let perm: Permuter15 = self.permutation();
+        let size: usize = perm.size();
+        let entries_to_move: usize = size - split_pos;
+
+        // SAFETY: new_leaf_ptr is valid (caller guarantees).
+        let new_leaf: &Self = unsafe { &*new_leaf_ptr };
+
+        // Pre-allocate external suffix storage if source has it.
+        if self.has_external_ksuf() {
+            let _ = unsafe { new_leaf.ensure_external_ksuf() };
+        }
+
+        // Move entries from self[split_pos..size] to new_leaf[0..entries_to_move].
+        for i in 0..entries_to_move {
+            let old_logical: usize = split_pos + i;
+            let old_slot: usize = perm.get(old_logical);
+            let new_slot: usize = i;
+
+            let ikey: u64 = self.ikey(old_slot);
+            let keylenx_val: u8 = self.keylenx(old_slot);
+            new_leaf.set_ikey(new_slot, ikey);
+            new_leaf.set_keylenx(new_slot, keylenx_val);
+
+            // Move value: ONE call, no if/else for storage mode.
+            self.values.move_slot(&new_leaf.values, old_slot, new_slot);
+
+            // Copy suffix if present.
+            if keylenx_val == KSUF_KEYLENX {
+                if let Some(suffix) = self.ksuf(old_slot) {
+                    // SAFETY: We hold lock on both leaves.
+                    unsafe { new_leaf.assign_ksuf_init(new_slot, suffix, guard) };
+                }
+                // SAFETY: We hold lock.
+                unsafe { self.clear_ksuf(old_slot, guard) };
+            }
+
+            // Clear source slot value (required after move_slot).
+            self.values.clear(old_slot);
+        }
+
+        // Update old leaf: truncate permutation.
+        let mut old_perm = perm;
+        old_perm.set_size(split_pos);
+        self.set_permutation(old_perm);
+
+        // Update new leaf: sequential permutation for moved entries.
+        let new_perm: Permuter15 = Permuter15::make_sorted(entries_to_move);
+        new_leaf.set_permutation_relaxed(new_perm);
+
+        let split_ikey: u64 = new_leaf.ikey(0);
+        (split_ikey, InsertTarget::Left)
+    }
+
+    /// Split ALL entries to the right leaf (used for reverse-sequential pattern).
+    ///
+    /// # Safety
+    ///
+    /// Same as `split_into_preallocated`.
+    pub unsafe fn split_all_to_right_preallocated(
+        &self,
+        new_leaf_ptr: *mut Self,
+        guard: &LocalGuard<'_>,
+    ) -> (u64, InsertTarget) {
+        let split_version = NodeVersion::new_for_split(&self.version);
+        unsafe {
+            StdPtr::write(
+                StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
+                split_version,
+            );
+        }
+
+        let perm: Permuter15 = self.permutation();
+        let size: usize = perm.size();
+        let new_leaf: &Self = unsafe { &*new_leaf_ptr };
+
+        if self.has_external_ksuf() {
+            let _ = unsafe { new_leaf.ensure_external_ksuf() };
+        }
+
+        for i in 0..size {
+            let old_slot: usize = perm.get(i);
+            let new_slot: usize = i;
+
+            let ikey: u64 = self.ikey(old_slot);
+            let keylenx_val: u8 = self.keylenx(old_slot);
+            new_leaf.set_ikey(new_slot, ikey);
+            new_leaf.set_keylenx(new_slot, keylenx_val);
+
+            self.values.move_slot(&new_leaf.values, old_slot, new_slot);
+
+            if keylenx_val == KSUF_KEYLENX {
+                if let Some(suffix) = self.ksuf(old_slot) {
+                    unsafe { new_leaf.assign_ksuf_init(new_slot, suffix, guard) };
+                }
+                unsafe { self.clear_ksuf(old_slot, guard) };
+            }
+
+            self.values.clear(old_slot);
+        }
+
+        self.set_permutation(Permuter15::empty());
+
+        let new_perm: Permuter15 = Permuter15::make_sorted(size);
+        new_leaf.set_permutation_relaxed(new_perm);
+
+        let split_ikey: u64 = new_leaf.ikey(0);
+        (split_ikey, InsertTarget::Left)
+    }
+
+    /// Atomic split + insert: split entries and insert a new key in one operation.
+    ///
+    /// # Safety
+    ///
+    /// Same as `split_into_preallocated`.
+    #[expect(clippy::too_many_lines)]
+    pub unsafe fn split_and_insert(
+        &self,
+        split_pos: usize,
+        new_leaf_ptr: *mut Self,
+        insert_pos: usize,
+        insert_data: &SplitInsertData<'_, P>,
+        guard: &LocalGuard<'_>,
+    ) -> SplitInsertResult {
+        let split_version = NodeVersion::new_for_split(&self.version);
+        unsafe {
+            StdPtr::write(
+                StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
+                split_version,
+            );
+        }
+
+        let old_perm: Permuter15 = self.permutation();
+        let old_size: usize = old_perm.size();
+        let new_leaf: &Self = unsafe { &*new_leaf_ptr };
+
+        if self.has_external_ksuf() {
+            let _ = unsafe { new_leaf.ensure_external_ksuf() };
+        }
+
+        let insert_goes_right: bool = insert_pos >= split_pos;
+        let entries_to_move: usize = old_size - split_pos;
+        let split_ikey: u64;
+
+        if insert_goes_right {
+            // =================================================================
+            // Case: Insert goes to RIGHT leaf (insert_pos >= split_pos)
+            // =================================================================
+            let right_insert_pos: usize = insert_pos - split_pos;
+            let right_size: usize = entries_to_move + 1;
+
+            let mut src_idx: usize = 0;
+
+            for dst_slot in 0..right_size {
+                if dst_slot == right_insert_pos {
+                    new_leaf.set_ikey(dst_slot, insert_data.ikey);
+                    new_leaf.set_keylenx(dst_slot, insert_data.keylenx);
+                    new_leaf.store_value_relaxed(dst_slot, &insert_data.value);
+
+                    if insert_data.keylenx == KSUF_KEYLENX
+                        && let Some(suffix) = insert_data.suffix
+                    {
+                        unsafe {
+                            new_leaf.assign_ksuf_init(dst_slot, suffix, guard);
+                        };
+                    }
+                } else {
+                    let old_logical_pos: usize = split_pos + src_idx;
+                    let old_slot: usize = old_perm.get(old_logical_pos);
+
+                    let ikey: u64 = self.ikey(old_slot);
+                    let keylenx_val: u8 = self.keylenx(old_slot);
+
+                    new_leaf.set_ikey(dst_slot, ikey);
+                    new_leaf.set_keylenx(dst_slot, keylenx_val);
+
+                    self.values.move_slot(&new_leaf.values, old_slot, dst_slot);
+
+                    if keylenx_val == KSUF_KEYLENX {
+                        if let Some(suffix) = self.ksuf(old_slot) {
+                            unsafe {
+                                new_leaf.assign_ksuf_init(dst_slot, suffix, guard);
+                            };
+                        }
+
+                        unsafe { self.clear_ksuf(old_slot, guard) };
+                    }
+
+                    self.values.clear(old_slot);
+                    src_idx += 1;
+                }
+            }
+
+            let mut left_perm = old_perm;
+            left_perm.set_size(split_pos);
+            self.set_permutation(left_perm);
+
+            let right_perm: Permuter15 = Permuter15::make_sorted(right_size);
+            new_leaf.set_permutation_relaxed(right_perm);
+
+            split_ikey = new_leaf.ikey(0);
+
+            SplitInsertResult {
+                split_ikey,
+                insert_target: InsertTarget::Right,
+            }
+        } else {
+            // =================================================================
+            // Case: Insert goes to LEFT leaf (insert_pos < split_pos)
+            // =================================================================
+
+            // Move right portion first.
+            for i in 0..entries_to_move {
+                let old_logical: usize = split_pos + i;
+                let old_slot: usize = old_perm.get(old_logical);
+                let new_slot: usize = i;
+
+                let ikey: u64 = self.ikey(old_slot);
+                let keylenx_val: u8 = self.keylenx(old_slot);
+
+                new_leaf.set_ikey(new_slot, ikey);
+                new_leaf.set_keylenx(new_slot, keylenx_val);
+
+                self.values.move_slot(&new_leaf.values, old_slot, new_slot);
+
+                if keylenx_val == KSUF_KEYLENX {
+                    if let Some(suffix) = self.ksuf(old_slot) {
+                        unsafe {
+                            new_leaf.assign_ksuf_init(new_slot, suffix, guard);
+                        };
+                    }
+
+                    unsafe { self.clear_ksuf(old_slot, guard) };
+                }
+
+                self.values.clear(old_slot);
+            }
+
+            // Find a free physical slot from the back of the updated permutation.
+            let mut left_perm = old_perm;
+            left_perm.set_size(split_pos);
+
+            let new_slot: usize = left_perm.back();
+
+            // Check slot-0 reuse rule.
+            let actual_slot: usize = if new_slot == 0 && !self.can_reuse_slot0(insert_data.ikey) {
+                let free_count: usize = WIDTH_15 - split_pos;
+                let mut found_slot: usize = new_slot;
+
+                for offset in 1..free_count {
+                    let candidate: usize = left_perm.back_at_offset(offset);
+
+                    if candidate != 0 {
+                        left_perm.swap_free_slots(WIDTH_15 - 1, WIDTH_15 - 1 - offset);
+                        found_slot = candidate;
+                        break;
+                    }
+                }
+
+                found_slot
+            } else {
+                new_slot
+            };
+
+            self.set_ikey(actual_slot, insert_data.ikey);
+            self.set_keylenx(actual_slot, insert_data.keylenx);
+            self.store_value(actual_slot, &insert_data.value);
+
+            let suffix_retire_ptr: *mut u8 = if insert_data.keylenx == KSUF_KEYLENX
+                && let Some(suffix) = insert_data.suffix
+            {
+                unsafe { self.assign_ksuf(actual_slot, suffix, guard) }
+            } else {
+                StdPtr::null_mut()
+            };
+
+            let allocated: usize = left_perm.insert_from_back(insert_pos);
+            debug_assert_eq!(allocated, actual_slot, "allocated unexpected slot");
+            self.set_permutation(left_perm);
+
+            let right_perm: Permuter15 = Permuter15::make_sorted(entries_to_move);
+            new_leaf.set_permutation_relaxed(right_perm);
+
+            split_ikey = new_leaf.ikey(0);
+
+            // Retire old suffix bag if needed.
+            if !suffix_retire_ptr.is_null() {
+                unsafe { Self::retire_suffix_bag_ptr(suffix_retire_ptr, guard) };
+            }
+
+            SplitInsertResult {
+                split_ikey,
+                insert_target: InsertTarget::Left,
+            }
+        }
+    }
+
+    /// Link a new sibling after this leaf during a split.
+    ///
+    /// # Safety
+    /// - Caller must hold the lock on `self`.
+    /// - `new_sibling` must be valid and not yet in the chain.
+    pub unsafe fn link_sibling(&self, new_sibling: *mut Self) {
+        // Lock our next pointer (mark it to signal split in progress).
+        let old_next: *mut Self = self.lock_next();
+
+        // SAFETY: new_sibling is valid.
+        let new_sib: &Self = unsafe { &*new_sibling };
+
+        // Set new sibling's prev/next.
+        new_sib.set_prev_relaxed(StdPtr::from_ref(self).cast_mut());
+        new_sib.set_next_relaxed(old_next);
+
+        // Update old_next's prev to point to new sibling.
+        if !old_next.is_null() {
+            unsafe { (*old_next).set_prev(new_sibling) };
+        }
+
+        // Publish: store new_sibling as our next (Release store).
+        // This simultaneously unmarks the pointer and publishes the new sibling.
+        self.set_next(new_sibling);
     }
 }
 
@@ -1837,23 +1870,32 @@ impl<S: ValueSlot> LeafNode15<S> {
 //  Send + Sync
 // ============================================================================
 
-// SAFETY: LeafNode15 is safe to send/share between threads when S is.
+// SAFETY: LeafNode15 is safe to send/share between threads.
 // The atomic fields handle concurrent access, and the raw pointers are
 // protected by the tree's concurrency protocol (version validation, locks).
-unsafe impl<S: ValueSlot + Send + Sync> Send for LeafNode15<S> {}
-unsafe impl<S: ValueSlot + Send + Sync> Sync for LeafNode15<S> {}
-
+// P::Values and P::Suffix implement Send+Sync via their own unsafe impls.
+unsafe impl<P: LeafPolicy> Send for LeafNode15<P> {}
+unsafe impl<P: LeafPolicy> Sync for LeafNode15<P> {}
 // ============================================================================
 //  TreeLeafNode Implementation
 // ============================================================================
 
-impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode15<S> {
+impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
     type Perm = Permuter15;
-    // Internodes use fixed WIDTH=15 (non-generic, 4-bit permutation slots)
     type Internode = InternodeNode;
+
     const WIDTH: usize = WIDTH_15;
-    /// 80% of 15 = 12, trigger splits earlier to reduce contention
-    const SPLIT_THRESHOLD: usize = 12;
+    const SPLIT_THRESHOLD: usize = WIDTH_15;
+
+    #[cfg(not(feature = "small-suffix-capacity"))]
+    const INLINE_KSUF_CAPACITY: usize = 512;
+
+    #[cfg(feature = "small-suffix-capacity")]
+    const INLINE_KSUF_CAPACITY: usize = 256;
+
+    // ========================================================================
+    //  Construction
+    // ========================================================================
 
     #[inline(always)]
     fn new_boxed() -> Box<Self> {
@@ -1870,344 +1912,255 @@ impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode15<S> {
         Self::new_layer_root()
     }
 
+    // ========================================================================
+    //  Version / Lock
+    // ========================================================================
+
     #[inline(always)]
     fn version(&self) -> &NodeVersion {
-        Self::version(self)
+        self.version()
     }
+
+    // ========================================================================
+    //  Permutation
+    // ========================================================================
 
     #[inline(always)]
     fn permutation(&self) -> Permuter15 {
-        Self::permutation(self)
+        self.permutation()
     }
 
     #[inline(always)]
     fn set_permutation(&self, perm: Permuter15) {
-        Self::set_permutation(self, perm);
+        self.set_permutation(perm);
     }
 
     #[inline(always)]
     fn set_permutation_relaxed(&self, perm: Permuter15) {
-        Self::set_permutation_relaxed(self, perm);
+        self.set_permutation_relaxed(perm);
     }
 
     #[inline(always)]
     fn permutation_raw(&self) -> u64 {
-        Self::permutation_raw(self)
+        self.permutation_raw()
     }
+
+    // ========================================================================
+    //  Key Operations
+    // ========================================================================
 
     #[inline(always)]
     fn ikey(&self, slot: usize) -> u64 {
-        Self::ikey(self, slot)
+        self.ikey(slot)
     }
 
     #[inline(always)]
     fn ikey_relaxed(&self, slot: usize) -> u64 {
-        Self::ikey_relaxed(self, slot)
+        self.ikey_relaxed(slot)
     }
 
     #[inline(always)]
     fn set_ikey(&self, slot: usize, ikey: u64) {
-        Self::set_ikey(self, slot, ikey);
+        self.set_ikey(slot, ikey);
     }
 
     #[inline(always)]
     fn set_ikey_relaxed(&self, slot: usize, ikey: u64) {
-        Self::set_ikey_relaxed(self, slot, ikey);
+        self.set_ikey_relaxed(slot, ikey);
     }
 
     #[inline(always)]
     fn ikey_bound(&self) -> u64 {
-        Self::ikey_bound(self)
+        self.ikey_bound()
     }
 
-    /// Find all slots where `ikey == target_ikey`, returns bitmask.
-    #[inline]
+    #[inline(always)]
     fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
-        Scalar::find_ikey_matches_leaf15(target_ikey, self)
+        self.find_ikey_matches(target_ikey)
     }
 
     #[inline(always)]
     fn keylenx(&self, slot: usize) -> u8 {
-        Self::keylenx(self, slot)
+        self.keylenx(slot)
     }
 
     #[inline(always)]
     fn set_keylenx(&self, slot: usize, keylenx: u8) {
-        Self::set_keylenx(self, slot, keylenx);
+        self.set_keylenx(slot, keylenx);
     }
 
     #[inline(always)]
     fn set_keylenx_relaxed(&self, slot: usize, keylenx: u8) {
-        Self::set_keylenx_relaxed(self, slot, keylenx);
+        self.set_keylenx_relaxed(slot, keylenx);
     }
 
     #[inline(always)]
     fn is_layer(&self, slot: usize) -> bool {
-        Self::is_layer(self, slot)
+        self.is_layer(slot)
     }
 
     #[inline(always)]
     fn has_ksuf(&self, slot: usize) -> bool {
-        Self::has_ksuf(self, slot)
+        self.has_ksuf(slot)
+    }
+
+    // ========================================================================
+    //  Value Operations (typed)
+    // ========================================================================
+
+    #[inline(always)]
+    fn load_value(&self, slot: usize) -> Option<P::Output> {
+        self.load_value(slot)
     }
 
     #[inline(always)]
-    fn leaf_value_ptr(&self, slot: usize) -> *mut u8 {
-        Self::leaf_value_ptr(self, slot)
+    fn store_value(&self, slot: usize, output: &P::Output) {
+        self.store_value(slot, output);
     }
 
     #[inline(always)]
-    fn set_leaf_value_ptr(&self, slot: usize, ptr: *mut u8) {
-        Self::set_leaf_value_ptr(self, slot, ptr);
+    fn store_value_relaxed(&self, slot: usize, output: &P::Output) {
+        self.store_value_relaxed(slot, output);
     }
 
     #[inline(always)]
-    fn set_leaf_value_ptr_relaxed(&self, slot: usize, ptr: *mut u8) {
-        Self::set_leaf_value_ptr_relaxed(self, slot, ptr);
+    fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle {
+        self.update_value_in_place(slot, output)
     }
 
     #[inline(always)]
-    fn cas_slot_value(
-        &self,
-        slot: usize,
-        expected: *mut u8,
-        new_value: *mut u8,
-    ) -> Result<(), *mut u8> {
-        Self::cas_slot_value(self, slot, expected, new_value)
+    fn take_value(&self, slot: usize) -> Option<P::Output> {
+        self.take_value(slot)
     }
 
-    #[inline]
+    #[inline(always)]
+    fn load_layer(&self, slot: usize) -> *mut u8 {
+        self.load_layer(slot)
+    }
+
+    #[inline(always)]
+    fn store_layer(&self, slot: usize, ptr: *mut u8) {
+        self.store_layer(slot, ptr);
+    }
+
+    #[inline(always)]
+    fn is_slot_empty(&self, slot: usize) -> bool {
+        self.is_slot_empty(slot)
+    }
+
+    #[inline(always)]
+    fn classify_slot(&self, slot: usize) -> SlotKind<P::Output> {
+        self.classify_slot(slot)
+    }
+
+    #[inline(always)]
+    fn classify_slot_light(&self, slot: usize) -> SlotState {
+        self.classify_slot_light(slot)
+    }
+
+    #[inline(always)]
+    fn move_value_to(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
+        self.move_value_to(dst, src_slot, dst_slot);
+    }
+
+    #[inline(always)]
+    fn clear_value(&self, slot: usize) {
+        self.clear_value(slot);
+    }
+
+    // ========================================================================
+    //  Slot Clearing
+    // ========================================================================
+
+    #[inline(always)]
     fn clear_slot(&self, slot: usize) {
-        Self::clear_slot(self, slot);
+        self.clear_slot(slot);
     }
 
+    #[inline(always)]
     fn clear_slot_and_permutation(&self, slot: usize) {
-        Self::clear_slot_and_permutation(self, slot);
+        self.clear_slot_and_permutation(slot);
     }
 
-    /// # Safety
-    ///
-    /// Trait methods use unguarded loads - intended for locked operations.
+    // ========================================================================
+    //  Navigation
+    // ========================================================================
+
     #[inline(always)]
     fn safe_next(&self) -> *mut Self {
-        // SAFETY: Trait methods are called during locked operations.
-        unsafe { Self::safe_next_unguarded(self) }
+        unsafe { self.safe_next_unguarded() }
     }
 
     #[inline(always)]
     fn next_is_marked(&self) -> bool {
-        Self::next_is_marked(self)
+        self.next_is_marked()
     }
 
     #[inline(always)]
     fn set_next(&self, next: *mut Self) {
-        Self::set_next(self, next);
+        self.set_next(next);
     }
 
     #[inline(always)]
     fn mark_next(&self) {
-        Self::mark_next(self);
+        self.mark_next();
     }
 
     #[inline(always)]
     fn unmark_next(&self) {
-        Self::unmark_next(self);
+        self.unmark_next();
     }
 
-    /// # Safety
-    ///
-    /// Trait methods use unguarded loads - intended for locked operations.
     #[inline(always)]
     fn prev(&self) -> *mut Self {
-        // SAFETY: Trait methods are called during locked operations.
-        unsafe { Self::prev_unguarded(self) }
+        unsafe { self.prev_unguarded() }
     }
 
     #[inline(always)]
     fn set_prev(&self, prev: *mut Self) {
-        Self::set_prev(self, prev);
+        self.set_prev(prev);
     }
 
-    #[inline(always)]
-    unsafe fn unlink_from_chain(&self) {
-        // SAFETY: Caller guarantees preconditions
-        unsafe { Self::unlink_from_chain(self) };
-    }
-
-    /// # Safety
-    ///
-    /// Trait methods use unguarded loads - intended for locked operations.
     #[inline(always)]
     fn parent(&self) -> *mut u8 {
-        // SAFETY: Trait methods are called during locked operations.
-        unsafe { Self::parent_unguarded(self) }
+        unsafe { self.parent_unguarded() }
     }
 
     #[inline(always)]
     fn set_parent(&self, parent: *mut u8) {
-        Self::set_parent(self, parent);
+        self.set_parent(parent);
     }
 
     #[inline(always)]
-    fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
-        Self::can_reuse_slot0(self, new_ikey)
+    unsafe fn unlink_from_chain(&self) {
+        unsafe { self.unlink_from_chain() }
     }
 
-    #[inline(always)]
-    unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
-        // SAFETY: Caller guarantees slot was claimed via cas_slot_value
-        unsafe { Self::store_key_data_for_cas(self, slot, ikey, keylenx) }
-    }
-
-    #[inline(always)]
-    fn load_slot_value(&self, slot: usize) -> *mut u8 {
-        Self::load_slot_value(self, slot)
-    }
-
-    /// # Safety
-    ///
-    /// Trait methods use unguarded loads - intended for locked operations.
     #[inline(always)]
     fn next_raw(&self) -> *mut Self {
-        // SAFETY: Trait methods are called during locked operations.
-        unsafe { Self::next_raw_unguarded(self) }
+        unsafe { self.next_raw_unguarded() }
     }
 
     #[inline(always)]
     fn wait_for_split(&self) {
-        Self::wait_for_split(self);
+        self.wait_for_split();
     }
 
     // ========================================================================
-    // Split Operations
+    //  Slot Assignment
+    // ========================================================================
+
+    #[inline(always)]
+    fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
+        self.can_reuse_slot0(new_ikey)
+    }
+
+    // ========================================================================
+    //  Split Operations
     // ========================================================================
 
     fn calculate_split_point(&self, insert_pos: usize, insert_ikey: u64) -> Option<SplitPoint> {
-        let perm = self.permutation();
-        let size = perm.size();
-
-        if size == 0 {
-            return None;
-        }
-
-        // =========================================================================
-        // Sequential Split Optimization (C++ masstree_split.hh:70-78)
-        // =========================================================================
-        //
-        // Detect sequential access patterns and optimize split point:
-        //
-        // - Forward-sequential (rw3): All threads insert increasing keys, racing
-        //   to the rightmost leaf. Detected when insert_pos == size (appending)
-        //   and there's no next sibling.
-        //   Optimization: Keep ALL keys in left leaf (split_pos = size).
-        //   The new key goes alone into the right leaf. Zero key movement.
-        //
-        // - Reverse-sequential (rw4): All threads insert decreasing keys, racing
-        //   to the leftmost leaf. Detected when insert_pos == 0 (prepending)
-        //   and there's no prev sibling.
-        //   Optimization: Move all but one key to right (split_pos = 1).
-        //   Clusters keys in the right leaf for subsequent inserts.
-        //
-        // Default: midpoint split
-        //
-        // Forward-sequential optimization is now enabled with atomic
-        // split+insert. The right leaf is never empty because the new key is
-        // inserted during the split operation.
-
-        // Check for forward-sequential pattern: appending to rightmost leaf
-        // SAFETY: Called during insert with lock held, unguarded access is safe
-        if insert_pos == size && unsafe { self.next_raw_unguarded() }.is_null() {
-            // Forward-sequential detected!
-            // split_pos = size means: move 0 keys, new key alone in right leaf
-            return Some(SplitPoint {
-                pos: size,
-                split_ikey: insert_ikey, // The new key becomes the separator
-            });
-        }
-
-        // Check for reverse-sequential pattern: prepending to leftmost leaf
-        // SAFETY: Called during insert with lock held, unguarded access is safe
-        if insert_pos == 0 && unsafe { self.prev_unguarded() }.is_null() && size > 1 {
-            // Reverse-sequential detected!
-            // split_pos = 1 means: keep only first key in left, move rest to right
-            let split_slot = perm.get(1);
-            let split_ikey = self.ikey(split_slot);
-            return Some(SplitPoint { pos: 1, split_ikey });
-        }
-
-        // Default: midpoint split
-        let mut split_pos: usize = size / 2;
-
-        // Edge case: ensure split_pos is valid before equal-ikey adjustment
-        if split_pos == 0 {
-            split_pos = 1;
-        }
-
-        // =========================================================================
-        // Equal-ikey Adjustment
-        // =========================================================================
-        //
-        // Adjust for equal ikeys: if keys at split boundary are equal,
-        // move split point to keep equal keys together.
-        //
-        // CRITICAL INVARIANT: All entries with the same ikey MUST end up in
-        // the same leaf. Otherwise, routing (which uses ikey comparison) will
-        // send lookups to the wrong leaf.
-        //
-        // The split_ikey becomes the separator in the parent internode:
-        // - Keys with ikey < split_ikey route to left leaf
-        // - Keys with ikey >= split_ikey route to right leaf
-        //
-        // So if we have entries with equal ikeys at the boundary, they must
-        // ALL go to the right leaf (since routing uses >=).
-        while split_pos > 0 && split_pos < size {
-            let left_slot = perm.get(split_pos - 1);
-            let right_slot = perm.get(split_pos);
-            let left_ikey = self.ikey(left_slot);
-            let right_ikey = self.ikey(right_slot);
-
-            if left_ikey == right_ikey {
-                // Equal ikeys at boundary - must keep them together!
-                // Check where insert_ikey falls relative to this group.
-                match insert_ikey.cmp(&left_ikey) {
-                    Ordering::Equal => {
-                        // Insert has same ikey as this group - move split right
-                        // to include more of the group (insert will join them)
-                        split_pos += 1;
-                    }
-
-                    Ordering::Less => {
-                        // Insert goes before this group - move split left
-                        split_pos -= 1;
-                    }
-
-                    Ordering::Greater => {
-                        // Insert goes after this group.
-                        // BUG FIX: We must CONTINUE moving split_pos LEFT until
-                        // we exit the equal-ikey group. This ensures all entries
-                        // with ikey == left_ikey end up in the RIGHT leaf,
-                        // matching the routing semantics (ikey >= split_ikey -> right).
-                        split_pos -= 1;
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-
-        // Edge case: if split_pos is 0 or size, can't split
-        // Note: split_pos == size is now handled by forward-sequential above
-        if split_pos == 0 || split_pos >= size {
-            return None;
-        }
-
-        let split_slot = perm.get(split_pos);
-        let split_ikey = self.ikey(split_slot);
-
-        Some(SplitPoint {
-            pos: split_pos,
-            split_ikey,
-        })
+        self.calculate_split_point(insert_pos, insert_ikey)
     }
 
     unsafe fn split_into_preallocated(
@@ -2216,144 +2169,7 @@ impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode15<S> {
         new_leaf_ptr: *mut Self,
         guard: &LocalGuard<'_>,
     ) -> (u64, InsertTarget) {
-        // CRITICAL (Help-Along Protocol): Initialize new leaf's version for split
-        // BEFORE any data is written. This creates a locked version with SPLITTING_BIT set.
-        // The new leaf will remain locked until propagate_split sets its parent.
-        //
-        // # Two-Layer Publication Model
-        //
-        // 1. new_leaf is allocated but not yet linked into the tree
-        // 2. We replace its default NodeVersion with a split-locked version
-        // 3. After link_sibling(), other threads see new_leaf via B-link chain
-        //    (REACHABILITY PUBLICATION via set_next Release store)
-        // 4. Those threads call stable() on new_leaf.version, which spins because dirty
-        // 5. propagate_split sets parent pointer and calls unlock_for_split
-        //    (USABILITY PUBLICATION via unlock_for_split Release store)
-        // 6. Now stable() returns and threads can proceed
-        //
-        // # Safety
-        //
-        // We're writing to a freshly allocated leaf that is not yet visible.
-        // Using ptr::write because NodeVersion doesn't implement Copy.
-        unsafe {
-            const PREFETCH_DISTANCE: usize = 2;
-
-            let new_leaf: &Self = &*new_leaf_ptr;
-            let split_version = NodeVersion::new_for_split(&self.version);
-
-            StdPtr::write(
-                StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
-                split_version,
-            );
-
-            // Load current permutation (caller holds lock)
-            let old_perm: Permuter15 = self.permutation();
-            let old_size = old_perm.size();
-
-            debug_assert!(
-                split_pos > 0 && split_pos < old_size,
-                "invalid split_pos {split_pos} for size {old_size}"
-            );
-
-            let entries_to_move = old_size - split_pos;
-
-            // Pre-allocate suffix sidecar if source has suffix storage.
-            // This moves allocation outside the loop, eliminating latency
-            // spikes when the first suffix is encountered.
-            //
-            // SAFETY: We hold the lock on new_leaf (via split version).
-            // The new leaf is not yet visible to other threads.
-            if self.has_suffix_storage() {
-                // Prefetch source sidecar to hide latency during suffix migration
-                let sidecar_ptr = self.suffix_sidecar.load(RELAXED);
-                if !sidecar_ptr.is_null() {
-                    prefetch_read(sidecar_ptr.cast::<u8>());
-                }
-                let _ = new_leaf.ensure_sidecar();
-            }
-
-            // Move entries to new leaf using RELAXED ordering.
-            //
-            // # Why Relaxed Is Safe
-            //
-            // 1. We hold the version lock on self (no concurrent writers)
-            // 2. new_leaf is not yet visible (will be published by link_sibling)
-            // 3. The final set_permutation uses Release ordering
-            // 4. link_sibling's set_next(Release) ensures visibility to readers
-            //    that Acquire-load next
-            // 5. Readers call stable() before accessing data, which provides
-            //    Acquire semantics via fence after observing clean version
-            //
-            // # Prefetching Strategy
-            //
-            // We prefetch 2 entries ahead to hide memory latency:
-            // - Source: prefetch_read on old leaf's ikey/value for entry i+2
-            // - Dest: prefetch_write on new leaf's slots for entry i+2
-            //
-            // This gives the prefetch time to complete while we process
-            // the current entry. Particularly helpful when:
-            // - Cache is cold (first access to these leaves)
-            // - Entries span cache line boundaries
-
-            for i in 0..entries_to_move {
-                // Prefetch source data for entry i+PREFETCH_DISTANCE
-                #[expect(
-                    clippy::indexing_slicing,
-                    reason = "bounds checked by `i + PREFETCH_DISTANCE < entries_to_move`"
-                )]
-                if i + PREFETCH_DISTANCE < entries_to_move {
-                    let prefetch_logical_pos = split_pos + i + PREFETCH_DISTANCE;
-                    let prefetch_slot = old_perm.get(prefetch_logical_pos);
-                    // Prefetch source ikey and value (keylenx is 1 byte, not worth prefetching)
-                    prefetch_read(StdPtr::addr_of!(self.ikey0[prefetch_slot]));
-                    prefetch_read(StdPtr::addr_of!(self.leaf_values[prefetch_slot]));
-                    // Prefetch destination in exclusive mode (avoids RFO stalls)
-                    let dest_slot = i + PREFETCH_DISTANCE;
-                    prefetch_write(StdPtr::addr_of!(new_leaf.ikey0[dest_slot]).cast_mut());
-                    prefetch_write(StdPtr::addr_of!(new_leaf.keylenx[dest_slot]).cast_mut());
-                    prefetch_write(StdPtr::addr_of!(new_leaf.leaf_values[dest_slot]).cast_mut());
-                }
-
-                let old_logical_pos = split_pos + i;
-                let old_slot = old_perm.get(old_logical_pos);
-                let new_slot = i;
-
-                let ikey = self.ikey_relaxed(old_slot);
-                let keylenx = self.keylenx_relaxed(old_slot);
-
-                new_leaf.set_ikey_relaxed(new_slot, ikey);
-                new_leaf.set_keylenx_relaxed(new_slot, keylenx);
-
-                // Move value pointer (already uses RELAXED via swap)
-                let old_ptr = self.take_leaf_value_ptr(old_slot);
-                new_leaf.set_leaf_value_ptr_relaxed(new_slot, old_ptr);
-
-                // Migrate suffix if present
-                if keylenx == KSUF_KEYLENX {
-                    if let Some(suffix) = self.ksuf(old_slot) {
-                        // Note: new_leaf is freshly allocated and caller holds lock
-                        // Use _init variant: slots 0..new_slot are filled sequentially
-                        new_leaf.assign_ksuf_init(new_slot, suffix, guard);
-                    }
-                    // Note: caller holds lock
-                    self.clear_ksuf(old_slot, guard);
-                }
-            }
-
-            // Build new leaf's permutation (Release ordering)
-            let new_perm = Permuter15::make_sorted(entries_to_move);
-            new_leaf.set_permutation(new_perm);
-
-            // Update old leaf's permutation (Release ordering)
-            let mut old_perm_updated = old_perm;
-            old_perm_updated.set_size(split_pos);
-            self.set_permutation(old_perm_updated);
-
-            // Get split key from new leaf's first entry
-            let split_ikey = new_leaf.ikey_relaxed(new_perm.get(0));
-
-            (split_ikey, InsertTarget::Left)
-        }
+        unsafe { self.split_into_preallocated(split_pos, new_leaf_ptr, guard) }
     }
 
     unsafe fn split_all_to_right_preallocated(
@@ -2361,531 +2177,149 @@ impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode15<S> {
         new_leaf_ptr: *mut Self,
         guard: &LocalGuard<'_>,
     ) -> (u64, InsertTarget) {
-        const PREFETCH_DISTANCE: usize = 2;
-
-        // CRITICAL (Help-Along Protocol): Initialize new leaf's version for split
-        // (same two-layer publication model as split_into_preallocated)
-        let split_version = NodeVersion::new_for_split(&self.version);
-        // SAFETY: new_leaf is not yet visible to other threads.
-        unsafe {
-            StdPtr::write(
-                StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
-                split_version,
-            );
-        }
-
-        let new_leaf: &Self = unsafe { &*new_leaf_ptr };
-
-        // Load current permutation (caller holds lock)
-        let old_perm: Permuter15 = self.permutation();
-        let old_size = old_perm.size();
-
-        debug_assert!(old_size > 0, "Cannot split empty leaf");
-
-        // Pre-allocate suffix sidecar if source has suffix storage.
-        // SAFETY: We hold the lock on new_leaf (via split version).
-        if self.has_suffix_storage() {
-            // Prefetch source sidecar to hide latency during suffix migration
-            let sidecar_ptr = self.suffix_sidecar.load(RELAXED);
-            if !sidecar_ptr.is_null() {
-                prefetch_read(sidecar_ptr.cast::<u8>());
-            }
-            let _ = unsafe { new_leaf.ensure_sidecar() };
-        }
-
-        // Move all entries to new leaf using RELAXED ordering.
-        // (Same justification as split_into_preallocated)
-        //
-        // Prefetch 2 entries ahead for better cache utilization.
-        for i in 0..old_size {
-            // Prefetch source and destination for entry i+PREFETCH_DISTANCE
-            #[expect(
-                clippy::indexing_slicing,
-                reason = "bounds checked by `i + PREFETCH_DISTANCE < old_size`"
-            )]
-            if i + PREFETCH_DISTANCE < old_size {
-                let prefetch_slot = old_perm.get(i + PREFETCH_DISTANCE);
-                prefetch_read(StdPtr::addr_of!(self.ikey0[prefetch_slot]));
-                prefetch_read(StdPtr::addr_of!(self.leaf_values[prefetch_slot]));
-                // Prefetch destination in exclusive mode (avoids RFO stalls)
-                let dest_slot = i + PREFETCH_DISTANCE;
-                prefetch_write(StdPtr::addr_of!(new_leaf.ikey0[dest_slot]).cast_mut());
-                prefetch_write(StdPtr::addr_of!(new_leaf.keylenx[dest_slot]).cast_mut());
-                prefetch_write(StdPtr::addr_of!(new_leaf.leaf_values[dest_slot]).cast_mut());
-            }
-
-            let old_slot = old_perm.get(i);
-            let new_slot = i;
-
-            let ikey = self.ikey_relaxed(old_slot);
-            let keylenx = self.keylenx_relaxed(old_slot);
-
-            new_leaf.set_ikey_relaxed(new_slot, ikey);
-            new_leaf.set_keylenx_relaxed(new_slot, keylenx);
-
-            let old_ptr = self.take_leaf_value_ptr(old_slot);
-            new_leaf.set_leaf_value_ptr_relaxed(new_slot, old_ptr);
-
-            if keylenx == KSUF_KEYLENX {
-                if let Some(suffix) = self.ksuf(old_slot) {
-                    // SAFETY: new_leaf is freshly allocated and caller holds lock
-                    // Use _init variant: slots 0..new_slot are filled sequentially
-                    unsafe { new_leaf.assign_ksuf_init(new_slot, suffix, guard) };
-                }
-                // SAFETY: caller holds lock
-                unsafe { self.clear_ksuf(old_slot, guard) };
-            }
-        }
-
-        // New leaf gets all entries (Release ordering)
-        let new_perm = Permuter15::make_sorted(old_size);
-        new_leaf.set_permutation(new_perm);
-
-        // Old leaf becomes empty (Release ordering)
-        self.set_permutation(Permuter15::empty());
-
-        // Split key is first key of new leaf
-        let split_ikey = new_leaf.ikey_relaxed(new_perm.get(0));
-
-        (split_ikey, InsertTarget::Right)
+        unsafe { self.split_all_to_right_preallocated(new_leaf_ptr, guard) }
     }
 
-    #[expect(clippy::too_many_lines)]
     unsafe fn split_and_insert(
         &self,
         split_pos: usize,
         new_leaf_ptr: *mut Self,
         insert_pos: usize,
-        insert_data: SplitInsertData<'_>,
+        insert_data: &SplitInsertData<'_, P>,
         guard: &LocalGuard<'_>,
     ) -> SplitInsertResult {
-        // =====================================================================
-        // Atomic Split+Insert
-        //
-        // This matches C++ Masstree's `split_into()` which performs both the
-        // split and the insert atomically. The key benefit is enabling the
-        // forward-sequential optimization where split_pos == size (no key
-        // movement, new key alone in right leaf).
-        //
-        // C++ Reference: masstree_split.hh:63-142
-        // =====================================================================
-        const PREFETCH_DISTANCE: usize = 2;
-
-        // SAFETY: new_leaf_ptr is valid and not yet visible to other threads
-        let new_leaf: &Self = unsafe { &*new_leaf_ptr };
-
-        // Initialize new leaf's version for split (same as split_into_preallocated)
-        let split_version = NodeVersion::new_for_split(&self.version);
-        // SAFETY: new_leaf is not yet visible to other threads
-        unsafe {
-            StdPtr::write(
-                StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
-                split_version,
-            );
-        }
-
-        // Load current permutation (caller holds lock)
-        let old_perm: Permuter15 = self.permutation();
-        let old_size = old_perm.size();
-
-        // Pre-allocate suffix sidecar if source has suffix storage
-        if self.has_suffix_storage() {
-            let sidecar_ptr = self.suffix_sidecar.load(RELAXED);
-            if !sidecar_ptr.is_null() {
-                prefetch_read(sidecar_ptr.cast::<u8>());
-            }
-            // SAFETY: We hold the lock on new_leaf (via split version)
-            let _ = unsafe { new_leaf.ensure_sidecar() };
-        }
-
-        // Determine if insert goes to left or right leaf
-        let insert_goes_right = insert_pos >= split_pos;
-
-        // Calculate how many entries move to right leaf
-        let entries_to_move = old_size - split_pos;
-
-        // Track right leaf's slot 0 ikey for split_ikey
-        let split_ikey: u64;
-
-        if insert_goes_right {
-            // =================================================================
-            // Case 2: Insert goes to RIGHT leaf (insert_pos >= split_pos)
-            //
-            // Interleaved move and insert into right leaf.
-            // The insert position in right leaf is: insert_pos - split_pos
-            // =================================================================
-
-            let right_insert_pos = insert_pos - split_pos;
-
-            // Total entries in right leaf after insert
-            let right_size = entries_to_move + 1;
-
-            // Move and insert with interleaving
-            let mut src_idx: usize = 0; // Index into source entries to move
-            for dst_slot in 0..right_size {
-                if dst_slot == right_insert_pos {
-                    // Write the new key at this position
-                    new_leaf.set_ikey_relaxed(dst_slot, insert_data.ikey);
-                    new_leaf.set_keylenx_relaxed(dst_slot, insert_data.keylenx);
-                    new_leaf.set_leaf_value_ptr_relaxed(dst_slot, insert_data.value_ptr);
-
-                    // Handle suffix for new key
-                    if insert_data.keylenx == KSUF_KEYLENX
-                        && let Some(suffix) = insert_data.suffix
-                    {
-                        // SAFETY: caller holds lock, slots 0..dst_slot are filled
-                        unsafe { new_leaf.assign_ksuf_init(dst_slot, suffix, guard) };
-                    }
-                } else {
-                    // Move existing entry from source
-                    let old_logical_pos = split_pos + src_idx;
-                    let old_slot = old_perm.get(old_logical_pos);
-
-                    // Prefetch ahead for moves
-                    #[expect(
-                        clippy::indexing_slicing,
-                        reason = "bounds checked by src_idx + PREFETCH_DISTANCE < entries_to_move"
-                    )]
-                    if src_idx + PREFETCH_DISTANCE < entries_to_move {
-                        let prefetch_logical_pos = split_pos + src_idx + PREFETCH_DISTANCE;
-                        let prefetch_slot = old_perm.get(prefetch_logical_pos);
-                        prefetch_read(StdPtr::addr_of!(self.ikey0[prefetch_slot]));
-                        prefetch_read(StdPtr::addr_of!(self.leaf_values[prefetch_slot]));
-                    }
-
-                    let ikey = self.ikey_relaxed(old_slot);
-                    let keylenx = self.keylenx_relaxed(old_slot);
-
-                    new_leaf.set_ikey_relaxed(dst_slot, ikey);
-                    new_leaf.set_keylenx_relaxed(dst_slot, keylenx);
-
-                    let old_ptr = self.take_leaf_value_ptr(old_slot);
-                    new_leaf.set_leaf_value_ptr_relaxed(dst_slot, old_ptr);
-
-                    // Migrate suffix if present
-                    if keylenx == KSUF_KEYLENX {
-                        if let Some(suffix) = self.ksuf(old_slot) {
-                            // SAFETY: new_leaf freshly allocated, caller holds lock
-                            unsafe { new_leaf.assign_ksuf_init(dst_slot, suffix, guard) };
-                        }
-                        // SAFETY: caller holds lock
-                        unsafe { self.clear_ksuf(old_slot, guard) };
-                    }
-
-                    src_idx += 1;
-                }
-            }
-
-            // Right leaf permutation (right_size entries)
-            let new_perm = Permuter15::make_sorted(right_size);
-            new_leaf.set_permutation(new_perm);
-
-            // split_ikey is right leaf's slot 0
-            split_ikey = new_leaf.ikey_relaxed(0);
-
-            // Update left leaf permutation to remove moved entries
-            let mut left_perm = old_perm;
-            left_perm.set_size(split_pos);
-            self.set_permutation(left_perm);
-
-            SplitInsertResult {
-                split_ikey,
-                insert_target: InsertTarget::Right,
-            }
-        } else {
-            // =================================================================
-            // Case 1: Insert goes to LEFT leaf (insert_pos < split_pos)
-            //
-            // Move [split_pos, old_size) to right leaf.
-            // Insert new key in left leaf at insert_pos.
-            // split_ikey = right leaf's slot 0
-            // =================================================================
-
-            // Move entries to right leaf
-            for i in 0..entries_to_move {
-                // Prefetch ahead
-                #[expect(
-                    clippy::indexing_slicing,
-                    reason = "bounds checked by i + PREFETCH_DISTANCE < entries_to_move"
-                )]
-                if i + PREFETCH_DISTANCE < entries_to_move {
-                    let prefetch_logical_pos = split_pos + i + PREFETCH_DISTANCE;
-                    let prefetch_slot = old_perm.get(prefetch_logical_pos);
-                    prefetch_read(StdPtr::addr_of!(self.ikey0[prefetch_slot]));
-                    prefetch_read(StdPtr::addr_of!(self.leaf_values[prefetch_slot]));
-                    let dest_slot = i + PREFETCH_DISTANCE;
-                    prefetch_write(StdPtr::addr_of!(new_leaf.ikey0[dest_slot]).cast_mut());
-                    prefetch_write(StdPtr::addr_of!(new_leaf.keylenx[dest_slot]).cast_mut());
-                    prefetch_write(StdPtr::addr_of!(new_leaf.leaf_values[dest_slot]).cast_mut());
-                }
-
-                let old_logical_pos = split_pos + i;
-                let old_slot = old_perm.get(old_logical_pos);
-                let new_slot = i;
-
-                let ikey = self.ikey_relaxed(old_slot);
-                let keylenx = self.keylenx_relaxed(old_slot);
-
-                new_leaf.set_ikey_relaxed(new_slot, ikey);
-                new_leaf.set_keylenx_relaxed(new_slot, keylenx);
-
-                let old_ptr = self.take_leaf_value_ptr(old_slot);
-                new_leaf.set_leaf_value_ptr_relaxed(new_slot, old_ptr);
-
-                // Migrate suffix if present
-                if keylenx == KSUF_KEYLENX {
-                    if let Some(suffix) = self.ksuf(old_slot) {
-                        // SAFETY: new_leaf is freshly allocated and caller holds lock
-                        unsafe { new_leaf.assign_ksuf_init(new_slot, suffix, guard) };
-                    }
-                    // SAFETY: caller holds lock
-                    unsafe { self.clear_ksuf(old_slot, guard) };
-                }
-            }
-
-            // Right leaf permutation (entries_to_move entries)
-            let new_perm = Permuter15::make_sorted(entries_to_move);
-            new_leaf.set_permutation(new_perm);
-
-            // split_ikey is right leaf's slot 0
-            split_ikey = new_leaf.ikey_relaxed(0);
-
-            // Insert into LEFT leaf at insert_pos
-            // First, update left leaf permutation to remove moved entries
-            let mut left_perm = old_perm;
-            left_perm.set_size(split_pos);
-
-            // Find slot for new key (use back of updated permutation)
-            let new_slot = left_perm.back();
-
-            // Check slot-0 rule
-            let actual_slot = if new_slot == 0 && !self.can_reuse_slot0(insert_data.ikey) {
-                // Need to find alternative slot
-                let free_count = WIDTH_15 - split_pos;
-                let mut found_slot = new_slot;
-                for offset in 1..free_count {
-                    let candidate = left_perm.back_at_offset(offset);
-                    if candidate != 0 {
-                        left_perm.swap_free_slots(WIDTH_15 - 1, WIDTH_15 - 1 - offset);
-                        found_slot = candidate;
-                        break;
-                    }
-                }
-                found_slot
-            } else {
-                new_slot
-            };
-
-            // Write the new key to left leaf
-            self.set_ikey_relaxed(actual_slot, insert_data.ikey);
-            self.set_keylenx_relaxed(actual_slot, insert_data.keylenx);
-            self.set_leaf_value_ptr_relaxed(actual_slot, insert_data.value_ptr);
-
-            // Handle suffix for new key
-            if insert_data.keylenx == KSUF_KEYLENX
-                && let Some(suffix) = insert_data.suffix
-            {
-                // SAFETY: caller holds lock
-                unsafe { self.assign_ksuf(actual_slot, suffix, guard) };
-            }
-
-            // Update left permutation to include new key
-            let allocated = left_perm.insert_from_back(insert_pos);
-            debug_assert_eq!(allocated, actual_slot, "allocated unexpected slot");
-            self.set_permutation(left_perm);
-
-            SplitInsertResult {
-                split_ikey,
-                insert_target: InsertTarget::Left,
-            }
-        }
+        unsafe { self.split_and_insert(split_pos, new_leaf_ptr, insert_pos, insert_data, guard) }
     }
 
-    #[inline]
     unsafe fn link_sibling(&self, new_sibling: *mut Self) {
-        // CAS-based link_sibling matching C++ btree_leaflink.hh:56-69 (link_split).
-        //
-        // The key insight is that we must use CAS to "lock" the next pointer before
-        // modifying it. This prevents concurrent splits from clobbering each other's
-        // next pointer updates. The mark bit (LSB) signals a split is in progress.
-        //
-        // Sequence:
-        // 1. CAS to mark self.next (lock_next)
-        // 2. Set up new_sibling's prev/next pointers (RELAXED - not yet visible)
-        // 3. Update old_next.prev if non-null (Release - old_next IS visible)
-        // 4. Store new_sibling into self.next (Release), completing the link
-
-        // Step 1: Lock the next pointer via CAS mark
-        // This returns the unmarked old_next pointer
-        let old_next: *mut Self = self.lock_next();
-
-        // SAFETY: Caller guarantees new_sibling is valid
-        unsafe {
-            // Step 2: Set up new_sibling's pointers using RELAXED ordering.
-            //
-            // # Why Relaxed Is Safe
-            //
-            // new_sibling is not yet visible to other threads. The Release store
-            // in set_next (Step 4) ensures these writes are visible to readers that
-            // subsequently Acquire-load self.next and dereference new_sibling.
-            (*new_sibling).set_prev_relaxed(StdPtr::from_ref(self).cast_mut());
-            (*new_sibling).set_next_relaxed(old_next);
-
-            // Step 3: Update old_next.prev if non-null
-            // This write IS visible (old_next is already in the tree), so we use Release.
-            // Readers traversing backward will Acquire-load prev.
-            if !old_next.is_null() {
-                (*old_next).set_prev(new_sibling);
-            }
-        }
-
-        // Step 4: Store new_sibling (unmarked) - atomically publishes the link.
-        // This also "unlocks" the next pointer by clearing the mark bit.
-        //
-        // The Release ordering on set_next ensures:
-        // - All writes to new_sibling (prev, next, data from split) are visible
-        //   to readers that Acquire-load self.next
-        // - The old_next.prev update is visible
-        //
-        // # Why No Explicit Fence Is Needed
-        //
-        // The original code had `fence(Release)` before this store. That fence was
-        // REDUNDANT because a Release store already guarantees that all prior stores
-        // (to ANY memory location in this thread) cannot be reordered after it.
-        // For readers that Acquire-load from this Release store, all prior writes
-        // are visible. This is per the C++11 memory model which Rust atomics follow.
-        <Self as TreeLeafNode<S>>::set_next(self, new_sibling);
-    }
-
-    #[inline(always)]
-    fn ksuf(&self, slot: usize) -> Option<&[u8]> {
-        Self::ksuf(self, slot)
-    }
-
-    #[inline(always)]
-    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) -> *mut u8 {
-        // SAFETY: Caller guarantees preconditions
-        unsafe { Self::assign_ksuf(self, slot, suffix, guard) }
-    }
-
-    unsafe fn retire_suffix_bag_ptr(&self, ptr: *mut u8, guard: &LocalGuard<'_>) {
-        // SAFETY: ptr came from assign_ksuf on this leaf type
-        unsafe { Self::retire_suffix_bag_ptr(ptr, guard) };
-    }
-
-    #[inline(always)]
-    unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
-        // SAFETY: Caller guarantees preconditions
-        unsafe { Self::assign_ksuf_init(self, slot, suffix, guard) }
-    }
-
-    #[inline(always)]
-    unsafe fn clear_ksuf(&self, slot: usize, guard: &LocalGuard<'_>) {
-        // SAFETY: Caller guarantees preconditions
-        unsafe { Self::clear_ksuf(self, slot, guard) }
-    }
-
-    #[inline(always)]
-    fn take_leaf_value_ptr(&self, slot: usize) -> *mut u8 {
-        Self::take_leaf_value_ptr(self, slot)
+        unsafe { self.link_sibling(new_sibling) }
     }
 
     // ========================================================================
-    // Suffix Comparison Operations (Trait Delegates)
+    //  Suffix Operations
+    // ========================================================================
+
+    #[inline(always)]
+    fn ksuf(&self, slot: usize) -> Option<&[u8]> {
+        self.ksuf(slot)
+    }
+
+    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) -> *mut u8 {
+        unsafe { self.assign_ksuf(slot, suffix, guard) }
+    }
+
+    unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
+        unsafe { Self::retire_suffix_bag_ptr(ptr, guard) }
+    }
+
+    unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+        unsafe { self.assign_ksuf_init(slot, suffix, guard) }
+    }
+
+    unsafe fn clear_ksuf(&self, slot: usize, guard: &LocalGuard<'_>) {
+        unsafe { self.clear_ksuf(slot, guard) }
+    }
+
+    // ========================================================================
+    //  Suffix Comparison
     // ========================================================================
 
     #[inline(always)]
     fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
-        Self::ksuf_equals(self, slot, suffix)
+        self.ksuf_equals(slot, suffix)
     }
 
     #[inline(always)]
     fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering> {
-        Self::ksuf_compare(self, slot, suffix)
+        self.ksuf_compare(slot, suffix)
     }
 
     #[inline(always)]
     fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
-        Self::ksuf_or_empty(self, slot)
+        self.ksuf_or_empty(slot)
     }
 
     #[inline(always)]
     fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
-        Self::ksuf_matches(self, slot, ikey, suffix)
+        self.ksuf_matches(slot, ikey, suffix)
     }
 
     #[inline(always)]
     fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
-        Self::ksuf_match_result(self, slot, keylenx, suffix)
+        self.ksuf_match_result(slot, keylenx, suffix)
     }
+
+    // ========================================================================
+    //  Cache Optimization
+    // ========================================================================
 
     #[inline(always)]
     fn prefetch(&self) {
-        Self::prefetch(self);
+        self.prefetch();
     }
 
     #[inline(always)]
     fn prefetch_ikey(&self, slot: usize) {
-        Self::prefetch_ikey(self, slot);
+        self.prefetch_ikey(slot);
     }
 
     #[inline(always)]
     fn prefetch_for_search(&self) {
-        Self::prefetch_for_search(self);
+        self.prefetch_for_search();
     }
 
     #[inline(always)]
     fn prefetch_for_search_adaptive(&self, size: usize) {
-        Self::prefetch_for_search_adaptive(self, size);
+        self.prefetch_for_search_adaptive(size);
     }
 
     // ========================================================================
-    // Modification State (modstate) Operations
+    //  Modification State
     // ========================================================================
 
     #[inline(always)]
     fn modstate(&self) -> u8 {
-        Self::modstate(self)
+        self.modstate()
     }
 
     #[inline(always)]
     fn set_modstate(&self, state: u8) {
-        Self::set_modstate(self, state);
+        self.set_modstate(state);
     }
 
     #[inline(always)]
     fn deleted_layer(&self) -> bool {
-        Self::deleted_layer(self)
+        self.deleted_layer()
     }
 
     #[inline(always)]
     fn mark_deleted_layer(&self) {
-        Self::mark_deleted_layer(self);
+        self.mark_deleted_layer();
     }
 
     #[inline(always)]
     fn mark_remove(&self) {
-        Self::mark_remove(self);
+        self.mark_remove();
     }
 
     #[inline(always)]
     fn is_removing(&self) -> bool {
-        Self::is_removing(self)
+        self.is_removing()
     }
 
     #[inline(always)]
     fn is_empty_state(&self) -> bool {
-        Self::is_empty_state(self)
+        self.is_empty_state()
     }
 
     #[inline(always)]
     fn mark_empty(&self) {
-        Self::mark_empty(self);
+        self.mark_empty();
     }
 
     #[inline(always)]
     fn clear_empty_state(&self) {
-        Self::clear_empty_state(self);
+        self.clear_empty_state();
     }
 }
 
@@ -2893,44 +2327,63 @@ impl<S: ValueSlot + Send + Sync + 'static> TreeLeafNode<S> for LeafNode15<S> {
 // Drop Implementation
 // =============================================================================
 
-impl<S: ValueSlot> Drop for LeafNode15<S> {
-    /// Drop the leaf node, cleaning up stored values and suffix sidecar.
-    ///
-    /// This iterates through all slots and drops any non-null value pointers
-    /// that are not layer pointers (keylenx < `LAYER_KEYLENX`). Layer pointers
-    /// are owned by the tree and cleaned up during tree teardown.
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "slot iterates 0..WIDTH_15 which matches array size"
-    )]
+impl<P: LeafPolicy> Drop for LeafNode15<P> {
     fn drop(&mut self) {
-        for slot in 0..WIDTH_15 {
-            let ptr: *mut u8 = self.leaf_values[slot].load(RELAXED);
-            if ptr.is_null() {
-                continue;
-            }
+        // ====================================================================
+        //  Value Cleanup
+        // ====================================================================
+        //
+        // For ArcPolicy: each terminal value slot holds one strong reference
+        // to Arc<V>. We must call cleanup() to drop it (decrement refcount).
+        //
+        // For InlinePolicy: values are Copy bits in AtomicU64. No heap
+        // allocation, no cleanup needed. The `if P::NEEDS_RETIREMENT` check
+        // compiles away entirely for inline mode.
+        if P::NEEDS_RETIREMENT {
+            for slot in 0..WIDTH_15 {
+                // Skip empty slots first (null pointer = no value stored).
+                // NOTE: We check is_empty() before keylenx because keylenx == 0
+                // is a valid terminal value state (keys exactly 8 bytes long
+                // produce keylenx == 0). Using keylenx == 0 as an empty check
+                // would leak those Arc values.
+                if self.values.is_empty(slot) {
+                    continue;
+                }
 
-            let keylenx: u8 = self.keylenx[slot].load(RELAXED);
-            if keylenx < LAYER_KEYLENX {
-                // SAFETY: ptr came from the slot type's storage method
-                // (Arc::into_raw for LeafValue).
-                // We only cleanup non-layer slots (keylenx < LAYER_KEYLENX).
+                let klx: u8 = self.keylenx[slot].load(RELAXED);
+
+                // Skip layer pointer slots — layer pointers are owned by the
+                // tree and cleaned up during tree teardown traversal, not here.
+                if klx >= LAYER_KEYLENX {
+                    continue;
+                }
+
+                // Terminal value slot — value array has content and it's not a layer.
+                // SAFETY:
+                // - We have &mut self (exclusive access via Drop).
+                // - Slot contains a terminal value (value is non-empty and
+                //   keylenx < LAYER_KEYLENX).
+                // - The pointer was stored by us via Arc::into_raw.
                 unsafe {
-                    S::cleanup_value_ptr(ptr);
+                    self.values.cleanup(slot);
                 }
             }
-            // Note: Layer pointers are owned by the tree and cleaned up
-            // during tree teardown, not here.
         }
+        // For InlinePolicy (NEEDS_RETIREMENT = false):
+        //   - inline_values are AtomicU64 bits, dropped automatically
+        //   - tags are AtomicPtr with sentinel pointers, no ownership
+        //   - No value cleanup needed
 
-        // Drop suffix sidecar if present (sidecar's Drop handles external bag)
-        let sidecar_ptr: *mut SuffixSidecar = self.suffix_sidecar.load(RELAXED);
-        if !sidecar_ptr.is_null() {
-            // SAFETY: sidecar_ptr came from Box::into_raw in ensure_sidecar.
-            // We own it exclusively during drop.
-            unsafe {
-                drop(Box::from_raw(sidecar_ptr));
-            }
+        // ====================================================================
+        //  Suffix Cleanup
+        // ====================================================================
+        //
+        // Drops the heap-allocated SuffixSidecar (which in turn drops its
+        // InlineSuffixBag and external SuffixBag if allocated).
+        //
+        // SAFETY: We have &mut self (exclusive access via Drop).
+        unsafe {
+            self.suffix.drop_storage();
         }
     }
 }
@@ -2939,101 +2392,65 @@ impl<S: ValueSlot> Drop for LeafNode15<S> {
 // LayerCapableLeaf Implementation
 // =============================================================================
 
-impl<V: Send + Sync + 'static> LayerCapableLeaf<LeafValue<V>> for LeafNode15<LeafValue<V>> {
+impl<P: LeafPolicy> LayerCapableLeaf<P> for LeafNode15<P> {
     #[inline]
-    fn try_clone_output(&self, slot: usize) -> Option<Arc<V>> {
+    fn try_clone_output(&self, slot: usize) -> Option<P::Output> {
         debug_assert!(
             slot < WIDTH_15,
-            "try_clone_arc: slot {slot} >= WIDTH_15 {WIDTH_15}"
+            "try_clone_output: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
-        // Check for layer pointer - layer pointers are NOT Arc values
         if self.keylenx(slot) >= LAYER_KEYLENX {
             return None;
         }
 
-        let ptr: *mut u8 = self.leaf_value_ptr(slot);
-        if ptr.is_null() {
-            return None;
-        }
-
-        // SAFETY:
-        // - ptr is non-null (checked above)
-        // - ptr is not a layer pointer (keylenx < LAYER_KEYLENX, checked above)
-        // - ptr came from Arc::into_raw during insert
-        // - Caller ensures slot is stable (lock or version validation)
-        unsafe {
-            let value_ptr: *const V = ptr.cast();
-            Arc::increment_strong_count(value_ptr);
-            Some(Arc::from_raw(value_ptr))
-        }
+        self.values.load(slot)
     }
 
-    unsafe fn assign_from_key_arc(
+    #[expect(clippy::cast_possible_truncation)]
+    unsafe fn assign_from_key(
         &self,
         slot: usize,
         key: &Key<'_>,
-        value: Option<Arc<V>>,
+        value: Option<P::Output>,
         guard: &LocalGuard<'_>,
     ) {
         debug_assert!(
             slot < WIDTH_15,
-            "assign_from_key_arc: slot {slot} >= WIDTH_15 {WIDTH_15}"
+            "assign_from_key: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
-        // Calculate inline length (0-8 bytes)
-        // current_len() returns the remaining key length at current layer
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "current_len() capped at slice length, min(8) ensures <= 8"
-        )]
-        let inline_len: u8 = key.current_len().min(8) as u8;
-
-        // INVARIANT: value must be Some for layer creation
-        // Conflict case always has a value, not a layer pointer.
-        // If this panics, caller incorrectly identified a layer pointer as a conflict.
-        #[expect(
-            clippy::expect_used,
-            reason = "invariant: source slot must contain value"
-        )]
-        let arc: Arc<V> = value.expect(
-            "assign_from_key_arc: value cannot be None (source slot was not a value); \
+        let output: P::Output = value.expect(
+            "assign_from_key: value cannot be None (source slot was not a value); \
              this indicates a bug in conflict detection",
         );
 
-        // Store ikey (8 bytes, big-endian encoded)
+        // Store key.
         self.set_ikey(slot, key.ikey());
 
-        // Store Arc as raw pointer
-        // NOTE: Arc ownership transfers to the slot; the slot now owns one strong reference.
-        // The caller must NOT drop `value` again - it's been consumed via into_raw.
-        let ptr: *mut u8 = Arc::into_raw(arc).cast_mut().cast::<u8>();
-        self.set_leaf_value_ptr(slot, ptr);
+        // Store value — typed, no raw pointer conversion.
+        self.store_value(slot, &output);
 
-        // Set keylenx and suffix based on whether key has remaining bytes
+        // Store keylenx and suffix.
         if key.has_suffix() {
-            // Key has suffix bytes beyond the 8-byte ikey
             self.set_keylenx(slot, KSUF_KEYLENX);
-
-            // Store suffix in suffix bag
-            // SAFETY: Caller guarantees guard is from this tree's collector
+            // SAFETY: Caller holds lock.
             unsafe { self.assign_ksuf(slot, key.suffix(), guard) };
         } else {
-            // Inline key (0-8 bytes total, no suffix)
+            let inline_len: u8 = key.current_len().min(8) as u8;
             self.set_keylenx(slot, inline_len);
         }
     }
-}
 
-// ============================================================================
-//  Compile-Time Layout Assertions
-// ============================================================================
-//
-// See `layout` submodule for comprehensive compile-time assertions that verify:
-// - Exact size (448 bytes, 7 cache lines)
-// - Cache-line alignment (64 bytes)
-// - Field offsets for hot-path optimization
-// - Cache line boundary constraints
-//
-// The layout module ensures any refactoring that changes field positions
-// will fail at compile time with clear error messages.
+    unsafe fn assign_ksuf_prealloc(
+        &self,
+        slot: usize,
+        suffix: &[u8],
+        guard: &LocalGuard<'_>,
+        prealloc: Vec<u8>,
+    ) -> *mut u8 {
+        // Delegate to the leaf's prealloc suffix assignment.
+        // SAFETY: Caller holds lock.
+        unsafe { Self::assign_ksuf_prealloc(self, slot, suffix, guard, prealloc) }
+    }
+}

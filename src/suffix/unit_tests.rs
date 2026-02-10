@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::iter as StdIter;
 use std::mem as StdMem;
 
-use super::{INITIAL_CAPACITY, InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar};
+use super::{InlineSuffixBag, PermutationProvider, SuffixBag, SuffixSidecar, INITIAL_CAPACITY};
 use crate::permuter::Permuter15;
 // Note: AllocError removed - allocations are now infallible
 
@@ -428,16 +428,16 @@ fn test_try_assign_in_place_mixed_usage() {
 fn test_inline_new() {
     let bag: InlineSuffixBag = InlineSuffixBag::new();
 
-    #[cfg(not(feature = "large-suffix-capacity"))]
-    {
-        assert_eq!(bag.capacity(), 256);
-        assert_eq!(bag.remaining(), 256);
-    }
-
-    #[cfg(feature = "large-suffix-capacity")]
+    #[cfg(not(feature = "small-suffix-capacity"))]
     {
         assert_eq!(bag.capacity(), 512);
         assert_eq!(bag.remaining(), 512);
+    }
+
+    #[cfg(feature = "small-suffix-capacity")]
+    {
+        assert_eq!(bag.capacity(), 256);
+        assert_eq!(bag.remaining(), 256);
     }
 
     assert_eq!(bag.used(), 0);
@@ -672,11 +672,11 @@ fn test_inline_size_calculation() {
     // InlineSuffixBag layout: 15 * 4 (slots) + 2 (size) + 1 (count) + 1 (pad) + CAPACITY
     // Default (256):  64 + 256 = 320 bytes
     // Large (512):    64 + 512 = 576 bytes
-    #[cfg(not(feature = "large-suffix-capacity"))]
-    assert_eq!(StdMem::size_of::<InlineSuffixBag>(), 320);
-
-    #[cfg(feature = "large-suffix-capacity")]
+    #[cfg(not(feature = "small-suffix-capacity"))]
     assert_eq!(StdMem::size_of::<InlineSuffixBag>(), 576);
+
+    #[cfg(feature = "small-suffix-capacity")]
+    assert_eq!(StdMem::size_of::<InlineSuffixBag>(), 320);
 }
 
 // ============================================================================
@@ -956,12 +956,10 @@ fn test_sidecar_drop_with_external() {
     }
 
     // Verify external is allocated
-    assert!(
-        !sidecar
-            .external
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .is_null()
-    );
+    assert!(!sidecar
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
 
     // Verify we can read from external
     assert_eq!(sidecar.get(0), Some(b"external_suffix_0".as_slice()));
@@ -1008,16 +1006,14 @@ fn test_sidecar_default() {
     let s1: SuffixSidecar = SuffixSidecar::new();
     let s2: SuffixSidecar = SuffixSidecar::default();
 
-    assert!(
-        s1.external
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .is_null()
-    );
-    assert!(
-        s2.external
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .is_null()
-    );
+    assert!(s1
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
+    assert!(s2
+        .external
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .is_null());
     assert_eq!(s1.inline.count(), 0);
     assert_eq!(s2.inline.count(), 0);
 }

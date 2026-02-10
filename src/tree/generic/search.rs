@@ -1,8 +1,6 @@
-use super::{
-    InsertSearchResultGeneric, Key, LayerCapableLeaf, MassTreeGeneric, NodeAllocatorGeneric,
-    ValueSlot,
-};
-use crate::leaf_trait::TreePermutation;
+use super::{InsertSearchResultGeneric, Key, LeafPolicy, MassTreeGeneric, TreeAllocator};
+use crate::leaf_trait::TreeLeafNode;
+use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 
 /// Threshold for switching from linear to binary search.
@@ -16,13 +14,10 @@ use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 /// is optimal for modern CPUs with 64-byte cache lines (8 u64 ikeys per line).
 const BINARY_SEARCH_THRESHOLD: usize = 16;
 
-impl<S, L, A> MassTreeGeneric<S, L, A>
+impl<P, A> MassTreeGeneric<P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     // ========================================================================
     //  Binary Search Core (for WIDTH > 16)
@@ -49,7 +44,11 @@ where
     ///
     /// Matches `key_lower_bound_by` in `ksearch.hh:64-80`.
     #[inline(always)]
-    fn binary_search_lower_bound(leaf: &L, perm: &L::Perm, target_ikey: u64) -> usize {
+    fn binary_search_lower_bound(
+        leaf: &LeafNode15<P>,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        target_ikey: u64,
+    ) -> usize {
         let size: usize = perm.size();
         let mut lo: usize = 0;
         let mut hi: usize = size;
@@ -91,9 +90,9 @@ where
     /// Matches `key_find_lower_bound_by` in `ksearch.hh:106-121`.
     #[inline]
     fn linear_search_insert(
-        leaf: &L,
+        leaf: &LeafNode15<P>,
         key: &Key<'_>,
-        perm: &L::Perm,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
         search_keylenx: u8,
     ) -> InsertSearchResultGeneric {
         let target_ikey: u64 = key.ikey();
@@ -133,7 +132,7 @@ where
     ///
     /// # Compile-Time Optimization
     ///
-    /// The `L::WIDTH <= BINARY_SEARCH_THRESHOLD` check is evaluated at compile time
+    /// The `LeafNode15::<P>::WIDTH <= BINARY_SEARCH_THRESHOLD` check is evaluated at compile time
     /// during monomorphization. The compiler eliminates the dead branch entirely,
     /// so there is no runtime cost for the strategy selection.
     ///
@@ -147,9 +146,9 @@ where
     )]
     pub(super) fn search_for_insert_generic(
         &self,
-        leaf: &L,
+        leaf: &LeafNode15<P>,
         key: &Key<'_>,
-        perm: &L::Perm,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     ) -> InsertSearchResultGeneric {
         #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
         let search_keylenx: u8 = if key.has_suffix() {
@@ -159,7 +158,7 @@ where
         };
 
         // Compile-time constant: dead branch eliminated during monomorphization
-        if L::WIDTH <= BINARY_SEARCH_THRESHOLD {
+        if LeafNode15::<P>::WIDTH <= BINARY_SEARCH_THRESHOLD {
             return Self::linear_search_insert(leaf, key, perm, search_keylenx);
         }
 
@@ -205,22 +204,21 @@ where
     ///
     /// # Memory Ordering
     ///
-    /// Reads `keylenx` and `leaf_value_ptr` with implied ordering from the
-    /// caller's permutation snapshot. A null pointer indicates the slot is
+    /// Reads `keylenx` and checks value emptiness with implied ordering from the
+    /// caller's permutation snapshot. An empty slot indicates the slot is
     /// mid-modification by another thread.
     #[inline]
     fn check_slot_for_insert(
-        leaf: &L,
+        leaf: &LeafNode15<P>,
         key: &Key<'_>,
         logical_pos: usize,
         slot: usize,
         search_keylenx: u8,
     ) -> Option<InsertSearchResultGeneric> {
         let slot_keylenx: u8 = leaf.keylenx(slot);
-        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
-        // Null pointer indicates concurrent modification - skip this slot
-        if slot_ptr.is_null() {
+        // Empty slot indicates concurrent modification - skip this slot
+        if leaf.is_value_empty(slot) {
             return None;
         }
 
@@ -267,7 +265,11 @@ where
     ///
     /// Returns `Found` on exact match, `Conflict` if suffixes differ.
     #[inline]
-    fn compare_suffixes(leaf: &L, key: &Key<'_>, slot: usize) -> InsertSearchResultGeneric {
+    fn compare_suffixes(
+        leaf: &LeafNode15<P>,
+        key: &Key<'_>,
+        slot: usize,
+    ) -> InsertSearchResultGeneric {
         let key_suffix = key.suffix();
 
         if let Some(slot_suffix) = leaf.ksuf(slot)
@@ -323,15 +325,15 @@ where
     )]
     pub(super) fn search_for_insert_single_layer(
         &self,
-        leaf: &L,
+        leaf: &LeafNode15<P>,
         key: &Key<'_>,
-        perm: &L::Perm,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     ) -> InsertSearchResultGeneric {
         #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
         let search_keylenx: u8 = key.current_len() as u8;
 
         // Compile-time constant: dead branch eliminated during monomorphization
-        if L::WIDTH <= BINARY_SEARCH_THRESHOLD {
+        if LeafNode15::<P>::WIDTH <= BINARY_SEARCH_THRESHOLD {
             return Self::linear_search_single_layer(leaf, key, perm, search_keylenx);
         }
 
@@ -375,16 +377,15 @@ where
     /// For example: `8 < 128` returns `NotFound` at the correct position.
     #[inline(always)]
     fn check_slot_single_layer(
-        leaf: &L,
+        leaf: &LeafNode15<P>,
         logical_pos: usize,
         slot: usize,
         search_keylenx: u8,
     ) -> Option<InsertSearchResultGeneric> {
         let slot_keylenx: u8 = leaf.keylenx(slot);
-        let slot_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
 
-        // Null pointer indicates concurrent modification - skip
-        if slot_ptr.is_null() {
+        // Empty slot indicates concurrent modification - skip
+        if leaf.is_value_empty(slot) {
             return None;
         }
 
@@ -406,9 +407,9 @@ where
     /// Linear search for single-layer mode (small leaves, WIDTH ≤ 16).
     #[inline]
     fn linear_search_single_layer(
-        leaf: &L,
+        leaf: &LeafNode15<P>,
         key: &Key<'_>,
-        perm: &L::Perm,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
         search_keylenx: u8,
     ) -> InsertSearchResultGeneric {
         let target_ikey: u64 = key.ikey();

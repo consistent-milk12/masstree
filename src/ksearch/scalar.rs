@@ -1,4 +1,6 @@
-use crate::{LeafNode15, TreeInternode, ValueSlot};
+use crate::leaf15::WIDTH_15;
+use crate::policy::LeafPolicy;
+use crate::{LeafNode15, TreeInternode};
 
 pub struct Scalar;
 
@@ -32,11 +34,9 @@ impl Scalar {
     /// Find all slots in a [`LeafNode15`] where `ikey == target_ikey`.
     ///
     /// Returns a bitmask where bit `i` is set if `leaf.ikey(i) == target_ikey`.
-    #[inline(always)]
     #[must_use]
-    pub fn find_ikey_matches_leaf15<S: ValueSlot>(target_ikey: u64, leaf: &LeafNode15<S>) -> u32 {
-        use crate::leaf15::WIDTH_15;
-
+    #[inline(always)]
+    pub fn find_ikey_matches_leaf15<P: LeafPolicy>(target_ikey: u64, leaf: &LeafNode15<P>) -> u32 {
         let mut mask: u32 = 0;
 
         for i in 0..WIDTH_15 {

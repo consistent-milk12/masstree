@@ -4,62 +4,15 @@
 //! during tree traversal. When the CPU knows we're about to access a
 //! memory location, it can begin fetching it into cache while we
 //! continue processing the current node.
-//!
-//! # Architecture Support
-//!
-//! - **`x86_64`**: Uses `_mm_prefetch` with `_MM_HINT_T0` (read), `_MM_HINT_ET0` (write), or `_MM_HINT_NTA` (non-temporal)
-//! - **`aarch64`**: Uses inline `PRFM` instruction (stable, no feature gates)
-//! - **Other**: No-op (safe fallback)
-//!
-//! # Feature Flags
-//!
-//! - **`no-prefetch`**: Disables all software prefetching, making all functions no-ops.
-//!   Use this for A/B benchmarking to measure the actual benefit of prefetching.
-//!
-//! # Usage
-//!
-//! ```ignore
-//! use crate::prefetch::prefetch_read;
-//!
-//! // During tree traversal, after determining the next child
-//! let child_ptr = internode.child(child_idx);
-//! prefetch_read(child_ptr);  // Start fetching while we validate version
-//!
-//! // By the time we follow the pointer, it's likely in cache
-//! node = child_ptr;
-//! ```
 
 /// Prefetch data for reading into all cache levels (temporal).
-///
-/// This is a hint to the CPU that we're about to read from the given
-/// pointer. The CPU may begin fetching the cache line(s) containing
-/// this address into L1/L2/L3 cache.
-///
-/// # Safety
-///
-/// This function is safe to call with any pointer, including null or invalid.
-/// Prefetch instructions are hints that never fault on `x86_64`/`aarch64`.
-///
-/// # Performance Notes
-///
-/// - Prefetching is most effective when there's work to do between
-///   the prefetch and the actual access (e.g., version validation)
-/// - Over-prefetching can pollute the cache; use judiciously
-/// - The prefetch distance should match your access pattern
-/// - No null check is performed to avoid branch overhead in hot paths
-///
-/// # Feature Flags
-///
-/// When `no-prefetch` feature is enabled, this function is a no-op.
 #[inline(always)]
-#[expect(clippy::nursery)]
-#[expect(clippy::needless_return)]
+#[expect(clippy::missing_const_for_fn)]
 pub fn prefetch_read<T>(ptr: *const T) {
     // When no-prefetch is enabled, all prefetch calls become no-ops for A/B benchmarking
     #[cfg(feature = "no-prefetch")]
     {
         let _ = ptr;
-        return;
     }
 
     // NOTE: No null check. Prefetch instructions are no-ops for null/invalid
@@ -102,23 +55,12 @@ pub fn prefetch_read<T>(ptr: *const T) {
 }
 
 /// Prefetch data for writing into all cache levels.
-///
-/// Similar to [`prefetch_read`], but hints that we intend to write
-/// to this address. The CPU may fetch the cache line in exclusive
-/// state, avoiding a later upgrade.
-///
-/// # When to Use
-///
-/// Use this when you're about to modify data at the pointer location.
-/// For read-only traversal, prefer [`prefetch_read`].
-///
-/// # Feature Flags
-///
-/// When `no-prefetch` feature is enabled, this function is a no-op.
 #[inline(always)]
-#[expect(clippy::needless_return, clippy::nursery)]
+#[allow(dead_code)]
+#[expect(clippy::missing_const_for_fn)]
 pub fn prefetch_write<T>(ptr: *mut T) {
     #[cfg(feature = "no-prefetch")]
+    #[expect(clippy::needless_return, reason = "Feature gate compatibility")]
     {
         let _ = ptr;
         return;

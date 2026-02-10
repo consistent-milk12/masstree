@@ -1,60 +1,28 @@
 //! Compile-time layout assertions for [`LeafNode15`].
 //!
-//! This module verifies that [`LeafNode15`] maintains its intended cache-line
-//! layout at compile time. Any refactoring that changes field offsets will
-//! cause a build failure with a clear error message.
-//!
-//! # Cache Line Strategy (Suffix Sidecar)
-//!
-//! ```text
-//! CL 0  (0-63):     version (4B) + modstate (1B) + _pad0 (55B) + 4B implicit padding
-//! CL 1  (64-127):   permutation (8B) + _pad1 (56B)
-//! CL 2  (128-191):  ikey0[0..=7] (8 keys, 64B)
-//! CL 3  (192-255):  ikey0[8..=14] (7 keys, 56B) + keylenx[0..=7] (8B)
-//! CL 4  (256-319):  keylenx[8..=14] (7B) + 1B pad + leaf_values[0..=6] (7 ptrs, 56B)
-//! CL 5  (320-383):  leaf_values[7..=14] (8 ptrs, 64B)
-//! CL 6  (384-447):  suffix_sidecar (8B) + next (8B) + prev (8B) + parent (8B) + 32B tail pad
-//! ```
-//!
-//! # Memory Savings
-//!
-//! - Before (with `inline_ksuf` + `external_ksuf`): 768 bytes (12 cache lines)
-//! - After (with `suffix_sidecar`): 448 bytes (7 cache lines)
-//! - Savings: 320 bytes (42% reduction)
-//!
-//! # Hot Path (get) Cache Lines
-//!
-//! - CL 0: version (OCC validation)
-//! - CL 1: permutation (slot ordering)
-//! - CL 2-3: ikey0 (key comparison)
-//! - CL 4-5: `leaf_values` (on match)
+//! Verifies size, alignment, and field offsets for both policy configurations.
 
 #![expect(clippy::items_after_statements, reason = "Compile time checks")]
 
 use std::mem as StdMem;
 
-use super::{LeafNode15, WIDTH_15};
-use crate::LeafValue;
+use super::LeafNode15;
 use crate::nodeversion::NodeVersion;
 use crate::permuter::AtomicPermuter15;
-use crate::suffix::SuffixSidecar;
+use crate::policy::{ArcPolicy, InlinePolicy};
 
 // ============================================================================
-//  Size and Alignment Assertions
+//  Size and Alignment — ArcPolicy
 // ============================================================================
 
-/// Verify [`LeafNode15`] size and alignment.
-///
-/// Note: These assertions assume `target_pointer_width = 64`.
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
+    use super::WIDTH_15;
+    use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8};
 
-    // LeafNode15 should be exactly 448 bytes (7 cache lines) with sidecar design
-    assert!(StdMem::size_of::<LeafNode15<LeafValue<u64>>>() == 448);
-
-    // Alignment should be 64 bytes (cache line)
-    assert!(StdMem::align_of::<LeafNode15<LeafValue<u64>>>() == 64);
+    // ArcPolicy<u64> leaf: exactly 448 bytes (7 cache lines)
+    assert!(StdMem::size_of::<LeafNode15<ArcPolicy<u64>>>() == 448);
+    assert!(StdMem::align_of::<LeafNode15<ArcPolicy<u64>>>() == 64);
 
     // Component sizes
     assert!(StdMem::size_of::<NodeVersion>() == 4);
@@ -62,69 +30,140 @@ const _: () = {
     assert!(StdMem::size_of::<[AtomicU64; WIDTH_15]>() == 120);
     assert!(StdMem::size_of::<[AtomicU8; WIDTH_15]>() == 15);
     assert!(StdMem::size_of::<[AtomicPtr<u8>; WIDTH_15]>() == 120);
-    assert!(StdMem::size_of::<AtomicPtr<SuffixSidecar>>() == 8);
 };
 
 // ============================================================================
-//  Field Offset Assertions
+//  Field Offsets — ArcPolicy
 // ============================================================================
 
-/// Verify critical field offsets for cache line optimization.
-///
-/// These assertions ensure the memory layout matches our cache line strategy:
-/// - CL 0 (0-63): version + modstate isolated from hot fields
-/// - CL 1 (64-127): permutation isolated (CAS-heavy)
-/// - CL 2 (128-191): ikey0 starts at cache line boundary
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     use std::mem::offset_of;
 
-    // Cache Line 0: Version and metadata (ends at offset 60, then 4B implicit padding)
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, version) == 0);
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, modstate) == 4);
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, _pad0) == 5);
-    // _pad0 is 55 bytes, ending at offset 60. Permutation starts at 64 (4B implicit padding).
+    type Leaf = LeafNode15<ArcPolicy<u64>>;
+
+    // Cache Line 0: Version and metadata
+    assert!(offset_of!(Leaf, version) == 0);
+    assert!(offset_of!(Leaf, modstate) == 4);
+    assert!(offset_of!(Leaf, _pad0) == 5);
 
     // Cache Line 1: Permutation (isolated for CAS performance)
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, permutation) == 64);
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, _pad1) == 72);
+    assert!(offset_of!(Leaf, permutation) == 64);
+    assert!(offset_of!(Leaf, _pad1) == 72);
 
-    // Cache Line 2+: Keys start at offset 128 (cache line aligned)
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, ikey0) == 128);
+    // Cache Line 2+: Keys
+    assert!(offset_of!(Leaf, ikey0) == 128);
+    assert!(offset_of!(Leaf, keylenx) == 248);
 
-    // keylenx follows ikey0: 128 + 120 = 248
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, keylenx) == 248);
+    // Values: ArcValueArray starts at 264 (248 + 15 + 1 pad)
+    assert!(offset_of!(Leaf, values) == 264);
 
-    // leaf_values follows keylenx: 248 + 15 + 1 (padding) = 264
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, leaf_values) == 264);
+    // Suffix: SidecarSuffix at 384 (264 + 120)
+    assert!(offset_of!(Leaf, suffix) == 384);
 
-    // suffix_sidecar follows leaf_values: 264 + 120 = 384 (cache line 6)
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, suffix_sidecar) == 384);
-
-    // Linking pointers in cache line 6
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, next) == 392);
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, prev) == 400);
-    assert!(offset_of!(LeafNode15<LeafValue<u64>>, parent) == 408);
+    // Navigation pointers in cache line 6
+    assert!(offset_of!(Leaf, next) == 392);
+    assert!(offset_of!(Leaf, prev) == 400);
+    assert!(offset_of!(Leaf, parent) == 408);
 };
 
 // ============================================================================
-//  Cache Line Boundary Assertions
+//  Size and Alignment — InlinePolicy (default: EmbeddedSuffix, 512-byte capacity)
 // ============================================================================
 
-/// Verify cache line boundaries are respected.
+#[cfg(all(
+    target_pointer_width = "64",
+    not(feature = "sidecar-suffix"),
+    not(feature = "small-suffix-capacity")
+))]
+const _: () = {
+    // InlinePolicy<u64> leaf: 1152 bytes (18 cache lines) with embedded suffix (512-byte inline bag).
+    assert!(StdMem::size_of::<LeafNode15<InlinePolicy<u64>>>() == 1152);
+    assert!(StdMem::align_of::<LeafNode15<InlinePolicy<u64>>>() == 64);
+};
+
+// ============================================================================
+//  Size and Alignment — InlinePolicy (EmbeddedSuffix, 256-byte capacity)
+// ============================================================================
+
+#[cfg(all(
+    target_pointer_width = "64",
+    not(feature = "sidecar-suffix"),
+    feature = "small-suffix-capacity"
+))]
+const _: () = {
+    // InlinePolicy<u64> leaf: 896 bytes (14 cache lines) with embedded suffix (256-byte inline bag).
+    assert!(StdMem::size_of::<LeafNode15<InlinePolicy<u64>>>() == 896);
+    assert!(StdMem::align_of::<LeafNode15<InlinePolicy<u64>>>() == 64);
+};
+
+// ============================================================================
+//  Size and Alignment — InlinePolicy (sidecar-suffix feature)
+// ============================================================================
+
+#[cfg(all(target_pointer_width = "64", feature = "sidecar-suffix"))]
+const _: () = {
+    // InlinePolicy<u64> leaf: 576 bytes (9 cache lines) with sidecar suffix (8-byte pointer).
+    assert!(StdMem::size_of::<LeafNode15<InlinePolicy<u64>>>() == 576);
+    assert!(StdMem::align_of::<LeafNode15<InlinePolicy<u64>>>() == 64);
+};
+
+// ============================================================================
+//  Field Offsets — InlinePolicy
+// ============================================================================
+
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     use std::mem::offset_of;
 
-    // Permutation must start exactly at cache line 1 (offset 64)
-    const PERM_OFFSET: usize = offset_of!(LeafNode15<LeafValue<u64>>, permutation);
-    assert!(PERM_OFFSET == 64);
+    type Leaf = LeafNode15<InlinePolicy<u64>>;
 
-    // ikey0 must start exactly at cache line 2 (offset 128)
-    const IKEY_OFFSET: usize = offset_of!(LeafNode15<LeafValue<u64>>, ikey0);
-    assert!(IKEY_OFFSET == 128);
+    // Shared early fields: identical offsets to ArcPolicy
+    assert!(offset_of!(Leaf, version) == 0);
+    assert!(offset_of!(Leaf, modstate) == 4);
+    assert!(offset_of!(Leaf, permutation) == 64);
+    assert!(offset_of!(Leaf, ikey0) == 128);
+    assert!(offset_of!(Leaf, keylenx) == 248);
 
-    // First 8 ikeys (indices 0..=7) must fit in cache line 2 (offsets 128-191)
-    const IKEY8_END: usize = IKEY_OFFSET + 8 * 8; // 8 keys * 8 bytes
+    // Values: InlineValueArray starts at 264 (same as ArcPolicy)
+    assert!(offset_of!(Leaf, values) == 264);
+
+    // Suffix always at 504 (264 + 240). Size differs by suffix strategy.
+    assert!(offset_of!(Leaf, suffix) == 504);
+};
+
+// ============================================================================
+//  Cache Line Boundary Assertions (shared early fields only)
+// ============================================================================
+
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    use std::mem::offset_of;
+
+    type ArcLeaf = LeafNode15<ArcPolicy<u64>>;
+    type InlineLeaf = LeafNode15<InlinePolicy<u64>>;
+
+    // Shared early fields: identical offsets across both policies.
+    // These precede the policy-specific `values` field.
+
+    // Permutation at cache line 1 (offset 64) — both policies
+    assert!(offset_of!(ArcLeaf, permutation) == 64);
+    assert!(offset_of!(InlineLeaf, permutation) == 64);
+
+    // ikey0 at cache line 2 (offset 128) — both policies
+    assert!(offset_of!(ArcLeaf, ikey0) == 128);
+    assert!(offset_of!(InlineLeaf, ikey0) == 128);
+
+    // values base offset — both policies (after keylenx + 1 byte implicit padding)
+    assert!(offset_of!(ArcLeaf, values) == 264);
+    assert!(offset_of!(InlineLeaf, values) == 264);
+
+    // First 8 ikeys fit in cache line 2 (offsets 128-191)
+    const IKEY_OFFSET: usize = 128;
+    const IKEY8_END: usize = IKEY_OFFSET + 8 * 8;
     assert!(IKEY8_END == 192);
+
+    // NOTE: `suffix`, `next`, `prev`, `parent` offsets are NOT shared.
+    // They differ because `P::Values` size differs (120 bytes for Arc vs 240 for Inline),
+    // causing `suffix` and all trailing fields to shift.
 };

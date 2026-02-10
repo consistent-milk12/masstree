@@ -2,24 +2,20 @@
 //!
 //! Reverse batch iteration methods for maximum performance.
 
-use crate::alloc_trait::NodeAllocatorGeneric;
-use crate::leaf_trait::LayerCapableLeaf;
-use crate::ref_value_slot::RefValueSlot;
-use crate::slot::ValueSlot;
+use crate::alloc_trait::TreeAllocator;
+use crate::leaf15::LeafNode15;
+use crate::policy::LeafPolicy;
+use crate::ref_value_slot::RefLeafPolicy;
 
 use super::RangeIter;
-use super::cleanup_guard::CleanupGuard;
 
 use crate::tree::range::find_rev::ReverseScan;
 use crate::tree::range::scan_state::ScanStateBack;
 
-impl<S, L, A> RangeIter<'_, '_, S, L, A>
+impl<P, A> RangeIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// High-performance reverse iteration with zero-copy references.
     ///
@@ -35,7 +31,7 @@ where
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue.
+    /// - `visitor`: Closure receiving `(&[u8], &P::Value)`. Return `true` to continue.
     ///
     /// # Returns
     ///
@@ -45,8 +41,8 @@ where
     #[expect(clippy::too_many_lines)]
     pub fn rev_for_each_ref<F>(mut self, mut visitor: F) -> usize
     where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> bool,
+        P: RefLeafPolicy,
+        F: FnMut(&[u8], &P::Value) -> bool,
     {
         use crate::tree::range::find_rev::{
             LeafBatchResultBack, advance_prev_leaf_ptr, process_prev_leaf_batch_ptr,
@@ -78,11 +74,11 @@ where
                     return 0;
                 }
 
-                let should_continue =
-                    CleanupGuard::<S>::with_output_ref(&snapshot.value, |value_ref| {
-                        count += 1;
-                        visitor(key, value_ref)
-                    });
+                let value_ref: &P::Value = P::output_as_ref(&snapshot.value);
+                let should_continue = {
+                    count += 1;
+                    visitor(key, value_ref)
+                };
 
                 if !should_continue {
                     return count;
@@ -149,7 +145,7 @@ where
             }
 
             // Check leaf deletion
-            let leaf: &L = unsafe { &*self.back_stack.get_leaf_ptr() };
+            let leaf: &LeafNode15<P> = unsafe { &*self.back_stack.get_leaf_ptr() };
 
             if leaf.version().is_deleted() {
                 self.back_state = ScanStateBack::Retry;
@@ -213,7 +209,7 @@ where
     ///
     /// This is the non-reference variant that works with ALL storage types including
     /// true-inline (`MassTree15Inline`). Unlike `rev_for_each_ref` which returns
-    /// `&S::Value` references, this returns `S::Output` by value.
+    /// `&P::Value` references, this returns `P::Output` by value.
     ///
     /// # Performance Characteristics
     ///
@@ -232,7 +228,7 @@ where
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Callback function `fn(&[u8], S::Output) -> bool`
+    /// - `visitor`: Callback function `fn(&[u8], P::Output) -> bool`
     ///
     /// # Returns
     ///
@@ -242,7 +238,7 @@ where
     #[expect(clippy::too_many_lines)]
     pub fn rev_for_each_intra_leaf_batch<F>(mut self, mut visitor: F) -> usize
     where
-        F: FnMut(&[u8], S::Output) -> bool,
+        F: FnMut(&[u8], P::Output) -> bool,
     {
         use crate::tree::range::find_rev::{
             LeafBatchResultBack, advance_prev_leaf_ptr, process_prev_leaf_batch,
@@ -343,7 +339,7 @@ where
             }
 
             // Check leaf deletion
-            let leaf: &L = unsafe { &*self.back_stack.get_leaf_ptr() };
+            let leaf: &LeafNode15<P> = unsafe { &*self.back_stack.get_leaf_ptr() };
 
             if leaf.version().is_deleted() {
                 self.back_state = ScanStateBack::Retry;
@@ -428,7 +424,7 @@ where
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Closure receiving `S::Output`. Return `true` to continue.
+    /// - `visitor`: Closure receiving `P::Output`. Return `true` to continue.
     ///
     /// # Returns
     ///
@@ -438,7 +434,7 @@ where
     #[expect(clippy::too_many_lines)]
     pub fn rev_for_each_values_batch<F>(mut self, mut visitor: F) -> usize
     where
-        F: FnMut(S::Output) -> bool,
+        F: FnMut(P::Output) -> bool,
     {
         use crate::tree::range::find_rev::{
             LeafBatchResultBack, advance_prev_leaf_ptr, process_prev_leaf_batch_values,
@@ -537,7 +533,7 @@ where
             }
 
             // Check leaf deletion
-            let leaf: &L = unsafe { &*self.back_stack.get_leaf_ptr() };
+            let leaf: &LeafNode15<P> = unsafe { &*self.back_stack.get_leaf_ptr() };
             if leaf.version().is_deleted() {
                 self.back_state = ScanStateBack::Retry;
                 continue;

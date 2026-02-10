@@ -29,10 +29,7 @@ use std::fmt::{self as StdFmt, Debug, Formatter};
 
 use seize::LocalGuard;
 
-use crate::{
-    MassTreeGeneric, NodeAllocatorGeneric, leaf_trait::LayerCapableLeaf, slot::ValueSlot,
-    tree::RemoveError, value::traits::LeafValueLoad,
-};
+use crate::{MassTreeGeneric, TreeAllocator, policy::LeafPolicy, tree::RemoveError};
 
 /// Result type for [`OccupiedEntry::try_remove_entry`].
 ///
@@ -47,9 +44,9 @@ pub type RemoveEntryResult<O> = Result<Option<(Vec<u8>, O)>, RemoveError>;
 ///
 /// # Differences from [`HashMap::Entry`](std::collections::HashMap)
 ///
-/// - Returns values by-value (`S::Output`), not by mutable reference
+/// - Returns values by-value (`P::Output`), not by mutable reference
 /// - Requires a guard for concurrent access
-/// - `and_modify` takes a transform function `FnOnce(&S::Output) -> S::Value`
+/// - `and_modify` takes a transform function `FnOnce(&P::Output) -> P::Value`
 /// - Key is borrowed, not owned (zero allocation for entry creation)
 /// - Provides fallible `try_*` variants that return `Result`
 ///
@@ -82,19 +79,16 @@ pub type RemoveEntryResult<O> = Result<Option<(Vec<u8>, O)>, RemoveError>;
 ///     .and_modify(|v| *v + 1)
 ///     .or_insert(0);
 /// ```
-pub enum Entry<'t, 'e, S, L, A>
+pub enum Entry<'t, 'e, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// An occupied entry (key exists in tree at classification time).
-    Occupied(OccupiedEntry<'t, 'e, S, L, A>),
+    Occupied(OccupiedEntry<'t, 'e, P, A>),
 
     /// A vacant entry (key does not exist classification time).
-    Vacant(VacantEntry<'t, 'e, S, L, A>),
+    Vacant(VacantEntry<'t, 'e, P, A>),
 }
 
 /// A view into an occupied entry in a tree.
@@ -105,22 +99,19 @@ where
 /// NOTE: The "occupied" status was determined at entry creation time.
 /// Under concurrency, the key may have been deleted since then. Methods
 /// handle this gracefully by returning [`Option`] or [`Result`].
-pub struct OccupiedEntry<'t, 'e, S, L, A>
+pub struct OccupiedEntry<'t, 'e, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// The key (borrowed from caller, zero allocation).
     key: &'e [u8],
 
     /// The current value (snapshot at entry creation time).
-    value: S::Output,
+    value: P::Output,
 
     /// Reference to the tree for insertion.
-    tree: &'t MassTreeGeneric<S, L, A>,
+    tree: &'t MassTreeGeneric<P, A>,
 
     /// Guard for concurrent access.
     guard: &'e LocalGuard<'t>,
@@ -134,19 +125,16 @@ where
 /// NOTE: The "vacant" status was determined at entry creation time.
 /// Under concurrency, another thread may have inserted a value since then.
 /// `insert` will overwrite any such value (last-writer-wins).
-pub struct VacantEntry<'t, 'e, S, L, A>
+pub struct VacantEntry<'t, 'e, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// The key (borrowed from caller, zero alloc)
     key: &'e [u8],
 
     /// Reference to the tree for insertion.
-    tree: &'t MassTreeGeneric<S, L, A>,
+    tree: &'t MassTreeGeneric<P, A>,
 
     /// Guard for concurrent access.
     guard: &'e LocalGuard<'t>,
@@ -156,13 +144,10 @@ where
 //  Entry Implementation
 // ============================================================================
 
-impl<'t, 'e, S, L, A> Entry<'t, 'e, S, L, A>
+impl<'t, 'e, P, A> Entry<'t, 'e, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Returns the key for this entry.
     #[must_use]
@@ -189,7 +174,7 @@ where
     /// ```
     /// Returns the entry's value if occupied, or inserts the default and returns it.
     #[inline(always)]
-    pub fn or_insert(self, default: S::Value) -> S::Output {
+    pub fn or_insert(self, default: P::Value) -> P::Output {
         match self {
             Entry::Occupied(o) => o.into_value(),
             Entry::Vacant(v) => v.insert(default),
@@ -198,9 +183,9 @@ where
 
     /// Returns the entry's value if occupied, or computes and inserts a default.
     #[inline(always)]
-    pub fn or_insert_with<F>(self, default: F) -> S::Output
+    pub fn or_insert_with<F>(self, default: F) -> P::Output
     where
-        F: FnOnce() -> S::Value,
+        F: FnOnce() -> P::Value,
     {
         match self {
             Entry::Occupied(o) => o.into_value(),
@@ -210,22 +195,22 @@ where
 
     /// Returns the entry's value if occupied, or computes a default from the key.
     #[inline(always)]
-    pub fn or_insert_with_key<F>(self, default: F) -> S::Output
+    pub fn or_insert_with_key<F>(self, default: F) -> P::Output
     where
-        F: FnOnce(&[u8]) -> S::Value,
+        F: FnOnce(&[u8]) -> P::Value,
     {
         match self {
             Entry::Occupied(o) => o.into_value(),
             Entry::Vacant(v) => {
-                let value: S::Value = default(v.key());
+                let value: P::Value = default(v.key());
                 v.insert(value)
             }
         }
     }
 
-    pub fn or_default(self) -> S::Output
+    pub fn or_default(self) -> P::Output
     where
-        S::Value: Default,
+        P::Value: Default,
     {
         self.or_insert(Default::default())
     }
@@ -233,13 +218,13 @@ where
     /// Modifies the value if occupied using the provided function.
     pub fn and_modify<F>(self, f: F) -> Self
     where
-        F: FnOnce(&S::Output) -> S::Value,
+        F: FnOnce(&P::Output) -> P::Value,
     {
         match self {
             Entry::Occupied(mut o) => {
-                let new_value: S::Value = f(&o.value);
-                let new_output: S::Output = S::into_output(new_value);
-                let return_output: S::Output = new_output.clone();
+                let new_value: P::Value = f(&o.value);
+                let new_output: P::Output = P::into_output(new_value);
+                let return_output: P::Output = new_output.clone();
 
                 let _old = o.tree.insert_output_with_guard(o.key, new_output, o.guard);
                 o.value = return_output;
@@ -253,7 +238,7 @@ where
 
     /// Inserts a value and returns an `OccupiedEntry`.
     #[inline]
-    pub fn insert_entry(self, value: S::Value) -> OccupiedEntry<'t, 'e, S, L, A> {
+    pub fn insert_entry(self, value: P::Value) -> OccupiedEntry<'t, 'e, P, A> {
         match self {
             Entry::Occupied(mut o) => {
                 o.insert(value);
@@ -262,12 +247,12 @@ where
 
             Entry::Vacant(v) => {
                 let key: &[u8] = v.key;
-                let tree: &MassTreeGeneric<S, L, A> = v.tree;
+                let tree: &MassTreeGeneric<P, A> = v.tree;
                 let guard: &LocalGuard<'_> = v.guard;
 
                 // Convert to output before insert
-                let output: S::Output = S::into_output(value);
-                let return_output: S::Output = output.clone();
+                let output: P::Output = P::into_output(value);
+                let return_output: P::Output = output.clone();
                 let _old = tree.insert_output_with_guard(key, output, guard);
 
                 OccupiedEntry {
@@ -282,7 +267,7 @@ where
 
     #[must_use]
     #[inline(always)]
-    pub const fn get(&self) -> Option<&S::Output> {
+    pub const fn get(&self) -> Option<&P::Output> {
         match self {
             Entry::Occupied(o) => Some(o.get()),
 
@@ -295,13 +280,10 @@ where
 //  OccupiedEntry Implementation
 // ============================================================================
 
-impl<S, L, A> OccupiedEntry<'_, '_, S, L, A>
+impl<P, A> OccupiedEntry<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Gets a reference to the key in the entry.
     #[must_use]
@@ -316,13 +298,13 @@ where
     /// via this entry). If another thread has modified the key since then,
     /// this may be stale.
     #[inline(always)]
-    pub const fn get(&self) -> &S::Output {
+    pub const fn get(&self) -> &P::Output {
         &self.value
     }
 
     /// Converts the [`OccupiedEntry`] into the value
     #[inline(always)]
-    pub fn into_value(self) -> S::Output {
+    pub fn into_value(self) -> P::Output {
         self.value
     }
 
@@ -333,9 +315,9 @@ where
     /// - `Some(old)` - Key existed, old value returned
     /// - `None` - Key was deleted concurrently, new value inserted anyway
     #[inline(always)]
-    pub fn insert(&mut self, value: S::Value) -> Option<S::Output> {
+    pub fn insert(&mut self, value: P::Value) -> Option<P::Output> {
         // Convert to output before insert
-        let output = S::into_output(value);
+        let output = P::into_output(value);
         let return_output = output.clone();
         let old = self
             .tree
@@ -361,7 +343,7 @@ where
         clippy::panic,
         reason = "Convenience wrapper; use try_remove for fallible version"
     )]
-    pub fn remove(self) -> Option<S::Output> {
+    pub fn remove(self) -> Option<P::Output> {
         match self.try_remove() {
             Ok(value) => value,
 
@@ -375,7 +357,7 @@ where
     ///
     /// Returns error if removal failed
     #[inline(always)]
-    pub fn try_remove(self) -> Result<Option<S::Output>, RemoveError> {
+    pub fn try_remove(self) -> Result<Option<P::Output>, RemoveError> {
         self.tree.remove_with_guard(self.key, self.guard)
     }
 
@@ -392,7 +374,7 @@ where
         clippy::panic,
         reason = "Convenience wrapper; use try_remove_entry for fallible version"
     )]
-    pub fn remove_entry(self) -> Option<(Vec<u8>, S::Output)> {
+    pub fn remove_entry(self) -> Option<(Vec<u8>, P::Output)> {
         match self.try_remove_entry() {
             Ok(result) => result,
 
@@ -402,11 +384,11 @@ where
 
     /// Fallible version of [`remove_entry`](Self::remove_entry).
     #[inline(always)]
-    pub fn try_remove_entry(self) -> RemoveEntryResult<S::Output> {
+    pub fn try_remove_entry(self) -> RemoveEntryResult<P::Output> {
         let key_owned: Vec<u8> = self.key.to_vec();
 
         (self.tree.remove_with_guard(self.key, self.guard)?)
-            .map_or_else(|| Ok(None), |value: S::Output| Ok(Some((key_owned, value))))
+            .map_or_else(|| Ok(None), |value: P::Output| Ok(Some((key_owned, value))))
     }
 }
 
@@ -414,13 +396,10 @@ where
 //  VacantEntry Implementation
 // ============================================================================
 
-impl<S, L, A> VacantEntry<'_, '_, S, L, A>
+impl<P, A> VacantEntry<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Gets a reference to the key that would be used when inserting.
     #[must_use]
@@ -449,12 +428,12 @@ where
     /// and `insert()`, this method will **overwrite** that value. This is
     /// "last-writer-wins" semantics.
     #[inline(always)]
-    pub fn insert(self, value: S::Value) -> S::Output {
+    pub fn insert(self, value: P::Value) -> P::Output {
         // Convert to output before insert, clone for return value
-        let output = S::into_output(value);
+        let output = P::into_output(value);
         let return_output = output.clone();
 
-        // Insert using internal method that accepts S::Output
+        // Insert using internal method that accepts P::Output
         // The return value (old value if any) is ignored since we're in a VacantEntry
         let _old = self
             .tree
@@ -467,13 +446,11 @@ where
 //  Debug Implementations
 // ============================================================================
 
-impl<S, L, A> Debug for Entry<'_, '_, S, L, A>
+impl<P, A> Debug for Entry<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Debug,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    P::Output: Send + Sync + Debug,
+    A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         match self {
@@ -484,13 +461,11 @@ where
     }
 }
 
-impl<S, L, A> Debug for OccupiedEntry<'_, '_, S, L, A>
+impl<P, A> Debug for OccupiedEntry<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Debug,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    P::Output: Send + Sync + Debug,
+    A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("OccupiedEntry")
@@ -500,13 +475,11 @@ where
     }
 }
 
-impl<S, L, A> Debug for VacantEntry<'_, '_, S, L, A>
+impl<P, A> Debug for VacantEntry<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Debug,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    P::Output: Send + Sync + Debug,
+    A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("VacantEntry")
@@ -519,13 +492,10 @@ where
 //  Constructor (internal)
 // ============================================================================
 
-impl<'t, 'e, S, L, A> Entry<'t, 'e, S, L, A>
+impl<'t, 'e, P, A> Entry<'t, 'e, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S> + LeafValueLoad<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Create an Entry by looking up the key.
     ///
@@ -537,13 +507,13 @@ where
     /// not copied (zero allocation).
     #[inline]
     pub(crate) fn new(
-        tree: &'t MassTreeGeneric<S, L, A>,
+        tree: &'t MassTreeGeneric<P, A>,
         key: &'e [u8],
         guard: &'e LocalGuard<'t>,
     ) -> Self {
         tree.get_with_guard(key, guard).map_or_else(
             || Entry::Vacant(VacantEntry { key, tree, guard }),
-            |value: S::Output| {
+            |value: P::Output| {
                 Entry::Occupied(OccupiedEntry {
                     key,
                     value,

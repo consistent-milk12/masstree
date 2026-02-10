@@ -2,16 +2,16 @@
 //!
 //! Reference-based range scan methods for [`crate::MassTreeGeneric`].
 //!
-//! These methods require [`RefValueSlot`] because they return `&V` references.
-//! True-inline storage (`TrueInlineSlot<V>`) does NOT implement [`RefValueSlot`],
+//! These methods require [`RefLeafPolicy`] because they return `&V` references.
+//! True-inline storage (`InlinePolicy<V>`) does NOT implement [`RefLeafPolicy`],
 //! so these methods are compile-time unavailable for `MassTree15Inline`.
 //!
 //! # Why This Separation?
 //!
-//! `MassTree15Inline` encodes values as bits in pointer addresses (XOR with a magic constant).
-//! The "pointer" returned by `output_to_raw()` is NOT a valid memory address.
-//! Dereferencing it is undefined behavior. By gating `_ref` methods behind `RefValueSlot`,
-//! we get compile-time prevention of this unsoundness.
+//! `InlinePolicy<V>` stores values as `u64` bits directly in the leaf node —
+//! there is no pointer-backed allocation and no stable memory address to reference.
+//! By gating `_ref` methods behind `RefLeafPolicy`, we get compile-time prevention
+//! of attempting to borrow a `&V` from inline storage.
 //!
 //! # Compile-Time Safety
 //!
@@ -36,25 +36,21 @@
 
 use seize::LocalGuard;
 
-use crate::alloc_trait::NodeAllocatorGeneric;
-use crate::leaf_trait::LayerCapableLeaf;
-use crate::ref_value_slot::RefValueSlot;
-use crate::slot::ValueSlot;
+use crate::alloc_trait::TreeAllocator;
+use crate::policy::LeafPolicy;
+use crate::ref_value_slot::RefLeafPolicy;
 use crate::tree::MassTreeGeneric;
 
 use super::iterator::RangeBound;
 
 // ============================================================================
-//  Reference-Based Scan API (requires RefValueSlot)
+//  Reference-Based Scan API (requires RefLeafPolicy)
 // ============================================================================
 
-impl<S, L, A> MassTreeGeneric<S, L, A>
+impl<P, A> MassTreeGeneric<P, A>
 where
-    S: ValueSlot + RefValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy + RefLeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Scan a range with zero-copy value references.
     ///
@@ -113,7 +109,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> usize
     where
-        F: FnMut(&[u8], &S::Value) -> bool,
+        F: FnMut(&[u8], &P::Value) -> bool,
     {
         // Use zero-copy for_each_ref internally
         self.range(start, end, guard).for_each_ref(visitor)
@@ -177,7 +173,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> usize
     where
-        F: FnMut(&[u8], &S::Value) -> bool,
+        F: FnMut(&[u8], &P::Value) -> bool,
     {
         // Delegate to RangeIter::for_each_batch_ref which has correct initialization
         self.range(start, end, guard).for_each_batch_ref(visitor)
@@ -235,7 +231,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> usize
     where
-        F: FnMut(&[u8], &S::Value) -> bool,
+        F: FnMut(&[u8], &P::Value) -> bool,
     {
         self.range(start, end, guard)
             .for_each_intra_leaf_batch_ref(visitor)
@@ -289,7 +285,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> usize
     where
-        F: FnMut(&[u8], &S::Value) -> bool,
+        F: FnMut(&[u8], &P::Value) -> bool,
     {
         self.range(start, end, guard).rev_for_each_ref(visitor)
     }

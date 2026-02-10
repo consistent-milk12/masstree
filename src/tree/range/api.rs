@@ -4,9 +4,8 @@
 
 use seize::LocalGuard;
 
-use crate::alloc_trait::NodeAllocatorGeneric;
-use crate::leaf_trait::LayerCapableLeaf;
-use crate::slot::ValueSlot;
+use crate::alloc_trait::TreeAllocator;
+use crate::policy::LeafPolicy;
 use crate::tree::MassTreeGeneric;
 
 use super::iterator::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
@@ -15,13 +14,10 @@ use super::iterator::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 //  Range Scan API for MassTreeGeneric
 // ============================================================================
 
-impl<S, L, A> MassTreeGeneric<S, L, A>
+impl<P, A> MassTreeGeneric<P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     // ========================================================================
     //  Iterator API
@@ -60,7 +56,7 @@ where
         start: RangeBound<'a>,
         end: RangeBound<'a>,
         guard: &'g LocalGuard<'a>,
-    ) -> RangeIter<'a, 'g, S, L, A> {
+    ) -> RangeIter<'a, 'g, P, A> {
         self.verify_guard(guard);
         RangeIter::new(self, start, end, guard)
     }
@@ -84,7 +80,7 @@ where
     /// let count = tree.iter(&guard).count();
     /// println!("Tree has {} entries", count);
     ///
-    pub fn iter<'a, 'g>(&'a self, guard: &'g LocalGuard<'a>) -> RangeIter<'a, 'g, S, L, A> {
+    pub fn iter<'a, 'g>(&'a self, guard: &'g LocalGuard<'a>) -> RangeIter<'a, 'g, P, A> {
         self.range(RangeBound::Unbounded, RangeBound::Unbounded, guard)
     }
 
@@ -106,7 +102,7 @@ where
     /// let guard = tree.guard();
     /// let keys: Vec<Vec<u8>> = tree.keys(&guard).collect();
     ///
-    pub fn keys<'a, 'g>(&'a self, guard: &'g LocalGuard<'a>) -> KeysIter<'a, 'g, S, L, A> {
+    pub fn keys<'a, 'g>(&'a self, guard: &'g LocalGuard<'a>) -> KeysIter<'a, 'g, P, A> {
         self.iter(guard).keys()
     }
 
@@ -128,7 +124,7 @@ where
     /// let guard = tree.guard();
     /// let values: Vec<Arc<String>> = tree.values(&guard).collect();
     ///
-    pub fn values<'a, 'g>(&'a self, guard: &'g LocalGuard<'a>) -> ValuesIter<'a, 'g, S, L, A> {
+    pub fn values<'a, 'g>(&'a self, guard: &'g LocalGuard<'a>) -> ValuesIter<'a, 'g, P, A> {
         self.iter(guard).values()
     }
 
@@ -159,7 +155,7 @@ where
     /// ```
     #[must_use]
     #[inline]
-    pub fn first(&self) -> Option<ScanEntry<S::Output>> {
+    pub fn first(&self) -> Option<ScanEntry<P::Output>> {
         let guard = self.guard();
         self.first_with_guard(&guard)
     }
@@ -167,7 +163,7 @@ where
     /// Get the first (smallest) key-value pair using an existing guard.
     #[must_use]
     #[inline]
-    pub fn first_with_guard<'a>(&'a self, guard: &LocalGuard<'a>) -> Option<ScanEntry<S::Output>> {
+    pub fn first_with_guard<'a>(&'a self, guard: &LocalGuard<'a>) -> Option<ScanEntry<P::Output>> {
         self.iter(guard).next()
     }
 
@@ -194,7 +190,7 @@ where
     /// ```
     #[must_use]
     #[inline]
-    pub fn last(&self) -> Option<ScanEntry<S::Output>> {
+    pub fn last(&self) -> Option<ScanEntry<P::Output>> {
         let guard = self.guard();
         self.last_with_guard(&guard)
     }
@@ -202,7 +198,7 @@ where
     /// Get the last (largest) key-value pair using an existing guard.
     #[must_use]
     #[inline]
-    pub fn last_with_guard<'a>(&'a self, guard: &LocalGuard<'a>) -> Option<ScanEntry<S::Output>> {
+    pub fn last_with_guard<'a>(&'a self, guard: &LocalGuard<'a>) -> Option<ScanEntry<P::Output>> {
         self.iter(guard).next_back()
     }
 
@@ -222,7 +218,7 @@ where
     ///
     /// - `start`: Start bound of the range
     /// - `end`: End bound of the range
-    /// - `visitor`: Callback function `fn(&[u8], S::Output) -> bool`
+    /// - `visitor`: Callback function `fn(&[u8], P::Output) -> bool`
     /// - `guard`: Memory reclamation guard
     ///
     /// # Returns
@@ -254,7 +250,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> usize
     where
-        F: FnMut(&[u8], S::Output) -> bool,
+        F: FnMut(&[u8], P::Output) -> bool,
     {
         // Use zero-allocation for_each internally
         self.range(start, end, guard).for_each(visitor)
@@ -289,7 +285,7 @@ where
     ///
     /// - `start`: Start bound of the range
     /// - `end`: End bound of the range
-    /// - `visitor`: Callback function `fn(&[u8], S::Output) -> bool`
+    /// - `visitor`: Callback function `fn(&[u8], P::Output) -> bool`
     /// - `guard`: Memory reclamation guard
     ///
     /// # Returns
@@ -321,7 +317,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> usize
     where
-        F: FnMut(&[u8], S::Output) -> bool,
+        F: FnMut(&[u8], P::Output) -> bool,
     {
         self.range(start, end, guard)
             .for_each_intra_leaf_batch(visitor)
@@ -352,7 +348,7 @@ where
     ///
     /// - `start`: Start bound (lower bound - stopping point for reverse)
     /// - `end`: End bound (upper bound - starting point for reverse)
-    /// - `visitor`: Callback function `fn(&[u8], S::Output) -> bool`
+    /// - `visitor`: Callback function `fn(&[u8], P::Output) -> bool`
     /// - `guard`: Memory reclamation guard
     ///
     /// # Returns
@@ -384,7 +380,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> usize
     where
-        F: FnMut(&[u8], S::Output) -> bool,
+        F: FnMut(&[u8], P::Output) -> bool,
     {
         self.range(start, end, guard)
             .rev_for_each_intra_leaf_batch(visitor)
@@ -427,7 +423,7 @@ where
     ///
     /// - `start`: Start bound of the range
     /// - `end`: End bound of the range
-    /// - `visitor`: Callback function `fn(S::Output) -> bool`
+    /// - `visitor`: Callback function `fn(P::Output) -> bool`
     /// - `guard`: Memory reclamation guard
     ///
     /// # Returns
@@ -456,7 +452,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> usize
     where
-        F: FnMut(S::Output) -> bool,
+        F: FnMut(P::Output) -> bool,
     {
         self.range(start, end, guard).for_each_values_batch(visitor)
     }
@@ -482,7 +478,7 @@ where
     ///
     /// - `start`: Start bound (lower bound - stopping point for reverse)
     /// - `end`: End bound (upper bound - starting point for reverse)
-    /// - `visitor`: Callback function `fn(S::Output) -> bool`
+    /// - `visitor`: Callback function `fn(P::Output) -> bool`
     /// - `guard`: Memory reclamation guard
     ///
     /// # Returns
@@ -496,7 +492,7 @@ where
         guard: &LocalGuard<'_>,
     ) -> usize
     where
-        F: FnMut(S::Output) -> bool,
+        F: FnMut(P::Output) -> bool,
     {
         self.range(start, end, guard)
             .rev_for_each_values_batch(visitor)
@@ -509,7 +505,7 @@ where
     /// # Arguments
     ///
     /// - `prefix`: The key prefix to match
-    /// - `visitor`: Callback function `fn(&[u8], S::Output) -> bool`
+    /// - `visitor`: Callback function `fn(&[u8], P::Output) -> bool`
     /// - `guard`: Memory reclamation guard
     ///
     /// # Returns
@@ -528,7 +524,7 @@ where
     ///
     pub fn scan_prefix<F>(&self, prefix: &[u8], mut visitor: F, guard: &LocalGuard<'_>) -> usize
     where
-        F: FnMut(&[u8], S::Output) -> bool,
+        F: FnMut(&[u8], P::Output) -> bool,
     {
         // Compute exclusive upper bound
         // This is the prefix with its last byte incremented
@@ -563,7 +559,7 @@ where
     /// # Returns
     ///
     /// A vector of all entries in the tree.
-    pub fn collect_entries(&self, guard: &LocalGuard<'_>) -> Vec<ScanEntry<S::Output>> {
+    pub fn collect_entries(&self, guard: &LocalGuard<'_>) -> Vec<ScanEntry<P::Output>> {
         self.iter(guard).collect()
     }
 
@@ -589,7 +585,7 @@ where
     /// # Returns
     ///
     /// A vector of all values in the tree.
-    pub fn collect_values(&self, guard: &LocalGuard<'_>) -> Vec<S::Output> {
+    pub fn collect_values(&self, guard: &LocalGuard<'_>) -> Vec<P::Output> {
         self.values(guard).collect()
     }
 }

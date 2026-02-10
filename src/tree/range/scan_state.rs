@@ -18,8 +18,9 @@ use std::ptr::{self as StdPtr, NonNull};
 
 use arrayvec::ArrayVec;
 
-use crate::leaf_trait::{TreeLeafNode, TreePermutation};
-use crate::slot::ValueSlot;
+use crate::leaf_trait::TreeLeafNode;
+use crate::leaf15::LeafNode15;
+use crate::policy::LeafPolicy;
 
 // ============================================================================
 //  ScanState Enum
@@ -127,10 +128,9 @@ impl ScanState {
 /// # C++ Reference
 ///
 /// Corresponds to `scanstackelt` in `masstree_scan.hh`.
-pub struct ScanStackElement<L, S>
+pub struct ScanStackElement<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     /// Current layer root (may be leaf or internode).
     ///
@@ -139,10 +139,10 @@ where
 
     /// Current leaf in this layer.
     ///
-    /// Uses `Option<NonNull<L>>` for explicit null representation with niche
+    /// Uses `Option<NonNull<LeafNode15<P>>>` for explicit null representation with niche
     /// optimization. The pointer is valid as long as the guard passed to scan
     /// APIs remains alive.
-    leaf: Option<NonNull<L>>,
+    leaf: Option<NonNull<LeafNode15<P>>>,
 
     /// Version snapshot for optimistic validation.
     ///
@@ -154,7 +154,7 @@ where
     ///
     /// Loaded via `leaf.permutation()`. Must be refreshed when version
     /// changes or when moving to a new leaf.
-    perm: L::Perm,
+    perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
 
     /// Current logical position in permutation.
     ///
@@ -173,15 +173,14 @@ where
     last_ikey: u64,
 
     /// Marker for the slot type.
-    _marker: PhantomData<S>,
+    _marker: PhantomData<P>,
 }
 
 // Manual Clone impl to avoid requiring `L: Clone` and `S: Clone` bounds.
 // All fields are Copy types (pointers, primitives, PhantomData).
-impl<L, S> Clone for ScanStackElement<L, S>
+impl<P> Clone for ScanStackElement<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     fn clone(&self) -> Self {
         Self {
@@ -200,10 +199,9 @@ where
     clippy::missing_fields_in_debug,
     reason = "Intentionally omit PhantomData and show perm.size() instead of full permutation"
 )]
-impl<L, S> Debug for ScanStackElement<L, S>
+impl<P> Debug for ScanStackElement<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("ScanStackElement")
@@ -216,10 +214,9 @@ where
     }
 }
 
-impl<L, S> ScanStackElement<L, S>
+impl<P> ScanStackElement<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     // ========================================================================
     //  Construction
@@ -230,12 +227,13 @@ where
     /// The element starts uninitialized (null leaf, invalid version).
     /// Call `initialize()` or `set_leaf()` before using.
     #[must_use]
+    #[expect(clippy::missing_const_for_fn, reason = "Perm::empty() is not const")]
     pub fn new(root: *const u8) -> Self {
         Self {
             root,
             leaf: None,
             version: 0,
-            perm: L::Perm::empty(),
+            perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm::empty(),
             ki: 0,
             last_ikey: 0,
             _marker: PhantomData,
@@ -251,9 +249,9 @@ where
     #[allow(dead_code, reason = "Scan stack element API")]
     pub const fn with_leaf(
         root: *const u8,
-        leaf: *mut L,
+        leaf: *mut LeafNode15<P>,
         version: u32,
-        perm: L::Perm,
+        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
         ki: usize,
     ) -> Self {
         Self {
@@ -281,7 +279,7 @@ where
     ///
     /// Returns null if the leaf is not set.
     #[inline(always)]
-    pub const fn leaf_ptr(&self) -> *mut L {
+    pub const fn leaf_ptr(&self) -> *mut LeafNode15<P> {
         match self.leaf {
             Some(nn) => nn.as_ptr(),
 
@@ -297,7 +295,7 @@ where
     /// - `self.leaf` is `Some` (not null)
     /// - The guard that protects this pointer is still alive
     #[inline(always)]
-    pub unsafe fn leaf_ref(&self) -> &L {
+    pub unsafe fn leaf_ref(&self) -> &LeafNode15<P> {
         debug_assert!(self.leaf.is_some(), "leaf_ref called on null leaf");
         // SAFETY: Caller ensures leaf is valid and Some
         unsafe { self.leaf.unwrap_unchecked().as_ref() }
@@ -312,7 +310,7 @@ where
     /// The caller must ensure the guard that protects this pointer is still alive.
     #[inline(always)]
     #[allow(dead_code, reason = "Scan stack element API")]
-    pub unsafe fn try_leaf_ref(&self) -> Option<&L> {
+    pub unsafe fn try_leaf_ref(&self) -> Option<&LeafNode15<P>> {
         // SAFETY: Caller ensures guard is held
         self.leaf.map(|nn| unsafe { nn.as_ref() })
     }
@@ -325,7 +323,7 @@ where
 
     /// Get the cached permutation.
     #[inline(always)]
-    pub const fn perm(&self) -> L::Perm {
+    pub const fn perm(&self) -> <LeafNode15<P> as TreeLeafNode<P>>::Perm {
         self.perm
     }
 
@@ -339,6 +337,10 @@ where
     ///
     /// Returns `Some(perm.get(ki))` if `ki < perm.size()`, else `None`.
     #[inline]
+    #[expect(
+        clippy::missing_const_for_fn,
+        reason = "perm.size()/get() are not const"
+    )]
     pub fn kp(&self) -> Option<usize> {
         if self.ki < self.perm.size() {
             Some(self.perm.get(self.ki))
@@ -350,6 +352,7 @@ where
     /// Check if the leaf is exhausted (no more slots at current position).
     #[inline(always)]
     #[allow(dead_code, reason = "Scan stack element API")]
+    #[expect(clippy::missing_const_for_fn, reason = "perm.size() is not const")]
     pub fn is_exhausted(&self) -> bool {
         self.ki >= self.perm.size()
     }
@@ -374,7 +377,7 @@ where
     ///
     /// Accepts null pointers (converts to `None` internally).
     #[inline(always)]
-    pub const fn set_leaf(&mut self, leaf: *mut L) {
+    pub const fn set_leaf(&mut self, leaf: *mut LeafNode15<P>) {
         self.leaf = NonNull::new(leaf);
     }
 
@@ -388,7 +391,7 @@ where
     /// Set the cached permutation.
     #[inline(always)]
     #[allow(dead_code, reason = "Scan stack element API")]
-    pub const fn set_perm(&mut self, perm: L::Perm) {
+    pub const fn set_perm(&mut self, perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm) {
         self.perm = perm;
     }
 
@@ -421,7 +424,12 @@ where
     ///
     /// Used when moving to a new leaf or after version change.
     #[inline]
-    pub const fn update_state(&mut self, version: u32, perm: L::Perm, ki: usize) {
+    pub const fn update_state(
+        &mut self,
+        version: u32,
+        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        ki: usize,
+    ) {
         self.version = version;
         self.perm = perm;
         self.ki = ki;
@@ -439,7 +447,7 @@ where
     pub unsafe fn refresh_from_leaf(&mut self, ki: usize) {
         debug_assert!(self.leaf.is_some(), "refresh_from_leaf called on null leaf");
         // SAFETY: Caller ensures leaf is valid
-        let leaf: &L = unsafe { self.leaf.unwrap_unchecked().as_ref() };
+        let leaf: &LeafNode15<P> = unsafe { self.leaf.unwrap_unchecked().as_ref() };
 
         self.version = leaf.version().stable();
         self.perm = leaf.permutation();
@@ -472,7 +480,7 @@ where
 /// `leaf` is always non-null. A `LayerContext` is only created when
 /// descending into a sublayer from a valid leaf position.
 #[derive(Clone, Copy)]
-pub struct LayerContext<L> {
+pub struct LayerContext<P: LeafPolicy> {
     /// Parent layer root.
     pub root: *const u8,
 
@@ -480,10 +488,10 @@ pub struct LayerContext<L> {
     ///
     /// Uses `NonNull` because a layer context is only created from a valid
     /// leaf - we never push a null leaf to the layer stack.
-    pub leaf: NonNull<L>,
+    pub leaf: NonNull<LeafNode15<P>>,
 }
 
-impl<L> Debug for LayerContext<L> {
+impl<P: LeafPolicy> Debug for LayerContext<P> {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("LayerContext")
             .field("root", &self.root)
@@ -492,7 +500,7 @@ impl<L> Debug for LayerContext<L> {
     }
 }
 
-impl<L> LayerContext<L> {
+impl<P: LeafPolicy> LayerContext<P> {
     /// Create a new layer context.
     ///
     /// # Panics
@@ -503,7 +511,7 @@ impl<L> LayerContext<L> {
     #[track_caller]
     #[inline(always)]
     #[expect(clippy::expect_used, reason = "Infallible")]
-    pub const fn new(root: *const u8, leaf: *mut L) -> Self {
+    pub const fn new(root: *const u8, leaf: *mut LeafNode15<P>) -> Self {
         Self {
             root,
             leaf: NonNull::new(leaf).expect("LayerContext requires non-null leaf"),
@@ -514,7 +522,7 @@ impl<L> LayerContext<L> {
     ///
     /// Returns `None` if `leaf` is null.
     #[inline(always)]
-    pub fn try_new(root: *const u8, leaf: *mut L) -> Option<Self> {
+    pub fn try_new(root: *const u8, leaf: *mut LeafNode15<P>) -> Option<Self> {
         Some(Self {
             root,
             leaf: NonNull::new(leaf)?,
@@ -523,7 +531,7 @@ impl<L> LayerContext<L> {
 
     /// Get the leaf as a raw mutable pointer.
     #[inline(always)]
-    pub const fn leaf_ptr(&self) -> *mut L {
+    pub const fn leaf_ptr(&self) -> *mut LeafNode15<P> {
         self.leaf.as_ptr()
     }
 }
@@ -541,7 +549,7 @@ impl<L> LayerContext<L> {
 /// # Usage
 ///
 /// ```ignore
-/// let mut layer_stack = LayerStack::<LeafNode24<S>>::new();
+/// let mut layer_stack = LayerStack::<MyPolicy>::new();
 ///
 /// // On layer descent
 /// layer_stack.push(LayerContext::new(current_root, current_leaf));
@@ -552,7 +560,7 @@ impl<L> LayerContext<L> {
 ///     stack.set_leaf(parent.leaf_ptr());
 /// }
 /// ```
-pub type LayerStack<L> = ArrayVec<LayerContext<L>, 6>;
+pub type LayerStack<P> = ArrayVec<LayerContext<P>, 6>;
 
 // ============================================================================
 //  ScanSnapshot - Captured slot data for emission
@@ -569,9 +577,9 @@ pub type LayerStack<L> = ArrayVec<LayerContext<L>, 6>;
 /// at capture time. This makes it safe to use even if the leaf is
 /// modified after validation.
 #[derive(Debug, Clone)]
-pub struct ScanSnapshot<S: ValueSlot> {
+pub struct ScanSnapshot<P: LeafPolicy> {
     /// The value output (Arc<V> clone or V copy).
-    pub value: S::Output,
+    pub value: P::Output,
 
     /// The key length at current layer.
     ///
@@ -611,8 +619,8 @@ pub struct ScanSnapshot<S: ValueSlot> {
 pub struct ScanSnapshotPtr<V> {
     /// Typed pointer to the value data.
     ///
-    /// - For `LeafValue<V>`: Points to Arc<V>'s data
-    /// - For `TrueInlineSlot<V>`: Stored as atomic bits (no stable pointer)
+    /// - For `ArcPolicy<V>`: Points to Arc<V>'s data
+    /// - For `InlinePolicy<V>`: Stored as atomic bits (no stable pointer)
     pub value_ptr: *const V,
 
     /// The key length at current layer (same as [`ScanSnapshot`]).
@@ -664,10 +672,10 @@ impl<V> ScanSnapshotPtr<V> {
     }
 }
 
-impl<S: ValueSlot> ScanSnapshot<S> {
+impl<P: LeafPolicy> ScanSnapshot<P> {
     /// Create a new scan snapshot.
     #[inline(always)]
-    pub const fn new(value: S::Output, key_len: usize) -> Self {
+    pub const fn new(value: P::Output, key_len: usize) -> Self {
         Self { value, key_len }
     }
 }
@@ -678,25 +686,25 @@ impl<S: ValueSlot> ScanSnapshot<S> {
 
 /// Result from find operations - optimized for the common non-Emit cases.
 ///
-/// Replaces `(ScanState, Option<ScanSnapshot<S>>)` with a discriminated union
+/// Replaces `(ScanState, Option<ScanSnapshot<P>>)` with a discriminated union
 /// that doesn't waste space on `None` for non-Emit states.
 ///
 /// # Size Optimization
 ///
-/// - Old: `(ScanState, Option<ScanSnapshot<S>>)` = 1 + 1 + `size_of(ScanSnapshot)`
-/// - New: `FindResult<S>` = `max(1, size_of(ScanSnapshot))` with discriminant
+/// - Old: `(ScanState, Option<ScanSnapshot<P>>)` = 1 + 1 + `size_of(ScanSnapshot)`
+/// - New: `FindResult<P>` = `max(1, size_of(ScanSnapshot))` with discriminant
 ///
-/// For typical `S::Output` sizes (8-16 bytes), this saves ~8 bytes per return.
-pub enum FindResult<S: ValueSlot> {
+/// For typical `P::Output` sizes (8-16 bytes), this saves ~8 bytes per return.
+pub enum FindResult<P: LeafPolicy> {
     /// Found a value to emit.
-    Emit(ScanSnapshot<S>),
+    Emit(ScanSnapshot<P>),
     /// State transition without payload.
     Transition(ScanState),
 }
 
-impl<S: ValueSlot> Clone for FindResult<S>
+impl<P: LeafPolicy> Clone for FindResult<P>
 where
-    S::Output: Clone,
+    P::Output: Clone,
 {
     fn clone(&self) -> Self {
         match self {
@@ -706,10 +714,10 @@ where
     }
 }
 
-impl<S: ValueSlot> FindResult<S> {
+impl<P: LeafPolicy> FindResult<P> {
     /// Create an Emit result with the given snapshot.
     #[inline(always)]
-    pub const fn emit(snapshot: ScanSnapshot<S>) -> Self {
+    pub const fn emit(snapshot: ScanSnapshot<P>) -> Self {
         Self::Emit(snapshot)
     }
 
@@ -722,7 +730,7 @@ impl<S: ValueSlot> FindResult<S> {
 
     /// Convert to the legacy tuple format for gradual migration.
     #[inline(always)]
-    pub fn into_parts(self) -> (ScanState, Option<ScanSnapshot<S>>) {
+    pub fn into_parts(self) -> (ScanState, Option<ScanSnapshot<P>>) {
         match self {
             Self::Emit(snap) => (ScanState::Emit, Some(snap)),
             Self::Transition(state) => (state, None),
@@ -771,22 +779,21 @@ impl ScanStateBack {
 //  BackStackElement (for DoubleEndedIterator)
 // ============================================================================
 
-pub struct BackStackElement<L, S>
+pub struct BackStackElement<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     /// Current layer root (may be leaf or internode).
     root: *const u8,
 
     /// Current leaf in this layer.
-    leaf: Option<NonNull<L>>,
+    leaf: Option<NonNull<LeafNode15<P>>>,
 
     /// Version snapshot for optimisitic validation.
     version: u32,
 
     /// Cached permutation snapshot.
-    perm: L::Perm,
+    perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
 
     /// Current logical position in permutation.
     ///
@@ -796,24 +803,24 @@ where
     ki: isize,
 
     /// Marker for the slot type.
-    _marker: PhantomData<S>,
+    _marker: PhantomData<P>,
 }
 
-impl<L, S> BackStackElement<L, S>
+impl<P> BackStackElement<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     /// Create a new back stack element for a layer.
     ///
     /// Matches [`ScanStackElement::new`] signature for consistency.
     #[inline(always)]
+    #[expect(clippy::missing_const_for_fn, reason = "Perm::empty() is not const")]
     pub fn new(root: *const u8) -> Self {
         Self {
             root,
             leaf: None,
             version: 0,
-            perm: L::Perm::empty(),
+            perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm::empty(),
             ki: 0,
             _marker: PhantomData,
         }
@@ -832,12 +839,12 @@ where
 
     /// Get the current leaf pointer.
     #[inline(always)]
-    pub fn get_leaf_ptr(&self) -> *mut L {
+    pub fn get_leaf_ptr(&self) -> *mut LeafNode15<P> {
         self.leaf.map_or(StdPtr::null_mut(), NonNull::as_ptr)
     }
 
     #[inline(always)]
-    pub const fn set_leaf(&mut self, leaf: *mut L) {
+    pub const fn set_leaf(&mut self, leaf: *mut LeafNode15<P>) {
         self.leaf = NonNull::new(leaf);
     }
 
@@ -849,7 +856,12 @@ where
 
     /// Update state after version validation.
     #[inline(always)]
-    pub const fn update_state(&mut self, version: u32, perm: L::Perm, ki: isize) {
+    pub const fn update_state(
+        &mut self,
+        version: u32,
+        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        ki: isize,
+    ) {
         self.version = version;
         self.perm = perm;
         self.ki = ki;
@@ -863,7 +875,7 @@ where
 
     /// Get current position (signed).
     #[inline(always)]
-    pub const fn get_perm_ref(&self) -> &L::Perm {
+    pub const fn get_perm_ref(&self) -> &<LeafNode15<P> as TreeLeafNode<P>>::Perm {
         &self.perm
     }
 
@@ -883,6 +895,7 @@ where
     ///
     /// Valid when `0 <= ki < perm.size()`.
     #[inline(always)]
+    #[expect(clippy::missing_const_for_fn, reason = "perm.size() is not const")]
     pub fn has_valid_position(&self) -> bool {
         (self.ki >= 0) && (self.ki.cast_unsigned() < self.perm.size())
     }
@@ -897,20 +910,18 @@ where
     }
 }
 
-impl<L, S> Default for BackStackElement<L, S>
+impl<P> Default for BackStackElement<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     fn default() -> Self {
         Self::new(StdPtr::null())
     }
 }
 
-impl<L, S> Clone for BackStackElement<L, S>
+impl<P> Clone for BackStackElement<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     fn clone(&self) -> Self {
         Self {
@@ -924,10 +935,9 @@ where
     }
 }
 
-impl<L, S> Debug for BackStackElement<L, S>
+impl<P> Debug for BackStackElement<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("BackStackElement")

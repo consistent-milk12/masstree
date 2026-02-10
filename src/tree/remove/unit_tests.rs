@@ -9,14 +9,14 @@ use super::{LockedParentResult, NodeCleaner};
 use crate::internode::InternodeNode;
 use crate::leaf15::LeafNode15;
 use crate::nodeversion::{LockGuard, NodeVersion};
+use crate::policy::ArcPolicy;
 use crate::tree::MassTree15;
-use crate::value::LeafValue;
 
 use std::ptr as StdPtr;
 use std::sync::Arc;
 
 // Type aliases for coalescing tests
-type TestLeaf = LeafNode15<LeafValue<u64>>;
+type TestLeaf = LeafNode15<ArcPolicy<u64>>;
 type TestInternode = InternodeNode;
 type TestTree = MassTree15<u64>;
 
@@ -235,14 +235,13 @@ fn test_get_parent_erased_leaf() {
     let parent_inode: Box<TestInternode> = TestInternode::new(0);
     let parent_ptr: *mut u8 = Box::into_raw(parent_inode).cast();
 
-    let leaf: Box<TestLeaf> = TestLeaf::new();
+    let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
     leaf.set_parent(parent_ptr);
 
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
     // Test: get_parent_erased should return the parent
-    let got_parent: *mut u8 =
-        unsafe { NodeCleaner::get_parent_erased::<LeafValue<u64>, TestLeaf>(leaf_ptr) };
+    let got_parent: *mut u8 = unsafe { NodeCleaner::get_parent_erased::<ArcPolicy<u64>>(leaf_ptr) };
 
     assert_eq!(got_parent, parent_ptr);
 
@@ -264,7 +263,7 @@ fn test_get_parent_erased_internode() {
 
     // Test: get_parent_erased should return the parent
     let got_parent: *mut u8 =
-        unsafe { NodeCleaner::get_parent_erased::<LeafValue<u64>, TestLeaf>(inode_ptr) };
+        unsafe { NodeCleaner::get_parent_erased::<ArcPolicy<u64>>(inode_ptr) };
 
     assert_eq!(got_parent, grandparent_ptr);
 
@@ -276,12 +275,11 @@ fn test_get_parent_erased_internode() {
 #[test]
 fn test_get_parent_erased_null_parent() {
     // Setup: Create a root leaf (null parent)
-    let leaf: Box<TestLeaf> = TestLeaf::new_root();
+    let leaf: Box<TestLeaf> = TestLeaf::new_root_boxed();
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
     // Test: get_parent_erased should return null
-    let parent: *mut u8 =
-        unsafe { NodeCleaner::get_parent_erased::<LeafValue<u64>, TestLeaf>(leaf_ptr) };
+    let parent: *mut u8 = unsafe { NodeCleaner::get_parent_erased::<ArcPolicy<u64>>(leaf_ptr) };
 
     assert!(parent.is_null());
 
@@ -299,7 +297,7 @@ fn test_set_parent_erased_leaf() {
     let new_parent_node: Box<TestInternode> = TestInternode::new(0);
     let new_parent: *mut u8 = Box::into_raw(new_parent_node).cast();
 
-    let leaf: Box<TestLeaf> = TestLeaf::new();
+    let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
     // Initially null
@@ -307,7 +305,7 @@ fn test_set_parent_erased_leaf() {
 
     // Test: set_parent_erased should update leaf's parent
     unsafe {
-        NodeCleaner::set_parent_erased::<LeafValue<u64>, TestLeaf>(leaf_ptr, new_parent);
+        NodeCleaner::set_parent_erased::<ArcPolicy<u64>>(leaf_ptr, new_parent);
     }
 
     // Verify
@@ -337,7 +335,7 @@ fn test_set_parent_erased_internode() {
 
     // Test: set_parent_erased should update internode's parent
     unsafe {
-        NodeCleaner::set_parent_erased::<LeafValue<u64>, TestLeaf>(inode_ptr, new_parent);
+        NodeCleaner::set_parent_erased::<ArcPolicy<u64>>(inode_ptr, new_parent);
     }
 
     // Verify
@@ -354,7 +352,7 @@ fn test_set_parent_erased_type_dispatch() {
     // This test verifies that is_leaf() correctly distinguishes node types
 
     // Create both types
-    let leaf: Box<TestLeaf> = TestLeaf::new();
+    let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
     let inode: Box<TestInternode> = TestInternode::new(1);
 
     // Verify is_leaf() returns correct values
@@ -371,7 +369,7 @@ fn test_set_parent_erased_type_dispatch() {
 #[test]
 fn test_locked_parent_null_parent() {
     // Setup: Create a root leaf (no parent)
-    let leaf: Box<TestLeaf> = TestLeaf::new_root();
+    let leaf: Box<TestLeaf> = TestLeaf::new_root_boxed();
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
     // Lock the leaf first (precondition)
@@ -380,7 +378,7 @@ fn test_locked_parent_null_parent() {
 
     // Test: locked_parent_generic should return NoParent for root leaf
     let result: LockedParentResult<'_> =
-        unsafe { NodeCleaner::locked_parent_generic::<LeafValue<u64>, TestLeaf>(leaf_ptr) };
+        unsafe { NodeCleaner::locked_parent_generic::<ArcPolicy<u64>>(leaf_ptr) };
 
     assert!(matches!(result, LockedParentResult::NoParent));
 
@@ -395,7 +393,7 @@ fn test_locked_parent_basic() {
     let parent: Box<TestInternode> = TestInternode::new(0);
     let parent_ptr: *mut TestInternode = Box::into_raw(parent);
 
-    let leaf: Box<TestLeaf> = TestLeaf::new();
+    let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
     leaf.set_parent(parent_ptr.cast());
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
@@ -408,7 +406,7 @@ fn test_locked_parent_basic() {
 
     // Test: locked_parent_generic should return locked parent
     let result: LockedParentResult<'_> =
-        unsafe { NodeCleaner::locked_parent_generic::<LeafValue<u64>, TestLeaf>(leaf_ptr) };
+        unsafe { NodeCleaner::locked_parent_generic::<ArcPolicy<u64>>(leaf_ptr) };
 
     let (lock, returned_parent) = match result {
         LockedParentResult::Locked(l, p) => (l, p),
@@ -441,7 +439,7 @@ fn test_locked_parent_returns_internode() {
 
     unsafe { (*grandparent_ptr).set_child(0, parent_ptr.cast()) };
 
-    let leaf: Box<TestLeaf> = TestLeaf::new();
+    let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
     leaf.set_parent(parent_ptr.cast());
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
@@ -453,7 +451,7 @@ fn test_locked_parent_returns_internode() {
 
     // Test: locked_parent should return parent (not grandparent)
     let result: LockedParentResult<'_> =
-        unsafe { NodeCleaner::locked_parent_generic::<LeafValue<u64>, TestLeaf>(leaf_ptr) };
+        unsafe { NodeCleaner::locked_parent_generic::<ArcPolicy<u64>>(leaf_ptr) };
 
     let (lock, returned_parent) = match result {
         LockedParentResult::Locked(l, p) => (l, p),
@@ -495,7 +493,7 @@ fn test_shift_internode_down_middle() {
     inode.set_nkeys(3);
 
     // Set up children using real leaf allocations
-    let leaves: Vec<Box<TestLeaf>> = (0..4).map(|_| TestLeaf::new()).collect();
+    let leaves: Vec<Box<TestLeaf>> = (0..4).map(|_| TestLeaf::new_boxed()).collect();
     let ptrs: Vec<*mut u8> = leaves
         .into_iter()
         .map(|l| Box::into_raw(l) as *mut u8)
@@ -549,7 +547,7 @@ fn test_shift_internode_down_last() {
     inode.set_nkeys(3);
 
     // Set up children using real leaf allocations
-    let leaves: Vec<Box<TestLeaf>> = (0..4).map(|_| TestLeaf::new()).collect();
+    let leaves: Vec<Box<TestLeaf>> = (0..4).map(|_| TestLeaf::new_boxed()).collect();
     let ptrs: Vec<*mut u8> = leaves
         .into_iter()
         .map(|l| Box::into_raw(l) as *mut u8)
@@ -600,7 +598,7 @@ fn test_shift_internode_down_second() {
     inode.set_nkeys(2);
 
     // Set up children using real leaf allocations
-    let leaves: Vec<Box<TestLeaf>> = (0..3).map(|_| TestLeaf::new()).collect();
+    let leaves: Vec<Box<TestLeaf>> = (0..3).map(|_| TestLeaf::new_boxed()).collect();
     let ptrs: Vec<*mut u8> = leaves
         .into_iter()
         .map(|l| Box::into_raw(l) as *mut u8)
@@ -643,9 +641,9 @@ fn test_unlink_from_chain_middle() {
     // Unlink B
     // Verify: A <-> C
 
-    let leaf_a: Box<TestLeaf> = TestLeaf::new();
-    let leaf_b: Box<TestLeaf> = TestLeaf::new();
-    let leaf_c: Box<TestLeaf> = TestLeaf::new();
+    let leaf_a: Box<TestLeaf> = TestLeaf::new_boxed();
+    let leaf_b: Box<TestLeaf> = TestLeaf::new_boxed();
+    let leaf_c: Box<TestLeaf> = TestLeaf::new_boxed();
 
     let a_ptr: *mut TestLeaf = Box::into_raw(leaf_a);
     let b_ptr: *mut TestLeaf = Box::into_raw(leaf_b);
@@ -683,8 +681,8 @@ fn test_unlink_from_chain_last() {
     // Unlink B (last)
     // Verify: A.next == null
 
-    let leaf_a: Box<TestLeaf> = TestLeaf::new();
-    let leaf_b: Box<TestLeaf> = TestLeaf::new();
+    let leaf_a: Box<TestLeaf> = TestLeaf::new_boxed();
+    let leaf_b: Box<TestLeaf> = TestLeaf::new_boxed();
 
     let a_ptr: *mut TestLeaf = Box::into_raw(leaf_a);
     let b_ptr: *mut TestLeaf = Box::into_raw(leaf_b);
@@ -1073,17 +1071,16 @@ fn test_miri_parent_erased_helpers() {
     let parent_node: Box<TestInternode> = TestInternode::new(0);
     let parent_ptr: *mut u8 = Box::into_raw(parent_node).cast();
 
-    let leaf: Box<TestLeaf> = TestLeaf::new();
+    let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
     // set_parent_erased
     unsafe {
-        NodeCleaner::set_parent_erased::<LeafValue<u64>, TestLeaf>(leaf_ptr, parent_ptr);
+        NodeCleaner::set_parent_erased::<ArcPolicy<u64>>(leaf_ptr, parent_ptr);
     }
 
     // get_parent_erased
-    let got: *mut u8 =
-        unsafe { NodeCleaner::get_parent_erased::<LeafValue<u64>, TestLeaf>(leaf_ptr) };
+    let got: *mut u8 = unsafe { NodeCleaner::get_parent_erased::<ArcPolicy<u64>>(leaf_ptr) };
     assert_eq!(got, parent_ptr);
 
     // Cleanup

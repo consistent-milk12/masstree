@@ -3,8 +3,7 @@
 //! Provides helpers for validating that a child is still in its parent
 //! during split propagation.
 
-use crate::leaf_trait::{LayerCapableLeaf, TreeInternode};
-use crate::slot::ValueSlot;
+use crate::internode::InternodeNode;
 
 /// Unit struct namespace for parent validation operations.
 pub struct ParentLocking;
@@ -19,29 +18,18 @@ impl ParentLocking {
     /// # Returns
     /// `Some(index)` if child found, [`None`] otherwise.
     #[inline(always)]
-    pub fn find_child_index<S, L>(parent: &L::Internode, child_ptr: *mut u8) -> Option<usize>
-    where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-    {
+    pub fn find_child_index(parent: &InternodeNode, child_ptr: *mut u8) -> Option<usize> {
         let nkeys: usize = parent.nkeys();
 
-        (0..=nkeys).find(|i: &usize| parent.child(*i) == child_ptr)
+        // SAFETY: Parent is locked - no concurrent retirement of children.
+        (0..=nkeys).find(|i: &usize| unsafe { parent.child_unguarded(*i) } == child_ptr)
     }
 
-    /// Validate that child is still in parent (memership check).
+    /// Validate that child is still in parent (membership check).
     ///
     /// Must be called after locking parent, before inserting.
     #[inline(always)]
-    pub fn validate_membership<S, L>(parent: &L::Internode, child_ptr: *mut u8) -> Option<usize>
-    where
-        S: ValueSlot,
-        S::Value: Send + Sync + 'static,
-        S::Output: Send + Sync,
-        L: LayerCapableLeaf<S>,
-    {
-        Self::find_child_index::<S, L>(parent, child_ptr)
+    pub fn validate_membership(parent: &InternodeNode, child_ptr: *mut u8) -> Option<usize> {
+        Self::find_child_index(parent, child_ptr)
     }
 }

@@ -2,13 +2,12 @@
 //!
 //! Forward batch iteration methods for maximum performance.
 
-use crate::alloc_trait::NodeAllocatorGeneric;
-use crate::leaf_trait::LayerCapableLeaf;
-use crate::ref_value_slot::RefValueSlot;
-use crate::slot::ValueSlot;
+use crate::alloc_trait::TreeAllocator;
+use crate::leaf15::LeafNode15;
+use crate::policy::LeafPolicy;
+use crate::ref_value_slot::RefLeafPolicy;
 
 use super::RangeIter;
-use super::cleanup_guard::CleanupGuard;
 
 use crate::tree::range::find::{
     find_next, find_next_ptr, find_next_single_layer_ptr, find_next_with_duplicate_check,
@@ -16,13 +15,10 @@ use crate::tree::range::find::{
 };
 use crate::tree::range::scan_state::{LayerContext, ScanState};
 
-impl<S, L, A> RangeIter<'_, '_, S, L, A>
+impl<P, A> RangeIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Zero-allocation iteration with a visitor closure.
     ///
@@ -32,7 +28,7 @@ where
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Closure receiving `(&[u8], S::Output)`. Return `true` to continue,
+    /// - `visitor`: Closure receiving `(&[u8], P::Output)`. Return `true` to continue,
     ///   `false` to stop early.
     ///
     /// # Returns
@@ -43,7 +39,7 @@ where
     #[must_use = "returns the number of entries visited"]
     pub fn for_each<F>(mut self, mut visitor: F) -> usize
     where
-        F: FnMut(&[u8], S::Output) -> bool,
+        F: FnMut(&[u8], P::Output) -> bool,
     {
         if self.flags.exhausted() {
             return 0;
@@ -78,7 +74,7 @@ where
 
     /// Advance without allocating key Vec.
     ///
-    /// Returns `(&[u8], S::Output)` where the key slice is borrowed from
+    /// Returns `(&[u8], P::Output)` where the key slice is borrowed from
     /// the internal `cursor_key` buffer.
     ///
     /// This function inlines the common case `(FindNext → Emit)` to avoid:
@@ -91,7 +87,7 @@ where
         clippy::too_many_lines,
         reason = "State machine with debug instrumentation"
     )]
-    pub(super) fn advance_no_alloc(&mut self) -> Option<(&[u8], S::Output)> {
+    pub(super) fn advance_no_alloc(&mut self) -> Option<(&[u8], P::Output)> {
         // Fast path: if we have a pending emit, process it first
         if self.state == ScanState::Emit
             && let Some(snapshot) = self.snapshot.take()
@@ -241,11 +237,11 @@ where
     /// Zero-copy iteration with borrowed value references.
     ///
     /// Unlike [`Self::for_each`] which clones values (Arc increment for `LeafValue`),
-    /// this returns `&S::Value` references tied to the guard lifetime.
+    /// this returns `&P::Value` references tied to the guard lifetime.
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue,
+    /// - `visitor`: Closure receiving `(&[u8], &P::Value)`. Return `true` to continue,
     ///   `false` to stop early.
     ///
     /// # Returns
@@ -260,8 +256,8 @@ where
     #[must_use = "returns the number of entries visited"]
     pub fn for_each_ref<F>(mut self, mut visitor: F) -> usize
     where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> bool,
+        P: RefLeafPolicy,
+        F: FnMut(&[u8], &P::Value) -> bool,
     {
         if self.flags.exhausted() {
             return 0;
@@ -307,7 +303,7 @@ where
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue.
+    /// - `visitor`: Closure receiving `(&[u8], &P::Value)`. Return `true` to continue.
     ///
     /// # Returns
     ///
@@ -317,8 +313,8 @@ where
     #[expect(clippy::too_many_lines, reason = "Complex state management logic")]
     pub fn for_each_batch_ref<F>(mut self, mut visitor: F) -> usize
     where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> bool,
+        P: RefLeafPolicy,
+        F: FnMut(&[u8], &P::Value) -> bool,
     {
         if self.flags.exhausted() {
             return 0;
@@ -351,12 +347,12 @@ where
                     return 0;
                 }
 
-                // Convert snapshot to reference and call visitor
-                let should_continue =
-                    CleanupGuard::<S>::with_output_ref(&snapshot.value, |value_ref| {
-                        count += 1;
-                        visitor(key, value_ref)
-                    });
+                // Borrow value directly from snapshot (no raw pointer conversion)
+                let value_ref: &P::Value = P::output_as_ref(&snapshot.value);
+                let should_continue = {
+                    count += 1;
+                    visitor(key, value_ref)
+                };
 
                 if !should_continue {
                     return count;
@@ -423,7 +419,7 @@ where
             }
 
             // Check leaf deletion
-            let leaf: &L = unsafe { self.stack.leaf_ref() };
+            let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
 
             if leaf.version().is_deleted() {
                 self.state = ScanState::Retry;
@@ -466,7 +462,7 @@ where
                         }
 
                         // SAFETY: find_next_ptr validated version, guard protects pointer
-                        let value_ref: &S::Value = unsafe { &*snap.value_ptr };
+                        let value_ref: &P::Value = unsafe { &*snap.value_ptr };
 
                         count += 1;
                         self.state = ScanState::FindNext;
@@ -498,7 +494,7 @@ where
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `true` to continue.
+    /// - `visitor`: Closure receiving `(&[u8], &P::Value)`. Return `true` to continue.
     ///
     /// # Returns
     ///
@@ -508,8 +504,8 @@ where
     #[expect(clippy::too_many_lines)]
     pub fn for_each_intra_leaf_batch_ref<F>(mut self, mut visitor: F) -> usize
     where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> bool,
+        P: RefLeafPolicy,
+        F: FnMut(&[u8], &P::Value) -> bool,
     {
         use crate::tree::range::find::{LeafBatchResult, advance_leaf_ptr, process_leaf_batch_ptr};
 
@@ -539,13 +535,11 @@ where
                     return 0;
                 }
 
-                let should_continue: bool = CleanupGuard::<S>::with_output_ref(
-                    &snapshot.value,
-                    |value_ref: &<S as ValueSlot>::Value| {
-                        count += 1;
-                        visitor(key, value_ref)
-                    },
-                );
+                let value_ref: &P::Value = P::output_as_ref(&snapshot.value);
+                let should_continue: bool = {
+                    count += 1;
+                    visitor(key, value_ref)
+                };
 
                 if !should_continue {
                     return count;
@@ -605,7 +599,7 @@ where
             }
 
             // Check leaf deletion
-            let leaf: &L = unsafe { self.stack.leaf_ref() };
+            let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
 
             if leaf.version().is_deleted() {
                 self.state = ScanState::Retry;
@@ -648,7 +642,7 @@ where
 
                             // SAFETY: find_next_with_duplicate_check_ptr validated version,
                             // guard protects pointer
-                            let value_ref: &S::Value = unsafe { &*snap.value_ptr };
+                            let value_ref: &P::Value = unsafe { &*snap.value_ptr };
 
                             count += 1;
                             self.state = ScanState::FindNext;
@@ -712,8 +706,8 @@ where
     /// Intra-leaf batch iteration returning values by copy.
     ///
     /// This is the variant of [`Self::for_each_intra_leaf_batch_ref`] that works for ALL
-    /// `ValueSlot` types, including true-inline storage. Instead of returning `&S::Value`
-    /// references, it returns `S::Output` by value.
+    /// `LeafPolicy` types, including true-inline storage. Instead of returning `&P::Value`
+    /// references, it returns `P::Output` by value.
     ///
     /// # Performance Characteristics
     ///
@@ -733,7 +727,7 @@ where
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Closure receiving `(&[u8], S::Output)`. Return `true` to continue.
+    /// - `visitor`: Closure receiving `(&[u8], P::Output)`. Return `true` to continue.
     ///
     /// # Returns
     ///
@@ -743,7 +737,7 @@ where
     #[expect(clippy::too_many_lines)]
     pub fn for_each_intra_leaf_batch<F>(mut self, mut visitor: F) -> usize
     where
-        F: FnMut(&[u8], S::Output) -> bool,
+        F: FnMut(&[u8], P::Output) -> bool,
     {
         use crate::tree::range::find::{LeafBatchResult, advance_leaf_ptr, process_leaf_batch};
 
@@ -830,7 +824,7 @@ where
             // Check leaf deletion
             // SAFETY: stack.is_null() check above ensures leaf_ptr is valid,
             // and the guard protects the node from deallocation.
-            let leaf: &L = unsafe { self.stack.leaf_ref() };
+            let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
             if leaf.version().is_deleted() {
                 self.state = ScanState::Retry;
                 continue;
@@ -943,7 +937,7 @@ where
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Closure receiving `S::Output`. Return `true` to continue.
+    /// - `visitor`: Closure receiving `P::Output`. Return `true` to continue.
     ///
     /// # Returns
     ///
@@ -966,7 +960,7 @@ where
     #[expect(clippy::too_many_lines)]
     pub fn for_each_values_batch<F>(mut self, mut visitor: F) -> usize
     where
-        F: FnMut(S::Output) -> bool,
+        F: FnMut(P::Output) -> bool,
     {
         use crate::tree::range::find::{
             LeafBatchResult, advance_leaf_ptr, process_leaf_batch_values,
@@ -1060,7 +1054,7 @@ where
             // Check leaf deletion
             // SAFETY: stack.is_null() check above ensures leaf_ptr is valid,
             // and the guard protects the node from deallocation.
-            let leaf: &L = unsafe { self.stack.leaf_ref() };
+            let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
             if leaf.version().is_deleted() {
                 self.state = ScanState::Retry;
                 continue;
@@ -1155,7 +1149,7 @@ where
     ///
     /// # Arguments
     ///
-    /// - `visitor`: Closure receiving `(&[u8], &S::Value)`. Return `Ok(true)` to
+    /// - `visitor`: Closure receiving `(&[u8], &P::Value)`. Return `Ok(true)` to
     ///   continue, `Ok(false)` to stop early, or `Err(E)` to stop with an error.
     ///
     /// # Returns
@@ -1187,8 +1181,8 @@ where
     #[must_use = "returns the count or error - check the result"]
     pub fn try_for_each_ref<F, E>(mut self, mut visitor: F) -> Result<usize, E>
     where
-        S: RefValueSlot,
-        F: FnMut(&[u8], &S::Value) -> Result<bool, E>,
+        P: RefLeafPolicy,
+        F: FnMut(&[u8], &P::Value) -> Result<bool, E>,
     {
         if self.flags.exhausted() {
             return Ok(0);
@@ -1225,7 +1219,7 @@ where
 
     /// Advance without cloning values.
     ///
-    /// Returns `(&[u8], &S::Value)` where both are borrowed references.
+    /// Returns `(&[u8], &P::Value)` where both are borrowed references.
     /// The value is obtained by dereferencing the raw pointer directly,
     /// avoiding Arc clone overhead.
     ///
@@ -1233,7 +1227,7 @@ where
     ///
     /// After `initialize()`, there may be a pending emit in `self.snapshot`.
     /// For the first entry, we convert the Output to a raw pointer and dereference.
-    /// This requires that `S::Output` is dereferenceable to `S::Value`.
+    /// This requires that `P::Output` is dereferenceable to `P::Value`.
     ///
     /// # Safety
     ///
@@ -1242,9 +1236,9 @@ where
     /// 2. Version validation ensures the slot hasn't been modified
     #[inline(always)]
     #[expect(clippy::too_many_lines, reason = "Complex allocation logic")]
-    pub(super) fn advance_no_alloc_ref(&mut self) -> Option<(&[u8], &S::Value)>
+    pub(super) fn advance_no_alloc_ref(&mut self) -> Option<(&[u8], &P::Value)>
     where
-        S: RefValueSlot,
+        P: RefLeafPolicy,
     {
         // Handle pending emit from initialize() - first entry case
         if self.state == ScanState::Emit && self.snapshot.is_some() {
@@ -1262,28 +1256,10 @@ where
             // Transition to FindNext for next call
             self.state = ScanState::FindNext;
 
-            // Clean up previous pointer BEFORE creating new one.
-            // This ordering is panic-safe: if output_to_raw panics below,
-            // we've already cleaned up the old allocation and last_output_ptr
-            // is None, so Drop won't double-free.
-            if let Some(old_ptr) = self.last_output_ptr.take() {
-                // SAFETY: old_ptr was created by output_to_raw in a previous call
-                unsafe { S::cleanup_output_raw(old_ptr) };
-            }
-
-            // Convert the output to a raw pointer and dereference.
-            // For Arc<V>: output_to_raw gives us the Arc's data pointer
-            // For Copy types: output_to_raw allocates a Box and returns its pointer
-            let ptr: *mut u8 = S::output_to_raw(&snapshot.value);
-
-            // Track this pointer so we can clean it up later
-            self.last_output_ptr = Some(ptr);
-
-            // SAFETY:
-            // - ptr was just created from a valid S::Output
-            // - output_to_raw guarantees the pointer is properly aligned for S::Value
-            // - The guard protects the underlying data from deallocation
-            let value_ref: &S::Value = unsafe { &*ptr.cast::<S::Value>() };
+            // Store the output so it stays alive for the returned reference.
+            // Replaces the previous output (dropping it automatically).
+            self.last_output = Some(snapshot.value);
+            let value_ref: &P::Value = P::output_as_ref(self.last_output.as_ref().unwrap());
 
             return Some((key, value_ref));
         }
@@ -1325,7 +1301,7 @@ where
                             }
 
                             self.state = ScanState::FindNext;
-                            let value_ref: &S::Value = unsafe { &*snap.value_ptr };
+                            let value_ref: &P::Value = unsafe { &*snap.value_ptr };
 
                             return Some((key, value_ref));
                         }
@@ -1367,8 +1343,8 @@ where
 
                         // SAFETY: find_next_single_layer_ptr validated the leaf version,
                         // and the guard protects the node from deallocation.
-                        let leaf: &L = unsafe { self.stack.leaf_ref() };
-                        let layer_ptr: *mut u8 = leaf.leaf_value_ptr(slot);
+                        let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
+                        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
                         self.stack.set_root(layer_ptr);
 
                         // Don't continue; fall through to handle Down below
@@ -1465,7 +1441,7 @@ where
                 // - Pointer is properly aligned (stored in leaf slot with correct layout)
                 // - We dereference directly (not via snap.value_ref()) because the
                 //   reference must outlive the local `snap` variable
-                let value_ref: &S::Value = unsafe { &*snap.value_ptr };
+                let value_ref: &P::Value = unsafe { &*snap.value_ptr };
 
                 return Some((key, value_ref));
             }

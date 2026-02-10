@@ -7,11 +7,12 @@ use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
+use crate::internode::InternodeNode;
 use crate::ksearch::upper_bound_internode_generic;
-use crate::leaf_trait::{TreeInternode, TreeLeafNode};
+use crate::leaf15::LeafNode15;
 use crate::nodeversion::NodeVersion;
+use crate::policy::LeafPolicy;
 use crate::prefetch::prefetch_read;
-use crate::slot::ValueSlot;
 
 use super::cursor_key::CursorKey;
 
@@ -34,14 +35,13 @@ use super::cursor_key::CursorKey;
 /// Pointer to the leaf containing (or that should contain) the key.
 /// Returns null if `start` is null.
 #[inline]
-pub fn reach_leaf_for_scan<L, S>(
+pub fn reach_leaf_for_scan<P>(
     start: *const u8,
     cursor_key: &CursorKey,
     _guard: &LocalGuard<'_>,
-) -> *mut L
+) -> *mut LeafNode15<P>
 where
-    L: TreeLeafNode<S>,
-    S: ValueSlot,
+    P: LeafPolicy,
 {
     if start.is_null() {
         return StdPtr::null_mut();
@@ -60,16 +60,18 @@ where
 
         if version.is_leaf() {
             // Reached a leaf
-            return node.cast_mut().cast::<L>();
+            return node.cast_mut().cast::<LeafNode15<P>>();
         }
 
         // It's an internode - traverse down
         // SAFETY: !is_leaf() confirmed above
-        let inode: &L::Internode = unsafe { &*(node.cast::<L::Internode>()) };
+        let inode: &InternodeNode = unsafe { &*(node.cast::<InternodeNode>()) };
 
         // Binary search for child
-        let child_idx: usize = upper_bound_internode_generic::<L::Internode>(target_ikey, inode);
-        let child: *mut u8 = inode.child(child_idx);
+        let child_idx: usize = upper_bound_internode_generic::<InternodeNode>(target_ikey, inode);
+        // SAFETY: We've already established ordering via version check;
+        // child pointer is valid during OCC read.
+        let child: *mut u8 = unsafe { inode.child_unguarded(child_idx) };
 
         // Prefetch child node
         prefetch_read(child);

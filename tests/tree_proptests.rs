@@ -14,6 +14,7 @@ use masstree::RangeBound;
 use masstree::key::MAX_KEY_LENGTH;
 use masstree::tree::{MassTree15, MassTree15Inline};
 use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
 use std::collections::BTreeMap;
 
 /// Max key length for short key tests (single layer, no layer descent).
@@ -1248,5 +1249,466 @@ proptest! {
         let iter_count = tree.iter(&guard).count();
 
         prop_assert_eq!(iter_count, keys.len());
+    }
+}
+
+// ============================================================================
+//  Comprehensive Proptest Infrastructure
+// ============================================================================
+
+/// Keys 0-64 bytes (all lengths, including multi-layer).
+fn any_length_key() -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec(any::<u8>(), 0..=64)
+}
+
+/// Extended operation enum for stateful oracle testing.
+#[derive(Debug, Clone)]
+enum FullOp {
+    Insert(Vec<u8>, u64),
+    Get(Vec<u8>),
+    Remove(Vec<u8>),
+    ContainsKey(Vec<u8>),
+    First,
+    Last,
+    Len,
+    ScanAll,
+    IterForward,
+    IterReverse,
+}
+
+/// Strategy for generating full operation sequences with mixed-length keys.
+fn full_operations(max_ops: usize) -> impl Strategy<Value = Vec<FullOp>> {
+    prop::collection::vec(
+        prop_oneof![
+            4 => (any_length_key(), any::<u64>()).prop_map(|(k, v)| FullOp::Insert(k, v)),
+            3 => any_length_key().prop_map(FullOp::Get),
+            3 => any_length_key().prop_map(FullOp::Remove),
+            2 => any_length_key().prop_map(FullOp::ContainsKey),
+            1 => Just(FullOp::First),
+            1 => Just(FullOp::Last),
+            1 => Just(FullOp::Len),
+            1 => Just(FullOp::ScanAll),
+            1 => Just(FullOp::IterForward),
+            1 => Just(FullOp::IterReverse),
+        ],
+        1..=max_ops,
+    )
+}
+
+// ============================================================================
+//  Verification Helpers
+// ============================================================================
+
+/// Verify `first()` and `last()` match oracle.
+fn verify_first_last(
+    tree: &MassTree15<u64>,
+    oracle: &BTreeMap<Vec<u8>, u64>,
+) -> Result<(), TestCaseError> {
+    let tree_first = tree.first().map(|e| {
+        let (k, v) = e.into_parts();
+        (k, *v)
+    });
+    let oracle_first = oracle.iter().next().map(|(k, v)| (k.clone(), *v));
+    prop_assert_eq!(tree_first, oracle_first, "first() mismatch");
+
+    let tree_last = tree.last().map(|e| {
+        let (k, v) = e.into_parts();
+        (k, *v)
+    });
+    let oracle_last = oracle.iter().next_back().map(|(k, v)| (k.clone(), *v));
+    prop_assert_eq!(tree_last, oracle_last, "last() mismatch");
+
+    Ok(())
+}
+
+/// Verify full forward scan matches oracle.
+fn verify_full_scan(
+    tree: &MassTree15<u64>,
+    oracle: &BTreeMap<Vec<u8>, u64>,
+) -> Result<(), TestCaseError> {
+    let guard = tree.guard();
+    let limit = oracle.len() + 1000;
+    let mut tree_entries: Vec<(Vec<u8>, u64)> = Vec::new();
+    for e in tree.iter(&guard) {
+        let (k, v) = e.into_parts();
+        tree_entries.push((k, *v));
+        if tree_entries.len() > limit {
+            prop_assert!(
+                false,
+                "Forward scan infinite loop: got >{limit} entries (expected {})",
+                oracle.len()
+            );
+        }
+    }
+    let oracle_entries: Vec<(Vec<u8>, u64)> = oracle.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    prop_assert_eq!(tree_entries, oracle_entries, "Full scan mismatch");
+    Ok(())
+}
+
+/// Verify full reverse iteration matches oracle.
+fn verify_reverse_iter(
+    tree: &MassTree15<u64>,
+    oracle: &BTreeMap<Vec<u8>, u64>,
+) -> Result<(), TestCaseError> {
+    let guard = tree.guard();
+    let limit = oracle.len() + 1000;
+    let mut tree_entries: Vec<(Vec<u8>, u64)> = Vec::new();
+    for e in tree.iter(&guard).rev() {
+        let (k, v) = e.into_parts();
+        tree_entries.push((k, *v));
+        if tree_entries.len() > limit {
+            prop_assert!(
+                false,
+                "Reverse scan infinite loop: got >{limit} entries (expected {})",
+                oracle.len()
+            );
+        }
+    }
+    let oracle_entries: Vec<(Vec<u8>, u64)> =
+        oracle.iter().rev().map(|(k, v)| (k.clone(), *v)).collect();
+    prop_assert_eq!(tree_entries, oracle_entries, "Reverse iter mismatch");
+    Ok(())
+}
+
+// --------------------------- Stress Tests -----------------------------------
+
+// ============================================================================
+//  Test 1: Stateful Oracle — All Operations
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+
+    /// Model-based differential testing with BTreeMap oracle.
+    /// Verifies the full invariant set after every mutation.
+    #[test]
+    fn stateful_oracle_all_ops(ops in full_operations(300)) {
+        let tree: MassTree15<u64> = MassTree15::new();
+        let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+
+        for (i, op) in ops.into_iter().enumerate() {
+            match op {
+                FullOp::Insert(key, value) => {
+                    let tree_old = tree.insert(&key, value).map(|arc| *arc);
+                    let oracle_old = oracle.insert(key.clone(), value);
+                    prop_assert_eq!(
+                        tree_old, oracle_old,
+                        "Insert mismatch at op {} for key {:?}", i, key
+                    );
+                    prop_assert_eq!(
+                        tree.len(), oracle.len(),
+                        "Len mismatch after insert at op {}", i
+                    );
+                    verify_first_last(&tree, &oracle)?;
+                }
+
+                FullOp::Get(key) => {
+                    let tree_val = tree.get(&key).map(|arc| *arc);
+                    let oracle_val = oracle.get(&key).copied();
+                    prop_assert_eq!(
+                        tree_val, oracle_val,
+                        "Get mismatch at op {} for key {:?}", i, key
+                    );
+                }
+
+                FullOp::Remove(key) => {
+                    let tree_old = tree.remove(&key).unwrap().map(|arc| *arc);
+                    let oracle_old = oracle.remove(&key);
+                    prop_assert_eq!(
+                        tree_old, oracle_old,
+                        "Remove mismatch at op {} for key {:?}", i, key
+                    );
+                    prop_assert_eq!(
+                        tree.len(), oracle.len(),
+                        "Len mismatch after remove at op {}", i
+                    );
+                    verify_first_last(&tree, &oracle)?;
+                }
+
+                FullOp::ContainsKey(key) => {
+                    let tree_has = tree.contains_key(&key);
+                    let oracle_has = oracle.contains_key(&key);
+                    prop_assert_eq!(
+                        tree_has, oracle_has,
+                        "ContainsKey mismatch at op {} for key {:?}", i, key
+                    );
+                }
+
+                FullOp::First => {
+                    let tree_first = tree.first().map(|e| {
+                        let (k, v) = e.into_parts();
+                        (k, *v)
+                    });
+                    let oracle_first =
+                        oracle.iter().next().map(|(k, v)| (k.clone(), *v));
+                    prop_assert_eq!(
+                        tree_first, oracle_first,
+                        "First mismatch at op {}", i
+                    );
+                }
+
+                FullOp::Last => {
+                    let tree_last = tree.last().map(|e| {
+                        let (k, v) = e.into_parts();
+                        (k, *v)
+                    });
+                    let oracle_last =
+                        oracle.iter().next_back().map(|(k, v)| (k.clone(), *v));
+                    prop_assert_eq!(
+                        tree_last, oracle_last,
+                        "Last mismatch at op {}", i
+                    );
+                }
+
+                FullOp::Len => {
+                    prop_assert_eq!(
+                        tree.len(), oracle.len(),
+                        "Len mismatch at op {}", i
+                    );
+                }
+
+                FullOp::ScanAll => {
+                    verify_full_scan(&tree, &oracle)?;
+                }
+
+                FullOp::IterForward => {
+                    let guard = tree.guard();
+                    let tree_entries: Vec<(Vec<u8>, u64)> = tree
+                        .iter(&guard)
+                        .map(|e| {
+                            let (k, v) = e.into_parts();
+                            (k, *v)
+                        })
+                        .collect();
+                    let oracle_entries: Vec<(Vec<u8>, u64)> =
+                        oracle.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                    prop_assert_eq!(
+                        tree_entries, oracle_entries,
+                        "IterForward mismatch at op {}", i
+                    );
+                }
+
+                FullOp::IterReverse => {
+                    verify_reverse_iter(&tree, &oracle)?;
+                }
+            }
+
+            // Every 10th operation: full scan comparison
+            if i % 10 == 9 {
+                verify_full_scan(&tree, &oracle)?;
+            }
+
+            // Every 25th operation: full reverse iter comparison
+            if i % 25 == 24 {
+                verify_reverse_iter(&tree, &oracle)?;
+            }
+        }
+    }
+}
+
+// ============================================================================
+//  Test 2: Split-Heavy Sequential Insert Then Remove All
+// ============================================================================
+
+/// Generate a sequential key from index, with variable padding for multi-layer coverage.
+fn make_sequential_key(i: u64) -> Vec<u8> {
+    let mut key = i.to_be_bytes().to_vec();
+    let extra = (i % 4) as usize * 8; // 0, 8, 16, 24 extra bytes
+    key.resize(key.len() + extra, 0);
+    key
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Sequential ascending inserts force continuous right-edge splits.
+    /// Then remove ALL keys and verify tree is empty.
+    #[test]
+    fn split_heavy_sequential_then_remove_all(count in 50usize..=200) {
+        let tree: MassTree15<u64> = MassTree15::new();
+        let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+
+        // Insert sequential ascending keys (forces right-edge splits)
+        let keys: Vec<Vec<u8>> = (0..count as u64).map(make_sequential_key).collect();
+
+        for (i, key) in keys.iter().enumerate() {
+            tree.insert(key, i as u64);
+            oracle.insert(key.clone(), i as u64);
+        }
+
+        prop_assert_eq!(tree.len(), count);
+
+        // Verify all present via get
+        for (i, key) in keys.iter().enumerate() {
+            let got = tree.get(key).map(|arc| *arc);
+            prop_assert_eq!(got, Some(i as u64), "Key {} missing after inserts", i);
+        }
+
+        // Full scan comparison before removal
+        verify_full_scan(&tree, &oracle)?;
+
+        // Remove all — scrambled order: evens descending, then odds ascending
+        let mut removal_order: Vec<usize> =
+            (0..count).rev().filter(|i| i % 2 == 0).collect();
+        removal_order.extend((0..count).filter(|i| i % 2 == 1));
+
+        for idx in &removal_order {
+            let key = &keys[*idx];
+            let removed = tree.remove(key).unwrap();
+            prop_assert!(removed.is_some(), "Remove returned None for key {}", idx);
+            prop_assert_eq!(*removed.unwrap(), *idx as u64);
+            oracle.remove(key);
+        }
+
+        prop_assert!(tree.is_empty());
+        prop_assert_eq!(tree.len(), 0);
+        prop_assert!(tree.first().is_none());
+        prop_assert!(tree.last().is_none());
+    }
+}
+
+// ============================================================================
+//  Test 3: Insert → Remove → Reinsert Cycle
+// ============================================================================
+
+/// Unique keys of any length (1-64 bytes).
+fn unique_any_keys(max_count: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
+    prop::collection::hash_set(prop::collection::vec(any::<u8>(), 1..=64), 1..=max_count)
+        .prop_map(|set| set.into_iter().collect())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Stress insert→remove→reinsert for the same keys, exercising slot reuse.
+    #[test]
+    fn insert_remove_reinsert_cycle(keys in unique_any_keys(50)) {
+        let tree: MassTree15<u64> = MassTree15::new();
+        let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+
+        // Phase 1: Insert N unique keys
+        for (i, key) in keys.iter().enumerate() {
+            tree.insert(key, i as u64);
+            oracle.insert(key.clone(), i as u64);
+        }
+        prop_assert_eq!(tree.len(), oracle.len());
+
+        // Phase 2: Remove all keys, verify each returns Some(old_value)
+        for (i, key) in keys.iter().enumerate() {
+            let removed = tree.remove(key).unwrap();
+            prop_assert_eq!(
+                removed.map(|arc| *arc), Some(i as u64),
+                "Remove phase: key {:?} (index {}) mismatch", key, i
+            );
+            oracle.remove(key);
+        }
+        prop_assert!(tree.is_empty());
+        prop_assert!(oracle.is_empty());
+
+        // Phase 3: Reinsert all keys with new values
+        for (i, key) in keys.iter().enumerate() {
+            let v = (i as u64) + 1000;
+            let old = tree.insert(key, v);
+            prop_assert!(old.is_none(), "Reinsert should not find old value");
+            oracle.insert(key.clone(), v);
+        }
+
+        // Verify all present with new values
+        verify_full_scan(&tree, &oracle)?;
+
+        // Phase 4: Remove half, reinsert with third values
+        let half = keys.len() / 2;
+        for key in keys.iter().take(half) {
+            tree.remove(key).unwrap();
+            oracle.remove(key);
+        }
+        for (i, key) in keys.iter().take(half).enumerate() {
+            let v = (i as u64) + 2000;
+            tree.insert(key, v);
+            oracle.insert(key.clone(), v);
+        }
+
+        // Final full verification
+        verify_full_scan(&tree, &oracle)?;
+        verify_first_last(&tree, &oracle)?;
+        prop_assert_eq!(tree.len(), oracle.len());
+    }
+}
+
+// ============================================================================
+//  Test 4: Shared Prefix Multi-Layer Stress
+// ============================================================================
+
+/// Keys with shared prefix (forces deep multi-layer trie descent).
+/// Uses vec + dedup instead of `hash_set` for faster proptest generation.
+fn shared_prefix_keys_strategy(max_count: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
+    (
+        prop::collection::vec(any::<u8>(), 16..=24),
+        prop::collection::vec(
+            prop::collection::vec(any::<u8>(), 1..=40),
+            max_count..=max_count,
+        ),
+    )
+        .prop_map(|(prefix, suffixes)| {
+            let mut keys: Vec<Vec<u8>> = suffixes
+                .into_iter()
+                .map(|s| {
+                    let mut key = prefix.clone();
+                    key.extend(s);
+                    key
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            keys
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Keys sharing long prefixes force deep trie descent (3+ layers).
+    #[test]
+    fn shared_prefix_multi_layer_stress(keys in shared_prefix_keys_strategy(50)) {
+        let tree: MassTree15<u64> = MassTree15::new();
+        let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+
+        // Insert all
+        for (i, key) in keys.iter().enumerate() {
+            tree.insert(key, i as u64);
+            oracle.insert(key.clone(), i as u64);
+        }
+        prop_assert_eq!(tree.len(), oracle.len());
+
+        // Verify all present
+        for (i, key) in keys.iter().enumerate() {
+            let got = tree.get(key).map(|arc| *arc);
+            prop_assert_eq!(got, Some(i as u64), "Key index {} missing", i);
+        }
+
+        // Full scan comparison
+        verify_full_scan(&tree, &oracle)?;
+
+        // Remove half
+        let half = keys.len() / 2;
+        for key in keys.iter().take(half) {
+            tree.remove(key).unwrap();
+            oracle.remove(key);
+        }
+
+        // Verify removed are gone, remaining are present
+        for (i, key) in keys.iter().enumerate() {
+            let got = tree.get(key).map(|arc| *arc);
+            if i < half {
+                prop_assert_eq!(got, None, "Key index {} should be removed", i);
+            } else {
+                prop_assert_eq!(got, Some(i as u64), "Key index {} should remain", i);
+            }
+        }
+
+        // Full scan and reverse iter comparison
+        verify_full_scan(&tree, &oracle)?;
+        verify_reverse_iter(&tree, &oracle)?;
+        verify_first_last(&tree, &oracle)?;
     }
 }

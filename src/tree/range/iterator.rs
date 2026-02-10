@@ -78,7 +78,6 @@
 mod adapters;
 mod batch_forward;
 mod batch_reverse;
-mod cleanup_guard;
 mod iter_flags;
 mod range_bound;
 mod scan_entry;
@@ -105,11 +104,10 @@ use std::marker::PhantomData;
 use arrayvec::ArrayVec;
 use seize::LocalGuard;
 
-use crate::alloc_trait::NodeAllocatorGeneric;
+use crate::alloc_trait::TreeAllocator;
 use crate::key::IKEY_SIZE;
 
-use crate::leaf_trait::{LayerCapableLeaf, TreeLeafNode};
-use crate::slot::ValueSlot;
+use crate::policy::LeafPolicy;
 use crate::tree::MassTreeGeneric;
 
 #[cfg(debug_assertions)]
@@ -183,11 +181,10 @@ use iter_flags::IterFlags;
 ///
 /// println!("Found {} entries", count);
 /// ```
-pub struct RangeIter<'a, 'g, S, L, A>
+pub struct RangeIter<'a, 'g, P, A>
 where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     // ========================================================================
     //  Forward iteration state
@@ -196,10 +193,10 @@ where
     pub(super) guard: &'g LocalGuard<'a>,
 
     /// Current scan position (forward).
-    pub(super) stack: ScanStackElement<L, S>,
+    pub(super) stack: ScanStackElement<P>,
 
     /// Parent layer stack for sublayer navigation (forward).
-    pub(super) layer_stack: LayerStack<L>,
+    pub(super) layer_stack: LayerStack<P>,
 
     /// Cursor tracking current key position (forward).
     pub(super) cursor_key: CursorKey,
@@ -208,20 +205,15 @@ where
     pub(super) state: ScanState,
 
     /// Captured snapshot for current entry (forward, if in Emit state).
-    pub(super) snapshot: Option<ScanSnapshot<S>>,
+    pub(super) snapshot: Option<ScanSnapshot<P>>,
 
-    /// Tracks the output pointer from `initialize()`'s snapshot.
+    /// Tracks the output from `initialize()`'s snapshot.
     ///
     /// This field is **only** used for the first entry case in `advance_no_alloc_ref`,
-    /// where we convert the `ScanSnapshot` from `initialize()` to a raw pointer.
+    /// where we keep the `P::Output` alive so that `output_as_ref` can return
+    /// a borrowed `&P::Value` from it.
     ///
-    /// For pointer-backed storage, `output_to_raw` allocates to provide
-    /// a stable pointer. This field tracks that allocation so we
-    /// can clean it up when:
-    /// - Advancing to the next entry (previous pointer no longer needed)
-    /// - Dropping the iterator
-    ///
-    /// For `LeafValue<V>` (Arc types), this tracks the cloned Arc that needs
+    /// For `ArcPolicy<V>` (Arc types), this tracks the cloned Arc that needs
     /// to be decremented when no longer needed.
     ///
     /// # Why Only First Entry?
@@ -229,17 +221,17 @@ where
     /// After the first entry, `find_next_ptr` returns `ScanSnapshotPtr` with
     /// pointers directly into the leaf node (protected by guard), so no
     /// allocation tracking is needed. Only the `initialize()` snapshot path
-    /// requires allocation tracking because it converts `S::Output` → raw pointer.
-    pub(super) last_output_ptr: Option<*mut u8>,
+    /// requires allocation tracking because it holds the `P::Output` alive.
+    pub(super) last_output: Option<P::Output>,
 
     // ========================================================================
     //  Reverse iteration state (for DoubleEndedIterator)
     // ========================================================================
     /// Current scan position (backward).
-    pub(super) back_stack: BackStackElement<L, S>,
+    pub(super) back_stack: BackStackElement<P>,
 
     /// Parent layer stack for sublayer navigation (backward).
-    pub(super) back_layer_stack: LayerStack<L>,
+    pub(super) back_layer_stack: LayerStack<P>,
 
     /// Cursor tracking current key position (backward).
     pub(super) back_cursor_key: CursorKey,
@@ -251,7 +243,7 @@ where
     pub(super) back_state: ScanStateBack,
 
     /// Captured snapshot for current entry (backward, if in Emit state).
-    pub(super) back_snapshot: Option<ScanSnapshot<S>>,
+    pub(super) back_snapshot: Option<ScanSnapshot<P>>,
 
     // ========================================================================
     //  Shared state
@@ -304,11 +296,10 @@ where
     _marker: PhantomData<&'a A>,
 }
 
-impl<S, L, A> Debug for RangeIter<'_, '_, S, L, A>
+impl<P, A> Debug for RangeIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("RangeIter")
@@ -322,13 +313,10 @@ where
     }
 }
 
-impl<'a, 'g, S, L, A> RangeIter<'a, 'g, S, L, A>
+impl<'a, 'g, P, A> RangeIter<'a, 'g, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     /// Create a new range iterator.
     ///
@@ -343,7 +331,7 @@ where
     ///
     /// A new iterator that will yield entries in the specified range.
     pub(crate) fn new(
-        tree: &'a MassTreeGeneric<S, L, A>,
+        tree: &'a MassTreeGeneric<P, A>,
         start: RangeBound<'a>,
         end: RangeBound<'a>,
         guard: &'g LocalGuard<'a>,
@@ -392,7 +380,7 @@ where
             cursor_key,
             state: ScanState::FindNext, // Will be set properly in first iteration
             snapshot: None,
-            last_output_ptr: None,
+            last_output: None,
 
             // Reverse iteration state (lazily initialized)
             back_stack: BackStackElement::new(root),
@@ -468,6 +456,9 @@ where
 
             match state {
                 ScanState::Down => {
+                    // Entering a sublayer invalidates single-layer assumptions.
+                    self.flags.disable_single_layer_mode();
+
                     // Start key descends into a sublayer.
                     // - parent_root: saved before find_initial modified stack.root
                     // - stack.leaf_ptr(): still points to the parent leaf (not modified)
@@ -516,7 +507,7 @@ where
         clippy::too_many_lines,
         reason = "State machine with fused optimization and debug instrumentation"
     )]
-    fn advance(&mut self) -> Option<ScanEntry<S::Output>> {
+    fn advance(&mut self) -> Option<ScanEntry<P::Output>> {
         loop {
             match self.state {
                 ScanState::Emit => {
@@ -679,7 +670,7 @@ where
 
                         // snapshot is guaranteed Some when new_state == Emit
                         // (find_next only returns Emit with Some(snapshot))
-                        let snapshot: ScanSnapshot<S> = snapshot?;
+                        let snapshot: ScanSnapshot<P> = snapshot?;
                         return Some(ScanEntry::new(key.to_vec(), snapshot.value));
                     }
 
@@ -763,6 +754,9 @@ where
 
             match state {
                 ScanStateBack::Down => {
+                    // Entering a sublayer invalidates single-layer assumptions.
+                    self.flags.disable_single_layer_mode();
+
                     // Descend into sublayer
                     ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
 
@@ -774,6 +768,13 @@ where
                 }
 
                 _ => {
+                    // `find_initial_reverse` performs iterative layer descent internally.
+                    // If it descended, `back_layer_stack` is non-empty even though we
+                    // did not observe an explicit `Down` state here.
+                    if !self.back_layer_stack.is_empty() {
+                        self.flags.disable_single_layer_mode();
+                    }
+
                     // Ready to iterate (Emit, FindPrev, Up)
                     self.back_state = state;
                     self.back_snapshot = snapshot;
@@ -795,7 +796,7 @@ where
         clippy::too_many_lines,
         reason = "State machine benefits from unified logic"
     )]
-    fn advance_back(&mut self) -> Option<ScanEntry<S::Output>> {
+    fn advance_back(&mut self) -> Option<ScanEntry<P::Output>> {
         loop {
             match self.back_state {
                 ScanStateBack::Emit => {
@@ -822,7 +823,7 @@ where
                     }
 
                     // Take snapshot
-                    let snapshot: ScanSnapshot<S> = self.back_snapshot.take()?;
+                    let snapshot: ScanSnapshot<P> = self.back_snapshot.take()?;
 
                     // Build entry
                     let entry = ScanEntry::new(key.to_vec(), snapshot.value);
@@ -970,12 +971,12 @@ where
     }
 
     /// Convert to a keys-only iterator.
-    pub const fn keys(self) -> KeysIter<'a, 'g, S, L, A> {
+    pub const fn keys(self) -> KeysIter<'a, 'g, P, A> {
         KeysIter { inner: self }
     }
 
     /// Convert to a values-only iterator.
-    pub const fn values(self) -> ValuesIter<'a, 'g, S, L, A> {
+    pub const fn values(self) -> ValuesIter<'a, 'g, P, A> {
         ValuesIter { inner: self }
     }
 
@@ -1049,15 +1050,12 @@ where
 //  Iterator Trait Implementations
 // ============================================================================
 
-impl<S, L, A> Iterator for RangeIter<'_, '_, S, L, A>
+impl<P, A> Iterator for RangeIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
-    type Item = ScanEntry<S::Output>;
+    type Item = ScanEntry<P::Output>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -1103,13 +1101,10 @@ where
     }
 }
 
-impl<S, L, A> DoubleEndedIterator for RangeIter<'_, '_, S, L, A>
+impl<P, A> DoubleEndedIterator for RangeIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
@@ -1147,29 +1142,11 @@ where
     }
 }
 
-impl<S, L, A> FusedIterator for RangeIter<'_, '_, S, L, A>
+impl<P, A> FusedIterator for RangeIter<'_, '_, P, A>
 where
-    S: ValueSlot,
-    S::Value: Send + Sync + 'static,
-    S::Output: Send + Sync + Clone,
-    L: LayerCapableLeaf<S>,
-    A: NodeAllocatorGeneric<S, L>,
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
 {
 }
 
-impl<S, L, A> Drop for RangeIter<'_, '_, S, L, A>
-where
-    S: ValueSlot,
-    L: TreeLeafNode<S>,
-    A: NodeAllocatorGeneric<S, L>,
-{
-    fn drop(&mut self) {
-        // Clean up any outstanding output pointer from advance_no_alloc_ref.
-        // This pointer was created by output_to_raw and must be freed.
-        if let Some(ptr) = self.last_output_ptr.take() {
-            // SAFETY: ptr was created by S::output_to_raw and has not been cleaned up yet.
-            // We only create one pointer at a time and track it in last_output_ptr.
-            unsafe { S::cleanup_output_raw(ptr) };
-        }
-    }
-}
+// No manual Drop needed — `last_output: Option<P::Output>` drops automatically.
