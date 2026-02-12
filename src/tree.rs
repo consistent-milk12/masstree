@@ -15,7 +15,7 @@ use crate::alloc_trait::TreeAllocator;
 use crate::alloc15::SeizeAllocator;
 use crate::inline::bits::InlineBits;
 use crate::leaf15::LeafNode15;
-use crate::policy::{ArcPolicy, InlinePolicy, LeafPolicy};
+use crate::policy::{BoxPolicy, InlinePolicy, LeafPolicy};
 use coalesce::CoalesceQueue;
 use seize::Collector;
 
@@ -126,7 +126,7 @@ impl std::error::Error for InsertError {}
 ///
 /// # Type Parameters
 ///
-/// - `P` - Leaf policy (determines value storage: `ArcPolicy<V>` or `InlinePolicy<V>`)
+/// - `P` - Leaf policy (determines value storage: `BoxPolicy<V>` or `InlinePolicy<V>`)
 /// - `A` - Allocator type (must implement [`TreeAllocator<P>`])
 ///
 /// The leaf type is always `LeafNode15<P>` — derived from the policy.
@@ -267,9 +267,10 @@ where
 /// [`InlineBits`]: crate::inline::bits::InlineBits
 pub type MassTree<V> = MassTree15Inline<V>;
 
-/// Arc-based storage for non-Copy types (String, Vec<u8>, etc.).
+/// Box-based storage for non-Copy types (String, Vec<u8>, etc.).
 ///
-/// VALUES ARE STORED AS `Arc<V>` - each insert allocates.
+/// Values are stored as `Box<V>` raw pointers. Returns [`ValuePtr<V>`] — a
+/// zero-cost `Copy` pointer valid for the lifetime of the EBR guard.
 ///
 /// # Example
 ///
@@ -280,7 +281,9 @@ pub type MassTree<V> = MassTree15Inline<V>;
 /// let guard = tree.guard();
 /// tree.insert_with_guard(b"key", "hello".to_string(), &guard).unwrap();
 /// ```
-pub type MassTree15<V> = MassTreeGeneric<ArcPolicy<V>, SeizeAllocator<ArcPolicy<V>>>;
+///
+/// [`ValuePtr<V>`]: crate::policy::ValuePtr
+pub type MassTree15<V> = MassTreeGeneric<BoxPolicy<V>, SeizeAllocator<BoxPolicy<V>>>;
 
 /// True-inline storage for Copy types (u64, i32, *const T, etc.).
 ///

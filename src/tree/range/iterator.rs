@@ -213,7 +213,7 @@ where
     /// where we keep the `P::Output` alive so that `output_as_ref` can return
     /// a borrowed `&P::Value` from it.
     ///
-    /// For `ArcPolicy<V>` (Arc types), this tracks the cloned Arc that needs
+    /// For `BoxPolicy<V>` (Arc types), this tracks the cloned Arc that needs
     /// to be decremented when no longer needed.
     ///
     /// # Why Only First Entry?

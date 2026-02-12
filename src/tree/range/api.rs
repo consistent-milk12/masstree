@@ -122,7 +122,7 @@ where
     ///
     /// ```ignore
     /// let guard = tree.guard();
-    /// let values: Vec<Arc<String>> = tree.values(&guard).collect();
+    /// let values: Vec<ValuePtr<String>> = tree.values(&guard).collect();
     ///
     pub fn values<'a, 'g>(&'a self, guard: &'g LocalGuard<'a>) -> ValuesIter<'a, 'g, P, A> {
         self.iter(guard).values()
@@ -134,8 +134,8 @@ where
 
     /// Get the first (smallest) key-value pair in the tree.
     ///
-    /// Creates a guard internally. For repeated access, prefer
-    /// [`first_with_guard`](Self::first_with_guard).
+    /// Creates a guard internally. Returns an owned clone of the value.
+    /// For repeated access, prefer [`first_with_guard`](Self::first_with_guard).
     ///
     /// # Returns
     ///
@@ -145,7 +145,7 @@ where
     /// # Example
     ///
     /// ```ignore
-    /// let tree = MassTree::<u64>::new();
+    /// let tree = MassTree15::<u64>::new();
     /// tree.insert(b"banana", 2);
     /// tree.insert(b"apple", 1);
     /// tree.insert(b"cherry", 3);
@@ -155,9 +155,13 @@ where
     /// ```
     #[must_use]
     #[inline]
-    pub fn first(&self) -> Option<ScanEntry<P::Output>> {
+    pub fn first(&self) -> Option<ScanEntry<P::Value>>
+    where
+        P::Value: Clone,
+    {
         let guard = self.guard();
         self.first_with_guard(&guard)
+            .map(|entry| ScanEntry::new(entry.key, P::clone_value_from_output(&entry.value)))
     }
 
     /// Get the first (smallest) key-value pair using an existing guard.
@@ -169,8 +173,8 @@ where
 
     /// Get the last (largest) key-value pair in the tree.
     ///
-    /// Creates a guard internally. For repeated access, prefer
-    /// [`last_with_guard`](Self::last_with_guard).
+    /// Creates a guard internally. Returns an owned clone of the value.
+    /// For repeated access, prefer [`last_with_guard`](Self::last_with_guard).
     ///
     /// # Returns
     ///
@@ -180,7 +184,7 @@ where
     /// # Example
     ///
     /// ```ignore
-    /// let tree = MassTree::<u64>::new();
+    /// let tree = MassTree15::<u64>::new();
     /// tree.insert(b"banana", 2);
     /// tree.insert(b"apple", 1);
     /// tree.insert(b"cherry", 3);
@@ -190,9 +194,13 @@ where
     /// ```
     #[must_use]
     #[inline]
-    pub fn last(&self) -> Option<ScanEntry<P::Output>> {
+    pub fn last(&self) -> Option<ScanEntry<P::Value>>
+    where
+        P::Value: Clone,
+    {
         let guard = self.guard();
         self.last_with_guard(&guard)
+            .map(|entry| ScanEntry::new(entry.key, P::clone_value_from_output(&entry.value)))
     }
 
     /// Get the last (largest) key-value pair using an existing guard.

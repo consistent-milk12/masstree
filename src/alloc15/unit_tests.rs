@@ -6,22 +6,22 @@ use crate::alloc_trait::TreeAllocator;
 use crate::internode::InternodeNode;
 use crate::node_pool;
 use crate::nodeversion::NodeVersion;
-use crate::policy::{ArcPolicy, InlinePolicy};
+use crate::policy::{BoxPolicy, InlinePolicy};
 
 // =============================================================================
-// SeizeAllocator Basic Tests (ArcPolicy)
+// SeizeAllocator Basic Tests (BoxPolicy)
 // =============================================================================
 
 #[test]
 fn test_seize_allocator_new() {
     // Allocator is stateless - just verify construction works
-    let _alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let _alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
 }
 
 #[test]
 fn test_seize_allocator_alloc_leaf() {
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
-    let leaf: Box<LeafNode15<ArcPolicy<u64>>> = LeafNode15::new_boxed();
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
+    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new_boxed();
 
     let ptr = alloc.alloc_leaf(leaf);
     assert!(!ptr.is_null());
@@ -39,9 +39,9 @@ fn test_seize_allocator_alloc_leaf() {
 
 #[test]
 fn test_seize_allocator_track_leaf_is_noop() {
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
-    let leaf: Box<LeafNode15<ArcPolicy<u64>>> = LeafNode15::new_boxed();
-    let ptr: *mut LeafNode15<ArcPolicy<u64>> = Box::into_raw(leaf);
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
+    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new_boxed();
+    let ptr: *mut LeafNode15<BoxPolicy<u64>> = Box::into_raw(leaf);
 
     // track_leaf is now a no-op (traversal handles cleanup)
     alloc.track_leaf(ptr);
@@ -54,7 +54,7 @@ fn test_seize_allocator_track_leaf_is_noop() {
 
 #[test]
 fn test_seize_allocator_alloc_leaf_direct() {
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
 
     let ptr = alloc.alloc_leaf_direct(false, false);
     assert!(!ptr.is_null());
@@ -67,14 +67,14 @@ fn test_seize_allocator_alloc_leaf_direct() {
     // Clean up - alloc_leaf_direct uses pool, so use pool_dealloc
     unsafe {
         StdPtr::drop_in_place(ptr);
-        let layout = Layout::new::<LeafNode15<ArcPolicy<u64>>>();
+        let layout = Layout::new::<LeafNode15<BoxPolicy<u64>>>();
         node_pool::pool_dealloc(ptr.cast(), layout);
     }
 }
 
 #[test]
 fn test_seize_allocator_teardown_single_leaf() {
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
 
     let ptr = alloc.alloc_leaf_direct(true, false);
     assert!(!ptr.is_null());
@@ -102,7 +102,7 @@ fn test_seize_allocator_teardown_deep_internode_tree() {
     // Structure: chain of internodes, each with one child
     // (depth = 15 levels, which is the max internode height)
 
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
 
     // Create the leaf at the bottom
     let leaf_ptr = alloc.alloc_leaf_direct(false, false);
@@ -123,7 +123,7 @@ fn test_seize_allocator_teardown_deep_internode_tree() {
         unsafe {
             let version_ptr = child_ptr.cast::<NodeVersion>();
             if (*version_ptr).is_leaf() {
-                let leaf: &LeafNode15<ArcPolicy<u64>> = &*child_ptr.cast();
+                let leaf: &LeafNode15<BoxPolicy<u64>> = &*child_ptr.cast();
                 leaf.set_parent(inode_ptr);
             } else {
                 let child_inode: &InternodeNode = &*child_ptr.cast();
@@ -153,7 +153,7 @@ fn test_seize_allocator_teardown_wide_internode_tree() {
     // Create a wide internode with many children (all leaves)
     // This tests breadth handling in the iterative traversal.
 
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
 
     // Create root internode
     let root_ptr = alloc.alloc_internode_direct_root(0);
@@ -288,7 +288,7 @@ fn test_seize_allocator_inline_teardown_deep_tree() {
 
 #[test]
 fn test_seize_allocator_teardown_null() {
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
 
     // Should handle null gracefully (no-op)
     alloc.teardown_tree(StdPtr::null_mut());

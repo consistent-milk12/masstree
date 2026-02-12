@@ -9,20 +9,20 @@ use std::mem as StdMem;
 use super::LeafNode15;
 use crate::nodeversion::NodeVersion;
 use crate::permuter::AtomicPermuter15;
-use crate::policy::{ArcPolicy, InlinePolicy};
+use crate::policy::{BoxPolicy, InlinePolicy};
 
 // ============================================================================
-//  Size and Alignment — ArcPolicy
+//  Size and Alignment — BoxPolicy
 // ============================================================================
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     use super::WIDTH_15;
-    use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8};
+    use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
-    // ArcPolicy<u64> leaf: exactly 448 bytes (7 cache lines)
-    assert!(StdMem::size_of::<LeafNode15<ArcPolicy<u64>>>() == 448);
-    assert!(StdMem::align_of::<LeafNode15<ArcPolicy<u64>>>() == 64);
+    // BoxPolicy<u64> leaf: exactly 448 bytes (7 cache lines)
+    assert!(StdMem::size_of::<LeafNode15<BoxPolicy<u64>>>() == 448);
+    assert!(StdMem::align_of::<LeafNode15<BoxPolicy<u64>>>() == 64);
 
     // Component sizes
     assert!(StdMem::size_of::<NodeVersion>() == 4);
@@ -33,14 +33,14 @@ const _: () = {
 };
 
 // ============================================================================
-//  Field Offsets — ArcPolicy
+//  Field Offsets — BoxPolicy
 // ============================================================================
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     use std::mem::offset_of;
 
-    type Leaf = LeafNode15<ArcPolicy<u64>>;
+    type Leaf = LeafNode15<BoxPolicy<u64>>;
 
     // Cache Line 0: Version and metadata
     assert!(offset_of!(Leaf, version) == 0);
@@ -55,7 +55,7 @@ const _: () = {
     assert!(offset_of!(Leaf, ikey0) == 128);
     assert!(offset_of!(Leaf, keylenx) == 248);
 
-    // Values: ArcValueArray starts at 264 (248 + 15 + 1 pad)
+    // Values: BoxValueArray starts at 264 (248 + 15 + 1 pad)
     assert!(offset_of!(Leaf, values) == 264);
 
     // Suffix: SidecarSuffix at 384 (264 + 120)
@@ -118,14 +118,14 @@ const _: () = {
 
     type Leaf = LeafNode15<InlinePolicy<u64>>;
 
-    // Shared early fields: identical offsets to ArcPolicy
+    // Shared early fields: identical offsets to BoxPolicy
     assert!(offset_of!(Leaf, version) == 0);
     assert!(offset_of!(Leaf, modstate) == 4);
     assert!(offset_of!(Leaf, permutation) == 64);
     assert!(offset_of!(Leaf, ikey0) == 128);
     assert!(offset_of!(Leaf, keylenx) == 248);
 
-    // Values: InlineValueArray starts at 264 (same as ArcPolicy)
+    // Values: InlineValueArray starts at 264 (same as BoxPolicy)
     assert!(offset_of!(Leaf, values) == 264);
 
     // Suffix always at 504 (264 + 240). Size differs by suffix strategy.
@@ -140,7 +140,7 @@ const _: () = {
 const _: () = {
     use std::mem::offset_of;
 
-    type ArcLeaf = LeafNode15<ArcPolicy<u64>>;
+    type ArcLeaf = LeafNode15<BoxPolicy<u64>>;
     type InlineLeaf = LeafNode15<InlinePolicy<u64>>;
 
     // Shared early fields: identical offsets across both policies.

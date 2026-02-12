@@ -1,10 +1,10 @@
 use super::{LayerContext, LayerStack, NonNull, ScanSnapshotPtr, ScanState};
 use crate::leaf15::LeafNode15;
-use crate::policy::ArcPolicy;
+use crate::policy::BoxPolicy;
 use arrayvec::ArrayVec;
 use std::ptr as StdPtr;
 
-type P = ArcPolicy<u64>;
+type P = BoxPolicy<u64>;
 type Leaf = LeafNode15<P>;
 
 // Note: These tests use mock types since we can't easily construct

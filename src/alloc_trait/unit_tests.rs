@@ -1,7 +1,7 @@
 use super::TreeAllocator;
 use crate::alloc15::SeizeAllocator;
 use crate::leaf15::LeafNode15;
-use crate::policy::{ArcPolicy, LeafPolicy};
+use crate::policy::{BoxPolicy, LeafPolicy};
 
 // ========================================================================
 // Generic Test Helpers
@@ -50,14 +50,14 @@ where
 
 #[test]
 fn test_seize_allocator15_generic_alloc() {
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
-    test_generic_alloc_leaf::<ArcPolicy<u64>, _>(&alloc);
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
+    test_generic_alloc_leaf::<BoxPolicy<u64>, _>(&alloc);
 }
 
 #[test]
 fn test_seize_allocator15_generic_track() {
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
-    test_generic_track_leaf::<ArcPolicy<u64>, _>(&alloc);
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
+    test_generic_track_leaf::<BoxPolicy<u64>, _>(&alloc);
 }
 
 // ========================================================================
@@ -76,7 +76,7 @@ where
 
 #[test]
 fn test_generic_code_compiles() {
-    let mut alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
+    let mut alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
 
-    assert!(generic_tree_setup::<ArcPolicy<u64>, _>(&mut alloc));
+    assert!(generic_tree_setup::<BoxPolicy<u64>, _>(&mut alloc));
 }

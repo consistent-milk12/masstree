@@ -7,10 +7,10 @@
 //!
 //! Optimal for integer-key workloads where most leaves have no suffixes.
 //!
-//! This is the suffix storage backend for both [`ArcPolicy<V>`] and
+//! This is the suffix storage backend for both [`BoxPolicy<V>`] and
 //! [`InlinePolicy<V>`].
 //!
-//! [`ArcPolicy<V>`]: super::ArcPolicy
+//! [`BoxPolicy<V>`]: super::BoxPolicy
 //! [`InlinePolicy<V>`]: super::InlinePolicy
 
 use std::cmp::Ordering;

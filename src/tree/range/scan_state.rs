@@ -578,7 +578,7 @@ pub type LayerStack<P> = ArrayVec<LayerContext<P>, 6>;
 /// modified after validation.
 #[derive(Debug, Clone)]
 pub struct ScanSnapshot<P: LeafPolicy> {
-    /// The value output (Arc<V> clone or V copy).
+    /// The value output (`ValuePtr<V>` clone or V copy).
     pub value: P::Output,
 
     /// The key length at current layer.
@@ -619,7 +619,7 @@ pub struct ScanSnapshot<P: LeafPolicy> {
 pub struct ScanSnapshotPtr<V> {
     /// Typed pointer to the value data.
     ///
-    /// - For `ArcPolicy<V>`: Points to Arc<V>'s data
+    /// - For `BoxPolicy<V>`: Points to Box<V>'s data
     /// - For `InlinePolicy<V>`: Stored as atomic bits (no stable pointer)
     pub value_ptr: *const V,
 

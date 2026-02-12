@@ -117,7 +117,7 @@ impl<P: LeafPolicy> BatchEntry<P> {
 ///
 /// # Type Parameter
 ///
-/// * `O` - The output type (`Arc<V>` for Arc mode, `V` for Inline mode)
+/// * `O` - The output type (`ValuePtr<V>` for Box mode, `V` for Inline mode)
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct BatchInsertResult<O> {
@@ -129,7 +129,7 @@ pub struct BatchInsertResult<O> {
 
     /// Old values from updated keys (in no particular order).
     ///
-    /// For `MassTree24<V>`, this is `Vec<Arc<V>>`.
+    /// For `MassTree24<V>`, this is `Vec<ValuePtr<V>>`.
     /// For `MassTree24Inline<V>`, this is `Vec<V>`.
     pub old_values: Vec<O>,
 
@@ -311,18 +311,29 @@ where
     /// # Note on Clone Bound
     ///
     /// This method requires `P::Output: Clone` because entries may need to be
-    /// retried after a split. For `Arc<V>`, cloning is cheap (refcount bump).
+    /// retried after a split. For `ValuePtr<V>`, cloning is trivial (Copy).
     /// For `Copy` types in `Inline` mode, cloning is also cheap.
     ///
     /// # Panics
     ///
     /// Panics on internal tree corruption (should not happen in normal operation).
-    pub fn insert_batch<I>(&self, entries: I) -> BatchInsertResult<P::Output>
+    pub fn insert_batch<I>(&self, entries: I) -> BatchInsertResult<P::Value>
     where
         I: IntoIterator<Item = (Vec<u8>, P::Value)>,
+        P::Value: Clone,
     {
         let guard = self.guard();
-        self.insert_batch_with_guard(entries, &guard)
+        let result = self.insert_batch_with_guard(entries, &guard);
+        BatchInsertResult {
+            inserted: result.inserted,
+            updated: result.updated,
+            old_values: result
+                .old_values
+                .iter()
+                .map(|o| P::clone_value_from_output(o))
+                .collect(),
+            failed: result.failed,
+        }
     }
 
     /// Insert multiple key-value pairs using an existing guard.

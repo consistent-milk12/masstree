@@ -121,7 +121,7 @@ proptest! {
 
         let result = tree.get(&key);
         prop_assert!(result.is_some(), "Key {:?} not found after insert", key);
-        prop_assert_eq!(*result.unwrap(), value);
+        prop_assert_eq!(result.unwrap(), value);
     }
 
     /// get_ref should return borrowed reference to the same value.
@@ -146,10 +146,10 @@ proptest! {
 
         let old2 = tree.insert(&key, v2);
         prop_assert!(old2.is_some(), "Second insert should return old value");
-        prop_assert_eq!(*old2.unwrap(), v1);
+        prop_assert_eq!(old2.unwrap(), v1);
 
         // Current value should be v2
-        prop_assert_eq!(*tree.get(&key).unwrap(), v2);
+        prop_assert_eq!(tree.get(&key).unwrap(), v2);
     }
 
     /// Get on non-existent key returns None.
@@ -175,7 +175,7 @@ proptest! {
 
         let result = tree.get(&key);
         prop_assert!(result.is_some(), "Long key {:?} not found after insert", key);
-        prop_assert_eq!(*result.unwrap(), value);
+        prop_assert_eq!(result.unwrap(), value);
     }
 }
 
@@ -202,7 +202,7 @@ proptest! {
             let oracle_old = oracle.insert(key.clone(), value);
 
             prop_assert_eq!(
-                tree_old.map(|arc| *arc),
+                tree_old,
                 oracle_old,
                 "Insert mismatch for key {:?}",
                 key
@@ -213,7 +213,7 @@ proptest! {
         for (key, expected) in &oracle {
             let actual = tree.get(key);
             prop_assert!(actual.is_some(), "Key {:?} missing from tree", key);
-            prop_assert_eq!(*actual.unwrap(), *expected);
+            prop_assert_eq!(actual.unwrap(), *expected);
         }
     }
 
@@ -234,7 +234,7 @@ proptest! {
                     let oracle_old = oracle.insert(key.clone(), value);
 
                     prop_assert_eq!(
-                        tree_old.map(|arc| *arc),
+                        tree_old,
                         oracle_old,
                         "Insert/Update mismatch for key {:?}",
                         key
@@ -242,7 +242,7 @@ proptest! {
                 }
 
                 Op::Get(key) => {
-                    let tree_val = tree.get(&key).map(|arc| *arc);
+                    let tree_val = tree.get(&key);
                     let oracle_val = oracle.get(&key).copied();
 
                     prop_assert_eq!(
@@ -258,7 +258,7 @@ proptest! {
                         continue;
                     }
 
-                    let tree_old = tree.remove(&key).unwrap().map(|arc| *arc);
+                    let tree_old = tree.remove(&key).unwrap();
                     let oracle_old = oracle.remove(&key);
 
                     prop_assert_eq!(
@@ -301,7 +301,7 @@ proptest! {
                 "Key {:?} (index {}) lost after splits",
                 key, i
             );
-            prop_assert_eq!(*result.unwrap(), i as u64);
+            prop_assert_eq!(result.unwrap(), i as u64);
         }
 
         // Verify len matches
@@ -324,7 +324,7 @@ proptest! {
             let key = format!("{i:08}");
             let result = tree.get(key.as_bytes());
             prop_assert!(result.is_some(), "Key {} not found", i);
-            prop_assert_eq!(*result.unwrap(), i as u64);
+            prop_assert_eq!(result.unwrap(), i as u64);
         }
     }
 
@@ -344,7 +344,7 @@ proptest! {
             let key = format!("{i:08}");
             let result = tree.get(key.as_bytes());
             prop_assert!(result.is_some(), "Key {} not found", i);
-            prop_assert_eq!(*result.unwrap(), i as u64);
+            prop_assert_eq!(result.unwrap(), i as u64);
         }
     }
 
@@ -369,7 +369,7 @@ proptest! {
 
         for i in 0..count {
             let key = format!("{i:08}");
-            prop_assert_eq!(*tree.get(key.as_bytes()).unwrap(), i as u64);
+            prop_assert_eq!(tree.get(key.as_bytes()).unwrap(), i as u64);
         }
     }
 }
@@ -444,7 +444,7 @@ proptest! {
                 continue;
             }
 
-            let tree_old = tree.insert(&key, value).map(|arc| *arc);
+            let tree_old = tree.insert(&key, value);
             let inline_old = inline.insert(&key, value);
 
             prop_assert_eq!(tree_old, inline_old, "Insert mismatch for key {:?}", key);
@@ -484,7 +484,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(b"", value);
-        prop_assert_eq!(*tree.get(b"").unwrap(), value);
+        prop_assert_eq!(tree.get(b"").unwrap(), value);
         prop_assert_eq!(tree.len(), 1);
     }
 
@@ -494,7 +494,7 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(&key, value);
-        prop_assert_eq!(*tree.get(&key).unwrap(), value);
+        prop_assert_eq!(tree.get(&key).unwrap(), value);
     }
 
     /// Binary keys with null bytes should work.
@@ -511,7 +511,7 @@ proptest! {
 
         let tree: MassTree15<u64> = MassTree15::new();
         tree.insert(&key, value);
-        prop_assert_eq!(*tree.get(&key).unwrap(), value);
+        prop_assert_eq!(tree.get(&key).unwrap(), value);
     }
 
     /// Keys differing only in last byte should be distinct.
@@ -535,8 +535,8 @@ proptest! {
         tree.insert(&key1, v1);
         tree.insert(&key2, v2);
 
-        prop_assert_eq!(*tree.get(&key1).unwrap(), v1);
-        prop_assert_eq!(*tree.get(&key2).unwrap(), v2);
+        prop_assert_eq!(tree.get(&key1).unwrap(), v1);
+        prop_assert_eq!(tree.get(&key2).unwrap(), v2);
         prop_assert_eq!(tree.len(), 2);
     }
 }
@@ -564,7 +564,7 @@ proptest! {
                     oracle.insert(key, value);
                 }
                 Op::Get(key) => {
-                    let tree_val = tree.get(&key).map(|arc| *arc);
+                    let tree_val = tree.get(&key);
                     let oracle_val = oracle.get(&key).copied();
                     prop_assert_eq!(tree_val, oracle_val);
                 }
@@ -582,7 +582,7 @@ proptest! {
         prop_assert_eq!(tree.len(), oracle.len());
 
         for (key, expected) in &oracle {
-            prop_assert_eq!(*tree.get(key).unwrap(), *expected);
+            prop_assert_eq!(tree.get(key).unwrap(), *expected);
         }
     }
 }
@@ -600,11 +600,11 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(&key, value);
-        prop_assert_eq!(*tree.get(&key).unwrap(), value);
+        prop_assert_eq!(tree.get(&key).unwrap(), value);
 
         let removed = tree.remove(&key).unwrap();
         prop_assert!(removed.is_some(), "Remove should return old value");
-        prop_assert_eq!(*removed.unwrap(), value);
+        prop_assert_eq!(removed.unwrap(), value);
 
         prop_assert!(tree.get(&key).is_none(), "Key should be gone after remove");
         prop_assert_eq!(tree.len(), 0);
@@ -634,16 +634,16 @@ proptest! {
 
         // Insert
         tree.insert(&key, v1);
-        prop_assert_eq!(*tree.get(&key).unwrap(), v1);
+        prop_assert_eq!(tree.get(&key).unwrap(), v1);
 
         // Remove
         let removed = tree.remove(&key).unwrap();
-        prop_assert_eq!(*removed.unwrap(), v1);
+        prop_assert_eq!(removed.unwrap(), v1);
         prop_assert!(tree.get(&key).is_none());
 
         // Re-insert with different value
         tree.insert(&key, v2);
-        prop_assert_eq!(*tree.get(&key).unwrap(), v2);
+        prop_assert_eq!(tree.get(&key).unwrap(), v2);
         prop_assert_eq!(tree.len(), 1);
     }
 
@@ -673,10 +673,10 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(&key, value);
-        prop_assert_eq!(*tree.get(&key).unwrap(), value);
+        prop_assert_eq!(tree.get(&key).unwrap(), value);
 
         let removed = tree.remove(&key).unwrap();
-        prop_assert_eq!(*removed.unwrap(), value);
+        prop_assert_eq!(removed.unwrap(), value);
         prop_assert!(tree.get(&key).is_none());
     }
 
@@ -710,7 +710,7 @@ proptest! {
         for (key, expected) in &oracle {
             let actual = tree.get(key);
             prop_assert!(actual.is_some(), "Key {:?} missing", key);
-            prop_assert_eq!(*actual.unwrap(), *expected);
+            prop_assert_eq!(actual.unwrap(), *expected);
         }
     }
 }
@@ -1007,7 +1007,7 @@ proptest! {
         for (key, expected) in &oracle {
             let actual = tree.get(key);
             prop_assert!(actual.is_some());
-            prop_assert_eq!(*actual.unwrap(), *expected);
+            prop_assert_eq!(actual.unwrap(), *expected);
         }
     }
 
@@ -1165,7 +1165,7 @@ proptest! {
                 "Long key {:?} (len={}) not found. Tree len={}, Oracle len={}",
                 key, key.len(), tree.len(), oracle.len()
             );
-            prop_assert_eq!(*result.unwrap(), *expected);
+            prop_assert_eq!(result.unwrap(), *expected);
         }
     }
 
@@ -1175,10 +1175,10 @@ proptest! {
         let tree: MassTree15<u64> = MassTree15::new();
 
         tree.insert(&key, value);
-        prop_assert_eq!(*tree.get(&key).unwrap(), value);
+        prop_assert_eq!(tree.get(&key).unwrap(), value);
 
         let removed = tree.remove(&key).unwrap();
-        prop_assert_eq!(*removed.unwrap(), value);
+        prop_assert_eq!(removed.unwrap(), value);
         prop_assert!(tree.is_empty());
     }
 
@@ -1195,7 +1195,7 @@ proptest! {
                     oracle.insert(key, value);
                 }
                 Op::Get(key) => {
-                    let tree_val = tree.get(&key).map(|arc| *arc);
+                    let tree_val = tree.get(&key);
                     let oracle_val = oracle.get(&key).copied();
                     prop_assert_eq!(tree_val, oracle_val);
                 }
@@ -1231,8 +1231,8 @@ proptest! {
         tree.insert(&key1, v1);
         tree.insert(&key2, v2);
 
-        prop_assert_eq!(*tree.get(&key1).unwrap(), v1);
-        prop_assert_eq!(*tree.get(&key2).unwrap(), v2);
+        prop_assert_eq!(tree.get(&key1).unwrap(), v1);
+        prop_assert_eq!(tree.get(&key2).unwrap(), v2);
         prop_assert_eq!(tree.len(), 2);
     }
 
@@ -1306,14 +1306,14 @@ fn verify_first_last(
 ) -> Result<(), TestCaseError> {
     let tree_first = tree.first().map(|e| {
         let (k, v) = e.into_parts();
-        (k, *v)
+        (k, v)
     });
     let oracle_first = oracle.iter().next().map(|(k, v)| (k.clone(), *v));
     prop_assert_eq!(tree_first, oracle_first, "first() mismatch");
 
     let tree_last = tree.last().map(|e| {
         let (k, v) = e.into_parts();
-        (k, *v)
+        (k, v)
     });
     let oracle_last = oracle.iter().next_back().map(|(k, v)| (k.clone(), *v));
     prop_assert_eq!(tree_last, oracle_last, "last() mismatch");
@@ -1389,7 +1389,7 @@ proptest! {
         for (i, op) in ops.into_iter().enumerate() {
             match op {
                 FullOp::Insert(key, value) => {
-                    let tree_old = tree.insert(&key, value).map(|arc| *arc);
+                    let tree_old = tree.insert(&key, value);
                     let oracle_old = oracle.insert(key.clone(), value);
                     prop_assert_eq!(
                         tree_old, oracle_old,
@@ -1403,7 +1403,7 @@ proptest! {
                 }
 
                 FullOp::Get(key) => {
-                    let tree_val = tree.get(&key).map(|arc| *arc);
+                    let tree_val = tree.get(&key);
                     let oracle_val = oracle.get(&key).copied();
                     prop_assert_eq!(
                         tree_val, oracle_val,
@@ -1412,7 +1412,7 @@ proptest! {
                 }
 
                 FullOp::Remove(key) => {
-                    let tree_old = tree.remove(&key).unwrap().map(|arc| *arc);
+                    let tree_old = tree.remove(&key).unwrap();
                     let oracle_old = oracle.remove(&key);
                     prop_assert_eq!(
                         tree_old, oracle_old,
@@ -1437,7 +1437,7 @@ proptest! {
                 FullOp::First => {
                     let tree_first = tree.first().map(|e| {
                         let (k, v) = e.into_parts();
-                        (k, *v)
+                        (k, v)
                     });
                     let oracle_first =
                         oracle.iter().next().map(|(k, v)| (k.clone(), *v));
@@ -1450,7 +1450,7 @@ proptest! {
                 FullOp::Last => {
                     let tree_last = tree.last().map(|e| {
                         let (k, v) = e.into_parts();
-                        (k, *v)
+                        (k, v)
                     });
                     let oracle_last =
                         oracle.iter().next_back().map(|(k, v)| (k.clone(), *v));
@@ -1540,7 +1540,7 @@ proptest! {
 
         // Verify all present via get
         for (i, key) in keys.iter().enumerate() {
-            let got = tree.get(key).map(|arc| *arc);
+            let got = tree.get(key);
             prop_assert_eq!(got, Some(i as u64), "Key {} missing after inserts", i);
         }
 
@@ -1556,7 +1556,7 @@ proptest! {
             let key = &keys[*idx];
             let removed = tree.remove(key).unwrap();
             prop_assert!(removed.is_some(), "Remove returned None for key {}", idx);
-            prop_assert_eq!(*removed.unwrap(), *idx as u64);
+            prop_assert_eq!(removed.unwrap(), *idx as u64);
             oracle.remove(key);
         }
 
@@ -1597,7 +1597,7 @@ proptest! {
         for (i, key) in keys.iter().enumerate() {
             let removed = tree.remove(key).unwrap();
             prop_assert_eq!(
-                removed.map(|arc| *arc), Some(i as u64),
+                removed, Some(i as u64),
                 "Remove phase: key {:?} (index {}) mismatch", key, i
             );
             oracle.remove(key);
@@ -1682,7 +1682,7 @@ proptest! {
 
         // Verify all present
         for (i, key) in keys.iter().enumerate() {
-            let got = tree.get(key).map(|arc| *arc);
+            let got = tree.get(key);
             prop_assert_eq!(got, Some(i as u64), "Key index {} missing", i);
         }
 
@@ -1698,7 +1698,7 @@ proptest! {
 
         // Verify removed are gone, remaining are present
         for (i, key) in keys.iter().enumerate() {
-            let got = tree.get(key).map(|arc| *arc);
+            let got = tree.get(key);
             if i < half {
                 prop_assert_eq!(got, None, "Key index {} should be removed", i);
             } else {

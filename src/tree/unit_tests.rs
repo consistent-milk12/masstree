@@ -160,9 +160,9 @@ fn test_first_last_long_keys() {
     let last = tree.last().unwrap();
 
     assert_eq!(first.key(), b"aaa_long_key_that_spans_layers");
-    assert_eq!(*first.value, 1);
+    assert_eq!(first.value, 1);
     assert_eq!(last.key(), b"zzz_long_key_that_spans_layers");
-    assert_eq!(*last.value, 3);
+    assert_eq!(last.value, 3);
 }
 
 #[test]
@@ -443,7 +443,7 @@ fn test_index_get_after_insert() {
 
     tree.insert(b"test", 999);
 
-    // Get returns V directly (not Arc<V>)
+    // Get returns V directly (not ValuePtr<V>)
     let result = tree.get(b"test");
     assert_eq!(result, Some(999));
 }
@@ -546,7 +546,7 @@ fn test_insert_returns_old_arc() {
     tree.insert(b"key", "first".to_string());
 
     let old = tree.insert(b"key", "second".to_string());
-    assert_eq!(*old.unwrap(), "first");
+    assert_eq!(old.unwrap(), "first");
 }
 
 #[test]
@@ -1352,11 +1352,11 @@ fn test_layer_split_preserves_all_keys() {
 #[test]
 fn test_masstree_generic_new_is_empty() {
     use crate::alloc15::SeizeAllocator;
-    use crate::policy::ArcPolicy;
+    use crate::policy::BoxPolicy;
 
     // Create via with_allocator
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
-    let tree: MassTreeGeneric<ArcPolicy<u64>, SeizeAllocator<ArcPolicy<u64>>> =
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
+    let tree: MassTreeGeneric<BoxPolicy<u64>, SeizeAllocator<BoxPolicy<u64>>> =
         MassTreeGeneric::with_allocator(alloc);
 
     assert!(tree.is_empty());
@@ -1366,10 +1366,10 @@ fn test_masstree_generic_new_is_empty() {
 #[test]
 fn test_masstree_generic_debug() {
     use crate::alloc15::SeizeAllocator;
-    use crate::policy::ArcPolicy;
+    use crate::policy::BoxPolicy;
 
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
-    let tree: MassTreeGeneric<ArcPolicy<u64>, SeizeAllocator<ArcPolicy<u64>>> =
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
+    let tree: MassTreeGeneric<BoxPolicy<u64>, SeizeAllocator<BoxPolicy<u64>>> =
         MassTreeGeneric::with_allocator(alloc);
 
     let debug_str = format!("{tree:?}");
@@ -1380,10 +1380,10 @@ fn test_masstree_generic_debug() {
 #[test]
 fn test_masstree_generic_guard() {
     use crate::alloc15::SeizeAllocator;
-    use crate::policy::ArcPolicy;
+    use crate::policy::BoxPolicy;
 
-    let alloc: SeizeAllocator<ArcPolicy<u64>> = SeizeAllocator::new();
-    let tree: MassTreeGeneric<ArcPolicy<u64>, SeizeAllocator<ArcPolicy<u64>>> =
+    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
+    let tree: MassTreeGeneric<BoxPolicy<u64>, SeizeAllocator<BoxPolicy<u64>>> =
         MassTreeGeneric::with_allocator(alloc);
 
     // Just verify guard creation doesn't panic
@@ -1397,8 +1397,8 @@ fn test_masstree_generic_guard() {
 fn _assert_masstree_generic_send_sync()
 where
     MassTreeGeneric<
-        crate::policy::ArcPolicy<u64>,
-        crate::alloc15::SeizeAllocator<crate::policy::ArcPolicy<u64>>,
+        crate::policy::BoxPolicy<u64>,
+        crate::alloc15::SeizeAllocator<crate::policy::BoxPolicy<u64>>,
     >: Send + Sync,
 {
 }
@@ -1629,8 +1629,8 @@ fn test_proptest_regression_two_keys() {
 
     assert!(result1.is_some(), "Key [52, 0] lost!");
     assert!(result2.is_some(), "Key [52] lost!");
-    assert_eq!(*result1.unwrap(), 0);
-    assert_eq!(*result2.unwrap(), 1);
+    assert_eq!(result1.unwrap(), 0);
+    assert_eq!(result2.unwrap(), 1);
     assert_eq!(tree.len(), 2);
 }
 
@@ -1645,7 +1645,7 @@ fn test_proptest_regression_nine_zeros() {
 
     let result = tree.get(key);
     assert!(result.is_some(), "9-byte key not found!");
-    assert_eq!(*result.unwrap(), 42);
+    assert_eq!(result.unwrap(), 42);
     assert_eq!(tree.len(), 1);
 }
 
@@ -1668,8 +1668,8 @@ fn test_two_suffix_keys_same_prefix() {
 
     assert!(result1.is_some(), "key1 not found!");
     assert!(result2.is_some(), "key2 not found!");
-    assert_eq!(*result1.unwrap(), 1);
-    assert_eq!(*result2.unwrap(), 2);
+    assert_eq!(result1.unwrap(), 1);
+    assert_eq!(result2.unwrap(), 2);
     assert_eq!(tree.len(), 2);
 }
 
@@ -1690,7 +1690,7 @@ fn test_many_suffix_keys_same_prefix() {
             result.is_some(),
             "Key {i} ('{key}') not found immediately after insert"
         );
-        assert_eq!(*result.unwrap(), i);
+        assert_eq!(result.unwrap(), i);
     }
 
     // Verify all keys still retrievable at the end
@@ -1698,7 +1698,7 @@ fn test_many_suffix_keys_same_prefix() {
         let key = format!("prefix00{i:08}");
         let result = tree.get(key.as_bytes());
         assert!(result.is_some(), "Key {i} ('{key}') not found at end");
-        assert_eq!(*result.unwrap(), i);
+        assert_eq!(result.unwrap(), i);
     }
 
     assert_eq!(tree.len(), 20);
@@ -1718,8 +1718,8 @@ fn test_masstree15_basic() {
     tree.insert(b"world", 456);
 
     assert_eq!(tree.len(), 2);
-    assert_eq!(*tree.get(b"hello").unwrap(), 123);
-    assert_eq!(*tree.get(b"world").unwrap(), 456);
+    assert_eq!(tree.get(b"hello").unwrap(), 123);
+    assert_eq!(tree.get(b"world").unwrap(), 456);
 }
 
 #[test]
@@ -1823,7 +1823,7 @@ fn test_correct_guard_works() {
     let guard = tree.guard();
     // Should not panic - guard is from the correct tree
     tree.insert_with_guard(b"key", 42, &guard);
-    assert_eq!(tree.get(b"key"), Some(Arc::new(42)));
+    assert_eq!(tree.get(b"key").unwrap(), 42);
 }
 
 #[test]

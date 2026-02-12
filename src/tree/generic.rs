@@ -1037,18 +1037,26 @@ where
     /// Creates a guard internally. For bulk operations, prefer
     /// [`insert_with_guard`](Self::insert_with_guard) to amortize guard creation cost.
     ///
+    /// Returns an owned clone of the old value if the key already existed.
+    /// The internal EBR guard is released before returning, so the value
+    /// is cloned to ensure independent ownership.
+    ///
     /// # Returns
     ///
     /// * `None` - New key inserted
-    /// * `Some(old)` - Key existed, old value returned
+    /// * `Some(old)` - Key existed, old value returned (owned clone)
     ///
     /// # Panics
     ///
     /// Panics on internal tree corruption (should not happen in normal operation).
     #[inline]
-    pub fn insert(&self, key: &[u8], value: P::Value) -> Option<P::Output> {
+    pub fn insert(&self, key: &[u8], value: P::Value) -> Option<P::Value>
+    where
+        P::Value: Clone,
+    {
         let guard = self.guard();
-        self.insert_with_guard(key, value, &guard)
+        let result = self.insert_with_guard(key, value, &guard);
+        result.map(|output| P::clone_value_from_output(&output))
     }
 
     /// Insert a key-value pair using an explicit guard.
@@ -1124,17 +1132,18 @@ where
 
     /// Remove a key from the tree.
     ///
-    /// Returns `Ok(Some(value))` if the key existed and was removed,
-    /// `Ok(None)` if the key was not found, or an error on failure.
+    /// Returns an owned clone of the removed value if the key existed.
+    /// The internal EBR guard is released before returning, so the value
+    /// is cloned to ensure independent ownership.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// let tree = MassTree24::new();
-    /// tree.insert(b"key", 42)?;
+    /// let tree = MassTree15::new();
+    /// tree.insert(b"key", 42);
     ///
     /// let removed = tree.remove(b"key")?;
-    /// assert_eq!(removed, Some(Arc::new(42)));
+    /// assert_eq!(removed.unwrap(), 42);
     ///
     /// let not_found = tree.remove(b"key")?;
     /// assert_eq!(not_found, None);
@@ -1144,9 +1153,13 @@ where
     ///
     /// Returns `RemoveError::RetryLimitExceeded` if the operation cannot
     /// complete after the retry limit (extremely rare, indicates contention).
-    pub fn remove(&self, key: &[u8]) -> Result<Option<P::Output>, RemoveError> {
+    pub fn remove(&self, key: &[u8]) -> Result<Option<P::Value>, RemoveError>
+    where
+        P::Value: Clone,
+    {
         let guard = self.guard();
-        self.remove_with_guard(key, &guard)
+        let result = self.remove_with_guard(key, &guard)?;
+        Ok(result.map(|output| P::clone_value_from_output(&output)))
     }
 
     /// Remove a key using an existing guard.
@@ -1283,7 +1296,7 @@ where
     ///
     /// // Increment counter, defaulting to 0
     /// let value = tree.entry_with_guard(b"counter", &guard)
-    ///     .and_modify(|v| *v + 1)  // For Arc<u64>: dereference Arc
+    ///     .and_modify(|v| *v + 1)  // For ValuePtr<u64>: dereference ValuePtr
     ///     .or_insert(0);
     ///
     /// // Fallible insertion

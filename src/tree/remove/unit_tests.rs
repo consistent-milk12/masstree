@@ -9,14 +9,28 @@ use super::{LockedParentResult, NodeCleaner};
 use crate::internode::InternodeNode;
 use crate::leaf15::LeafNode15;
 use crate::nodeversion::{LockGuard, NodeVersion};
-use crate::policy::ArcPolicy;
+use crate::policy::{BoxPolicy, ValuePtr};
 use crate::tree::MassTree15;
 
 use std::ptr as StdPtr;
 use std::sync::Arc;
 
+/// Helper macro: compare `Option<V>` with `Option<V>`.
+///
+/// Previously handled `ValuePtr<T>` → `T` conversion via `Deref`.
+/// Now that auto-guard methods return owned values directly, this is a
+/// simple equality check (kept for call-site compatibility).
+macro_rules! assert_val_eq {
+    ($got:expr, $expected:expr) => {
+        assert_eq!($got, $expected);
+    };
+    ($got:expr, $expected:expr, $($arg:tt)*) => {
+        assert_eq!($got, $expected, $($arg)*);
+    };
+}
+
 // Type aliases for coalescing tests
-type TestLeaf = LeafNode15<ArcPolicy<u64>>;
+type TestLeaf = LeafNode15<BoxPolicy<u64>>;
 type TestInternode = InternodeNode;
 type TestTree = MassTree15<u64>;
 
@@ -28,7 +42,7 @@ fn test_remove_single_key() {
     assert_eq!(tree.len(), 1);
 
     let removed = tree.remove(b"key1").unwrap();
-    assert_eq!(removed, Some(Arc::new(42)));
+    assert_val_eq!(removed, Some(42));
     assert_eq!(tree.len(), 0);
 }
 
@@ -42,7 +56,7 @@ fn test_remove_nonexistent_key() {
     assert!(matches!(result, Ok(None)));
 
     // Original key still exists
-    assert_eq!(tree.get(b"key1"), Some(Arc::new(42)));
+    assert_val_eq!(tree.get(b"key1"), Some(42));
 }
 
 #[test]
@@ -76,7 +90,7 @@ fn test_remove_returns_old_value() {
     tree.insert(b"key", "world".to_string());
 
     let removed = tree.remove(b"key").unwrap();
-    assert_eq!(removed, Some(Arc::new("world".to_string())));
+    assert_val_eq!(removed, Some("world".to_string()));
 }
 
 #[test]
@@ -85,12 +99,12 @@ fn test_remove_short_key() {
 
     // 1-byte key
     tree.insert(&[42], 1);
-    assert_eq!(tree.remove(&[42]).unwrap(), Some(Arc::new(1)));
+    assert_val_eq!(tree.remove(&[42]).unwrap(), Some(1));
 
     // 8-byte key (max inline)
     let key8 = [1, 2, 3, 4, 5, 6, 7, 8];
     tree.insert(&key8, 8);
-    assert_eq!(tree.remove(&key8).unwrap(), Some(Arc::new(8)));
+    assert_val_eq!(tree.remove(&key8).unwrap(), Some(8));
 }
 
 #[test]
@@ -102,7 +116,7 @@ fn test_remove_with_suffix() {
     tree.insert(key16, 16);
 
     let removed = tree.remove(key16).unwrap();
-    assert_eq!(removed, Some(Arc::new(16)));
+    assert_val_eq!(removed, Some(16));
     assert!(tree.get(key16).is_none());
 }
 
@@ -135,7 +149,7 @@ fn test_remove_in_reverse_order() {
     // Remove in reverse order
     for i in (0..50u64).rev() {
         let removed = tree.remove(&i.to_be_bytes()).unwrap();
-        assert_eq!(removed, Some(Arc::new(i)));
+        assert_val_eq!(removed, Some(i));
     }
 
     assert!(tree.is_empty());
@@ -171,7 +185,7 @@ fn test_remove_and_reinsert_same_key() {
 
     // Reinsert with different value
     tree.insert(b"key", 2);
-    assert_eq!(tree.get(b"key"), Some(Arc::new(2)));
+    assert_val_eq!(tree.get(b"key"), Some(2));
 }
 
 #[test]
@@ -181,10 +195,10 @@ fn test_remove_reinsert_cycle() {
 
     for i in 0..10u64 {
         tree.insert(key, i);
-        assert_eq!(tree.get(key), Some(Arc::new(i)));
+        assert_val_eq!(tree.get(key), Some(i));
 
         let removed = tree.remove(key).unwrap();
-        assert_eq!(removed, Some(Arc::new(i)));
+        assert_val_eq!(removed, Some(i));
         assert!(tree.get(key).is_none());
     }
 }
@@ -203,7 +217,7 @@ fn test_remove_empty_key() {
     // Empty key is valid
     tree.insert(&[], 0);
     let removed = tree.remove(&[]).unwrap();
-    assert_eq!(removed, Some(Arc::new(0)));
+    assert_val_eq!(removed, Some(0));
 }
 
 #[test]
@@ -216,9 +230,9 @@ fn test_remove_preserves_other_keys() {
 
     let _ = tree.remove(b"bbb");
 
-    assert_eq!(tree.get(b"aaa"), Some(Arc::new(1)));
+    assert_val_eq!(tree.get(b"aaa"), Some(1));
     assert!(tree.get(b"bbb").is_none());
-    assert_eq!(tree.get(b"ccc"), Some(Arc::new(3)));
+    assert_val_eq!(tree.get(b"ccc"), Some(3));
 }
 
 // ============================================================================
@@ -241,7 +255,7 @@ fn test_get_parent_erased_leaf() {
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
     // Test: get_parent_erased should return the parent
-    let got_parent: *mut u8 = unsafe { NodeCleaner::get_parent_erased::<ArcPolicy<u64>>(leaf_ptr) };
+    let got_parent: *mut u8 = unsafe { NodeCleaner::get_parent_erased::<BoxPolicy<u64>>(leaf_ptr) };
 
     assert_eq!(got_parent, parent_ptr);
 
@@ -263,7 +277,7 @@ fn test_get_parent_erased_internode() {
 
     // Test: get_parent_erased should return the parent
     let got_parent: *mut u8 =
-        unsafe { NodeCleaner::get_parent_erased::<ArcPolicy<u64>>(inode_ptr) };
+        unsafe { NodeCleaner::get_parent_erased::<BoxPolicy<u64>>(inode_ptr) };
 
     assert_eq!(got_parent, grandparent_ptr);
 
@@ -279,7 +293,7 @@ fn test_get_parent_erased_null_parent() {
     let leaf_ptr: *mut u8 = Box::into_raw(leaf).cast();
 
     // Test: get_parent_erased should return null
-    let parent: *mut u8 = unsafe { NodeCleaner::get_parent_erased::<ArcPolicy<u64>>(leaf_ptr) };
+    let parent: *mut u8 = unsafe { NodeCleaner::get_parent_erased::<BoxPolicy<u64>>(leaf_ptr) };
 
     assert!(parent.is_null());
 
@@ -305,7 +319,7 @@ fn test_set_parent_erased_leaf() {
 
     // Test: set_parent_erased should update leaf's parent
     unsafe {
-        NodeCleaner::set_parent_erased::<ArcPolicy<u64>>(leaf_ptr, new_parent);
+        NodeCleaner::set_parent_erased::<BoxPolicy<u64>>(leaf_ptr, new_parent);
     }
 
     // Verify
@@ -335,7 +349,7 @@ fn test_set_parent_erased_internode() {
 
     // Test: set_parent_erased should update internode's parent
     unsafe {
-        NodeCleaner::set_parent_erased::<ArcPolicy<u64>>(inode_ptr, new_parent);
+        NodeCleaner::set_parent_erased::<BoxPolicy<u64>>(inode_ptr, new_parent);
     }
 
     // Verify
@@ -378,7 +392,7 @@ fn test_locked_parent_null_parent() {
 
     // Test: locked_parent_generic should return NoParent for root leaf
     let result: LockedParentResult<'_> =
-        unsafe { NodeCleaner::locked_parent_generic::<ArcPolicy<u64>>(leaf_ptr) };
+        unsafe { NodeCleaner::locked_parent_generic::<BoxPolicy<u64>>(leaf_ptr) };
 
     assert!(matches!(result, LockedParentResult::NoParent));
 
@@ -406,7 +420,7 @@ fn test_locked_parent_basic() {
 
     // Test: locked_parent_generic should return locked parent
     let result: LockedParentResult<'_> =
-        unsafe { NodeCleaner::locked_parent_generic::<ArcPolicy<u64>>(leaf_ptr) };
+        unsafe { NodeCleaner::locked_parent_generic::<BoxPolicy<u64>>(leaf_ptr) };
 
     let (lock, returned_parent) = match result {
         LockedParentResult::Locked(l, p) => (l, p),
@@ -451,7 +465,7 @@ fn test_locked_parent_returns_internode() {
 
     // Test: locked_parent should return parent (not grandparent)
     let result: LockedParentResult<'_> =
-        unsafe { NodeCleaner::locked_parent_generic::<ArcPolicy<u64>>(leaf_ptr) };
+        unsafe { NodeCleaner::locked_parent_generic::<BoxPolicy<u64>>(leaf_ptr) };
 
     let (lock, returned_parent) = match result {
         LockedParentResult::Locked(l, p) => (l, p),
@@ -729,7 +743,7 @@ fn test_remove_leaf_updates_parent_child_ptr() {
     assert!(removed.is_ok());
 
     // Verify tree still works
-    assert_eq!(tree.get(&50_u64.to_be_bytes()), Some(Arc::new(50)));
+    assert_val_eq!(tree.get(&50_u64.to_be_bytes()), Some(50));
     assert_eq!(tree.get(&150_u64.to_be_bytes()), None);
 }
 
@@ -748,7 +762,7 @@ fn test_remove_leaf_leftmost_not_removed() {
 
     // Can still insert
     tree.insert(&100_u64.to_be_bytes(), 100);
-    assert_eq!(tree.get(&100_u64.to_be_bytes()), Some(Arc::new(100)));
+    assert_val_eq!(tree.get(&100_u64.to_be_bytes()), Some(100));
 }
 
 #[test]
@@ -776,7 +790,7 @@ fn test_redirect_via_sequential_removal() {
     eprintln!("Verifying remaining keys...");
     for i in 25_u64..50 {
         eprintln!("  Getting key {}", i);
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
     }
 
     // Verify removed keys are gone
@@ -809,7 +823,7 @@ fn test_redirect_alternating_removal() {
         if i % 4 == 0 {
             assert!(tree.get(&i.to_be_bytes()).is_none());
         } else {
-            assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+            assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
         }
     }
 }
@@ -870,7 +884,7 @@ fn test_concurrent_remove_and_get() {
 
     // Final verification: odd keys should still exist
     for i in (1_u64..1000).step_by(2) {
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
     }
 }
 
@@ -1031,7 +1045,7 @@ fn test_reader_retry_succeeds_after_coalesce() {
 
     // Get should work (retry if needed internally)
     assert!(tree.get(&42_u64.to_be_bytes()).is_none());
-    assert_eq!(tree.get(&100_u64.to_be_bytes()), Some(Arc::new(100)));
+    assert_val_eq!(tree.get(&100_u64.to_be_bytes()), Some(100));
 }
 
 // ============================================================================
@@ -1043,10 +1057,7 @@ fn test_miri_remove_single_key() {
     let tree: TestTree = TestTree::new();
 
     tree.insert(&1_u64.to_be_bytes(), 1);
-    assert_eq!(
-        tree.remove(&1_u64.to_be_bytes()).unwrap(),
-        Some(Arc::new(1))
-    );
+    assert_val_eq!(tree.remove(&1_u64.to_be_bytes()).unwrap(), Some(1));
     assert!(tree.get(&1_u64.to_be_bytes()).is_none());
 }
 
@@ -1059,7 +1070,7 @@ fn test_miri_remove_multiple_keys() {
     }
 
     for i in 0_u64..10 {
-        assert_eq!(tree.remove(&i.to_be_bytes()).unwrap(), Some(Arc::new(i)));
+        assert_val_eq!(tree.remove(&i.to_be_bytes()).unwrap(), Some(i));
     }
 
     assert_eq!(tree.len(), 0);
@@ -1076,11 +1087,11 @@ fn test_miri_parent_erased_helpers() {
 
     // set_parent_erased
     unsafe {
-        NodeCleaner::set_parent_erased::<ArcPolicy<u64>>(leaf_ptr, parent_ptr);
+        NodeCleaner::set_parent_erased::<BoxPolicy<u64>>(leaf_ptr, parent_ptr);
     }
 
     // get_parent_erased
-    let got: *mut u8 = unsafe { NodeCleaner::get_parent_erased::<ArcPolicy<u64>>(leaf_ptr) };
+    let got: *mut u8 = unsafe { NodeCleaner::get_parent_erased::<BoxPolicy<u64>>(leaf_ptr) };
     assert_eq!(got, parent_ptr);
 
     // Cleanup
@@ -1128,7 +1139,7 @@ fn test_coalesce_safety_no_infinite_loop() {
 
     // Verify new keys are accessible
     for i in 100_u64..110 {
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
     }
 }
 
@@ -1185,7 +1196,7 @@ fn test_coalesce_concurrent_with_reads() {
 
     // Verify remaining keys are still accessible
     for i in 50_u64..100 {
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
     }
 }
 
@@ -1215,13 +1226,13 @@ fn test_insert_through_deleted_nodes() {
 
     // Verify all keys
     for i in 0_u64..10 {
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
     }
     for i in 10_u64..20 {
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i * 10)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i * 10));
     }
     for i in 20_u64..30 {
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
     }
 }
 
@@ -1293,7 +1304,7 @@ fn test_coalesce_preserves_leftmost_leaf() {
 
     // Verify keys
     for i in 0_u64..10 {
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i * 2)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i * 2));
     }
 }
 
@@ -1335,32 +1346,32 @@ fn test_coalesce_interleaved_operations() {
 
     // Verify all keys have correct values
     for i in 0_u64..25 {
-        assert_eq!(
+        assert_val_eq!(
             tree.get(&i.to_be_bytes()),
-            Some(Arc::new(i + 1000)),
+            Some(i + 1000),
             "Key {i} should have value {}",
             i + 1000
         );
     }
     for i in 25_u64..50 {
-        assert_eq!(
+        assert_val_eq!(
             tree.get(&i.to_be_bytes()),
-            Some(Arc::new(i)),
+            Some(i),
             "Key {i} should have original value"
         );
     }
     for i in 50_u64..75 {
-        assert_eq!(
+        assert_val_eq!(
             tree.get(&i.to_be_bytes()),
-            Some(Arc::new(i + 2000)),
+            Some(i + 2000),
             "Key {i} should have value {}",
             i + 2000
         );
     }
     for i in 75_u64..100 {
-        assert_eq!(
+        assert_val_eq!(
             tree.get(&i.to_be_bytes()),
-            Some(Arc::new(i)),
+            Some(i),
             "Key {i} should have original value"
         );
     }
@@ -1529,7 +1540,7 @@ fn test_coalesce_with_range_scan() {
     tree.scan(
         RangeBound::Unbounded,
         RangeBound::Unbounded,
-        |k: &[u8], v: Arc<u64>| {
+        |k: &[u8], v: ValuePtr<u64>| {
             let key = u64::from_be_bytes(k.try_into().unwrap());
             found.push(key);
             assert_eq!(*v, key, "Value should match key");
@@ -1577,7 +1588,7 @@ fn test_coalesce_stress_rapid_cycles() {
     }
 
     for i in 0_u64..50 {
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
     }
 }
 
@@ -1601,12 +1612,12 @@ fn test_gc_layer_basic_sublayer_cleanup() {
     assert_eq!(tree.len(), 2);
 
     // Verify both keys exist
-    assert_eq!(tree.get(key1), Some(Arc::new(1)));
-    assert_eq!(tree.get(key2), Some(Arc::new(2)));
+    assert_val_eq!(tree.get(key1), Some(1));
+    assert_val_eq!(tree.get(key2), Some(2));
 
     // Remove all keys from the sublayer
-    assert_eq!(tree.remove(key1).unwrap(), Some(Arc::new(1)));
-    assert_eq!(tree.remove(key2).unwrap(), Some(Arc::new(2)));
+    assert_val_eq!(tree.remove(key1).unwrap(), Some(1));
+    assert_val_eq!(tree.remove(key2).unwrap(), Some(2));
     assert_eq!(tree.len(), 0);
 
     // Process coalesce - should trigger gc_layer for the empty sublayer
@@ -1615,7 +1626,7 @@ fn test_gc_layer_basic_sublayer_cleanup() {
 
     // Tree should still be functional - insert new keys
     tree.insert(key1, 10);
-    assert_eq!(tree.get(key1), Some(Arc::new(10)));
+    assert_val_eq!(tree.get(key1), Some(10));
 }
 
 /// Test gc_layer with multiple sublayers.
@@ -1652,12 +1663,12 @@ fn test_gc_layer_multiple_sublayers() {
     tree.process_coalesce(&guard);
 
     // Other sublayers should still work
-    assert_eq!(tree.get(b"bbbbbbbb1"), Some(Arc::new(0)));
-    assert_eq!(tree.get(b"cccccccc2"), Some(Arc::new(1)));
+    assert_val_eq!(tree.get(b"bbbbbbbb1"), Some(0));
+    assert_val_eq!(tree.get(b"cccccccc2"), Some(1));
 
     // Can reuse the cleaned-up prefix
     tree.insert(b"aaaaaaaaX", 99);
-    assert_eq!(tree.get(b"aaaaaaaaX"), Some(Arc::new(99)));
+    assert_val_eq!(tree.get(b"aaaaaaaaX"), Some(99));
 }
 
 /// Test gc_layer with deep layer chains (multiple levels of sublayers).
@@ -1683,7 +1694,7 @@ fn test_gc_layer_deep_chain() {
     tree.process_coalesce(&guard);
 
     // Remaining key should still exist
-    assert_eq!(tree.get(key_l2_b), Some(Arc::new(2)));
+    assert_val_eq!(tree.get(key_l2_b), Some(2));
 
     // Remove the last key - now sublayer should be gc'd
     let _ = tree.remove(key_l2_b);
@@ -1692,7 +1703,7 @@ fn test_gc_layer_deep_chain() {
 
     // Tree should be empty but functional
     tree.insert(key_l2_a, 100);
-    assert_eq!(tree.get(key_l2_a), Some(Arc::new(100)));
+    assert_val_eq!(tree.get(key_l2_a), Some(100));
 }
 
 /// Test gc_layer doesn't affect sibling sublayers.
@@ -1723,12 +1734,12 @@ fn test_gc_layer_preserves_siblings() {
     tree.process_coalesce(&guard);
 
     // Sublayer B should be unaffected
-    assert_eq!(tree.get(key_b1), Some(Arc::new(3)));
-    assert_eq!(tree.get(key_b2), Some(Arc::new(4)));
+    assert_val_eq!(tree.get(key_b1), Some(3));
+    assert_val_eq!(tree.get(key_b2), Some(4));
 
     // Can insert new keys into the cleaned-up sublayer A
     tree.insert(key_a1, 10);
-    assert_eq!(tree.get(key_a1), Some(Arc::new(10)));
+    assert_val_eq!(tree.get(key_a1), Some(10));
 }
 
 /// Test gc_layer with concurrent reads.
@@ -1780,7 +1791,7 @@ fn test_gc_layer_concurrent_reads() {
 
     // Tree should be consistent
     for i in 0_u64..10 {
-        assert_eq!(tree.get(&i.to_be_bytes()), Some(Arc::new(i)));
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
     }
 }
 
@@ -1814,7 +1825,7 @@ fn test_gc_layer_slot_changed() {
     tree.process_coalesce(&guard);
 
     // New key should be accessible
-    assert_eq!(tree.get(b"changedXXnewkey"), Some(Arc::new(99)));
+    assert_val_eq!(tree.get(b"changedXXnewkey"), Some(99));
 }
 
 /// Stress test: rapid sublayer create-remove-gc cycles.
@@ -1854,5 +1865,5 @@ fn test_gc_layer_stress() {
 
     // Should work for new insertions
     tree.insert(b"finaltest!", 12345);
-    assert_eq!(tree.get(b"finaltest!"), Some(Arc::new(12345)));
+    assert_val_eq!(tree.get(b"finaltest!"), Some(12345));
 }

@@ -6,14 +6,14 @@
 ///
 /// # Type Parameters
 ///
-/// - `O`: The output type (e.g., `Arc<V>` for `MassTree15<V>`, `V` for `MassTree<V>`/`MassTree15Inline<V>`)
+/// - `O`: The output type (e.g., `ValuePtr<V>` for `MassTree15<V>`, `V` for `MassTree<V>`/`MassTree15Inline<V>`)
 ///
 /// # Example
 ///
 /// ```ignore
 /// for entry in tree.iter(&guard) {
 ///     let key: &[u8] = &entry.key;
-///     let value: &V = entry.value.as_ref(); // For Arc<V>
+///     let value: &V = entry.value.as_ref(); // For ValuePtr<V>
 /// }
 ///
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ pub struct ScanEntry<O> {
 
     /// The value output.
     ///
-    /// For `MassTree15<V>`: `Arc<V>` (shared reference)
+    /// For `MassTree15<V>`: `ValuePtr<V>` (pointer valid under guard)
     /// For `MassTree<V>` / `MassTree15Inline<V>`: `V` (copy)
     pub value: O,
 }

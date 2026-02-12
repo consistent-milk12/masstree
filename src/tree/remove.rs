@@ -335,13 +335,31 @@ where
         // Step 1: Take the value with ownership transfer.
         //
         // Uses `take_value` which atomically swaps the slot to null and returns
-        // the value WITHOUT incrementing Arc's refcount (for ArcPolicy). This
-        // correctly transfers ownership from the slot to the caller.
+        // the value. For BoxPolicy, this returns a ValuePtr (no refcount op).
+        // For InlinePolicy, this returns a Copy value.
         //
         // This also serves as defense-in-depth: if a reader somehow slips through
         // (e.g., already past stable() before we set INSERTING_BIT), they will
         // see an empty slot and skip it in their search loop.
         let value: Option<P::Output> = leaf.take_value(self.kp);
+
+        // Step 1b: Retire taken value via EBR (BoxPolicy only).
+        //
+        // BoxPolicy has no refcount — concurrent readers may hold raw ValuePtr
+        // copies to this value. We must defer deallocation until all current
+        // epoch guards have dropped. The caller's copy remains valid under
+        // their guard; EBR frees after all guards from this epoch drop.
+        //
+        // InlinePolicy: NEEDS_RETIREMENT=false → compiled away entirely.
+        if P::NEEDS_RETIREMENT
+            && let Some(ref v) = value
+        {
+            // SAFETY: The value was just taken from the slot. Concurrent
+            // readers hold ValuePtr copies protected by their EBR guards.
+            // defer_retire ensures the Box is dropped only after all
+            // current-epoch guards have been released.
+            unsafe { P::retire_output(P::clone_output(v), self.guard) };
+        }
 
         // Step 2: Clear keylenx (take_value only clears the value pointer)
         leaf.set_keylenx(self.kp, 0);

@@ -45,7 +45,7 @@ fn test_suffix_migration_split_into() {
     for (i, key) in keys.iter().enumerate() {
         let result = tree.get(key.as_bytes());
         assert!(result.is_some(), "Key '{key}' not found after splits");
-        assert_eq!(*result.unwrap(), i as u64, "Wrong value for key '{key}'");
+        assert_eq!(result.unwrap(), i as u64, "Wrong value for key '{key}'");
     }
 }
 
@@ -60,8 +60,8 @@ fn test_suffix_migration_split_all_to_right() {
     tree.insert(b"aaaaaaaa_suffix", 2); // Forces split with split_all_to_right
 
     // Verify both findable
-    assert_eq!(*tree.get(b"zzzzzzzz_suffix").unwrap(), 1);
-    assert_eq!(*tree.get(b"aaaaaaaa_suffix").unwrap(), 2);
+    assert_eq!(tree.get(b"zzzzzzzz_suffix").unwrap(), 1);
+    assert_eq!(tree.get(b"aaaaaaaa_suffix").unwrap(), 2);
 }
 
 /// Test suffix migration with various suffix lengths.
@@ -92,7 +92,7 @@ fn test_suffix_migration_various_lengths() {
     for (i, (key, _)) in test_cases.iter().enumerate() {
         let result = tree.get(key.as_bytes());
         assert!(result.is_some(), "Key of length {} not found", key.len());
-        assert_eq!(*result.unwrap(), i as u64);
+        assert_eq!(result.unwrap(), i as u64);
     }
 }
 
@@ -111,7 +111,7 @@ fn test_8_byte_boundary_key() {
 
     let result = tree.get(key8);
     assert!(result.is_some(), "8-byte key not found");
-    assert_eq!(*result.unwrap(), 8);
+    assert_eq!(result.unwrap(), 8);
 }
 
 /// Test exact 16-byte boundary keys (2 layers).
@@ -126,7 +126,7 @@ fn test_16_byte_boundary_key() {
 
     let result = tree.get(key16);
     assert!(result.is_some(), "16-byte key not found");
-    assert_eq!(*result.unwrap(), 16);
+    assert_eq!(result.unwrap(), 16);
 }
 
 /// Test exact 24-byte boundary keys (3 layers).
@@ -141,7 +141,7 @@ fn test_24_byte_boundary_key() {
 
     let result = tree.get(key24);
     assert!(result.is_some(), "24-byte key not found");
-    assert_eq!(*result.unwrap(), 24);
+    assert_eq!(result.unwrap(), 24);
 }
 
 /// Test keys at multiple boundaries together.
@@ -157,9 +157,9 @@ fn test_multiple_boundary_keys() {
     tree.insert(key16, 16);
     tree.insert(key24, 24);
 
-    assert_eq!(*tree.get(key8).unwrap(), 8);
-    assert_eq!(*tree.get(key16).unwrap(), 16);
-    assert_eq!(*tree.get(key24).unwrap(), 24);
+    assert_eq!(tree.get(key8).unwrap(), 8);
+    assert_eq!(tree.get(key16).unwrap(), 16);
+    assert_eq!(tree.get(key24).unwrap(), 24);
 }
 
 /// Test keys that share boundary prefix.
@@ -172,9 +172,9 @@ fn test_shared_boundary_prefix() {
     tree.insert(b"prefix00_more", 2); // 13 bytes
     tree.insert(b"prefix00_even_more", 3); // 18 bytes
 
-    assert_eq!(*tree.get(b"prefix00").unwrap(), 1);
-    assert_eq!(*tree.get(b"prefix00_more").unwrap(), 2);
-    assert_eq!(*tree.get(b"prefix00_even_more").unwrap(), 3);
+    assert_eq!(tree.get(b"prefix00").unwrap(), 1);
+    assert_eq!(tree.get(b"prefix00_more").unwrap(), 2);
+    assert_eq!(tree.get(b"prefix00_even_more").unwrap(), 3);
 }
 
 // ============================================================================
@@ -190,8 +190,8 @@ fn test_prefix_of_other_basic() {
     tree.insert(b"prefix", 1);
     tree.insert(b"prefix_with_more", 2);
 
-    assert_eq!(*tree.get(b"prefix").unwrap(), 1);
-    assert_eq!(*tree.get(b"prefix_with_more").unwrap(), 2);
+    assert_eq!(tree.get(b"prefix").unwrap(), 1);
+    assert_eq!(tree.get(b"prefix_with_more").unwrap(), 2);
 }
 
 /// Test prefix-of-other at 8-byte boundary.
@@ -203,8 +203,8 @@ fn test_prefix_of_other_at_boundary() {
     tree.insert(b"prefix00", 1);
     tree.insert(b"prefix00suffix", 2);
 
-    assert_eq!(*tree.get(b"prefix00").unwrap(), 1);
-    assert_eq!(*tree.get(b"prefix00suffix").unwrap(), 2);
+    assert_eq!(tree.get(b"prefix00").unwrap(), 1);
+    assert_eq!(tree.get(b"prefix00suffix").unwrap(), 2);
 }
 
 /// Test multiple levels of prefix relationships.
@@ -224,7 +224,7 @@ fn test_prefix_chain() {
     for (i, key) in keys.iter().enumerate() {
         let result = tree.get(key.as_bytes());
         assert!(result.is_some(), "Key '{key}' not found");
-        assert_eq!(*result.unwrap(), i as u64);
+        assert_eq!(result.unwrap(), i as u64);
     }
 }
 
@@ -238,9 +238,9 @@ fn test_prefix_of_other_in_layer() {
     tree.insert(b"prefix00suffix_ab", 2); // suffix_a is prefix of suffix_ab
     tree.insert(b"prefix00suffix_abc", 3);
 
-    assert_eq!(*tree.get(b"prefix00suffix_a").unwrap(), 1);
-    assert_eq!(*tree.get(b"prefix00suffix_ab").unwrap(), 2);
-    assert_eq!(*tree.get(b"prefix00suffix_abc").unwrap(), 3);
+    assert_eq!(tree.get(b"prefix00suffix_a").unwrap(), 1);
+    assert_eq!(tree.get(b"prefix00suffix_ab").unwrap(), 2);
+    assert_eq!(tree.get(b"prefix00suffix_abc").unwrap(), 3);
 }
 
 /// Test reverse insertion order (longer key first).
@@ -253,9 +253,9 @@ fn test_prefix_of_other_reverse_order() {
     tree.insert(b"prefix00suffix", 2);
     tree.insert(b"prefix00", 3);
 
-    assert_eq!(*tree.get(b"prefix00suffix_longer").unwrap(), 1);
-    assert_eq!(*tree.get(b"prefix00suffix").unwrap(), 2);
-    assert_eq!(*tree.get(b"prefix00").unwrap(), 3);
+    assert_eq!(tree.get(b"prefix00suffix_longer").unwrap(), 1);
+    assert_eq!(tree.get(b"prefix00suffix").unwrap(), 2);
+    assert_eq!(tree.get(b"prefix00").unwrap(), 3);
 }
 
 // ============================================================================
@@ -274,8 +274,8 @@ fn test_inline_suffix_coexistence() {
     tree.insert(b"exactkey12345678", 2);
 
     // Both must coexist and be findable
-    assert_eq!(*tree.get(b"exactkey").unwrap(), 1);
-    assert_eq!(*tree.get(b"exactkey12345678").unwrap(), 2);
+    assert_eq!(tree.get(b"exactkey").unwrap(), 1);
+    assert_eq!(tree.get(b"exactkey12345678").unwrap(), 2);
 }
 
 /// Test various inline lengths with suffix keys.
@@ -297,15 +297,15 @@ fn test_inline_lengths_with_suffix() {
     tree.insert(b"abcdefgh_suffix", 9);
 
     // All must coexist
-    assert_eq!(*tree.get(b"a").unwrap(), 1);
-    assert_eq!(*tree.get(b"ab").unwrap(), 2);
-    assert_eq!(*tree.get(b"abc").unwrap(), 3);
-    assert_eq!(*tree.get(b"abcd").unwrap(), 4);
-    assert_eq!(*tree.get(b"abcde").unwrap(), 5);
-    assert_eq!(*tree.get(b"abcdef").unwrap(), 6);
-    assert_eq!(*tree.get(b"abcdefg").unwrap(), 7);
-    assert_eq!(*tree.get(b"abcdefgh").unwrap(), 8);
-    assert_eq!(*tree.get(b"abcdefgh_suffix").unwrap(), 9);
+    assert_eq!(tree.get(b"a").unwrap(), 1);
+    assert_eq!(tree.get(b"ab").unwrap(), 2);
+    assert_eq!(tree.get(b"abc").unwrap(), 3);
+    assert_eq!(tree.get(b"abcd").unwrap(), 4);
+    assert_eq!(tree.get(b"abcde").unwrap(), 5);
+    assert_eq!(tree.get(b"abcdef").unwrap(), 6);
+    assert_eq!(tree.get(b"abcdefg").unwrap(), 7);
+    assert_eq!(tree.get(b"abcdefgh").unwrap(), 8);
+    assert_eq!(tree.get(b"abcdefgh_suffix").unwrap(), 9);
 }
 
 /// Test that no spurious layer is created for inline vs suffix.
@@ -319,16 +319,16 @@ fn test_no_spurious_layer_creation() {
     tree.insert(b"prefix00_suffix", 2); // suffix (15 bytes)
 
     // Both findable
-    assert_eq!(*tree.get(b"prefix00").unwrap(), 1);
-    assert_eq!(*tree.get(b"prefix00_suffix").unwrap(), 2);
+    assert_eq!(tree.get(b"prefix00").unwrap(), 1);
+    assert_eq!(tree.get(b"prefix00_suffix").unwrap(), 2);
 
     // Insert another suffix key - now we need a layer for suffix conflict
     tree.insert(b"prefix00_other", 3);
 
     // All three still findable
-    assert_eq!(*tree.get(b"prefix00").unwrap(), 1);
-    assert_eq!(*tree.get(b"prefix00_suffix").unwrap(), 2);
-    assert_eq!(*tree.get(b"prefix00_other").unwrap(), 3);
+    assert_eq!(tree.get(b"prefix00").unwrap(), 1);
+    assert_eq!(tree.get(b"prefix00_suffix").unwrap(), 2);
+    assert_eq!(tree.get(b"prefix00_other").unwrap(), 3);
 }
 
 // ============================================================================
@@ -357,7 +357,7 @@ fn test_layer_growth_beyond_width() {
         key.extend_from_slice(&i.to_be_bytes());
         let result = tree.get(&key);
         assert!(result.is_some(), "Key with suffix {i} not found");
-        assert_eq!(*result.unwrap(), i);
+        assert_eq!(result.unwrap(), i);
     }
 }
 
@@ -433,7 +433,7 @@ fn test_layer_root_becomes_internode() {
         let key = format!("prefix00suffix_{i:02}");
         let result = tree.get(key.as_bytes());
         assert!(result.is_some(), "Key {i} not found after layer growth");
-        assert_eq!(*result.unwrap(), i);
+        assert_eq!(result.unwrap(), i);
     }
 }
 
@@ -461,10 +461,10 @@ fn test_layer_internode_mixed_operations() {
     // Verify all keys
     for i in 0..20u64 {
         let key = format!("layer___val_{i:04}");
-        assert_eq!(*tree.get(key.as_bytes()).unwrap(), i);
+        assert_eq!(tree.get(key.as_bytes()).unwrap(), i);
 
         let new_key = format!("layer___new_{i:04}");
-        assert_eq!(*tree.get(new_key.as_bytes()).unwrap(), 100 + i);
+        assert_eq!(tree.get(new_key.as_bytes()).unwrap(), 100 + i);
     }
 }
 
@@ -478,12 +478,12 @@ fn test_empty_key() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     tree.insert(b"", 0);
-    assert_eq!(*tree.get(b"").unwrap(), 0);
+    assert_eq!(tree.get(b"").unwrap(), 0);
 
     // Non-empty key shouldn't conflict
     tree.insert(b"notempty", 1);
-    assert_eq!(*tree.get(b"").unwrap(), 0);
-    assert_eq!(*tree.get(b"notempty").unwrap(), 1);
+    assert_eq!(tree.get(b"").unwrap(), 0);
+    assert_eq!(tree.get(b"notempty").unwrap(), 1);
 }
 
 /// Test single-byte keys.
@@ -496,7 +496,7 @@ fn test_single_byte_keys() {
     }
 
     for i in 0..=255u8 {
-        assert_eq!(*tree.get(&[i]).unwrap(), u64::from(i));
+        assert_eq!(tree.get(&[i]).unwrap(), u64::from(i));
     }
 }
 
@@ -519,11 +519,11 @@ fn test_update_existing() {
     let tree: MassTree15<u64> = MassTree15::new();
 
     tree.insert(b"key", 1);
-    assert_eq!(*tree.get(b"key").unwrap(), 1);
+    assert_eq!(tree.get(b"key").unwrap(), 1);
 
     let old = tree.insert(b"key", 2);
-    assert_eq!(*old.unwrap(), 1);
-    assert_eq!(*tree.get(b"key").unwrap(), 2);
+    assert_eq!(old.unwrap(), 1);
+    assert_eq!(tree.get(b"key").unwrap(), 2);
 }
 
 /// Test very long key.
@@ -534,7 +534,7 @@ fn test_very_long_key() {
     let long_key: Vec<u8> = (0..200).map(|i| (i % 256) as u8).collect();
     tree.insert(&long_key, 42);
 
-    assert_eq!(*tree.get(&long_key).unwrap(), 42);
+    assert_eq!(tree.get(&long_key).unwrap(), 42);
 
     // Slightly different key shouldn't match
     let mut different = long_key;
@@ -551,7 +551,7 @@ fn test_max_key_length() {
     let max_key: Vec<u8> = (0..256).map(|i| (i % 256) as u8).collect();
     tree.insert(&max_key, 256);
 
-    assert_eq!(*tree.get(&max_key).unwrap(), 256);
+    assert_eq!(tree.get(&max_key).unwrap(), 256);
 }
 
 /// Test many keys with same first 8 bytes but different lengths.
@@ -580,6 +580,6 @@ fn test_same_prefix_different_lengths() {
         }
         let result = tree.get(&key);
         assert!(result.is_some(), "Key of length {len} not found");
-        assert_eq!(*result.unwrap(), len as u64);
+        assert_eq!(result.unwrap(), len as u64);
     }
 }

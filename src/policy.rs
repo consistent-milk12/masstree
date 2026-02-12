@@ -3,8 +3,10 @@
 //! This module defines the trait hierarchy that parameterizes [`LeafNode15`] over
 //! its value and suffix storage strategy. Two policies are provided:
 //!
-//! - [`ArcPolicy<V>`]: Heap-allocated `Arc<V>` values, lazy sidecar suffix.
-//!   Compact 448-byte leaves. For general-purpose use with any `V: Send + Sync`.
+//! - [`BoxPolicy<V>`]: Heap-allocated `Box<V>` values stored as raw pointers,
+//!   lazy sidecar suffix. Compact 448-byte leaves. Returns [`ValuePtr<V>`] — a
+//!   zero-cost `Copy` pointer valid for the lifetime of the EBR guard.
+//!   For general-purpose use with any `V: Send + Sync`.
 //!
 //! - [`InlinePolicy<V>`]: True-inline `Copy` values stored as `u64` bits.
 //!   Embedded suffix (896/1152-byte leaves) by default, or sidecar suffix
@@ -19,7 +21,7 @@
 
 #![allow(dead_code)]
 
-mod arc_values;
+mod box_values;
 #[cfg(not(feature = "sidecar-suffix"))]
 mod embedded_suffix;
 mod inline_values;
@@ -27,19 +29,145 @@ mod sidecar_suffix;
 #[cfg(test)]
 mod tests;
 
-pub use arc_values::ArcValueArray;
+pub use box_values::BoxValueArray;
 #[cfg(not(feature = "sidecar-suffix"))]
 pub use embedded_suffix::EmbeddedSuffix;
 pub use inline_values::InlineValueArray;
 pub use sidecar_suffix::SidecarSuffix;
 
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::ops::Deref;
+use std::ptr::NonNull;
 
 use seize::{Guard, LocalGuard};
 
 use crate::inline::bits::InlineBits;
 use crate::prefetch::prefetch_read;
+
+// ============================================================================
+//  ValuePtr<V> — Zero-Cost Value Pointer
+// ============================================================================
+
+/// A lightweight, `Copy` pointer to a heap-allocated value.
+///
+/// Returned by [`BoxPolicy`] operations (`get_with_guard`, `insert_with_guard`,
+/// `remove_with_guard`, `scan`). The pointer is valid as long as the EBR guard
+/// used for the operation is held.
+///
+/// # Safety Contract
+///
+/// - **No `Drop`**: `ValuePtr` does not free the underlying allocation.
+///   The leaf node's `cleanup()` or EBR deferred retirement handles deallocation.
+/// - **Guard-scoped validity**: The pointer is guaranteed valid while the guard
+///   that produced it is alive. Using it after the guard drops is UB.
+/// - **`Copy`**: Trivially copyable (it's just a pointer). This satisfies the
+///   `Output: Clone` bound required by all internal tree code.
+///
+/// # Example
+///
+/// ```ignore
+/// let guard = tree.guard();
+/// if let Some(val) = tree.get_with_guard(b"key", &guard) {
+///     println!("value = {}", *val); // Deref to &V
+/// }
+/// // guard drops here — val would be invalid after this point
+/// ```
+#[repr(transparent)]
+pub struct ValuePtr<V>(NonNull<V>);
+
+impl<V> ValuePtr<V> {
+    /// Create a `ValuePtr` from a raw pointer.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null and point to a valid, aligned `V` that will
+    /// remain live for as long as any copy of this `ValuePtr` is dereferenced.
+    #[inline(always)]
+    pub(crate) const unsafe fn from_raw(ptr: *mut V) -> Self {
+        // SAFETY: Caller guarantees ptr is non-null.
+        Self(unsafe { NonNull::new_unchecked(ptr) })
+    }
+
+    /// Get the raw pointer.
+    #[inline(always)]
+    pub(crate) const fn as_ptr(self) -> *mut V {
+        self.0.as_ptr()
+    }
+}
+
+// Copy + Clone: trivial pointer copy, zero cost.
+impl<V> Copy for ValuePtr<V> {}
+
+impl<V> Clone for ValuePtr<V> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+// Deref to &V for convenient field access and method calls.
+impl<V> Deref for ValuePtr<V> {
+    type Target = V;
+
+    #[inline(always)]
+    fn deref(&self) -> &V {
+        // SAFETY: The pointer is valid as long as the EBR guard is held.
+        // Callers of get_with_guard/insert_with_guard/etc. receive ValuePtr
+        // alongside their guard reference, ensuring the pointee is alive.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+// SAFETY: ValuePtr<V> is Send when V: Send + Sync.
+// The pointer targets heap memory protected by the tree's EBR scheme.
+// Sending ValuePtr across threads is safe because:
+// 1. The pointed-to V is Send + Sync (required by LeafPolicy bounds).
+// 2. The allocation is pinned by the EBR guard (no deallocation while guard alive).
+unsafe impl<V: Send + Sync> Send for ValuePtr<V> {}
+
+// SAFETY: ValuePtr<V> is Sync when V: Send + Sync.
+// Sharing &ValuePtr across threads is safe because Deref yields &V,
+// and V: Sync means &V can be shared.
+unsafe impl<V: Send + Sync> Sync for ValuePtr<V> {}
+
+impl<V: std::fmt::Debug> std::fmt::Debug for ValuePtr<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<V: PartialEq> PartialEq for ValuePtr<V> {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<V: Eq> Eq for ValuePtr<V> {}
+
+impl<V: std::fmt::Display> std::fmt::Display for ValuePtr<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&**self, f)
+    }
+}
+
+impl<V: std::hash::Hash> std::hash::Hash for ValuePtr<V> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (**self).hash(state);
+    }
+}
+
+impl<V: PartialOrd> PartialOrd for ValuePtr<V> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        (**self).partial_cmp(&**other)
+    }
+}
+
+impl<V: Ord> Ord for ValuePtr<V> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (**self).cmp(&**other)
+    }
+}
 
 // ============================================================================
 //  Sealed Module
@@ -48,7 +176,7 @@ use crate::prefetch::prefetch_read;
 mod sealed {
     use crate::inline::bits::InlineBits;
 
-    use super::{ArcPolicy, ArcValueArray, InlinePolicy, InlineValueArray, SidecarSuffix};
+    use super::{BoxPolicy, BoxValueArray, InlinePolicy, InlineValueArray, SidecarSuffix};
 
     #[cfg(not(feature = "sidecar-suffix"))]
     use super::EmbeddedSuffix;
@@ -56,13 +184,13 @@ mod sealed {
     /// Prevents external crates from implementing policy traits.
     pub trait Sealed {}
 
-    impl<V: Send + Sync + 'static> Sealed for ArcPolicy<V> {}
+    impl<V: Send + Sync + 'static> Sealed for BoxPolicy<V> {}
     impl<V: InlineBits> Sealed for InlinePolicy<V> {}
 
     /// Prevents external crates from implementing `ValueArray`.
     pub trait ValueArraySealed {}
 
-    impl<V: Send + Sync + 'static> ValueArraySealed for ArcValueArray<V> {}
+    impl<V: Send + Sync + 'static> ValueArraySealed for BoxValueArray<V> {}
     impl<V: InlineBits> ValueArraySealed for InlineValueArray<V> {}
 
     /// Prevents external crates from implementing `SuffixStore`.
@@ -76,7 +204,7 @@ mod sealed {
     /// Prevents external crates from implementing `RefPolicy`.
     pub trait RefPolicySealed {}
 
-    impl<V: Send + Sync + 'static> RefPolicySealed for ArcPolicy<V> {}
+    impl<V: Send + Sync + 'static> RefPolicySealed for BoxPolicy<V> {}
 }
 
 // ============================================================================
@@ -91,20 +219,20 @@ mod sealed {
 ///
 /// # Variants
 ///
-/// - `Ptr(*mut u8)`: A raw pointer to an old Arc allocation that needs EBR
-///   retirement. Only produced by `ArcValueArray`.
+/// - `Ptr(*mut u8)`: A raw pointer to an old heap allocation that needs EBR
+///   retirement. Produced by `BoxValueArray`.
 /// - `Noop`: No retirement needed. Always produced by `InlineValueArray`
 ///   (inline values are `Copy`, no heap allocation to free).
 #[derive(Debug, PartialEq, Eq)]
 pub enum RetireHandle {
-    /// A raw pointer to an old Arc allocation that needs EBR retirement.
+    /// A raw pointer to an old heap allocation that needs EBR retirement.
     Ptr(*mut u8),
 
     /// No retirement needed (inline values are Copy).
     Noop,
 }
 
-// SAFETY: RetireHandle::Ptr contains a pointer that was obtained from Arc::into_raw
+// SAFETY: RetireHandle::Ptr contains a pointer that was obtained from Box::into_raw
 // and will be consumed exactly once by retire_handle(). The pointer is not
 // dereferenced outside of the retirement path which runs under EBR protection.
 unsafe impl Send for RetireHandle {}
@@ -115,8 +243,7 @@ unsafe impl Send for RetireHandle {}
 
 /// Classification of a leaf slot's contents with value extraction.
 ///
-/// Used by scan paths where the output is always consumed. For Arc mode,
-/// constructing the `Value` variant increments the Arc refcount.
+/// Used by scan paths where the output is always consumed.
 ///
 /// # Usage
 ///
@@ -142,7 +269,7 @@ pub enum SlotKind<O> {
 ///
 /// Used by search paths that need to branch on slot state but only
 /// extract the value conditionally (e.g., after version validation).
-/// This avoids forcing an Arc clone in hot paths where only the
+/// This avoids forcing a value clone in hot paths where only the
 /// branch decision is needed.
 ///
 /// # Usage
@@ -177,7 +304,7 @@ pub enum SlotState {
 ///
 /// # Implementations
 ///
-/// - [`ArcValueArray<V>`]: `[AtomicPtr<u8>; 15]` storing `Arc<V>` raw pointers.
+/// - [`BoxValueArray<V>`]: `[AtomicPtr<u8>; 15]` storing `Box<V>` raw pointers.
 /// - [`InlineValueArray<V>`]: `[AtomicPtr<u8>; 15]` (state tag) + `[AtomicU64; 15]` (bits).
 ///
 /// # Slot State
@@ -195,7 +322,7 @@ pub enum SlotState {
 ///
 /// # Safety
 ///
-/// This trait is **sealed** — only `ArcValueArray` and `InlineValueArray` may
+/// This trait is **sealed** — only `BoxValueArray` and `InlineValueArray` may
 /// implement it. Implementations must maintain the ordering contract above.
 pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'static {
     /// Create a new array with all slots empty.
@@ -232,11 +359,11 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// before calling. This is a **prechecked contract** — `load()` does NOT
     /// check layer status itself. The caller is responsible for the check.
     ///
-    /// For `ArcValueArray`, calling `load()` on a layer slot would perform
-    /// `Arc::increment_strong_count` on a non-Arc pointer, which is **UB**.
+    /// For `BoxValueArray`, calling `load()` on a layer slot wraps a non-`V`
+    /// pointer — dereferencing it is **UB**.
     /// For `InlineValueArray`, layer slots return `None` (safe but misleading).
     ///
-    /// For `ArcValueArray`: increments refcount and returns `Arc<V>`.
+    /// For `BoxValueArray`: wraps the pointer in `ValuePtr<V>` (zero atomic ops).
     /// For `InlineValueArray`: copies the `u64` bits and reconstructs `V`.
     fn load(&self, slot: usize) -> Option<O>;
 
@@ -257,7 +384,7 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// The old value **must** be captured before the store to ensure correct
     /// retirement — reading the slot after overwrite would return the new value.
     ///
-    /// For `ArcValueArray`: loads old raw pointer, stores new pointer, returns
+    /// For `BoxValueArray`: loads old raw pointer, stores new pointer, returns
     /// `RetireHandle::Ptr(old_ptr)`.
     /// For `InlineValueArray`: overwrites bits, returns `RetireHandle::Noop`.
     ///
@@ -276,7 +403,7 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
 
     /// Load the raw pointer at a slot without any typed interpretation.
     ///
-    /// For `ArcValueArray`: returns the raw `*mut u8` from the `AtomicPtr`.
+    /// For `BoxValueArray`: returns the raw `*mut u8` from the `AtomicPtr`.
     /// For `InlineValueArray`: returns the tag pointer (null/sentinel/layer).
     ///
     /// Used for low-level inspection and prefetch paths.
@@ -306,7 +433,7 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// the value and `self[src_slot]` is in an indeterminate state. The caller
     /// **must** call `self.clear(src_slot)` after the move to reset the source.
     ///
-    /// For Arc: loads raw pointer from source, stores to destination (pointer
+    /// For Box: loads raw pointer from source, stores to destination (pointer
     /// move, no refcount change).
     /// For inline: loads tag+bits from source, stores tag+bits to destination
     /// (bitwise move).
@@ -321,7 +448,7 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
 
     /// Clean up a slot's value during leaf Drop.
     ///
-    /// For `ArcValueArray`: decrements refcount (`Arc::from_raw` + drop).
+    /// For `BoxValueArray`: frees the allocation (`Box::from_raw` + drop).
     /// For `InlineValueArray`: no-op.
     ///
     /// # Safety
@@ -341,7 +468,7 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
 ///
 /// - [`SidecarSuffix`]: Lazy-allocated `AtomicPtr<SuffixSidecar>`. Compact leaves
 ///   (8 bytes in leaf struct). One pointer dereference for suffix access.
-///   Used by [`ArcPolicy`] and optionally by [`InlinePolicy`] (`sidecar-suffix` feature).
+///   Used by [`BoxPolicy`] and optionally by [`InlinePolicy`] (`sidecar-suffix` feature).
 /// - `EmbeddedSuffix` (default for [`InlinePolicy`]): `InlineSuffixBag` + `AtomicPtr<SuffixBag>`
 ///   embedded directly in the leaf. Zero-indirection suffix reads. Larger leaves.
 ///
@@ -481,54 +608,54 @@ pub trait SuffixStore: sealed::SuffixStoreSealed + Send + Sync + Sized + 'static
 /// This is the single type parameter on `LeafNode15<P: LeafPolicy>`.
 /// Two canonical implementations are provided:
 ///
-/// - [`ArcPolicy<V>`]: Heap-allocated `Arc<V>` values, sidecar suffix, 448-byte leaves.
+/// - [`BoxPolicy<V>`]: Heap-allocated `Box<V>` values, sidecar suffix, 448-byte leaves.
 /// - [`InlinePolicy<V>`]: Inline `Copy` values, embedded suffix (default) or
 ///   sidecar suffix (`sidecar-suffix` feature).
 ///
 /// # Design
 ///
 /// `LeafPolicy` intentionally bundles value and suffix strategies into one trait
-/// rather than parameterizing independently. `ArcPolicy` uses `SidecarSuffix`;
+/// rather than parameterizing independently. `BoxPolicy` uses `SidecarSuffix`;
 /// `InlinePolicy` uses `EmbeddedSuffix` by default (or `SidecarSuffix` with
 /// the `sidecar-suffix` feature). The value array type differs:
-/// `ArcValueArray` (120 bytes) vs `InlineValueArray` (240 bytes). Keeping one
+/// `BoxValueArray` (120 bytes) vs `InlineValueArray` (240 bytes). Keeping one
 /// type parameter simplifies the tree's generic signature from `<S, L, A>` to
 /// `<P, A>`.
 ///
 /// # Safety
 ///
-/// This trait is **sealed** — only `ArcPolicy` and `InlinePolicy` may implement it.
+/// This trait is **sealed** — only `BoxPolicy` and `InlinePolicy` may implement it.
 pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     /// The user-facing value type provided to `insert()`.
     type Value: Send + Sync;
 
     /// The internal output type returned from `get()` and carried across retries.
     ///
-    /// - `ArcPolicy<V>`: `Arc<V>` (cheap clone via refcount increment)
+    /// - `BoxPolicy<V>`: `ValuePtr<V>` (trivial `Copy` pointer — zero atomic ops)
     /// - `InlinePolicy<V>`: `V` (bitwise copy)
     type Output: Clone + Send + Sync;
 
     /// The value storage array type embedded in the leaf.
     ///
-    /// - `ArcPolicy<V>`: `ArcValueArray<V>` wrapping `[AtomicPtr<u8>; 15]`
+    /// - `BoxPolicy<V>`: `BoxValueArray<V>` wrapping `[AtomicPtr<u8>; 15]`
     /// - `InlinePolicy<V>`: `InlineValueArray<V>` wrapping sentinel + bits arrays
     type Values: ValueArray<Self::Output>;
 
     /// The suffix storage type embedded in the leaf.
     ///
-    /// - `ArcPolicy`: `SidecarSuffix` (8-byte `AtomicPtr<SuffixSidecar>`)
+    /// - `BoxPolicy`: `SidecarSuffix` (8-byte `AtomicPtr<SuffixSidecar>`)
     /// - `InlinePolicy`: `EmbeddedSuffix` (default) or `SidecarSuffix` (`sidecar-suffix` feature)
     type Suffix: SuffixStore;
 
     /// Whether old value pointers require EBR deferred retirement.
     ///
-    /// - `true`: `Arc` mode. Old pointers passed to `guard.defer_retire()`.
+    /// - `true`: Box mode. Old pointers passed to `guard.defer_retire()`.
     /// - `false`: Inline mode. Values are `Copy`, no heap allocation to free.
     const NEEDS_RETIREMENT: bool;
 
     /// Whether this policy supports zero-copy reference returns.
     ///
-    /// - `true`: Arc mode. Values live at stable addresses behind the pointer.
+    /// - `true`: Box mode. Values live at stable addresses behind the pointer.
     /// - `false`: Inline mode. Values are encoded as bits, no stable address.
     const SUPPORTS_REF: bool;
 
@@ -544,7 +671,7 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
 
     /// Prefetch the value at a slot for upcoming access.
     ///
-    /// For Arc: prefetches the pointer target into L1 cache.
+    /// For Box: prefetches the pointer target into L1 cache.
     /// For inline: no-op (bits are already in the leaf cache line).
     fn prefetch_value(values: &Self::Values, slot: usize);
 
@@ -565,7 +692,7 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     /// Returns a `RetireHandle` for the displaced value. The caller
     /// is responsible for retiring the handle after installing the layer.
     ///
-    /// For Arc: swaps out the pointer, returns `RetireHandle::Ptr`.
+    /// For Box: swaps out the pointer, returns `RetireHandle::Ptr`.
     /// For inline: clears the bits, returns `RetireHandle::Noop`.
     fn take_value_for_layer(values: &Self::Values, slot: usize) -> RetireHandle;
 
@@ -575,18 +702,31 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
 
     /// Convert a user value into an output handle.
     ///
-    /// Called exactly once per insert. For Arc mode, this allocates the Arc.
+    /// Called exactly once per insert. For Box mode, this allocates the Box.
     /// The returned output is carried across retries (splits, layer creation).
     fn into_output(value: Self::Value) -> Self::Output;
 
     /// Clone an output for return to the caller.
     ///
-    /// For Arc: `Arc::clone` (refcount increment).
+    /// For Box: copies the pointer (zero-cost via `Copy`).
     /// For inline: bitwise copy.
     #[inline(always)]
     fn clone_output(output: &Self::Output) -> Self::Output {
         output.clone()
     }
+
+    /// Clone an owned `Value` from an `Output` reference.
+    ///
+    /// Used by auto-guard convenience methods (`get`, `insert`, `remove`) to
+    /// produce an independently-owned `Value` before the internal guard drops.
+    /// Without this, the returned `Output` (a `ValuePtr` for [`BoxPolicy`])
+    /// would dangle after the guard is released.
+    ///
+    /// For Box: clones `V` via `Deref` — `(**output).clone()`.
+    /// For inline: copies `V` — `V: Copy` implies `Clone`.
+    fn clone_value_from_output(output: &Self::Output) -> Self::Value
+    where
+        Self::Value: Clone;
 
     // ========================================================================
     //  Retirement
@@ -598,7 +738,7 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     /// moment the old value was displaced. This design guarantees we always
     /// retire the correct (old) value, not the newly installed one.
     ///
-    /// For Arc: defers `Arc::from_raw` + drop via `guard.defer_retire`.
+    /// For Box: defers `Box::from_raw` + drop via `guard.defer_retire`.
     /// For inline: no-op (handle is always `RetireHandle::Noop`).
     ///
     /// # Safety
@@ -613,7 +753,7 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     /// cleanup (e.g., during remove or layer-creation). The caller owns the
     /// `Output` value and passes it here for deferred drop.
     ///
-    /// For Arc: converts `Arc<V>` back to raw pointer, defers drop.
+    /// For Box: extracts raw pointer from `ValuePtr`, defers `Box::from_raw` + drop.
     /// For inline: no-op.
     ///
     /// # Safety
@@ -645,7 +785,7 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
 
 /// Marker trait for policies that support zero-copy reference returns.
 ///
-/// Only [`ArcPolicy`] implements this trait. [`InlinePolicy`] does not,
+/// Only [`BoxPolicy`] implements this trait. [`InlinePolicy`] does not,
 /// because inline values have no stable memory address to reference.
 ///
 /// # API Gating
@@ -667,18 +807,19 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
 pub trait RefPolicy: sealed::RefPolicySealed + LeafPolicy {
     /// Borrow the underlying value from an output handle.
     ///
-    /// For `ArcPolicy<V>`: returns `&V` via `Deref`.
+    /// For `BoxPolicy<V>`: returns `&V` via `Deref`.
     fn output_as_ref(output: &Self::Output) -> &Self::Value;
 }
 
 // ============================================================================
-//  ArcPolicy<V> — Heap-Allocated Arc Storage
+//  BoxPolicy<V> — Heap-Allocated Box Storage
 // ============================================================================
 
-/// Arc-based value storage with lazy sidecar suffix.
+/// Box-based value storage with lazy sidecar suffix.
 ///
-/// Produces compact 448-byte leaves. Values are `Arc<V>` raw pointers stored
+/// Produces compact 448-byte leaves. Values are `Box<V>` raw pointers stored
 /// in `[AtomicPtr<u8>; 15]`. Old values require EBR deferred retirement.
+/// Returns [`ValuePtr<V>`] — a `Copy` pointer with zero atomic overhead on reads.
 ///
 /// # When to Use
 ///
@@ -686,28 +827,34 @@ pub trait RefPolicy: sealed::RefPolicySealed + LeafPolicy {
 /// - Workloads are primarily integer-key (few/no suffixes)
 /// - Memory efficiency matters (small leaf footprint)
 ///
+/// # Lifetime Safety
+///
+/// [`ValuePtr<V>`] is valid only while the EBR guard used to obtain it is held.
+/// Unlike `Arc<V>`, it does not carry independent ownership. Users who need
+/// to outlive the guard must clone the inner `V`.
+///
 /// # Type Parameters
 ///
 /// - `V`: The user value type. Must be `Send + Sync + 'static`.
-pub struct ArcPolicy<V>(PhantomData<V>);
+pub struct BoxPolicy<V>(PhantomData<V>);
 
-impl<V: Send + Sync + 'static> LeafPolicy for ArcPolicy<V> {
+impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
     type Value = V;
-    type Output = Arc<V>;
-    type Values = ArcValueArray<V>;
+    type Output = ValuePtr<V>;
+    type Values = BoxValueArray<V>;
     type Suffix = SidecarSuffix;
 
     const NEEDS_RETIREMENT: bool = true;
     const SUPPORTS_REF: bool = true;
 
     #[inline(always)]
-    fn is_value_empty(values: &ArcValueArray<V>, slot: usize) -> bool {
+    fn is_value_empty(values: &BoxValueArray<V>, slot: usize) -> bool {
         values.is_empty(slot)
     }
 
     #[inline(always)]
-    fn prefetch_value(values: &ArcValueArray<V>, slot: usize) {
-        // Prefetch the Arc<V> target into L1 cache for upcoming dereference.
+    fn prefetch_value(values: &BoxValueArray<V>, slot: usize) {
+        // Prefetch the Box<V> target into L1 cache for upcoming dereference.
         let ptr: *mut u8 = values.load_raw(slot);
         if !ptr.is_null() {
             prefetch_read(ptr.cast::<V>());
@@ -715,7 +862,7 @@ impl<V: Send + Sync + 'static> LeafPolicy for ArcPolicy<V> {
     }
 
     #[inline(always)]
-    unsafe fn load_value_ptr(values: &ArcValueArray<V>, slot: usize) -> *const V {
+    unsafe fn load_value_ptr(values: &BoxValueArray<V>, slot: usize) -> *const V {
         // SAFETY: Caller holds a valid guard and will validate OCC version after.
         let ptr: *mut u8 = values.load_raw(slot);
         if ptr.is_null() {
@@ -726,53 +873,65 @@ impl<V: Send + Sync + 'static> LeafPolicy for ArcPolicy<V> {
     }
 
     #[inline(always)]
-    fn take_value_for_layer(values: &ArcValueArray<V>, slot: usize) -> RetireHandle {
-        // Load the raw pointer before clearing the slot.
-        // This is called under a lock, so Relaxed loads are safe.
-        let ptr: *mut u8 = values.load_raw(slot);
-        if ptr.is_null() {
-            return RetireHandle::Noop;
-        }
-        // Clear the slot (sets to null).
+    fn take_value_for_layer(values: &BoxValueArray<V>, slot: usize) -> RetireHandle {
+        // Clear the slot (sets to null). The value pointer has already been
+        // copied by try_clone_output() and inserted into the sublayer leaf,
+        // so the allocation is TRANSFERRED, not destroyed. Return Noop to
+        // prevent the caller from retiring a pointer still in use.
+        //
+        // This differs from ArcPolicy where try_clone_output() bumps the
+        // refcount, making retire_handle(Ptr) safe (just decrements).
+        // BoxPolicy has no refcount — the single Box allocation is simply
+        // moved from parent slot to sublayer slot.
         values.clear(slot);
-        RetireHandle::Ptr(ptr)
+        RetireHandle::Noop
     }
 
     #[inline(always)]
-    fn into_output(value: V) -> Arc<V> {
-        Arc::new(value)
+    fn into_output(value: V) -> ValuePtr<V> {
+        let ptr: *mut V = Box::into_raw(Box::new(value));
+        // SAFETY: Box::into_raw returns a non-null, properly aligned pointer.
+        unsafe { ValuePtr::from_raw(ptr) }
+    }
+
+    #[inline(always)]
+    fn clone_value_from_output(output: &ValuePtr<V>) -> V
+    where
+        V: Clone,
+    {
+        (**output).clone()
     }
 
     #[inline(always)]
     unsafe fn retire_handle(handle: RetireHandle, guard: &LocalGuard<'_>) {
         if let RetireHandle::Ptr(ptr) = handle {
             debug_assert!(!ptr.is_null());
-            // SAFETY: ptr was obtained from Arc::into_raw in update_in_place().
+            // SAFETY: ptr was obtained from Box::into_raw in into_output().
             // The guard ensures no readers can still observe the old value
             // after the current epoch completes.
             unsafe {
                 guard.defer_retire(ptr.cast::<V>(), |ptr, _| {
-                    drop(Arc::from_raw(ptr));
+                    drop(Box::from_raw(ptr));
                 });
             }
         }
     }
 
     #[inline(always)]
-    unsafe fn retire_output(output: Arc<V>, guard: &LocalGuard<'_>) {
-        let ptr: *mut V = Arc::into_raw(output).cast_mut();
+    unsafe fn retire_output(output: ValuePtr<V>, guard: &LocalGuard<'_>) {
+        let ptr: *mut V = output.as_ptr();
 
-        // SAFETY: ptr is a valid Arc<V> pointer. The guard ensures no readers
+        // SAFETY: ptr is a valid Box<V> pointer. The guard ensures no readers
         // can observe this value after the current epoch completes.
         unsafe {
             guard.defer_retire(ptr, |ptr, _| {
-                drop(Arc::from_raw(ptr));
+                drop(Box::from_raw(ptr));
             });
         }
     }
 
     #[inline(always)]
-    unsafe fn load_value_ref<'g>(values: &ArcValueArray<V>, slot: usize) -> Option<&'g V> {
+    unsafe fn load_value_ref<'g>(values: &BoxValueArray<V>, slot: usize) -> Option<&'g V> {
         // SAFETY: Caller guarantees:
         // 1. A valid guard prevents retirement of this value.
         // 2. OCC version will be validated after this load.
@@ -782,16 +941,16 @@ impl<V: Send + Sync + 'static> LeafPolicy for ArcPolicy<V> {
         if ptr.is_null() {
             None
         } else {
-            // SAFETY: ptr is a valid Arc<V> raw pointer. The guard prevents
+            // SAFETY: ptr is a valid Box<V> raw pointer. The guard prevents
             // retirement. OCC validation ensures we read consistent data.
             Some(unsafe { &*ptr.cast::<V>() })
         }
     }
 }
 
-impl<V: Send + Sync + 'static> RefPolicy for ArcPolicy<V> {
+impl<V: Send + Sync + 'static> RefPolicy for BoxPolicy<V> {
     #[inline(always)]
-    fn output_as_ref(output: &Arc<V>) -> &V {
+    fn output_as_ref(output: &ValuePtr<V>) -> &V {
         output
     }
 }
@@ -861,6 +1020,14 @@ impl<V: InlineBits> LeafPolicy for InlinePolicy<V> {
     #[inline(always)]
     fn into_output(value: V) -> V {
         value
+    }
+
+    #[inline(always)]
+    fn clone_value_from_output(output: &V) -> V
+    where
+        V: Clone,
+    {
+        *output // V: Copy implies Clone; bitwise copy.
     }
 
     #[inline(always)]

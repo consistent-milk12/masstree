@@ -5,7 +5,7 @@
 
 #![expect(clippy::expect_used, clippy::unwrap_used)]
 
-use masstree::{BatchInsertResult, MassTree15};
+use masstree::MassTree15;
 use std::sync::Arc;
 use std::thread;
 
@@ -61,9 +61,9 @@ fn test_shared_prefix_correctness() {
         for i in 0..KEYS_PER_THREAD {
             let key = format!("PREFIX00T{tid}I{i:04}");
             let expected = (tid * KEYS_PER_THREAD + i) as u64;
-            // get() returns Option<Arc<u64>> for MassTree15
+            // get() returns Option<u64> (owned clone) for MassTree15
             let value = tree.get(key.as_bytes()).expect("key should exist");
-            assert_eq!(*value, expected);
+            assert_eq!(value, expected);
         }
     }
 }
@@ -231,7 +231,7 @@ fn test_batch_long_keys_with_conflicts() {
         })
         .collect();
 
-    let result: BatchInsertResult<Arc<u64>> = tree.insert_batch(entries);
+    let result = tree.insert_batch(entries);
 
     // At least one operation should succeed (insert or update)
     // Using inserted + updated is more resilient than just inserted

@@ -67,10 +67,10 @@
 //! - Returns `V` by copy: `get_with_guard() → Option<V>`
 //! - Use `scan()` for range iteration
 //!
-//! ### `MassTree15<V>` (Arc-Based)
-//! - Values wrapped in `Arc<V>` (heap allocation per insert)
-//! - Returns references: `get_ref() → Option<&V>`
-//! - Use `scan_ref()` for zero-copy range iteration
+//! ### `MassTree15<V>` (Box-Based)
+//! - Values stored as `Box<V>` raw pointers (heap allocation per insert)
+//! - Returns [`ValuePtr<V>`] — zero-cost `Copy` pointer valid under EBR guard
+//! - Use `get_ref()` / `scan_ref()` for zero-copy reference access
 
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]
@@ -241,7 +241,7 @@ pub use value::{InsertTarget, LeafValue, SplitPoint};
 pub(crate) use link::Linker;
 
 // Re-export main types for convenience
-pub use policy::LeafPolicy;
+pub use policy::{BoxPolicy, LeafPolicy, ValuePtr};
 pub use ref_value_slot::RefLeafPolicy;
 pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
 pub use tree::{InsertError, RemoveError};

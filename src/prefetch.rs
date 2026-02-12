@@ -7,7 +7,7 @@
 
 /// Prefetch data for reading into all cache levels (temporal).
 #[inline(always)]
-#[expect(clippy::missing_const_for_fn)]
+#[allow(clippy::missing_const_for_fn)]
 pub fn prefetch_read<T>(ptr: *const T) {
     // When no-prefetch is enabled, all prefetch calls become no-ops for A/B benchmarking
     #[cfg(feature = "no-prefetch")]
@@ -57,7 +57,7 @@ pub fn prefetch_read<T>(ptr: *const T) {
 /// Prefetch data for writing into all cache levels.
 #[inline(always)]
 #[allow(dead_code)]
-#[expect(clippy::missing_const_for_fn)]
+#[allow(clippy::missing_const_for_fn)]
 pub fn prefetch_write<T>(ptr: *mut T) {
     #[cfg(feature = "no-prefetch")]
     #[expect(clippy::needless_return, reason = "Feature gate compatibility")]

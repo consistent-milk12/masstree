@@ -48,7 +48,7 @@ fn test_batch_insert_single_entry() {
     assert_eq!(tree.len(), 1);
 
     let value = tree.get(b"hello").unwrap();
-    assert_eq!(*value, 42);
+    assert_eq!(value, 42);
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn test_batch_insert_multiple_entries() {
     for i in 0..100 {
         let key = format!("key{i:03}");
         let value = tree.get(key.as_bytes()).unwrap();
-        assert_eq!(*value, i as u64);
+        assert_eq!(value, i as u64);
     }
 }
 
@@ -96,9 +96,9 @@ fn test_batch_insert_with_updates() {
     assert_eq!(result.failed, 0);
     assert_eq!(tree.len(), 75);
 
-    // Verify old values were returned (they are Arc<u64>)
+    // Verify old values were returned (they are owned u64)
     assert_eq!(result.old_values.len(), 25);
-    let old_values: HashSet<u64> = result.old_values.iter().map(|arc| **arc).collect();
+    let old_values: HashSet<u64> = result.old_values.iter().copied().collect();
     for i in 25..50 {
         assert!(old_values.contains(&(i as u64)));
     }
@@ -107,7 +107,7 @@ fn test_batch_insert_with_updates() {
     for i in 25..75 {
         let key = format!("key{i:03}");
         let value = tree.get(key.as_bytes()).unwrap();
-        assert_eq!(*value, (i * 10) as u64);
+        assert_eq!(value, (i * 10) as u64);
     }
 }
 
@@ -136,7 +136,7 @@ fn test_batch_insert_all_updates() {
     for i in 0..100 {
         let key = format!("key{i:03}");
         let value = tree.get(key.as_bytes()).unwrap();
-        assert_eq!(*value, (i + 1000) as u64);
+        assert_eq!(value, (i + 1000) as u64);
     }
 }
 
@@ -161,7 +161,7 @@ fn test_batch_insert_masstree15() {
     // Verify random sample
     for i in [0u64, 100, 500, 999] {
         let value = tree.get(&i.to_be_bytes()).unwrap();
-        assert_eq!(*value, i);
+        assert_eq!(value, i);
     }
 }
 
@@ -178,7 +178,7 @@ fn test_batch_insert_inline_u64() {
     assert_eq!(result.inserted, 500);
     assert_eq!(tree.len(), 500);
 
-    // Verify values (returned as V directly, not Arc<V>)
+    // Verify values (returned as V directly, not ValuePtr<V>)
     for i in 0..500 {
         let key = format!("key{i:04}");
         let value = tree.get(key.as_bytes()).unwrap();
@@ -206,7 +206,7 @@ fn test_batch_insert_inline_with_updates() {
     assert_eq!(result.updated, 50);
     assert_eq!(tree.len(), 100);
 
-    // Old values are i32 directly (not Arc<i32>)
+    // Old values are i32 directly (not ValuePtr<i32>)
     for old_value in &result.old_values {
         assert!(*old_value >= 0 && *old_value < 50);
     }
@@ -249,7 +249,7 @@ fn test_batch_insert_reverse_sequential() {
     // Verify order is correct
     for i in 0u64..1000 {
         let value = tree.get(&i.to_be_bytes()).unwrap();
-        assert_eq!(*value, i);
+        assert_eq!(value, i);
     }
 }
 
@@ -310,7 +310,7 @@ fn test_batch_insert_short_keys() {
     // Verify
     for i in 0..256 {
         let value = tree.get(&[i as u8]).unwrap();
-        assert_eq!(*value, i as u64);
+        assert_eq!(value, i as u64);
     }
 }
 
@@ -354,7 +354,7 @@ fn test_batch_insert_duplicate_keys_in_batch() {
 
     // Final value should be from last occurrence
     let value = tree.get(b"duplicate").unwrap();
-    assert_eq!(*value, 3);
+    assert_eq!(value, 3);
 }
 
 // ============================================================================
@@ -379,7 +379,7 @@ fn test_batch_insert_triggers_single_split() {
     for i in 0..20 {
         let key = format!("same_prefix_{i:02}");
         if let Some(value) = tree.get(key.as_bytes()) {
-            assert_eq!(*value, i as u64);
+            assert_eq!(value, i as u64);
         }
     }
 }
@@ -416,7 +416,7 @@ fn test_batch_insert_large_batch() {
     for i in [0, 1000, 5000, 9999] {
         let key = format!("key{i:08}");
         if let Some(value) = tree.get(key.as_bytes()) {
-            assert_eq!(*value, i as u64);
+            assert_eq!(value, i as u64);
         }
     }
 }
@@ -548,7 +548,7 @@ fn test_batch_insert_empty_key() {
     assert_eq!(tree.len(), 1);
 
     let value = tree.get(&[]).unwrap();
-    assert_eq!(*value, 42);
+    assert_eq!(value, 42);
 }
 
 #[test]
@@ -568,9 +568,9 @@ fn test_batch_insert_same_ikey_different_keylen() {
     assert_eq!(tree.len(), 3);
 
     // Verify each key
-    assert_eq!(*tree.get(b"abcdefgh").unwrap(), 1);
-    assert_eq!(*tree.get(b"abcdefg").unwrap(), 2);
-    assert_eq!(*tree.get(b"abcdef").unwrap(), 3);
+    assert_eq!(tree.get(b"abcdefgh").unwrap(), 1);
+    assert_eq!(tree.get(b"abcdefg").unwrap(), 2);
+    assert_eq!(tree.get(b"abcdef").unwrap(), 3);
 }
 
 // ============================================================================
@@ -617,7 +617,7 @@ fn test_batch_result_all_succeeded() {
 //  Output Type Verification Tests
 // ============================================================================
 
-/// Verify that MassTree15 (Arc mode) returns Arc<V> in old_values
+/// Verify that MassTree15 (Box mode) returns ValuePtr<V> in old_values
 #[test]
 fn test_batch_arc_mode_old_value_type() {
     let tree: MassTree15<String> = MassTree15::new();
@@ -632,8 +632,8 @@ fn test_batch_arc_mode_old_value_type() {
     assert_eq!(result.updated, 1);
     assert_eq!(result.old_values.len(), 1);
 
-    // old_values is Vec<Arc<String>>
-    let old: &Arc<String> = &result.old_values[0];
+    // old_values is Vec<ValuePtr<String>>
+    let old = &result.old_values[0];
     assert_eq!(old.as_str(), "initial");
 }
 
@@ -652,7 +652,7 @@ fn test_batch_inline_mode_old_value_type() {
     assert_eq!(result.updated, 1);
     assert_eq!(result.old_values.len(), 1);
 
-    // old_values is Vec<u64> (not Vec<Arc<u64>>)
+    // old_values is Vec<u64> (not Vec<ValuePtr<u64>>)
     let old: u64 = result.old_values[0];
     assert_eq!(old, 100);
 }

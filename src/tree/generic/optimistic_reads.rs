@@ -563,15 +563,23 @@ where
     /// Creates a guard internally. For bulk operations, prefer
     /// [`get_with_guard`](Self::get_with_guard) to amortize guard creation cost.
     ///
+    /// Returns an owned clone of the value. The internal EBR guard is
+    /// released before returning, so the value is cloned to ensure
+    /// independent ownership.
+    ///
     /// # Returns
     ///
-    /// * `Some(Arc<V>)` - If the key was found
+    /// * `Some(V)` - If the key was found (owned clone)
     /// * `None` - If the key was not found
     #[must_use]
     #[inline]
-    pub fn get(&self, key: &[u8]) -> Option<P::Output> {
+    pub fn get(&self, key: &[u8]) -> Option<P::Value>
+    where
+        P::Value: Clone,
+    {
         let guard = self.guard();
         self.get_with_guard(key, &guard)
+            .map(|output| P::clone_value_from_output(&output))
     }
 
     /// Check if a key exists in the tree.

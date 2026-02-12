@@ -47,7 +47,7 @@ pub use crate::value::SplitPoint;
 ///     ikey,
 ///     keylenx,
 ///     suffix,
-///     value: output, // P::Output directly — Arc<V> or V
+///     value: output, // P::Output directly — ValuePtr<V> or V
 /// };
 /// ```
 ///
@@ -69,7 +69,7 @@ pub struct SplitInsertData<'a, P: LeafPolicy> {
 
     /// The typed value to insert.
     ///
-    /// For `ArcPolicy<V>`: `Arc<V>` — ownership transfers to the leaf during split.
+    /// For `BoxPolicy<V>`: `ValuePtr<V>` — ownership transfers to the leaf during split.
     /// For `InlinePolicy<V>`: `V` — copied into the leaf's inline storage.
     ///
     /// Replaces the old `value_ptr: *mut u8` which required:
@@ -463,7 +463,7 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
 ///
 /// # Type Parameters
 ///
-/// - `P`: The leaf policy (e.g., `ArcPolicy<V>` or `InlinePolicy<V>`)
+/// - `P`: The leaf policy (e.g., `BoxPolicy<V>` or `InlinePolicy<V>`)
 ///
 /// # Associated Types
 ///
@@ -485,7 +485,7 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     /// Inline suffix storage capacity in bytes.
     ///
     /// Controls the `InlineSuffixBag` capacity inside the sidecar (for both
-    /// `ArcPolicy` and `InlinePolicy`). Larger values reduce drain-to-external
+    /// `BoxPolicy` and `InlinePolicy`). Larger values reduce drain-to-external
     /// frequency at the cost of a larger sidecar heap allocation.
     ///
     /// Does NOT affect leaf node size (suffix is behind a pointer for both policies).

@@ -1,7 +1,7 @@
 //! Unit tests for [`LeafNode15`] methods.
 
 use super::LeafNode15;
-use crate::policy::ArcPolicy;
+use crate::policy::BoxPolicy;
 
 // ========================================================================
 //  Adaptive Prefetch Tests
@@ -9,7 +9,7 @@ use crate::policy::ArcPolicy;
 
 #[test]
 fn test_prefetch_adaptive() {
-    let leaf: Box<LeafNode15<ArcPolicy<u64>>> = LeafNode15::new_boxed();
+    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new_boxed();
 
     // Test all size ranges - these should not panic or crash
     leaf.prefetch_for_search_adaptive(0);
@@ -21,7 +21,7 @@ fn test_prefetch_adaptive() {
 
 #[test]
 fn test_prefetch_for_search() {
-    let leaf: Box<LeafNode15<ArcPolicy<u64>>> = LeafNode15::new_boxed();
+    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new_boxed();
 
     // Should not panic or crash
     leaf.prefetch_for_search();
@@ -29,7 +29,7 @@ fn test_prefetch_for_search() {
 
 #[test]
 fn test_prefetch_adaptive_empty_node() {
-    let leaf: Box<LeafNode15<ArcPolicy<u64>>> = LeafNode15::new_boxed();
+    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new_boxed();
 
     // For empty nodes, adaptive prefetch should skip CL 2-3
     // This is purely a "doesn't crash" test - we can't verify
@@ -40,7 +40,7 @@ fn test_prefetch_adaptive_empty_node() {
 
 #[test]
 fn test_prefetch_adaptive_small_node() {
-    let leaf: Box<LeafNode15<ArcPolicy<u64>>> = LeafNode15::new_boxed();
+    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new_boxed();
 
     // For size <= 8, adaptive prefetch should skip CL 3
     // Test boundary conditions
@@ -51,7 +51,7 @@ fn test_prefetch_adaptive_small_node() {
 
 #[test]
 fn test_prefetch_adaptive_large_node() {
-    let leaf: Box<LeafNode15<ArcPolicy<u64>>> = LeafNode15::new_boxed();
+    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new_boxed();
 
     // For size > 8, adaptive prefetch should include CL 3
     leaf.prefetch_for_search_adaptive(9);

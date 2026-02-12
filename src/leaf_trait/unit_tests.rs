@@ -1,7 +1,7 @@
 use super::{TreeLeafNode, TreePermutation};
 use crate::leaf15::LeafNode15;
 use crate::permuter::Permuter15;
-use crate::policy::{ArcPolicy, LeafPolicy};
+use crate::policy::{BoxPolicy, LeafPolicy};
 
 // ========================================================================
 //  TreePermutation Tests
@@ -146,32 +146,32 @@ fn test_leaf_version<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
 
 #[test]
 fn test_leafnode15_trait_new() {
-    test_leaf_new::<ArcPolicy<u64>, LeafNode15<ArcPolicy<u64>>>();
+    test_leaf_new::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
 }
 
 #[test]
 fn test_leafnode15_trait_permutation() {
-    test_leaf_permutation::<ArcPolicy<u64>, LeafNode15<ArcPolicy<u64>>>();
+    test_leaf_permutation::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
 }
 
 #[test]
 fn test_leafnode15_trait_ikey() {
-    test_leaf_ikey::<ArcPolicy<u64>, LeafNode15<ArcPolicy<u64>>>();
+    test_leaf_ikey::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
 }
 
 #[test]
 fn test_leafnode15_trait_keylenx() {
-    test_leaf_keylenx::<ArcPolicy<u64>, LeafNode15<ArcPolicy<u64>>>();
+    test_leaf_keylenx::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
 }
 
 #[test]
 fn test_leafnode15_trait_linking() {
-    test_leaf_linking::<ArcPolicy<u64>, LeafNode15<ArcPolicy<u64>>>();
+    test_leaf_linking::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
 }
 
 #[test]
 fn test_leafnode15_trait_version() {
-    test_leaf_version::<ArcPolicy<u64>, LeafNode15<ArcPolicy<u64>>>();
+    test_leaf_version::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
 }
 
 // ========================================================================
@@ -183,12 +183,12 @@ fn test_width_constants() {
     // Permutation WIDTH matches leaf WIDTH
     assert_eq!(
         <Permuter15 as TreePermutation>::WIDTH,
-        <LeafNode15<ArcPolicy<u64>> as TreeLeafNode<ArcPolicy<u64>>>::WIDTH
+        <LeafNode15<BoxPolicy<u64>> as TreeLeafNode<BoxPolicy<u64>>>::WIDTH
     );
 
     // Verify actual values
     assert_eq!(
-        <LeafNode15<ArcPolicy<u64>> as TreeLeafNode<ArcPolicy<u64>>>::WIDTH,
+        <LeafNode15<BoxPolicy<u64>> as TreeLeafNode<BoxPolicy<u64>>>::WIDTH,
         15
     );
 }
@@ -228,7 +228,7 @@ fn test_generic_perm_fill_15() {
 
 #[test]
 fn test_generic_leaf_setup_15() {
-    let leaf: Box<LeafNode15<ArcPolicy<u64>>> = generic_leaf_setup(42);
+    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = generic_leaf_setup(42);
     assert_eq!(leaf.ikey(0), 42);
     assert_eq!(leaf.size(), 1);
 }

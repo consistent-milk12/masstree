@@ -22,11 +22,11 @@ fn main() {
     println!("=== MassTree Basic Usage Examples ===\n");
 
     // =========================================================================
-    // Example 1: MassTree15 with Arc-based storage
+    // Example 1: MassTree15 with Box-based storage
     // =========================================================================
-    println!("--- Example 1: MassTree15 (Arc-based storage) ---\n");
+    println!("--- Example 1: MassTree15 (Box-based storage) ---\n");
 
-    // Create a new tree that stores u64 values wrapped in Arc
+    // Create a new tree that stores u64 values managed by BoxPolicy
     let tree: MassTree15<u64> = MassTree15::new();
 
     // Get a guard for operations (ties to an epoch for memory safety)
@@ -34,7 +34,7 @@ fn main() {
 
     // Insert some key-value pairs
     // Keys are byte slices, values are your type
-    // insert_with_guard returns Option<Arc<V>> - the old value if key existed
+    // insert_with_guard returns Option<ValuePtr<V>> - the old value if key existed
     let old = tree.insert_with_guard(b"users/alice", 100, &guard);
     println!("First insert of users/alice: old={old:?}"); // None - no previous value
 
@@ -49,14 +49,14 @@ fn main() {
     println!("Inserted 5 entries");
     println!("Tree size: {}\n", tree.len());
 
-    // Point lookup - returns Option<&V> (for Arc-based storage only)
+    // Point lookup - returns Option<&V> (for Box-based storage only)
     if let Some(value) = tree.get_ref(b"users/alice", &guard) {
         println!("get_ref(users/alice) = {value}");
     }
 
-    // Point lookup with Arc - returns Option<Arc<V>>
-    if let Some(arc_value) = tree.get_with_guard(b"users/bob", &guard) {
-        println!("get_with_guard(users/bob) = {arc_value}");
+    // Point lookup - returns Option<ValuePtr<V>>
+    if let Some(value) = tree.get_with_guard(b"users/bob", &guard) {
+        println!("get_with_guard(users/bob) = {value}");
     }
 
     println!();
@@ -141,7 +141,7 @@ fn main() {
         println!("Verified new value: {new_val}");
     }
 
-    // Remove a key - returns Result<Option<Arc<V>>, RemoveError>
+    // Remove a key - returns Result<Option<ValuePtr<V>>, RemoveError>
     // The Result handles concurrent modification; Option indicates if key existed
     match tree.remove_with_guard(b"users/bob", &guard) {
         Ok(Some(removed)) => println!("Removed users/bob: value was {removed}"),
@@ -158,11 +158,11 @@ fn main() {
     println!();
 
     // =========================================================================
-    // Example 5: MassTree15Inline for Copy types (no Arc overhead)
+    // Example 5: MassTree15Inline for Copy types (no Box overhead)
     // =========================================================================
-    println!("--- Example 5: MassTree15Inline (Copy types, no Arc) ---\n");
+    println!("--- Example 5: MassTree15Inline (Copy types, no Box) ---\n");
 
-    // For Copy types, use Inline variants to avoid Arc allocation
+    // For Copy types, use Inline variants to avoid Box allocation
     let inline_tree: MassTree15Inline<u64> = MassTree15Inline::new();
     let guard = inline_tree.guard();
 
@@ -171,7 +171,7 @@ fn main() {
     inline_tree.insert_with_guard(b"counter/b", 2, &guard);
     inline_tree.insert_with_guard(b"counter/c", 3, &guard);
 
-    // get_with_guard returns the value directly (no Arc) for Inline variants
+    // get_with_guard returns the value directly (no Box) for Inline variants
     if let Some(value) = inline_tree.get_with_guard(b"counter/a", &guard) {
         println!("Inline get: counter/a = {value}");
     }
@@ -199,7 +199,7 @@ fn main() {
     simple_tree.insert(b"greeting", "Hello, World!".to_string());
     simple_tree.insert(b"farewell", "Goodbye!".to_string());
 
-    // get() returns Option<Arc<V>>
+    // get() returns Option<ValuePtr<V>>
     if let Some(greeting) = simple_tree.get(b"greeting") {
         println!("Auto-guard get: {greeting}");
     }
@@ -207,7 +207,7 @@ fn main() {
     println!("Simple tree size: {}", simple_tree.len());
     println!("Is empty: {}", simple_tree.is_empty());
 
-    // Remove with auto-guard - returns Result<Option<Arc<V>>, RemoveError>
+    // Remove with auto-guard - returns Result<Option<ValuePtr<V>>, RemoveError>
     if let Ok(Some(_)) = simple_tree.remove(b"farewell") {
         println!("Removed 'farewell'");
     }

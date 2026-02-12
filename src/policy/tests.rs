@@ -2,17 +2,17 @@
 
 #[cfg(test)]
 mod value_array_tests {
-    use std::sync::Arc;
-
-    use crate::policy::{ArcValueArray, InlineValueArray, RetireHandle, ValueArray};
+    use crate::policy::{
+        BoxPolicy, BoxValueArray, InlineValueArray, LeafPolicy, RetireHandle, ValueArray, ValuePtr,
+    };
 
     // ====================================================================
-    //  ArcValueArray<V> Tests
+    //  BoxValueArray<V> Tests
     // ====================================================================
 
     #[test]
-    fn arc_new_all_empty() {
-        let arr: ArcValueArray<u64> = ArcValueArray::new();
+    fn box_new_all_empty() {
+        let arr: BoxValueArray<u64> = BoxValueArray::new();
         for slot in 0..15 {
             assert!(arr.is_empty(slot));
             assert!(arr.load(slot).is_none());
@@ -20,102 +20,101 @@ mod value_array_tests {
     }
 
     #[test]
-    fn arc_store_and_load() {
-        let arr: ArcValueArray<u64> = ArcValueArray::new();
-        let val = Arc::new(42u64);
+    fn box_store_and_load() {
+        let arr: BoxValueArray<u64> = BoxValueArray::new();
+        let val: ValuePtr<u64> = BoxPolicy::into_output(42u64);
 
         arr.store(0, &val);
 
         assert!(!arr.is_empty(0));
-        let loaded: Arc<u64> = arr.load(0).unwrap();
+        let loaded: ValuePtr<u64> = arr.load(0).unwrap();
         assert_eq!(*loaded, 42);
-
-        // Original Arc should still be valid (refcount incremented).
-        assert_eq!(*val, 42);
 
         // Cleanup to avoid leak.
         unsafe { arr.cleanup(0) };
     }
 
     #[test]
-    fn arc_store_relaxed() {
-        let arr: ArcValueArray<u64> = ArcValueArray::new();
-        let val = Arc::new(99u64);
+    fn box_store_relaxed() {
+        let arr: BoxValueArray<u64> = BoxValueArray::new();
+        let val: ValuePtr<u64> = BoxPolicy::into_output(99u64);
 
         arr.store_relaxed(3, &val);
 
         assert!(!arr.is_empty(3));
-        let loaded: Arc<u64> = arr.load(3).unwrap();
+        let loaded: ValuePtr<u64> = arr.load(3).unwrap();
         assert_eq!(*loaded, 99);
 
         unsafe { arr.cleanup(3) };
     }
 
     #[test]
-    fn arc_update_in_place_returns_ptr_handle() {
-        let arr: ArcValueArray<u64> = ArcValueArray::new();
-        let old_val = Arc::new(100u64);
-        let new_val = Arc::new(200u64);
+    fn box_update_in_place_returns_ptr_handle() {
+        let arr: BoxValueArray<u64> = BoxValueArray::new();
+        let old_val: ValuePtr<u64> = BoxPolicy::into_output(100u64);
+        let new_val: ValuePtr<u64> = BoxPolicy::into_output(200u64);
 
         arr.store(5, &old_val);
 
         let handle: RetireHandle = arr.update_in_place(5, &new_val);
 
-        // Handle must be Ptr (old Arc needs retirement).
+        // Handle must be Ptr (old Box needs retirement).
         match handle {
             RetireHandle::Ptr(ptr) => assert!(!ptr.is_null()),
-            RetireHandle::Noop => panic!("expected Ptr handle for Arc"),
+            RetireHandle::Noop => panic!("expected Ptr handle for Box"),
         }
 
-        let loaded: Arc<u64> = arr.load(5).unwrap();
+        let loaded: ValuePtr<u64> = arr.load(5).unwrap();
         assert_eq!(*loaded, 200);
 
         // Retire old value manually (in production, guard.defer_retire does this).
         if let RetireHandle::Ptr(ptr) = handle {
-            unsafe { drop(Arc::from_raw(ptr.cast::<u64>())) };
+            unsafe { drop(Box::from_raw(ptr.cast::<u64>())) };
         }
 
         unsafe { arr.cleanup(5) };
     }
 
     #[test]
-    fn arc_take_returns_value_and_empties() {
-        let arr: ArcValueArray<u64> = ArcValueArray::new();
-        let val = Arc::new(77u64);
+    fn box_take_returns_value_and_empties() {
+        let arr: BoxValueArray<u64> = BoxValueArray::new();
+        let val: ValuePtr<u64> = BoxPolicy::into_output(77u64);
 
         arr.store(7, &val);
         assert!(!arr.is_empty(7));
 
-        let taken: Arc<u64> = arr.take(7).unwrap();
+        let taken: ValuePtr<u64> = arr.take(7).unwrap();
         assert_eq!(*taken, 77);
         assert!(arr.is_empty(7));
         assert!(arr.take(7).is_none());
+
+        // Must free the taken value (no refcount).
+        unsafe { drop(Box::from_raw(taken.as_ptr())) };
     }
 
     #[test]
-    fn arc_clear_makes_empty() {
-        let arr: ArcValueArray<u64> = ArcValueArray::new();
-        let val = Arc::new(55u64);
+    fn box_clear_makes_empty() {
+        let arr: BoxValueArray<u64> = BoxValueArray::new();
+        let val: ValuePtr<u64> = BoxPolicy::into_output(55u64);
 
         arr.store(2, &val);
         assert!(!arr.is_empty(2));
 
-        // NOTE: clear does NOT drop the Arc — caller must handle retirement.
-        // In practice, clear is used after move_slot where ownership transferred.
-        // Retrieve raw pointer before clearing so we can drop the orphaned reference.
+        // NOTE: clear does NOT drop the Box — caller must handle retirement.
+        // Retrieve raw pointer before clearing so we can drop the orphaned allocation.
         let raw = arr.load_raw(2);
         arr.clear(2);
         assert!(arr.is_empty(2));
 
-        // SAFETY: raw was stored via Arc::into_raw in store().
-        unsafe { drop(Arc::from_raw(raw.cast::<u64>())) };
+        // SAFETY: raw was stored via Box::into_raw in into_output().
+        unsafe { drop(Box::from_raw(raw.cast::<u64>())) };
     }
 
     #[test]
-    fn arc_move_slot_transfers_ownership() {
-        let src: ArcValueArray<u64> = ArcValueArray::new();
-        let dst: ArcValueArray<u64> = ArcValueArray::new();
-        let val = Arc::new(33u64);
+    fn box_move_slot_transfers_ownership() {
+        let src: BoxValueArray<u64> = BoxValueArray::new();
+        let dst: BoxValueArray<u64> = BoxValueArray::new();
+        let val: ValuePtr<u64> = BoxPolicy::into_output(33u64);
 
         src.store(4, &val);
 
@@ -126,15 +125,15 @@ mod value_array_tests {
         assert!(src.is_empty(4));
         assert!(!dst.is_empty(9));
 
-        let loaded: Arc<u64> = dst.load(9).unwrap();
+        let loaded: ValuePtr<u64> = dst.load(9).unwrap();
         assert_eq!(*loaded, 33);
 
         unsafe { dst.cleanup(9) };
     }
 
     #[test]
-    fn arc_layer_pointer_ops() {
-        let arr: ArcValueArray<u64> = ArcValueArray::new();
+    fn box_layer_pointer_ops() {
+        let arr: BoxValueArray<u64> = BoxValueArray::new();
 
         // Use a real allocation for provenance-safe layer pointer simulation.
         let fake_layer: *mut u8 = Box::into_raw(Box::new(0u8));

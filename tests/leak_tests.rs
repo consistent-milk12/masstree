@@ -319,5 +319,5 @@ macro_rules! leak_tests {
     };
 }
 
-leak_tests!(arc_values, MassTree15<u64>);
+leak_tests!(box_values, MassTree15<u64>);
 leak_tests!(inline_values, MassTree15Inline<u64>);

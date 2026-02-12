@@ -48,7 +48,7 @@ use super::ValueArray;
 /// Total: 240 bytes
 /// ```
 ///
-/// This is 120 bytes more than `ArcValueArray<V>` (120 bytes), which is the
+/// This is 120 bytes more than `BoxValueArray<V>` (120 bytes), which is the
 /// cost of inline value storage. The tradeoff: no heap allocation per insert,
 /// no retirement needed for value updates, no pointer indirection for reads.
 ///

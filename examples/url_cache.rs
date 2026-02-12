@@ -139,13 +139,13 @@ impl UrlCache {
     /// Get a cached response, returning None if not found or expired
     ///
     /// If an expired entry is found, it is removed lazily (on-access cleanup).
-    fn get(&self, url: &str) -> Option<Arc<CachedResponse>> {
+    fn get(&self, url: &str) -> Option<CachedResponse> {
         let guard = self.tree.guard();
 
         match self.tree.get_with_guard(url.as_bytes(), &guard) {
             Some(entry) if !entry.is_expired() => {
                 self.stats.hit();
-                Some(entry)
+                Some((*entry).clone())
             }
             Some(_) => {
                 // Entry exists but expired - remove it lazily and count as miss
@@ -220,7 +220,7 @@ impl UrlCache {
 
         // Find all expired entries
         for entry in self.tree.iter(&guard) {
-            // entry.value() returns &Arc<CachedResponse>
+            // entry.value() returns &ValuePtr<CachedResponse>
             let cached = entry.value();
             if cached.is_expired() {
                 to_remove.push(entry.key().to_vec());

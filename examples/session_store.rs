@@ -185,12 +185,12 @@ impl SessionStore {
     }
 
     /// Get a session by ID, returning None if not found or expired
-    fn get_session(&self, session_id: &str) -> Option<Arc<Session>> {
+    fn get_session(&self, session_id: &str) -> Option<Session> {
         let guard = self.sessions.guard();
         let key = format!("session:{session_id}");
 
         match self.sessions.get_with_guard(key.as_bytes(), &guard) {
-            Some(session) if !session.is_expired() => Some(session),
+            Some(session) if !session.is_expired() => Some((*session).clone()),
             Some(_) => {
                 // Expired session - clean it up lazily
                 drop(guard); // Release guard before calling invalidate
@@ -212,7 +212,7 @@ impl SessionStore {
     /// consider using interior mutability (e.g., `RwLock` inside Session).
     fn update_session_data(&self, session_id: &str, key: &str, value: &str) -> bool {
         self.get_session(session_id).is_some_and(|session| {
-            let mut updated = (*session).clone();
+            let mut updated = session.clone();
             updated.touch();
             updated.set_data(key, value);
 
@@ -295,7 +295,7 @@ impl SessionStore {
     }
 
     /// Get all active sessions for a user
-    fn get_user_sessions(&self, user_id: UserId) -> Vec<Arc<Session>> {
+    fn get_user_sessions(&self, user_id: UserId) -> Vec<Session> {
         let user_guard = self.user_index.guard();
         let session_guard = self.sessions.guard();
         let prefix = format!("user:{user_id}:");
@@ -317,7 +317,7 @@ impl SessionStore {
                         .get_with_guard(session_key.as_bytes(), &session_guard)
                         && !session.is_expired()
                     {
-                        sessions.push(session);
+                        sessions.push((*session).clone());
                     }
                 }
 

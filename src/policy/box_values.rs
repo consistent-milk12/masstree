@@ -1,24 +1,30 @@
-//! Arc-based value array implementation.
+//! Box-based value array implementation.
 //!
-//! Stores `Arc<V>` values as raw pointers in `[AtomicPtr<u8>; 15]`.
-//! This is the value storage backend for [`ArcPolicy<V>`].
+//! Stores `Box<V>` values as raw pointers in `[AtomicPtr<u8>; 15]`.
+//! This is the value storage backend for [`BoxPolicy<V>`].
+//!
+//! Unlike [`BoxValueArray`], `load()` does **not** perform any atomic
+//! reference-count operations. Values are returned as [`ValuePtr<V>`]
+//! — a `Copy` wrapper around a raw pointer. Lifetime safety comes from
+//! the EBR guard held by the caller: the pointer remains valid as long
+//! as the guard is alive.
 //!
 //! # Slot State Encoding
 //!
 //! - `null` pointer → Empty
-//! - non-null pointer → Terminal value (`Arc<V>` raw pointer) or Layer pointer
+//! - non-null pointer → Terminal value (`Box<V>` raw pointer) or Layer pointer
 //!
 //! Layer vs value distinction is made by the leaf via `keylenx`.
-//! This array does not discriminate — `load()` returns `Some(Arc)` for any
-//! non-null pointer. The caller **MUST** check `keylenx < LAYER_KEYLENX`
-//! before calling `load()`. Calling `load()` on a layer slot is **UB**
-//! (it would `Arc::increment_strong_count` on a non-Arc pointer).
+//! This array does not discriminate — `load()` returns `Some(ValuePtr)` for
+//! any non-null pointer. The caller **MUST** check `keylenx < LAYER_KEYLENX`
+//! before calling `load()`. Calling `load()` on a layer slot produces a
+//! `ValuePtr` to a non-`V` allocation — dereferencing it is **UB**.
 //!
-//! [`ArcPolicy<V>`]: super::ArcPolicy
+//! [`BoxPolicy<V>`]: super::BoxPolicy
+//! [`BoxValueArray`]: super::BoxValueArray
 
 use std::marker::PhantomData;
 use std::ptr as StdPtr;
-use std::sync::Arc;
 use std::sync::atomic::AtomicPtr;
 
 use crate::leaf15::WIDTH_15;
@@ -26,36 +32,37 @@ use crate::ordering::{READ_ORD, RELAXED, WRITE_ORD};
 
 use super::RetireHandle;
 use super::ValueArray;
+use super::ValuePtr;
 
 // ============================================================================
-//  ArcValueArray<V>
+//  BoxValueArray<V>
 // ============================================================================
 
 /// Value array backed by `[AtomicPtr<u8>; 15]`.
 ///
 /// Each slot stores a raw pointer that is either:
 /// - `null` → slot is empty
-/// - valid `Arc<V>` pointer → terminal value
+/// - valid `Box<V>` pointer → terminal value
 /// - valid node pointer → layer (distinguished by `keylenx` on the leaf)
 ///
 /// # Memory Ownership
 ///
-/// For terminal value slots, this array **owns** one strong reference count
-/// of the `Arc<V>`. When the leaf is dropped, `cleanup()` must be called
-/// for each terminal value slot to decrement the refcount.
+/// For terminal value slots, this array **owns** the heap allocation
+/// produced by `Box::into_raw`. When the leaf is dropped, `cleanup()` must
+/// be called for each terminal value slot to reclaim the allocation.
 ///
 /// For layer pointer slots, ownership belongs to the tree's allocator.
 /// This array merely stores the pointer.
 #[repr(C)]
-pub struct ArcValueArray<V> {
+pub struct BoxValueArray<V> {
     ptrs: [AtomicPtr<u8>; WIDTH_15],
     _marker: PhantomData<V>,
 }
 
-impl<V> ArcValueArray<V> {
-    /// Load the raw pointer at a slot without any Arc operations.
+impl<V> BoxValueArray<V> {
+    /// Load the raw pointer at a slot without any typed interpretation.
     ///
-    /// Used by `ArcPolicy::load_value_ref()` for zero-copy reference returns
+    /// Used by `BoxPolicy::load_value_ref()` for zero-copy reference returns
     /// and by internal classification methods.
     #[inline(always)]
     pub(crate) fn load_raw(&self, slot: usize) -> *mut u8 {
@@ -64,18 +71,17 @@ impl<V> ArcValueArray<V> {
     }
 }
 
-// SAFETY: ArcValueArray is Send+Sync when V: Send+Sync.
+// SAFETY: BoxValueArray is Send+Sync when V: Send+Sync.
 // The AtomicPtr provides thread-safe access. The raw pointers stored
-// are valid Arc<V> pointers or layer pointers protected by the tree's
+// are valid Box<V> pointers or layer pointers protected by the tree's
 // concurrency protocol (OCC + locks).
-unsafe impl<V: Send + Sync> Send for ArcValueArray<V> {}
-unsafe impl<V: Send + Sync> Sync for ArcValueArray<V> {}
+unsafe impl<V: Send + Sync> Send for BoxValueArray<V> {}
+unsafe impl<V: Send + Sync> Sync for BoxValueArray<V> {}
 
-impl<V: Send + Sync + 'static> ValueArray<Arc<V>> for ArcValueArray<V> {
+impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     #[inline(always)]
     fn new() -> Self {
         // Initialize all slots to null (empty).
-        // Using array initialization to avoid per-element loop.
         Self {
             ptrs: std::array::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
             _marker: PhantomData,
@@ -95,7 +101,7 @@ impl<V: Send + Sync + 'static> ValueArray<Arc<V>> for ArcValueArray<V> {
     #[inline(always)]
     fn is_layer(&self, slot: usize) -> bool {
         debug_assert!(slot < WIDTH_15, "is_layer: slot {slot} out of bounds");
-        // WARNING: For Arc mode, this cannot distinguish values from layers.
+        // WARNING: For Box mode, this cannot distinguish values from layers.
         // Returns `true` for ANY non-null pointer, including terminal values.
         // The authoritative layer check is `keylenx >= LAYER_KEYLENX` on the
         // leaf node. This method exists only for the ValueArray trait contract
@@ -111,8 +117,10 @@ impl<V: Send + Sync + 'static> ValueArray<Arc<V>> for ArcValueArray<V> {
     /// # Prechecked Contract
     ///
     /// Caller **must** verify `keylenx < LAYER_KEYLENX` before calling.
-    /// This method does NOT check layer status. Calling on a layer slot is UB.
-    fn load(&self, slot: usize) -> Option<Arc<V>> {
+    /// This method does NOT check layer status. Calling on a layer slot
+    /// produces a `ValuePtr` pointing to a non-`V` allocation — dereferencing
+    /// it is **UB**.
+    fn load(&self, slot: usize) -> Option<ValuePtr<V>> {
         debug_assert!(slot < WIDTH_15, "load: slot {slot} out of bounds");
 
         let ptr: *mut u8 = self.ptrs[slot].load(READ_ORD);
@@ -123,38 +131,36 @@ impl<V: Send + Sync + 'static> ValueArray<Arc<V>> for ArcValueArray<V> {
 
         // SAFETY: Caller has verified `keylenx < LAYER_KEYLENX` before calling
         // (prechecked contract). ptr is non-null and was stored by
-        // output_to_raw (Arc::into_raw). We increment the strong count to
-        // create a new Arc handle without taking ownership of the stored pointer.
+        // into_output (Box::into_raw). We wrap it in ValuePtr without any
+        // refcount operation — the pointer is valid as long as the caller's
+        // EBR guard is held.
         //
-        // WARNING: Calling this on a layer slot is UB — the pointer is not an
-        // Arc allocation. The leaf's classify_slot() and load_value() methods
-        // enforce the keylenx precondition.
-        unsafe {
-            Arc::increment_strong_count(ptr.cast::<V>());
-            Some(Arc::from_raw(ptr.cast::<V>()))
-        }
+        // WARNING: Calling this on a layer slot produces a ValuePtr to a
+        // non-V allocation. The leaf's classify_slot() and load_value()
+        // methods enforce the keylenx precondition.
+        unsafe { Some(ValuePtr::from_raw(ptr.cast::<V>())) }
     }
 
     #[inline(always)]
-    fn store(&self, slot: usize, output: &Arc<V>) {
+    fn store(&self, slot: usize, output: &ValuePtr<V>) {
         debug_assert!(slot < WIDTH_15, "store: slot {slot} out of bounds");
 
-        // Clone the Arc (increment refcount) and convert to raw pointer.
-        // The array takes ownership of one strong reference.
-        let ptr: *mut u8 = Arc::into_raw(Arc::clone(output)) as *mut u8;
+        // Extract the raw pointer from ValuePtr and store it.
+        // The slot takes ownership of the allocation.
+        let ptr: *mut u8 = output.as_ptr().cast::<u8>();
         self.ptrs[slot].store(ptr, WRITE_ORD);
     }
 
     #[inline(always)]
-    fn store_relaxed(&self, slot: usize, output: &Arc<V>) {
+    fn store_relaxed(&self, slot: usize, output: &ValuePtr<V>) {
         debug_assert!(slot < WIDTH_15, "store_relaxed: slot {slot} out of bounds");
 
-        let ptr: *mut u8 = Arc::into_raw(Arc::clone(output)) as *mut u8;
+        let ptr: *mut u8 = output.as_ptr().cast::<u8>();
         self.ptrs[slot].store(ptr, RELAXED);
     }
 
     #[inline(always)]
-    fn update_in_place(&self, slot: usize, output: &Arc<V>) -> RetireHandle {
+    fn update_in_place(&self, slot: usize, output: &ValuePtr<V>) -> RetireHandle {
         debug_assert!(
             slot < WIDTH_15,
             "update_in_place: slot {slot} out of bounds"
@@ -169,14 +175,14 @@ impl<V: Send + Sync + 'static> ValueArray<Arc<V>> for ArcValueArray<V> {
             "update_in_place called on empty slot {slot}"
         );
 
-        let new_ptr: *mut u8 = Arc::into_raw(Arc::clone(output)) as *mut u8;
+        let new_ptr: *mut u8 = output.as_ptr().cast::<u8>();
         self.ptrs[slot].store(new_ptr, WRITE_ORD);
 
         RetireHandle::Ptr(old_ptr)
     }
 
     #[inline(always)]
-    fn take(&self, slot: usize) -> Option<Arc<V>> {
+    fn take(&self, slot: usize) -> Option<ValuePtr<V>> {
         debug_assert!(slot < WIDTH_15, "take: slot {slot} out of bounds");
 
         let old_ptr: *mut u8 = self.ptrs[slot].swap(StdPtr::null_mut(), RELAXED);
@@ -185,10 +191,13 @@ impl<V: Send + Sync + 'static> ValueArray<Arc<V>> for ArcValueArray<V> {
             return None;
         }
 
-        // SAFETY: old_ptr was stored by us via Arc::into_raw.
-        // We take ownership of the stored reference (no refcount change).
-        // The swap to null ensures no double-free.
-        unsafe { Some(Arc::from_raw(old_ptr.cast::<V>())) }
+        // SAFETY: old_ptr was stored by us via Box::into_raw (through into_output).
+        // We take ownership of the stored pointer (no refcount change).
+        // The swap to null ensures no double-free from the slot side.
+        // The caller must ensure the returned ValuePtr is either:
+        // 1. Retired via EBR (for concurrent safety), or
+        // 2. Used only while the guard is held.
+        unsafe { Some(ValuePtr::from_raw(old_ptr.cast::<V>())) }
     }
 
     // ========================================================================
@@ -235,7 +244,7 @@ impl<V: Send + Sync + 'static> ValueArray<Arc<V>> for ArcValueArray<V> {
         );
 
         // Load the raw pointer from source. This may be a value or layer pointer.
-        // No refcount change — we're transferring ownership.
+        // No ownership change — we're transferring the pointer.
         let ptr: *mut u8 = self.ptrs[src_slot].load(RELAXED);
         dst.ptrs[dst_slot].store(ptr, WRITE_ORD);
 
@@ -258,9 +267,9 @@ impl<V: Send + Sync + 'static> ValueArray<Arc<V>> for ArcValueArray<V> {
         // SAFETY: Caller guarantees:
         // 1. Exclusive access (&mut via Drop).
         // 2. Slot contains a terminal value (checked via keylenx in leaf Drop).
-        // 3. The pointer was stored by us via Arc::into_raw.
+        // 3. The pointer was stored by us via Box::into_raw.
         unsafe {
-            drop(Arc::from_raw(ptr.cast::<V>()));
+            drop(Box::from_raw(ptr.cast::<V>()));
         }
     }
 }

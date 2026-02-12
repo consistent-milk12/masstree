@@ -14,7 +14,7 @@
 //!
 //! | Policy | Leaf Size | Cache Lines | Use Case |
 //! |--------|-----------|-------------|----------|
-//! | `ArcPolicy<V>` | 448 bytes | 7 | General-purpose, non-Copy values |
+//! | `BoxPolicy<V>` | 448 bytes | 7 | General-purpose, non-Copy values |
 //! | `InlinePolicy<V>` (default) | 1152 bytes | 18 | Embedded suffix, zero-indirection |
 //! | `InlinePolicy<V>` + `small-suffix-capacity` | 896 bytes | 14 | Smaller embedded suffix |
 //! | `InlinePolicy<V>` + `sidecar-suffix` | 576 bytes | 9 | Compact leaves, pointer-indirect |
@@ -101,13 +101,13 @@ pub const MODSTATE_EMPTY: u8 = 3;
 ///
 /// `repr(C, align(64))`: cache-line aligned. Fields are ordered to isolate
 /// contention — version (CL0) and permutation (CL1) live on separate cache
-/// lines. Size: 448B with `ArcPolicy`, 896B with `InlinePolicy`.
+/// lines. Size: 448B with `BoxPolicy`, 896B with `InlinePolicy`.
 #[repr(C, align(64))]
 pub struct LeafNode15<P: LeafPolicy> {
     // — Cache Line 0: read-heavy, rarely written —
     /// OCC version word.
     version: NodeVersion,
-    /// Lifecycle state: INSERT(0) / REMOVE(1) / DELETED_LAYER(2) / EMPTY(3).
+    /// Lifecycle state: INSERT(0) / REMOVE(1) / `DELETED_LAYER`(2) / EMPTY(3).
     modstate: AtomicU8,
     _pad0: [u8; 55],
 
@@ -196,12 +196,12 @@ impl<P: LeafPolicy> LeafNode15<P> {
         // - All writes are to properly aligned fields
         unsafe {
             // Zero the entire struct first (most fields are zero-initialized).
-            // For ArcPolicy, zero = null pointers (empty slots).
+            // For BoxPolicy, zero = null pointers (empty slots).
             // For InlinePolicy, zero = null tags (empty slots) + zero bits.
             // For SidecarSuffix, zero = null sidecar pointer (both policies).
             StdPtr::write_bytes(ptr, 0, 1);
 
-            let node: &mut LeafNode15<P> = &mut *ptr;
+            let node: &mut Self = &mut *ptr;
 
             // Version: leaf node, optionally root
             StdPtr::write(&raw mut node.version, NodeVersion::new(true));
@@ -216,7 +216,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
             StdPtr::write(&raw mut node.permutation, AtomicPermuter15::new());
 
             // NOTE: values and suffix fields are correctly zero-initialized:
-            // - ArcValueArray: all AtomicPtr null (zero)
+            // - BoxValueArray: all AtomicPtr null (zero)
             // - InlineValueArray: all AtomicPtr null + all AtomicU64 zero
             // - SidecarSuffix: AtomicPtr null (zero) — no-op init:
             P::Suffix::init_at_zero(StdPtr::addr_of_mut!((*ptr).suffix));
@@ -2333,8 +2333,8 @@ impl<P: LeafPolicy> Drop for LeafNode15<P> {
         //  Value Cleanup
         // ====================================================================
         //
-        // For ArcPolicy: each terminal value slot holds one strong reference
-        // to Arc<V>. We must call cleanup() to drop it (decrement refcount).
+        // For BoxPolicy: each terminal value slot holds a raw Box<V> pointer.
+        // We must call cleanup() to drop it (deallocate).
         //
         // For InlinePolicy: values are Copy bits in AtomicU64. No heap
         // allocation, no cleanup needed. The `if P::NEEDS_RETIREMENT` check

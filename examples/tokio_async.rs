@@ -113,7 +113,7 @@ async fn main() {
         // CPU-intensive: scan and process all entries
         for entry in state_clone.tree.iter(&guard) {
             count += 1;
-            // entry.value() returns &Arc<String>
+            // entry.value() returns &ValuePtr<String>
             total_len += entry.value().len();
         }
 
