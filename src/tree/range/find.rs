@@ -1253,6 +1253,7 @@ pub fn process_leaf_batch_ptr<P, F>(
     cursor_key: &mut CursorKey,
     layer_stack: &mut LayerStack<P>,
     end_bound: &RangeBound<'_>,
+    end_bound_ikey: Option<u64>,
     visitor: &mut F,
     count: &mut usize,
 ) -> LeafBatchResult
@@ -1292,6 +1293,21 @@ where
             return LeafBatchResult::LayerEncountered;
         }
 
+        // Fast end bound pre-check using ikey. This avoids full key comparison
+        // for the common case where the first 8 bytes already decide the bound.
+        let mut needs_full_end_check = true;
+        if end_bound_ikey.is_none() {
+            needs_full_end_check = false;
+        } else if cursor_key.is_at_root_layer()
+            && let Some(bound_ikey) = end_bound_ikey
+        {
+            match slot_ikey.cmp(&bound_ikey) {
+                Ordering::Greater => return LeafBatchResult::EndBoundExceeded,
+                Ordering::Less => needs_full_end_check = false,
+                Ordering::Equal => {}
+            }
+        }
+
         // Check value slot
         if leaf.is_value_empty(slot) {
             stack.next();
@@ -1319,7 +1335,7 @@ where
 
         // Check end bound
         let key: &[u8] = cursor_key.full_key();
-        if !end_bound.contains(key) {
+        if needs_full_end_check && !end_bound.contains(key) {
             return LeafBatchResult::EndBoundExceeded;
         }
 
@@ -1378,6 +1394,7 @@ pub fn process_leaf_batch<P, F>(
     cursor_key: &mut CursorKey,
     layer_stack: &mut LayerStack<P>,
     end_bound: &RangeBound<'_>,
+    end_bound_ikey: Option<u64>,
     visitor: &mut F,
     count: &mut usize,
 ) -> LeafBatchResult
@@ -1417,6 +1434,21 @@ where
             return LeafBatchResult::LayerEncountered;
         }
 
+        // Fast end bound pre-check using ikey. This avoids full key comparison
+        // for the common case where the first 8 bytes already decide the bound.
+        let mut needs_full_end_check = true;
+        if end_bound_ikey.is_none() {
+            needs_full_end_check = false;
+        } else if cursor_key.is_at_root_layer()
+            && let Some(bound_ikey) = end_bound_ikey
+        {
+            match slot_ikey.cmp(&bound_ikey) {
+                Ordering::Greater => return LeafBatchResult::EndBoundExceeded,
+                Ordering::Less => needs_full_end_check = false,
+                Ordering::Equal => {}
+            }
+        }
+
         // Check value slot
         if leaf.is_value_empty(slot) {
             stack.next();
@@ -1444,7 +1476,7 @@ where
 
         // Check end bound
         let key: &[u8] = cursor_key.full_key();
-        if !end_bound.contains(key) {
+        if needs_full_end_check && !end_bound.contains(key) {
             return LeafBatchResult::EndBoundExceeded;
         }
 

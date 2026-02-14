@@ -4,11 +4,18 @@
 
 use seize::LocalGuard;
 
+use crate::Permuter;
 use crate::alloc_trait::TreeAllocator;
+use crate::key::{IKEY_SIZE, MAX_KEY_LENGTH};
+use crate::leaf15::{LAYER_KEYLENX, LeafNode15};
+use crate::nodeversion::NodeVersion;
 use crate::policy::LeafPolicy;
 use crate::tree::MassTreeGeneric;
 
+use super::cursor_key::CursorKey;
+use super::helper::{KeyIndexedPosition, lower_with_position};
 use super::iterator::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
+use super::traversal::reach_leaf_for_scan;
 
 // ============================================================================
 //  Range Scan API for MassTreeGeneric
@@ -59,6 +66,34 @@ where
     ) -> RangeIter<'a, 'g, P, A> {
         self.verify_guard(guard);
         RangeIter::new(self, start, end, guard)
+    }
+
+    /// Create a forward-only range iterator (skips backward state initialization).
+    ///
+    /// Used internally by forward-only scan methods (`scan`, `scan_prefix`,
+    /// `scan_intra_leaf_batch`, `scan_values`) to avoid initializing ~300 bytes
+    /// of backward iteration state that will never be accessed.
+    pub(crate) fn range_forward<'a, 'g>(
+        &'a self,
+        start: RangeBound<'a>,
+        end: RangeBound<'a>,
+        guard: &'g LocalGuard<'a>,
+    ) -> RangeIter<'a, 'g, P, A> {
+        self.verify_guard(guard);
+        RangeIter::new_forward_only(self, start, end, guard)
+    }
+
+    /// Create a forward-only iterator rooted at a specific sublayer.
+    pub(crate) fn range_forward_from_root<'a, 'g>(
+        &'a self,
+        layer_root: *const u8,
+        cursor_key: CursorKey,
+        start: RangeBound<'a>,
+        end: RangeBound<'a>,
+        guard: &'g LocalGuard<'a>,
+    ) -> RangeIter<'a, 'g, P, A> {
+        self.verify_guard(guard);
+        RangeIter::new_forward_only_from_root(layer_root, cursor_key, start, end, guard)
     }
 
     /// Create an iterator over all entries.
@@ -260,8 +295,7 @@ where
     where
         F: FnMut(&[u8], P::Output) -> bool,
     {
-        // Use zero-allocation for_each internally
-        self.range(start, end, guard).for_each(visitor)
+        self.range_forward(start, end, guard).for_each(visitor)
     }
 
     /// Highest-performance batch-optimized range scan.
@@ -281,9 +315,7 @@ where
     ///
     /// Available for ALL storage types including:
     /// - `MassTree15<V>` (Arc-based)
-    /// - `MassTree24<V>` (Arc-based)
     /// - `MassTree15Inline<V>` (true-inline)
-    /// - `MassTree24Inline<V>` (Box/index-based)
     ///
     /// For pointer-backed storage that can return references, consider
     /// [`scan_intra_leaf_batch_ref`](Self::scan_intra_leaf_batch_ref) in `api_ref.rs`
@@ -327,7 +359,7 @@ where
     where
         F: FnMut(&[u8], P::Output) -> bool,
     {
-        self.range(start, end, guard)
+        self.range_forward(start, end, guard)
             .for_each_intra_leaf_batch(visitor)
     }
 
@@ -348,9 +380,7 @@ where
     ///
     /// Available for ALL storage types including:
     /// - `MassTree15<V>` (Arc-based)
-    /// - `MassTree24<V>` (Arc-based)
     /// - `MassTree15Inline<V>` (true-inline)
-    /// - `MassTree24Inline<V>` (Box/index-based)
     ///
     /// # Arguments
     ///
@@ -462,7 +492,8 @@ where
     where
         F: FnMut(P::Output) -> bool,
     {
-        self.range(start, end, guard).for_each_values_batch(visitor)
+        self.range_forward(start, end, guard)
+            .for_each_values_batch(visitor)
     }
 
     /// Highest-performance reverse value-only scan (no key materialization).
@@ -529,29 +560,180 @@ where
     ///     println!("User key: {:?}", key);
     ///     true // Continue
     /// }, &guard);
+    ///```
     ///
+    /// # Panics
+    /// Invariant check.
     pub fn scan_prefix<F>(&self, prefix: &[u8], mut visitor: F, guard: &LocalGuard<'_>) -> usize
     where
         F: FnMut(&[u8], P::Output) -> bool,
     {
-        // Compute exclusive upper bound
-        // This is the prefix with its last byte incremented
-        // e.g., "abc" -> "abd", "ab\xff" -> "ac", etc.
-        let upper_bound: Option<Vec<u8>> = compute_prefix_upper_bound(prefix);
+        assert!(
+            prefix.len() <= MAX_KEY_LENGTH,
+            "key length {} exceeds maximum {}",
+            prefix.len(),
+            MAX_KEY_LENGTH
+        );
 
-        let end: RangeBound<'_> = upper_bound
-            .as_ref()
-            .map_or(RangeBound::Unbounded, |bound| RangeBound::Excluded(bound));
+        // Compute exclusive upper bound on the stack (no heap allocation).
+        // Increments the rightmost non-0xFF byte: "abc" -> "abd", "ab\xff" -> "ac".
+        let mut upper_buf = [0u8; MAX_KEY_LENGTH];
+        let upper_len: Option<usize> = compute_prefix_upper_bound_into(prefix, &mut upper_buf);
 
-        // Use zero-allocation for_each with prefix check
-        self.range(RangeBound::Included(prefix), end, guard)
-            .for_each(|key, value| {
-                // Double-check prefix match (handles edge cases)
-                if !key.starts_with(prefix) {
-                    return false;
+        let end: RangeBound<'_> = upper_len.map_or(RangeBound::Unbounded, |len| {
+            RangeBound::Excluded(&upper_buf[..len])
+        });
+
+        // Trie-aware fast path: descend through exact 8-byte chunks when
+        // matching layer pointers exist, then scan from that sublayer root.
+        if let Some((layer_root, descended_chunks)) = self.descend_prefix_layers(prefix, guard)
+            && descended_chunks > 0
+        {
+            let mut cursor = CursorKey::from_slice(prefix);
+            for _ in 0..descended_chunks {
+                if cursor.has_suffix() {
+                    cursor.shift();
+                } else {
+                    cursor.shift_clear();
                 }
-                visitor(key, value)
-            })
+            }
+
+            let prefix_at_chunk_boundary = prefix.len() == descended_chunks * IKEY_SIZE;
+            let mut count = 0usize;
+
+            // Exact prefix key sorts before descendants and may live in the
+            // parent layer (outside the descended sublayer).
+            if prefix_at_chunk_boundary && let Some(value) = self.get_with_guard(prefix, guard) {
+                count += 1;
+                if !visitor(prefix, value) {
+                    return count;
+                }
+            }
+
+            // All descendants in this sublayer share the consumed chunk-prefix.
+            // For exact chunk-boundary prefixes, no additional prefix filtering
+            // is needed inside this sublayer.
+            if prefix_at_chunk_boundary {
+                return count
+                    + self
+                        .range_forward_from_root(
+                            layer_root,
+                            cursor,
+                            RangeBound::Unbounded,
+                            RangeBound::Unbounded,
+                            guard,
+                        )
+                        .for_each_intra_leaf_batch(visitor);
+            }
+
+            return count
+                + self
+                    .range_forward_from_root(
+                        layer_root,
+                        cursor,
+                        RangeBound::Included(prefix),
+                        end,
+                        guard,
+                    )
+                    .for_each_intra_leaf_batch(visitor);
+        }
+
+        // Forward-only iterator with intra-leaf batch processing
+        self.range_forward(RangeBound::Included(prefix), end, guard)
+            .for_each_intra_leaf_batch(|key, value| visitor(key, value))
+    }
+
+    /// Value-only prefix scan (no key materialization).
+    ///
+    /// Like [`scan_prefix`](Self::scan_prefix) but skips building key bytes,
+    /// saving up to 56 bytes of copying per entry for long keys.
+    ///
+    /// # End Bound Accuracy
+    ///
+    /// - For ikey-aligned prefixes (multiples of 8 bytes): **exact**
+    /// - For non-aligned prefixes: **approximate** (may over-include entries
+    ///   sharing the same ikey as the boundary)
+    ///
+    /// # Arguments
+    ///
+    /// - `prefix`: The key prefix to match
+    /// - `visitor`: Callback function `fn(P::Output) -> bool`
+    /// - `guard`: Memory reclamation guard
+    ///
+    /// # Returns
+    ///
+    /// Number of entries visited.
+    pub fn scan_prefix_values<F>(&self, prefix: &[u8], visitor: F, guard: &LocalGuard<'_>) -> usize
+    where
+        F: FnMut(P::Output) -> bool,
+    {
+        assert!(
+            prefix.len() <= MAX_KEY_LENGTH,
+            "key length {} exceeds maximum {}",
+            prefix.len(),
+            MAX_KEY_LENGTH
+        );
+
+        let mut upper_buf: [u8; 256] = [0u8; MAX_KEY_LENGTH];
+        let upper_len: Option<usize> = compute_prefix_upper_bound_into(prefix, &mut upper_buf);
+
+        let end: RangeBound<'_> = upper_len.map_or(RangeBound::Unbounded, |len| {
+            RangeBound::Excluded(&upper_buf[..len])
+        });
+
+        // Trie-aware fast path mirrors scan_prefix:
+        // descend through exact 8-byte chunks and scan from the descended root.
+        if let Some((layer_root, descended_chunks)) = self.descend_prefix_layers(prefix, guard)
+            && descended_chunks > 0
+        {
+            let mut cursor: CursorKey = CursorKey::from_slice(prefix);
+
+            for _ in 0..descended_chunks {
+                if cursor.has_suffix() {
+                    cursor.shift();
+                } else {
+                    cursor.shift_clear();
+                }
+            }
+
+            let prefix_at_chunk_boundary: bool = prefix.len() == descended_chunks * IKEY_SIZE;
+            let mut count: usize = 0usize;
+            let mut visitor: F = visitor;
+
+            if prefix_at_chunk_boundary {
+                if let Some(value) = self.get_with_guard(prefix, guard) {
+                    count += 1;
+                    if !visitor(value) {
+                        return count;
+                    }
+                }
+
+                return count
+                    + self
+                        .range_forward_from_root(
+                            layer_root,
+                            cursor,
+                            RangeBound::Unbounded,
+                            RangeBound::Unbounded,
+                            guard,
+                        )
+                        .for_each_values_batch(visitor);
+            }
+
+            return count
+                + self
+                    .range_forward_from_root(
+                        layer_root,
+                        cursor,
+                        RangeBound::Included(prefix),
+                        end,
+                        guard,
+                    )
+                    .for_each_values_batch(visitor);
+        }
+
+        self.range_forward(RangeBound::Included(prefix), end, guard)
+            .for_each_values_batch(visitor)
     }
 
     // ========================================================================
@@ -598,28 +780,152 @@ where
     }
 }
 
+impl<P, A> MassTreeGeneric<P, A>
+where
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
+{
+    /// Descend through as many full 8-byte prefix chunks as possible.
+    ///
+    /// Returns the sublayer root and number of consumed 8-byte chunks.
+    fn descend_prefix_layers(
+        &self,
+        prefix: &[u8],
+        guard: &LocalGuard<'_>,
+    ) -> Option<(*const u8, usize)> {
+        let full_chunks: usize = prefix.len() / IKEY_SIZE;
+
+        if full_chunks == 0 {
+            return None;
+        }
+
+        let mut current_root = self.load_root_ptr_generic(guard);
+        let mut descended = 0usize;
+
+        while descended < full_chunks {
+            let chunk_ikey = read_full_chunk_ikey(prefix, descended);
+
+            let Some(next_root) = find_layer_child_root::<P>(current_root, chunk_ikey, guard)
+            else {
+                break;
+            };
+
+            current_root = next_root;
+            descended += 1;
+        }
+
+        Some((current_root, descended))
+    }
+}
+
 // ============================================================================
 //  Helper Functions
 // ============================================================================
 
-/// Compute the exclusive upper bound for a prefix scan.
+/// Find child sublayer root for an exact ikey layer-pointer entry in `root`.
+fn find_layer_child_root<P>(
+    root: *const u8,
+    chunk_ikey: u64,
+    guard: &LocalGuard<'_>,
+) -> Option<*const u8>
+where
+    P: LeafPolicy,
+{
+    if root.is_null() {
+        return None;
+    }
+
+    let cursor = CursorKey::from_slice(&chunk_ikey.to_be_bytes());
+    let leaf_ptr: *mut LeafNode15<P> = reach_leaf_for_scan::<P>(root, &cursor, guard);
+
+    if leaf_ptr.is_null() {
+        return None;
+    }
+
+    // SAFETY: leaf_ptr is protected by guard and null-checked above.
+    let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
+    let version: u32 = leaf.version().stable();
+
+    if NodeVersion::is_deleted_version(version) {
+        return None;
+    }
+
+    let perm: Permuter = leaf.permutation();
+    let kx: KeyIndexedPosition = lower_with_position(&cursor, leaf, &perm);
+    let _ = kx.p?;
+
+    let mut i: usize = kx.i;
+
+    while i < perm.size() {
+        let slot: usize = perm.get(i);
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
+
+        if slot_ikey != chunk_ikey {
+            break;
+        }
+
+        if leaf.keylenx(slot) >= LAYER_KEYLENX && !leaf.is_value_empty(slot) {
+            let layer_ptr: *const u8 = leaf.load_layer_raw(slot).cast_const();
+
+            if leaf.version().has_changed(version) {
+                return None;
+            }
+
+            if !layer_ptr.is_null() {
+                return Some(layer_ptr);
+            }
+
+            return None;
+        }
+
+        i += 1;
+    }
+
+    if leaf.version().has_changed(version) {
+        return None;
+    }
+
+    None
+}
+
+#[expect(clippy::indexing_slicing, reason = "chunk bounds are caller-checked")]
+fn read_full_chunk_ikey(prefix: &[u8], chunk_idx: usize) -> u64 {
+    let start: usize = chunk_idx * IKEY_SIZE;
+    let end: usize = start + IKEY_SIZE;
+
+    #[expect(clippy::expect_used, reason = "slice length is guaranteed to be 8")]
+    let bytes: [u8; IKEY_SIZE] = prefix[start..end].try_into().expect("slice is 8 bytes");
+
+    u64::from_be_bytes(bytes)
+}
+
+/// Compute the exclusive upper bound for a prefix scan into a caller-provided buffer.
 ///
-/// Returns `None` if the prefix cannot be incremented (all 0xFF bytes).
+/// Copies the prefix into `buf`, then increments the rightmost non-0xFF byte.
+/// Returns `Some(len)` with the length of the upper bound, or `None` if the prefix
+/// is empty or all 0xFF bytes (unbounded).
+///
+/// This avoids heap allocation by writing directly into a stack buffer.
 #[expect(clippy::indexing_slicing, reason = "Checked")]
-fn compute_prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+fn compute_prefix_upper_bound_into(prefix: &[u8], buf: &mut [u8; MAX_KEY_LENGTH]) -> Option<usize> {
+    assert!(
+        prefix.len() <= MAX_KEY_LENGTH,
+        "key length {} exceeds maximum {}",
+        prefix.len(),
+        MAX_KEY_LENGTH
+    );
+
     if prefix.is_empty() {
         return None; // Unbounded
     }
 
-    let mut upper = prefix.to_vec();
+    buf[..prefix.len()].copy_from_slice(prefix);
 
     // Find the rightmost byte that can be incremented
-    for i in (0..upper.len()).rev() {
-        if upper[i] < 0xFF {
-            upper[i] += 1;
-            upper.truncate(i + 1);
-
-            return Some(upper);
+    for i in (0..prefix.len()).rev() {
+        if buf[i] < 0xFF {
+            buf[i] += 1;
+            return Some(i + 1);
         }
     }
 

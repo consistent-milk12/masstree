@@ -12,6 +12,7 @@
 //! | 06 | deep_trie_traversal | Multi-layer descent (10% writes) |
 //! | 07 | deep_trie_read_only | Multi-layer descent (pure reads) |
 //! | 08 | variable_keys_arc | Structure-only (Arc<[u8]> keys) |
+//! | 09 | prefix_realistic_mixed | Hierarchical prefixes + pagination + writes |
 //!
 //! ## Methodology Notes
 //!
@@ -26,6 +27,7 @@
 //! - Benchmark 04 includes `Vec<u8>` clone overhead; benchmark 08 uses `Arc<[u8]>`
 //!   for structure-only comparison without allocator costs.
 //! - Benchmark 05 counters measure scans/sec not records/sec (~500 records/scan).
+//! - Benchmark 09 counters measure mixed operations/sec (scan/read/write mix).
 //! - See per-benchmark comments for detailed methodology notes.
 //!
 //! ## Running
@@ -1555,6 +1557,74 @@ mod prefix_queries {
             });
     }
 
+    /// Masstree with value-only prefix scan (no key materialization).
+    /// Uses `scan_prefix_values` which skips key reconstruction entirely.
+    #[divan::bench(args = THREAD_COUNTS)]
+    fn masstree15_values(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(keys_shared_prefix::<PREFIX_KEY_SIZE>(N, PREFIX_BUCKETS));
+        let prefixes = Arc::new(random_prefixes(
+            SCANS_PER_THREAD * threads,
+            PREFIX_BUCKETS,
+            42,
+        ));
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * SCANS_PER_THREAD))
+            .with_inputs(|| Arc::new(setup_masstree15_prefix(keys.as_ref())))
+            .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(&tree);
+                        let prefixes = Arc::clone(&prefixes);
+                        let warmup_done = Arc::clone(&warmup_done);
+                        let start = Arc::clone(&start);
+                        thread::spawn(move || {
+                            let guard = tree.guard();
+                            let base = t * SCANS_PER_THREAD;
+
+                            // Warmup
+                            for i in 0..50 {
+                                let prefix = &prefixes[base + (i % SCANS_PER_THREAD)];
+                                let mut count = 0u64;
+                                tree.scan_prefix_values(
+                                    prefix,
+                                    |v| {
+                                        count = count.wrapping_add(v);
+                                        true
+                                    },
+                                    &guard,
+                                );
+                                black_box(count);
+                            }
+                            warmup_done.wait();
+                            start.wait();
+                            pre_measurement_barrier();
+                            let mut total = 0u64;
+                            for i in 0..SCANS_PER_THREAD {
+                                let prefix = &prefixes[base + i];
+                                tree.scan_prefix_values(
+                                    prefix,
+                                    |v| {
+                                        total = total.wrapping_add(v);
+                                        true
+                                    },
+                                    &guard,
+                                );
+                            }
+                            post_measurement_barrier();
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
     #[divan::bench(args = THREAD_COUNTS)]
     fn skipmap(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys_shared_prefix::<PREFIX_KEY_SIZE>(N, PREFIX_BUCKETS));
@@ -2572,6 +2642,677 @@ mod variable_keys_arc {
                             }
                             post_measurement_barrier();
                             black_box(sum);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+}
+
+// =============================================================================
+// 09: REALISTIC PREFIX MIX - Hierarchical Prefixes + Pagination + Updates
+// =============================================================================
+//
+// Simulates a production-style listing workload:
+// - Hierarchical keys (tenant -> collection -> filter token -> unique suffix)
+// - Hot/cold tenant skew for scan prefixes (Zipf-like)
+// - Mixed prefix depths (8/16/20-byte prefixes)
+// - Pagination-style early stop (visitor returns false after N hits)
+// - Concurrent point reads and upserts while scans execute
+//
+// Counter reports MIXED OPS/SEC (not scans/sec):
+// one operation is either a prefix scan, point read, or upsert.
+
+#[divan::bench_group(name = "09_prefix_realistic_mixed", sample_count = 200)]
+mod prefix_realistic_mixed {
+    use super::*;
+    use bench_utils::zipfian_indices;
+
+    const KEY_SIZE: usize = 64;
+    const N: usize = 80_000;
+    const OPS_PER_THREAD: usize = 5_000;
+
+    const SCAN_RATIO: usize = 75;
+    const READ_RATIO: usize = 20;
+    // write ratio is implied: 100 - SCAN_RATIO - READ_RATIO
+
+    const TENANTS: u64 = 64;
+    const COLLECTIONS: u64 = 8;
+    const SEGMENTS: u64 = 4;
+    const DAYS: u64 = 4;
+    const REGIONS: u64 = 2;
+    const KINDS: u64 = 2;
+
+    #[derive(Clone, Copy)]
+    enum OpKind {
+        Scan,
+        Read,
+        Write,
+    }
+
+    #[derive(Clone, Copy)]
+    struct PrefixPlan {
+        prefix: [u8; KEY_SIZE],
+        prefix_len: u8,
+        start_key: [u8; KEY_SIZE],
+        end_key: [u8; KEY_SIZE],
+        limit: u16,
+    }
+
+    struct ThreadWorkload {
+        ops: Vec<OpKind>,
+        scan_plans: Vec<PrefixPlan>,
+        point_indices: Vec<usize>,
+    }
+
+    fn setup_masstree15_prefix_realistic(keys: &[[u8; KEY_SIZE]]) -> MassTree15Inline<u64> {
+        let tree = MassTree15Inline::new();
+        {
+            let guard = tree.guard();
+            for (i, key) in keys.iter().enumerate() {
+                let _ = tree.insert_with_guard(key, i as u64, &guard);
+            }
+        }
+        tree
+    }
+
+    fn setup_skipmap_prefix_realistic(keys: &[[u8; KEY_SIZE]]) -> SkipMap<[u8; KEY_SIZE], u64> {
+        let map = SkipMap::new();
+        for (i, key) in keys.iter().enumerate() {
+            map.insert(*key, i as u64);
+        }
+        map
+    }
+
+    fn setup_tree_index_prefix_realistic(
+        keys: &[[u8; KEY_SIZE]],
+    ) -> TreeIndex<[u8; KEY_SIZE], u64> {
+        let tree = TreeIndex::new();
+        for (i, key) in keys.iter().enumerate() {
+            let _ = tree.insert_sync(*key, i as u64);
+        }
+        tree
+    }
+
+    fn tree_index_upsert_sync_prefix(
+        tree: &TreeIndex<[u8; KEY_SIZE], u64>,
+        key: [u8; KEY_SIZE],
+        value: u64,
+    ) {
+        let mut key = key;
+        let mut value = value;
+        for _ in 0..3 {
+            match tree.insert_sync(key, value) {
+                Ok(()) => return,
+                Err((k, v)) => {
+                    tree.remove_sync(&k);
+                    key = k;
+                    value = v;
+                }
+            }
+        }
+        let _ = tree.insert_sync(key, value);
+    }
+
+    fn xorshift64(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    fn realistic_prefix_keys() -> Vec<[u8; KEY_SIZE]> {
+        let mut out = keys::<KEY_SIZE>(N);
+
+        for (i, key) in out.iter_mut().enumerate() {
+            let i_u64 = i as u64;
+
+            let tenant = i_u64 % TENANTS;
+            let collection = (i_u64 / TENANTS) % COLLECTIONS;
+
+            // 4-byte filter token (segment/day/region/kind) + 4-byte unique tail.
+            let group = i_u64 / (TENANTS * COLLECTIONS);
+            let segment = (group % SEGMENTS) as u8;
+            let day = ((group / SEGMENTS) % DAYS) as u8;
+            let region = ((group / (SEGMENTS * DAYS)) % REGIONS) as u8;
+            let kind = ((group / (SEGMENTS * DAYS * REGIONS)) % KINDS) as u8;
+            let tail = ((i_u64.wrapping_mul(0x9E37_79B9_7F4A_7C15)) >> 32) as u32;
+
+            key[0..8].copy_from_slice(&tenant.to_be_bytes());
+            key[8..16].copy_from_slice(&collection.to_be_bytes());
+            key[16] = segment;
+            key[17] = day;
+            key[18] = region;
+            key[19] = kind;
+            key[20..24].copy_from_slice(&tail.to_be_bytes());
+        }
+
+        out
+    }
+
+    fn prefix_upper_bound(prefix: &[u8; KEY_SIZE], len: usize) -> [u8; KEY_SIZE] {
+        let mut out = [0u8; KEY_SIZE];
+        out[..len].copy_from_slice(&prefix[..len]);
+
+        for i in (0..len).rev() {
+            if out[i] < u8::MAX {
+                out[i] += 1;
+                out[i + 1..].fill(0);
+                return out;
+            }
+            out[i] = 0;
+        }
+
+        // Not expected for this dataset, but keep a bounded range fallback.
+        [u8::MAX; KEY_SIZE]
+    }
+
+    fn shuffled_op_kinds(
+        count: usize,
+        scan_ratio: usize,
+        read_ratio: usize,
+        seed: u64,
+    ) -> Vec<OpKind> {
+        let scan_count = (count * scan_ratio) / 100;
+        let read_count = (count * read_ratio) / 100;
+        let write_count = count - scan_count - read_count;
+
+        let mut ops = Vec::with_capacity(count);
+        ops.extend(std::iter::repeat_n(OpKind::Scan, scan_count));
+        ops.extend(std::iter::repeat_n(OpKind::Read, read_count));
+        ops.extend(std::iter::repeat_n(OpKind::Write, write_count));
+        bench_utils::shuffle(&mut ops, seed);
+        ops
+    }
+
+    fn build_scan_plans(count: usize, seed: u64) -> Vec<PrefixPlan> {
+        let tenants = zipfian_indices(TENANTS as usize, count, 1.15, seed ^ 0x1357_2468_ABCD_EF10);
+        let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+        let mut plans = Vec::with_capacity(count);
+
+        for tenant_idx in tenants {
+            let roll = xorshift64(&mut state);
+            let depth_pick = (roll % 100) as usize;
+            let prefix_len = if depth_pick < 45 {
+                8usize
+            } else if depth_pick < 80 {
+                16usize
+            } else {
+                20usize
+            };
+
+            let limit_pick = ((roll >> 8) % 100) as usize;
+            let limit = if limit_pick < 50 {
+                32usize
+            } else if limit_pick < 85 {
+                128usize
+            } else {
+                512usize
+            };
+
+            let collection = (roll >> 16) % COLLECTIONS;
+            let segment = ((roll >> 24) % SEGMENTS) as u8;
+            let day = ((roll >> 32) % DAYS) as u8;
+            let region = ((roll >> 40) % REGIONS) as u8;
+            let kind = ((roll >> 48) % KINDS) as u8;
+
+            let mut prefix = [0u8; KEY_SIZE];
+            prefix[0..8].copy_from_slice(&(tenant_idx as u64).to_be_bytes());
+            prefix[8..16].copy_from_slice(&collection.to_be_bytes());
+            prefix[16] = segment;
+            prefix[17] = day;
+            prefix[18] = region;
+            prefix[19] = kind;
+
+            let mut start_key = [0u8; KEY_SIZE];
+            start_key[..prefix_len].copy_from_slice(&prefix[..prefix_len]);
+            let end_key = prefix_upper_bound(&prefix, prefix_len);
+
+            plans.push(PrefixPlan {
+                prefix,
+                prefix_len: prefix_len as u8,
+                start_key,
+                end_key,
+                limit: limit as u16,
+            });
+        }
+
+        plans
+    }
+
+    fn build_thread_workload(thread_id: usize) -> ThreadWorkload {
+        let ops = shuffled_op_kinds(
+            OPS_PER_THREAD,
+            SCAN_RATIO,
+            READ_RATIO,
+            42 + thread_id as u64,
+        );
+        let scan_count = ops.iter().filter(|op| matches!(op, OpKind::Scan)).count();
+        let point_count = OPS_PER_THREAD - scan_count;
+
+        let scan_plans = build_scan_plans(scan_count, 11_111 + thread_id as u64);
+        let point_indices = zipfian_indices(N, point_count, 1.05, 22_222 + thread_id as u64);
+
+        ThreadWorkload {
+            ops,
+            scan_plans,
+            point_indices,
+        }
+    }
+
+    fn build_workloads(threads: usize) -> Arc<Vec<ThreadWorkload>> {
+        Arc::new((0..threads).map(build_thread_workload).collect())
+    }
+
+    #[divan::bench(args = THREAD_COUNTS)]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(realistic_prefix_keys());
+        let workloads = build_workloads(threads);
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| Arc::new(setup_masstree15_prefix_realistic(keys.as_ref())))
+            .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(&tree);
+                        let keys = Arc::clone(&keys);
+                        let workloads = Arc::clone(&workloads);
+                        let warmup_done = Arc::clone(&warmup_done);
+                        let start = Arc::clone(&start);
+
+                        thread::spawn(move || {
+                            let guard = tree.guard();
+                            let wl = &workloads[t];
+
+                            let mut scan_i = 0usize;
+                            let mut point_i = 0usize;
+                            for i in 0..WARMUP_OPS {
+                                match wl.ops[i % wl.ops.len()] {
+                                    OpKind::Scan => {
+                                        let plan = wl.scan_plans[scan_i % wl.scan_plans.len()];
+                                        scan_i += 1;
+                                        let mut seen = 0usize;
+                                        tree.scan_prefix(
+                                            &plan.prefix[..usize::from(plan.prefix_len)],
+                                            |_, _| {
+                                                seen += 1;
+                                                seen < usize::from(plan.limit)
+                                            },
+                                            &guard,
+                                        );
+                                    }
+                                    OpKind::Read => {
+                                        let idx =
+                                            wl.point_indices[point_i % wl.point_indices.len()];
+                                        point_i += 1;
+                                        black_box(tree.get_with_guard(&keys[idx], &guard));
+                                    }
+                                    OpKind::Write => {
+                                        let idx =
+                                            wl.point_indices[point_i % wl.point_indices.len()];
+                                        point_i += 1;
+                                        let _ = tree.insert_with_guard(
+                                            &keys[idx],
+                                            (i + 1) as u64,
+                                            &guard,
+                                        );
+                                    }
+                                }
+                            }
+                            warmup_done.wait();
+                            start.wait();
+
+                            pre_measurement_barrier();
+                            let mut total = 0u64;
+                            let mut scan_i = 0usize;
+                            let mut point_i = 0usize;
+                            for (op_idx, op) in wl.ops.iter().enumerate() {
+                                match op {
+                                    OpKind::Scan => {
+                                        let plan = wl.scan_plans[scan_i];
+                                        scan_i += 1;
+                                        let mut seen = 0usize;
+                                        tree.scan_prefix(
+                                            &plan.prefix[..usize::from(plan.prefix_len)],
+                                            |_, v| {
+                                                total = total.wrapping_add(v);
+                                                seen += 1;
+                                                seen < usize::from(plan.limit)
+                                            },
+                                            &guard,
+                                        );
+                                    }
+                                    OpKind::Read => {
+                                        let idx = wl.point_indices[point_i];
+                                        point_i += 1;
+                                        if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                            total = total.wrapping_add(v);
+                                        }
+                                    }
+                                    OpKind::Write => {
+                                        let idx = wl.point_indices[point_i];
+                                        let value = ((t as u64) << 32) ^ op_idx as u64;
+                                        point_i += 1;
+                                        let _ = tree.insert_with_guard(&keys[idx], value, &guard);
+                                    }
+                                }
+                            }
+                            post_measurement_barrier();
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = THREAD_COUNTS)]
+    fn masstree15_values(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(realistic_prefix_keys());
+        let workloads = build_workloads(threads);
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| Arc::new(setup_masstree15_prefix_realistic(keys.as_ref())))
+            .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(&tree);
+                        let keys = Arc::clone(&keys);
+                        let workloads = Arc::clone(&workloads);
+                        let warmup_done = Arc::clone(&warmup_done);
+                        let start = Arc::clone(&start);
+
+                        thread::spawn(move || {
+                            let guard = tree.guard();
+                            let wl = &workloads[t];
+
+                            let mut scan_i = 0usize;
+                            let mut point_i = 0usize;
+                            for i in 0..WARMUP_OPS {
+                                match wl.ops[i % wl.ops.len()] {
+                                    OpKind::Scan => {
+                                        let plan = wl.scan_plans[scan_i % wl.scan_plans.len()];
+                                        scan_i += 1;
+                                        let mut seen = 0usize;
+                                        tree.scan_prefix_values(
+                                            &plan.prefix[..usize::from(plan.prefix_len)],
+                                            |_| {
+                                                seen += 1;
+                                                seen < usize::from(plan.limit)
+                                            },
+                                            &guard,
+                                        );
+                                    }
+                                    OpKind::Read => {
+                                        let idx =
+                                            wl.point_indices[point_i % wl.point_indices.len()];
+                                        point_i += 1;
+                                        black_box(tree.get_with_guard(&keys[idx], &guard));
+                                    }
+                                    OpKind::Write => {
+                                        let idx =
+                                            wl.point_indices[point_i % wl.point_indices.len()];
+                                        point_i += 1;
+                                        let _ = tree.insert_with_guard(
+                                            &keys[idx],
+                                            (i + 1) as u64,
+                                            &guard,
+                                        );
+                                    }
+                                }
+                            }
+                            warmup_done.wait();
+                            start.wait();
+
+                            pre_measurement_barrier();
+                            let mut total = 0u64;
+                            let mut scan_i = 0usize;
+                            let mut point_i = 0usize;
+                            for (op_idx, op) in wl.ops.iter().enumerate() {
+                                match op {
+                                    OpKind::Scan => {
+                                        let plan = wl.scan_plans[scan_i];
+                                        scan_i += 1;
+                                        let mut seen = 0usize;
+                                        tree.scan_prefix_values(
+                                            &plan.prefix[..usize::from(plan.prefix_len)],
+                                            |v| {
+                                                total = total.wrapping_add(v);
+                                                seen += 1;
+                                                seen < usize::from(plan.limit)
+                                            },
+                                            &guard,
+                                        );
+                                    }
+                                    OpKind::Read => {
+                                        let idx = wl.point_indices[point_i];
+                                        point_i += 1;
+                                        if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                            total = total.wrapping_add(v);
+                                        }
+                                    }
+                                    OpKind::Write => {
+                                        let idx = wl.point_indices[point_i];
+                                        let value = ((t as u64) << 32) ^ op_idx as u64;
+                                        point_i += 1;
+                                        let _ = tree.insert_with_guard(&keys[idx], value, &guard);
+                                    }
+                                }
+                            }
+                            post_measurement_barrier();
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = THREAD_COUNTS)]
+    fn skipmap(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(realistic_prefix_keys());
+        let workloads = build_workloads(threads);
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| Arc::new(setup_skipmap_prefix_realistic(keys.as_ref())))
+            .bench_local_values(|map| {
+                let warmup_done = Arc::new(Barrier::new(threads));
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let map = Arc::clone(&map);
+                        let keys = Arc::clone(&keys);
+                        let workloads = Arc::clone(&workloads);
+                        let warmup_done = Arc::clone(&warmup_done);
+                        let start = Arc::clone(&start);
+
+                        thread::spawn(move || {
+                            let wl = &workloads[t];
+
+                            let mut scan_i = 0usize;
+                            let mut point_i = 0usize;
+                            for i in 0..WARMUP_OPS {
+                                match wl.ops[i % wl.ops.len()] {
+                                    OpKind::Scan => {
+                                        let plan = wl.scan_plans[scan_i % wl.scan_plans.len()];
+                                        scan_i += 1;
+                                        let mut seen = 0usize;
+                                        for _ in map.range(plan.start_key..plan.end_key) {
+                                            seen += 1;
+                                            if seen >= usize::from(plan.limit) {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    OpKind::Read => {
+                                        let idx =
+                                            wl.point_indices[point_i % wl.point_indices.len()];
+                                        point_i += 1;
+                                        black_box(map.get(&keys[idx]));
+                                    }
+                                    OpKind::Write => {
+                                        let idx =
+                                            wl.point_indices[point_i % wl.point_indices.len()];
+                                        point_i += 1;
+                                        map.insert(keys[idx], (i + 1) as u64);
+                                    }
+                                }
+                            }
+                            warmup_done.wait();
+                            start.wait();
+
+                            pre_measurement_barrier();
+                            let mut total = 0u64;
+                            let mut scan_i = 0usize;
+                            let mut point_i = 0usize;
+                            for (op_idx, op) in wl.ops.iter().enumerate() {
+                                match op {
+                                    OpKind::Scan => {
+                                        let plan = wl.scan_plans[scan_i];
+                                        scan_i += 1;
+                                        let mut seen = 0usize;
+                                        for entry in map.range(plan.start_key..plan.end_key) {
+                                            total = total.wrapping_add(*entry.value());
+                                            seen += 1;
+                                            if seen >= usize::from(plan.limit) {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    OpKind::Read => {
+                                        let idx = wl.point_indices[point_i];
+                                        point_i += 1;
+                                        if let Some(entry) = map.get(&keys[idx]) {
+                                            total = total.wrapping_add(*entry.value());
+                                        }
+                                    }
+                                    OpKind::Write => {
+                                        let idx = wl.point_indices[point_i];
+                                        let value = ((t as u64) << 32) ^ op_idx as u64;
+                                        point_i += 1;
+                                        map.insert(keys[idx], value);
+                                    }
+                                }
+                            }
+                            post_measurement_barrier();
+                            black_box(total);
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+            });
+    }
+
+    #[divan::bench(args = THREAD_COUNTS)]
+    fn tree_index(bencher: Bencher, threads: usize) {
+        let keys = Arc::new(realistic_prefix_keys());
+        let workloads = build_workloads(threads);
+
+        bencher
+            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .with_inputs(|| Arc::new(setup_tree_index_prefix_realistic(keys.as_ref())))
+            .bench_local_values(|tree| {
+                let warmup_done = Arc::new(Barrier::new(threads));
+                let start = Arc::new(Barrier::new(threads));
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let tree = Arc::clone(&tree);
+                        let keys = Arc::clone(&keys);
+                        let workloads = Arc::clone(&workloads);
+                        let warmup_done = Arc::clone(&warmup_done);
+                        let start = Arc::clone(&start);
+
+                        thread::spawn(move || {
+                            let guard = SddGuard::new();
+                            let wl = &workloads[t];
+
+                            let mut scan_i = 0usize;
+                            let mut point_i = 0usize;
+                            for i in 0..WARMUP_OPS {
+                                match wl.ops[i % wl.ops.len()] {
+                                    OpKind::Scan => {
+                                        let plan = wl.scan_plans[scan_i % wl.scan_plans.len()];
+                                        scan_i += 1;
+                                        black_box(
+                                            tree.range(plan.start_key..plan.end_key, &guard)
+                                                .take(usize::from(plan.limit))
+                                                .count(),
+                                        );
+                                    }
+                                    OpKind::Read => {
+                                        let idx =
+                                            wl.point_indices[point_i % wl.point_indices.len()];
+                                        point_i += 1;
+                                        black_box(tree.peek(&keys[idx], &guard));
+                                    }
+                                    OpKind::Write => {
+                                        let idx =
+                                            wl.point_indices[point_i % wl.point_indices.len()];
+                                        point_i += 1;
+                                        tree_index_upsert_sync_prefix(
+                                            &tree,
+                                            keys[idx],
+                                            (i + 1) as u64,
+                                        );
+                                    }
+                                }
+                            }
+                            warmup_done.wait();
+                            start.wait();
+
+                            pre_measurement_barrier();
+                            let mut total = 0u64;
+                            let mut scan_i = 0usize;
+                            let mut point_i = 0usize;
+                            for (op_idx, op) in wl.ops.iter().enumerate() {
+                                match op {
+                                    OpKind::Scan => {
+                                        let plan = wl.scan_plans[scan_i];
+                                        scan_i += 1;
+                                        for (_, v) in tree
+                                            .range(plan.start_key..plan.end_key, &guard)
+                                            .take(usize::from(plan.limit))
+                                        {
+                                            total = total.wrapping_add(*v);
+                                        }
+                                    }
+                                    OpKind::Read => {
+                                        let idx = wl.point_indices[point_i];
+                                        point_i += 1;
+                                        if let Some(v) = tree.peek(&keys[idx], &guard) {
+                                            total = total.wrapping_add(*v);
+                                        }
+                                    }
+                                    OpKind::Write => {
+                                        let idx = wl.point_indices[point_i];
+                                        let value = ((t as u64) << 32) ^ op_idx as u64;
+                                        point_i += 1;
+                                        tree_index_upsert_sync_prefix(&tree, keys[idx], value);
+                                    }
+                                }
+                            }
+                            post_measurement_barrier();
+                            black_box(total);
                         })
                     })
                     .collect();

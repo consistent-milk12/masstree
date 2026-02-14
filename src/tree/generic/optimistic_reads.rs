@@ -102,7 +102,7 @@ where
         key.current_len() as u8
     };
 
-    // OPTIMIZATION: Fast path flag - if search key has no suffix, skip suffix/layer checks
+    // OPTIM: Fast path flag - if search key has no suffix, skip suffix/layer checks
     // For inline keys (≤8 bytes), we don't need to compare suffixes or check for layer pointers
     let needs_suffix_check: bool = key.has_suffix();
 
@@ -179,8 +179,6 @@ where
 ///
 /// Prefetches the value/layer pointer target immediately after loading it.
 /// This hides memory latency while suffix comparison runs.
-///
-/// C++ ref: `masstree_get.hh:41` - `lv_.prefetch(n_->keylenx_[kx.p])`
 #[inline(always)]
 fn check_slot_match<P>(
     leaf: &LeafNode15<P>,
@@ -206,7 +204,7 @@ where
 
     if slot_keylenx == search_keylenx {
         // Potential exact match
-        // OPTIMIZATION: Only check suffix if the search key has one
+        // OPTIM: Only check suffix if the search key has one
         if needs_suffix_check
             && slot_keylenx == KSUF_KEYLENX
             && !leaf.ksuf_equals(slot, key.suffix())
@@ -218,7 +216,7 @@ where
         return Some(LookupResult::ValueSlot(slot));
     }
 
-    // OPTIMIZATION: Layer pointer check only relevant if search key has suffix
+    // OPTIM: Layer pointer check only relevant if search key has suffix
     if needs_suffix_check && slot_keylenx >= LAYER_KEYLENX {
         let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
 
@@ -852,7 +850,7 @@ where
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             'leaf_loop: loop {
-                // OPTIMIZATION: Compute ikey once per leaf iteration.
+                // OPTIM: Compute ikey once per leaf iteration.
                 // key.shift() mutates on layer descent, so this must be per-iteration.
                 let target_ikey: u64 = key.ikey();
 
@@ -1058,8 +1056,8 @@ where
     ///
     /// # Note
     ///
-    /// This method is only available for pointer-backed storage modes
-    /// (`MassTree24`, `MassTree15`, `MassTree24Inline`).
+    /// This method is only available for pointer-backed storage modes (Currently only MassTree15,
+    /// which uses Box)
     ///
     /// It is not available for true-inline storage (`MassTree15Inline`) because
     /// values are stored as atomic bits, not at stable addresses.
@@ -1079,6 +1077,7 @@ where
     #[inline(always)]
     pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g P::Value> {
         let mut search_key: Key<'_> = Key::new(key);
+
         self.get_impl(&mut search_key, guard, |ptr: *mut u8| {
             // SAFETY: version validated, guard protects from deallocation
             unsafe { &*(ptr.cast::<P::Value>()) }

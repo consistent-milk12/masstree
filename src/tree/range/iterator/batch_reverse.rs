@@ -221,10 +221,8 @@ where
     /// # Availability
     ///
     /// Available for ALL storage types:
-    /// - `MassTree15<V>` (Arc-based)
-    /// - `MassTree24<V>` (Arc-based)
+    /// - `MassTree15<V>` (Box-based)
     /// - `MassTree15Inline<V>` (true-inline)
-    /// - `MassTree24Inline<V>` (Box/index-based)
     ///
     /// # Arguments
     ///

@@ -12,7 +12,7 @@
 #![allow(clippy::unwrap_used)]
 
 use masstree::MassTree15Inline;
-use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
+use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::sync::Arc;
 use std::thread;
 

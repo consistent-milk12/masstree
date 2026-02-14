@@ -129,8 +129,8 @@ pub struct BatchInsertResult<O> {
 
     /// Old values from updated keys (in no particular order).
     ///
-    /// For `MassTree24<V>`, this is `Vec<ValuePtr<V>>`.
-    /// For `MassTree24Inline<V>`, this is `Vec<V>`.
+    /// For `MassTree15<V>`, this is `Vec<ValuePtr<V>>`.
+    /// For `MassTree15Inline<V>`, this is `Vec<V>`.
     pub old_values: Vec<O>,
 
     /// Number of entries that failed and need individual retry.
@@ -286,9 +286,9 @@ where
     /// # Example
     ///
     /// ```rust,ignore
-    /// use masstree::MassTree24;
+    /// use masstree::MassTree15;
     ///
-    /// let tree: MassTree24<u64> = MassTree24::new();
+    /// let tree: MassTree15<u64> = MassTree15::new();
     ///
     /// let entries = vec![
     ///     (b"key1".to_vec(), 1u64),

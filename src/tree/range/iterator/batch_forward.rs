@@ -523,6 +523,7 @@ where
         }
 
         let mut count: usize = 0;
+        let end_bound_ikey: Option<u64> = self.end_bound.extract_ikey();
 
         // Handle initial Emit state from initialize() if present
         if self.state == ScanState::Emit {
@@ -670,6 +671,7 @@ where
                 &mut self.cursor_key,
                 &mut self.layer_stack,
                 &self.end_bound,
+                end_bound_ikey,
                 &mut visitor,
                 &mut count,
             );
@@ -754,6 +756,7 @@ where
         }
 
         let mut count: usize = 0;
+        let end_bound_ikey: Option<u64> = self.end_bound.extract_ikey();
 
         // Handle initial Emit state from initialize() if present
         if self.state == ScanState::Emit {
@@ -885,6 +888,7 @@ where
                 &mut self.cursor_key,
                 &mut self.layer_stack,
                 &self.end_bound,
+                end_bound_ikey,
                 &mut visitor,
                 &mut count,
             );
@@ -980,9 +984,6 @@ where
         }
 
         let mut count: usize = 0;
-
-        // Pre-extract end bound ikey for fast comparison
-        let end_bound_ikey: Option<u64> = self.end_bound.extract_ikey();
 
         // Handle initial Emit state from initialize() if present
         if self.state == ScanState::Emit {
@@ -1103,6 +1104,12 @@ where
             // VALUE-ONLY BATCH: Process all remaining entries without key building
             // (Fast path - no duplicate checking needed)
             // ================================================================
+
+            // Layer-aware ikey extraction: align end-bound ikey with the current
+            // trie depth so descended scans don't compare sublayer ikeys against
+            // root-layer bound bytes.
+            let end_bound_ikey: Option<u64> =
+                self.end_bound.extract_ikey_at(self.cursor_key.offset());
 
             let result = process_leaf_batch_values(
                 &mut self.stack,

@@ -260,7 +260,7 @@ where
     /// Packed boolean flags.
     ///
     /// Contains: exhausted, initialized, `emit_equal`, `needs_duplicate_check`, `single_layer_mode`,
-    /// `back_initialized`, `back_exhausted`, `back_emit_equal`
+    /// `back_initialized`, `back_exhausted`, `back_emit_equal`, `forward_only`
     pub(super) flags: IterFlags,
 
     // ========================================================================
@@ -318,6 +318,123 @@ where
     P: LeafPolicy,
     A: TreeAllocator<P>,
 {
+    /// Create a forward-only range iterator (no backward state initialization).
+    ///
+    /// This is cheaper than [`new`](Self::new) because it skips initializing
+    /// backward iteration state (~300 bytes of `CursorKey`, `BackStackElement`,
+    /// `ReverseScanHelper`, etc.). Use this when you know only forward batch
+    /// methods will be called (`for_each`, `for_each_intra_leaf_batch`,
+    /// `for_each_values_batch`).
+    ///
+    /// If reverse iteration is requested later (`next_back` / `.rev()`), reverse
+    /// state is lazily initialized on first use to preserve correctness.
+    pub(crate) fn new_forward_only(
+        tree: &'a MassTreeGeneric<P, A>,
+        start: RangeBound<'a>,
+        end: RangeBound<'a>,
+        guard: &'g LocalGuard<'a>,
+    ) -> Self {
+        let (start_key, emit_equal) = start.to_start_params();
+        let cursor_key = CursorKey::from_slice(start_key);
+        let root = tree.load_root_ptr_generic(guard);
+        let stack = ScanStackElement::new(root);
+
+        let single_layer_mode = {
+            let start_ok = start_key.len() <= IKEY_SIZE;
+            let end_ok = match &end {
+                RangeBound::Unbounded => true,
+                RangeBound::Included(k) | RangeBound::Excluded(k) => k.len() <= IKEY_SIZE,
+            };
+            start_ok && end_ok
+        };
+
+        Self {
+            // Forward iteration state (fully initialized)
+            guard,
+            stack,
+            layer_stack: ArrayVec::new(),
+            cursor_key,
+            state: ScanState::FindNext,
+            snapshot: None,
+            last_output: None,
+
+            // Backward state: cheap defaults (never accessed by forward batch methods)
+            back_stack: BackStackElement::default(),
+            back_layer_stack: ArrayVec::new(),
+            back_cursor_key: CursorKey::empty(),
+            back_helper: ReverseScanHelper::new(),
+            back_state: ScanStateBack::FindPrev,
+            back_snapshot: None,
+
+            // Shared state
+            tree_root: root,
+            start_bound: start,
+            end_bound: end,
+            flags: IterFlags::with_forward_only(emit_equal, single_layer_mode),
+
+            #[cfg(debug_assertions)]
+            debug_last_emitted_key: None,
+            #[cfg(debug_assertions)]
+            debug_last_emitted_key_back: None,
+            #[cfg(debug_assertions)]
+            debug_last_cursor_state: None,
+            #[cfg(debug_assertions)]
+            debug_transition_history: Vec::with_capacity(32),
+
+            _marker: PhantomData,
+        }
+    }
+
+    /// Create a forward-only range iterator rooted at a specific sublayer.
+    ///
+    /// The `cursor_key` must already be prepared for that layer (offset/len set
+    /// as if descent had already occurred).
+    pub(crate) fn new_forward_only_from_root(
+        layer_root: *const u8,
+        cursor_key: CursorKey,
+        start_bound: RangeBound<'a>,
+        end_bound: RangeBound<'a>,
+        guard: &'g LocalGuard<'a>,
+    ) -> Self {
+        let stack = ScanStackElement::new(layer_root);
+
+        Self {
+            // Forward iteration state (fully initialized except lazy initialize())
+            guard,
+            stack,
+            layer_stack: ArrayVec::new(),
+            cursor_key,
+            state: ScanState::FindNext,
+            snapshot: None,
+            last_output: None,
+
+            // Backward state: cheap defaults (forward path)
+            back_stack: BackStackElement::default(),
+            back_layer_stack: ArrayVec::new(),
+            back_cursor_key: CursorKey::empty(),
+            back_helper: ReverseScanHelper::new(),
+            back_state: ScanStateBack::FindPrev,
+            back_snapshot: None,
+
+            // Shared state
+            tree_root: layer_root,
+            start_bound,
+            end_bound,
+            flags: IterFlags::with_forward_only(true, false),
+
+            #[cfg(debug_assertions)]
+            debug_last_emitted_key: None,
+            #[cfg(debug_assertions)]
+            debug_last_emitted_key_back: None,
+            #[cfg(debug_assertions)]
+            debug_last_cursor_state: None,
+            #[cfg(debug_assertions)]
+            debug_transition_history: Vec::with_capacity(32),
+
+            _marker: PhantomData,
+        }
+    }
+
     /// Create a new range iterator.
     ///
     /// # Arguments
@@ -727,6 +844,24 @@ where
         if self.flags.back_initialized() {
             return;
         }
+
+        // Forward-only constructor path: lazily materialize reverse state
+        // when callers request `next_back`/`.rev()`.
+        let mut back_emit_equal = self.flags.back_emit_equal();
+        if self.flags.forward_only() {
+            back_emit_equal = matches!(
+                self.end_bound,
+                RangeBound::Unbounded | RangeBound::Included(_)
+            );
+            self.back_stack = BackStackElement::new(self.tree_root);
+            self.back_layer_stack.clear();
+            self.back_cursor_key = CursorKey::for_reverse_scan(&self.end_bound);
+            self.back_helper = ReverseScanHelper::new();
+            self.back_state = ScanStateBack::FindPrev;
+            self.back_snapshot = None;
+            self.flags.clear_forward_only();
+        }
+
         self.flags.mark_back_initialized();
 
         // Handle empty tree
@@ -747,7 +882,7 @@ where
                 &mut self.back_stack,
                 &mut self.back_cursor_key,
                 &mut self.back_layer_stack,
-                self.flags.back_emit_equal(),
+                back_emit_equal,
                 &mut self.back_helper,
                 self.guard,
             );

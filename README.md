@@ -46,42 +46,44 @@ Copy types.
 
 ## vs Rust Concurrent Maps (12T SMT)
 
-> Source: `runs/run174_read_write.txt`
+> Source: `runs/run176_read_write.txt`
 > **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
 
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **34.85** | 14.61 | 10.15 | 13.71 | **2.39x** |
-| 02_zipfian | **34.32** | 15.21 | 11.88 | 3.39 | **2.26x** |
-| 03_shared_prefix | **23.21** | 14.25 | 9.75 | 14.13 | **1.63x** |
-| 04_high_contention | **58.77** | 21.67 | 17.04 | 2.00 | **2.71x** |
-| 05_large_dataset | **15.20** | 10.05 | 8.28 | 8.29 | **1.51x** |
-| 06_single_hot_key | **11.43** | 5.56 | 6.17 | 2.40 | **1.85x** |
-| 07_mixed_50_50 | **31.72** | 8.73 | 6.38 | 14.13 | **2.24x** |
-| 08_8byte_keys | **48.53** | 25.27 | 15.02 | 19.33 | **1.92x** |
-| 09_pure_read | **41.04** | 26.29 | 19.03 | 16.91 | **1.56x** |
-| 10_remove_heavy | **20.17** | 16.97 | 7.35 | 4.37 | **1.19x** |
-| 13_insert_only_fair | **31.78** | 23.45 | 14.68 | 5.89 | **1.36x** |
-| 14_pure_insert | **13.20** | 12.64 | 9.62 | 2.51 | **1.04x** |
+| 01_uniform | **40.63** | 13.54 | 12.01 | 14.36 | **2.83x** |
+| 02_zipfian | **36.54** | 17.73 | 12.11 | 2.92 | **2.06x** |
+| 03_shared_prefix | **21.72** | 13.04 | 9.79 | 13.34 | **1.63x** |
+| 04_high_contention | **59.88** | 20.99 | 16.30 | 1.96 | **2.85x** |
+| 05_large_dataset | **16.43** | 10.13 | 8.50 | 8.51 | **1.62x** |
+| 06_single_hot_key | **10.87** | 5.32 | 6.22 | 2.30 | **1.75x** |
+| 07_mixed_50_50 | **28.89** | 7.75 | 5.99 | 13.40 | **2.16x** |
+| 08_8byte_keys | **48.28** | 26.54 | 14.08 | 18.07 | **1.82x** |
+| 09_pure_read | **45.28** | 24.51 | 16.72 | 16.97 | **1.85x** |
+| 10_remove_heavy | **17.95** | 13.64 | 6.89 | 4.33 | **1.32x** |
+| 13_insert_only_fair | **30.92** | 19.64 | 13.93 | 5.83 | **1.57x** |
+| 14_pure_insert | **13.28** | 12.20 | 9.48 | 2.25 | **1.09x** |
 
 ## High-Impact Workloads (12T SMT)
 
-> Source: `runs/run154_high_impact_twig_optimization.txt`
+> Source: `runs/run180_high_impact.txt`
 > **Config:** 12 threads on 6 physical cores (SMT), 200 samples
 
 Benchmarks targeting Masstree's architectural advantages: long keys, variable-length keys,
-hot key patterns, mixed operations, prefix queries, and deep trie traversal.
+hot key patterns, mixed operations, prefix queries, deep trie traversal, and mixed prefix workloads.
 
 | Benchmark | masstree15 | indexset | tree_index | skipmap | MT vs Best |
 |-----------|------------|----------|------------|---------|------------|
-| 01_long_keys_128b | **34.95** | 14.58 | 14.98 | 11.15 | **2.33x** |
-| 02_multiple_hot_keys | **40.97** | 14.24 | 12.43 | 13.26 | **2.88x** |
-| 03_mixed_get_insert_remove | **27.24** | 6.00 | 11.93 | 8.85 | **2.28x** |
-| 04_variable_long_keys | **28.17** | 9.30 | 8.29 | 7.51 | **3.03x** |
-| 05_prefix_queries (Kitem/s) | **426.3** | n/a | 14.56 | 140.7 | **3.02x** |
-| 06_deep_trie_traversal | **18.16** | 13.77 | 11.16 | 8.84 | **1.32x** |
-| 07_deep_trie_read_only | **27.90** | 15.05 | 17.35 | 15.28 | **1.61x** |
-| 08_variable_keys_arc | **29.56** | 11.13 | 11.55 | 8.46 | **2.56x** |
+| 01_long_keys_128b | **34.08** | 14.66 | 15.32 | 10.25 | **2.22x** |
+| 02_multiple_hot_keys | **42.11** | 13.85 | 15.47 | 14.47 | **2.72x** |
+| 03_mixed_get_insert_remove | **22.52** | 5.92 | 11.86 | 8.64 | **1.90x** |
+| 04_variable_long_keys | **24.34** | 8.57 | 9.01 | 7.67 | **2.70x** |
+| 05_prefix_queries (Kitem/s) | **849.8** | n/a | 702.7 | 143.1 | **1.21x** |
+| 05_prefix_values (Mitem/s) | **2.193** | n/a | n/a | n/a | — |
+| 06_deep_trie_traversal | **17.91** | 13.87 | 10.97 | 8.56 | **1.29x** |
+| 07_deep_trie_read_only | **26.22** | 14.90 | 16.23 | 11.97 | **1.62x** |
+| 08_variable_keys_arc | **26.17** | 11.14 | 11.14 | 7.94 | **2.35x** |
+| 09_prefix_realistic_mixed | **4.551** | n/a | 3.964 | 0.995 | **1.15x** |
 
 ## Range Scans (6T Physical)
 
@@ -260,7 +262,7 @@ use masstree::{MassTree, MassTree15, MassTree15Inline};
 // Default: inline storage for Copy types (recommended)
 let tree: MassTree<u64> = MassTree::new();
 
-// Arc-based storage for non-Copy types
+// Box-based storage for non-Copy types
 let tree_arc: MassTree15<String> = MassTree15::new();
 
 // Explicit inline storage (same as MassTree)

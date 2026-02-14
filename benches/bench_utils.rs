@@ -15,7 +15,7 @@
 use std::sync::atomic::{Ordering as AtomicOrdering, fence};
 
 use arrayvec::ArrayVec;
-use rand::{Rng, SeedableRng, seq::SliceRandom};
+use rand::{RngExt, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Zipf};
 

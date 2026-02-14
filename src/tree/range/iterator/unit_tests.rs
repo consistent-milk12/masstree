@@ -227,6 +227,26 @@ fn test_alternating_next_next_back() {
 }
 
 #[test]
+fn test_forward_only_iterator_supports_reverse_lazily() {
+    let tree = MassTree::<u64>::default();
+    tree.insert(b"a", 1);
+    tree.insert(b"b", 2);
+    tree.insert(b"c", 3);
+    tree.insert(b"d", 4);
+
+    let guard = tree.guard();
+    let mut iter = tree.range_forward(RangeBound::Unbounded, RangeBound::Unbounded, &guard);
+
+    assert_eq!(iter.next().unwrap().key(), b"a");
+    assert_eq!(iter.next_back().unwrap().key(), b"d");
+    assert_eq!(iter.next_back().unwrap().key(), b"c");
+    assert_eq!(iter.next().unwrap().key(), b"b");
+
+    assert!(iter.next().is_none());
+    assert!(iter.next_back().is_none());
+}
+
+#[test]
 fn test_rev_with_longer_keys() {
     let tree = MassTree::<u64>::default();
 

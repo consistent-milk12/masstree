@@ -141,11 +141,21 @@ impl<'a> RangeBound<'a> {
     #[must_use]
     #[inline]
     pub fn extract_ikey(&self) -> Option<u64> {
+        self.extract_ikey_at(0)
+    }
+
+    /// Extract the ikey at a specific key offset for fast layer-aligned checks.
+    ///
+    /// `offset` is the number of key bytes already consumed by trie descent.
+    /// Returns `None` for `Unbounded`.
+    #[must_use]
+    #[inline]
+    pub fn extract_ikey_at(&self, offset: usize) -> Option<u64> {
         match self {
             RangeBound::Unbounded => None,
 
             RangeBound::Included(bound) | RangeBound::Excluded(bound) => {
-                Some(Self::key_to_ikey(bound))
+                Some(Self::key_to_ikey_at(bound, offset))
             }
         }
     }
@@ -153,15 +163,24 @@ impl<'a> RangeBound<'a> {
     /// Convert key bytes to ikey (first 8 bytes as big-endian u64).
     #[inline]
     #[expect(clippy::indexing_slicing, reason = "length is checked before indexing")]
-    fn key_to_ikey(key: &[u8]) -> u64 {
-        if key.len() >= IKEY_SIZE {
+    fn key_to_ikey_at(key: &[u8], offset: usize) -> u64 {
+        if offset >= key.len() {
+            return 0;
+        }
+
+        let remaining = key.len() - offset;
+        if remaining >= IKEY_SIZE {
             // SAFETY: length checked above
             #[expect(clippy::expect_used, reason = "length is checked")]
-            u64::from_be_bytes(key[..IKEY_SIZE].try_into().expect("slice is 8 bytes"))
+            u64::from_be_bytes(
+                key[offset..offset + IKEY_SIZE]
+                    .try_into()
+                    .expect("slice is 8 bytes"),
+            )
         } else {
             // Zero-pad short keys
             let mut bytes = [0u8; IKEY_SIZE];
-            bytes[..key.len()].copy_from_slice(key);
+            bytes[..remaining].copy_from_slice(&key[offset..]);
             u64::from_be_bytes(bytes)
         }
     }

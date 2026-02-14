@@ -599,7 +599,7 @@ pub struct ScanSnapshot<P: LeafPolicy> {
 ///
 /// # Type Parameter
 ///
-/// - `V`: The value type stored in the tree (e.g., `u64` for `MassTree24<u64>`)
+/// - `V`: The value type stored in the tree (e.g., `u64` for `MassTree15<u64>`)
 ///
 /// # Safety
 ///

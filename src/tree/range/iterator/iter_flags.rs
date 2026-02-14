@@ -4,7 +4,7 @@
 
 /// Packed boolean flags for iterator state.
 ///
-/// Uses a u16 bitfield to store 9 boolean flags efficiently.
+/// Uses a u16 bitfield to store 10 boolean flags efficiently.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IterFlags(u16);
 
@@ -21,6 +21,8 @@ impl IterFlags {
     const BACK_INITIALIZED: u16 = 1 << 6;
     const BACK_EMIT_EQUAL: u16 = 1 << 7;
     const BACK_NEEDS_DUPLICATE_CHECK: u16 = 1 << 8;
+    // Constructor mode
+    const FORWARD_ONLY: u16 = 1 << 9;
 
     /// Create new flags with all bits cleared.
     #[inline(always)]
@@ -41,6 +43,14 @@ impl IterFlags {
             bits |= Self::SINGLE_LAYER_MODE;
         }
 
+        Self(bits)
+    }
+
+    /// Create flags for forward-only constructors.
+    #[inline(always)]
+    pub const fn with_forward_only(emit_equal: bool, single_layer_mode: bool) -> Self {
+        let mut bits = Self::with_values(emit_equal, single_layer_mode).0;
+        bits |= Self::FORWARD_ONLY;
         Self(bits)
     }
 
@@ -116,6 +126,11 @@ impl IterFlags {
     #[inline(always)]
     pub const fn back_needs_duplicate_check(self) -> bool {
         self.0 & Self::BACK_NEEDS_DUPLICATE_CHECK != 0
+    }
+
+    #[inline(always)]
+    pub const fn forward_only(self) -> bool {
+        self.0 & Self::FORWARD_ONLY != 0
     }
 
     // ========================================================================
@@ -233,5 +248,14 @@ impl IterFlags {
     #[inline(always)]
     pub const fn require_back_duplicate_check(&mut self) {
         self.0 |= Self::BACK_NEEDS_DUPLICATE_CHECK;
+    }
+
+    /// Mark this iterator as no longer forward-only.
+    ///
+    /// Used when a forward-only iterator receives a reverse call and lazily
+    /// initializes reverse state.
+    #[inline(always)]
+    pub const fn clear_forward_only(&mut self) {
+        self.0 &= !Self::FORWARD_ONLY;
     }
 }

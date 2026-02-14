@@ -61,9 +61,7 @@ where
     /// # Availability
     ///
     /// This method is only available for pointer-backed storage modes:
-    /// - `MassTree15<V>` (Arc-based)
-    /// - `MassTree24<V>` (Arc-based)
-    /// - `MassTree24Inline<V>` (Box/index-based)
+    /// - `MassTree15<V>` (Box-based)
     ///
     /// It is **NOT** available for true-inline storage (`MassTree15Inline`).
     /// Use [`Self::scan`] instead for inline storage.
@@ -111,8 +109,7 @@ where
     where
         F: FnMut(&[u8], &P::Value) -> bool,
     {
-        // Use zero-copy for_each_ref internally
-        self.range(start, end, guard).for_each_ref(visitor)
+        self.range_forward(start, end, guard).for_each_ref(visitor)
     }
 
     /// Batch scan with zero-copy value references and reduced dispatch overhead.
@@ -175,8 +172,8 @@ where
     where
         F: FnMut(&[u8], &P::Value) -> bool,
     {
-        // Delegate to RangeIter::for_each_batch_ref which has correct initialization
-        self.range(start, end, guard).for_each_batch_ref(visitor)
+        self.range_forward(start, end, guard)
+            .for_each_batch_ref(visitor)
     }
 
     /// Intra-leaf batch scan with maximum performance.
@@ -233,7 +230,7 @@ where
     where
         F: FnMut(&[u8], &P::Value) -> bool,
     {
-        self.range(start, end, guard)
+        self.range_forward(start, end, guard)
             .for_each_intra_leaf_batch_ref(visitor)
     }
 
