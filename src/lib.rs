@@ -182,22 +182,21 @@ pub fn init_tracing() {
 #[cfg(not(feature = "tracing"))]
 pub const fn init_tracing() {}
 
-// Core public API
-pub mod alloc15;
-pub mod alloc_trait;
-pub mod inline;
-pub mod internode;
-pub mod key;
-pub mod leaf15;
-pub mod leaf_trait;
-pub mod nodeversion;
-pub mod permuter;
-pub mod ref_value_slot;
-pub mod suffix;
-pub mod tree;
-pub mod value;
+// All modules are crate-internal. Public types are re-exported below.
+pub(crate) mod alloc15;
+pub(crate) mod alloc_trait;
+pub(crate) mod inline;
+pub(crate) mod internode;
+pub(crate) mod key;
+pub(crate) mod leaf15;
+pub(crate) mod leaf_trait;
+pub(crate) mod nodeversion;
+pub(crate) mod permuter;
+pub(crate) mod ref_value_slot;
+pub(crate) mod suffix;
+pub(crate) mod tree;
+pub(crate) mod value;
 
-// Internal implementation details
 pub(crate) mod hints;
 pub(crate) mod ksearch;
 pub(crate) mod link;
@@ -212,44 +211,39 @@ mod shard_counter;
 #[allow(dead_code)]
 pub mod insert_stats;
 
-// Note: AllocError/AllocKind/AllocResult removed - allocations are now infallible
-pub use retirement::BatchedRetire;
+// ============================================================================
+//  Public API Re-exports
+//
+//  All public types are re-exported here. Internal modules are pub(crate).
+// ============================================================================
 
-// Re-export leaf node traits for generic tree operations
-pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
-
-// Re-export allocator trait for generic tree operations
-pub use alloc_trait::TreeAllocator;
-
-// Re-export Permuter types
-pub use permuter::{AtomicPermuter, AtomicPermuter15, Permuter, Permuter15};
-
-// Re-export leaf node types
-pub use leaf15::{LeafNode15, MODSTATE_DELETED_LAYER, MODSTATE_INSERT, MODSTATE_REMOVE, WIDTH_15};
-
-// Re-export internode and version types (for debugging)
-pub use internode::InternodeNode;
-pub use nodeversion::NodeVersion;
-
-// Re-export allocator types
-pub use alloc15::SeizeAllocator;
-
-// Re-export inline types
-pub use inline::bits::InlineBits;
-
-// Re-export value types
-pub use value::{InsertTarget, LeafValue, SplitPoint};
-
-// Re-export link utilities (internal - use crate:: paths)
-pub(crate) use link::Linker;
-
-// Re-export main types for convenience
-pub use policy::{BoxPolicy, LeafPolicy, ValuePtr};
-pub use ref_value_slot::RefLeafPolicy;
-pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
+// Core tree types
+pub use tree::{BatchEntry, BatchInsertResult, batch};
 pub use tree::{InsertError, RemoveError};
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use tree::{MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};
 
-// Re-export batch insert types
-pub use tree::{BatchEntry, BatchInsertResult, batch};
+// Value storage policies
+pub use inline::bits::InlineBits;
+pub use policy::{BoxPolicy, LeafPolicy, ValuePtr};
+pub use ref_value_slot::RefLeafPolicy;
+pub use value::LeafValue;
+
+// Key types and constants
+pub use key::{IKEY_SIZE, Key, MAX_KEY_LENGTH};
+
+// Node types (for generic tree programming)
+pub use alloc_trait::TreeAllocator;
+pub use alloc15::SeizeAllocator;
+pub use internode::InternodeNode;
+pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
+pub use leaf15::LeafNode15;
+pub use nodeversion::NodeVersion;
+pub use permuter::{AtomicPermuter, AtomicPermuter15, MAX_WIDTH, Permuter, Permuter15};
+pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
+
+// Memory reclamation
+pub use retirement::BatchedRetire;
+
+// Internal re-exports (crate-only)
+pub(crate) use link::Linker;

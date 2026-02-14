@@ -105,7 +105,7 @@ impl PermuterUtils {
 /// # Example
 ///
 /// ```rust,ignore
-/// use masstree::permuter::Permuter;
+/// use masstree::Permuter;
 ///
 /// // Default WIDTH=15
 /// let mut p = Permuter::empty();
@@ -175,9 +175,6 @@ impl<const WIDTH: usize> Default for Permuter<WIDTH> {
 
 /// Type alias for standard 15-slot permuter.
 pub type Permuter15 = Permuter<15>;
-
-/// Type alias for compact 7-slot permuter (2 cache lines).
-pub type PermuterCompact = Permuter<7>;
 
 impl<const WIDTH: usize> Permuter<WIDTH> {
     /// Create an empty permuter with size 0.

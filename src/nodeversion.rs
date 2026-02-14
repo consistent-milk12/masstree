@@ -154,7 +154,7 @@ impl Backoff {
 /// # Example
 ///
 /// ```rust
-/// use masstree::nodeversion::NodeVersion;
+/// use masstree::NodeVersion;
 ///
 /// // Create a leaf node version
 /// let v = NodeVersion::new(true);
@@ -1003,7 +1003,7 @@ impl NodeVersion {
     /// # Example
     /// ```rust,ignore
     /// use std::time::Duration;
-    /// use masstree::nodeversion::NodeVersion;
+    /// use masstree::NodeVersion;
     ///
     /// let version = NodeVersion::new(true);
     /// if let Some(guard) = version.try_lock_for(Duration::from_millis(100)) {
@@ -1248,161 +1248,6 @@ impl Clone for NodeVersion {
 
 impl Default for NodeVersion {
     /// Creates a new leaf node version.
-    fn default() -> Self {
-        Self::new(true)
-    }
-}
-
-// ============================================================================
-//  SingleThreadedNodeVersion (for benchmarks)
-// ============================================================================
-
-/// A single-threaded node version that skips synchronization.
-///
-/// This is useful for single-threaded benchmarks where you want to measure
-/// the overhead of the data structure without synchronization costs.
-///
-/// All operations return immediately without any atomic operations or fences.
-/// This is NOT thread-safe and must only be used in single-threaded contexts.
-///
-/// # Reference
-/// C++ `nodeversion.hh` has `singlethreaded_nodeversion` for this purpose.
-#[derive(Debug, Clone)]
-pub struct SingleThreadedNodeVersion {
-    value: u32,
-}
-
-/// A no-op lock guard for single-threaded usage.
-///
-/// Does nothing on drop since there's no actual lock to release.
-#[derive(Debug)]
-#[must_use = "releasing a lock without using the guard is a logic error"]
-pub struct SingleThreadedLockGuard<'a> {
-    version: &'a mut SingleThreadedNodeVersion,
-}
-
-impl Drop for SingleThreadedLockGuard<'_> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        // Same logic as the real LockGuard drop:
-        // - If splitting: increment split counter, clear dirty/lock bits
-        // - If inserting: increment insert counter, clear inserting/lock bits
-        let value: u32 = self.version.value;
-        self.version.value = if (value & SPLITTING_BIT) != 0 {
-            (value.wrapping_add(VSPLIT_LOWBIT)) & SPLIT_UNLOCK_MASK
-        } else {
-            value.wrapping_add(VINSERT_LOWBIT) & UNLOCK_MASK
-        };
-    }
-}
-
-impl SingleThreadedLockGuard<'_> {
-    /// Mark the node as being inserted into (no-op, for API compatibility).
-    #[inline(always)]
-    pub const fn mark_insert(&mut self) {
-        // No-op - version increments on drop anyway
-    }
-
-    /// Mark the node as being split.
-    #[inline(always)]
-    pub const fn mark_split(&mut self) {
-        self.version.value |= SPLITTING_BIT;
-    }
-
-    /// Mark the node as deleted.
-    #[inline(always)]
-    pub const fn mark_deleted(&mut self) {
-        self.version.value |= DELETED_BIT | SPLITTING_BIT;
-    }
-
-    /// Clear the root bit.
-    #[inline(always)]
-    pub const fn mark_nonroot(&mut self) {
-        self.version.value &= !ROOT_BIT;
-    }
-}
-
-impl SingleThreadedNodeVersion {
-    /// Create a new single-threaded node version.
-    #[must_use]
-    #[inline(always)]
-    pub const fn new(is_leaf: bool) -> Self {
-        let initial: u32 = if is_leaf { ISLEAF_BIT } else { 0 };
-        Self { value: initial }
-    }
-
-    /// Check if this is a leaf node.
-    #[must_use]
-    #[inline(always)]
-    pub const fn is_leaf(&self) -> bool {
-        (self.value & ISLEAF_BIT) != 0
-    }
-
-    /// Check if this is a root node.
-    #[must_use]
-    #[inline(always)]
-    pub const fn is_root(&self) -> bool {
-        (self.value & ROOT_BIT) != 0
-    }
-
-    /// Check if this node is logically deleted.
-    #[must_use]
-    #[inline(always)]
-    pub const fn is_deleted(&self) -> bool {
-        (self.value & DELETED_BIT) != 0
-    }
-
-    /// Check if a version value indicates the node is deleted.
-    ///
-    /// In single-threaded mode, this is equivalent to `is_deleted()` but
-    /// provided for API consistency with concurrent mode.
-    #[must_use]
-    #[inline(always)]
-    pub const fn is_deleted_version(version: u32) -> bool {
-        (version & DELETED_BIT) != 0
-    }
-
-    /// Get a stable version (returns immediately in single-threaded mode).
-    #[must_use]
-    #[inline(always)]
-    pub const fn stable(&self) -> u32 {
-        self.value
-    }
-
-    /// Check if the version has changed since `old`.
-    #[must_use]
-    #[inline(always)]
-    pub const fn has_changed(&self, old: u32) -> bool {
-        (old ^ self.value) > (LOCK_BIT | INSERTING_BIT)
-    }
-
-    /// Check if a split has occurred since `old`.
-    #[must_use]
-    #[inline(always)]
-    pub const fn has_split(&self, old: u32) -> bool {
-        (old ^ self.value) >= VSPLIT_LOWBIT
-    }
-
-    /// Acquire the "lock" (no-op, returns guard immediately).
-    #[inline(always)]
-    pub const fn lock(&mut self) -> SingleThreadedLockGuard<'_> {
-        SingleThreadedLockGuard { version: self }
-    }
-
-    /// Mark the node as a root.
-    #[inline(always)]
-    pub const fn mark_root(&mut self) {
-        self.value |= ROOT_BIT;
-    }
-
-    /// Clear the root bit.
-    #[inline(always)]
-    pub const fn mark_nonroot(&mut self) {
-        self.value &= !ROOT_BIT;
-    }
-}
-
-impl Default for SingleThreadedNodeVersion {
     fn default() -> Self {
         Self::new(true)
     }

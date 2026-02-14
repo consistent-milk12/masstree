@@ -50,5 +50,3 @@ mod traversal;
 
 // Re-export public types
 pub use iterator::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
-
-pub use find_rev::ReverseScan;

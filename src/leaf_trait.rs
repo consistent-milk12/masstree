@@ -883,21 +883,6 @@ pub trait LayerCapableLeaf<P: LeafPolicy>: TreeLeafNode<P> {
         value: Option<P::Output>,
         guard: &LocalGuard<'_>,
     );
-
-    /// Assign a suffix using a pre-allocated buffer.
-    ///
-    /// Reduces critical section time by using the caller's pre-allocated Vec.
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold the leaf lock.
-    unsafe fn assign_ksuf_prealloc(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-        prealloc: Vec<u8>,
-    ) -> *mut u8;
 }
 
 // ============================================================================

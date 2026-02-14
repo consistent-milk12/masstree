@@ -518,17 +518,6 @@ impl<P: LeafPolicy> LayerContext<P> {
         }
     }
 
-    /// Try to create a new layer context.
-    ///
-    /// Returns `None` if `leaf` is null.
-    #[inline(always)]
-    pub fn try_new(root: *const u8, leaf: *mut LeafNode15<P>) -> Option<Self> {
-        Some(Self {
-            root,
-            leaf: NonNull::new(leaf)?,
-        })
-    }
-
     /// Get the leaf as a raw mutable pointer.
     #[inline(always)]
     pub const fn leaf_ptr(&self) -> *mut LeafNode15<P> {
@@ -848,12 +837,6 @@ where
         self.leaf = NonNull::new(leaf);
     }
 
-    /// Check if leaf is null (uninitialized or exhausted).
-    #[inline(always)]
-    pub const fn is_null(&self) -> bool {
-        self.leaf.is_none()
-    }
-
     /// Update state after version validation.
     #[inline(always)]
     pub const fn update_state(
@@ -889,24 +872,6 @@ where
     #[inline(always)]
     pub const fn set_ki(&mut self, ki: isize) {
         self.ki = ki;
-    }
-
-    /// Check if current position is valid (not exhausted).
-    ///
-    /// Valid when `0 <= ki < perm.size()`.
-    #[inline(always)]
-    #[expect(clippy::missing_const_for_fn, reason = "perm.size() is not const")]
-    pub fn has_valid_position(&self) -> bool {
-        (self.ki >= 0) && (self.ki.cast_unsigned() < self.perm.size())
-    }
-
-    #[inline(always)]
-    pub fn get_kp_opt(&self) -> Option<usize> {
-        if self.has_valid_position() {
-            Some(self.perm.get(self.ki.cast_unsigned()))
-        } else {
-            None
-        }
     }
 }
 

@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use seize::{Guard, LocalGuard};
 
-use crate::suffix::{InlineSuffixBag, SideCarUtils, SuffixBag};
 use crate::TreePermutation;
+use crate::suffix::{InlineSuffixBag, SideCarUtils, SuffixBag};
 
 use super::SuffixStore;
 
@@ -335,7 +335,7 @@ impl EmbeddedSuffix {
             return ptr;
         }
 
-        let new_external: Box<SuffixBag> = Box::new(SuffixBag::new());
+        let new_external: Box<SuffixBag> = Box::default();
         let new_ptr: *mut SuffixBag = Box::into_raw(new_external);
         self.external_ksuf.store(new_ptr, AtomicOrdering::Release);
 

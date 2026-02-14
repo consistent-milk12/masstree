@@ -9,7 +9,6 @@ mod bench_utils;
 
 use bench_utils::{keys, keys_shared_prefix, keys_shared_prefix_chunks, uniform_indices};
 use crossbeam_skiplist::SkipMap;
-use dashmap::DashMap;
 use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::{MassTree15, MassTree15Inline};
@@ -85,16 +84,7 @@ fn setup_tree_index<const K: usize>(keys: &[[u8; K]]) -> TreeIndex<[u8; K], u64>
     tree
 }
 
-fn setup_dashmap<const K: usize>(keys: &[[u8; K]]) -> DashMap<[u8; K], u64> {
-    let map = DashMap::new();
-    for (i, key) in keys.iter().enumerate() {
-        map.insert(*key, i as u64);
-    }
-    map
-}
-
 // String value setup helpers (for non-Copy type benchmarks)
-
 fn generate_string_value(i: usize) -> String {
     format!("value_{i:016x}_padding_to_make_it_longer")
 }
@@ -2449,43 +2439,6 @@ mod random_read_8b {
     }
 
     #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn dashmap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<8>(N));
-        let map = Arc::new(setup_dashmap::<8>(keys.as_ref()));
-        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start_barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start_barrier = Arc::clone(&start_barrier);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let start = t * OPS_PER_THREAD;
-                            start_barrier.wait();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[start + i];
-                                if let Some(v) = map.get(&keys[idx]) {
-                                    sum += *v;
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
     fn skipmap(bencher: Bencher, threads: usize) {
         let keys = Arc::new(keys::<8>(N));
         let map = Arc::new(setup_skipmap::<8>(keys.as_ref()));
@@ -2593,43 +2546,6 @@ mod random_read_32b {
                                 let idx = indices[start + i];
                                 if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum += v;
-                                }
-                            }
-                            black_box(sum);
-                        })
-                    })
-                    .collect();
-
-                for h in handles {
-                    h.join().unwrap();
-                }
-            });
-    }
-
-    #[divan::bench(args = [1, 2, 3, 4, 5, 6])]
-    fn dashmap(bencher: Bencher, threads: usize) {
-        let keys = Arc::new(keys::<32>(N));
-        let map = Arc::new(setup_dashmap::<32>(keys.as_ref()));
-        let indices = Arc::new(uniform_indices(N, OPS_PER_THREAD * threads, 42));
-
-        bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
-            .bench_local(|| {
-                let start_barrier = Arc::new(Barrier::new(threads));
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let map = Arc::clone(&map);
-                        let keys = Arc::clone(&keys);
-                        let indices = Arc::clone(&indices);
-                        let start_barrier = Arc::clone(&start_barrier);
-                        thread::spawn(move || {
-                            let mut sum = 0u64;
-                            let start = t * OPS_PER_THREAD;
-                            start_barrier.wait();
-                            for i in 0..OPS_PER_THREAD {
-                                let idx = indices[start + i];
-                                if let Some(v) = map.get(&keys[idx]) {
-                                    sum += *v;
                                 }
                             }
                             black_box(sum);

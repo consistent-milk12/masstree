@@ -935,8 +935,8 @@ impl ReverseScan {
     /// Corresponds to `find_retry` logic in `masstree_scan.hh:305-330`.
     pub fn reposition_back<P>(
         stack: &mut BackStackElement<P>,
-        cursor_key: &mut CursorKey,
-        helper: &mut ReverseScanHelper,
+        cursor_key: &CursorKey,
+        helper: &ReverseScanHelper,
         guard: &LocalGuard<'_>,
     ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
     where

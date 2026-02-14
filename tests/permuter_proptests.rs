@@ -4,7 +4,7 @@
 //! The permuter is a critical data structure that must maintain strict invariants.
 #![expect(clippy::indexing_slicing, reason = "fail fast in tests")]
 
-use masstree::permuter::{MAX_WIDTH, Permuter};
+use masstree::{MAX_WIDTH, Permuter};
 use proptest::prelude::*;
 
 // ============================================================================

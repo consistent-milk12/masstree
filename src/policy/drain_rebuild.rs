@@ -70,8 +70,7 @@ pub(super) unsafe fn drain_and_rebuild_prealloc(
     prealloc: Vec<u8>,
 ) -> *mut u8 {
     // Drain using pre-allocated buffer.
-    let mut new_bag: SuffixBag =
-        inline.drain_to_external_with_vec(perm, slot, suffix, prealloc);
+    let mut new_bag: SuffixBag = inline.drain_to_external_with_vec(perm, slot, suffix, prealloc);
 
     // Merge old external entries.
     let old_external: *mut SuffixBag = external_slot.load(AtomicOrdering::Relaxed);
@@ -153,11 +152,7 @@ fn merge_old_external_perm(
 /// Merge active suffixes from old external bag into new bag (sequential init).
 ///
 /// Iterates slots `0..slot` sequentially.
-fn merge_old_external_init(
-    new_bag: &mut SuffixBag,
-    old_external: *mut SuffixBag,
-    slot: usize,
-) {
+fn merge_old_external_init(new_bag: &mut SuffixBag, old_external: *mut SuffixBag, slot: usize) {
     if old_external.is_null() {
         return;
     }

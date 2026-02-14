@@ -144,6 +144,8 @@ impl<P: LeafPolicy> StdFmt::Debug for LeafNode15<P> {
             .field("is_root", &self.version.is_root())
             .field(
                 "has_parent",
+                // SAFETY: Debug formatting only reads the atomic parent pointer.
+                // No dereference of the parent — just a null check.
                 &(!unsafe { self.parent_unguarded() }.is_null()),
             )
             .finish_non_exhaustive()
@@ -357,6 +359,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// Caller must ensure the slot contains a terminal value, not a layer.
     #[inline(always)]
     pub unsafe fn load_value_ptr(&self, slot: usize) -> *const P::Value {
+        // SAFETY: Caller guarantees slot contains a terminal value (not a layer).
+        // Delegates to the policy's typed load which reads the raw pointer atomically.
         unsafe { P::load_value_ptr(&self.values, slot) }
     }
 
@@ -848,6 +852,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
     pub fn prefetch_for_search(&self) {
         let self_ptr: *const u8 = StdPtr::from_ref::<Self>(self).cast::<u8>();
 
+        // SAFETY: self_ptr is derived from a valid reference. Offsets target
+        // permutation and ikey0 fields, which are within struct bounds.
         unsafe {
             prefetch_read(self_ptr.add(StdMem::offset_of!(Self, permutation)));
             prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0)));
@@ -860,6 +866,9 @@ impl<P: LeafPolicy> LeafNode15<P> {
     pub fn prefetch_for_search_adaptive(&self, size: usize) {
         let self_ptr: *const u8 = StdPtr::from_ref(self).cast::<u8>();
 
+        // SAFETY: self_ptr is derived from a valid reference. Offsets target
+        // permutation and ikey0 fields, which are within struct bounds.
+        // Conditional prefetch avoids fetching cache lines for empty regions.
         unsafe {
             prefetch_read(self_ptr.add(StdMem::offset_of!(Self, permutation)));
 
@@ -1607,6 +1616,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
         guard: &LocalGuard<'_>,
     ) -> (u64, InsertTarget) {
         let split_version = NodeVersion::new_for_split(&self.version);
+        // SAFETY: new_leaf_ptr is not yet visible to other threads (caller guarantee).
+        // Writing the version field initializes the new leaf before publication.
         unsafe {
             StdPtr::write(
                 StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
@@ -1616,9 +1627,12 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
         let perm: Permuter15 = self.permutation();
         let size: usize = perm.size();
+        // SAFETY: new_leaf_ptr is valid and properly aligned (caller guarantee).
         let new_leaf: &Self = unsafe { &*new_leaf_ptr };
 
         if self.has_external_ksuf() {
+            // SAFETY: new_leaf is not yet visible; pre-allocating suffix storage
+            // before entries are moved ensures suffix writes won't fail.
             let _ = unsafe { new_leaf.ensure_external_ksuf() };
         }
 
@@ -1635,8 +1649,12 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
             if keylenx_val == KSUF_KEYLENX {
                 if let Some(suffix) = self.ksuf(old_slot) {
+                    // SAFETY: We hold lock on self; new_leaf is not yet visible.
+                    // Suffix data is copied to new_leaf's storage.
                     unsafe { new_leaf.assign_ksuf_init(new_slot, suffix, guard) };
                 }
+                // SAFETY: We hold lock on self. Clearing old suffix after copy
+                // retires the old bag pointer via the guard for deferred reclamation.
                 unsafe { self.clear_ksuf(old_slot, guard) };
             }
 
@@ -1667,6 +1685,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
         guard: &LocalGuard<'_>,
     ) -> SplitInsertResult {
         let split_version = NodeVersion::new_for_split(&self.version);
+        // SAFETY: new_leaf_ptr is not yet visible to other threads (caller guarantee).
+        // Writing the version field initializes the new leaf before publication.
         unsafe {
             StdPtr::write(
                 StdPtr::addr_of!((*new_leaf_ptr).version).cast_mut(),
@@ -1676,9 +1696,12 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
         let old_perm: Permuter15 = self.permutation();
         let old_size: usize = old_perm.size();
+        // SAFETY: new_leaf_ptr is valid and properly aligned (caller guarantee).
         let new_leaf: &Self = unsafe { &*new_leaf_ptr };
 
         if self.has_external_ksuf() {
+            // SAFETY: new_leaf is not yet visible; pre-allocating suffix storage
+            // before entries are moved ensures suffix writes won't fail.
             let _ = unsafe { new_leaf.ensure_external_ksuf() };
         }
 
@@ -1704,6 +1727,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
                     if insert_data.keylenx == KSUF_KEYLENX
                         && let Some(suffix) = insert_data.suffix
                     {
+                        // SAFETY: new_leaf is not yet visible. Initializing suffix
+                        // storage for the newly inserted entry.
                         unsafe {
                             new_leaf.assign_ksuf_init(dst_slot, suffix, guard);
                         };
@@ -1722,11 +1747,15 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
                     if keylenx_val == KSUF_KEYLENX {
                         if let Some(suffix) = self.ksuf(old_slot) {
+                            // SAFETY: We hold lock on self; new_leaf is not yet visible.
+                            // Suffix data is copied to new_leaf's storage.
                             unsafe {
                                 new_leaf.assign_ksuf_init(dst_slot, suffix, guard);
                             };
                         }
 
+                        // SAFETY: We hold lock on self. Old suffix cleared after copy;
+                        // old bag pointer retired via guard for deferred reclamation.
                         unsafe { self.clear_ksuf(old_slot, guard) };
                     }
 
@@ -1769,11 +1798,15 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
                 if keylenx_val == KSUF_KEYLENX {
                     if let Some(suffix) = self.ksuf(old_slot) {
+                        // SAFETY: We hold lock on self; new_leaf is not yet visible.
+                        // Suffix data is copied to new_leaf's storage.
                         unsafe {
                             new_leaf.assign_ksuf_init(new_slot, suffix, guard);
                         };
                     }
 
+                    // SAFETY: We hold lock on self. Old suffix cleared after copy;
+                    // old bag pointer retired via guard for deferred reclamation.
                     unsafe { self.clear_ksuf(old_slot, guard) };
                 }
 
@@ -1813,6 +1846,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
             let suffix_retire_ptr: *mut u8 = if insert_data.keylenx == KSUF_KEYLENX
                 && let Some(suffix) = insert_data.suffix
             {
+                // SAFETY: We hold lock on self. Assigns suffix to the newly
+                // inserted slot; returns old bag pointer for deferred retirement.
                 unsafe { self.assign_ksuf(actual_slot, suffix, guard) }
             } else {
                 StdPtr::null_mut()
@@ -1829,6 +1864,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
             // Retire old suffix bag if needed.
             if !suffix_retire_ptr.is_null() {
+                // SAFETY: suffix_retire_ptr was returned by assign_ksuf and points
+                // to a heap-allocated suffix bag. Guard defers reclamation until safe.
                 unsafe { Self::retire_suffix_bag_ptr(suffix_retire_ptr, guard) };
             }
 
@@ -1857,6 +1894,9 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
         // Update old_next's prev to point to new sibling.
         if !old_next.is_null() {
+            // SAFETY: old_next is non-null (just checked) and points to a valid
+            // leaf in the chain. We hold the lock on self which protects the
+            // next pointer, preventing concurrent modification of this link.
             unsafe { (*old_next).set_prev(new_sibling) };
         }
 
@@ -2084,10 +2124,16 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
 
     // ========================================================================
     //  Navigation
+    //
+    //  SAFETY for all navigation forwarding methods below: These delegate to
+    //  the inherent `unsafe` methods on LeafNode15. The caller (tree traversal
+    //  code) ensures pointers are valid and won't be retired during use by
+    //  holding an epoch guard or the node's version lock.
     // ========================================================================
 
     #[inline(always)]
     fn safe_next(&self) -> *mut Self {
+        // SAFETY: Caller holds an epoch guard protecting the next pointer target.
         unsafe { self.safe_next_unguarded() }
     }
 
@@ -2113,6 +2159,7 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
 
     #[inline(always)]
     fn prev(&self) -> *mut Self {
+        // SAFETY: Caller holds an epoch guard protecting the prev pointer target.
         unsafe { self.prev_unguarded() }
     }
 
@@ -2123,6 +2170,7 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
 
     #[inline(always)]
     fn parent(&self) -> *mut u8 {
+        // SAFETY: Caller holds an epoch guard protecting the parent pointer target.
         unsafe { self.parent_unguarded() }
     }
 
@@ -2133,11 +2181,14 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
 
     #[inline(always)]
     unsafe fn unlink_from_chain(&self) {
+        // SAFETY: Caller holds the version lock and guarantees prev is non-null
+        // and all linked leaves are valid (trait method preconditions).
         unsafe { self.unlink_from_chain() }
     }
 
     #[inline(always)]
     fn next_raw(&self) -> *mut Self {
+        // SAFETY: Caller holds an epoch guard protecting the next pointer target.
         unsafe { self.next_raw_unguarded() }
     }
 
@@ -2169,6 +2220,8 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
         new_leaf_ptr: *mut Self,
         guard: &LocalGuard<'_>,
     ) -> (u64, InsertTarget) {
+        // SAFETY: Caller holds lock on self, new_leaf_ptr is valid and not yet
+        // visible to other threads (trait method preconditions).
         unsafe { self.split_into_preallocated(split_pos, new_leaf_ptr, guard) }
     }
 
@@ -2177,6 +2230,8 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
         new_leaf_ptr: *mut Self,
         guard: &LocalGuard<'_>,
     ) -> (u64, InsertTarget) {
+        // SAFETY: Caller holds lock on self, new_leaf_ptr is valid and not yet
+        // visible to other threads (trait method preconditions).
         unsafe { self.split_all_to_right_preallocated(new_leaf_ptr, guard) }
     }
 
@@ -2188,10 +2243,14 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
         insert_data: &SplitInsertData<'_, P>,
         guard: &LocalGuard<'_>,
     ) -> SplitInsertResult {
+        // SAFETY: Caller holds lock on self, new_leaf_ptr is valid and not yet
+        // visible to other threads (trait method preconditions).
         unsafe { self.split_and_insert(split_pos, new_leaf_ptr, insert_pos, insert_data, guard) }
     }
 
     unsafe fn link_sibling(&self, new_sibling: *mut Self) {
+        // SAFETY: Caller holds lock on self, new_sibling is valid and not yet
+        // in the chain (trait method preconditions).
         unsafe { self.link_sibling(new_sibling) }
     }
 
@@ -2205,18 +2264,24 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
     }
 
     unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) -> *mut u8 {
+        // SAFETY: Caller holds lock on this leaf. Suffix storage is modified
+        // under lock; old bag pointer returned for deferred retirement.
         unsafe { self.assign_ksuf(slot, suffix, guard) }
     }
 
     unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
+        // SAFETY: ptr points to a heap-allocated suffix bag that is no longer
+        // reachable. Guard defers deallocation until no readers hold references.
         unsafe { Self::retire_suffix_bag_ptr(ptr, guard) }
     }
 
     unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
+        // SAFETY: Caller holds lock. Slot has no prior suffix (first assignment).
         unsafe { self.assign_ksuf_init(slot, suffix, guard) }
     }
 
     unsafe fn clear_ksuf(&self, slot: usize, guard: &LocalGuard<'_>) {
+        // SAFETY: Caller holds lock. Old suffix bag pointer retired via guard.
         unsafe { self.clear_ksuf(slot, guard) }
     }
 
@@ -2440,17 +2505,5 @@ impl<P: LeafPolicy> LayerCapableLeaf<P> for LeafNode15<P> {
             let inline_len: u8 = key.current_len().min(8) as u8;
             self.set_keylenx(slot, inline_len);
         }
-    }
-
-    unsafe fn assign_ksuf_prealloc(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        guard: &LocalGuard<'_>,
-        prealloc: Vec<u8>,
-    ) -> *mut u8 {
-        // Delegate to the leaf's prealloc suffix assignment.
-        // SAFETY: Caller holds lock.
-        unsafe { Self::assign_ksuf_prealloc(self, slot, suffix, guard, prealloc) }
     }
 }

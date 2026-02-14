@@ -2,7 +2,7 @@
 
 use super::{
     DIRTY_MASK, INSERTING_BIT, ISLEAF_BIT, LOCK_BIT, LockGuard, NodeVersion, SPLITTING_BIT,
-    SingleThreadedNodeVersion, VINSERT_LOWBIT, VSPLIT_LOWBIT,
+    VINSERT_LOWBIT, VSPLIT_LOWBIT,
 };
 
 // ========================================================================
@@ -388,65 +388,6 @@ fn test_has_split_no_compiler_fence() {
 
     // And should match has_split
     assert_eq!(v.has_split(before), v.has_split_no_compiler_fence(before));
-}
-
-// =======================================================================
-// SingleThreadedNodeVersion Tests
-// =======================================================================
-
-#[test]
-fn test_single_threaded_basic() {
-    let mut v = SingleThreadedNodeVersion::new(true);
-
-    assert!(v.is_leaf());
-    assert!(!v.is_root());
-    assert!(!v.is_deleted());
-
-    v.mark_root();
-    assert!(v.is_root());
-
-    v.mark_nonroot();
-    assert!(!v.is_root());
-}
-
-#[test]
-fn test_single_threaded_lock_unlock() {
-    let mut v = SingleThreadedNodeVersion::new(true);
-    let stable_before = v.stable();
-
-    {
-        let mut guard = v.lock();
-        guard.mark_insert();
-        // Guard drops, version increments
-    }
-
-    // Version should have changed
-    assert!(v.has_changed(stable_before));
-}
-
-#[test]
-fn test_single_threaded_split() {
-    let mut v = SingleThreadedNodeVersion::new(true);
-    let stable_before = v.stable();
-
-    {
-        let mut guard = v.lock();
-        guard.mark_split();
-    }
-
-    assert!(v.has_split(stable_before));
-}
-
-#[test]
-fn test_single_threaded_deleted() {
-    let mut v = SingleThreadedNodeVersion::new(true);
-
-    {
-        let mut guard = v.lock();
-        guard.mark_deleted();
-    }
-
-    assert!(v.is_deleted());
 }
 
 // =======================================================================

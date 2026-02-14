@@ -89,12 +89,6 @@ impl SuffixSidecar {
         }
     }
 
-    /// Get suffix for slot from inline storage only.
-    #[inline]
-    pub fn get_inline(&self, slot: usize) -> Option<&[u8]> {
-        self.inline.get(slot)
-    }
-
     /// Get suffix for slot, checking both inline and external.
     ///
     /// Tries inline first (common case), then falls back to external.
@@ -136,7 +130,7 @@ impl SuffixSidecar {
         }
 
         // Allocate new external bag (aborts on OOM)
-        let new_external: Box<SuffixBag> = Box::new(SuffixBag::new());
+        let new_external: Box<SuffixBag> = Box::default();
         let new_ptr: *mut SuffixBag = Box::into_raw(new_external);
         self.external.store(new_ptr, Ordering::Release);
 
@@ -144,7 +138,7 @@ impl SuffixSidecar {
     }
 
     /// Check if slot has a suffix (inline or external).
-    #[inline(always)]
+    #[cfg(test)]
     pub fn has_suffix(&self, slot: usize) -> bool {
         if self.inline.has_suffix(slot) {
             return true;

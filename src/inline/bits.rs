@@ -3,9 +3,6 @@
 //! This module provides the [`InlineBits`] trait that enables small [`Copy`] values
 //! to be stored directly in leaf nodes without heap allocation.
 
-use std::fmt as StdFmt;
-use std::mem as StdMem;
-
 // ============================================================================
 //  InlineBits Trait
 // ============================================================================
@@ -289,30 +286,4 @@ impl InlineBits for (u16, u16, u16, u16) {
             bits as u16,
         )
     }
-}
-
-// ============================================================================
-//  Debug Formatting Helper
-// ============================================================================
-
-/// Wrapper for debug formatting inline values.
-pub struct InlineBitsDebug<V: InlineBits>(pub V);
-
-impl<V: InlineBits + StdFmt::Debug> StdFmt::Debug for InlineBitsDebug<V> {
-    fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
-        write!(f, "Inline({:?})", self.0)
-    }
-}
-
-// ============================================================================
-//  Compile-time Assertions
-// ============================================================================
-
-/// Assert that a type fits in 8 bytes (compile-time check).
-#[doc(hidden)]
-pub const fn assert_fits_in_u64<V: InlineBits>() {
-    assert!(
-        StdMem::size_of::<V>() <= 8,
-        "InlineBits value must fit in 8 bytes"
-    );
 }

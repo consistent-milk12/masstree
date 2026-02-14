@@ -558,12 +558,6 @@ impl ReverseScanHelper {
         Self { upper_bound: false }
     }
 
-    /// Create helper starting at upper bound (used after layer descent).
-    #[inline(always)]
-    pub const fn at_upper_bound() -> Self {
-        Self { upper_bound: true }
-    }
-
     /// Retreat to the previous logical position.
     ///
     /// For rev scans: `ki - 1`. Returns -1 when `ki == 0`.

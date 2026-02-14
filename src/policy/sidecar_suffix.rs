@@ -17,11 +17,11 @@ use std::cmp::Ordering;
 use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
-use seize::{Guard, LocalGuard};
+use seize::{Collector, Guard, LocalGuard};
 
+use crate::TreePermutation;
 use crate::ordering::RELAXED;
 use crate::suffix::{SideCarUtils, SuffixBag, SuffixSidecar};
-use crate::TreePermutation;
 
 use super::SuffixStore;
 
@@ -83,7 +83,7 @@ impl SidecarSuffix {
         }
 
         // Caller holds lock, no race possible.
-        let new_sidecar: Box<SuffixSidecar> = Box::new(SuffixSidecar::new());
+        let new_sidecar: Box<SuffixSidecar> = Box::default();
         let ptr: *mut SuffixSidecar = Box::into_raw(new_sidecar);
         self.sidecar.store(ptr, AtomicOrdering::Release);
 
@@ -294,9 +294,12 @@ impl SuffixStore for SidecarSuffix {
 
         // SAFETY: ptr came from assign() and is a valid SuffixBag pointer.
         unsafe {
-            guard.defer_retire(ptr.cast::<SuffixBag>(), |ptr, collector| {
-                SideCarUtils::retire_suffix_bag(ptr, collector);
-            });
+            guard.defer_retire(
+                ptr.cast::<SuffixBag>(),
+                |ptr: *mut SuffixBag, collector: &Collector| {
+                    SideCarUtils::retire_suffix_bag(ptr, collector);
+                },
+            );
         }
     }
 

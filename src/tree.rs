@@ -26,11 +26,7 @@ mod range;
 pub mod remove;
 mod split;
 
-#[cfg(test)]
-pub mod test_hooks;
-
 pub use generic::{BatchEntry, BatchInsertResult};
-pub use range::ReverseScan;
 pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use remove::RemoveError;
 
@@ -184,7 +180,7 @@ where
 
 /// Result of searching a leaf for insert position (generic version).
 #[derive(Debug)]
-pub(crate) enum InsertSearchResultGeneric {
+pub enum InsertSearchResultGeneric {
     /// Key exists at this slot.
     Found { slot: usize },
 

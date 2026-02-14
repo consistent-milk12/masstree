@@ -10,9 +10,7 @@
     reason = "fail fast in tests"
 )]
 
-use masstree::RangeBound;
-use masstree::key::MAX_KEY_LENGTH;
-use masstree::tree::{MassTree15, MassTree15Inline};
+use masstree::{MAX_KEY_LENGTH, MassTree15, MassTree15Inline, RangeBound};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use std::collections::BTreeMap;

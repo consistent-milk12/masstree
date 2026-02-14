@@ -4,7 +4,7 @@
 
 #![expect(clippy::indexing_slicing, reason = "fail fast in tests")]
 
-use masstree::key::{IKEY_SIZE, Key, MAX_KEY_LENGTH};
+use masstree::{IKEY_SIZE, Key, MAX_KEY_LENGTH};
 use proptest::prelude::*;
 use std::cmp::Ordering;
 

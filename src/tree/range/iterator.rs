@@ -1091,8 +1091,8 @@ where
                 ScanStateBack::Retry => {
                     let (new_state, _) = ReverseScan::reposition_back(
                         &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_helper,
+                        &self.back_cursor_key,
+                        &self.back_helper,
                         self.guard,
                     );
 

@@ -103,15 +103,9 @@ fn test_helper_new_state() {
 }
 
 #[test]
-fn test_helper_at_upper_bound() {
-    let helper = ReverseScanHelper::at_upper_bound();
-    assert!(helper.upper_bound);
-}
-
-#[test]
 fn test_helper_mark_key_complete_clears_upper_bound() {
-    let mut helper = ReverseScanHelper::at_upper_bound();
-    assert!(helper.upper_bound);
+    let mut helper = ReverseScanHelper::new();
+    helper.upper_bound = true;
 
     helper.mark_key_complete();
 

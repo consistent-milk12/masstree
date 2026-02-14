@@ -5,7 +5,7 @@
 
 #![expect(clippy::indexing_slicing, reason = "fail fast in tests")]
 
-use masstree::tree::{MassTree15, MassTree15Inline};
+use masstree::{MassTree15, MassTree15Inline};
 
 /// Helper: build a key from an 8-byte layer prefix and a suffix.
 fn make_key(layer0: u64, suffix: &[u8]) -> Vec<u8> {

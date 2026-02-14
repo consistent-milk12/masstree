@@ -307,6 +307,7 @@ impl CursorKey {
     /// Returns the number of layers deep (offset / 8).
     #[must_use]
     #[inline(always)]
+    #[cfg(any(test, debug_assertions))]
     pub const fn layer_depth(&self) -> usize {
         self.offset / IKEY_SIZE
     }
@@ -477,29 +478,6 @@ impl CursorKey {
     #[inline(always)]
     pub const fn is_at_empty_root(&self) -> bool {
         self.offset == 0 && self.len == 0
-    }
-
-    /// Reset to root layer (undo all shifts).
-    ///
-    /// This is a full reset - the cursor will point to the original key
-    /// from the buffer. Uses an O(n) scan to find the key end, so this
-    /// should only be used for error recovery, not in hot paths.
-    ///
-    /// # Performance
-    ///
-    /// Calls [`find_key_end`] which scans backward through the buffer.
-    /// Marked `#[cold]` as this is only used for recovery/reset scenarios.
-    #[cold]
-    pub fn unshift_all(&mut self) {
-        if self.offset > 0 {
-            // Find total key length by scanning for last non-zero byte.
-            // This is O(n) but acceptable since unshift_all is rare.
-            let total_len: usize = self.find_key_end();
-
-            self.offset = 0;
-            self.len = total_len;
-            self.ikey = Self::read_ikey_from_buf(&self.buf, 0, self.len);
-        }
     }
 
     // ========================================================================
@@ -682,7 +660,6 @@ impl CursorKey {
             len: self.len,
             ikey: self.ikey,
             full_key: self.full_key().to_vec(),
-            has_suffix: self.has_suffix(),
             layer_depth: self.layer_depth(),
         }
     }
@@ -721,24 +698,6 @@ impl CursorKey {
         bytes[..available].copy_from_slice(&buf[start..end]);
         u64::from_be_bytes(bytes)
     }
-
-    /// Find the end of the key in the buffer (for `unshift_all`).
-    ///
-    /// Scans backward from the current position to find the last non-zero byte.
-    /// This is O(n) and only used by [`unshift_all`] for recovery scenarios.
-    #[cold]
-    fn find_key_end(&self) -> usize {
-        // Start from the furthest point we've written
-        let max_end: usize = self.offset + self.len;
-
-        for i in (0..max_end).rev() {
-            if self.buf[i] != 0 {
-                return i + 1;
-            }
-        }
-
-        0
-    }
 }
 
 // ============================================================================
@@ -763,9 +722,6 @@ pub struct CursorDebugState {
 
     /// Complete key bytes (owned copy)
     pub full_key: Vec<u8>,
-
-    /// Whether cursor has suffix (len > 8)
-    pub has_suffix: bool,
 
     /// Layer depth (offset / 8)
     pub layer_depth: usize,
