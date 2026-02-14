@@ -40,6 +40,70 @@ mod split;
 // Re-export batch types
 pub use batch::{BatchEntry, BatchInsertResult};
 
+// ============================================================================
+//  Shared Types (used by insert.rs and batch.rs)
+// ============================================================================
+
+/// Result of finding a usable slot for insertion.
+///
+/// # Slot-0 Rule
+///
+/// Slot 0 stores the leaf's `ikey_bound()` value. When a key is deleted from slot 0,
+/// the slot cannot be reused for a different ikey because readers use `ikey_bound()`
+/// for B-link navigation. The slot-0 rule ensures:
+///
+/// - If slot 0 is free and `ikey == ikey_bound()`, slot 0 can be reused
+/// - If slot 0 is free but `ikey != ikey_bound()`, we must find another slot
+/// - If no other slots are free, we trigger a split (even though slot 0 is "free")
+pub enum FindSlotResult {
+    /// Found a usable slot at the given physical index.
+    ///
+    /// - `slot`: Physical slot index in the leaf (0..WIDTH)
+    /// - `back_offset`: Offset from the back of the free list where this slot was found.
+    ///   Usually 0 (meaning the slot was at `perm.back()`). Non-zero when slot-0 rule
+    ///   forced us to skip slot 0 and find an alternative.
+    Found { slot: usize, back_offset: usize },
+
+    /// No usable slot available - the leaf must be split.
+    ///
+    /// This occurs when:
+    /// - The leaf is full (`perm.size() >= WIDTH`), OR
+    /// - Only slot 0 is free but cannot be reused (slot-0 rule violation)
+    NeedsSplit,
+}
+
+/// Errors from membership validation.
+///
+/// Each variant indicates why the key doesn't belong in the current leaf
+/// and how to recover.
+pub enum MembershipError {
+    /// A split is in progress on this leaf.
+    ///
+    /// # Recovery
+    ///
+    /// Wait for split completion (`wait_for_split()`), then B-link advance.
+    /// The key may now be in this leaf or a right sibling.
+    SplitInProgress,
+
+    /// Key's ikey is >= the next sibling's lower bound.
+    ///
+    /// # Recovery
+    ///
+    /// B-link advance (walk right) to find the correct leaf. This is the
+    /// common case during concurrent splits - the key moved to a newly
+    /// created right sibling.
+    KeyMovedToSibling,
+
+    /// Key's ikey is < this leaf's lower bound (`ikey_bound()`).
+    ///
+    /// # Recovery
+    ///
+    /// **Cannot recover by walking right.** Must restart traversal from
+    /// the layer root. This occurs when concurrent splits created new
+    /// leaves to the left of our traversal path.
+    KeyBelowLowerBound,
+}
+
 impl<P, A> MassTreeGeneric<P, A>
 where
     P: LeafPolicy,

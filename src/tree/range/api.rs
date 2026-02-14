@@ -663,6 +663,10 @@ where
     /// # Returns
     ///
     /// Number of entries visited.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `prefix.len()` exceeds `MAX_KEY_LENGTH` (256 bytes).
     pub fn scan_prefix_values<F>(&self, prefix: &[u8], visitor: F, guard: &LocalGuard<'_>) -> usize
     where
         F: FnMut(P::Output) -> bool,

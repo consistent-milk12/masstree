@@ -23,16 +23,14 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 
 use seize::LocalGuard;
 
+use crate::Permuter;
 use crate::leaf15::LeafNode15;
 use crate::{
-    Linker, MassTreeGeneric, TreeAllocator,
-    key::Key,
-    leaf_trait::TreeLeafNode,
-    nodeversion::LockGuard,
-    policy::{LeafPolicy, RetireHandle},
+    Linker, MassTreeGeneric, TreeAllocator, key::Key, leaf_trait::TreeLeafNode,
+    nodeversion::LockGuard, policy::LeafPolicy,
 };
 
-use super::{InsertSearchResultGeneric, TreePermutation};
+use super::{FindSlotResult, InsertSearchResultGeneric};
 
 // ============================================================================
 //  Batch Entry Types
@@ -222,33 +220,11 @@ enum BatchEntryResult<O> {
     /// Layer descent needed - mark for individual retry.
     NeedsLayerDescent,
 
-    /// Entry doesn't belong to this leaf (ikey >= next leaf's bound).
-    #[expect(dead_code)]
-    BelongsToSibling,
-
     /// Slot is being modified by another thread, retry.
     Retry,
 }
 
-/// Result of finding a usable slot for insertion.
-enum FindSlotResult {
-    /// Found a usable slot.
-    Found { slot: usize, back_offset: usize },
-
-    /// No usable slot, split needed.
-    NeedsSplit,
-}
-
-/// Errors from membership validation.
-enum MembershipError {
-    /// A split is in progress - wait and retry.
-    SplitInProgress,
-    /// Key has moved to a sibling leaf - retry traversal (walk right).
-    KeyMovedToSibling,
-    /// Key is below this leaf's lower bound - must restart from root.
-    /// This cannot be recovered by walking right; requires full re-traversal.
-    KeyBelowLowerBound,
-}
+// FindSlotResult and MembershipError are shared with insert.rs, defined in super (generic.rs).
 
 // ============================================================================
 //  Batch Insert Implementation
@@ -473,7 +449,7 @@ where
                 let mut lock = leaf.version().lock();
 
                 // Validate post-lock state
-                if !self.validate_post_lock_batch(leaf, pre_lock_version, pre_lock_perm_raw) {
+                if !self.validate_post_lock(leaf, pre_lock_version, pre_lock_perm_raw) {
                     drop(lock);
                     continue 'retry;
                 }
@@ -486,7 +462,7 @@ where
                 }
 
                 // Validate membership
-                if self.validate_membership_batch(leaf, &key).is_err() {
+                if self.validate_membership(leaf, &key).is_err() {
                     drop(lock);
                     continue 'retry;
                 }
@@ -573,8 +549,8 @@ where
         deferred_retires: &mut Vec<*mut u8>,
         guard: &LocalGuard<'_>,
     ) -> usize {
-        let mut processed = 0;
-        let mut perm = leaf.permutation();
+        let mut processed: usize = 0;
+        let mut perm: Permuter = leaf.permutation();
 
         // Determine the ikey upper bound for this leaf
         // SAFETY: Called under lock - no concurrent retirement.
@@ -589,14 +565,17 @@ where
 
         // Handle empty leaf reuse
         if leaf.is_empty() && start_index < batch.len() {
-            let entry = &batch[start_index];
-            let key = Key::new(&entry.key);
-            if self.can_reuse_empty_leaf_batch(leaf, &key) {
-                let deferred =
+            let entry: &BatchEntry<P> = &batch[start_index];
+            let key: Key<'_> = Key::new(&entry.key);
+
+            if self.can_reuse_empty_leaf(leaf, &key) {
+                let deferred: *mut u8 =
                     self.insert_into_empty_leaf_batch(leaf, lock, &key, &entry.output, guard);
+
                 if !deferred.is_null() {
                     deferred_retires.push(deferred);
                 }
+
                 result.record_insert();
                 processed = 1;
                 perm = leaf.permutation();
@@ -621,8 +600,8 @@ where
             }
 
             // Create key for this entry
-            let key = Key::new(&entry.key);
-            let is_single_layer = !key.has_suffix();
+            let key: Key<'_> = Key::new(&entry.key);
+            let is_single_layer: bool = !key.has_suffix();
 
             // Try to insert this entry
             let insert_result = if is_single_layer {
@@ -643,27 +622,29 @@ where
                     if !deferred.is_null() {
                         deferred_retires.push(deferred);
                     }
+
                     result.record_insert();
                     processed += 1;
                 }
+
                 BatchEntryResult::Updated(old_value) => {
                     result.record_update(old_value);
                     processed += 1;
                 }
+
                 BatchEntryResult::NeedsSplit => {
                     // Leaf is full - stop processing
                     // Caller will retry and trigger split via normal insert
                     break;
                 }
+
                 BatchEntryResult::NeedsLayerDescent => {
-                    // Layer descent needed - mark as failed for individual retry
-                    result.record_failure();
-                    processed += 1;
-                }
-                BatchEntryResult::BelongsToSibling => {
-                    // Entry belongs to a sibling - stop
+                    // Layer descent needed - stop and fall back to individual insert
+                    // This ensures the output is properly transferred to the tree
+                    // instead of being leaked when BatchEntry is dropped.
                     break;
                 }
+
                 BatchEntryResult::Retry => {
                     // Slot being modified - stop and retry
                     break;
@@ -698,16 +679,16 @@ where
                 }
 
                 // Update existing value and return old value
-                let old_value = self.update_value_in_slot_batch(leaf, lock, slot, value, guard);
+                let old_value = self.update_existing_value(leaf, lock, slot, value, guard);
                 BatchEntryResult::Updated(old_value)
             }
 
             InsertSearchResultGeneric::NotFound { logical_pos } => {
                 let ikey = key.ikey();
 
-                match self.find_usable_slot_batch(leaf, perm, ikey) {
+                match self.find_usable_slot(leaf, perm, ikey) {
                     FindSlotResult::Found { slot, back_offset } => {
-                        let deferred_retire = self.insert_into_slot_batch(
+                        let deferred_retire = self.insert_new_value(
                             leaf,
                             lock,
                             slot,
@@ -717,6 +698,7 @@ where
                             key,
                             value,
                             guard,
+                            None,
                         );
                         self.count.increment();
 
@@ -757,16 +739,16 @@ where
                 }
 
                 // Update existing value and return old value
-                let old_value = self.update_value_in_slot_batch(leaf, lock, slot, value, guard);
+                let old_value = self.update_existing_value(leaf, lock, slot, value, guard);
                 BatchEntryResult::Updated(old_value)
             }
 
             InsertSearchResultGeneric::NotFound { logical_pos } => {
                 let ikey = key.ikey();
 
-                match self.find_usable_slot_batch(leaf, perm, ikey) {
+                match self.find_usable_slot(leaf, perm, ikey) {
                     FindSlotResult::Found { slot, back_offset } => {
-                        let deferred_retire = self.insert_into_slot_batch(
+                        let deferred_retire = self.insert_new_value(
                             leaf,
                             lock,
                             slot,
@@ -776,6 +758,7 @@ where
                             key,
                             value,
                             guard,
+                            None,
                         );
                         self.count.increment();
 
@@ -803,122 +786,12 @@ where
     }
 
     // ========================================================================
-    //  Helper Methods (with _batch suffix to avoid visibility changes)
+    //  Batch-Specific Helpers
     // ========================================================================
-
-    /// Find a usable slot for insertion.
-    #[inline(always)]
-    #[expect(
-        clippy::unused_self,
-        reason = "Method for consistency with other helpers"
-    )]
-    fn find_usable_slot_batch(
-        &self,
-        leaf: &LeafNode15<P>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-        ikey: u64,
-    ) -> FindSlotResult {
-        if perm.size() >= LeafNode15::<P>::WIDTH {
-            return FindSlotResult::NeedsSplit;
-        }
-
-        let slot = perm.back();
-
-        if slot == 0 && !leaf.can_reuse_slot0(ikey) {
-            let free_count = LeafNode15::<P>::WIDTH - perm.size();
-
-            for offset in 1..free_count {
-                let candidate = perm.back_at_offset(offset);
-                if candidate != 0 {
-                    return FindSlotResult::Found {
-                        slot: candidate,
-                        back_offset: offset,
-                    };
-                }
-            }
-
-            return FindSlotResult::NeedsSplit;
-        }
-
-        FindSlotResult::Found {
-            slot,
-            back_offset: 0,
-        }
-    }
-
-    /// Validate post-lock state.
-    #[inline(always)]
-    #[expect(
-        clippy::unused_self,
-        reason = "Method for consistency with other helpers"
-    )]
-    fn validate_post_lock_batch(
-        &self,
-        leaf: &LeafNode15<P>,
-        pre_lock_version: u32,
-        pre_lock_perm_raw: <<LeafNode15<P> as TreeLeafNode<P>>::Perm as TreePermutation>::Raw,
-    ) -> bool {
-        !leaf.version().has_changed(pre_lock_version) && leaf.permutation_raw() == pre_lock_perm_raw
-    }
-
-    /// Validate membership.
-    #[inline(always)]
-    #[expect(
-        clippy::unused_self,
-        reason = "Method for consistency with other helpers"
-    )]
-    fn validate_membership_batch(
-        &self,
-        leaf: &LeafNode15<P>,
-        key: &Key<'_>,
-    ) -> Result<(), MembershipError> {
-        // SAFETY: Called under lock - no concurrent retirement.
-        let next_raw: *mut LeafNode15<P> = unsafe { leaf.next_raw_unguarded() };
-
-        if Linker::is_marked(next_raw) {
-            leaf.wait_for_split();
-            return Err(MembershipError::SplitInProgress);
-        }
-
-        // Check lower bound for non-leftmost leaves.
-        // If key < ikey_bound and prev exists, we're "too far right" due to
-        // concurrent splits. Recovery requires restart from root (can't walk left).
-        // SAFETY: Called under lock - no concurrent retirement.
-        if !unsafe { leaf.prev_unguarded() }.is_null() {
-            let lower_bound: u64 = leaf.ikey_bound();
-            if key.ikey() < lower_bound {
-                return Err(MembershipError::KeyBelowLowerBound);
-            }
-        }
-
-        // Check upper bound (key hasn't moved to right sibling)
-        let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
-
-        if !next_ptr.is_null() {
-            // SAFETY: next_ptr is valid, protected by guard
-            let next_bound: u64 = unsafe { (*next_ptr).ikey_bound() };
-
-            if key.ikey() >= next_bound {
-                return Err(MembershipError::KeyMovedToSibling);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Check if an empty leaf can be reused.
-    #[inline(always)]
-    #[expect(
-        clippy::unused_self,
-        reason = "Method for consistency with other helpers"
-    )]
-    fn can_reuse_empty_leaf_batch(&self, leaf: &LeafNode15<P>, key: &Key<'_>) -> bool {
-        // SAFETY: Called under lock - no concurrent retirement.
-        if unsafe { leaf.prev_unguarded() }.is_null() {
-            return true;
-        }
-        leaf.ikey_bound() == key.ikey()
-    }
+    //
+    // Helpers shared with insert.rs (find_usable_slot, validate_post_lock,
+    // validate_membership, can_reuse_empty_leaf, update_existing_value,
+    // insert_new_value) are defined in insert.rs with pub(crate) visibility.
 
     /// Insert into an empty leaf. Returns a pointer to a suffix bag that must be
     /// retired after the lock is dropped (null if none).
@@ -931,77 +804,16 @@ where
         guard: &LocalGuard<'_>,
     ) -> *mut u8 {
         leaf.clear_empty_state();
-        let slot = 0;
-        let deferred_retire = self.assign_slot_generic(leaf, lock, slot, key, value, guard, None);
-        let new_perm = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
-        leaf.set_permutation(new_perm);
+        let slot: usize = 0;
+        let deferred_retire: *mut u8 =
+            self.assign_slot_generic(leaf, lock, slot, key, value, guard, None);
+
+        // Use Relaxed ordering since we hold the lock - the lock's Release
+        // fence on drop provides the necessary synchronization.
+        let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
+        leaf.set_permutation_relaxed(new_perm);
         self.count.increment();
-        deferred_retire
-    }
 
-    /// Update a value in an existing slot, returning the old value.
-    #[expect(
-        clippy::unused_self,
-        reason = "Method for consistency with other helpers"
-    )]
-    fn update_value_in_slot_batch(
-        &self,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        slot: usize,
-        new_value: &P::Output,
-        guard: &LocalGuard<'_>,
-    ) -> P::Output {
-        // Load old value before overwrite.
-        // load_value returns Option<P::Output>; slot is guaranteed occupied (Found path).
-        let old_output: P::Output = leaf
-            .load_value(slot)
-            .expect("slot should have value in Found path");
-
-        lock.mark_insert();
-
-        // Store new value in place; get retirement handle for old data.
-        // We hold the lock. Slot contains a terminal value (Found path).
-        let retire: RetireHandle = leaf.update_in_place(slot, new_value);
-
-        // Defer retirement of old value data if needed.
-        // SAFETY: handle was produced by update_in_place() on this leaf.
-        unsafe { P::retire_handle(retire, guard) };
-
-        old_output
-    }
-
-    /// Insert a new value into a slot. Returns a pointer to a suffix bag that must be
-    /// retired after the lock is dropped (null if none).
-    #[expect(clippy::too_many_arguments)]
-    fn insert_into_slot_batch(
-        &self,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        slot: usize,
-        back_offset: usize,
-        logical_pos: usize,
-        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
-        key: &Key<'_>,
-        value: &P::Output,
-        guard: &LocalGuard<'_>,
-    ) -> *mut u8 {
-        // Assign the slot
-        let deferred_retire = self.assign_slot_generic(leaf, lock, slot, key, value, guard, None);
-
-        // Update permutation
-        let mut new_perm = perm;
-
-        if back_offset > 0 {
-            let back_pos = LeafNode15::<P>::WIDTH - 1;
-            let chosen_pos = back_pos - back_offset;
-            new_perm.swap_free_slots(back_pos, chosen_pos);
-        }
-
-        let allocated = new_perm.insert_from_back(logical_pos);
-        debug_assert_eq!(allocated, slot, "allocated unexpected slot");
-
-        leaf.set_permutation(new_perm);
         deferred_retire
     }
 }

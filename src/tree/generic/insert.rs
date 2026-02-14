@@ -12,8 +12,8 @@ use crate::leaf15::KSUF_KEYLENX;
 use crate::policy::RetireHandle;
 
 use super::{
-    InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker, LocalGuard,
-    MassTreeGeneric, TreeAllocator, TreePermutation,
+    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker,
+    LocalGuard, MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
 };
 
 use crate::leaf15::LeafNode15;
@@ -61,38 +61,6 @@ macro_rules! stat {
 }
 
 // ============================================================================
-//  FindSlotResult - Slot allocation outcome
-// ============================================================================
-
-/// Result of finding a usable slot for insertion.
-///
-/// # Slot-0 Rule
-///
-/// Slot 0 stores the leaf's `ikey_bound()` value. When a key is deleted from slot 0,
-/// the slot cannot be reused for a different ikey because readers use `ikey_bound()`
-/// for B-link navigation. The slot-0 rule ensures:
-///
-/// - If slot 0 is free and `ikey == ikey_bound()`, slot 0 can be reused
-/// - If slot 0 is free but `ikey != ikey_bound()`, we must find another slot
-/// - If no other slots are free, we trigger a split (even though slot 0 is "free")
-enum FindSlotResult {
-    /// Found a usable slot at the given physical index.
-    ///
-    /// - `slot`: Physical slot index in the leaf (0..WIDTH)
-    /// - `back_offset`: Offset from the back of the free list where this slot was found.
-    ///   Usually 0 (meaning the slot was at `perm.back()`). Non-zero when slot-0 rule
-    ///   forced us to skip slot 0 and find an alternative.
-    Found { slot: usize, back_offset: usize },
-
-    /// No usable slot available - the leaf must be split.
-    ///
-    /// This occurs when:
-    /// - The leaf is full (`perm.size() >= WIDTH`), OR
-    /// - Only slot 0 is free but cannot be reused (slot-0 rule violation)
-    NeedsSplit,
-}
-
-// ============================================================================
 //  Hot Path Helpers
 // ============================================================================
 
@@ -110,7 +78,7 @@ where
     /// or `FindSlotResult::NeedsSplit` if no usable slot is available.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
-    fn find_usable_slot(
+    pub(crate) fn find_usable_slot(
         &self,
         leaf: &LeafNode15<P>,
         perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
@@ -156,7 +124,7 @@ where
     /// Caller must hold the lock on `leaf`.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
-    fn update_existing_value(
+    pub(crate) fn update_existing_value(
         &self,
         leaf: &LeafNode15<P>,
         lock: &mut LockGuard<'_>,
@@ -196,7 +164,7 @@ where
         clippy::too_many_arguments,
         reason = "Slot assignment requires full context"
     )]
-    fn insert_new_value(
+    pub(crate) fn insert_new_value(
         &self,
         leaf: &LeafNode15<P>,
         lock: &mut LockGuard<'_>,
@@ -246,7 +214,7 @@ where
     /// - Caller must have already verified !`deleted_layer()`
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
-    fn can_reuse_empty_leaf(&self, leaf: &LeafNode15<P>, key: &Key<'_>) -> bool {
+    pub(crate) fn can_reuse_empty_leaf(&self, leaf: &LeafNode15<P>, key: &Key<'_>) -> bool {
         // Leftmost leaves can always be reused - they'll set ikey_bound from the key
         // SAFETY: Called under lock - no concurrent retirement.
         if unsafe { leaf.prev_unguarded() }.is_null() {
@@ -291,9 +259,11 @@ where
         let deferred_retire =
             self.assign_slot_generic(leaf, lock, slot, key, value, guard, pre_allocated);
 
-        // Create permutation with single entry at position 0, using slot 0
+        // Create permutation with single entry at position 0, using slot 0.
+        // Use Relaxed ordering since we hold the lock - the lock's Release
+        // fence on drop provides the necessary synchronization.
         let new_perm = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
-        leaf.set_permutation(new_perm);
+        leaf.set_permutation_relaxed(new_perm);
 
         (Ok(None), deferred_retire)
     }
@@ -313,7 +283,7 @@ where
     /// Returns `true` if validation passed, `false` if retry is needed.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
-    fn validate_post_lock(
+    pub(crate) fn validate_post_lock(
         &self,
         leaf: &LeafNode15<P>,
         pre_lock_version: u32,
@@ -328,7 +298,7 @@ where
     /// to retry (split in progress, key moved to sibling, or key below lower bound).
     #[inline] // Not #[inline(always)] - 35+ lines with multiple branches
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
-    fn validate_membership(
+    pub(crate) fn validate_membership(
         &self,
         leaf: &LeafNode15<P>,
         key: &Key<'_>,
@@ -418,38 +388,6 @@ where
         leaf.set_keylenx(slot, LAYER_KEYLENX);
         leaf.store_layer(slot, layer_ptr);
     }
-}
-
-/// Errors from membership validation.
-///
-/// Each variant indicates why the key doesn't belong in the current leaf
-/// and how to recover.
-enum MembershipError {
-    /// A split is in progress on this leaf.
-    ///
-    /// # Recovery
-    ///
-    /// Wait for split completion (`wait_for_split()`), then B-link advance.
-    /// The key may now be in this leaf or a right sibling.
-    SplitInProgress,
-
-    /// Key's ikey is >= the next sibling's lower bound.
-    ///
-    /// # Recovery
-    ///
-    /// B-link advance (walk right) to find the correct leaf. This is the
-    /// common case during concurrent splits - the key moved to a newly
-    /// created right sibling.
-    KeyMovedToSibling,
-
-    /// Key's ikey is < this leaf's lower bound (`ikey_bound()`).
-    ///
-    /// # Recovery
-    ///
-    /// **Cannot recover by walking right.** Must restart traversal from
-    /// the layer root. This occurs when concurrent splits created new
-    /// leaves to the left of our traversal path.
-    KeyBelowLowerBound,
 }
 
 // ============================================================================

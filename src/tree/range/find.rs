@@ -1248,6 +1248,10 @@ pub enum LeafBatchResult {
 /// - State machine dispatch per entry
 /// - Redundant leaf/version checks
 #[inline]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Hot path batch processor - parameters represent mutable scan state that cannot be bundled without allocation overhead"
+)]
 pub fn process_leaf_batch_ptr<P, F>(
     stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
@@ -1389,6 +1393,10 @@ where
 /// 5. Check end bound
 /// 6. Validate version (OCC) after batch
 #[inline]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Hot path batch processor - parameters represent mutable scan state that cannot be bundled without allocation overhead"
+)]
 pub fn process_leaf_batch<P, F>(
     stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,

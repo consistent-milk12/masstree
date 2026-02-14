@@ -1056,8 +1056,8 @@ where
     ///
     /// # Note
     ///
-    /// This method is only available for pointer-backed storage modes (Currently only MassTree15,
-    /// which uses Box)
+    /// This method is only available for pointer-backed storage modes (Currently only `MassTree15`,
+    /// which uses `Box`)
     ///
     /// It is not available for true-inline storage (`MassTree15Inline`) because
     /// values are stored as atomic bits, not at stable addresses.

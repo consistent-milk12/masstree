@@ -289,7 +289,7 @@ mod value_array_tests {
 
         arr.store(0, &std::f64::consts::PI);
         let loaded: f64 = arr.load(0).unwrap();
-        assert_eq!(loaded, std::f64::consts::PI);
+        assert!((loaded - std::f64::consts::PI).abs() < f64::EPSILON);
     }
 
     #[test]
