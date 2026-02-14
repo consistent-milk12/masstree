@@ -64,19 +64,19 @@ pub type RemoveEntryResult<O> = Result<Option<(Vec<u8>, O)>, RemoveError>;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use masstree::MassTree;
 ///
 /// let tree: MassTree<u64> = MassTree::new();
 /// let guard = tree.guard();
 ///
 /// // Insert if absent, get value either way
-/// let value = tree.entry_with_guard(b"counter", &guard)
+/// let _value = tree.entry_with_guard(b"counter", &guard)
 ///     .or_insert(0);
 ///
 /// // Modify existing or insert default
-/// let value = tree.entry_with_guard(b"counter", &guard)
-///     .and_modify(|v| *v + 1)
+/// let _value = tree.entry_with_guard(b"counter", &guard)
+///     .and_modify(|v| v + 1)
 ///     .or_insert(0);
 /// ```
 pub enum Entry<'t, 'e, P, A>
@@ -169,7 +169,10 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # use masstree::MassTree;
+    /// # let tree: MassTree<u64> = MassTree::new();
+    /// # let guard = tree.guard();
     /// let value = tree.entry_with_guard(b"key", &guard).or_insert(42);
     /// ```
     /// Returns the entry's value if occupied, or inserts the default and returns it.
@@ -208,6 +211,7 @@ where
         }
     }
 
+    /// Inserts the default value if vacant, returns the entry's value.
     pub fn or_default(self) -> P::Output
     where
         P::Value: Default,
@@ -265,6 +269,7 @@ where
         }
     }
 
+    /// Returns a reference to the value if occupied, or `None` if vacant.
     #[must_use]
     #[inline(always)]
     pub const fn get(&self) -> Option<&P::Output> {

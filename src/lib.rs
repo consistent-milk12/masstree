@@ -15,8 +15,8 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
-//! use masstree::MassTree;
+//! ```rust
+//! use masstree::{MassTree, RangeBound};
 //!
 //! let tree: MassTree<u64> = MassTree::new();
 //! let guard = tree.guard();
@@ -31,9 +31,7 @@
 //! tree.remove_with_guard(b"hello", &guard).unwrap();
 //!
 //! // Range scan
-//! use masstree::RangeBound;
-//! tree.scan(RangeBound::Included(b"a"), RangeBound::Excluded(b"z"), |key, value| {
-//!     println!("{:?} -> {}", key, value);
+//! tree.scan(RangeBound::Included(b"a"), RangeBound::Excluded(b"z"), |_key, _value| {
 //!     true // continue scanning
 //! }, &guard);
 //! ```
@@ -218,7 +216,7 @@ pub mod insert_stats;
 // ============================================================================
 
 // Core tree types
-pub use tree::{BatchEntry, BatchInsertResult, batch};
+pub use tree::{BatchEntry, BatchInsertResult, Entry, OccupiedEntry, VacantEntry, batch};
 pub use tree::{InsertError, RemoveError};
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use tree::{MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};

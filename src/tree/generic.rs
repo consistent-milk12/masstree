@@ -12,7 +12,7 @@ use crate::{
     hints::{likely, unlikely},
     internode::InternodeNode,
     key::Key,
-    leaf_trait::{LayerCapableLeaf, TreeLeafNode},
+    leaf_trait::TreeLeafNode,
     leaf15::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode15},
     nodeversion::{LockGuard, NodeVersion},
     policy::LeafPolicy,
@@ -21,7 +21,6 @@ use crate::{
     tree::{
         InsertError, InsertSearchResultGeneric,
         coalesce::{Coalesce, CoalesceQueue},
-        generic::entry::Entry,
         remove::NodeCleaner,
         split::Propagation,
     },
@@ -39,6 +38,7 @@ mod split;
 
 // Re-export batch types
 pub use batch::{BatchEntry, BatchInsertResult};
+pub use entry::{Entry, OccupiedEntry, VacantEntry};
 
 // ============================================================================
 //  Shared Types (used by insert.rs and batch.rs)
@@ -1202,14 +1202,16 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let tree = MassTree15::new();
+    /// ```rust
+    /// use masstree::MassTree15;
+    ///
+    /// let tree: MassTree15<u64> = MassTree15::new();
     /// tree.insert(b"key", 42);
     ///
-    /// let removed = tree.remove(b"key")?;
-    /// assert_eq!(removed.unwrap(), 42);
+    /// let removed = tree.remove(b"key").unwrap();
+    /// assert_eq!(removed, Some(42));
     ///
-    /// let not_found = tree.remove(b"key")?;
+    /// let not_found = tree.remove(b"key").unwrap();
     /// assert_eq!(not_found, None);
     /// ```
     ///
@@ -1349,36 +1351,31 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use masstree::MassTree;
+    /// ```rust
+    /// use masstree::{MassTree, Entry};
     ///
     /// let tree: MassTree<u64> = MassTree::new();
     /// let guard = tree.guard();
     ///
     /// // Insert if absent, returning the value
-    /// let value = tree.entry_with_guard(b"key", &guard).or_insert(42);
+    /// let _value = tree.entry_with_guard(b"key", &guard).or_insert(42);
     ///
     /// // Increment counter, defaulting to 0
-    /// let value = tree.entry_with_guard(b"counter", &guard)
-    ///     .and_modify(|v| *v + 1)  // For ValuePtr<u64>: dereference ValuePtr
+    /// let _value = tree.entry_with_guard(b"counter", &guard)
+    ///     .and_modify(|v| v + 1)
     ///     .or_insert(0);
     ///
     /// // Fallible insertion
-    /// let result = tree.entry_with_guard(b"key", &guard)
+    /// let _result = tree.entry_with_guard(b"key", &guard)
     ///     .or_try_insert(100);
     ///
     /// // Pattern matching
-    /// use masstree::Entry;
     /// match tree.entry_with_guard(b"maybe", &guard) {
     ///     Entry::Occupied(o) => {
-    ///         // Remove returns the actually removed value, or None if deleted
-    ///         if let Some(val) = o.remove() {
-    ///             println!("Removed: {:?}", val);
-    ///         }
+    ///         let _val = o.remove();
     ///     }
     ///     Entry::Vacant(v) => {
     ///         v.insert(100);
-    ///         println!("Inserted default");
     ///     }
     /// }
     /// ```
@@ -1421,7 +1418,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
     /// use masstree::MassTree;
     ///
     /// let data = vec![
@@ -1471,7 +1468,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
     /// use masstree::MassTree;
     ///
     /// let mut tree: MassTree<u64> = MassTree::new();
@@ -1479,8 +1476,8 @@ where
     ///
     /// // Can use byte literals directly, &[u8; N] implements AsRef<[u8]>
     /// tree.extend([
-    ///     (b"key1", 1u64);
-    ///     (b"key2", 2u64);
+    ///     (b"key1" as &[u8], 1u64),
+    ///     (b"key2" as &[u8], 2u64),
     /// ]);
     ///
     /// assert_eq!(tree.len(), 3);

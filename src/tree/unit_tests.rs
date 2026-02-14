@@ -11,21 +11,10 @@ use std::thread;
 // ========================================================================
 // Send/Sync Verification
 // ========================================================================
-//
-// MassTree<V> is Send + Sync when V: Send + Sync.
-//
-// The struct uses:
-// - AtomicPtr<u8> for root_ptr (Send + Sync)
-// - AtomicUsize for count (Send + Sync)
-// - PhantomData<V> which inherits Send/Sync from V
-//
-// This enables concurrent access via Arc<MassTree<V>>.
 
-fn _assert_send_sync()
-where
-    MassTree<u64>: Send + Sync,
-{
-}
+static_assertions::assert_impl_all!(MassTree<u64>: Send, Sync);
+static_assertions::assert_impl_all!(MassTree15<String>: Send, Sync);
+static_assertions::assert_impl_all!(MassTree15Inline<u64>: Send, Sync);
 
 // ========================================================================
 //  MassTree Basic Tests

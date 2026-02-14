@@ -26,7 +26,7 @@ mod range;
 pub mod remove;
 mod split;
 
-pub use generic::{BatchEntry, BatchInsertResult};
+pub use generic::{BatchEntry, BatchInsertResult, Entry, OccupiedEntry, VacantEntry};
 pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use remove::RemoveError;
 
@@ -38,7 +38,7 @@ pub use remove::RemoveError;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use masstree::MassTree;
 ///
 /// let tree: MassTree<u64> = MassTree::new();
@@ -46,7 +46,7 @@ pub use remove::RemoveError;
 ///     (b"key1".to_vec(), 1u64),
 ///     (b"key2".to_vec(), 2u64),
 /// ];
-/// let result = tree.insert_batch(entries)?;
+/// let result = tree.insert_batch(entries);
 /// ```
 pub mod batch {
     pub use super::batch_utils::{
@@ -163,6 +163,37 @@ where
     _marker: PhantomData<P>,
 }
 
+// SAFETY: `MassTreeGeneric` is `Send` because:
+// - `Collector` (seize): Send (epoch-based reclamation, thread-safe by design)
+// - `A: TreeAllocator<P>`: bound requires Send
+// - `AtomicPtr<u8>`: Send (atomic pointer, no ownership of pointee)
+// - `ShardedCounter`: Send (uses AtomicUsize shards)
+// - `CoalesceQueue<LeafNode15<P>>`: Send (Mutex-protected queue)
+// - `PhantomData<P>`: Send when P: Send (P: LeafPolicy requires Send)
+// All concurrent mutation is serialized by per-node locks; the tree itself
+// can safely transfer ownership between threads.
+unsafe impl<P, A> Send for MassTreeGeneric<P, A>
+where
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
+{
+}
+
+// SAFETY: `MassTreeGeneric` is `Sync` because:
+// - All read paths use optimistic concurrency control (OCC) with version validation
+// - All write paths acquire per-node spin locks before mutation
+// - Memory reclamation uses epoch-based protection (seize::Collector)
+// - The root pointer is AtomicPtr with proper Acquire/Release ordering
+// - ShardedCounter uses per-shard AtomicUsize (no shared mutable state)
+// - CoalesceQueue is Mutex-protected
+// Multiple threads can safely share a &MassTreeGeneric reference.
+unsafe impl<P, A> Sync for MassTreeGeneric<P, A>
+where
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
+{
+}
+
 impl<P, A> StdFmt::Debug for MassTreeGeneric<P, A>
 where
     P: LeafPolicy,
@@ -251,13 +282,13 @@ where
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust
 /// use masstree::MassTree;
 ///
 /// let tree: MassTree<u64> = MassTree::new();
 /// let guard = tree.guard();
-/// tree.insert_with_guard(b"key", 42, &guard).unwrap();
-/// assert_eq!(tree.get_with_guard(b"key", &guard), Some(42)); // Returns u64 directly!
+/// tree.insert_with_guard(b"key", 42, &guard);
+/// assert_eq!(tree.get_with_guard(b"key", &guard), Some(42));
 /// ```
 ///
 /// [`InlineBits`]: crate::inline::bits::InlineBits
@@ -270,12 +301,12 @@ pub type MassTree<V> = MassTree15Inline<V>;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust
 /// use masstree::MassTree15;
 ///
 /// let tree: MassTree15<String> = MassTree15::new();
 /// let guard = tree.guard();
-/// tree.insert_with_guard(b"key", "hello".to_string(), &guard).unwrap();
+/// tree.insert_with_guard(b"key", "hello".to_string(), &guard);
 /// ```
 ///
 /// [`ValuePtr<V>`]: crate::policy::ValuePtr

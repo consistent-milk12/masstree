@@ -18,7 +18,6 @@
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
-use crate::key::Key;
 use crate::nodeversion::NodeVersion;
 use crate::policy::{LeafPolicy, RetireHandle, SlotKind, SlotState};
 use seize::LocalGuard;
@@ -832,57 +831,6 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
 
     /// Clear the empty state flag.
     fn clear_empty_state(&self);
-}
-
-// =============================================================================
-// LayerCapableLeaf Trait
-// =============================================================================
-
-/// Extension trait for Arc-mode leaves that support layer creation.
-///
-/// This trait adds layer-specific operations needed for handling suffix conflicts
-/// in keys longer than 8 bytes. It is separate from [`TreeLeafNode`] because the
-/// methods are specific to `LeafValue<V>` mode (Arc-wrapped values).
-///
-/// # When Layer Creation Occurs
-///
-/// Layer creation is triggered when:
-/// 1. Two keys share the same 8-byte ikey
-/// 2. Both have suffixes (bytes beyond the first 8)
-/// 3. The suffixes differ
-/// 4. Neither slot is already a layer pointer
-///
-/// This is the "Conflict" case in `InsertSearchResultGeneric`.
-///
-/// # Implementors
-///
-/// - `LeafNode15<P>` (for all policies)
-pub trait LayerCapableLeaf<P: LeafPolicy>: TreeLeafNode<P> {
-    /// Clone the output value at a slot, if it contains a terminal value.
-    ///
-    /// Returns `None` if the slot is empty or contains a layer pointer.
-    ///
-    /// For Arc: `Arc::increment_strong_count` + `Arc::from_raw` (new handle).
-    /// For inline: loads bits, reconstructs `V` (Copy).
-    fn try_clone_output(&self, slot: usize) -> Option<P::Output>;
-
-    /// Assign a key, value, and optional suffix to a slot.
-    ///
-    /// Used during layer creation to populate the sublayer root leaf with
-    /// the conflicting entry. The `value` is `Some(output)` for terminal
-    /// entries and `None` if the source slot was empty (shouldn't happen
-    /// in practice).
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold the leaf lock or have exclusive access.
-    unsafe fn assign_from_key(
-        &self,
-        slot: usize,
-        key: &Key<'_>,
-        value: Option<P::Output>,
-        guard: &LocalGuard<'_>,
-    );
 }
 
 // ============================================================================

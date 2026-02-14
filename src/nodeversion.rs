@@ -34,7 +34,10 @@
 //! Operations that require the lock take `&mut LockGuard` as proof. The guard
 //! automatically unlocks on drop (panic-safe).
 //!
-//! ```rust,ignore
+//! ```rust
+//! use masstree::NodeVersion;
+//!
+//! let version = NodeVersion::new(true);
 //! let mut guard = version.lock();
 //! guard.mark_insert();
 //! // Lock released when guard drops
@@ -1001,12 +1004,12 @@ impl NodeVersion {
     /// - Bounded wait times in production
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust
     /// use std::time::Duration;
     /// use masstree::NodeVersion;
     ///
     /// let version = NodeVersion::new(true);
-    /// if let Some(guard) = version.try_lock_for(Duration::from_millis(100)) {
+    /// if let Some(_guard) = version.try_lock_for(Duration::from_millis(100)) {
     ///     // Lock acquired within 100ms
     /// } else {
     ///     // Timeout expired, lock not acquired

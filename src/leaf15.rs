@@ -34,7 +34,6 @@ use crate::internode::InternodeNode;
 use crate::key::IKEY_SIZE;
 use crate::key::Key;
 use crate::ksearch::scalar::Scalar;
-use crate::leaf_trait::LayerCapableLeaf;
 use crate::leaf_trait::SplitInsertData;
 use crate::leaf_trait::SplitInsertResult;
 use crate::leaf_trait::TreeLeafNode;
@@ -2434,6 +2433,7 @@ impl<P: LeafPolicy> Drop for LeafNode15<P> {
                 }
             }
         }
+
         // For InlinePolicy (NEEDS_RETIREMENT = false):
         //   - inline_values are AtomicU64 bits, dropped automatically
         //   - tags are AtomicPtr with sentinel pointers, no ownership
@@ -2454,12 +2454,12 @@ impl<P: LeafPolicy> Drop for LeafNode15<P> {
 }
 
 // =============================================================================
-// LayerCapableLeaf Implementation
+// Layer Creation Helpers
 // =============================================================================
 
-impl<P: LeafPolicy> LayerCapableLeaf<P> for LeafNode15<P> {
+impl<P: LeafPolicy> LeafNode15<P> {
     #[inline]
-    fn try_clone_output(&self, slot: usize) -> Option<P::Output> {
+    pub(crate) fn try_clone_output(&self, slot: usize) -> Option<P::Output> {
         debug_assert!(
             slot < WIDTH_15,
             "try_clone_output: slot {slot} >= WIDTH_15 {WIDTH_15}"
@@ -2473,7 +2473,7 @@ impl<P: LeafPolicy> LayerCapableLeaf<P> for LeafNode15<P> {
     }
 
     #[expect(clippy::cast_possible_truncation)]
-    unsafe fn assign_from_key(
+    pub(crate) unsafe fn assign_from_key(
         &self,
         slot: usize,
         key: &Key<'_>,

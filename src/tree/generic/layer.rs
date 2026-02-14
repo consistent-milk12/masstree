@@ -10,8 +10,8 @@ use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
 
 use super::{
-    Key, LAYER_KEYLENX, LayerCapableLeaf, LeafPolicy, LocalGuard, MassTreeGeneric, Ordering,
-    TreeAllocator, TreePermutation,
+    Key, LAYER_KEYLENX, LeafPolicy, LocalGuard, MassTreeGeneric, Ordering, TreeAllocator,
+    TreePermutation,
 };
 
 impl<P, A> MassTreeGeneric<P, A>

@@ -104,15 +104,15 @@ impl PermuterUtils {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use masstree::Permuter;
 ///
 /// // Default WIDTH=15
-/// let mut p = Permuter::empty();
+/// let mut p: Permuter<15> = Permuter::empty();
 /// assert_eq!(p.size(), 0);
 ///
 /// // Compact WIDTH=7
-/// let mut compact: Permuter<7> = Permuter::empty();
+/// let compact: Permuter<7> = Permuter::empty();
 /// assert_eq!(compact.size(), 0);
 ///
 /// // Insert at position 0, allocates slot from back
@@ -457,7 +457,9 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// use masstree::Permuter;
+    ///
     /// let perm = Permuter::<15>::empty();
     /// let (new_perm, slot) = perm.insert_from_back_immutable(0);
     /// assert_eq!(new_perm.size(), 1);

@@ -261,7 +261,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
     /// use masstree::MassTree15;
     ///
     /// let tree: MassTree15<u64> = MassTree15::new();
