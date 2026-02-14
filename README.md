@@ -35,14 +35,14 @@ Copy types.
 
 | Benchmark | Rust | C++ | Ratio |
 |-----------|------|-----|-------|
-| **rw3** (forward-seq) | 70.62 | 45.34 | **156%** |
-| **same** (10 hot keys) | 2.82 | 2.07 | **136%** |
-| **rw4** (reverse-seq) | 58.52 | 43.24 | **135%** |
+| **same** (10 hot keys) | 3.16 | 2.07 | **153%** |
+| **rw3** (forward-seq) | 66.54 | 45.34 | **147%** |
+| **rw4** (reverse-seq) | 61.67 | 43.24 | **143%** |
 | **highcontention** (500 keys, 64B) | 78.04 | 58.62 | **133%** |
-| **rw1** (random insert+read) | 9.70 | 8.16 | **119%** |
-| **rw2g98** (98% reads) | 24.10 | 20.70 | **116%** |
-| **uscale** (random 140M) | 10.11 | 8.81 | **115%** |
-| **wscale** (wide random) | 8.93 | 8.12 | **110%** |
+| **rw1** (random insert+read) | 9.98 | 8.16 | **122%** |
+| **rw2g98** (98% reads) | 24.54 | 20.70 | **119%** |
+| **uscale** (random 140M) | 10.44 | 8.81 | **119%** |
+| **wscale** (wide random) | 8.40 | 8.12 | **103%** |
 
 ## vs Rust Concurrent Maps (12T SMT)
 

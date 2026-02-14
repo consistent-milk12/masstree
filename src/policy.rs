@@ -22,6 +22,7 @@
 #![allow(dead_code)]
 
 mod box_values;
+mod drain_rebuild;
 #[cfg(not(feature = "sidecar-suffix"))]
 mod embedded_suffix;
 mod inline_values;
@@ -166,6 +167,13 @@ impl<V: PartialOrd> PartialOrd for ValuePtr<V> {
 impl<V: Ord> Ord for ValuePtr<V> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (**self).cmp(&**other)
+    }
+}
+
+impl<V> AsRef<V> for ValuePtr<V> {
+    #[inline(always)]
+    fn as_ref(&self) -> &V {
+        self
     }
 }
 
@@ -389,6 +397,13 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// For `InlineValueArray`: overwrites bits, returns `RetireHandle::Noop`.
     ///
     /// Caller must pass the returned handle to [`LeafPolicy::retire_handle()`].
+    ///
+    /// # Lock Requirement
+    ///
+    /// Caller **must** hold the leaf lock. The old-value load uses `Relaxed`
+    /// ordering, which is sound only because the lock's `Acquire` on entry
+    /// synchronizes all prior stores. Calling without the lock risks reading
+    /// a stale pointer, leading to double-free.
     fn update_in_place(&self, slot: usize, output: &O) -> RetireHandle;
 
     /// Take the terminal value, leaving the slot empty.

@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use seize::Collector;
 
 use super::{InlineSuffixBag, SuffixBag};
-use crate::alloc_common::BoxAllocator;
+
 // Note: AllocError/AllocResult removed - allocations are now infallible
 
 /// Utility functions for suffix sidecar operations.
@@ -136,7 +136,7 @@ impl SuffixSidecar {
         }
 
         // Allocate new external bag (aborts on OOM)
-        let new_external: Box<SuffixBag> = BoxAllocator::boxed(SuffixBag::new());
+        let new_external: Box<SuffixBag> = Box::new(SuffixBag::new());
         let new_ptr: *mut SuffixBag = Box::into_raw(new_external);
         self.external.store(new_ptr, Ordering::Release);
 

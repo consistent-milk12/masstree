@@ -82,12 +82,16 @@
 // The memory is always properly aligned before casting.
 #![allow(clippy::cast_ptr_alignment)]
 
-#[cfg(feature = "mimalloc")]
-use mimalloc::MiMalloc;
+#[cfg(all(feature = "mimalloc", feature = "tcmalloc"))]
+compile_error!("features `mimalloc` and `tcmalloc` are mutually exclusive");
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "tcmalloc")]
+#[global_allocator]
+static GLOBAL: tcmalloc::TCMalloc = tcmalloc::TCMalloc;
 
 /// Initialize tracing with file and console output.
 ///
@@ -194,7 +198,6 @@ pub mod tree;
 pub mod value;
 
 // Internal implementation details
-mod alloc_common;
 pub(crate) mod hints;
 pub(crate) mod ksearch;
 pub(crate) mod link;

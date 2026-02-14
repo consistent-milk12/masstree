@@ -81,11 +81,11 @@ unsafe impl<V: Send + Sync> Sync for BoxValueArray<V> {}
 impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     #[inline(always)]
     fn new() -> Self {
-        // Initialize all slots to null (empty).
-        Self {
-            ptrs: std::array::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-            _marker: PhantomData,
-        }
+        // SAFETY: BoxValueArray is #[repr(C)]. All fields are zero-safe:
+        // - ptrs: [AtomicPtr<u8>; 15] — null pointers are all-zero-bits
+        // - _marker: PhantomData<V> — ZST, no bytes
+        // AtomicPtr is #[repr(C)] wrapping UnsafeCell<*mut T>; null is 0.
+        unsafe { std::mem::zeroed() }
     }
 
     // ========================================================================
@@ -206,8 +206,8 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
 
     #[inline(always)]
     fn load_raw(&self, slot: usize) -> *mut u8 {
-        debug_assert!(slot < WIDTH_15, "load_raw: slot {slot} out of bounds");
-        self.ptrs[slot].load(READ_ORD)
+        // Delegate to inherent method to avoid duplicate logic.
+        self.load_raw(slot)
     }
 
     #[inline(always)]

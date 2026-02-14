@@ -19,10 +19,9 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use seize::{Guard, LocalGuard};
 
-use crate::TreePermutation;
-use crate::alloc_common::BoxAllocator;
 use crate::ordering::RELAXED;
 use crate::suffix::{SideCarUtils, SuffixBag, SuffixSidecar};
+use crate::TreePermutation;
 
 use super::SuffixStore;
 
@@ -84,7 +83,7 @@ impl SidecarSuffix {
         }
 
         // Caller holds lock, no race possible.
-        let new_sidecar: Box<SuffixSidecar> = BoxAllocator::boxed(SuffixSidecar::new());
+        let new_sidecar: Box<SuffixSidecar> = Box::new(SuffixSidecar::new());
         let ptr: *mut SuffixSidecar = Box::into_raw(new_sidecar);
         self.sidecar.store(ptr, AtomicOrdering::Release);
 
@@ -170,8 +169,20 @@ impl SuffixStore for SidecarSuffix {
             return StdPtr::null_mut(); // No retirement needed.
         }
 
+        // Middle path: try in-place assignment on existing external.
+        // Avoids drain-and-rebuild when the external bag can accommodate
+        // the suffix directly (reuse or compact existing space).
+        let ext_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
+        if !ext_ptr.is_null() {
+            // SAFETY: ext_ptr is valid, caller holds lock.
+            let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
+            if bag.try_assign_in_place(slot, suffix) {
+                sidecar.inline.clear(slot);
+                return StdPtr::null_mut();
+            }
+        }
+
         // Slow path: drain inline to new external bag, merge old external.
-        // Matches existing leaf15.rs 2-tier pattern (inline → drain).
         // SAFETY: Caller holds leaf lock.
         unsafe { self.drain_and_rebuild(sidecar, slot, suffix, perm) }
     }
@@ -225,6 +236,17 @@ impl SuffixStore for SidecarSuffix {
         // Fast path: inline assignment.
         if sidecar.inline.try_assign(slot, suffix) {
             return StdPtr::null_mut();
+        }
+
+        // Middle path: try in-place assignment on existing external.
+        let ext_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
+        if !ext_ptr.is_null() {
+            // SAFETY: ext_ptr is valid, caller holds lock.
+            let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
+            if bag.try_assign_in_place(slot, suffix) {
+                sidecar.inline.clear(slot);
+                return StdPtr::null_mut();
+            }
         }
 
         // Slow path with pre-allocated buffer.
@@ -307,9 +329,6 @@ impl SidecarSuffix {
     /// Drain inline suffixes to a new external bag, assign the new suffix,
     /// merge old external entries, and install the new bag.
     ///
-    /// Uses [`InlineSuffixBag::drain_to_external()`] which pre-calculates
-    /// capacity for zero reallocations during the drain.
-    ///
     /// Returns the old external bag pointer for deferred retirement
     /// (null if no previous external bag existed).
     ///
@@ -326,34 +345,16 @@ impl SidecarSuffix {
         suffix: &[u8],
         perm: &impl TreePermutation,
     ) -> *mut u8 {
-        // Drain all inline suffixes + new suffix into a new external bag.
-        // drain_to_external pre-calculates capacity for zero reallocations.
-        let mut new_bag: SuffixBag = sidecar.inline.drain_to_external(perm, slot, suffix);
-
-        // Merge active suffixes from old external bag (if any).
-        let old_external: *mut SuffixBag = sidecar.external.load(RELAXED);
-
-        if !old_external.is_null() {
-            // SAFETY: old_external is valid, we hold the lock.
-            let old_ref: &SuffixBag = unsafe { &*old_external };
-
-            for i in 0..perm.size() {
-                let phys: usize = perm.get(i);
-
-                if phys != slot
-                    && let Some(s) = old_ref.get(phys)
-                {
-                    new_bag.assign(phys, s);
-                }
-            }
+        // SAFETY: Caller holds leaf lock. Sidecar fields are valid.
+        unsafe {
+            super::drain_rebuild::drain_and_rebuild(
+                &sidecar.inline,
+                &sidecar.external,
+                slot,
+                suffix,
+                perm,
+            )
         }
-
-        // Install new external bag (Release ordering for publication).
-        let new_ptr: *mut SuffixBag = Box::into_raw(BoxAllocator::boxed(new_bag));
-        sidecar.external.store(new_ptr, AtomicOrdering::Release);
-
-        // Return old external for retirement (may be null if first external).
-        old_external.cast::<u8>()
     }
 
     /// Same as [`drain_and_rebuild`](Self::drain_and_rebuild) but uses a
@@ -374,40 +375,20 @@ impl SidecarSuffix {
         perm: &impl TreePermutation,
         prealloc: Vec<u8>,
     ) -> *mut u8 {
-        // Drain using pre-allocated buffer.
-        let mut new_bag: SuffixBag = sidecar
-            .inline
-            .drain_to_external_with_vec(perm, slot, suffix, prealloc);
-
-        // Merge old external entries.
-        let old_external: *mut SuffixBag = sidecar.external.load(RELAXED);
-
-        if !old_external.is_null() {
-            // SAFETY: old_external is valid, we hold the lock.
-            let old_ref: &SuffixBag = unsafe { &*old_external };
-
-            for i in 0..perm.size() {
-                let phys: usize = perm.get(i);
-
-                if phys != slot
-                    && let Some(s) = old_ref.get(phys)
-                {
-                    new_bag.assign(phys, s);
-                }
-            }
+        // SAFETY: Caller holds leaf lock.
+        unsafe {
+            super::drain_rebuild::drain_and_rebuild_prealloc(
+                &sidecar.inline,
+                &sidecar.external,
+                slot,
+                suffix,
+                perm,
+                prealloc,
+            )
         }
-
-        let new_ptr: *mut SuffixBag = Box::into_raw(BoxAllocator::boxed(new_bag));
-        sidecar.external.store(new_ptr, AtomicOrdering::Release);
-
-        old_external.cast::<u8>()
     }
 
     /// Slow path for suffix assignment during node initialization.
-    ///
-    /// Uses [`InlineSuffixBag::drain_to_external_init()`] which iterates
-    /// slots 0..slot sequentially (no permutation needed). Retires the
-    /// old external bag internally via the guard.
     ///
     /// # Safety
     ///
@@ -422,35 +403,15 @@ impl SidecarSuffix {
         suffix: &[u8],
         guard: &LocalGuard<'_>,
     ) {
-        // Drain inline using sequential iteration (0..slot).
-        let mut new_bag: SuffixBag = sidecar.inline.drain_to_external_init(slot, suffix);
-
-        // Merge old external entries (if any).
-        let old_external: *mut SuffixBag = sidecar.external.load(RELAXED);
-
-        if !old_external.is_null() {
-            // SAFETY: old_external is valid, we hold the lock.
-            let old_ref: &SuffixBag = unsafe { &*old_external };
-
-            for s in 0..slot {
-                if let Some(ext_suffix) = old_ref.get(s) {
-                    new_bag.assign(s, ext_suffix);
-                }
-            }
-        }
-
-        // Install new external bag.
-        let new_ptr: *mut SuffixBag = Box::into_raw(BoxAllocator::boxed(new_bag));
-        sidecar.external.store(new_ptr, AtomicOrdering::Release);
-
-        // Retire old external bag (if any).
-        if !old_external.is_null() {
-            // SAFETY: old_external was a valid Box<SuffixBag> from a prior drain.
-            unsafe {
-                guard.defer_retire(old_external, |ptr, _| {
-                    drop(Box::from_raw(ptr));
-                });
-            }
+        // SAFETY: Caller holds leaf lock, guard is valid.
+        unsafe {
+            super::drain_rebuild::drain_and_rebuild_init(
+                &sidecar.inline,
+                &sidecar.external,
+                slot,
+                suffix,
+                guard,
+            );
         }
     }
 }

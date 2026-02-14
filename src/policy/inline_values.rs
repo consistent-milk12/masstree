@@ -85,11 +85,12 @@ unsafe impl<V: InlineBits> Sync for InlineValueArray<V> {}
 impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     #[inline(always)]
     fn new() -> Self {
-        Self {
-            tags: std::array::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-            values: std::array::from_fn(|_| AtomicU64::new(0)),
-            _marker: PhantomData,
-        }
+        // SAFETY: InlineValueArray is #[repr(C)]. All fields are zero-safe:
+        // - tags: [AtomicPtr<u8>; 15] — null pointers are all-zero-bits
+        // - values: [AtomicU64; 15] — zero is all-zero-bits
+        // - _marker: PhantomData<V> — ZST, no bytes
+        // AtomicPtr/AtomicU64 are #[repr(C)] wrapping UnsafeCell; 0/null is 0.
+        unsafe { std::mem::zeroed() }
     }
 
     // ========================================================================
@@ -122,7 +123,13 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
         let tag: *mut u8 = self.tags[slot].load(READ_ORD);
 
         if InlineSentinel::is_inline_sentinel(tag) {
-            let bits: u64 = self.values[slot].load(READ_ORD);
+            // Relaxed is sufficient: the Acquire on the tag above synchronizes
+            // with the writer's Release on the tag store. Since the writer
+            // stores bits before the tag (with Release), the bits are guaranteed
+            // visible once we've Acquired the tag. For in-place updates (bits
+            // change, tag stays sentinel), the OCC version Acquire in the caller
+            // provides the necessary synchronization.
+            let bits: u64 = self.values[slot].load(RELAXED);
             Some(V::from_bits(bits))
         } else {
             // Empty (null) or layer pointer — not a terminal value.
@@ -134,10 +141,10 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     fn store(&self, slot: usize, output: &V) {
         debug_assert!(slot < WIDTH_15, "store: slot {slot} out of bounds");
 
-        // Store bits first, then sentinel tag (publication order).
-        // The tag store with WRITE_ORD ensures bits are visible to readers
-        // who observe the sentinel.
-        self.values[slot].store(output.to_bits(), WRITE_ORD);
+        // Store bits first (Relaxed), then sentinel tag (Release = publication).
+        // The Release on the tag guarantees that any reader who Acquires the
+        // sentinel will see the prior Relaxed bits store.
+        self.values[slot].store(output.to_bits(), RELAXED);
         self.tags[slot].store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
     }
 

@@ -22,9 +22,8 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use seize::{Guard, LocalGuard};
 
-use crate::TreePermutation;
-use crate::alloc_common::BoxAllocator;
 use crate::suffix::{InlineSuffixBag, SideCarUtils, SuffixBag};
+use crate::TreePermutation;
 
 use super::SuffixStore;
 
@@ -336,7 +335,7 @@ impl EmbeddedSuffix {
             return ptr;
         }
 
-        let new_external: Box<SuffixBag> = BoxAllocator::boxed(SuffixBag::new());
+        let new_external: Box<SuffixBag> = Box::new(SuffixBag::new());
         let new_ptr: *mut SuffixBag = Box::into_raw(new_external);
         self.external_ksuf.store(new_ptr, AtomicOrdering::Release);
 
@@ -345,9 +344,6 @@ impl EmbeddedSuffix {
 
     /// Drain inline+external suffixes to a new external bag, assign the
     /// new suffix, and install it.
-    ///
-    /// Uses [`InlineSuffixBag::drain_to_external()`] which pre-calculates
-    /// capacity for zero reallocations during the drain.
     ///
     /// Returns the old external bag pointer for deferred retirement
     /// (null if no previous external bag existed).
@@ -363,36 +359,16 @@ impl EmbeddedSuffix {
         suffix: &[u8],
         perm: &impl TreePermutation,
     ) -> *mut u8 {
-        let inline: &InlineSuffixBag = self.inline_bag();
-
-        // Drain all inline suffixes + new suffix into new bag.
-        // drain_to_external pre-calculates capacity for zero reallocations.
-        let mut new_bag: SuffixBag = inline.drain_to_external(perm, slot, suffix);
-
-        // Merge active suffixes from old external (not in inline).
-        let old_external: *mut SuffixBag = self.external_ptr();
-
-        if !old_external.is_null() {
-            // SAFETY: old_external is valid, we hold the lock.
-            let old_ref: &SuffixBag = unsafe { &*old_external };
-
-            for i in 0..perm.size() {
-                let phys: usize = perm.get(i);
-
-                if phys != slot
-                    && let Some(s) = old_ref.get(phys)
-                {
-                    new_bag.assign(phys, s);
-                }
-            }
+        // SAFETY: Caller holds leaf lock. inline_bag() and external_ksuf are valid.
+        unsafe {
+            super::drain_rebuild::drain_and_rebuild(
+                self.inline_bag(),
+                &self.external_ksuf,
+                slot,
+                suffix,
+                perm,
+            )
         }
-
-        // Install new external bag.
-        let new_ptr: *mut SuffixBag = Box::into_raw(BoxAllocator::boxed(new_bag));
-        self.external_ksuf.store(new_ptr, AtomicOrdering::Release);
-
-        // Return old external for retirement (may be null).
-        old_external.cast::<u8>()
     }
 
     /// Same as [`drain_and_rebuild`](Self::drain_and_rebuild) but uses a
@@ -411,41 +387,20 @@ impl EmbeddedSuffix {
         perm: &impl TreePermutation,
         prealloc: Vec<u8>,
     ) -> *mut u8 {
-        let inline: &InlineSuffixBag = self.inline_bag();
-
-        // Drain using pre-allocated buffer.
-        let mut new_bag: SuffixBag =
-            inline.drain_to_external_with_vec(perm, slot, suffix, prealloc);
-
-        // Merge old external entries.
-        let old_external: *mut SuffixBag = self.external_ptr();
-
-        if !old_external.is_null() {
-            // SAFETY: old_external is valid, we hold the lock.
-            let old_ref: &SuffixBag = unsafe { &*old_external };
-
-            for i in 0..perm.size() {
-                let phys: usize = perm.get(i);
-
-                if phys != slot
-                    && let Some(s) = old_ref.get(phys)
-                {
-                    new_bag.assign(phys, s);
-                }
-            }
+        // SAFETY: Caller holds leaf lock.
+        unsafe {
+            super::drain_rebuild::drain_and_rebuild_prealloc(
+                self.inline_bag(),
+                &self.external_ksuf,
+                slot,
+                suffix,
+                perm,
+                prealloc,
+            )
         }
-
-        let new_ptr: *mut SuffixBag = Box::into_raw(BoxAllocator::boxed(new_bag));
-        self.external_ksuf.store(new_ptr, AtomicOrdering::Release);
-
-        old_external.cast::<u8>()
     }
 
     /// Slow path for suffix assignment during node initialization.
-    ///
-    /// Uses [`InlineSuffixBag::drain_to_external_init()`] which iterates
-    /// slots 0..slot sequentially (no permutation needed). Retires the
-    /// old external bag internally via the guard.
     ///
     /// # Safety
     ///
@@ -453,37 +408,15 @@ impl EmbeddedSuffix {
     #[cold]
     #[inline(never)]
     unsafe fn assign_init_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
-        let inline: &InlineSuffixBag = self.inline_bag();
-
-        // Drain inline using sequential iteration (0..slot).
-        let mut new_bag: SuffixBag = inline.drain_to_external_init(slot, suffix);
-
-        // Merge old external entries (if any).
-        let old_external: *mut SuffixBag = self.external_ptr();
-
-        if !old_external.is_null() {
-            // SAFETY: old_external is valid, we hold the lock.
-            let old_ref: &SuffixBag = unsafe { &*old_external };
-
-            for s in 0..slot {
-                if let Some(ext_suffix) = old_ref.get(s) {
-                    new_bag.assign(s, ext_suffix);
-                }
-            }
-        }
-
-        // Install new external bag.
-        let new_ptr: *mut SuffixBag = Box::into_raw(BoxAllocator::boxed(new_bag));
-        self.external_ksuf.store(new_ptr, AtomicOrdering::Release);
-
-        // Retire old external bag (if any).
-        if !old_external.is_null() {
-            // SAFETY: old_external was a valid Box<SuffixBag> from a prior drain.
-            unsafe {
-                guard.defer_retire(old_external, |ptr, _| {
-                    drop(Box::from_raw(ptr));
-                });
-            }
+        // SAFETY: Caller holds leaf lock, guard is valid.
+        unsafe {
+            super::drain_rebuild::drain_and_rebuild_init(
+                self.inline_bag(),
+                &self.external_ksuf,
+                slot,
+                suffix,
+                guard,
+            );
         }
     }
 }
