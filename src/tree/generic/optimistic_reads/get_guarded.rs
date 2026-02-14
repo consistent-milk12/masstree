@@ -1,12 +1,11 @@
 use seize::LocalGuard;
-use std::ptr as StdPtr;
 
 use crate::leaf15::LeafNode15;
 use crate::{
     LeafPolicy, MassTreeGeneric, NodeVersion, TreeAllocator,
     hints::unlikely,
     key::Key,
-    tree::generic::optimistic_reads::{LookupResult, search_leaf_multi_layer},
+    tree::generic::optimistic_reads::{LookupResult, VersionCheck, search_leaf_multi_layer},
 };
 
 impl<P, A> MassTreeGeneric<P, A>
@@ -131,26 +130,16 @@ where
                 let output: Option<P::Output> = found_slot.and_then(|s| leaf.load_value(s));
 
                 // Version validation after all reads (common case: unchanged)
-                // Store version reference once to avoid repeated method calls
-                let ver: &NodeVersion = leaf.version();
-                if unlikely(ver.has_changed(version)) {
-                    if unlikely(ver.has_split_no_compiler_fence(version)) {
-                        let (advanced, new_version) =
-                            self.advance_to_key_generic(leaf, key, version, guard);
-
-                        if !StdPtr::eq(advanced, leaf) {
-                            leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
-
-                            continue 'leaf_loop;
-                        }
-
+                match self.validate_version_single(leaf, key, version, guard) {
+                    VersionCheck::Valid => {}
+                    VersionCheck::RetrySearch { new_version } => {
                         version = new_version;
-                    } else {
-                        // Update only, re-stabilize without B-link check
-                        version = ver.stable();
+                        continue 'search_loop;
                     }
-
-                    continue 'search_loop;
+                    VersionCheck::RetryLeaf { new_leaf_ptr } => {
+                        leaf_ptr = new_leaf_ptr;
+                        continue 'leaf_loop;
+                    }
                 }
 
                 // Version validated, safe to return
@@ -159,8 +148,8 @@ where
                 }
 
                 // Not found, check dirty or B-link
-                if unlikely(ver.is_dirty()) {
-                    version = ver.stable();
+                if unlikely(leaf.version().is_dirty()) {
+                    version = leaf.version().stable();
 
                     continue 'search_loop;
                 }
@@ -204,51 +193,13 @@ where
         let mut layer_root: *const u8 = initial_root;
         let mut in_sublayer: bool = false;
 
-        // DEBUG: detect infinite loops during concurrent gc_layer debugging
-        #[cfg(debug_assertions)]
-        let mut layer_iters: u32 = 0;
-
         'layer_loop: loop {
-            #[cfg(debug_assertions)]
-            {
-                layer_iters += 1;
-                if layer_iters > 500 {
-                    eprintln!(
-                        "[DEBUG] layer_loop iter={layer_iters}, \
-                         in_sublayer={in_sublayer}, layer_root={layer_root:?}"
-                    );
-                    if layer_iters > 1000 {
-                        eprintln!("[DEBUG] ABORTING: infinite layer_loop detected");
-                        return None;
-                    }
-                }
-            }
-
             layer_root = self.maybe_parent_generic(layer_root);
 
             let mut leaf_ptr: *mut LeafNode15<P> =
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
-            // DEBUG: detect infinite loops
-            #[cfg(debug_assertions)]
-            let mut leaf_iters: u32 = 0;
-
             'leaf_loop: loop {
-                #[cfg(debug_assertions)]
-                {
-                    leaf_iters += 1;
-                    if leaf_iters > 500 {
-                        eprintln!(
-                            "[DEBUG] leaf_loop iter={leaf_iters}, leaf_ptr={leaf_ptr:?}, \
-                             in_sublayer={in_sublayer}"
-                        );
-                        if leaf_iters > 1000 {
-                            eprintln!("[DEBUG] ABORTING: infinite leaf_loop");
-                            return None;
-                        }
-                    }
-                }
-
                 // OPTIM: Compute ikey once per leaf iteration.
                 //
                 // key.shift() mutates on layer descent, so this must be per-iteration.
@@ -302,32 +253,7 @@ where
                     continue 'leaf_loop;
                 }
 
-                // DEBUG: detect search_loop infinite loops
-                #[cfg(debug_assertions)]
-                let mut search_iters: u32 = 0;
-
                 'search_loop: loop {
-                    #[cfg(debug_assertions)]
-                    {
-                        search_iters += 1;
-                        if search_iters > 500 {
-                            let dl = leaf.deleted_layer();
-                            let ver = leaf.version();
-                            eprintln!(
-                                "[DEBUG] search_loop iter={search_iters}, \
-                                 deleted_layer={dl}, version_val={}, \
-                                 is_deleted={}, is_dirty={}",
-                                ver.value(),
-                                ver.is_deleted(),
-                                ver.is_dirty()
-                            );
-                            if search_iters > 1000 {
-                                eprintln!("[DEBUG] ABORTING: infinite search_loop");
-                                return None;
-                            }
-                        }
-                    }
-
                     // Check for GC'd sublayer - must restart from root
                     if leaf.deleted_layer() {
                         key.unshift_all();
@@ -353,23 +279,16 @@ where
                                 leaf.load_value(slot)
                             };
 
-                            if unlikely(ver.has_changed(version)) {
-                                if unlikely(ver.has_split_no_compiler_fence(version)) {
-                                    let (new_ptr, new_version, changed_leaf) =
-                                        self.handle_version_change(leaf, key, version, guard);
-
-                                    if changed_leaf {
-                                        leaf_ptr = new_ptr;
-
-                                        continue 'leaf_loop;
-                                    }
-
+                            match self.validate_version_multi(leaf, ver, key, version, guard) {
+                                VersionCheck::Valid => {}
+                                VersionCheck::RetrySearch { new_version } => {
                                     version = new_version;
-                                } else {
-                                    version = ver.stable();
+                                    continue 'search_loop;
                                 }
-
-                                continue 'search_loop;
+                                VersionCheck::RetryLeaf { new_leaf_ptr } => {
+                                    leaf_ptr = new_leaf_ptr;
+                                    continue 'leaf_loop;
+                                }
                             }
 
                             return output;
@@ -377,23 +296,16 @@ where
 
                         LookupResult::Layer(layer_ptr) => {
                             // Validate version BEFORE descending
-                            if unlikely(ver.has_changed(version)) {
-                                if unlikely(ver.has_split_no_compiler_fence(version)) {
-                                    let (new_ptr, new_version, changed_leaf) =
-                                        self.handle_version_change(leaf, key, version, guard);
-
-                                    if changed_leaf {
-                                        leaf_ptr = new_ptr;
-
-                                        continue 'leaf_loop;
-                                    }
-
+                            match self.validate_version_multi(leaf, ver, key, version, guard) {
+                                VersionCheck::Valid => {}
+                                VersionCheck::RetrySearch { new_version } => {
                                     version = new_version;
-                                } else {
-                                    version = ver.stable();
+                                    continue 'search_loop;
                                 }
-
-                                continue 'search_loop;
+                                VersionCheck::RetryLeaf { new_leaf_ptr } => {
+                                    leaf_ptr = new_leaf_ptr;
+                                    continue 'leaf_loop;
+                                }
                             }
 
                             // Check sublayer is not deleted before descent
@@ -410,23 +322,16 @@ where
 
                         LookupResult::NotFound => {
                             // Validate before returning None
-                            if unlikely(ver.has_changed(version)) {
-                                if unlikely(ver.has_split_no_compiler_fence(version)) {
-                                    let (new_ptr, new_version, changed_leaf) =
-                                        self.handle_version_change(leaf, key, version, guard);
-
-                                    if changed_leaf {
-                                        leaf_ptr = new_ptr;
-
-                                        continue 'leaf_loop;
-                                    }
-
+                            match self.validate_version_multi(leaf, ver, key, version, guard) {
+                                VersionCheck::Valid => {}
+                                VersionCheck::RetrySearch { new_version } => {
                                     version = new_version;
-                                } else {
-                                    version = ver.stable();
+                                    continue 'search_loop;
                                 }
-
-                                continue 'search_loop;
+                                VersionCheck::RetryLeaf { new_leaf_ptr } => {
+                                    leaf_ptr = new_leaf_ptr;
+                                    continue 'leaf_loop;
+                                }
                             }
 
                             if unlikely(ver.is_dirty()) {

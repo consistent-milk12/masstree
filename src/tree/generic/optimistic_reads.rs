@@ -21,6 +21,25 @@ use crate::ref_value_slot::RefLeafPolicy;
 mod get_guarded;
 
 // ============================================================================
+//  Version Validation Helpers
+// ============================================================================
+
+/// Result of OCC version validation after a read phase.
+///
+/// Used by both single-layer and multi-layer read paths to reduce
+/// version validation boilerplate.
+enum VersionCheck<P: LeafPolicy> {
+    /// Version unchanged — reads are valid, proceed with result.
+    Valid,
+
+    /// Version changed but same leaf — re-search from `'search_loop`.
+    RetrySearch { new_version: u32 },
+
+    /// Leaf changed (split) — restart from `'leaf_loop` with new pointer.
+    RetryLeaf { new_leaf_ptr: *mut LeafNode15<P> },
+}
+
+// ============================================================================
 //  LookupResult - Search outcome enum
 // ============================================================================
 
@@ -85,7 +104,10 @@ enum TwigDescentResult<Leaf> {
 /// Uses `#[inline]` - medium-sized function with loop unrolling; let compiler
 /// decide based on call-site context to avoid I-cache pressure.
 #[inline]
-#[expect(clippy::collapsible_if, reason = "Leads to unusual regressions?!")]
+#[expect(
+    clippy::collapsible_if,
+    reason = "Collapsing these branches causes measurable benchmark regressions (branch prediction / code layout effects)"
+)]
 fn search_leaf_multi_layer<P>(leaf: &LeafNode15<P>, key: &Key<'_>) -> LookupResult
 where
     P: LeafPolicy,
@@ -269,6 +291,75 @@ where
             // Different leaf - search there
             (StdPtr::from_ref(advanced).cast_mut(), new_version, true)
         }
+    }
+
+    /// OCC version validation for single-layer read paths.
+    ///
+    /// Checks if the version changed since our read phase. If a split occurred,
+    /// B-link advances to find the correct leaf. Returns the action to take.
+    #[inline(always)]
+    fn validate_version_single(
+        &self,
+        leaf: &LeafNode15<P>,
+        key: &Key<'_>,
+        version: u32,
+        guard: &LocalGuard<'_>,
+    ) -> VersionCheck<P> {
+        if unlikely(leaf.version().has_changed(version)) {
+            if unlikely(leaf.version().has_split_no_compiler_fence(version)) {
+                let (advanced, new_version) =
+                    self.advance_to_key_generic(leaf, key, version, guard);
+
+                if !StdPtr::eq(advanced, leaf) {
+                    return VersionCheck::RetryLeaf {
+                        new_leaf_ptr: StdPtr::from_ref(advanced).cast_mut(),
+                    };
+                }
+
+                return VersionCheck::RetrySearch { new_version };
+            }
+
+            return VersionCheck::RetrySearch {
+                new_version: leaf.version().stable(),
+            };
+        }
+
+        VersionCheck::Valid
+    }
+
+    /// OCC version validation for multi-layer read paths.
+    ///
+    /// Uses `handle_version_change` which encapsulates the B-link advance
+    /// and leaf comparison logic.
+    #[inline(always)]
+    fn validate_version_multi(
+        &self,
+        leaf: &LeafNode15<P>,
+        ver: &NodeVersion,
+        key: &Key<'_>,
+        version: u32,
+        guard: &LocalGuard<'_>,
+    ) -> VersionCheck<P> {
+        if unlikely(ver.has_changed(version)) {
+            if unlikely(ver.has_split_no_compiler_fence(version)) {
+                let (new_ptr, new_version, changed_leaf) =
+                    self.handle_version_change(leaf, key, version, guard);
+
+                if changed_leaf {
+                    return VersionCheck::RetryLeaf {
+                        new_leaf_ptr: new_ptr,
+                    };
+                }
+
+                return VersionCheck::RetrySearch { new_version };
+            }
+
+            return VersionCheck::RetrySearch {
+                new_version: ver.stable(),
+            };
+        }
+
+        VersionCheck::Valid
     }
 
     #[expect(
@@ -712,7 +803,7 @@ where
                 continue 'leaf_loop;
             }
 
-            // OPTIMIZATION: Use try_stable() to avoid spinning on locked leaf.
+            // OPTIM: Use try_stable() to avoid spinning on locked leaf.
             // If leaf is locked, opportunistically check B-link chain - under
             // high contention, our key may have moved to a sibling leaf.
             let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
@@ -750,8 +841,6 @@ where
                 let mut found_ptr: *mut u8 = StdPtr::null_mut();
 
                 // Simple linear search - let LLVM decide optimal unrolling.
-                // LLVM SHOULD auto unroll with #[inline(always)], and speculative batch
-                // loads waste work on early matches.
                 for i in 0..size {
                     let slot: usize = perm.get(i);
 
@@ -769,26 +858,18 @@ where
                 }
 
                 // Version validation after all reads (common case: unchanged)
-                if unlikely(leaf.version().has_changed(version)) {
-                    // Only do full B-link handling if split occurred
-                    // For update-only, simple retry is faster
-                    if unlikely(leaf.version().has_split_no_compiler_fence(version)) {
-                        let (advanced, new_version) =
-                            self.advance_to_key_generic(leaf, key, version, guard);
+                match self.validate_version_single(leaf, key, version, guard) {
+                    VersionCheck::Valid => {}
 
-                        if !StdPtr::eq(advanced, leaf) {
-                            leaf_ptr = StdPtr::from_ref(advanced).cast_mut();
-
-                            continue 'leaf_loop;
-                        }
-
+                    VersionCheck::RetrySearch { new_version } => {
                         version = new_version;
-                    } else {
-                        // Update only - re-stabilize without B-link check
-                        version = leaf.version().stable();
+                        continue 'search_loop;
                     }
 
-                    continue 'search_loop;
+                    VersionCheck::RetryLeaf { new_leaf_ptr } => {
+                        leaf_ptr = new_leaf_ptr;
+                        continue 'leaf_loop;
+                    }
                 }
 
                 if !found_ptr.is_null() {
@@ -918,25 +999,18 @@ where
                     // target_ikey already computed at start of 'leaf_loop
                     let result: LookupResult = search_leaf_multi_layer::<P>(leaf, key);
 
-                    if unlikely(leaf.version().has_changed(version)) {
-                        // Only do full B-link handling if split occurred
-                        if unlikely(leaf.version().has_split_no_compiler_fence(version)) {
-                            let (new_ptr, new_version, changed_leaf) =
-                                self.handle_version_change(leaf, key, version, guard);
+                    match self.validate_version_multi(leaf, leaf.version(), key, version, guard) {
+                        VersionCheck::Valid => {}
 
-                            if changed_leaf {
-                                leaf_ptr = new_ptr;
-
-                                continue 'leaf_loop;
-                            }
-
+                        VersionCheck::RetrySearch { new_version } => {
                             version = new_version;
-                        } else {
-                            // Update only - re-stabilize without B-link check
-                            version = leaf.version().stable();
+                            continue 'search_loop;
                         }
 
-                        continue 'search_loop;
+                        VersionCheck::RetryLeaf { new_leaf_ptr } => {
+                            leaf_ptr = new_leaf_ptr;
+                            continue 'leaf_loop;
+                        }
                     }
 
                     match result {

@@ -127,6 +127,10 @@ where
         guard: &LocalGuard<'_>,
     ) -> *mut u8 {
         // STEP: 1 - Extract existing key's suffix and value
+        debug_assert!(
+            parent_leaf.ksuf(conflict_slot).is_some(),
+            "conflict slot {conflict_slot} should have a suffix"
+        );
         let existing_suffix: &[u8] = parent_leaf.ksuf(conflict_slot).unwrap_or(&[]);
         let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
         let existing_output: Option<P::Output> = parent_leaf.try_clone_output(conflict_slot);

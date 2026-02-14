@@ -33,7 +33,7 @@ fn test_entry_or_insert_occupied() {
     // Pre-insert a value
     tree.insert_with_guard(b"key", 100, &guard);
 
-    // Kkey exists, should return existing value, not insert
+    // Key exists, should return existing value, not insert
     let value: ValuePtr<u64> = tree.entry_with_guard(b"key", &guard).or_insert(42);
     assert_eq!(*value, 100);
     assert_eq!(tree.len(), 1);

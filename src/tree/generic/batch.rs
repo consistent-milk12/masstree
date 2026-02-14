@@ -356,24 +356,21 @@ where
 
     /// Insert pre-constructed batch entries.
     ///
+    /// Takes ownership of the entries to avoid cloning keys and outputs.
     /// Use this when you need finer control over the batch entries,
     /// or when retrying failed entries from a previous batch.
     ///
     /// # Arguments
     ///
-    /// * `entries` - Mutable slice of batch entries (will be sorted in place)
+    /// * `entries` - Batch entries (will be sorted by ikey internally)
     /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
     ///
     /// # Returns
     ///
     /// A `BatchInsertResult` with insertion statistics.
-    ///
-    /// # Note
-    ///
-    /// The entries slice will be sorted by ikey in place.
     pub fn insert_batch_entries(
         &self,
-        entries: &mut [BatchEntry<P>],
+        mut entries: Vec<BatchEntry<P>>,
         guard: &LocalGuard<'_>,
     ) -> BatchInsertResult<P::Output> {
         if entries.is_empty() {
@@ -383,13 +380,7 @@ where
         // Sort by ikey for cache locality
         entries.sort_unstable_by_key(BatchEntry::ikey);
 
-        // Convert slice to Vec for processing
-        let batch: Vec<BatchEntry<P>> = entries
-            .iter()
-            .map(|e| BatchEntry::from_output(e.key.clone(), e.output.clone()))
-            .collect();
-
-        self.process_sorted_batch(&batch, guard)
+        self.process_sorted_batch(&entries, guard)
     }
 
     // ========================================================================
@@ -445,7 +436,10 @@ where
                 let pre_lock_version = leaf.version().stable();
                 let pre_lock_perm_raw = leaf.permutation_raw();
 
-                // Lock the leaf (pure spin - yields cause syscall overhead under contention)
+                // Lock the leaf with pure spin (no yield).
+                // Batch inserts optimize for throughput over fairness — yielding causes
+                // syscall overhead that dominates the short critical section.
+                // See insert.rs which uses lock_bounded() for the opposite tradeoff.
                 let mut lock = leaf.version().lock();
 
                 // Validate post-lock state
