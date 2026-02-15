@@ -12,7 +12,7 @@ use bench_utils::{
     uniform_indices, zipfian_indices,
 };
 use crossbeam_skiplist::SkipMap;
-use divan::{Bencher, black_box};
+use divan::{black_box, Bencher};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::MassTree15Inline;
 use scc::TreeIndex;

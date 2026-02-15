@@ -220,6 +220,7 @@ where
     }
 
     /// Modifies the value if occupied using the provided function.
+    #[must_use]
     pub fn and_modify<F>(self, f: F) -> Self
     where
         F: FnOnce(&P::Output) -> P::Value,
@@ -388,6 +389,10 @@ where
     }
 
     /// Fallible version of [`remove_entry`](Self::remove_entry).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying tree operation encounters a failure.
     #[inline(always)]
     pub fn try_remove_entry(self) -> RemoveEntryResult<P::Output> {
         let key_owned: Vec<u8> = self.key.to_vec();

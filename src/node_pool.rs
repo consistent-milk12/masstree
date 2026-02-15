@@ -9,6 +9,10 @@
 //!
 //! ## Divergences from C++
 //!
+//! - **Capacity-bounded**: each bucket caps at 256 entries, spilling to the
+//!   global allocator. C++ freelists are unbounded.
+//! - **Individual refill**: allocates 64 blocks individually via `alloc()`.
+//!   C++ carves a single 2 MB `posix_memalign` slab (with optional hugepages).
 //! - **OOM**: aborts via `handle_alloc_error`. C++ returns null.
 
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
@@ -30,8 +34,11 @@ const CACHE_LINE: usize = 64;
 /// C++ uses 20 → nodes up to 1280 bytes.
 const MAX_SIZE_CLASSES: usize = 20;
 
-/// Slab size for batch refill (2 MB, matching C++ `posix_memalign` slab).
-const SLAB_SIZE: usize = 2 * 1024 * 1024;
+/// Max cached nodes per size class per thread.
+const POOL_CAPACITY: usize = 256;
+
+/// Batch refill count from global allocator.
+const REFILL_BATCH: usize = 64;
 
 // ============================================================================
 //  Size Class Computation
@@ -67,19 +74,16 @@ unsafe fn bucket_layout(nl: usize) -> Layout {
 // ============================================================================
 
 /// Intrusive freelist — first 8 bytes of each freed block store the next pointer.
-///
-/// Blocks are carved from contiguous 2 MB slabs during refill, giving good spatial
-/// locality and cache/prefetch behavior. Slabs are intentionally **never freed** —
-/// blocks handed out may still be live nodes in the shared tree when a thread exits.
-/// This matches C++ Masstree, which never frees pool memory.
 struct Freelist {
     head: *mut u8,
+    count: usize,
 }
 
 impl Freelist {
     const fn new() -> Self {
         Self {
             head: StdPtr::null_mut(),
+            count: 0,
         }
     }
 
@@ -93,6 +97,7 @@ impl Freelist {
 
         // SAFETY: ptr from our freelist, first 8 bytes are next ptr
         self.head = unsafe { StdPtr::read(ptr.cast::<*mut u8>()) };
+        self.count -= 1;
 
         Some(ptr)
     }
@@ -104,36 +109,35 @@ impl Freelist {
     const unsafe fn push(&mut self, ptr: *mut u8) {
         unsafe { StdPtr::write(ptr.cast::<*mut u8>(), self.head) };
         self.head = ptr;
+        self.count += 1;
     }
 
-    /// Slow path: allocate a 2 MB slab and carve it into `block_size`-byte blocks.
-    ///
-    /// The slab is never freed — blocks may outlive this thread as live tree nodes.
-    /// This matches C++ Masstree's pool behavior.
+    /// Slow path: batch-allocate `REFILL_BATCH` blocks.
     #[cold]
-    fn refill(&mut self, nl: usize) {
-        let block_size: usize = nl * CACHE_LINE;
-        let num_blocks: usize = SLAB_SIZE / block_size;
+    fn refill(&mut self, layout: Layout) {
+        for _ in 0..REFILL_BATCH {
+            // SAFETY: layout is a valid bucket layout
+            let ptr: *mut u8 = unsafe { alloc(layout) };
 
-        // SAFETY: SLAB_SIZE > 0 and CACHE_LINE is a power of 2
-        let slab_layout: Layout =
-            unsafe { Layout::from_size_align_unchecked(num_blocks * block_size, CACHE_LINE) };
+            if ptr.is_null() {
+                break;
+            }
 
-        // SAFETY: slab_layout has non-zero size and valid alignment
-        let slab_ptr: *mut u8 = unsafe { alloc(slab_layout) };
-
-        if slab_ptr.is_null() {
-            return;
+            // SAFETY: freshly allocated with correct layout
+            unsafe { self.push(ptr) };
         }
+    }
 
-        // Carve contiguous blocks from the slab.
-        for i in 0..num_blocks {
-            // SAFETY: i * block_size is within the slab allocation
-            let block: *mut u8 = unsafe { slab_ptr.add(i * block_size) };
-
-            // SAFETY: block is cache-line-aligned, at least 8 bytes (block_size >= CACHE_LINE)
-            unsafe { self.push(block) };
+    fn drain(&mut self, layout: Layout) {
+        while let Some(ptr) = self.pop() {
+            // SAFETY: ptr was allocated with this layout
+            unsafe { dealloc(ptr, layout) };
         }
+    }
+
+    #[inline(always)]
+    const fn has_capacity(&self) -> bool {
+        self.count < POOL_CAPACITY
     }
 }
 
@@ -169,7 +173,7 @@ impl ThreadPool {
             return ptr;
         }
 
-        bucket.refill(nl);
+        bucket.refill(bucket_layout);
         bucket
             .pop()
             .unwrap_or_else(|| unsafe { alloc(bucket_layout) })
@@ -188,8 +192,21 @@ impl ThreadPool {
         // SAFETY: nl in [1, MAX_SIZE_CLASSES]
         let bucket: &mut Freelist = unsafe { self.buckets.get_unchecked_mut(nl - 1) };
 
-        // SAFETY: ptr is cache-line-aligned, at least 8 bytes (from a pooled size class)
-        unsafe { bucket.push(ptr) };
+        if bucket.has_capacity() {
+            unsafe { bucket.push(ptr) };
+        } else {
+            unsafe { dealloc(ptr, bucket_layout(nl)) };
+        }
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        for (i, bucket) in self.buckets.iter_mut().enumerate() {
+            let nl: usize = i + 1;
+            // SAFETY: nl in [1, MAX_SIZE_CLASSES]
+            bucket.drain(unsafe { bucket_layout(nl) });
+        }
     }
 }
 

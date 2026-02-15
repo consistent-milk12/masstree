@@ -12,10 +12,10 @@
     clippy::expect_used
 )]
 
-use std::sync::atomic::{Ordering as AtomicOrdering, fence};
+use std::sync::atomic::{fence, Ordering as AtomicOrdering};
 
 use arrayvec::ArrayVec;
-use rand::{RngExt, SeedableRng, seq::SliceRandom};
+use rand::{seq::SliceRandom, RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Zipf};
 
