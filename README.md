@@ -18,7 +18,7 @@ Copy types.
 
 ## Status
 
-**v0.8.0** — Core feature complete.
+**v0.8.1** — Core feature complete.
 
 | Feature | Status |
 |---------|--------|
@@ -35,34 +35,34 @@ Copy types.
 
 | Benchmark | Rust | C++ | Ratio |
 |-----------|------|-----|-------|
-| **same** (10 hot keys) | 3.16 | 2.07 | **153%** |
-| **rw3** (forward-seq) | 66.54 | 45.34 | **147%** |
-| **rw4** (reverse-seq) | 61.67 | 43.24 | **143%** |
+| **rw3** (forward-seq) | 70.62 | 45.34 | **156%** |
+| **same** (10 hot keys) | 2.82 | 2.07 | **136%** |
+| **rw4** (reverse-seq) | 58.52 | 43.24 | **135%** |
 | **highcontention** (500 keys, 64B) | 78.04 | 58.62 | **133%** |
-| **rw1** (random insert+read) | 9.98 | 8.16 | **122%** |
-| **rw2g98** (98% reads) | 24.54 | 20.70 | **119%** |
-| **uscale** (random 140M) | 10.44 | 8.81 | **119%** |
-| **wscale** (wide random) | 8.40 | 8.12 | **103%** |
+| **rw1** (random insert+read) | 9.70 | 8.16 | **119%** |
+| **rw2g98** (98% reads) | 24.10 | 20.70 | **116%** |
+| **uscale** (random 140M) | 10.11 | 8.81 | **115%** |
+| **wscale** (wide random) | 8.93 | 8.12 | **110%** |
 
 ## vs Rust Concurrent Maps (12T SMT)
 
-> Source: `runs/run176_read_write.txt`
+> Source: `runs/run184_read_write_reworked.txt`
 > **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
 
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **40.63** | 13.54 | 12.01 | 14.36 | **2.83x** |
-| 02_zipfian | **36.54** | 17.73 | 12.11 | 2.92 | **2.06x** |
-| 03_shared_prefix | **21.72** | 13.04 | 9.79 | 13.34 | **1.63x** |
-| 04_high_contention | **59.88** | 20.99 | 16.30 | 1.96 | **2.85x** |
-| 05_large_dataset | **16.43** | 10.13 | 8.50 | 8.51 | **1.62x** |
-| 06_single_hot_key | **10.87** | 5.32 | 6.22 | 2.30 | **1.75x** |
-| 07_mixed_50_50 | **28.89** | 7.75 | 5.99 | 13.40 | **2.16x** |
-| 08_8byte_keys | **48.28** | 26.54 | 14.08 | 18.07 | **1.82x** |
-| 09_pure_read | **45.28** | 24.51 | 16.72 | 16.97 | **1.85x** |
-| 10_remove_heavy | **17.95** | 13.64 | 6.89 | 4.33 | **1.32x** |
-| 13_insert_only_fair | **30.92** | 19.64 | 13.93 | 5.83 | **1.57x** |
-| 14_pure_insert | **13.28** | 12.20 | 9.48 | 2.25 | **1.09x** |
+| 01_uniform | **34.80** | 14.49 | 10.80 | 14.94 | **2.33x** |
+| 02_zipfian | **37.63** | 18.86 | 12.92 | 3.28 | **2.00x** |
+| 03_shared_prefix | **24.39** | 14.61 | 11.08 | 14.36 | **1.67x** |
+| 04_high_contention | **58.85** | 21.64 | 16.90 | 1.97 | **2.72x** |
+| 05_large_dataset | **15.15** | 11.35 | 7.50 | 9.17 | **1.34x** |
+| 06_single_hot_key | **14.88** | 6.82 | 7.46 | 2.52 | **2.00x** |
+| 07_mixed_50_50 | **33.27** | 8.73 | 6.46 | 14.86 | **2.24x** |
+| 08_8byte_keys | **54.04** | 24.97 | 14.06 | 19.69 | **2.16x** |
+| 09_pure_read | **49.32** | 24.12 | 14.40 | 17.40 | **2.05x** |
+| 10_remove_heavy | **18.75** | 11.18 | 7.18 | 4.26 | **1.68x** |
+| 13_insert_only_fair | **35.05** | 24.29 | 15.13 | 6.30 | **1.44x** |
+| 14_pure_insert | **13.90** | 11.96 | 9.86 | 2.30 | **1.16x** |
 
 ## High-Impact Workloads (12T SMT)
 
@@ -87,55 +87,55 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 ## Range Scans (6T Physical)
 
-> Source: `runs/run161_range_scan.txt`
+> Source: `runs/run182_range_scan.txt`
 > **Config:** Physical cores only, 100 samples, performance governor
 
 | Benchmark | masstree15_inline | tree_index | MT vs TI |
 |-----------|-------------------|------------|----------|
-| 01_sequential_full_scan | **28.42** | 13.47 | **2.11x** |
-| 02_reverse_scan | **27.09** | 13.59 | **1.99x** |
-| 03_clustered_scan | **29.54** | 13.40 | **2.20x** |
-| 04_sparse_scan | **29.43** | 13.39 | **2.20x** |
-| 05_shared_prefix_scan | **25.49** | 15.17 | **1.68x** |
-| 06_suffix_differ_scan | **22.21** | 15.66 | **1.42x** |
-| 07_hierarchical_scan | **27.12** | 15.62 | **1.74x** |
-| 08_adversarial_splits | **28.71** | 8.40 | **3.42x** |
-| 09_interleaved_scan | **25.42** | 13.55 | **1.88x** |
-| 10_blink_stress_scan | **29.31** | 13.58 | **2.16x** |
-| 11_random_keys_scan | **29.44** | 13.54 | **2.17x** |
-| 12_long_keys_64b_scan | **27.68** | 15.63 | **1.77x** |
-| 15_full_scan_aggregate | **178.1** | 83.36 | **2.14x** |
-| 16_insert_heavy | **26.93** | 19.02 | **1.42x** |
-| 17_hot_spot | **9.51** | 2.99 | **3.18x** |
+| 01_sequential_full_scan | **29.29** | 13.88 | **2.11x** |
+| 02_reverse_scan | **28.30** | 13.53 | **2.09x** |
+| 03_clustered_scan | **28.93** | 13.85 | **2.09x** |
+| 04_sparse_scan | **29.30** | 13.83 | **2.12x** |
+| 05_shared_prefix_scan | **24.69** | 17.11 | **1.44x** |
+| 06_suffix_differ_scan | **22.04** | 16.97 | **1.30x** |
+| 07_hierarchical_scan | **26.14** | 16.96 | **1.54x** |
+| 08_adversarial_splits | **28.58** | 9.00 | **3.18x** |
+| 09_interleaved_scan | **24.85** | 14.67 | **1.69x** |
+| 10_blink_stress_scan | **28.44** | 14.37 | **1.98x** |
+| 11_random_keys_scan | **28.44** | 14.22 | **2.00x** |
+| 12_long_keys_64b_scan | **27.72** | 17.03 | **1.63x** |
+| 15_full_scan_aggregate | **174.6** | 106.8 | **1.63x** |
+| 16_insert_heavy | **25.41** | 19.39 | **1.31x** |
+| 17_hot_spot | **11.15** | 4.60 | **2.42x** |
 
 ## Range Scans (12T SMT)
 
-> Source: `runs/run161_range_scan.txt`
+> Source: `runs/run182_range_scan.txt`
 > **Config:** 12 threads on 6 physical cores (SMT), 100 samples
 
 | Benchmark | masstree15_inline | tree_index | MT vs TI |
 |-----------|-------------------|------------|----------|
-| 01_sequential_full_scan | **30.38** | 15.27 | **1.99x** |
-| 02_reverse_scan | **28.51** | 15.14 | **1.88x** |
-| 03_clustered_scan | **30.50** | 15.18 | **2.01x** |
-| 04_sparse_scan | **30.37** | 15.11 | **2.01x** |
-| 05_shared_prefix_scan | **26.12** | 21.48 | **1.22x** |
-| 06_suffix_differ_scan | **24.00** | 21.08 | **1.14x** |
-| 07_hierarchical_scan | **27.98** | 21.17 | **1.32x** |
-| 08_adversarial_splits | **29.23** | 10.04 | **2.91x** |
-| 09_interleaved_scan | **26.24** | 15.30 | **1.72x** |
-| 10_blink_stress_scan | **30.14** | 15.23 | **1.98x** |
-| 11_random_keys_scan | **29.70** | 15.17 | **1.96x** |
-| 12_long_keys_64b_scan | **28.25** | 21.33 | **1.32x** |
-| 15_full_scan_aggregate | **176.8** | 113.5 | **1.56x** |
-| 16_insert_heavy | **30.06** | 25.26 | **1.19x** |
-| 17_hot_spot | **9.69** | 4.04 | **2.40x** |
+| 01_sequential_full_scan | **29.53** | 16.49 | **1.79x** |
+| 02_reverse_scan | **28.52** | 16.53 | **1.73x** |
+| 03_clustered_scan | **28.26** | 16.51 | **1.71x** |
+| 04_sparse_scan | **28.80** | 16.61 | **1.73x** |
+| 05_shared_prefix_scan | **25.09** | 20.39 | **1.23x** |
+| 06_suffix_differ_scan | **23.12** | 19.46 | **1.19x** |
+| 07_hierarchical_scan | **27.04** | 20.29 | **1.33x** |
+| 08_adversarial_splits | **28.55** | 11.54 | **2.47x** |
+| 09_interleaved_scan | **24.39** | 15.54 | **1.57x** |
+| 10_blink_stress_scan | **29.64** | 15.93 | **1.86x** |
+| 11_random_keys_scan | **29.25** | 15.27 | **1.92x** |
+| 12_long_keys_64b_scan | **27.75** | 19.30 | **1.44x** |
+| 15_full_scan_aggregate | **226.7** | 124.8 | **1.82x** |
+| 16_insert_heavy | **25.15** | 23.16 | **1.09x** |
+| 17_hot_spot | **10.39** | 5.34 | **1.95x** |
 
 ## Install
 
 ```toml
 [dependencies]
-masstree = { version = "0.8.0", features = ["mimalloc"] }
+masstree = { version = "0.8.1", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).
@@ -145,14 +145,14 @@ The `mimalloc` feature sets the global allocator. If your project already uses a
 ## Quick Start
 
 ```rust
-use masstree::MassTree;
+use masstree::{MassTree, RangeBound};
 
 let tree: MassTree<u64> = MassTree::new();
 let guard = tree.guard();
 
-// Insert
-tree.insert_with_guard(b"hello", 123, &guard).unwrap();
-tree.insert_with_guard(b"world", 456, &guard).unwrap();
+// Insert (returns None for new keys, Some(old) for existing)
+tree.insert_with_guard(b"hello", 123, &guard);
+tree.insert_with_guard(b"world", 456, &guard);
 
 // Point lookup (returns copy for inline storage)
 assert_eq!(tree.get_with_guard(b"hello", &guard), Some(123));
@@ -162,10 +162,15 @@ tree.remove_with_guard(b"hello", &guard).unwrap();
 assert_eq!(tree.get_with_guard(b"hello", &guard), None);
 
 // Range scan
-tree.scan(b"a"..b"z", |key, value| {
-    println!("{:?} -> {}", key, value);
-    true // continue scanning
-}, &guard);
+tree.scan(
+    RangeBound::Included(b"a"),
+    RangeBound::Excluded(b"z"),
+    |key, value| {
+        println!("{:?} -> {}", key, value);
+        true // continue scanning
+    },
+    &guard,
+);
 
 // Prefix scan
 tree.scan_prefix(b"wor", |key, value| {
@@ -184,10 +189,10 @@ use masstree::MassTree;
 let tree: MassTree<u64> = MassTree::new();
 
 // Auto-guard versions (simpler but slightly more overhead per call)
-tree.insert(b"key1", 100).unwrap();
-tree.insert(b"key2", 200).unwrap();
+tree.insert(b"key1", 100);
+tree.insert(b"key2", 200);
 
-assert_eq!(tree.get(b"key1"), Some(std::sync::Arc::new(100)));
+assert_eq!(tree.get(b"key1"), Some(100));
 assert_eq!(tree.len(), 2);
 assert!(!tree.is_empty());
 
@@ -204,7 +209,7 @@ let guard = tree.guard();
 
 // Populate
 for i in 0..100u64 {
-    tree.insert_with_guard(&i.to_be_bytes(), i, &guard).unwrap();
+    tree.insert_with_guard(&i.to_be_bytes(), i, &guard);
 }
 
 // Iterator-based range scan
@@ -238,7 +243,7 @@ for entry in tree.iter(&guard) {
 | Type | Value Requirement | `get_ref()` | Best For |
 |------|-------------------|-------------|----------|
 | `MassTree<V>` | `V: InlineBits` (Copy + ≤64 bits) | Nope | `u64`, `i32`, `f64`, small tuples |
-| `MassTree15<V>` | `V: Send + Sync + 'static` | Yes| `String`, `Vec`, custom structs |
+| `MassTree15<V>` | `V: Send + Sync + 'static` | Yes | `String`, `Vec`, custom structs |
 | `MassTree15Inline<V>` | `V: InlineBits` | Nope | Same as `MassTree<V>` (explicit alias) |
 
 ### `MassTree<V>` (Default, True-Inline)
@@ -247,10 +252,11 @@ for entry in tree.iter(&guard) {
 - Returns `V` by copy: `get_with_guard() → Option<V>`
 - Use `scan()` for range iteration
 
-### `MassTree15<V>` (Arc-Based)
+### `MassTree15<V>` (Box-Based)
 
-- Values wrapped in `Arc<V>` (heap allocation per insert)
-- Returns references: `get_ref() → Option<&V>`
+- Values stored as `Box<V>` raw pointers (heap allocation per insert)
+- Returns `ValuePtr<V>`: a zero-cost `Copy` pointer with `Deref` to `&V`
+- Supports `get_ref() → Option<&V>` for zero-copy access
 - Use `scan_ref()` for zero-copy range iteration
 
 `MassTree<V>` is the recommended default for `Copy` types like `u64`, `i32`, `f64`, pointers, etc.
@@ -263,7 +269,7 @@ use masstree::{MassTree, MassTree15, MassTree15Inline};
 let tree: MassTree<u64> = MassTree::new();
 
 // Box-based storage for non-Copy types
-let tree_arc: MassTree15<String> = MassTree15::new();
+let tree_box: MassTree15<String> = MassTree15::new();
 
 // Explicit inline storage (same as MassTree)
 let inline: MassTree15Inline<u64> = MassTree15Inline::new();
