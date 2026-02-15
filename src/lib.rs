@@ -80,16 +80,9 @@
 // The memory is always properly aligned before casting.
 #![allow(clippy::cast_ptr_alignment)]
 
-#[cfg(all(feature = "mimalloc", feature = "tcmalloc"))]
-compile_error!("features `mimalloc` and `tcmalloc` are mutually exclusive");
-
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-#[cfg(feature = "tcmalloc")]
-#[global_allocator]
-static GLOBAL: tcmalloc::TCMalloc = tcmalloc::TCMalloc;
 
 /// Initialize tracing with file and console output.
 ///
@@ -190,7 +183,6 @@ pub(crate) mod leaf15;
 pub(crate) mod leaf_trait;
 pub(crate) mod nodeversion;
 pub(crate) mod permuter;
-pub(crate) mod ref_value_slot;
 pub(crate) mod suffix;
 pub(crate) mod tree;
 pub(crate) mod value;
@@ -223,8 +215,8 @@ pub use tree::{MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};
 
 // Value storage policies
 pub use inline::bits::InlineBits;
+pub use policy::RefPolicy as RefLeafPolicy;
 pub use policy::{BoxPolicy, LeafPolicy, ValuePtr};
-pub use ref_value_slot::RefLeafPolicy;
 pub use value::LeafValue;
 
 // Key types and constants

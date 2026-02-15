@@ -38,7 +38,7 @@ use seize::LocalGuard;
 
 use crate::alloc_trait::TreeAllocator;
 use crate::policy::LeafPolicy;
-use crate::ref_value_slot::RefLeafPolicy;
+use crate::policy::RefPolicy as RefLeafPolicy;
 use crate::tree::MassTreeGeneric;
 
 use super::iterator::RangeBound;

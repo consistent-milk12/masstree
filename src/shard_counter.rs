@@ -96,25 +96,14 @@ impl ShardedCounter {
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
+        #[expect(
+            clippy::declare_interior_mutable_const,
+            reason = "Intentional: each array element gets a fresh zeroed copy"
+        )]
+        const EMPTY: PaddedCounter = PaddedCounter::new();
+
         Self {
-            shards: [
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-                PaddedCounter::new(),
-            ],
+            shards: [EMPTY; SHARDS],
         }
     }
 

@@ -5,7 +5,7 @@
 use crate::alloc_trait::TreeAllocator;
 use crate::leaf15::LeafNode15;
 use crate::policy::LeafPolicy;
-use crate::ref_value_slot::RefLeafPolicy;
+use crate::policy::RefPolicy as RefLeafPolicy;
 
 use super::RangeIter;
 

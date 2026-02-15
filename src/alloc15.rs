@@ -15,8 +15,6 @@
 //! - **No `drop_in_place` for `InternodeNode`**: It has no Drop impl
 //! - **Function pointers**: No closure allocations in `retire_subtree_root`
 
-use std::alloc as StdAlloc;
-use std::alloc::Layout;
 use std::marker::PhantomData;
 use std::ptr as StdPtr;
 
@@ -182,16 +180,17 @@ unsafe fn traverse_and_free_iterative<P: LeafPolicy>(root_ptr: *mut u8) {
             }
             TraversalWork::FreeLeaf(ptr) => {
                 // SAFETY: ptr is a valid leaf, we have exclusive access.
+                // Uses pool_teardown_dealloc_leaf: dropping thread never allocates
+                // nodes, so caching in its pool is wasted work.
                 unsafe {
                     StdPtr::drop_in_place(ptr.cast::<LeafNode15<P>>());
-                    node_pool::pool_dealloc(ptr, Layout::new::<LeafNode15<P>>());
+                    node_pool::pool_teardown_dealloc_leaf::<P>(ptr);
                 }
             }
             TraversalWork::FreeInternode(ptr) => {
-                // NO drop_in_place - InternodeNode has no Drop impl
-                // Just return memory to pool
-                let layout: Layout = Layout::new::<InternodeNode>();
-                unsafe { node_pool::pool_dealloc(ptr, layout) };
+                // NO drop_in_place - InternodeNode has no Drop impl.
+                // Uses pool_teardown_dealloc_internode to bypass pool (see FreeLeaf).
+                unsafe { node_pool::pool_teardown_dealloc_internode(ptr) };
             }
         }
     }
@@ -359,14 +358,7 @@ impl<P: LeafPolicy + 'static> TreeAllocator<P> for SeizeAllocator<P> {
 
     #[inline]
     fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode15<P> {
-        let layout = Layout::new::<LeafNode15<P>>();
-        let raw_ptr = node_pool::pool_alloc(layout);
-
-        if raw_ptr.is_null() {
-            StdAlloc::handle_alloc_error(layout);
-        }
-
-        let ptr: *mut LeafNode15<P> = raw_ptr.cast();
+        let ptr: *mut LeafNode15<P> = node_pool::pool_alloc_leaf::<P>().cast();
 
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
@@ -378,11 +370,7 @@ impl<P: LeafPolicy + 'static> TreeAllocator<P> for SeizeAllocator<P> {
 
     #[inline]
     fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
-        let layout = Layout::new::<InternodeNode>();
-        let ptr = node_pool::pool_alloc(layout);
-        if ptr.is_null() {
-            StdAlloc::handle_alloc_error(layout);
-        }
+        let ptr = node_pool::pool_alloc_internode();
 
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
@@ -394,11 +382,7 @@ impl<P: LeafPolicy + 'static> TreeAllocator<P> for SeizeAllocator<P> {
 
     #[inline]
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
-        let layout = Layout::new::<InternodeNode>();
-        let ptr = node_pool::pool_alloc(layout);
-        if ptr.is_null() {
-            StdAlloc::handle_alloc_error(layout);
-        }
+        let ptr = node_pool::pool_alloc_internode();
 
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {
@@ -414,11 +398,7 @@ impl<P: LeafPolicy + 'static> TreeAllocator<P> for SeizeAllocator<P> {
         parent_version: &crate::nodeversion::NodeVersion,
         height: u32,
     ) -> *mut u8 {
-        let layout = Layout::new::<InternodeNode>();
-        let ptr = node_pool::pool_alloc(layout);
-        if ptr.is_null() {
-            StdAlloc::handle_alloc_error(layout);
-        }
+        let ptr = node_pool::pool_alloc_internode();
 
         // SAFETY: ptr is valid, properly aligned, and we have exclusive access
         unsafe {

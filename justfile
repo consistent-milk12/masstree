@@ -155,7 +155,7 @@ test-shuttle:
 
 # Run clippy lints
 lint:
-    cargo clippy --all-targets --all-features
+    cargo clippy --all-targets --features mimalloc
 
 # Run clippy and fail on warnings
 lint-strict:

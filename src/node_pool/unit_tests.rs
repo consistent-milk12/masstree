@@ -1,4 +1,4 @@
-use super::{Layout, pool_alloc, pool_dealloc, size_class};
+use super::{Layout, pool_alloc, pool_dealloc, pool_teardown_dealloc, size_class};
 
 #[test]
 fn test_size_class_computation() {
@@ -58,4 +58,34 @@ fn test_different_layouts_same_class() {
     assert_eq!(ptr_a, ptr_b);
 
     unsafe { pool_dealloc(ptr_b, layout_b) };
+}
+
+#[test]
+fn test_teardown_dealloc_bypasses_pool() {
+    let layout: Layout = Layout::from_size_align(128, 64).unwrap();
+
+    // Allocate a block and return it via teardown dealloc (bypasses pool)
+    let ptr: *mut u8 = pool_alloc(layout);
+    assert!(!ptr.is_null());
+    unsafe { pool_teardown_dealloc(ptr, layout) };
+
+    // Next allocation should NOT return the same pointer (block went to
+    // global allocator, not back into the thread-local pool)
+    let ptr2: *mut u8 = pool_alloc(layout);
+    assert_ne!(ptr, ptr2);
+
+    unsafe { pool_dealloc(ptr2, layout) };
+}
+
+#[test]
+fn test_teardown_dealloc_oversized_layout() {
+    // Layouts too large for the pool go directly to global dealloc
+    let layout: Layout = Layout::from_size_align(2048, 64).unwrap();
+    assert_eq!(size_class(layout), None);
+
+    let ptr: *mut u8 = pool_alloc(layout);
+    assert!(!ptr.is_null());
+
+    // Should not panic — falls through to direct dealloc
+    unsafe { pool_teardown_dealloc(ptr, layout) };
 }

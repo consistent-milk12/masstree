@@ -12,10 +12,10 @@
     clippy::expect_used
 )]
 
-use std::sync::atomic::{fence, Ordering as AtomicOrdering};
+use std::sync::atomic::{Ordering as AtomicOrdering, fence};
 
 use arrayvec::ArrayVec;
-use rand::{seq::SliceRandom, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Zipf};
 
@@ -962,4 +962,100 @@ impl BenchmarkRunner {
 
         result
     }
+}
+
+// =============================================================================
+// Concurrent Benchmark Harness
+// =============================================================================
+
+/// Context provided to each thread in a concurrent benchmark.
+///
+/// Controls the warmup → synchronize → measure → finish protocol.
+pub struct ThreadContext<'a> {
+    /// Thread index (0-based).
+    pub tid: usize,
+    /// Effective warmup ops (proportional to workload size).
+    pub warmup_ops: usize,
+    warmup_done: &'a std::sync::Barrier,
+    start: &'a std::sync::Barrier,
+}
+
+impl ThreadContext<'_> {
+    /// Signal that this thread has completed its warmup phase.
+    /// Blocks until all threads have finished warmup.
+    pub fn finish_warmup(&self) {
+        self.warmup_done.wait();
+    }
+
+    /// Synchronize all threads and begin the measurement phase.
+    /// Inserts a memory barrier to prevent reordering, then waits for all threads.
+    pub fn begin_measurement(&self) {
+        pre_measurement_barrier();
+        self.start.wait();
+    }
+
+    /// End the measurement phase with a memory barrier.
+    pub fn end_measurement(&self) {
+        post_measurement_barrier();
+    }
+}
+
+/// Check if core pinning is requested via environment variable.
+fn should_pin_cores() -> bool {
+    std::env::var("BENCH_PIN_CORES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Run a concurrent benchmark with proper thread management.
+///
+/// Uses `std::thread::scope` for zero-cost borrowing (no Arc needed).
+///
+/// Features:
+/// - Proportional warmup: `min(warmup_ops, ops_per_thread / 5)`
+/// - Optional core pinning via `BENCH_PIN_CORES=1` environment variable
+/// - Two-barrier synchronization: warmup completion + measurement start
+///
+/// The `per_thread` closure receives a [`ThreadContext`] and should follow
+/// this protocol:
+/// 1. Perform warmup using `ctx.warmup_ops` iterations
+/// 2. Call `ctx.finish_warmup()`
+/// 3. Call `ctx.begin_measurement()`
+/// 4. Execute measured operations
+/// 5. Call `ctx.end_measurement()`
+pub fn run_concurrent<F>(threads: usize, warmup_ops: usize, ops_per_thread: usize, per_thread: F)
+where
+    F: Fn(&ThreadContext) + Send + Sync,
+{
+    let effective_warmup = warmup_ops.min(ops_per_thread / 5);
+    let warmup_done = std::sync::Barrier::new(threads);
+    let start = std::sync::Barrier::new(threads);
+    let pin = should_pin_cores();
+    let core_ids = if pin {
+        core_affinity::get_core_ids().unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    std::thread::scope(|s| {
+        for tid in 0..threads {
+            let warmup_done = &warmup_done;
+            let start = &start;
+            let core_ids = &core_ids;
+            let per_thread = &per_thread;
+            s.spawn(move || {
+                if !core_ids.is_empty() {
+                    let core_id = core_ids[tid % core_ids.len()];
+                    core_affinity::set_for_current(core_id);
+                }
+                let ctx = ThreadContext {
+                    tid,
+                    warmup_ops: effective_warmup,
+                    warmup_done,
+                    start,
+                };
+                per_thread(&ctx);
+            });
+        }
+    });
 }

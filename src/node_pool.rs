@@ -9,14 +9,15 @@
 //!
 //! ## Divergences from C++
 //!
-//! - **Capacity-bounded**: each bucket caps at 256 entries, spilling to the
+//! - **Capacity-bounded**: each bucket caps at 512 entries, spilling to the
 //!   global allocator. C++ freelists are unbounded.
-//! - **Individual refill**: allocates 64 blocks individually via `alloc()`.
+//! - **Individual refill**: allocates 128 blocks individually via `alloc()`.
 //!   C++ carves a single 2 MB `posix_memalign` slab (with optional hugepages).
 //! - **OOM**: aborts via `handle_alloc_error`. C++ returns null.
 
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::cell::UnsafeCell;
+use std::mem::size_of;
 use std::ptr as StdPtr;
 
 use seize::Collector;
@@ -35,10 +36,10 @@ const CACHE_LINE: usize = 64;
 const MAX_SIZE_CLASSES: usize = 20;
 
 /// Max cached nodes per size class per thread.
-const POOL_CAPACITY: usize = 256;
+const POOL_CAPACITY: usize = 512;
 
 /// Batch refill count from global allocator.
-const REFILL_BATCH: usize = 64;
+const REFILL_BATCH: usize = 128;
 
 // ============================================================================
 //  Size Class Computation
@@ -54,6 +55,21 @@ const fn size_class(layout: Layout) -> Option<usize> {
     } else {
         Some(nl)
     }
+}
+
+/// Compile-time size class for a known node type.
+///
+/// Panics at compile time if the type is too large for the pool.
+#[inline(always)]
+const fn node_size_class<T>() -> usize {
+    let nl: usize = size_of::<T>().div_ceil(CACHE_LINE);
+
+    assert!(
+        nl > 0 && nl <= MAX_SIZE_CLASSES,
+        "node type too large for pool"
+    );
+
+    nl
 }
 
 /// `nl * CACHE_LINE` layout with cache-line alignment.
@@ -165,18 +181,22 @@ impl ThreadPool {
             return unsafe { alloc(layout) };
         };
 
+        self.alloc_from_bucket(nl)
+    }
+
+    /// Fast path for known size class — skips `size_class()` computation.
+    #[inline(always)]
+    fn alloc_from_bucket(&mut self, nl: usize) -> *mut u8 {
         // SAFETY: nl in [1, MAX_SIZE_CLASSES]
         let bucket: &mut Freelist = unsafe { self.buckets.get_unchecked_mut(nl - 1) };
-        let bucket_layout: Layout = unsafe { bucket_layout(nl) };
+        let bl: Layout = unsafe { bucket_layout(nl) };
 
         if let Some(ptr) = bucket.pop() {
             return ptr;
         }
 
-        bucket.refill(bucket_layout);
-        bucket
-            .pop()
-            .unwrap_or_else(|| unsafe { alloc(bucket_layout) })
+        bucket.refill(bl);
+        bucket.pop().unwrap_or(StdPtr::null_mut())
     }
 
     /// # Safety
@@ -189,6 +209,17 @@ impl ThreadPool {
             return;
         };
 
+        // SAFETY: nl in [1, MAX_SIZE_CLASSES]
+        unsafe { self.dealloc_to_bucket(ptr, nl) };
+    }
+
+    /// Fast path for known size class — skips `size_class()` computation.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be valid memory, `nl` must be in `[1, MAX_SIZE_CLASSES]`.
+    #[inline(always)]
+    unsafe fn dealloc_to_bucket(&mut self, ptr: *mut u8, nl: usize) {
         // SAFETY: nl in [1, MAX_SIZE_CLASSES]
         let bucket: &mut Freelist = unsafe { self.buckets.get_unchecked_mut(nl - 1) };
 
@@ -221,6 +252,10 @@ thread_local! {
 /// Allocate from the thread-local pool. Aborts on OOM.
 #[inline]
 #[must_use]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Generic API used by unit tests")
+)]
 pub fn pool_alloc(layout: Layout) -> *mut u8 {
     POOL.with(|cell: &UnsafeCell<ThreadPool>| {
         // SAFETY: thread-local access is single-threaded
@@ -242,6 +277,10 @@ pub fn pool_alloc(layout: Layout) -> *mut u8 {
 /// - `ptr` must be valid memory with the given layout
 /// - `layout.align()` must not exceed `CACHE_LINE` (64)
 #[inline]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Generic API used by unit tests")
+)]
 pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
     debug_assert!(
         layout.align() <= CACHE_LINE,
@@ -257,6 +296,145 @@ pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
 }
 
 // ============================================================================
+//  Type-Specialized Alloc/Dealloc
+// ============================================================================
+
+/// Allocate a `LeafNode15<P>` from the thread-local pool. Aborts on OOM.
+///
+/// Faster than `pool_alloc(Layout::new::<LeafNode15<P>>())` — the size class
+/// is computed at compile time, skipping `size_class()` and its `Option` branch.
+#[inline]
+#[must_use]
+pub fn pool_alloc_leaf<P: LeafPolicy>() -> *mut u8 {
+    // node_size_class panics at compile time if LeafNode15<P> is too large.
+    let nl: usize = node_size_class::<LeafNode15<P>>();
+
+    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+        let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
+        let ptr: *mut u8 = pool.alloc_from_bucket(nl);
+
+        if ptr.is_null() {
+            handle_alloc_error(unsafe { bucket_layout(nl) });
+        }
+
+        ptr
+    })
+}
+
+/// Allocate an `InternodeNode` from the thread-local pool. Aborts on OOM.
+#[inline]
+#[must_use]
+pub fn pool_alloc_internode() -> *mut u8 {
+    const NL: usize = node_size_class::<InternodeNode>();
+
+    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+        let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
+        let ptr: *mut u8 = pool.alloc_from_bucket(NL);
+
+        if ptr.is_null() {
+            handle_alloc_error(unsafe { bucket_layout(NL) });
+        }
+
+        ptr
+    })
+}
+
+/// Return a `LeafNode15<P>` to the thread-local pool.
+///
+/// # Safety
+///
+/// `ptr` must be valid memory originally allocated via `pool_alloc_leaf`.
+#[inline]
+pub unsafe fn pool_dealloc_leaf<P: LeafPolicy>(ptr: *mut u8) {
+    let nl: usize = node_size_class::<LeafNode15<P>>();
+
+    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+        let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
+
+        unsafe { pool.dealloc_to_bucket(ptr, nl) };
+    });
+}
+
+/// Return an `InternodeNode` to the thread-local pool.
+///
+/// # Safety
+///
+/// `ptr` must be valid memory originally allocated via `pool_alloc_internode`.
+#[inline]
+pub unsafe fn pool_dealloc_internode(ptr: *mut u8) {
+    const NL: usize = node_size_class::<InternodeNode>();
+
+    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+        let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
+
+        unsafe { pool.dealloc_to_bucket(ptr, NL) };
+    });
+}
+
+// ============================================================================
+//  Teardown-Specific Dealloc
+// ============================================================================
+
+/// Deallocate during tree teardown — bypasses the thread-local pool.
+///
+/// During `teardown_tree`, the dropping thread frees ALL nodes but never
+/// allocates new ones. Caching blocks in its pool is pure waste: the first
+/// 512 would fill the bucket and 97%+ would overflow to `dealloc()` anyways.
+/// This function skips the pool entirely, avoiding thread-local access,
+/// capacity checks, and useless freelist pushes.
+///
+/// # Safety
+///
+/// - `ptr` must be valid memory allocated via `pool_alloc` with the given layout
+/// - `layout.align()` must not exceed `CACHE_LINE` (64)
+#[inline]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Generic API used by unit tests")
+)]
+pub unsafe fn pool_teardown_dealloc(ptr: *mut u8, layout: Layout) {
+    debug_assert!(
+        layout.align() <= CACHE_LINE,
+        "pool_teardown_dealloc: layout alignment ({}) exceeds CACHE_LINE ({})",
+        layout.align(),
+        CACHE_LINE,
+    );
+
+    let Some(nl) = size_class(layout) else {
+        // SAFETY: caller guarantees valid ptr/layout
+        unsafe { dealloc(ptr, layout) };
+        return;
+    };
+
+    // SAFETY: nl in [1, MAX_SIZE_CLASSES], caller guarantees valid ptr
+    unsafe { dealloc(ptr, bucket_layout(nl)) };
+}
+
+/// Teardown dealloc for `LeafNode15<P>` — bypasses pool, compile-time size class.
+///
+/// # Safety
+///
+/// `ptr` must be valid memory allocated via `pool_alloc_leaf`.
+#[inline]
+pub unsafe fn pool_teardown_dealloc_leaf<P: LeafPolicy>(ptr: *mut u8) {
+    let nl: usize = node_size_class::<LeafNode15<P>>();
+    // SAFETY: nl validated at compile time, caller guarantees valid ptr
+    unsafe { dealloc(ptr, bucket_layout(nl)) };
+}
+
+/// Teardown dealloc for `InternodeNode` — bypasses pool, compile-time size class.
+///
+/// # Safety
+///
+/// `ptr` must be valid memory allocated via `pool_alloc_internode`.
+#[inline]
+pub unsafe fn pool_teardown_dealloc_internode(ptr: *mut u8) {
+    const NL: usize = node_size_class::<InternodeNode>();
+    // SAFETY: NL validated at compile time, caller guarantees valid ptr
+    unsafe { dealloc(ptr, bucket_layout(NL)) };
+}
+
+// ============================================================================
 //  Capture-Free Reclaimers (for `guard.defer_retire()`)
 // ============================================================================
 
@@ -268,7 +446,8 @@ pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
 #[inline]
 pub unsafe fn reclaim_leaf15<P: LeafPolicy>(ptr: *mut LeafNode15<P>, _collector: &Collector) {
     unsafe { StdPtr::drop_in_place(ptr) };
-    unsafe { pool_dealloc(ptr.cast(), Layout::new::<LeafNode15<P>>()) };
+
+    unsafe { pool_dealloc_leaf::<P>(ptr.cast()) };
 }
 
 /// # Safety
@@ -277,7 +456,8 @@ pub unsafe fn reclaim_leaf15<P: LeafPolicy>(ptr: *mut LeafNode15<P>, _collector:
 #[inline]
 pub unsafe fn reclaim_internode(ptr: *mut InternodeNode, _collector: &Collector) {
     unsafe { StdPtr::drop_in_place(ptr) };
-    unsafe { pool_dealloc(ptr.cast(), Layout::new::<InternodeNode>()) };
+
+    unsafe { pool_dealloc_internode(ptr.cast()) };
 }
 
 // ============================================================================

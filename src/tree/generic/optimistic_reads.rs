@@ -16,7 +16,7 @@ use crate::leaf15::KSUF_KEYLENX;
 use crate::leaf15::LAYER_KEYLENX;
 use crate::leaf15::LeafNode15;
 use crate::link::Linker;
-use crate::ref_value_slot::RefLeafPolicy;
+use crate::policy::RefPolicy as RefLeafPolicy;
 
 mod get_guarded;
 
