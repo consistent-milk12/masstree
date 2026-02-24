@@ -71,7 +71,17 @@ impl<'op> PropagationContext<'op> {
         version.lock()
     }
 
-    /// Lock a node with yield-on-contention for high thread counts.
+    /// Lock a node using yield-on-contention strategy.
+    ///
+    /// Uses [`NodeVersion::lock_with_yield`], which yields the CPU after just
+    /// 1 spin-loop hint. Preferred for split propagation because:
+    ///
+    /// - **Longer critical sections**: split propagation updates child pointers,
+    ///   key fences, and permutations -- more work than a single insert/remove.
+    /// - **Cascading contention**: multiple threads may trigger splits that
+    ///   propagate to the same parent, creating sustained contention.
+    /// - **Thread scaling**: at high thread counts (12+), spinning wastes cores
+    ///   that could be doing useful traversals elsewhere in the tree.
     ///
     /// # Safety
     /// Same as [`Self::lock_node`].

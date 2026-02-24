@@ -18,8 +18,8 @@ use std::ptr::{self as StdPtr, NonNull};
 
 use arrayvec::ArrayVec;
 
-use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
+use crate::leaf_trait::TreeLeafNode;
 use crate::policy::LeafPolicy;
 
 // ============================================================================
@@ -528,12 +528,14 @@ impl<P: LeafPolicy> LayerContext<P> {
 /// Stack of parent layer contexts for sublayer navigation.
 ///
 /// Most keys need very few layers (32 bytes = 4 layers maximum in typical
-/// use). We use `SmallVec` to avoid heap allocation for common cases.
+/// use). Uses inline `ArrayVec` storage for the common case (up to 6 layers,
+/// handling keys up to 48 bytes) and spills to heap-allocated `Vec` for
+/// deeper nesting.
 ///
 /// # Capacity
 ///
-/// - Inline storage: 4 elements (handles keys up to 32 bytes)
-/// - Spills to heap for deeper nesting (rare)
+/// - Inline storage: 6 elements (handles keys up to 48 bytes)
+/// - Spills to heap for deeper nesting (rare, up to `MAX_KEY_LENGTH / 8` = 32 layers)
 ///
 /// # Usage
 ///
@@ -549,7 +551,80 @@ impl<P: LeafPolicy> LayerContext<P> {
 ///     stack.set_leaf(parent.leaf_ptr());
 /// }
 /// ```
-pub type LayerStack<P> = ArrayVec<LayerContext<P>, 6>;
+pub struct LayerStack<P: LeafPolicy> {
+    /// Inline storage for the common case (up to 6 layers).
+    inline: ArrayVec<LayerContext<P>, 6>,
+
+    /// Heap spillover for deep keys (> 6 layers). `None` until first spill.
+    overflow: Option<Vec<LayerContext<P>>>,
+}
+
+impl<P: LeafPolicy> LayerStack<P> {
+    /// Create a new empty layer stack.
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self {
+            inline: ArrayVec::new_const(),
+            overflow: None,
+        }
+    }
+
+    /// Push a layer context onto the stack.
+    ///
+    /// Uses inline storage for the first 6 elements, then spills to heap.
+    #[inline]
+    pub fn push(&mut self, ctx: LayerContext<P>) {
+        if let Some(ref mut overflow) = self.overflow {
+            overflow.push(ctx);
+        } else if let Err(err) = self.inline.try_push(ctx) {
+            // Spill: move all inline elements to heap + the rejected element.
+            let mut heap = Vec::with_capacity(8);
+            heap.extend(self.inline.drain(..));
+            heap.push(err.element());
+            self.overflow = Some(heap);
+        }
+    }
+
+    /// Pop the most recent layer context.
+    #[inline]
+    pub fn pop(&mut self) -> Option<LayerContext<P>> {
+        if let Some(ref mut overflow) = self.overflow {
+            let result = overflow.pop();
+            // Reclaim heap when empty (shrink back to inline-only mode).
+            if overflow.is_empty() {
+                self.overflow = None;
+            }
+            result
+        } else {
+            self.inline.pop()
+        }
+    }
+
+    /// Returns `true` if the stack has no elements.
+    #[inline(always)]
+    pub const fn is_empty(&self) -> bool {
+        match self.overflow {
+            Some(ref overflow) => overflow.is_empty(),
+            None => self.inline.is_empty(),
+        }
+    }
+
+    /// Remove all elements from the stack.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.overflow = None;
+        self.inline.clear();
+    }
+
+    /// Returns the total number of elements.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        match self.overflow {
+            Some(ref overflow) => overflow.len(),
+            None => self.inline.len(),
+        }
+    }
+}
 
 // ============================================================================
 //  ScanSnapshot - Captured slot data for emission

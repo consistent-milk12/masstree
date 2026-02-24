@@ -65,7 +65,7 @@ tracing-appender = { version = "0.2.4", optional = true }
 
 [dev-dependencies]
 parking_lot = "0.12.5"
-clap = { version = "4.5.58", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 divan = "0.1.21"
@@ -78,8 +78,8 @@ rand = "0.10.0"
 rand_chacha = "0.10.0"
 rand_distr = "0.6.0"
 indexset = { version = "0.15.0", features = ["concurrent"] }
-scc = "3.6.1"
-sdd = "4.6.2"
+scc = "3.6.5"
+sdd = "4.6.3"
 tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.22", features = [
 	"env-filter",
@@ -98,6 +98,8 @@ rayon = "1.11.0"
 core_affinity = "0.8.3"
 tokio = { version = "1.49.0", features = ["full"] }
 dhat = "0.3.3"
+hdrhistogram = "7.5.4"
+minstant = "0.1.7"
 
 [lints.rust]
 # Allow loom and shuttle cfg for deterministic concurrency testing

@@ -40,6 +40,7 @@
 
 mod api;
 mod api_ref;
+mod batch_common;
 mod cursor_key;
 mod find;
 mod find_rev;

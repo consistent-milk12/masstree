@@ -1,7 +1,6 @@
 use super::{LayerContext, LayerStack, NonNull, ScanSnapshotPtr, ScanState};
 use crate::leaf15::LeafNode15;
 use crate::policy::BoxPolicy;
-use arrayvec::ArrayVec;
 use std::ptr as StdPtr;
 
 type P = BoxPolicy<u64>;
@@ -54,7 +53,7 @@ fn test_layer_context_creation() {
 #[test]
 #[expect(clippy::unwrap_used)]
 fn test_layer_stack_operations() {
-    let mut stack: LayerStack<P> = ArrayVec::new();
+    let mut stack: LayerStack<P> = LayerStack::new();
 
     assert!(stack.is_empty());
 
@@ -89,14 +88,12 @@ fn test_layer_stack_operations() {
 }
 
 #[test]
-fn test_layer_stack_capacity() {
-    let mut stack: LayerStack<P> = ArrayVec::new();
+fn test_layer_stack_inline_capacity() {
+    let mut stack: LayerStack<P> = LayerStack::new();
 
-    // ArrayVec has fixed capacity of 6
-    assert_eq!(stack.capacity(), 6);
     assert!(stack.is_empty());
 
-    // Push 6 elements (full capacity)
+    // Push 6 elements (inline capacity)
     for i in 1..=6 {
         stack.push(LayerContext::new(
             StdPtr::without_provenance(i * 0x1000),
@@ -104,16 +101,80 @@ fn test_layer_stack_capacity() {
         ));
     }
 
-    // Stack should be full but not panicking
     assert_eq!(stack.len(), 6);
-    assert!(stack.is_full());
+    assert!(!stack.is_empty());
+}
 
-    // try_push should fail when full
-    let result = stack.try_push(LayerContext::new(
-        StdPtr::without_provenance(0x7000),
-        StdPtr::without_provenance_mut(0x8000),
+#[test]
+fn test_layer_stack_spills_to_heap() {
+    let mut stack: LayerStack<P> = LayerStack::new();
+
+    // Push beyond inline capacity (7 elements) — must not panic.
+    for i in 1..=7 {
+        stack.push(LayerContext::new(
+            StdPtr::without_provenance(i * 0x1000),
+            StdPtr::without_provenance_mut(i * 0x2000),
+        ));
+    }
+
+    assert_eq!(stack.len(), 7);
+
+    // Pop all and verify LIFO order
+    for i in (1..=7).rev() {
+        let ctx = stack.pop().unwrap();
+        assert_eq!(ctx.root, StdPtr::without_provenance(i * 0x1000));
+    }
+
+    assert!(stack.is_empty());
+    assert!(stack.pop().is_none());
+}
+
+#[test]
+fn test_layer_stack_deep_keys() {
+    let mut stack: LayerStack<P> = LayerStack::new();
+
+    // Simulate worst-case: MAX_KEY_LENGTH(256) / IKEY_SIZE(8) = 32 layers
+    for i in 1..=32 {
+        stack.push(LayerContext::new(
+            StdPtr::without_provenance(i * 0x1000),
+            StdPtr::without_provenance_mut(i * 0x2000),
+        ));
+    }
+
+    assert_eq!(stack.len(), 32);
+
+    // Pop all and verify LIFO order
+    for i in (1..=32).rev() {
+        let ctx = stack.pop().unwrap();
+        assert_eq!(ctx.root, StdPtr::without_provenance(i * 0x1000));
+    }
+
+    assert!(stack.is_empty());
+}
+
+#[test]
+fn test_layer_stack_clear() {
+    let mut stack: LayerStack<P> = LayerStack::new();
+
+    // Fill beyond inline capacity
+    for i in 1..=10 {
+        stack.push(LayerContext::new(
+            StdPtr::without_provenance(i * 0x1000),
+            StdPtr::without_provenance_mut(i * 0x2000),
+        ));
+    }
+    assert_eq!(stack.len(), 10);
+
+    stack.clear();
+    assert!(stack.is_empty());
+    assert_eq!(stack.len(), 0);
+
+    // Reuse after clear (should work with inline storage again)
+    stack.push(LayerContext::new(
+        StdPtr::without_provenance(0x1000),
+        StdPtr::without_provenance_mut(0x2000),
     ));
-    assert!(result.is_err());
+    assert_eq!(stack.len(), 1);
 }
 
 #[test]

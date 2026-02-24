@@ -101,7 +101,6 @@ use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
 
-use arrayvec::ArrayVec;
 use seize::LocalGuard;
 
 use crate::alloc_trait::TreeAllocator;
@@ -157,7 +156,7 @@ use iter_flags::IterFlags;
 ///
 /// The iterator allocates:
 /// - `Vec<u8>` for each key (unavoidable for owned keys)
-/// - `SmallVec` for layer stack (usually inline, up to 4 layers)
+/// - `LayerStack` for layer stack (inline up to 6 layers, heap spillover for deeper keys)
 /// - No per-item allocation for value cloning (Arc refcount bump or Copy)
 ///
 /// For higher performance, use the batch methods: [`for_each`](Self::for_each),
@@ -352,7 +351,7 @@ where
             // Forward iteration state (fully initialized)
             guard,
             stack,
-            layer_stack: ArrayVec::new(),
+            layer_stack: LayerStack::new(),
             cursor_key,
             state: ScanState::FindNext,
             snapshot: None,
@@ -360,7 +359,7 @@ where
 
             // Backward state: cheap defaults (never accessed by forward batch methods)
             back_stack: BackStackElement::default(),
-            back_layer_stack: ArrayVec::new(),
+            back_layer_stack: LayerStack::new(),
             back_cursor_key: CursorKey::empty(),
             back_helper: ReverseScanHelper::new(),
             back_state: ScanStateBack::FindPrev,
@@ -402,7 +401,7 @@ where
             // Forward iteration state (fully initialized except lazy initialize())
             guard,
             stack,
-            layer_stack: ArrayVec::new(),
+            layer_stack: LayerStack::new(),
             cursor_key,
             state: ScanState::FindNext,
             snapshot: None,
@@ -410,7 +409,7 @@ where
 
             // Backward state: cheap defaults (forward path)
             back_stack: BackStackElement::default(),
-            back_layer_stack: ArrayVec::new(),
+            back_layer_stack: LayerStack::new(),
             back_cursor_key: CursorKey::empty(),
             back_helper: ReverseScanHelper::new(),
             back_state: ScanStateBack::FindPrev,
@@ -493,7 +492,7 @@ where
             // Forward iteration state
             guard,
             stack,
-            layer_stack: ArrayVec::new(),
+            layer_stack: LayerStack::new(),
             cursor_key,
             state: ScanState::FindNext, // Will be set properly in first iteration
             snapshot: None,
@@ -501,7 +500,7 @@ where
 
             // Reverse iteration state (lazily initialized)
             back_stack: BackStackElement::new(root),
-            back_layer_stack: ArrayVec::new(),
+            back_layer_stack: LayerStack::new(),
             back_cursor_key: CursorKey::for_reverse_scan(&end),
             back_helper: ReverseScanHelper::new(),
             back_state: ScanStateBack::FindPrev,
@@ -1092,7 +1091,7 @@ where
                     let (new_state, _) = ReverseScan::reposition_back(
                         &mut self.back_stack,
                         &self.back_cursor_key,
-                        &self.back_helper,
+                        self.back_helper,
                         self.guard,
                     );
 

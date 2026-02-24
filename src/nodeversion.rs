@@ -47,7 +47,7 @@ use std::hint as StdHint;
 use std::marker::PhantomData;
 use std::ptr as StdPtr;
 use std::sync::atomic as StdAtomic;
-use std::sync::atomic::{AtomicU32, Ordering, fence};
+use std::sync::atomic::{fence, AtomicU32, Ordering};
 use std::thread as StdThread;
 use std::time::{Duration, Instant};
 
@@ -213,13 +213,16 @@ impl Drop for LockGuard<'_> {
         // - If splitting: increment split counter, clear all dirty/lock bits
         // - If inserting: increment insert counter, clear inserting/lock bits
         //
-        // With current strategy, INSERTING_BIT is always set (unless SPLITTING_BIT was set),
-        // so the version counter is always incremented on unlock.
+        // INSERTING_BIT is set for mutation paths (mark_insert), but not for validation-only
+        // locks (e.g., parent validation in remove). When INSERTING_BIT is unset and
+        // SPLITTING_BIT is unset, the shift produces 0, so no version increment occurs --
+        // correct for locks that didn't mutate the node.
         let new_value: u32 = if self.locked_value & SPLITTING_BIT != 0 {
             (self.locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK
         } else {
-            // The expression `(inserting << 2)` equals `vinsert_lowbit` when inserting
-            // Currently, INSERTING_BIT is always 1 here, so version increments
+            // The expression `(inserting << 2)` equals `vinsert_lowbit` when inserting.
+            // When INSERTING_BIT is 0 (validation-only lock), shift produces 0 and
+            // no version increment occurs -- correct for non-mutating locks.
             (self.locked_value + ((self.locked_value & INSERTING_BIT) << 2)) & UNLOCK_MASK
         };
 
@@ -956,7 +959,7 @@ impl NodeVersion {
     /// Try to acquire the lock without blocking.
     ///
     /// Returns `Some(guard)` if the lock was acquired, `None` if the lock
-    /// is held or dirty bits are set.
+    /// is already held.
     ///
     /// # Memory Ordering
     /// Uses `Acquire` ordering on successful CAS.
@@ -1060,9 +1063,9 @@ impl NodeVersion {
     /// # Algorithm
     ///
     /// 1. Try to acquire the lock with `try_lock()`
-    /// 2. If failed, do a small number of spin-loop hints
-    /// 3. Then yield the CPU with `thread::yield_now()`
-    /// 4. Repeat until lock acquired
+    /// 2. If failed, do 1 spin-loop hint
+    /// 3. On the next failure, yield the CPU with `thread::yield_now()`
+    /// 4. Reset and repeat until lock acquired
     ///
     /// # Memory Ordering
     /// Uses `Acquire` ordering on successful lock acquisition.

@@ -27,7 +27,7 @@ use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
-use crate::hints::likely;
+use crate::hints::{likely, unlikely};
 use crate::key::IKEY_SIZE;
 use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
@@ -38,6 +38,7 @@ use crate::policy::LeafPolicy;
 use crate::prefetch::prefetch_read;
 use crate::tree::range::iterator::RangeBound;
 
+use super::batch_common::{CopySlotVisitor, RefSlotVisitor, SlotVisitor, build_slot_key};
 use super::cursor_key::CursorKey;
 use super::helper::{
     ForwardScanHelper, KeyIndexedPosition, lower_with_position, lower_with_suffix,
@@ -639,13 +640,13 @@ where
     }
 
     // Value slot - prepare for emit (NO CLONING)
-    if leaf.is_value_empty(slot) {
+    // Load raw pointer once — handles TOCTOU race if value was
+    // concurrently removed between permutation read and here.
+    let slot_ptr: *mut u8 = leaf.load_value_raw(slot);
+    if slot_ptr.is_null() {
         stack.next();
         return (ScanState::FindNext, None);
     }
-
-    // Load raw pointer for zero-copy return — caller will dereference.
-    let slot_ptr: *mut u8 = leaf.load_value_raw(slot);
 
     // Compute key length - only read suffix NOW if needed
     let key_len: usize = if slot_keylenx == KSUF_KEYLENX {
@@ -778,13 +779,13 @@ where
     }
 
     // Value slot - prepare for emit
-    if leaf.is_value_empty(slot) {
+    // Load raw pointer once — handles TOCTOU race if value was
+    // concurrently removed between permutation read and here.
+    let slot_ptr: *mut u8 = leaf.load_value_raw(slot);
+    if slot_ptr.is_null() {
         stack.next();
         return (ScanState::FindNext, None);
     }
-
-    // Load raw pointer for zero-copy return.
-    let slot_ptr: *mut u8 = leaf.load_value_raw(slot);
 
     // Single-layer keys are always ≤ 8 bytes, no suffix handling
     let key_len: usize = slot_keylenx as usize;
@@ -1225,190 +1226,49 @@ pub enum LeafBatchResult {
     EndBoundExceeded = 4,
 }
 
-/// Process remaining entries in current leaf in a tight loop.
+/// Unified keyed batch processor for forward scans.
 ///
-/// This is the core intra-leaf batch optimization. Instead of returning after
-/// each entry, we process all remaining entries in the current leaf before
-/// returning control to the caller.
+/// Processes all remaining entries in the current leaf, building keys and
+/// delegating value loading to the [`SlotVisitor`] trait. This single function
+/// handles both ref and copy variants — the visitor determines how values
+/// are loaded and delivered.
 ///
 /// # Algorithm
 ///
 /// For each remaining slot in the permutation:
-/// 1. Read slot data `(ikey, keylenx, value_ptr)`
+/// 1. Read slot data `(ikey, keylenx)`
 /// 2. If layer pointer → return [`LayerEncountered`] (caller handles descent)
-/// 3. If null value → skip
-/// 4. Build key and call visitor
-/// 5. Check end bound
-/// 6. Validate version (OCC) after batch
+/// 3. Fast end bound pre-check using ikey
+/// 4. If null value → skip
+/// 5. Build key via [`build_slot_key`]
+/// 6. Full end bound check if needed
+/// 7. Call visitor ([`SlotVisitor::visit`])
+/// 8. Validate version (OCC) after batch
 ///
 /// # Performance
 ///
-/// This eliminates:
-/// - Function call overhead per entry
-/// - State machine dispatch per entry
-/// - Redundant leaf/version checks
+/// After monomorphization, the `SlotVisitor` trait dispatch is fully inlined.
+/// This is zero-cost compared to the previous separate functions.
+///
+/// [`SlotVisitor`]: super::batch_common::SlotVisitor
+/// [`build_slot_key`]: super::batch_common::build_slot_key
 #[inline]
 #[expect(
     clippy::too_many_arguments,
     reason = "Hot path batch processor - parameters represent mutable scan state that cannot be bundled without allocation overhead"
 )]
-pub fn process_leaf_batch_ptr<P, F>(
+fn process_leaf_batch_keyed<P, V>(
     stack: &mut ScanStackElement<P>,
     cursor_key: &mut CursorKey,
     layer_stack: &mut LayerStack<P>,
     end_bound: &RangeBound<'_>,
     end_bound_ikey: Option<u64>,
-    visitor: &mut F,
+    slot_visitor: &mut V,
     count: &mut usize,
 ) -> LeafBatchResult
 where
     P: LeafPolicy,
-    F: FnMut(&[u8], &P::Value) -> bool,
-{
-    // Cache leaf pointer to avoid borrow conflicts
-    let leaf_ptr: *const LeafNode15<P> = stack.leaf_ptr();
-    let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-    let perm = stack.perm();
-    let perm_size = perm.size();
-    let cached_version = stack.version();
-
-    // Check if leaf was deleted since we cached the version
-    // This makes the function self-contained (caller also checks, but belt-and-suspenders)
-    if leaf.version().is_deleted() {
-        return LeafBatchResult::VersionChanged;
-    }
-
-    // Process remaining entries in this leaf
-    while stack.ki() < perm_size {
-        let slot = perm.get(stack.ki());
-
-        // Read slot data with relaxed ordering (permutation provides synchronization)
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = leaf.keylenx(slot);
-
-        // Check for layer pointer - must handle via state machine
-        if slot_keylenx >= LAYER_KEYLENX {
-            // Set up for layer descent
-            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-            layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
-            cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(layer_ptr);
-            stack.set_root(layer_ptr);
-            return LeafBatchResult::LayerEncountered;
-        }
-
-        // Fast end bound pre-check using ikey. This avoids full key comparison
-        // for the common case where the first 8 bytes already decide the bound.
-        let mut needs_full_end_check = true;
-        if end_bound_ikey.is_none() {
-            needs_full_end_check = false;
-        } else if cursor_key.is_at_root_layer()
-            && let Some(bound_ikey) = end_bound_ikey
-        {
-            match slot_ikey.cmp(&bound_ikey) {
-                Ordering::Greater => return LeafBatchResult::EndBoundExceeded,
-                Ordering::Less => needs_full_end_check = false,
-                Ordering::Equal => {}
-            }
-        }
-
-        // Check value slot
-        if leaf.is_value_empty(slot) {
-            stack.next();
-            continue;
-        }
-
-        // Build key in cursor (side effects only, key_len computed via cursor)
-        if slot_keylenx == KSUF_KEYLENX {
-            if let Some(suffix) = leaf.ksuf(slot) {
-                let suffix_len = suffix.len();
-                cursor_key.assign_store_ikey(slot_ikey);
-                let _ = cursor_key.assign_store_suffix(suffix);
-                cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
-            } else {
-                cursor_key.assign_store_ikey(slot_ikey);
-                cursor_key.assign_store_length(IKEY_SIZE);
-            }
-        } else {
-            let len = slot_keylenx as usize;
-            cursor_key.assign_store_ikey(slot_ikey);
-            cursor_key.assign_store_length(len);
-        }
-
-        cursor_key.mark_key_complete();
-
-        // Check end bound
-        let key: &[u8] = cursor_key.full_key();
-        if needs_full_end_check && !end_bound.contains(key) {
-            return LeafBatchResult::EndBoundExceeded;
-        }
-
-        // SAFETY: Guard protects value, slot is valid (non-empty, in permutation)
-        let value_ref: &P::Value = unsafe { &*leaf.load_value_ptr(slot) };
-
-        *count += 1;
-        stack.next();
-
-        if !visitor(key, value_ref) {
-            return LeafBatchResult::Stopped;
-        }
-    }
-
-    // Validate version after processing batch (OCC)
-    if leaf.version().has_changed(cached_version) {
-        return LeafBatchResult::VersionChanged;
-    }
-
-    LeafBatchResult::LeafExhausted
-}
-
-/// Process remaining entries in current leaf, returning values by copy.
-///
-/// This is the variant of [`process_leaf_batch_ptr`] that works for ALL `LeafPolicy`
-/// types, including true-inline storage. Instead of returning `&P::Value` references
-/// (which requires pointer-backed storage), it returns `P::Output` by value.
-///
-/// # Key Differences from `process_leaf_batch_ptr`
-///
-/// | Aspect | `process_leaf_batch_ptr` | `process_leaf_batch` |
-/// |--------|--------------------------|----------------------|
-/// | Visitor signature | `FnMut(&[u8], &P::Value)` | `FnMut(&[u8], P::Output)` |
-/// | Value access | `&*slot_ptr.cast()` (deref) | `leaf.load_value(slot)` |
-/// | Storage support | `RefLeafPolicy` only | All `LeafPolicy` types |
-/// | Use case | Zero-copy for Arc/Box | Universal, works with inline |
-///
-/// # Performance for Inline Storage
-///
-/// For true-inline storage (`InlinePolicy<V>`), `ValueArray::load()` directly
-/// reads the `AtomicU64` bits and reconstructs the value. No pointer
-/// indirection or intermediate conversion needed.
-///
-/// # Algorithm
-///
-/// Same as `process_leaf_batch_ptr`:
-/// 1. Read slot data `(ikey, keylenx, value_ptr)`
-/// 2. If layer pointer → return [`LeafBatchResult::LayerEncountered`]
-/// 3. If null value → skip
-/// 4. Build key and call visitor with loaded value
-/// 5. Check end bound
-/// 6. Validate version (OCC) after batch
-#[inline]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Hot path batch processor - parameters represent mutable scan state that cannot be bundled without allocation overhead"
-)]
-pub fn process_leaf_batch<P, F>(
-    stack: &mut ScanStackElement<P>,
-    cursor_key: &mut CursorKey,
-    layer_stack: &mut LayerStack<P>,
-    end_bound: &RangeBound<'_>,
-    end_bound_ikey: Option<u64>,
-    visitor: &mut F,
-    count: &mut usize,
-) -> LeafBatchResult
-where
-    P: LeafPolicy,
-    F: FnMut(&[u8], P::Output) -> bool,
+    V: SlotVisitor<P>,
 {
     // Cache leaf pointer to avoid borrow conflicts
     let leaf_ptr: *const LeafNode15<P> = stack.leaf_ptr();
@@ -1458,28 +1318,13 @@ where
         }
 
         // Check value slot
-        if leaf.is_value_empty(slot) {
+        if unlikely(leaf.is_value_empty(slot)) {
             stack.next();
             continue;
         }
 
-        // Build key in cursor (side effects only, key_len computed via cursor)
-        if slot_keylenx == KSUF_KEYLENX {
-            if let Some(suffix) = leaf.ksuf(slot) {
-                let suffix_len = suffix.len();
-                cursor_key.assign_store_ikey(slot_ikey);
-                let _ = cursor_key.assign_store_suffix(suffix);
-                cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
-            } else {
-                cursor_key.assign_store_ikey(slot_ikey);
-                cursor_key.assign_store_length(IKEY_SIZE);
-            }
-        } else {
-            let len = slot_keylenx as usize;
-            cursor_key.assign_store_ikey(slot_ikey);
-            cursor_key.assign_store_length(len);
-        }
-
+        // Build key in cursor
+        build_slot_key(cursor_key, leaf, slot, slot_ikey, slot_keylenx);
         cursor_key.mark_key_complete();
 
         // Check end bound
@@ -1488,19 +1333,19 @@ where
             return LeafBatchResult::EndBoundExceeded;
         }
 
-        // Load value via typed API — works for all storage types.
-        // Use let-else to eliminate TOCTOU race between is_value_empty and load_value
-        let Some(output) = leaf.load_value(slot) else {
-            // Concurrent modification removed value - skip this slot
-            stack.next();
-            continue;
-        };
-
-        *count += 1;
-        stack.next();
-
-        if !visitor(key, output) {
-            return LeafBatchResult::Stopped;
+        // Delegate value loading + visiting to the trait implementation
+        match slot_visitor.visit(leaf, slot, key) {
+            None => {
+                // TOCTOU: value was concurrently removed — skip
+                stack.next();
+            }
+            Some(should_continue) => {
+                *count += 1;
+                stack.next();
+                if !should_continue {
+                    return LeafBatchResult::Stopped;
+                }
+            }
         }
     }
 
@@ -1510,6 +1355,72 @@ where
     }
 
     LeafBatchResult::LeafExhausted
+}
+
+/// Process remaining entries in current leaf, returning `&P::Value` references.
+///
+/// Thin wrapper around [`process_leaf_batch_keyed`] using [`RefSlotVisitor`].
+/// For `RefLeafPolicy` types with pointer-backed storage (Arc, Box).
+#[inline]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Hot path batch processor - parameters represent mutable scan state that cannot be bundled without allocation overhead"
+)]
+pub fn process_leaf_batch_ptr<P, F>(
+    stack: &mut ScanStackElement<P>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<P>,
+    end_bound: &RangeBound<'_>,
+    end_bound_ikey: Option<u64>,
+    visitor: &mut F,
+    count: &mut usize,
+) -> LeafBatchResult
+where
+    P: LeafPolicy,
+    F: FnMut(&[u8], &P::Value) -> bool,
+{
+    process_leaf_batch_keyed(
+        stack,
+        cursor_key,
+        layer_stack,
+        end_bound,
+        end_bound_ikey,
+        &mut RefSlotVisitor(visitor),
+        count,
+    )
+}
+
+/// Process remaining entries in current leaf, returning `P::Output` by value.
+///
+/// Thin wrapper around [`process_leaf_batch_keyed`] using [`CopySlotVisitor`].
+/// Works for ALL `LeafPolicy` types including true-inline storage.
+#[inline]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Hot path batch processor - parameters represent mutable scan state that cannot be bundled without allocation overhead"
+)]
+pub fn process_leaf_batch<P, F>(
+    stack: &mut ScanStackElement<P>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<P>,
+    end_bound: &RangeBound<'_>,
+    end_bound_ikey: Option<u64>,
+    visitor: &mut F,
+    count: &mut usize,
+) -> LeafBatchResult
+where
+    P: LeafPolicy,
+    F: FnMut(&[u8], P::Output) -> bool,
+{
+    process_leaf_batch_keyed(
+        stack,
+        cursor_key,
+        layer_stack,
+        end_bound,
+        end_bound_ikey,
+        &mut CopySlotVisitor(visitor),
+        count,
+    )
 }
 
 /// Process leaf batch without key materialization (values only).
@@ -1575,7 +1486,7 @@ where
         let slot_keylenx: u8 = leaf.keylenx(slot);
 
         // Handle layer pointer - must use state machine
-        if slot_keylenx >= LAYER_KEYLENX {
+        if unlikely(slot_keylenx >= LAYER_KEYLENX) {
             let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
             layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
             // Still need to track ikey for layer navigation
@@ -1594,7 +1505,7 @@ where
         }
 
         // Check value slot
-        if leaf.is_value_empty(slot) {
+        if unlikely(leaf.is_value_empty(slot)) {
             stack.next();
             continue;
         }

@@ -18,12 +18,73 @@ use crate::{
     key::IKEY_SIZE,
     leaf15::LAYER_KEYLENX,
     tree::range::{
+        batch_common::{CopySlotVisitor, RefSlotVisitor, SlotVisitor, build_slot_key},
         cursor_key::CursorKey,
         helper::ReverseScanHelper,
-        scan_state::{BackStackElement, LayerContext, LayerStack, ScanSnapshot, ScanStateBack},
+        scan_state::{
+            BackStackElement, LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr,
+            ScanStateBack,
+        },
         traversal::reach_leaf_for_scan,
     },
 };
+
+// ============================================================================
+//  ReverseEmitter Trait - Clone vs Zero-Copy Abstraction
+// ============================================================================
+
+/// Abstracts clone vs zero-copy value emission for reverse per-entry scanning.
+///
+/// Two implementations:
+/// - [`CloneEmitter`]: calls `load_value()`, returns `ScanSnapshot<P>`. Requires `P::Output: Clone`.
+/// - [`PtrEmitter`]: calls `load_value_raw()` + null check, returns `ScanSnapshotPtr<P::Value>`.
+///
+/// After monomorphization, trait dispatch is fully inlined — zero overhead.
+pub trait ReverseEmitter<P: LeafPolicy> {
+    type Snapshot;
+
+    /// Load a value from `leaf[slot]` and wrap it with `key_len`.
+    ///
+    /// Returns `None` if the value was concurrently removed (TOCTOU race).
+    fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<Self::Snapshot>;
+}
+
+/// Clone-based emitter: calls `leaf.load_value(slot)`, returns `ScanSnapshot<P>`.
+pub struct CloneEmitter;
+
+impl<P: LeafPolicy> ReverseEmitter<P> for CloneEmitter
+where
+    P::Output: Clone,
+{
+    type Snapshot = ScanSnapshot<P>;
+
+    #[inline(always)]
+    fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<ScanSnapshot<P>> {
+        let output = leaf.load_value(slot)?;
+        Some(ScanSnapshot { value: output, key_len })
+    }
+}
+
+/// Zero-copy emitter: calls `leaf.load_value_raw(slot)`, returns `ScanSnapshotPtr<P::Value>`.
+#[allow(dead_code, reason = "Zero-copy reverse scan API — callers will use find_prev_ptr")]
+pub struct PtrEmitter;
+
+impl<P: LeafPolicy> ReverseEmitter<P> for PtrEmitter {
+    type Snapshot = ScanSnapshotPtr<P::Value>;
+
+    #[inline(always)]
+    fn emit_value(
+        leaf: &LeafNode15<P>,
+        slot: usize,
+        key_len: usize,
+    ) -> Option<ScanSnapshotPtr<P::Value>> {
+        let ptr = leaf.load_value_raw(slot);
+        if ptr.is_null() {
+            return None;
+        }
+        Some(ScanSnapshotPtr::from_raw(ptr, key_len))
+    }
+}
 
 /// Result of attempting to find initial position in a single layer.
 enum InitialPositionResult<P: LeafPolicy> {
@@ -515,7 +576,7 @@ impl ReverseScan {
     {
         // OPTIMIZATION: Skip duplicate check in normal reverse iteration.
         // Duplicates can only occur after Retry states (version conflict).
-        Self::find_prev_inner(stack, cursor_key, layer_stack, helper, guard, false)
+        Self::find_prev_generic::<P, CloneEmitter>(stack, cursor_key, layer_stack, helper, guard, false)
     }
 
     /// Find the previous entry with duplicate checking enabled.
@@ -533,22 +594,71 @@ impl ReverseScan {
         P: LeafPolicy,
         P::Output: Clone,
     {
-        Self::find_prev_inner(stack, cursor_key, layer_stack, helper, guard, true)
+        Self::find_prev_generic::<P, CloneEmitter>(stack, cursor_key, layer_stack, helper, guard, true)
     }
 
-    /// Inner implementation of `find_prev` with configurable duplicate checking.
+    /// Find the previous entry, returning a raw pointer instead of cloning.
+    ///
+    /// This is the zero-copy variant of [`find_prev`] for use with `scan_ref`.
+    /// Instead of calling `load_value` (which clones Arc values),
+    /// it returns the raw pointer directly via [`ScanSnapshotPtr`].
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer is only valid while:
+    /// 1. The guard is held (prevents deallocation)
+    /// 2. The version hasn't changed (OCC validation at leaf boundaries)
+    ///
+    /// Callers must dereference immediately within the same guard scope.
     #[inline]
-    fn find_prev_inner<P>(
+    #[allow(dead_code, reason = "Zero-copy reverse scan API")]
+    pub fn find_prev_ptr<P>(
+        stack: &mut BackStackElement<P>,
+        cursor_key: &mut CursorKey,
+        layer_stack: &mut LayerStack<P>,
+        helper: &mut ReverseScanHelper,
+        guard: &LocalGuard<'_>,
+    ) -> (ScanStateBack, Option<ScanSnapshotPtr<P::Value>>)
+    where
+        P: LeafPolicy,
+    {
+        Self::find_prev_generic::<P, PtrEmitter>(stack, cursor_key, layer_stack, helper, guard, false)
+    }
+
+    /// Find the previous entry with duplicate checking, returning raw pointer.
+    ///
+    /// Zero-copy variant of [`find_prev_with_duplicate_check`].
+    #[inline]
+    #[allow(dead_code, reason = "Zero-copy reverse scan API")]
+    pub fn find_prev_with_duplicate_check_ptr<P>(
+        stack: &mut BackStackElement<P>,
+        cursor_key: &mut CursorKey,
+        layer_stack: &mut LayerStack<P>,
+        helper: &mut ReverseScanHelper,
+        guard: &LocalGuard<'_>,
+    ) -> (ScanStateBack, Option<ScanSnapshotPtr<P::Value>>)
+    where
+        P: LeafPolicy,
+    {
+        Self::find_prev_generic::<P, PtrEmitter>(stack, cursor_key, layer_stack, helper, guard, true)
+    }
+
+    /// Generic inner implementation of `find_prev` with configurable emission strategy.
+    ///
+    /// `E` controls whether values are cloned ([`CloneEmitter`]) or returned as
+    /// raw pointers ([`PtrEmitter`]). After monomorphization, the trait dispatch
+    /// is fully inlined — zero overhead.
+    #[inline]
+    fn find_prev_generic<P, E: ReverseEmitter<P>>(
         stack: &mut BackStackElement<P>,
         cursor_key: &mut CursorKey,
         layer_stack: &mut LayerStack<P>,
         helper: &mut ReverseScanHelper,
         guard: &LocalGuard<'_>,
         needs_duplicate_check: bool,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
+    ) -> (ScanStateBack, Option<E::Snapshot>)
     where
         P: LeafPolicy,
-        P::Output: Clone,
     {
         // Fast path: null leaf means we need to go up
         let leaf_ptr: *mut LeafNode15<P> = stack.get_leaf_ptr();
@@ -561,7 +671,7 @@ impl ReverseScan {
         // Fast path: leaf exhausted (ki went negative)
         // Check BEFORE version to avoid unnecessary atomic load
         if ki < 0 {
-            return Self::advance_to_prev_leaf(stack, cursor_key, helper, guard);
+            return Self::advance_to_prev_leaf_generic::<P, E>(stack, cursor_key, helper, guard);
         }
 
         // SAFETY: leaf_ptr is valid (null checked above)
@@ -570,7 +680,7 @@ impl ReverseScan {
 
         // Version check - if changed, reposition
         if leaf.version().has_changed(version) {
-            return Self::reposition_back(stack, cursor_key, helper, guard);
+            return Self::reposition_back_generic::<P, E>(stack, cursor_key, *helper, guard);
         }
 
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = *stack.get_perm_ref();
@@ -578,11 +688,11 @@ impl ReverseScan {
 
         // Defensive check: ki might be >= size due to concurrent deletion
         if ki.unsigned_abs() >= size {
-            return Self::advance_to_prev_leaf(stack, cursor_key, helper, guard);
+            return Self::advance_to_prev_leaf_generic::<P, E>(stack, cursor_key, helper, guard);
         }
 
         // Process the current slot
-        Self::process_slot_reverse(
+        Self::process_slot_generic::<P, E>(
             leaf,
             leaf_ptr,
             perm,
@@ -597,13 +707,13 @@ impl ReverseScan {
         )
     }
 
-    /// Process a single slot during reverse scan.
+    /// Process a single slot during reverse scan (generic over emission strategy).
     ///
     /// Handles slot classification (layer pointer vs value) and emission logic.
     /// This is the hot inner loop of reverse scanning.
     #[inline]
     #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    fn process_slot_reverse<P>(
+    fn process_slot_generic<P, E: ReverseEmitter<P>>(
         leaf: &LeafNode15<P>,
         leaf_ptr: *mut LeafNode15<P>,
         perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
@@ -615,10 +725,9 @@ impl ReverseScan {
         layer_stack: &mut LayerStack<P>,
         helper: &mut ReverseScanHelper,
         needs_duplicate_check: bool,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
+    ) -> (ScanStateBack, Option<E::Snapshot>)
     where
         P: LeafPolicy,
-        P::Output: Clone,
     {
         let slot: usize = perm.get(ki.unsigned_abs());
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
@@ -649,7 +758,7 @@ impl ReverseScan {
 
         // Handle layer pointer
         if keylenx >= LAYER_KEYLENX {
-            return Self::handle_layer_pointer_reverse(
+            return Self::handle_layer_pointer_generic::<P, E>(
                 leaf,
                 leaf_ptr,
                 slot,
@@ -664,7 +773,7 @@ impl ReverseScan {
         }
 
         // Try to emit this slot's value (returns tuple directly, no intermediate enum)
-        Self::try_emit_value_reverse(
+        Self::try_emit_generic::<P, E>(
             leaf, slot, slot_ikey, keylenx, version, &perm, ki, cursor_key, stack, helper,
         )
     }
@@ -674,9 +783,11 @@ impl ReverseScan {
     /// Pushes parent context and prepares for sublayer descent.
     /// Unlike `handle_layer_descent_reverse` (used by `find_initial`), this
     /// always uses `shift_clear_reverse` since we're doing scan-discovered descent.
+    ///
+    /// Always returns `None` for the snapshot — layer pointers never emit values.
     #[inline]
     #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    fn handle_layer_pointer_reverse<P>(
+    fn handle_layer_pointer_generic<P, E: ReverseEmitter<P>>(
         leaf: &LeafNode15<P>,
         leaf_ptr: *mut LeafNode15<P>,
         slot: usize,
@@ -687,10 +798,9 @@ impl ReverseScan {
         stack: &mut BackStackElement<P>,
         cursor_key: &mut CursorKey,
         layer_stack: &mut LayerStack<P>,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
+    ) -> (ScanStateBack, Option<E::Snapshot>)
     where
         P: LeafPolicy,
-        P::Output: Clone,
     {
         // Push current context to layer stack for return
         layer_stack.push(LayerContext::new(stack.get_root(), leaf_ptr));
@@ -712,6 +822,7 @@ impl ReverseScan {
 
     /// Try to emit a value slot during reverse scan (`find_prev` path).
     ///
+    /// Generic over emission strategy `E` — handles both clone and zero-copy paths.
     /// Handles both suffix keys and inline keys with proper version validation.
     /// Returns the state tuple directly to avoid intermediate enum allocation.
     ///
@@ -722,7 +833,7 @@ impl ReverseScan {
     /// filtering after version-triggered repositioning.
     #[inline]
     #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    fn try_emit_value_reverse<P>(
+    fn try_emit_generic<P, E: ReverseEmitter<P>>(
         leaf: &LeafNode15<P>,
         slot: usize,
         slot_ikey: u64,
@@ -733,10 +844,9 @@ impl ReverseScan {
         cursor_key: &mut CursorKey,
         stack: &mut BackStackElement<P>,
         helper: &mut ReverseScanHelper,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
+    ) -> (ScanStateBack, Option<E::Snapshot>)
     where
         P: LeafPolicy,
-        P::Output: Clone,
     {
         // Get value pointer first (before version check to pipeline loads)
         if leaf.is_value_empty(slot) {
@@ -770,7 +880,8 @@ impl ReverseScan {
 
         cursor_key.assign_store_length(key_len);
 
-        let Some(output) = leaf.load_value(slot) else {
+        // Emit value via trait — CloneEmitter calls load_value, PtrEmitter calls load_value_raw
+        let Some(snapshot) = E::emit_value(leaf, slot, key_len) else {
             // Concurrent modification removed value between is_value_empty check and load
             stack.set_ki(ReverseScanHelper::prev(ki));
             return (ScanStateBack::FindPrev, None);
@@ -779,13 +890,7 @@ impl ReverseScan {
         // Update position for next iteration
         stack.update_state(version, *perm, ReverseScanHelper::prev(ki));
 
-        (
-            ScanStateBack::Emit,
-            Some(ScanSnapshot {
-                value: output,
-                key_len,
-            }),
-        )
+        (ScanStateBack::Emit, Some(snapshot))
     }
 
     // ========================================================================
@@ -825,15 +930,14 @@ impl ReverseScan {
     /// ki_ = helper.lower(ka, this);
     /// ```
     #[inline]
-    fn advance_to_prev_leaf<P>(
+    fn advance_to_prev_leaf_generic<P, E: ReverseEmitter<P>>(
         stack: &mut BackStackElement<P>,
         cursor_key: &mut CursorKey,
         helper: &ReverseScanHelper,
         guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
+    ) -> (ScanStateBack, Option<E::Snapshot>)
     where
         P: LeafPolicy,
-        P::Output: Clone,
     {
         let current_ptr: *mut LeafNode15<P> = stack.get_leaf_ptr();
 
@@ -936,12 +1040,30 @@ impl ReverseScan {
     pub fn reposition_back<P>(
         stack: &mut BackStackElement<P>,
         cursor_key: &CursorKey,
-        helper: &ReverseScanHelper,
+        helper: ReverseScanHelper,
         guard: &LocalGuard<'_>,
     ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
     where
         P: LeafPolicy,
         P::Output: Clone,
+    {
+        Self::reposition_back_generic::<P, CloneEmitter>(stack, cursor_key, helper, guard)
+    }
+
+    /// Generic reposition after version conflict during reverse scan.
+    ///
+    /// When a version conflict is detected, we must traverse from the layer
+    /// root to find the correct leaf for the current cursor key.
+    ///
+    /// Always returns `None` for the snapshot — repositioning only updates state.
+    fn reposition_back_generic<P, E: ReverseEmitter<P>>(
+        stack: &mut BackStackElement<P>,
+        cursor_key: &CursorKey,
+        helper: ReverseScanHelper,
+        guard: &LocalGuard<'_>,
+    ) -> (ScanStateBack, Option<E::Snapshot>)
+    where
+        P: LeafPolicy,
     {
         const MAX_REPOSITION_RETRIES: u32 = 16;
 
@@ -1194,45 +1316,49 @@ pub enum LeafBatchResultBack {
 
 use super::iterator::RangeBound;
 
-/// Process remaining entries in current leaf in reverse order (tight loop).
+/// Unified keyed batch processor for reverse scans.
 ///
-/// This is the core intra-leaf batch optimization for reverse scans. Instead of
-/// returning after each entry, we process all remaining entries in the current
-/// leaf before returning control to the caller.
+/// Processes all remaining entries in the current leaf in reverse order,
+/// building keys and delegating value loading to the [`SlotVisitor`] trait.
 ///
 /// # Algorithm
 ///
 /// For each remaining slot in permutation (from ki down to 0):
-/// 1. Read slot data `(ikey, keylenx, value_ptr)`
-/// 2. If layer pointer -> return [`LeafBatchResultBack::LayerEncountered`]
-/// 3. If null value -> skip
-/// 4. Build key and call visitor
-/// 5. Check start bound
-/// 6. Validate version (OCC) after batch
+/// 1. Read slot data `(ikey, keylenx)`
+/// 2. Prefetch previous slot's value
+/// 3. If layer pointer → return [`LayerEncountered`]
+/// 4. If null value → skip
+/// 5. Build key via [`build_slot_key`], mark key complete
+/// 6. Check start bound (reverse)
+/// 7. Call visitor ([`SlotVisitor::visit`])
+/// 8. Validate version (OCC) after batch
 ///
 /// # Performance
 ///
-/// This eliminates:
-/// - Function call overhead per entry
-/// - State machine dispatch per entry
-/// - Redundant leaf/version checks
+/// After monomorphization, the `SlotVisitor` trait dispatch is fully inlined.
+/// Includes prefetching for memory latency hiding.
+///
+/// [`SlotVisitor`]: super::batch_common::SlotVisitor
+/// [`build_slot_key`]: super::batch_common::build_slot_key
 #[inline]
 #[expect(clippy::too_many_arguments)]
-pub fn process_prev_leaf_batch_ptr<P, F>(
+fn process_prev_leaf_batch_keyed<P, V>(
     stack: &mut BackStackElement<P>,
     cursor_key: &mut CursorKey,
     layer_stack: &mut LayerStack<P>,
     start_bound: &RangeBound<'_>,
+    start_bound_ikey: Option<u64>,
     helper: &mut ReverseScanHelper,
-    visitor: &mut F,
+    slot_visitor: &mut V,
     count: &mut usize,
 ) -> LeafBatchResultBack
 where
     P: LeafPolicy,
-    F: FnMut(&[u8], &P::Value) -> bool,
+    V: SlotVisitor<P>,
 {
     // Cache leaf pointer to avoid borrow conflicts
     let leaf_ptr: *const LeafNode15<P> = stack.get_leaf_ptr();
+    // SAFETY: leaf_ptr is valid - protected by guard in caller
     let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
     let perm = *stack.get_perm_ref();
     let perm_size = perm.size();
@@ -1280,25 +1406,24 @@ where
             continue;
         }
 
-        // Build key
-        cursor_key.assign_store_ikey(slot_ikey);
-
-        let _key_len: usize = if slot_keylenx == KSUF_KEYLENX {
-            if let Some(suffix) = leaf.ksuf(slot) {
-                let suffix_len = suffix.len();
-                let _ = cursor_key.assign_store_suffix(suffix);
-                cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
-                IKEY_SIZE + suffix_len
-            } else {
-                cursor_key.assign_store_length(IKEY_SIZE);
-                IKEY_SIZE
+        // Fast start bound pre-check using ikey. This avoids full key comparison
+        // for the common case where the first 8 bytes already decide the bound.
+        // Symmetric with the forward path's end_bound_ikey pre-check.
+        let mut needs_full_start_check = true;
+        if start_bound_ikey.is_none() {
+            needs_full_start_check = false;
+        } else if cursor_key.is_at_root_layer()
+            && let Some(bound_ikey) = start_bound_ikey
+        {
+            match slot_ikey.cmp(&bound_ikey) {
+                Ordering::Less => return LeafBatchResultBack::StartBoundExceeded,
+                Ordering::Greater => needs_full_start_check = false,
+                Ordering::Equal => {}
             }
-        } else {
-            let len = slot_keylenx as usize;
-            cursor_key.assign_store_length(len);
-            len
-        };
+        }
 
+        // Build key
+        build_slot_key(cursor_key, leaf, slot, slot_ikey, slot_keylenx);
         cursor_key.mark_key_complete();
 
         // Clear upper_bound after first successful key emission
@@ -1307,20 +1432,25 @@ where
         // Check start bound (for reverse iteration)
         // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
         let key: &[u8] = unsafe { cursor_key.full_key_unchecked() };
-        if !start_bound.contains_reverse(key) {
+        if needs_full_start_check && !start_bound.contains_reverse(key) {
             return LeafBatchResultBack::StartBoundExceeded;
         }
 
-        // SAFETY: Guard protects value, slot is valid (non-empty, in permutation)
-        let value_ref: &P::Value = unsafe { &*leaf.load_value_ptr(slot) };
-
-        *count += 1;
-        ki -= 1;
-
-        if !visitor(key, value_ref) {
-            // Update stack position before returning
-            stack.set_ki(ki);
-            return LeafBatchResultBack::Stopped;
+        // Delegate value loading + visiting to the trait implementation
+        match slot_visitor.visit(leaf, slot, key) {
+            None => {
+                // TOCTOU: value was concurrently removed — skip
+                ki -= 1;
+            }
+            Some(should_continue) => {
+                *count += 1;
+                ki -= 1;
+                if !should_continue {
+                    // Update stack position before returning
+                    stack.set_ki(ki);
+                    return LeafBatchResultBack::Stopped;
+                }
+            }
         }
     }
 
@@ -1336,24 +1466,40 @@ where
     LeafBatchResultBack::LeafExhausted
 }
 
-/// Batch process entries in a leaf for reverse iteration (value by copy).
+/// Process remaining entries in current leaf in reverse, returning `&P::Value` references.
 ///
-/// This is the non-reference variant that works with ALL storage types including
-/// true-inline (`InlinePolicy`). Unlike `process_prev_leaf_batch_ptr` which
-/// dereferences pointers to return `&P::Value`, this uses `ValueArray::load()`
-/// to return `P::Output` by value.
+/// Thin wrapper around [`process_prev_leaf_batch_keyed`] using [`RefSlotVisitor`].
+#[inline]
+#[expect(clippy::too_many_arguments)]
+pub fn process_prev_leaf_batch_ptr<P, F>(
+    stack: &mut BackStackElement<P>,
+    cursor_key: &mut CursorKey,
+    layer_stack: &mut LayerStack<P>,
+    start_bound: &RangeBound<'_>,
+    start_bound_ikey: Option<u64>,
+    helper: &mut ReverseScanHelper,
+    visitor: &mut F,
+    count: &mut usize,
+) -> LeafBatchResultBack
+where
+    P: LeafPolicy,
+    F: FnMut(&[u8], &P::Value) -> bool,
+{
+    process_prev_leaf_batch_keyed(
+        stack,
+        cursor_key,
+        layer_stack,
+        start_bound,
+        start_bound_ikey,
+        helper,
+        &mut RefSlotVisitor(visitor),
+        count,
+    )
+}
+
+/// Process remaining entries in current leaf in reverse, returning `P::Output` by value.
 ///
-/// # Inline Storage
-///
-/// For true-inline storage, `ValueArray::load()` directly reads the `AtomicU64`
-/// bits and reconstructs the value. No pointer indirection needed.
-///
-/// # Performance
-///
-/// Same batch optimization as `process_prev_leaf_batch_ptr`:
-/// - Single OCC validation per leaf
-/// - No per-entry function call overhead
-/// - Prefetching for pipelining
+/// Thin wrapper around [`process_prev_leaf_batch_keyed`] using [`CopySlotVisitor`].
 #[inline]
 #[expect(clippy::too_many_arguments)]
 pub fn process_prev_leaf_batch<P, F>(
@@ -1361,6 +1507,7 @@ pub fn process_prev_leaf_batch<P, F>(
     cursor_key: &mut CursorKey,
     layer_stack: &mut LayerStack<P>,
     start_bound: &RangeBound<'_>,
+    start_bound_ikey: Option<u64>,
     helper: &mut ReverseScanHelper,
     visitor: &mut F,
     count: &mut usize,
@@ -1369,113 +1516,16 @@ where
     P: LeafPolicy,
     F: FnMut(&[u8], P::Output) -> bool,
 {
-    // Cache leaf pointer to avoid borrow conflicts
-    let leaf_ptr: *const LeafNode15<P> = stack.get_leaf_ptr();
-    let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-    let perm = *stack.get_perm_ref();
-    let perm_size = perm.size();
-    let cached_version = stack.get_version();
-
-    // Check if leaf was deleted since we cached the version
-    if leaf.version().is_deleted() {
-        return LeafBatchResultBack::VersionChanged;
-    }
-
-    // Get current position (signed for reverse iteration)
-    let mut ki: isize = stack.get_ki();
-
-    // Process remaining entries in reverse order
-    while ki >= 0 && ki.cast_unsigned() < perm_size {
-        let slot = perm.get(ki.cast_unsigned());
-
-        // Read slot data with relaxed ordering (permutation provides synchronization)
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = leaf.keylenx(slot);
-
-        // Prefetch previous slot's value to hide memory latency
-        if ki > 0 {
-            let prev_slot: usize = perm.get((ki - 1).cast_unsigned());
-            leaf.prefetch_value(prev_slot);
-        }
-
-        // Check for layer pointer - must handle via state machine
-        // Most slots are values, not layer pointers
-        if unlikely(slot_keylenx >= LAYER_KEYLENX) {
-            // Set up for layer descent
-            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-            layer_stack.push(LayerContext::new(stack.get_root(), stack.get_leaf_ptr()));
-            cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(layer_ptr);
-            stack.set_root(layer_ptr.cast_const());
-            // Update ki for when we return from sublayer
-            stack.set_ki(ki - 1);
-            return LeafBatchResultBack::LayerEncountered;
-        }
-
-        // Check value slot
-        if unlikely(leaf.is_value_empty(slot)) {
-            ki -= 1;
-            continue;
-        }
-
-        // Build key
-        cursor_key.assign_store_ikey(slot_ikey);
-
-        let _key_len: usize = if slot_keylenx == KSUF_KEYLENX {
-            if let Some(suffix) = leaf.ksuf(slot) {
-                let suffix_len = suffix.len();
-                let _ = cursor_key.assign_store_suffix(suffix);
-                cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
-                IKEY_SIZE + suffix_len
-            } else {
-                cursor_key.assign_store_length(IKEY_SIZE);
-                IKEY_SIZE
-            }
-        } else {
-            let len = slot_keylenx as usize;
-            cursor_key.assign_store_length(len);
-            len
-        };
-
-        cursor_key.mark_key_complete();
-
-        // Clear upper_bound after first successful key emission
-        helper.mark_key_complete();
-
-        // Check start bound (for reverse iteration)
-        // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-        let key: &[u8] = unsafe { cursor_key.full_key_unchecked() };
-        if !start_bound.contains_reverse(key) {
-            return LeafBatchResultBack::StartBoundExceeded;
-        }
-
-        // Load value via typed API.
-        let Some(output) = leaf.load_value(slot) else {
-            // Concurrent modification removed value between is_value_empty check and load
-            ki -= 1;
-            continue;
-        };
-
-        *count += 1;
-        ki -= 1;
-
-        if !visitor(key, output) {
-            // Update stack position before returning
-            stack.set_ki(ki);
-            return LeafBatchResultBack::Stopped;
-        }
-    }
-
-    // Update stack with final position
-    stack.set_ki(ki);
-
-    // Validate version after processing batch (OCC)
-    // Version rarely changes mid-scan
-    if unlikely(leaf.version().has_changed(cached_version)) {
-        return LeafBatchResultBack::VersionChanged;
-    }
-
-    LeafBatchResultBack::LeafExhausted
+    process_prev_leaf_batch_keyed(
+        stack,
+        cursor_key,
+        layer_stack,
+        start_bound,
+        start_bound_ikey,
+        helper,
+        &mut CopySlotVisitor(visitor),
+        count,
+    )
 }
 
 /// Advance to previous leaf in the B-link chain (batch processing variant).

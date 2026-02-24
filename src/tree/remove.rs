@@ -319,7 +319,7 @@ where
         // CRITICAL: Set INSERTING_BIT before ANY mutations.
         //
         // This causes concurrent readers calling stable() to spin-wait until
-        // both LOCK_BIT and INSERTING_BIT are cleared. Without this, readers
+        // INSERTING_BIT is cleared (stable() waits on DIRTY_MASK). Without this, readers
         // could observe:
         // - Partially cleared suffix state
         // - Updated permutation with stale slot data
@@ -863,7 +863,12 @@ impl NodeCleaner {
         // SAFETY: leaf_ptr is valid from reach_leaf_concurrent_generic
         let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
-        // Step 1: Lock the leaf
+        // Step 1: Lock the leaf with pure spin (no yield).
+        // Remove's critical section is very short (permutation CAS + value clear),
+        // similar to batch inserts. Pure spin avoids yield syscall overhead.
+        // Unlike single inserts, removes don't exhibit the `same`-key convoy
+        // pattern -- deletions spread across leaves as the tree was built by inserts.
+        // See insert.rs which uses lock_bounded() for the opposite tradeoff.
         let lock: LockGuard<'_> = leaf.version().lock();
 
         // Step 2: Check if this leaf is part of a gc'd sublayer
@@ -1194,7 +1199,11 @@ impl NodeCleaner {
                 return LockedParentResult::NoParent;
             }
 
-            // Step 3: Lock the parent (must be an internode)
+            // Step 3: Lock the parent with pure spin (must be an internode).
+            // Parent internode locks are held only for pointer swing + version bump,
+            // the shortest critical section in the write path. Parent contention is
+            // rare since only concurrent removes/splits targeting siblings under the
+            // same parent compete here.
             // SAFETY: parent_ptr is non-null and points to an internode.
             let parent: &InternodeNode = unsafe { &*(parent_ptr.cast::<InternodeNode>()) };
             let parent_lock: LockGuard<'_> = parent.version().lock();

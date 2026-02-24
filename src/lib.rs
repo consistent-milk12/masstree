@@ -120,9 +120,11 @@ pub fn init_tracing() {
     // OnceLock::get_or_init ensures this runs exactly once
     GUARD.get_or_init(|| {
         // Configuration from environment
-        let log_dir = StdEnv::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
-        let console_enabled = false;
-        let filter_str = StdEnv::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
+        let log_dir: String =
+            StdEnv::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
+        let console_enabled: bool = false;
+        let filter_str: String =
+            StdEnv::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
 
         // Create log directory
         let _ = StdFs::create_dir_all(&log_dir);

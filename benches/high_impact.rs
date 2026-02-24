@@ -2758,7 +2758,7 @@ mod prefix_realistic_mixed {
         let _ = tree.insert_sync(key, value);
     }
 
-    fn xorshift64(state: &mut u64) -> u64 {
+    const fn xorshift64(state: &mut u64) -> u64 {
         *state ^= *state << 13;
         *state ^= *state >> 7;
         *state ^= *state << 17;

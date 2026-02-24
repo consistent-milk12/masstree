@@ -45,7 +45,7 @@ where
         F: FnMut(&[u8], &P::Value) -> bool,
     {
         use crate::tree::range::find_rev::{
-            LeafBatchResultBack, advance_prev_leaf_ptr, process_prev_leaf_batch_ptr,
+            advance_prev_leaf_ptr, process_prev_leaf_batch_ptr, LeafBatchResultBack,
         };
 
         if self.flags.back_exhausted() {
@@ -62,6 +62,9 @@ where
         }
 
         let mut count: usize = 0;
+
+        // Pre-extract start bound ikey for fast comparison in batch processor
+        let start_bound_ikey: Option<u64> = self.start_bound.extract_ikey();
 
         // Handle initial Emit state from initialize_back() if present
         if self.back_state == ScanStateBack::Emit {
@@ -122,7 +125,7 @@ where
                     let (new_state, _) = ReverseScan::reposition_back(
                         &mut self.back_stack,
                         &self.back_cursor_key,
-                        &self.back_helper,
+                        self.back_helper,
                         self.guard,
                     );
                     self.back_state = new_state;
@@ -161,6 +164,7 @@ where
                 &mut self.back_cursor_key,
                 &mut self.back_layer_stack,
                 &self.start_bound,
+                start_bound_ikey,
                 &mut self.back_helper,
                 &mut visitor,
                 &mut count,
@@ -239,7 +243,7 @@ where
         F: FnMut(&[u8], P::Output) -> bool,
     {
         use crate::tree::range::find_rev::{
-            LeafBatchResultBack, advance_prev_leaf_ptr, process_prev_leaf_batch,
+            advance_prev_leaf_ptr, process_prev_leaf_batch, LeafBatchResultBack,
         };
 
         if self.flags.back_exhausted() {
@@ -255,6 +259,9 @@ where
         }
 
         let mut count: usize = 0;
+
+        // Pre-extract start bound ikey for fast comparison in batch processor
+        let start_bound_ikey: Option<u64> = self.start_bound.extract_ikey();
 
         // Handle initial Emit state from initialize_back() if present
         if self.back_state == ScanStateBack::Emit {
@@ -312,7 +319,7 @@ where
                     let (new_state, _) = ReverseScan::reposition_back(
                         &mut self.back_stack,
                         &self.back_cursor_key,
-                        &self.back_helper,
+                        self.back_helper,
                         self.guard,
                     );
                     self.back_state = new_state;
@@ -354,6 +361,7 @@ where
                 &mut self.back_cursor_key,
                 &mut self.back_layer_stack,
                 &self.start_bound,
+                start_bound_ikey,
                 &mut self.back_helper,
                 &mut visitor,
                 &mut count,
@@ -435,7 +443,7 @@ where
         F: FnMut(P::Output) -> bool,
     {
         use crate::tree::range::find_rev::{
-            LeafBatchResultBack, advance_prev_leaf_ptr, process_prev_leaf_batch_values,
+            advance_prev_leaf_ptr, process_prev_leaf_batch_values, LeafBatchResultBack,
         };
 
         if self.flags.back_exhausted() {
@@ -505,7 +513,7 @@ where
                     let (new_state, _) = ReverseScan::reposition_back(
                         &mut self.back_stack,
                         &self.back_cursor_key,
-                        &self.back_helper,
+                        self.back_helper,
                         self.guard,
                     );
 

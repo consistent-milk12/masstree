@@ -19,11 +19,12 @@
 mod bench_utils;
 
 use bench_utils::{
-    keys, keys_shared_prefix_chunks, run_concurrent, uniform_indices, zipfian_indices,
+    keys, keys_shared_prefix_chunks, post_measurement_barrier, pre_measurement_barrier,
+    run_concurrent, uniform_indices, zipfian_indices,
 };
 use crossbeam_skiplist::SkipMap;
 use divan::counter::ItemsCount;
-use divan::{Bencher, black_box};
+use divan::{black_box, Bencher};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::MassTree15Inline;
 use scc::TreeIndex;
@@ -1816,115 +1817,360 @@ mod remove_heavy {
 }
 
 // =============================================================================
-// 11: LATENCY DISTRIBUTION - Single-threaded p50/p99/max
-// Percentiles are emitted to stderr since Divan only reports closure timing.
+// 11: LATENCY DISTRIBUTION — HDR Histogram + minstant
 // =============================================================================
+//
+// Uses `minstant` for low-overhead timestamps (~10ns vs ~27ns for Instant::now())
+// and `hdrhistogram` for O(1) recording into logarithmically-bucketed histograms.
+//
+// Methodology:
+// - 50K pre-populated keys, 10K measured ops per divan sample
+// - 1-in-10 sampling to avoid timing overhead dominating the measurement
+// - Histogram range [1ns, 10ms] at 2 significant figures (~20KB per histogram)
+// - Results emitted to stderr (divan only captures closure wall-clock time)
+//
+// Run:  cargo bench --bench concurrent_read_write --features mimalloc -- 11_latency
 
-#[divan::bench_group(name = "11_latency_single_thread", sample_count = 200)]
-mod latency_single {
+#[divan::bench_group(name = "11_latency_read", sample_count = 100)]
+mod latency_read {
     use super::*;
-    use std::time::Instant;
+    use hdrhistogram::Histogram;
+    use minstant::Instant;
 
     const N: usize = 50_000;
-    const OPS: usize = 5_000;
+    const OPS: usize = 10_000;
+    const SAMPLE_EVERY: usize = 10;
 
-    fn percentile(sorted: &[u64], p: f64) -> u64 {
-        let idx = ((sorted.len() as f64) * p / 100.0) as usize;
-        sorted[idx.min(sorted.len() - 1)]
+    /// Range: 1ns to 10ms (captures OS scheduling jitter).
+    /// 2 significant figures ≈ 20KB per histogram.
+    fn new_hist() -> Histogram<u32> {
+        Histogram::<u32>::new_with_bounds(1, 10_000_000, 2).expect("valid histogram params")
+    }
+
+    fn emit(label: &str, hist: &Histogram<u32>) {
+        eprintln!(
+            "  [{label}] n={} p50={}ns p99={}ns p99.9={}ns p99.99={}ns max={}ns",
+            hist.len(),
+            hist.value_at_quantile(0.50),
+            hist.value_at_quantile(0.99),
+            hist.value_at_quantile(0.999),
+            hist.value_at_quantile(0.9999),
+            hist.max(),
+        );
     }
 
     #[divan::bench]
-    fn masstree15_read_latency(bencher: Bencher) {
+    fn masstree15(bencher: Bencher) {
         let keys = keys::<KEY_SIZE>(N);
         let tree = setup_masstree15(&keys);
         let indices = uniform_indices(N, OPS, BASE_SEED);
 
         bencher.bench_local(|| {
             let guard = tree.guard();
-            let mut latencies = Vec::with_capacity(OPS);
-            (0..OPS).for_each(|i| {
-                let idx = indices[i];
-                let start = Instant::now();
+            let mut hist = new_hist();
+
+            // Warmup
+            for i in 0..WARMUP_OPS {
+                let idx = indices[i % OPS];
                 black_box(tree.get_with_guard(&keys[idx], &guard));
-                latencies.push(start.elapsed().as_nanos() as u64);
-            });
-            latencies.sort_unstable();
-            let p50 = percentile(&latencies, 50.0);
-            let p99 = percentile(&latencies, 99.0);
-            let max = latencies[latencies.len() - 1];
-            eprintln!("  [latency] masstree15: p50={p50}ns p99={p99}ns max={max}ns");
-            black_box((p50, p99, max))
+            }
+            pre_measurement_barrier();
+
+            let mut sum = 0u64;
+            for (i, &idx) in indices.iter().enumerate().take(OPS) {
+                if i % SAMPLE_EVERY == 0 {
+                    let start = Instant::now();
+                    if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                        sum = sum.wrapping_add(v);
+                    }
+                    let _ = hist.record(start.elapsed().as_nanos() as u64);
+                } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                    sum = sum.wrapping_add(v);
+                }
+            }
+
+            post_measurement_barrier();
+            emit("masstree15", &hist);
+            black_box(sum);
         });
     }
 
     #[divan::bench]
-    fn skipmap_read_latency(bencher: Bencher) {
+    fn skipmap(bencher: Bencher) {
         let keys = keys::<KEY_SIZE>(N);
         let map = setup_skipmap(&keys);
         let indices = uniform_indices(N, OPS, BASE_SEED);
 
         bencher.bench_local(|| {
-            let mut latencies = Vec::with_capacity(OPS);
-            (0..OPS).for_each(|i| {
-                let idx = indices[i];
-                let start = Instant::now();
+            let mut hist = new_hist();
+
+            for i in 0..WARMUP_OPS {
+                let idx = indices[i % OPS];
                 black_box(map.get(&keys[idx]));
-                latencies.push(start.elapsed().as_nanos() as u64);
-            });
-            latencies.sort_unstable();
-            let p50 = percentile(&latencies, 50.0);
-            let p99 = percentile(&latencies, 99.0);
-            let max = latencies[latencies.len() - 1];
-            eprintln!("  [latency] skipmap: p50={p50}ns p99={p99}ns max={max}ns");
-            black_box((p50, p99, max))
+            }
+            pre_measurement_barrier();
+
+            let mut sum = 0u64;
+            for (i, &idx) in indices.iter().enumerate().take(OPS) {
+                if i % SAMPLE_EVERY == 0 {
+                    let start = Instant::now();
+                    if let Some(e) = map.get(&keys[idx]) {
+                        sum = sum.wrapping_add(*e.value());
+                    }
+                    let _ = hist.record(start.elapsed().as_nanos() as u64);
+                } else if let Some(e) = map.get(&keys[idx]) {
+                    sum = sum.wrapping_add(*e.value());
+                }
+            }
+
+            post_measurement_barrier();
+            emit("skipmap", &hist);
+            black_box(sum);
         });
     }
 
     #[divan::bench]
-    fn indexset_read_latency(bencher: Bencher) {
+    fn indexset(bencher: Bencher) {
         let keys = keys::<KEY_SIZE>(N);
         let map = setup_indexset(&keys);
         let indices = uniform_indices(N, OPS, BASE_SEED);
 
         bencher.bench_local(|| {
-            let mut latencies = Vec::with_capacity(OPS);
-            (0..OPS).for_each(|i| {
-                let idx = indices[i];
-                let start = Instant::now();
+            let mut hist = new_hist();
+
+            for i in 0..WARMUP_OPS {
+                let idx = indices[i % OPS];
                 black_box(map.get(&keys[idx]));
-                latencies.push(start.elapsed().as_nanos() as u64);
-            });
-            latencies.sort_unstable();
-            let p50 = percentile(&latencies, 50.0);
-            let p99 = percentile(&latencies, 99.0);
-            let max = latencies[latencies.len() - 1];
-            eprintln!("  [latency] indexset: p50={p50}ns p99={p99}ns max={max}ns");
-            black_box((p50, p99, max))
+            }
+            pre_measurement_barrier();
+
+            let mut sum = 0u64;
+            for (i, &idx) in indices.iter().enumerate().take(OPS) {
+                if i % SAMPLE_EVERY == 0 {
+                    let start = Instant::now();
+                    if let Some(r) = map.get(&keys[idx]) {
+                        sum = sum.wrapping_add(r.get().value);
+                    }
+                    let _ = hist.record(start.elapsed().as_nanos() as u64);
+                } else if let Some(r) = map.get(&keys[idx]) {
+                    sum = sum.wrapping_add(r.get().value);
+                }
+            }
+
+            post_measurement_barrier();
+            emit("indexset", &hist);
+            black_box(sum);
         });
     }
 
     #[divan::bench]
-    fn tree_index_read_latency(bencher: Bencher) {
+    fn tree_index(bencher: Bencher) {
         let keys = keys::<KEY_SIZE>(N);
         let tree = setup_tree_index(&keys);
         let indices = uniform_indices(N, OPS, BASE_SEED);
 
         bencher.bench_local(|| {
             let guard = SddGuard::new();
-            let mut latencies = Vec::with_capacity(OPS);
-            (0..OPS).for_each(|i| {
-                let idx = indices[i];
-                let start = Instant::now();
+            let mut hist = new_hist();
+
+            for i in 0..WARMUP_OPS {
+                let idx = indices[i % OPS];
                 black_box(tree.peek(&keys[idx], &guard));
-                latencies.push(start.elapsed().as_nanos() as u64);
-            });
-            latencies.sort_unstable();
-            let p50 = percentile(&latencies, 50.0);
-            let p99 = percentile(&latencies, 99.0);
-            let max = latencies[latencies.len() - 1];
-            eprintln!("  [latency] tree_index: p50={p50}ns p99={p99}ns max={max}ns");
-            black_box((p50, p99, max))
+            }
+            pre_measurement_barrier();
+
+            let mut sum = 0u64;
+            for (i, &idx) in indices.iter().enumerate().take(OPS) {
+                if i % SAMPLE_EVERY == 0 {
+                    let start = Instant::now();
+                    if let Some(v) = tree.peek(&keys[idx], &guard) {
+                        sum = sum.wrapping_add(*v);
+                    }
+                    let _ = hist.record(start.elapsed().as_nanos() as u64);
+                } else if let Some(v) = tree.peek(&keys[idx], &guard) {
+                    sum = sum.wrapping_add(*v);
+                }
+            }
+
+            post_measurement_barrier();
+            emit("tree_index", &hist);
+            black_box(sum);
         });
+    }
+}
+
+// =============================================================================
+// 11b: LATENCY DISTRIBUTION — Multi-threaded (per-thread histograms, merged)
+// =============================================================================
+//
+// Measures read latency under contention. Each thread records into its own
+// histogram (zero synchronization during measurement), then histograms are
+// merged after threads join.
+//
+// Run:  cargo bench --bench concurrent_read_write --features mimalloc -- 11b_latency
+
+#[divan::bench_group(name = "11b_latency_read_concurrent", sample_count = 50)]
+mod latency_read_concurrent {
+    use super::*;
+    use hdrhistogram::Histogram;
+    use minstant::Instant;
+    use std::sync::Mutex;
+
+    const N: usize = 50_000;
+    const OPS_PER_THREAD: usize = 10_000;
+    const SAMPLE_EVERY: usize = 10;
+
+    fn new_hist() -> Histogram<u32> {
+        Histogram::<u32>::new_with_bounds(1, 10_000_000, 2).expect("valid histogram params")
+    }
+
+    fn emit(label: &str, hist: &Histogram<u32>) {
+        eprintln!(
+            "  [{label}] n={} p50={}ns p99={}ns p99.9={}ns p99.99={}ns max={}ns",
+            hist.len(),
+            hist.value_at_quantile(0.50),
+            hist.value_at_quantile(0.99),
+            hist.value_at_quantile(0.999),
+            hist.value_at_quantile(0.9999),
+            hist.max(),
+        );
+    }
+
+    #[divan::bench(args = [4, 8, 12])]
+    fn masstree15(bencher: Bencher, threads: usize) {
+        let keys = keys::<KEY_SIZE>(N);
+        let indices = uniform_indices(N, OPS_PER_THREAD * threads, BASE_SEED);
+
+        bencher
+            .with_inputs(|| setup_masstree15(&keys))
+            .bench_local_values(|tree| {
+                let combined = Mutex::new(new_hist());
+
+                run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
+                    let guard = tree.guard();
+                    let base = ctx.tid * OPS_PER_THREAD;
+                    let mut hist = new_hist();
+
+                    for i in 0..ctx.warmup_ops {
+                        let idx = indices[base + (i % OPS_PER_THREAD)];
+                        black_box(tree.get_with_guard(&keys[idx], &guard));
+                    }
+                    ctx.finish_warmup();
+                    ctx.begin_measurement();
+
+                    let mut sum = 0u64;
+                    for i in 0..OPS_PER_THREAD {
+                        let idx = indices[base + i];
+                        if i % SAMPLE_EVERY == 0 {
+                            let start = Instant::now();
+                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                                sum = sum.wrapping_add(v);
+                            }
+                            let _ = hist.record(start.elapsed().as_nanos() as u64);
+                        } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
+                            sum = sum.wrapping_add(v);
+                        }
+                    }
+
+                    ctx.end_measurement();
+                    black_box(sum);
+                    combined.lock().unwrap().add(&hist).unwrap();
+                });
+
+                let merged = combined.lock().unwrap();
+                emit(&format!("masstree15/{threads}T"), &merged);
+            });
+    }
+
+    #[divan::bench(args = [4, 8, 12])]
+    fn skipmap(bencher: Bencher, threads: usize) {
+        let keys = keys::<KEY_SIZE>(N);
+        let indices = uniform_indices(N, OPS_PER_THREAD * threads, BASE_SEED);
+
+        bencher
+            .with_inputs(|| setup_skipmap(&keys))
+            .bench_local_values(|map| {
+                let combined = Mutex::new(new_hist());
+
+                run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
+                    let base = ctx.tid * OPS_PER_THREAD;
+                    let mut hist = new_hist();
+
+                    for i in 0..ctx.warmup_ops {
+                        let idx = indices[base + (i % OPS_PER_THREAD)];
+                        black_box(map.get(&keys[idx]));
+                    }
+                    ctx.finish_warmup();
+                    ctx.begin_measurement();
+
+                    let mut sum = 0u64;
+                    for i in 0..OPS_PER_THREAD {
+                        let idx = indices[base + i];
+                        if i % SAMPLE_EVERY == 0 {
+                            let start = Instant::now();
+                            if let Some(e) = map.get(&keys[idx]) {
+                                sum = sum.wrapping_add(*e.value());
+                            }
+                            let _ = hist.record(start.elapsed().as_nanos() as u64);
+                        } else if let Some(e) = map.get(&keys[idx]) {
+                            sum = sum.wrapping_add(*e.value());
+                        }
+                    }
+
+                    ctx.end_measurement();
+                    black_box(sum);
+                    combined.lock().unwrap().add(&hist).unwrap();
+                });
+
+                let merged = combined.lock().unwrap();
+                emit(&format!("skipmap/{threads}T"), &merged);
+            });
+    }
+
+    #[divan::bench(args = [4, 8, 12])]
+    fn tree_index(bencher: Bencher, threads: usize) {
+        let keys = keys::<KEY_SIZE>(N);
+        let indices = uniform_indices(N, OPS_PER_THREAD * threads, BASE_SEED);
+
+        bencher
+            .with_inputs(|| setup_tree_index(&keys))
+            .bench_local_values(|tree| {
+                let combined = Mutex::new(new_hist());
+
+                run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
+                    let guard = SddGuard::new();
+                    let base = ctx.tid * OPS_PER_THREAD;
+                    let mut hist = new_hist();
+
+                    for i in 0..ctx.warmup_ops {
+                        let idx = indices[base + (i % OPS_PER_THREAD)];
+                        black_box(tree.peek(&keys[idx], &guard));
+                    }
+                    ctx.finish_warmup();
+                    ctx.begin_measurement();
+
+                    let mut sum = 0u64;
+                    for i in 0..OPS_PER_THREAD {
+                        let idx = indices[base + i];
+                        if i % SAMPLE_EVERY == 0 {
+                            let start = Instant::now();
+                            if let Some(v) = tree.peek(&keys[idx], &guard) {
+                                sum = sum.wrapping_add(*v);
+                            }
+                            let _ = hist.record(start.elapsed().as_nanos() as u64);
+                        } else if let Some(v) = tree.peek(&keys[idx], &guard) {
+                            sum = sum.wrapping_add(*v);
+                        }
+                    }
+
+                    ctx.end_measurement();
+                    black_box(sum);
+                    combined.lock().unwrap().add(&hist).unwrap();
+                });
+
+                let merged = combined.lock().unwrap();
+                emit(&format!("tree_index/{threads}T"), &merged);
+            });
     }
 }
 
