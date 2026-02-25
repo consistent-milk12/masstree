@@ -144,6 +144,10 @@ name = "high_impact"
 harness = false
 
 [[bench]]
+name = "high_impact_masstree"
+harness = false
+
+[[bench]]
 name = "mttest"
 harness = false
 

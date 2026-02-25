@@ -33,27 +33,27 @@ Copy types.
 
 ## vs Rust Concurrent Maps (12T SMT)
 
-> Source: `runs/run193_read_write.txt` (masstree), `runs/run184_read_write_reworked.txt` (competitors)
+> Source: `runs/run194_read_write.txt` (masstree), `runs/run184_read_write_reworked.txt` (competitors)
 > **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
 
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **40.85** | 14.49 | 10.80 | 14.94 | **2.74x** |
-| 02_zipfian | **36.64** | 18.86 | 12.92 | 3.28 | **1.94x** |
-| 03_shared_prefix | **26.97** | 14.61 | 11.08 | 14.36 | **1.85x** |
-| 04_high_contention | **66.13** | 21.64 | 16.90 | 1.97 | **3.06x** |
-| 05_large_dataset | **15.93** | 11.35 | 7.50 | 9.17 | **1.40x** |
-| 06_single_hot_key | **15.21** | 6.82 | 7.46 | 2.52 | **2.04x** |
-| 07_mixed_50_50 | **32.76** | 8.73 | 6.46 | 14.86 | **2.20x** |
-| 08_8byte_keys | **52.67** | 24.97 | 14.06 | 19.69 | **2.11x** |
-| 09_pure_read | **53.36** | 24.12 | 14.40 | 17.40 | **2.21x** |
-| 10_remove_heavy | **21.58** | 11.18 | 7.18 | 4.26 | **1.93x** |
-| 13_insert_only_fair | **34.03** | 24.29 | 15.13 | 6.30 | **1.40x** |
-| 14_pure_insert | **13.06** | 11.96 | 9.86 | 2.30 | **1.09x** |
+| 01_uniform | **48.14** | 14.49 | 10.80 | 14.94 | **3.22x** |
+| 02_zipfian | **41.79** | 18.86 | 12.92 | 3.28 | **2.22x** |
+| 03_shared_prefix | **29.48** | 14.61 | 11.08 | 14.36 | **2.02x** |
+| 04_high_contention | **62.40** | 21.64 | 16.90 | 1.97 | **2.88x** |
+| 05_large_dataset | **17.00** | 11.35 | 7.50 | 9.17 | **1.50x** |
+| 06_single_hot_key | **15.42** | 6.82 | 7.46 | 2.52 | **2.07x** |
+| 07_mixed_50_50 | **33.89** | 8.73 | 6.46 | 14.86 | **2.28x** |
+| 08_8byte_keys | **52.92** | 24.97 | 14.06 | 19.69 | **2.12x** |
+| 09_pure_read | **50.77** | 24.12 | 14.40 | 17.40 | **2.11x** |
+| 10_remove_heavy | **20.90** | 11.18 | 7.18 | 4.26 | **1.87x** |
+| 13_insert_only_fair | **35.46** | 24.29 | 15.13 | 6.30 | **1.46x** |
+| 14_pure_insert | **14.08** | 11.96 | 9.86 | 2.30 | **1.18x** |
 
 ## High-Impact Workloads (12T SMT)
 
-> Source: `runs/run188_high_impact.txt`
+> Source: `runs/run195_high_impact.txt` (masstree), `runs/run188_high_impact.txt` (competitors)
 > **Config:** 12 threads on 6 physical cores (SMT), 200 samples
 
 Benchmarks targeting Masstree's architectural advantages: long keys, variable-length keys,
@@ -61,15 +61,15 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 | Benchmark | masstree15 | indexset | tree_index | skipmap | MT vs Best |
 |-----------|------------|----------|------------|---------|------------|
-| 01_long_keys_128b | **34.28** | 14.60 | 12.83 | 10.84 | **2.35x** |
-| 02_multiple_hot_keys | **39.25** | 13.99 | 13.31 | 13.36 | **2.81x** |
-| 03_mixed_get_insert_remove | **21.99** | 5.923 | 10.02 | 8.488 | **2.20x** |
-| 04_variable_long_keys | **25.04** | 9.427 | 8.393 | 7.651 | **2.66x** |
-| 05_prefix_queries (Kitem/s) | **846.9** | n/a | 495.9 | 144.9 | **1.71x** |
-| 06_deep_trie_traversal | **17.66** | 13.49 | 8.102 | 9.308 | **1.31x** |
-| 07_deep_trie_read_only | **27.55** | 14.81 | 14.54 | 13.37 | **1.86x** |
-| 08_variable_keys_arc | **26.26** | 11.67 | 10.45 | 8.875 | **2.25x** |
-| 09_prefix_realistic_mixed | **4.986** | n/a | 2.968 | 1.045 | **1.68x** |
+| 01_long_keys_128b | **39.21** | 14.60 | 12.83 | 10.84 | **2.69x** |
+| 02_multiple_hot_keys | **40.31** | 13.99 | 13.31 | 13.36 | **2.88x** |
+| 03_mixed_get_insert_remove | **27.12** | 5.923 | 10.02 | 8.488 | **2.71x** |
+| 04_variable_long_keys | **27.54** | 9.427 | 8.393 | 7.651 | **2.92x** |
+| 05_prefix_queries (Kitem/s) | **1040** | n/a | 495.9 | 144.9 | **2.10x** |
+| 06_deep_trie_traversal | **25.53** | 13.49 | 8.102 | 9.308 | **1.89x** |
+| 07_deep_trie_read_only | **30.99** | 14.81 | 14.54 | 13.37 | **2.09x** |
+| 08_variable_keys_arc | **27.74** | 11.67 | 10.45 | 8.875 | **2.38x** |
+| 09_prefix_realistic_mixed | **4.862** | n/a | 2.968 | 1.045 | **1.64x** |
 
 ## Range Scans (6T Physical)
 
