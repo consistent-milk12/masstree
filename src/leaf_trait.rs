@@ -437,6 +437,10 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     fn set_parent(&self, parent: *mut u8);
 
     /// Unlink this leaf from the doubly-linked chain.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the lock and ensure neighbors are valid.
     unsafe fn unlink_from_chain(&self);
 
     /// Get the raw next pointer including mark bit (unguarded).

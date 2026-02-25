@@ -3,7 +3,7 @@
 //! Tests cover:
 //! - `handle_down_back` logic: Sublayer descent cursor setup
 //! - `handle_up_back` logic: Layer ascent with cursor unshift
-//! - `ReverseFlags` upper_bound state transitions
+//! - `ReverseFlags` `upper_bound` state transitions
 //! - `CursorKey` reverse operations
 
 use crate::tree::range::cursor_key::CursorKey;

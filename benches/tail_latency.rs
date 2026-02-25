@@ -8,6 +8,7 @@
 
 #![expect(clippy::pedantic)]
 #![expect(clippy::indexing_slicing)]
+#![expect(clippy::type_complexity)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -43,11 +44,11 @@ fn gen_keys(n: usize) -> Vec<[u8; KEY_SIZE]> {
     for i in 0..n {
         let mut key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
 
-        for c in 0..4 {
+        (0..4).for_each(|c| {
             let v: u64 = (i as u64).wrapping_mul(MULTIPLIERS[c]);
             let start: usize = c * 8;
             key[start..start + 8].copy_from_slice(&v.to_be_bytes());
-        }
+        });
 
         out.push(key);
     }
@@ -409,7 +410,7 @@ fn mixed_90_10_8t_masstree(b: &Bencher<'_>) {
         let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
         let idx: usize = indices[i % indices.len()];
 
-        if i % 10 == 0 {
+        if i.is_multiple_of(10) {
             let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
         } else {
             std::hint::black_box(tree.get_with_guard(&keys[idx], &guard));
@@ -428,7 +429,7 @@ fn mixed_90_10_8t_skipmap(b: &Bencher<'_>) {
         let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
         let idx: usize = indices[i % indices.len()];
 
-        if i % 10 == 0 {
+        if i.is_multiple_of(10) {
             map.insert(keys[idx], i as u64);
         } else {
             std::hint::black_box(map.get(&keys[idx]));
@@ -447,7 +448,7 @@ fn mixed_90_10_8t_indexset(b: &Bencher<'_>) {
         let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
         let idx: usize = indices[i % indices.len()];
 
-        if i % 10 == 0 {
+        if i.is_multiple_of(10) {
             map.insert(keys[idx], i as u64);
         } else {
             std::hint::black_box(map.get(&keys[idx]));
@@ -467,7 +468,7 @@ fn mixed_90_10_8t_treeindex(b: &Bencher<'_>) {
         let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
         let idx: usize = indices[i % indices.len()];
 
-        if i % 10 == 0 {
+        if i.is_multiple_of(10) {
             tree_index_upsert_sync(&tree, keys[idx], i as u64);
         } else {
             std::hint::black_box(tree.peek(&keys[idx], &guard));
@@ -494,7 +495,7 @@ fn mixed_50_50_8t_masstree(b: &Bencher<'_>) {
         let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
         let idx: usize = indices[i % indices.len()];
 
-        if i % 2 == 0 {
+        if i.is_multiple_of(2) {
             let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
         } else {
             std::hint::black_box(tree.get_with_guard(&keys[idx], &guard));
@@ -513,7 +514,7 @@ fn mixed_50_50_8t_skipmap(b: &Bencher<'_>) {
         let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
         let idx: usize = indices[i % indices.len()];
 
-        if i % 2 == 0 {
+        if i.is_multiple_of(2) {
             map.insert(keys[idx], i as u64);
         } else {
             std::hint::black_box(map.get(&keys[idx]));
@@ -532,7 +533,7 @@ fn mixed_50_50_8t_indexset(b: &Bencher<'_>) {
         let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
         let idx: usize = indices[i % indices.len()];
 
-        if i % 2 == 0 {
+        if i.is_multiple_of(2) {
             map.insert(keys[idx], i as u64);
         } else {
             std::hint::black_box(map.get(&keys[idx]));
@@ -552,7 +553,7 @@ fn mixed_50_50_8t_treeindex(b: &Bencher<'_>) {
         let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
         let idx: usize = indices[i % indices.len()];
 
-        if i % 2 == 0 {
+        if i.is_multiple_of(2) {
             tree_index_upsert_sync(&tree, keys[idx], i as u64);
         } else {
             std::hint::black_box(tree.peek(&keys[idx], &guard));
@@ -745,9 +746,11 @@ fn scan_50_8t_masstree(b: &Bencher<'_>) {
 fn scan_50_8t_skipmap(b: &Bencher<'_>) {
     let n: usize = 100_000;
     let (map, keys) = setup_skipmap(n);
+
     // Sort keys for ordered access pattern matching skipmap's ordering
-    let mut sorted_keys: Vec<[u8; KEY_SIZE]> = keys.clone();
+    let mut sorted_keys: Vec<[u8; KEY_SIZE]> = keys;
     sorted_keys.sort_unstable();
+
     let start_indices: Vec<usize> = random_indices(n - 50, 200_000, 77);
     let cursor: AtomicUsize = AtomicUsize::new(0);
 
@@ -771,8 +774,10 @@ fn scan_50_8t_skipmap(b: &Bencher<'_>) {
 fn scan_50_8t_treeindex(b: &Bencher<'_>) {
     let n: usize = 100_000;
     let (tree, keys) = setup_tree_index(n);
-    let mut sorted_keys: Vec<[u8; KEY_SIZE]> = keys.clone();
+
+    let mut sorted_keys: Vec<[u8; KEY_SIZE]> = keys;
     sorted_keys.sort_unstable();
+
     let start_indices: Vec<usize> = random_indices(n - 50, 200_000, 77);
     let cursor: AtomicUsize = AtomicUsize::new(0);
 
