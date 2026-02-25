@@ -1,5 +1,3 @@
-//! Filepath: src/tree/range/api.rs
-//!
 //! Public API methods for range scans on [`crate::MassTreeGeneric`].
 
 use seize::LocalGuard;
@@ -30,20 +28,8 @@ where
     //  Iterator API
     // ========================================================================
 
-    /// Create an iterator over a key range.
-    ///
-    /// Returns an iterator that yields [`ScanEntry`] items containing
-    /// owned keys and cloned values in lexicographic order.
-    ///
-    /// # Arguments
-    ///
-    /// - `start`: Start bound of the range
-    /// - `end`: End bound of the range
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// A [`RangeIter`] that yields entries in the specified range.
+    /// Create an iterator over a key range, yielding [`ScanEntry`] items
+    /// with owned keys and cloned values in lexicographic order.
     ///
     /// # Example
     ///
@@ -68,11 +54,7 @@ where
         RangeIter::new(self, start, end, guard)
     }
 
-    /// Create a forward-only range iterator (skips backward state initialization).
-    ///
-    /// Used internally by forward-only scan methods (`scan`, `scan_prefix`,
-    /// `scan_intra_leaf_batch`, `scan_values`) to avoid initializing ~300 bytes
-    /// of backward iteration state that will never be accessed.
+    /// Forward-only range iterator (skips ~300 bytes of backward state init).
     pub(crate) fn range_forward<'a, 'g>(
         &'a self,
         start: RangeBound<'a>,
@@ -83,7 +65,7 @@ where
         RangeIter::new_forward_only(self, start, end, guard)
     }
 
-    /// Create a forward-only iterator rooted at a specific sublayer.
+    /// Forward-only iterator rooted at a specific sublayer.
     pub(crate) fn range_forward_from_root<'a, 'g>(
         &'a self,
         layer_root: *const u8,
@@ -96,42 +78,17 @@ where
         RangeIter::new_forward_only_from_root(layer_root, cursor_key, start, end, guard)
     }
 
-    /// Create an iterator over all entries.
-    ///
-    /// Equivalent to `range(RangeBound::Unbounded, RangeBound::Unbounded, guard)`.
-    ///
-    /// # Arguments
-    ///
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// A [`RangeIter`] that yields all entries in the tree.
-    ///
-    /// # Example
+    /// Iterate over all entries. Equivalent to unbounded `range()`.
     ///
     /// ```ignore
     /// let guard = tree.guard();
     /// let count = tree.iter(&guard).count();
-    /// println!("Tree has {} entries", count);
     ///
     pub fn iter<'a, 'g>(&'a self, guard: &'g LocalGuard<'a>) -> RangeIter<'a, 'g, P, A> {
         self.range(RangeBound::Unbounded, RangeBound::Unbounded, guard)
     }
 
-    /// Create an iterator over all keys.
-    ///
-    /// Returns an iterator that yields owned key `Vec<u8>` values.
-    ///
-    /// # Arguments
-    ///
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// A [`KeysIter`] that yields all keys in the tree.
-    ///
-    /// # Example
+    /// Iterate over all keys, yielding owned `Vec<u8>` values.
     ///
     /// ```ignore
     /// let guard = tree.guard();
@@ -141,19 +98,7 @@ where
         self.iter(guard).keys()
     }
 
-    /// Create an iterator over all values.
-    ///
-    /// Returns an iterator that yields cloned values.
-    ///
-    /// # Arguments
-    ///
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// A [`ValuesIter`] that yields all values in the tree.
-    ///
-    /// # Example
+    /// Iterate over all values, yielding cloned values.
     ///
     /// ```ignore
     /// let guard = tree.guard();
@@ -167,24 +112,10 @@ where
     //  First / Last Access
     // ========================================================================
 
-    /// Get the first (smallest) key-value pair in the tree.
-    ///
-    /// Creates a guard internally. Returns an owned clone of the value.
+    /// Get the first (smallest) key-value pair. Creates a guard internally.
     /// For repeated access, prefer [`first_with_guard`](Self::first_with_guard).
     ///
-    /// # Returns
-    ///
-    /// * `Some(ScanEntry)` - The entry with the lexicographically smallest key
-    /// * `None` - If the tree is empty
-    ///
-    /// # Example
-    ///
     /// ```ignore
-    /// let tree = MassTree15::<u64>::new();
-    /// tree.insert(b"banana", 2);
-    /// tree.insert(b"apple", 1);
-    /// tree.insert(b"cherry", 3);
-    ///
     /// let first = tree.first().unwrap();
     /// assert_eq!(first.key(), b"apple");
     /// ```
@@ -206,24 +137,10 @@ where
         self.iter(guard).next()
     }
 
-    /// Get the last (largest) key-value pair in the tree.
-    ///
-    /// Creates a guard internally. Returns an owned clone of the value.
+    /// Get the last (largest) key-value pair. Creates a guard internally.
     /// For repeated access, prefer [`last_with_guard`](Self::last_with_guard).
     ///
-    /// # Returns
-    ///
-    /// * `Some(ScanEntry)` - The entry with the lexicographically largest key
-    /// * `None` - If the tree is empty
-    ///
-    /// # Example
-    ///
     /// ```ignore
-    /// let tree = MassTree15::<u64>::new();
-    /// tree.insert(b"banana", 2);
-    /// tree.insert(b"apple", 1);
-    /// tree.insert(b"cherry", 3);
-    ///
     /// let last = tree.last().unwrap();
     /// assert_eq!(last.key(), b"cherry");
     /// ```
@@ -249,39 +166,17 @@ where
     //  Visitor API
     // ========================================================================
 
-    /// Scan a range with a visitor callback.
+    /// Scan a range with a visitor callback. Return `false` to stop early.
     ///
-    /// The visitor receives borrowed key bytes and cloned value output.
-    /// Return `false` from the visitor to stop scanning early.
-    ///
-    /// This is more efficient than the iterator API when you don't need
-    /// to own the keys, as it avoids allocating `Vec<u8>` for each key.
-    ///
-    /// # Arguments
-    ///
-    /// - `start`: Start bound of the range
-    /// - `end`: End bound of the range
-    /// - `visitor`: Callback function `fn(&[u8], P::Output) -> bool`
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited (including the last one if stopped early).
-    ///
-    /// # Example
+    /// More efficient than the iterator API when you don't need to own keys
+    /// (avoids `Vec<u8>` allocation per entry). Returns entries visited count.
     ///
     /// ```ignore
     /// let guard = tree.guard();
-    /// let mut count = 0;
-    ///
     /// tree.scan(
     ///     RangeBound::Unbounded,
     ///     RangeBound::Unbounded,
-    ///     |key, value| {
-    ///         count += 1;
-    ///         println!("Key {:?} -> {:?}", key, value);
-    ///         count < 100 // Stop after 100 entries
-    ///     },
+    ///     |key, value| { println!("{:?} -> {:?}", key, value); true },
     ///     &guard
     /// );
     ///
@@ -298,54 +193,21 @@ where
         self.range_forward(start, end, guard).for_each(visitor)
     }
 
-    /// Highest-performance batch-optimized range scan.
+    /// Batch-optimized forward range scan — fastest for all storage types.
     ///
-    /// This is the fastest scan method for all storage types including inline.
-    /// Unlike [`scan`](Self::scan), this method processes entries in batches
-    /// within each leaf node, reducing per-entry overhead.
+    /// Processes all entries per leaf with single OCC validation, reducing
+    /// per-entry overhead vs [`scan`](Self::scan). Falls back to state machine
+    /// for sublayer transitions.
     ///
-    /// # Performance Characteristics
-    ///
-    /// - Processes all entries in a leaf before moving to next leaf
-    /// - Single OCC validation per leaf (vs per-entry in `scan`)
-    /// - No function call overhead per entry within a leaf
-    /// - Falls back to state machine for layer transitions (sublayers)
-    ///
-    /// # Availability
-    ///
-    /// Available for ALL storage types including:
-    /// - `MassTree15<V>` (Arc-based)
-    /// - `MassTree15Inline<V>` (true-inline)
-    ///
-    /// For pointer-backed storage that can return references, consider
-    /// [`scan_intra_leaf_batch_ref`](Self::scan_intra_leaf_batch_ref) in `api_ref.rs`
-    /// which avoids cloning values.
-    ///
-    /// # Arguments
-    ///
-    /// - `start`: Start bound of the range
-    /// - `end`: End bound of the range
-    /// - `visitor`: Callback function `fn(&[u8], P::Output) -> bool`
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    ///
-    /// # Example
+    /// For pointer-backed storage that can return references, see
+    /// [`scan_intra_leaf_batch_ref`](Self::scan_intra_leaf_batch_ref).
     ///
     /// ```ignore
     /// let guard = tree.guard();
     /// let mut sum = 0u64;
-    ///
-    /// // Fastest scan for large ranges
     /// tree.scan_intra_leaf_batch(
-    ///     RangeBound::Unbounded,
-    ///     RangeBound::Unbounded,
-    ///     |_key, value| {
-    ///         sum += value;
-    ///         true
-    ///     },
+    ///     RangeBound::Unbounded, RangeBound::Unbounded,
+    ///     |_key, value| { sum += value; true },
     ///     &guard
     /// );
     /// ```
@@ -363,50 +225,15 @@ where
             .for_each_intra_leaf_batch(visitor)
     }
 
-    /// Highest-performance batch-optimized reverse range scan.
-    ///
-    /// This is the fastest reverse scan method for all storage types including inline.
-    /// Unlike [`scan_intra_leaf_batch`](Self::scan_intra_leaf_batch), this iterates
-    /// in descending key order.
-    ///
-    /// # Performance Characteristics
-    ///
-    /// - Processes all entries in a leaf before moving to previous leaf
-    /// - Single OCC validation per leaf
-    /// - No function call overhead per entry within a leaf
-    /// - Falls back to state machine for layer transitions
-    ///
-    /// # Availability
-    ///
-    /// Available for ALL storage types including:
-    /// - `MassTree15<V>` (Arc-based)
-    /// - `MassTree15Inline<V>` (true-inline)
-    ///
-    /// # Arguments
-    ///
-    /// - `start`: Start bound (lower bound - stopping point for reverse)
-    /// - `end`: End bound (upper bound - starting point for reverse)
-    /// - `visitor`: Callback function `fn(&[u8], P::Output) -> bool`
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    ///
-    /// # Example
+    /// Batch-optimized reverse range scan. Same perf characteristics as
+    /// [`scan_intra_leaf_batch`](Self::scan_intra_leaf_batch) but descending order.
     ///
     /// ```ignore
     /// let guard = tree.guard();
     /// let mut sum = 0u64;
-    ///
-    /// // Fastest reverse scan for large ranges
     /// tree.scan_rev_batch(
-    ///     RangeBound::Unbounded,
-    ///     RangeBound::Unbounded,
-    ///     |_key, value| {
-    ///         sum += value;
-    ///         true
-    ///     },
+    ///     RangeBound::Unbounded, RangeBound::Unbounded,
+    ///     |_key, value| { sum += value; true },
     ///     &guard
     /// );
     /// ```
@@ -424,60 +251,22 @@ where
             .rev_for_each_intra_leaf_batch(visitor)
     }
 
-    /// Highest-performance value-only scan (no key materialization).
+    /// Value-only scan — fastest when you don't need keys.
     ///
-    /// This is the fastest scan method when you only need values. Keys are not
-    /// built or copied, saving up to 56 bytes of copying per entry for long keys.
-    ///
-    /// # Performance
-    ///
-    /// For 64-byte keys: ~1.5-2x faster than `scan_intra_leaf_batch` when
-    /// the visitor would ignore the key parameter anyway.
+    /// Skips key materialization (~1.5-2x faster than `scan_intra_leaf_batch`
+    /// for 64-byte keys). Ideal for aggregations (sum, count, min, max).
     ///
     /// # End Bound Behavior
     ///
-    /// - `Unbounded`: Exact (scans all entries)
-    /// - `Included`/`Excluded`: **Approximate** for keys with suffix
-    ///
-    /// For bounded scans, the end check uses ikey comparison only. This means:
-    /// - Keys where `ikey < bound_ikey`: correctly included
-    /// - Keys where `ikey > bound_ikey`: correctly excluded
-    /// - Keys where `ikey == bound_ikey`: **may over-include** entries
-    ///
-    /// If you need exact end bounds with long keys, use `scan_intra_leaf_batch`.
-    ///
-    /// # When to Use
-    ///
-    /// - Aggregations (sum, count, min, max)
-    /// - Existence checks
-    /// - Any scan where you process values but don't need keys
-    ///
-    /// # When NOT to Use
-    ///
-    /// - When you need the key for each entry
-    /// - When exact end bound semantics matter for long keys
-    ///
-    /// # Arguments
-    ///
-    /// - `start`: Start bound of the range
-    /// - `end`: End bound of the range
-    /// - `visitor`: Callback function `fn(P::Output) -> bool`
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    ///
-    /// # Example
+    /// Bounded end checks use ikey comparison only. For keys sharing the same
+    /// ikey as the bound, entries **may be over-included**. Use
+    /// `scan_intra_leaf_batch` when exact bounds matter for long keys.
     ///
     /// ```ignore
     /// let guard = tree.guard();
     /// let mut sum = 0u64;
-    ///
-    /// // Fastest: unbounded value scan
     /// tree.scan_values(
-    ///     RangeBound::Unbounded,
-    ///     RangeBound::Unbounded,
+    ///     RangeBound::Unbounded, RangeBound::Unbounded,
     ///     |value| { sum += value; true },
     ///     &guard
     /// );
@@ -496,33 +285,11 @@ where
             .for_each_values_batch(visitor)
     }
 
-    /// Highest-performance reverse value-only scan (no key materialization).
+    /// Reverse value-only scan. Same as [`scan_values`](Self::scan_values) in
+    /// descending order.
     ///
-    /// This is the fastest reverse scan method when you only need values.
-    /// Same as [`scan_values`](Self::scan_values) but iterates in descending order.
-    ///
-    /// # Performance
-    ///
-    /// For 64-byte keys: ~1.5-2x faster than `scan_rev_batch` when
-    /// the visitor would ignore the key parameter anyway.
-    ///
-    /// # Start Bound Behavior (Reverse Iteration)
-    ///
-    /// - `Unbounded`: Exact (scans all entries)
-    /// - `Included`/`Excluded`: **Approximate** for keys with suffix
-    ///
-    /// If you need exact start bounds with long keys, use `scan_rev_batch`.
-    ///
-    /// # Arguments
-    ///
-    /// - `start`: Start bound (lower bound - stopping point for reverse)
-    /// - `end`: End bound (upper bound - starting point for reverse)
-    /// - `visitor`: Callback function `fn(P::Output) -> bool`
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
+    /// Start bound uses ikey comparison only — **approximate** for suffixed keys.
+    /// Use `scan_rev_batch` when exact start bounds matter for long keys.
     pub fn scan_values_rev<F>(
         &self,
         start: RangeBound<'_>,
@@ -537,33 +304,19 @@ where
             .rev_for_each_values_batch(visitor)
     }
 
-    /// Scan all entries with a prefix.
-    ///
-    /// Convenience method for scanning all keys that start with a given prefix.
-    ///
-    /// # Arguments
-    ///
-    /// - `prefix`: The key prefix to match
-    /// - `visitor`: Callback function `fn(&[u8], P::Output) -> bool`
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
-    ///
-    /// # Example
+    /// Scan all entries matching a prefix.
     ///
     /// ```ignore
     /// let guard = tree.guard();
-    ///
     /// tree.scan_prefix(b"user:", |key, value| {
     ///     println!("User key: {:?}", key);
-    ///     true // Continue
+    ///     true
     /// }, &guard);
     ///```
     ///
     /// # Panics
-    /// Invariant check.
+    ///
+    /// Panics if `prefix.len()` exceeds `MAX_KEY_LENGTH`.
     pub fn scan_prefix<F>(&self, prefix: &[u8], mut visitor: F, guard: &LocalGuard<'_>) -> usize
     where
         F: FnMut(&[u8], P::Output) -> bool,
@@ -582,28 +335,15 @@ where
 
     /// Value-only prefix scan (no key materialization).
     ///
-    /// Like [`scan_prefix`](Self::scan_prefix) but skips building key bytes,
-    /// saving up to 56 bytes of copying per entry for long keys.
+    /// Like [`scan_prefix`](Self::scan_prefix) but skips building key bytes.
     ///
-    /// # End Bound Accuracy
-    ///
-    /// - For ikey-aligned prefixes (multiples of 8 bytes): **exact**
-    /// - For non-aligned prefixes: **approximate** (may over-include entries
-    ///   sharing the same ikey as the boundary)
-    ///
-    /// # Arguments
-    ///
-    /// - `prefix`: The key prefix to match
-    /// - `visitor`: Callback function `fn(P::Output) -> bool`
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// Number of entries visited.
+    /// End bound is **exact** for ikey-aligned prefixes (multiples of 8 bytes),
+    /// **approximate** for non-aligned (may over-include entries sharing the
+    /// boundary ikey).
     ///
     /// # Panics
     ///
-    /// Panics if `prefix.len()` exceeds `MAX_KEY_LENGTH` (256 bytes).
+    /// Panics if `prefix.len()` exceeds `MAX_KEY_LENGTH`.
     pub fn scan_prefix_values<F>(
         &self,
         prefix: &[u8],
@@ -629,13 +369,10 @@ where
     //  Shared Prefix Scan Logic
     // ========================================================================
 
-    /// Shared implementation for `scan_prefix` and `scan_prefix_values`.
+    /// Shared impl for `scan_prefix` and `scan_prefix_values`.
     ///
-    /// Performs prefix validation, upper-bound computation, and trie-aware
-    /// fast-path descent. Delegates visitor-specific logic to `scan_fn`:
-    /// - First argument: `Some(value)` if the exact prefix key exists at a
-    ///   chunk boundary, `None` otherwise.
-    /// - Second argument: a forward-only `RangeIter` positioned for the scan.
+    /// Validates prefix, computes upper bound, attempts trie-aware fast-path
+    /// descent, then delegates to `scan_fn(exact_value_at_boundary, iter)`.
     #[inline]
     fn scan_prefix_inner(
         &self,
@@ -650,8 +387,7 @@ where
             MAX_KEY_LENGTH
         );
 
-        // Compute exclusive upper bound on the stack (no heap allocation).
-        // Increments the rightmost non-0xFF byte: "abc" -> "abd", "ab\xff" -> "ac".
+        // Exclusive upper bound on stack: "abc" -> "abd", "ab\xff" -> "ac".
         let mut upper_buf = [0u8; MAX_KEY_LENGTH];
         let upper_len = compute_prefix_upper_bound_into(prefix, &mut upper_buf);
 
@@ -659,8 +395,7 @@ where
             RangeBound::Excluded(&upper_buf[..len])
         });
 
-        // Trie-aware fast path: descend through exact 8-byte chunks when
-        // matching layer pointers exist, then scan from that sublayer root.
+        // Trie fast path: descend through exact 8-byte chunks via layer pointers.
         if let Some((layer_root, descended_chunks)) = self.descend_prefix_layers(prefix, guard)
             && descended_chunks > 0
         {
@@ -706,40 +441,16 @@ where
     // ========================================================================
 
     /// Collect all entries into a Vec.
-    ///
-    /// # Arguments
-    ///
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// A vector of all entries in the tree.
     pub fn collect_entries(&self, guard: &LocalGuard<'_>) -> Vec<ScanEntry<P::Output>> {
         self.iter(guard).collect()
     }
 
     /// Collect all keys into a Vec.
-    ///
-    /// # Arguments
-    ///
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// A vector of all keys in the tree.
     pub fn collect_keys(&self, guard: &LocalGuard<'_>) -> Vec<Vec<u8>> {
         self.keys(guard).collect()
     }
 
     /// Collect all values into a Vec.
-    ///
-    /// # Arguments
-    ///
-    /// - `guard`: Memory reclamation guard
-    ///
-    /// # Returns
-    ///
-    /// A vector of all values in the tree.
     pub fn collect_values(&self, guard: &LocalGuard<'_>) -> Vec<P::Output> {
         self.values(guard).collect()
     }
@@ -750,9 +461,8 @@ where
     P: LeafPolicy,
     A: TreeAllocator<P>,
 {
-    /// Descend through as many full 8-byte prefix chunks as possible.
-    ///
-    /// Returns the sublayer root and number of consumed 8-byte chunks.
+    /// Descend through full 8-byte prefix chunks via layer pointers.
+    /// Returns `(sublayer_root, chunks_descended)`.
     fn descend_prefix_layers(
         &self,
         prefix: &[u8],
@@ -787,7 +497,7 @@ where
 //  Helper Functions
 // ============================================================================
 
-/// Find child sublayer root for an exact ikey layer-pointer entry in `root`.
+/// Find the sublayer root for an exact ikey match in the leaf reached from `root`.
 fn find_layer_child_root<P>(
     root: *const u8,
     chunk_ikey: u64,
@@ -864,13 +574,10 @@ fn read_full_chunk_ikey(prefix: &[u8], chunk_idx: usize) -> u64 {
     u64::from_be_bytes(bytes)
 }
 
-/// Compute the exclusive upper bound for a prefix scan into a caller-provided buffer.
+/// Compute exclusive upper bound for prefix scan into `buf`.
 ///
-/// Copies the prefix into `buf`, then increments the rightmost non-0xFF byte.
-/// Returns `Some(len)` with the length of the upper bound, or `None` if the prefix
-/// is empty or all 0xFF bytes (unbounded).
-///
-/// This avoids heap allocation by writing directly into a stack buffer.
+/// Increments the rightmost non-0xFF byte: "abc" -> "abd", "ab\xff" -> "ac".
+/// Returns `Some(len)` or `None` if empty/all-0xFF (unbounded).
 #[expect(clippy::indexing_slicing, reason = "Checked")]
 fn compute_prefix_upper_bound_into(prefix: &[u8], buf: &mut [u8; MAX_KEY_LENGTH]) -> Option<usize> {
     assert!(
@@ -881,12 +588,11 @@ fn compute_prefix_upper_bound_into(prefix: &[u8], buf: &mut [u8; MAX_KEY_LENGTH]
     );
 
     if prefix.is_empty() {
-        return None; // Unbounded
+        return None;
     }
 
     buf[..prefix.len()].copy_from_slice(prefix);
 
-    // Find the rightmost byte that can be incremented
     for i in (0..prefix.len()).rev() {
         if buf[i] < 0xFF {
             buf[i] += 1;
@@ -894,7 +600,6 @@ fn compute_prefix_upper_bound_into(prefix: &[u8], buf: &mut [u8; MAX_KEY_LENGTH]
         }
     }
 
-    // All bytes are 0xFF, no upper bound possible
     None
 }
 

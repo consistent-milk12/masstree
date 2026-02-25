@@ -1,5 +1,4 @@
 //! Filepath: src/tree.rs
-//! `MassTree` - A high-performance concurrent trie of B+trees.
 //!
 //! This module provides the main `MassTree<V>` type and related type aliases.
 
@@ -59,9 +58,6 @@ pub mod batch {
 // ============================================================================
 
 /// Errors that can occur during insert operations.
-///
-/// Note: `AllocationFailed` variant removed. Allocations are now infallible
-/// (abort on OOM like standard Rust).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertError {
     /// Leaf node is full and cannot accept more keys.
@@ -124,8 +120,6 @@ impl std::error::Error for InsertError {}
 ///
 /// - `P` - Leaf policy (determines value storage: `BoxPolicy<V>` or `InlinePolicy<V>`)
 /// - `A` - Allocator type (must implement [`TreeAllocator<P>`])
-///
-/// The leaf type is always `LeafNode15<P>` — derived from the policy.
 pub struct MassTreeGeneric<P, A>
 where
     P: LeafPolicy,
@@ -138,25 +132,12 @@ where
     allocator: A,
 
     /// Atomic root pointer for concurrent access.
-    ///
-    /// Points to either a leaf node or an internode.
-    /// The node type is determined by the node's version field.
     root_ptr: AtomicPtr<u8>,
 
     /// Number of key-value pairs in the tree.
-    ///
-    /// Uses a sharded counter to minimize cache-line contention during
-    /// concurrent inserts. Each thread increments a different shard,
-    /// avoiding the cache-line bouncing that occurs with a single [`AtomicUsize`].
-    ///
-    /// Note: `len()` sums multiple shards and is not linearizable during
-    /// concurrent mutations. The count is exact after all threads quiesce.
     count: ShardedCounter,
 
     /// Queue of empty leaves pending cleanup (lazy coalescing).
-    ///
-    /// When leaves become empty after key removal, they are queued here
-    /// for background cleanup rather than being removed inline.
     coalesce_queue: CoalesceQueue<LeafNode15<P>>,
 
     /// Marker to indicate policy type.
@@ -231,54 +212,21 @@ where
     A: TreeAllocator<P>,
 {
     fn drop(&mut self) {
-        // No concurrent access is possible here (Drop requires unique access).
-        //
-        // Step 1: Clear the coalesce queue (leaves will be freed in teardown)
         self.coalesce_queue.clear();
 
-        // Step 2: Process all deferred retirements (suffix bags, etc.)
-        // This MUST be called before teardown_tree to ensure any objects
-        // retired via defer_retire() are reclaimed before we free nodes.
-        //
         // SAFETY: &mut self guarantees no threads are active with guards.
         unsafe { self.collector.reclaim_all() };
 
-        // Step 3: Free all nodes via allocator traversal.
         let root: *mut u8 = self.root_ptr.load(AtomicOrdering::Acquire);
         self.allocator.teardown_tree(root);
     }
 }
-
-// Send + Sync for MassTreeGeneric when V: Send + Sync
-//
-// The struct uses:
-// - Collector (Send + Sync)
-// - A (Send + Sync via trait bound)
-// - AtomicPtr<u8> (Send + Sync)
-// - AtomicUsize (Send + Sync)
-// - PhantomData<(V, L)> inherits from V, L (both have Send + Sync bounds)
-//
-// We explicitly verify this compiles via the test below.
 
 // ============================================================================
 //  Type Aliases for MassTreeGeneric
 // ============================================================================
 
 /// High-performance inline storage variant for `Copy` types (default tree type).
-///
-/// This is a type alias for [`MassTree15Inline`], providing the best performance
-/// for common use cases with small, `Copy` types like `u64`, `i32`, `*const T`, etc.
-///
-/// **Values are stored directly in leaf nodes** without `Arc` overhead, eliminating
-/// ~30-50ns of heap allocation per insert.
-///
-/// # Type Requirements
-///
-/// `V` must implement [`InlineBits`], which requires:
-/// - `Copy + Send + Sync + 'static`
-/// - Types that fit in 64 bits (u64, i64, f64, *const T, etc.)
-///
-/// For non-Copy types like `String`, use [`MassTree15`] explicitly.
 ///
 /// # Example
 ///

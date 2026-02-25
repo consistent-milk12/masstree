@@ -1,16 +1,6 @@
 //! Filepath: src/tree/range/helper.rs
 //!
 //! Forward scan helper and lower bound search functions.
-//!
-//! # Design
-//!
-//! The scan algorithm is direction-agnostic at the core, with direction-specific
-//! logic encapsulated in helper types. `ForwardScanHelper` implements forward
-//! iteration; a future `ReverseScanHelper` could implement reverse iteration.
-//!
-//! # C++ Reference
-//!
-//! Corresponds to `forward_scan_helper` in `masstree_scan.hh`.
 
 use std::cmp::Ordering;
 
@@ -29,26 +19,12 @@ use super::cursor_key::CursorKey;
 // ============================================================================
 
 /// Result of a lower bound search within a leaf.
-///
-/// Contains both the logical insertion position and optionally the physical
-/// slot if an exact ikey match was found.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyIndexedPosition {
     /// Logical position for insertion (`0..=perm.size()`).
-    ///
-    /// All slots at positions `< i` have ikeys less than the search key.
-    /// Slots at positions `>= i` have ikeys greater than or equal.
     pub i: usize,
 
     /// Physical slot if exact ikey match found, else `None`.
-    ///
-    /// When `Some(slot)`:
-    /// - `leaf.ikey(slot) == search_ikey`
-    /// - Still need to compare keylenx/suffix for full key equality
-    ///
-    /// When `None`:
-    /// - No slot has matching ikey
-    /// - Position `i` is where a new entry would be inserted
     pub p: Option<usize>,
 }
 
@@ -64,22 +40,6 @@ impl KeyIndexedPosition {
     pub const fn found(i: usize, slot: usize) -> Self {
         Self { i, p: Some(slot) }
     }
-
-    /// Check if an exact ikey match was found.
-    #[inline(always)]
-    #[allow(dead_code, reason = "API completeness for KeyIndexedPosition")]
-    pub const fn has_match(&self) -> bool {
-        self.p.is_some()
-    }
-
-    /// Get the physical slot (panics if no match).
-    #[inline(always)]
-    #[allow(dead_code, reason = "API completeness for KeyIndexedPosition")]
-    #[expect(clippy::expect_used, reason = "Fail fast")]
-    pub const fn slot(&self) -> usize {
-        self.p
-            .expect("slot() called on KeyIndexedPosition without match")
-    }
 }
 
 // ============================================================================
@@ -87,16 +47,6 @@ impl KeyIndexedPosition {
 // ============================================================================
 
 /// Helper for forward (ascending) range scans.
-///
-/// Provides direction-specific operations that the scan algorithm uses:
-/// - Position advancement: `ki + 1`
-/// - Leaf advancement: `safe_next()`
-/// - Duplicate detection: based on `CursorKey::compare()`
-/// - Suffix matching: check if stored suffix >= search suffix
-///
-/// # C++ Reference
-///
-/// Corresponds to `forward_scan_helper` in `masstree_scan.hh:37-93`.
 #[derive(Debug, Clone, Copy)]
 pub struct ForwardScanHelper;
 
@@ -117,12 +67,6 @@ impl ForwardScanHelper {
     /// # Safety
     ///
     /// The returned pointer is only valid while the guard is held.
-    ///
-    /// # Note
-    ///
-    /// This is no longer used directly by `advance_leaf*` functions (they now
-    /// use `next_raw()` + `Linker::is_marked()` for split-aware advancement),
-    /// but kept for API completeness and potential future use.
     #[inline(always)]
     #[allow(dead_code, reason = "Forward scan helper API")]
     pub fn advance<P>(leaf: &LeafNode15<P>) -> *mut LeafNode15<P>
@@ -147,20 +91,6 @@ impl ForwardScanHelper {
     }
 
     /// Check if suffix comparison result allows emit for initial position.
-    ///
-    /// For forward scans with `find_initial`:
-    /// - If stored suffix > search suffix: emit (key is after start bound)
-    /// - If stored suffix == search suffix AND `emit_equal`: emit (exact match allowed)
-    /// - Otherwise: skip to next
-    ///
-    /// # Arguments
-    ///
-    /// - `ksuf_compare`: Result of `stored_suffix.cmp(search_suffix)`
-    /// - `emit_equal`: Whether exact matches should be emitted (Included bound)
-    ///
-    /// # Returns
-    ///
-    /// `true` if the key at this position should be considered for emission.
     #[inline(always)]
     pub const fn initial_ksuf_match(ksuf_compare: Ordering, emit_equal: bool) -> bool {
         match ksuf_compare {
@@ -173,23 +103,6 @@ impl ForwardScanHelper {
     }
 
     /// Check if a slot is a duplicate of the last emitted key.
-    ///
-    /// For forward scans: a slot is a duplicate if its key <= the cursor key.
-    /// This means `cursor.compare(ikey, keylenx) >= 0` (cursor >= slot).
-    ///
-    /// # Arguments
-    ///
-    /// - `cursor_key`: The cursor tracking last emitted key
-    /// - `ikey`: The slot's ikey
-    /// - `keylenx`: The slot's keylenx
-    ///
-    /// # Returns
-    ///
-    /// `true` if this slot should be skipped (already emitted or before cursor).
-    ///
-    /// # C++ Reference
-    ///
-    /// Matches `forward_scan_helper::is_duplicate()` in `masstree_scan.hh:68-76`.
     #[inline(always)]
     #[allow(dead_code, reason = "Forward scan helper API")]
     pub fn is_duplicate(cursor_key: &CursorKey, ikey: u64, keylenx: u8) -> bool {
@@ -199,17 +112,6 @@ impl ForwardScanHelper {
     }
 
     /// Check if a slot with suffix is a duplicate, considering suffix bytes.
-    ///
-    /// Called when both cursor and slot have suffixes and ikeys are equal.
-    ///
-    /// # Arguments
-    ///
-    /// - `cursor_key`: The cursor tracking last emitted key
-    /// - `stored_suffix`: The suffix bytes from the leaf slot
-    ///
-    /// # Returns
-    ///
-    /// `true` if this slot should be skipped.
     #[inline(always)]
     #[allow(dead_code, reason = "Forward scan helper API")]
     pub fn is_duplicate_with_suffix(cursor_key: &CursorKey, stored_suffix: &[u8]) -> bool {
@@ -223,43 +125,6 @@ impl ForwardScanHelper {
 // ============================================================================
 
 /// Find the lower bound position for a key within a leaf.
-///
-/// Searches through the permutation to find:
-/// 1. The logical position where the key would be inserted (maintaining order)
-/// 2. The physical slot if an exact ikey match exists
-///
-/// # Algorithm
-///
-/// Linear search through permutation slots, comparing ikeys. For WIDTH=24,
-/// linear search is competitive with binary search due to cache effects.
-///
-/// ```text
-/// For each position i in 0..perm.size():
-///     slot = perm.get(i)
-///     slot_ikey = leaf.ikey(slot)
-///
-///     if cursor_key.ikey < slot_ikey:
-///         return (i, None)  // Insert before this position
-///     if cursor_key.ikey == slot_ikey:
-///         return (i, Some(slot))  // Exact ikey match
-///
-/// return (perm.size(), None)  // Insert at end
-///
-///
-/// # Arguments
-///
-/// - `cursor_key`: The key to search for
-/// - `leaf`: The leaf node to search in
-/// - `perm`: The permutation (snapshot) of the leaf
-///
-/// # Returns
-///
-/// `KeyIndexedPosition` with insertion point and optional exact match.
-///
-/// # C++ Reference
-///
-/// Corresponds to the lower bound logic in `find_initial` and `find_next`
-/// from `masstree_scan.hh`.
 #[inline]
 pub fn lower_with_position<P>(
     cursor_key: &CursorKey,
@@ -272,8 +137,6 @@ where
     let size: usize = perm.size();
     let search_ikey: u64 = cursor_key.current_ikey();
 
-    // Linear search through permutation
-    // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates at end
     for i in 0..size {
         let slot: usize = perm.get(i);
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
@@ -303,22 +166,6 @@ where
 ///
 /// This is used when we need to find the exact position considering suffix
 /// bytes, not just ikey matching.
-///
-/// # Algorithm
-///
-/// 1. First find by ikey using `lower_with_position`
-/// 2. If exact ikey match found and both have suffixes, compare suffixes
-/// 3. Return adjusted position based on suffix comparison
-///
-/// # Arguments
-///
-/// - `cursor_key`: The key to search for
-/// - `leaf`: The leaf node to search in
-/// - `perm`: The permutation (snapshot) of the leaf
-///
-/// # Returns
-///
-/// `KeyIndexedPosition` with accurate position considering suffixes.
 #[inline]
 pub fn lower_with_suffix<P>(
     cursor_key: &CursorKey,
@@ -417,8 +264,6 @@ where
     let search_ikey: u64 = cursor_key.current_ikey();
     let cursor_len: usize = cursor_key.current_len();
 
-    // Scan forward from start_i to find first slot where cursor <= slot
-    // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates at end
     for i in (start_i + 1)..size {
         let slot: usize = perm.get(i);
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
@@ -464,8 +309,6 @@ where
     let size: usize = perm.size();
     let search_ikey: u64 = cursor_key.current_ikey();
 
-    // Scan forward from start_i to find first slot with different ikey
-    // Use Relaxed ordering - caller loaded permutation with Acquire, OCC validates at end
     for i in (start_i + 1)..size {
         let slot: usize = perm.get(i);
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
@@ -485,8 +328,6 @@ where
             // Found a slot where cursor suffix <= stored: insert before
             return KeyIndexedPosition::not_found(i);
         }
-
-        // Continue scanning
     }
 
     // Cursor is greater than all slots
@@ -535,12 +376,6 @@ pub const fn inline_key_len(keylenx: u8) -> usize {
 /// Provides direction-specific **stateless** operations for backward iteration.
 /// The `upper_bound` flag that was previously stored here now lives in
 /// [`ReverseFlags`](super::iterator::iter_flags::ReverseFlags).
-///
-/// # Critical Implementation notes (from C++ comments)
-/// > We run ki backwards, referring to perm.size() each time through,
-/// > because inserting elements into a node need not bump its version.
-/// > Therefore, if we decremented ki, starting from a node's original
-/// > size(), we might miss some concurrently inserted keys.
 #[derive(Clone, Copy, Debug)]
 pub struct ReverseScanHelper;
 
@@ -666,9 +501,6 @@ impl ReverseScanHelper {
 
         let kx: KeyIndexedPosition = lower_with_position(cursor_key, leaf, perm);
 
-        // C++ pattern: `kx.i - (kx.p < 0)`.
-        // In this Rust port, `p == None` means "no exact match".
-        // So we subtract 1 only when `p` is missing.
         if kx.p.is_some() {
             kx.i.cast_signed()
         } else {

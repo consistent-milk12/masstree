@@ -128,10 +128,6 @@ where
     }
 }
 
-// ============================================================================
-//  ScanEmitter Trait - Clone vs Zero-Copy Abstraction
-// ============================================================================
-
 /// Abstracts clone vs zero-copy value emission for per-entry scanning.
 ///
 /// Used by both forward (`find_next_generic`) and reverse (`find_prev_generic`).
@@ -187,10 +183,6 @@ impl<P: LeafPolicy> ScanEmitter<P> for PtrEmitter {
         Some(ScanSnapshotPtr::from_raw(ptr, key_len))
     }
 }
-
-// ============================================================================
-//  BatchDirection Trait — Direction-Parameterized Batch Processing
-// ============================================================================
 
 /// Direction-specific operations for batch leaf processing.
 ///
@@ -280,18 +272,22 @@ impl BatchDirection for Forward {
     fn exhausted() -> LeafBatchResult {
         LeafBatchResult::LeafExhausted
     }
+
     #[inline(always)]
     fn layer_encountered() -> LeafBatchResult {
         LeafBatchResult::LayerEncountered
     }
+
     #[inline(always)]
     fn version_changed() -> LeafBatchResult {
         LeafBatchResult::VersionChanged
     }
+
     #[inline(always)]
     fn stopped() -> LeafBatchResult {
         LeafBatchResult::Stopped
     }
+
     #[inline(always)]
     fn bound_exceeded() -> LeafBatchResult {
         LeafBatchResult::EndBoundExceeded
@@ -346,27 +342,27 @@ impl BatchDirection for Backward {
     fn exhausted() -> LeafBatchResultBack {
         LeafBatchResultBack::LeafExhausted
     }
+
     #[inline(always)]
     fn layer_encountered() -> LeafBatchResultBack {
         LeafBatchResultBack::LayerEncountered
     }
+
     #[inline(always)]
     fn version_changed() -> LeafBatchResultBack {
         LeafBatchResultBack::VersionChanged
     }
+
     #[inline(always)]
     fn stopped() -> LeafBatchResultBack {
         LeafBatchResultBack::Stopped
     }
+
     #[inline(always)]
     fn bound_exceeded() -> LeafBatchResultBack {
         LeafBatchResultBack::StartBoundExceeded
     }
 }
-
-// ============================================================================
-//  BatchCtx — Direction-Agnostic Batch State
-// ============================================================================
 
 /// Extracted batch processing state, direction-agnostic.
 ///
@@ -384,14 +380,7 @@ pub struct BatchCtx<'a, P: LeafPolicy> {
     pub layer_stack: &'a mut LayerStack<P>,
 }
 
-// ============================================================================
-//  Unified Keyed Batch Processor
-// ============================================================================
-
 /// Direction-parameterized keyed batch processor.
-///
-/// Replaces `ForwardScanCtx::process_leaf_batch_keyed` and
-/// `ReverseScanCtx::process_prev_leaf_batch_keyed`.
 #[inline]
 pub fn process_batch_keyed<D, V, P>(
     ctx: &mut BatchCtx<'_, P>,
@@ -488,9 +477,6 @@ where
 // ============================================================================
 
 /// Direction-parameterized values-only batch processor (no key materialization).
-///
-/// Replaces `ForwardScanCtx::process_leaf_batch_values` and
-/// `ReverseScanCtx::process_prev_leaf_batch_values`.
 #[inline]
 pub fn process_batch_values<D, P>(
     ctx: &mut BatchCtx<'_, P>,

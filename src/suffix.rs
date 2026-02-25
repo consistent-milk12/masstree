@@ -76,26 +76,6 @@ pub trait PermutationProvider {
 // ============================================================================
 
 /// Contiguous storage for key suffixes.
-///
-/// Each leaf node can have at most 15 suffixes (one per slot).
-/// Suffixes are stored contiguously in a growable buffer.
-///
-/// # Memory Layout
-///
-/// ```text
-/// SuffixBag {
-///     slots: [(offset, len); 15],  // Per-slot metadata
-///     data: [u8],                   // Contiguous suffix bytes
-/// }
-/// ```
-///
-/// # Growth Strategy
-///
-/// When a new suffix doesn't fit:
-/// 1. Calculate total size of active suffixes + new suffix
-/// 2. Allocate new buffer with 2x capacity (at least needed size)
-/// 3. Copy only active suffixes (garbage collection)
-/// 4. Assign new suffix
 #[derive(Debug)]
 pub struct SuffixBag {
     /// Per-slot metadata: (offset, length) pairs.
@@ -167,8 +147,6 @@ impl SuffixBag {
     }
 
     /// Return the number of slots that have suffixes.
-    ///
-    /// This is now O(1) - the count is cached and maintained incrementally.
     #[must_use]
     #[inline(always)]
     pub const fn count(&self) -> usize {
@@ -176,12 +154,6 @@ impl SuffixBag {
     }
 
     /// Reserve additional capacity for suffix data.
-    ///
-    /// # Arguments
-    ///
-    /// * `additional` - Number of additional bytes to reserve
-    ///
-    /// Note: Aborts on allocation failure (standard Rust OOM behavior).
     #[inline(always)]
     pub fn reserve(&mut self, additional: usize) {
         self.data.reserve(additional);
@@ -192,24 +164,6 @@ impl SuffixBag {
     // ========================================================================
 
     /// Assign a suffix with smart space management.
-    ///
-    /// Attempts to store `suffix` at the given `slot` index. Uses several
-    /// optimization strategies in order:
-    /// 1. Re-use existing slot if new suffix fits in allocated space
-    /// 2. Append to data buffer if capacity allows
-    /// 3. Compact in-place to reclaim fragmented space
-    /// 4. Grow the buffer if compaction is insufficient
-    ///
-    /// Aborts on allocation failure (standard Rust OOM behavior).
-    ///
-    /// # Arguments
-    ///
-    /// * `slot` - Slot index, must be `< 15`
-    /// * `suffix` - Suffix bytes to store
-    ///
-    /// # Returns
-    ///
-    /// `true` if assignment succeeded without growing, `false` if buffer grew.
     ///
     /// # Panics
     ///
@@ -391,35 +345,6 @@ impl SuffixBag {
     /// This is an optimization for the common case where we hold the lock
     /// and can mutate in place. It avoids the clone + box allocation overhead.
     ///
-    /// # Safety Requirements (Concurrency)
-    ///
-    /// This function mutates internal `Vec` state which is NOT thread-safe.
-    /// Callers MUST ensure no concurrent readers by:
-    ///
-    /// 1. Holding the leaf lock (`version.is_locked()`)
-    /// 2. Having called `mark_insert()` to set `INSERTING_BIT`
-    ///
-    /// With `INSERTING_BIT` set, `stable()` will spin-wait, preventing new
-    /// readers from observing the mutation. Existing readers (who called
-    /// `stable()` before `INSERTING_BIT` was set) will detect the change
-    /// via `has_changed()` and retry.
-    ///
-    /// # Memory Ordering
-    ///
-    /// The `Vec::extend_from_slice` and slot metadata updates use regular
-    /// (non-atomic) writes. The caller's subsequent `keylenx` store with
-    /// Release ordering publishes these writes to readers.
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the suffix was assigned successfully (fits in existing capacity)
-    /// - `false` if the suffix doesn't fit and caller should reallocate
-    ///
-    /// # Fast Paths (like C++ `stringbag::assign`)
-    ///
-    /// 1. **Reuse existing slot**: If the new suffix fits in the old suffix's space
-    /// 2. **Append to end**: If there's room in the buffer
-    ///
     /// # Panics
     ///
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
@@ -559,11 +484,6 @@ impl SuffixBag {
     // ========================================================================
 
     /// Check if a slot's suffix equals the given suffix.
-    ///
-    /// # Returns
-    ///
-    /// - `true` if suffixes match exactly
-    /// - `false` if slot has no suffix or suffixes differ
     #[must_use]
     #[inline(always)]
     pub fn suffix_equals(&self, slot: usize, suffix: &[u8]) -> bool {
@@ -571,11 +491,6 @@ impl SuffixBag {
     }
 
     /// Compare a slot's suffix with the given suffix.
-    ///
-    /// # Returns
-    ///
-    /// - `Some(Ordering)` if slot has a suffix
-    /// - `None` if slot has no suffix
     #[must_use]
     #[inline(always)]
     pub fn suffix_compare(&self, slot: usize, suffix: &[u8]) -> Option<std::cmp::Ordering> {

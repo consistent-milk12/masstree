@@ -1,16 +1,4 @@
 //! Deletion operations for `MassTree`.
-//!
-//! This module implements the `remove()` operation following the C++
-//! reference in `reference/masstree_remove.hh`.
-//!
-//! # Algorithm Overview
-//!
-//! 1. Navigate to the target leaf using optimistic traversal
-//! 2. Search for the key within the leaf
-//! 3. Lock the leaf and verify the key still exists
-//! 4. Remove the slot from the permutation
-//! 5. Retire the value via seize
-//! 6. If leaf is now empty, schedule for lazy coalescing
 
 use std::fmt::{self as StdFmt, Display, Formatter};
 use std::hint as StdHint;
@@ -41,9 +29,6 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoveError {
     /// Retry limit exceeded during optimistic concurrency.
-    ///
-    /// This should be extremely rare. It indicates severe contention
-    /// on the target leaf node.
     RetryLimitExceeded,
 }
 
@@ -68,15 +53,11 @@ enum RemoveSearchResult {
     NotFound,
 
     /// Key found at logical position `ki`, physical slot `kp`.
-    ///
-    /// Note: `kp` is captured here but discarded after locking because
-    /// the slot position must be re-verified under lock.
     Found {
         /// Logical position in permutation (0..size).
         ki: usize,
 
         /// Physical slot index (0..WIDTH).
-        /// Discarded after locking - position is re-verified.
         #[allow(dead_code, reason = "Captured for debugging, verified under lock")]
         kp: usize,
     },
@@ -92,9 +73,6 @@ enum RemoveSearchResult {
 }
 
 /// Result of attempting to find, lock, and verify a key for removal.
-///
-/// This enum separates the search/lock phase from the actual removal,
-/// enabling cleaner control flow in the main remove loop.
 enum RemoveLockResult<'t, 'g, P, A>
 where
     P: LeafPolicy,
@@ -122,9 +100,6 @@ where
     Retry,
 
     /// Leaf is part of a gc'd sublayer, restart from tree root.
-    ///
-    /// This happens when another thread called `gc_layer` between our
-    /// search and lock. The key must be unshifted before retry.
     RestartFromRoot,
 }
 
@@ -133,16 +108,6 @@ where
 // ============================================================================
 
 /// Context for tracking layer descent during remove operations.
-///
-/// When descending into a sublayer, we track the parent leaf and slot
-/// so that sublayer cleanup can clear the parent's layer slot if the sublayer
-/// becomes empty.
-///
-/// # Why This Is Needed
-///
-/// Sublayer roots have NULL parent pointers (they're marked as roots).
-/// We cannot use `sublayer_leaf.parent()` to find the parent leaf.
-/// Instead, we track this information during the layer descent.
 #[derive(Debug, Clone, Copy)]
 struct LayerContext {
     /// Pointer to the parent leaf that contains the layer slot.
@@ -180,11 +145,6 @@ enum LockedParentResult<'a> {
     NoParent,
 
     /// Failed to lock parent after `MAX_PARENT_RETRIES` attempts.
-    ///
-    /// # Safety Implication
-    ///
-    /// Callers MUST NOT proceed with operations that assume the parent doesn't exist.
-    /// The parent likely DOES exist but is under extreme contention.
     RetryExhausted,
 }
 
@@ -193,17 +153,6 @@ enum LockedParentResult<'a> {
 // ============================================================================
 
 /// A cursor for remove operations that holds the lock as persistent state.
-///
-/// This matches the C++ `tcursor` pattern where the lock is part of the cursor
-/// rather than passed between functions. The cursor owns the lock and methods
-/// consume `self` when they transfer lock ownership up the tree.
-///
-/// # C++ Reference
-///
-/// `masstree_tcursor.hh` defines the cursor with:
-/// - `n_`: current leaf
-/// - `v_`: version/lock state (persistent in cursor)
-/// - `kx_.i`, `kx_.p`: position state (ki, kp)
 ///
 /// # Lifetime
 ///
@@ -233,7 +182,6 @@ where
     kp: usize,
 
     /// Context chain for sublayer cleanup (parent leaf + slot at each layer).
-    /// Accumulated during layer descent so `gc_layer` can cascade up twig chains.
     layer_contexts: Vec<LayerContext>,
 
     /// Guard for memory reclamation.
@@ -246,16 +194,6 @@ where
     A: TreeAllocator<P>,
 {
     /// Create a new remove cursor with the lock already held.
-    ///
-    /// # Arguments
-    ///
-    /// * `tree` - The tree being modified
-    /// * `leaf` - Pointer to the locked leaf
-    /// * `lock` - The lock guard (takes ownership)
-    /// * `ki` - Logical position in permutation
-    /// * `kp` - Physical slot index
-    /// * `layer_contexts` - Parent info chain for sublayer cleanup
-    /// * `guard` - Guard for memory reclamation
     #[inline(always)]
     #[expect(clippy::too_many_arguments, reason = "Complex state management")]
     const fn new(
@@ -279,117 +217,39 @@ where
     }
 
     /// Complete the removal of a key from the locked leaf.
-    ///
-    /// This is the main entry point after finding the key. It:
-    /// 1. Extracts the value for return
-    /// 2. Signals mutation via `mark_insert()` (CRITICAL: before any writes)
-    /// 3. Nulls the value pointer (readers skip null slots)
-    /// 4. Clears suffix if present
-    /// 5. Updates permutation
-    /// 6. Schedules value retirement
-    /// 7. If leaf is now empty, triggers leaf removal
-    ///
-    /// # Concurrency Safety
-    ///
-    /// The `mark_insert()` call MUST happen before any mutations. This sets the
-    /// `INSERTING_BIT` which causes `stable()` to spin-wait. Without this,
-    /// readers could observe partially modified state.
-    ///
-    /// # Returns
-    /// The removed value (if any).
     #[must_use]
     pub fn finish_remove(mut self) -> Option<P::Output> {
-        // =====================================================================
-        // Phase 1: Read-only checks (safe before mark_insert)
-        // =====================================================================
-        //
-        // Note: We access the leaf via direct pointer dereference throughout this
-        // function to avoid borrow conflicts with self.lock.mark_insert().
-
         // SAFETY: leaf is valid and locked by us
         let leaf: &LeafNode15<P> = unsafe { &*self.leaf };
 
         // Capture keylenx before mutations (for suffix check)
         let slot_keylenx: u8 = leaf.keylenx(self.kp);
 
-        // =====================================================================
-        // Phase 2: Signal mutation (CRITICAL - must be before any writes)
-        // =====================================================================
-
-        // CRITICAL: Set INSERTING_BIT before ANY mutations.
-        //
-        // This causes concurrent readers calling stable() to spin-wait until
-        // INSERTING_BIT is cleared (stable() waits on DIRTY_MASK). Without this, readers
-        // could observe:
-        // - Partially cleared suffix state
-        // - Updated permutation with stale slot data
-        // - Null value pointer for a slot still in the old permutation
-        //
-        // The NodeVersion protocol requires: lock() → mark_insert() → mutate → unlock
         self.lock.mark_insert();
 
-        // =====================================================================
-        // Phase 3: Mutations (safe now that INSERTING_BIT is set)
-        // =====================================================================
-
-        // Step 1: Take the value with ownership transfer.
-        //
-        // Uses `take_value` which atomically swaps the slot to null and returns
-        // the value. For BoxPolicy, this returns a ValuePtr (no refcount op).
-        // For InlinePolicy, this returns a Copy value.
-        //
-        // This also serves as defense-in-depth: if a reader somehow slips through
-        // (e.g., already past stable() before we set INSERTING_BIT), they will
-        // see an empty slot and skip it in their search loop.
         let value: Option<P::Output> = leaf.take_value(self.kp);
 
-        // Step 1b: Retire taken value via EBR (BoxPolicy only).
-        //
-        // BoxPolicy has no refcount — concurrent readers may hold raw ValuePtr
-        // copies to this value. We must defer deallocation until all current
-        // epoch guards have dropped. The caller's copy remains valid under
-        // their guard; EBR frees after all guards from this epoch drop.
-        //
-        // InlinePolicy: NEEDS_RETIREMENT=false → compiled away entirely.
         if P::NEEDS_RETIREMENT
             && let Some(ref v) = value
         {
-            // SAFETY: The value was just taken from the slot. Concurrent
-            // readers hold ValuePtr copies protected by their EBR guards.
-            // defer_retire ensures the Box is dropped only after all
-            // current-epoch guards have been released.
+            // SAFETY: The value was just taken from the slot.
             unsafe { P::retire_output(P::clone_output(v), self.guard) };
         }
 
-        // Step 2: Clear keylenx (take_value only clears the value pointer)
         leaf.set_keylenx(self.kp, 0);
 
-        // Step 3: Clear suffix if present
-        //
-        // Now safe because:
-        // 1. INSERTING_BIT is set - new readers will spin
-        // 2. Value pointer is null - in-flight readers skip this slot
         if slot_keylenx == KSUF_KEYLENX {
             // SAFETY: We hold the lock on this leaf (self.lock), and self.kp is a
-            // valid slot index obtained during search. The guard protects memory.
+            // valid slot index obtained during search.
             unsafe { leaf.clear_ksuf(self.kp, self.guard) };
         }
 
-        // Step 4: Update permutation - remove slot at logical position
         let mut new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
         new_perm.remove(self.ki);
         leaf.set_permutation(new_perm);
 
-        // Step 8: Decrement entry count
         self.tree.dec_count();
 
-        // Step 9: Lazy coalescing for empty leaves
-        //
-        // When a leaf becomes empty, we:
-        // 1. Mark it as empty (so insert can reuse it)
-        // 2. Schedule it for background cleanup
-        //
-        // This avoids the lock-coupling approach from C++ that caused infinite loops.
         if new_perm.size() == 0 {
             leaf.mark_empty();
 
@@ -411,11 +271,6 @@ where
                 .schedule(self.leaf, ikey_bound, sublayer_ctxs);
         }
 
-        // Lock drops here, which:
-        // 1. Increments VINSERT counter
-        // 2. Clears LOCK_BIT and INSERTING_BIT
-        // 3. Readers calling has_changed() will now detect the version change
-
         value
     }
 }
@@ -426,30 +281,6 @@ pub struct NodeCleaner;
 
 impl NodeCleaner {
     /// Remove a leaf from its parent internode(s) during coalesce.
-    ///
-    /// This function makes a leaf unreachable from the tree by removing all
-    /// parent child pointers that reference it. After this function returns,
-    /// the leaf can be safely retired.
-    ///
-    /// # Algorithm (Lock Coupling)
-    /// 1. Start with locked leaf
-    /// 2. Acquire parent lock (while leaf still locked)
-    /// 3. Find leaf position in parent using `upper_bound` search
-    /// 4. Verify leaf is still at expected position
-    /// 5. Set child pointer to null
-    /// 6. Shift remaining entries to fill gap (if not leftmost)
-    /// 7. Release leaf lock (keep parent lock)
-    /// 8. If parent is empty and not root, mark deleted and continue up
-    /// 9. Otherwise, release parent lock and return
-    ///
-    /// # Safety
-    /// - `leaf_ptr` must point to a valid, locked, deleted leaf
-    /// - `lock` must be the lock guard for the leaf at `leaf_ptr`
-    /// - The leaf must already be marked deleted and unlinked from B-link chain
-    ///
-    /// # Returns
-    /// `true` if parent cleanup succeeded (safe to retire), `false` if it failed
-    /// (parent not found or lock coupling failed - do not retire the leaf).
     #[cold]
     #[inline(never)]
     pub fn remove_leaf_from_parent_for_coalesce<P, A>(
@@ -469,7 +300,6 @@ impl NodeCleaner {
         let mut current_lock: LockGuard<'_> = leaf_lock;
 
         loop {
-            // Step 1: Lock parent while current is locked
             // SAFETY: current is valid and locked; we hold current_lock.
             let parent_result: LockedParentResult<'_> =
                 unsafe { Self::locked_parent_generic::<P>(current) };
@@ -478,33 +308,19 @@ impl NodeCleaner {
                 LockedParentResult::Locked(lock, ptr) => (lock, ptr),
 
                 LockedParentResult::NoParent => {
-                    // No parent - we're at the layer root
-                    // The leaf is the only node in this layer (root leaf), nothing to remove from.
-                    // This is a valid success case - the leaf has no parent pointer to clean up.
                     drop(current_lock);
                     return true;
                 }
 
                 LockedParentResult::RetryExhausted => {
-                    // SAFETY: Retry exhaustion means the parent LIKELY EXISTS but is under
-                    // extreme contention. We MUST NOT proceed as if there's no parent,
-                    // because that would allow retiring a node that's still reachable.
-                    //
-                    // Return false to signal that the cleanup failed. The leaf remains
-                    // marked as deleted but is NOT retired. It will be:
-                    // - Skipped by readers (deleted bit set)
-                    // - Eventually cleaned up when contention subsides
                     drop(current_lock);
                     return false;
                 }
             };
 
             // SAFETY: parent_ptr is a valid internode pointer returned by locked_parent_generic.
-            // The function only returns Locked variant with valid internode pointers.
-            // We hold parent_lock which guarantees exclusive access.
             let parent: &InternodeNode = unsafe { &*parent_ptr.cast::<InternodeNode>() };
 
-            // Step 2: Mark parent as being modified
             parent_lock.mark_insert();
 
             debug_assert!(
@@ -512,15 +328,12 @@ impl NodeCleaner {
                 "remove_leaf_from_parent: parent should not be deleted"
             );
 
-            // Step 3: Find child position using upper_bound
             let mut kp: usize = upper_bound_internode_generic(current_ikey, parent);
 
-            // Step 4: Validate child is at expected position
             if TreeInternode::child(parent, kp) != current {
-                // Child not at expected position - search for it linearly.
-                // This can happen if concurrent operations changed the parent structure.
                 let nkeys: usize = parent.nkeys();
                 let mut found_kp: Option<usize> = None;
+
                 for i in 0..=nkeys {
                     if TreeInternode::child(parent, i) == current {
                         found_kp = Some(i);
@@ -529,23 +342,18 @@ impl NodeCleaner {
                 }
 
                 if let Some(actual_kp) = found_kp {
-                    // Found at different position - use the actual position
                     kp = actual_kp;
                 } else {
-                    // Not found - already removed by another thread (concurrent coalesce)
-                    // This is a success case: the parent cleanup is already done.
                     drop(current_lock);
                     drop(parent_lock);
+
                     return true;
                 }
             }
 
-            // Step 5: Update child pointer
             let new_child: *mut u8 = current_replacement.unwrap_or(StdPtr::null_mut());
             parent.set_child(kp, new_child);
 
-            // Step 6: Handle replacement or shift
-            // If we have a non-null replacement, reparent it; otherwise shift down.
             let should_shift: bool = match current_replacement {
                 Some(repl) if !repl.is_null() => {
                     // SAFETY: repl is a valid node pointer (the replacement child).
@@ -553,40 +361,29 @@ impl NodeCleaner {
                     unsafe {
                         Self::set_parent_erased::<P>(repl, parent_ptr);
                     }
+
                     false
                 }
+
                 _ => kp > 0,
             };
+
             if should_shift {
                 Self::shift_internode_down_generic::<InternodeNode>(parent, kp);
             }
 
-            // Step 7: Handle redirect if leftmost child removed
-            //
-            // When we remove a child at position 0 or 1, and after shifting child[0]
-            // becomes null (because the original child[0] was the one removed), we
-            // need to update ancestor separator keys that used the old ikey_bound.
-            //
-            // This happens when:
-            // - kp == 0: We removed the leftmost child directly
-            // - kp == 1 and after shift child[0] is null: Edge case from prior collapse
-            //
-            // The redirect walks up ancestors updating separator keys from old_ikey
-            // to new_ikey (the first key of the new leftmost child).
             if (kp <= 1) && (parent.nkeys() > 0) && TreeInternode::child(parent, 0).is_null() {
                 let new_ikey: u64 = parent.ikey(0);
                 Self::redirect_ikey_bounds_generic::<P>(parent_ptr, current_ikey, new_ikey);
                 current_ikey = new_ikey;
             }
 
-            // Step 8: Drop current lock AFTER parent update is complete
-            // This is the lock coupling protocol - never release current before parent is updated
             drop(current_lock);
 
-            // Step 9: Check if parent should be collapsed
             if parent.nkeys() > 0 || parent.version().is_root() {
                 // Parent still has children or is root - we're done successfully
                 drop(parent_lock);
+
                 return true;
             }
 
@@ -594,13 +391,9 @@ impl NodeCleaner {
             let child0: *mut u8 = TreeInternode::child(parent, 0);
 
             // Step 10: Collapse empty parent
-            // Mark deleted and retire, then continue walking up to update grandparent.
-            // If child[0] is non-null, it becomes the replacement in grandparent.
-            // If child[0] is null, grandparent's child pointer is set to null.
             parent_lock.mark_deleted();
 
             // SAFETY: parent_ptr is a valid internode that we hold locked (parent_lock).
-            // We just marked it deleted. Guard ensures deferred reclamation.
             unsafe {
                 allocator.retire_internode_erased(parent_ptr, guard);
             }
@@ -621,18 +414,8 @@ impl NodeCleaner {
 
     /// Main entry point for concurrent deletion.
     ///
-    /// # Algorithm
-    /// 1. Navigate to the target leaf using optimistic traversal
-    /// 2. Search for the key within the leaf
-    /// 3. Lock the leaf and verify the key still exists
-    /// 4. Remove the slot from the permutation
-    /// 5. Retire the value via seize
-    /// 6. If leaf is now empty, trigger leaf removal
-    ///
-    /// # Reference
-    /// C++ `masstree_remove.hh:162-176` - `finish_remove()`
-    ///
     /// # Errors
+    ///
     /// If fails to properly remove
     pub fn remove_concurrent_generic<P, A>(
         tree: &MassTreeGeneric<P, A>,
@@ -659,25 +442,22 @@ impl NodeCleaner {
                 }
                 retry_count += 1;
 
-                // Step 1: Navigate to target leaf
                 let leaf_ptr: *mut LeafNode15<P> =
                     tree.reach_leaf_concurrent_generic(layer_root, &key, false, guard);
+
                 // SAFETY: reach_leaf_concurrent_generic returns a valid leaf pointer
                 let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
-                // Step 2: Get stable version and search for slot
                 let version: u32 = leaf.version().stable();
                 let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
                 let search_result: RemoveSearchResult =
                     Self::search_for_remove_generic::<P>(leaf, &key, &perm);
 
-                // Step 3: Version validation before locking
                 if leaf.version().has_changed(version) {
                     continue 'retry_loop;
                 }
 
-                // Step 4: Handle search result
                 match search_result {
                     RemoveSearchResult::NotFound => {
                         return Ok(None);
@@ -729,9 +509,6 @@ impl NodeCleaner {
                     }
 
                     RemoveSearchResult::DescendLayer { layer_ptr, slot } => {
-                        // Speculative check: avoid layer descent if already deleted.
-                        // This is an optimization - the authoritative check happens
-                        // under lock in lock_and_verify_for_remove.
                         if !Self::is_sublayer_valid(layer_ptr) {
                             return Ok(None);
                         }
@@ -756,13 +533,6 @@ impl NodeCleaner {
     /// Search for a key within a leaf for removal.
     ///
     /// Unlike `search_for_insert`, we need to find an exact match.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Linear scan through permutation slots
-    /// 2. Compare ikey values
-    /// 3. If ikey matches, check keylenx and suffix
-    /// 4. Return position if exact match found
     #[inline(always)]
     fn search_for_remove_generic<P>(
         leaf: &LeafNode15<P>,
@@ -833,20 +603,6 @@ impl NodeCleaner {
     }
 
     /// Lock the leaf and verify the key is still present for removal.
-    ///
-    /// This is the hot path after finding a key. It:
-    /// 1. Locks the leaf
-    /// 2. Checks for `deleted_layer` (gc'd sublayer)
-    /// 3. Re-verifies the key position after locking
-    /// 4. Returns appropriate result for caller to act on
-    ///
-    /// # Returns
-    ///
-    /// - `NotFound`: Key was not found (sublayer deleted)
-    /// - `Ready(cursor)`: Cursor is ready for removal
-    /// - `DescendLayer{...}`: Need to descend into sublayer
-    /// - `Retry`: Version changed, retry from `reach_leaf`
-    /// - `RestartFromRoot`: Leaf is `deleted_layer`, restart with unshifted key
     #[inline]
     fn lock_and_verify_for_remove<'t, 'g, P, A>(
         tree: &'t MassTreeGeneric<P, A>,
@@ -863,21 +619,13 @@ impl NodeCleaner {
         // SAFETY: leaf_ptr is valid from reach_leaf_concurrent_generic
         let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
-        // Step 1: Lock the leaf with pure spin (no yield).
-        // Remove's critical section is very short (permutation CAS + value clear),
-        // similar to batch inserts. Pure spin avoids yield syscall overhead.
-        // Unlike single inserts, removes don't exhibit the `same`-key convoy
-        // pattern -- deletions spread across leaves as the tree was built by inserts.
-        // See insert.rs which uses lock_bounded() for the opposite tradeoff.
         let lock: LockGuard<'_> = leaf.version().lock();
 
-        // Step 2: Check if this leaf is part of a gc'd sublayer
         if leaf.deleted_layer() {
             drop(lock);
             return RemoveLockResult::RestartFromRoot;
         }
 
-        // Step 3: Re-verify after lock (key might have moved)
         let new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
         if new_perm.size() <= ki {
             // Slot was removed by concurrent delete
@@ -895,9 +643,7 @@ impl NodeCleaner {
             return RemoveLockResult::Retry;
         }
 
-        // Step 4: Handle based on key type
         if slot_keylenx >= LAYER_KEYLENX {
-            // This is a layer pointer, not a value - need to descend
             drop(lock);
             let lp: *mut u8 = leaf.load_layer_raw(new_kp);
 
@@ -913,7 +659,6 @@ impl NodeCleaner {
             };
         }
 
-        // Step 5: Key found, create cursor for removal
         let cursor = RemoveCursor::new(
             tree,
             leaf_ptr,
@@ -933,13 +678,6 @@ impl NodeCleaner {
 
     /// Check if a sublayer is valid (not deleted) before descending.
     ///
-    /// Returns `true` if the sublayer is valid and can be descended into,
-    /// `false` if the sublayer has been garbage collected.
-    ///
-    /// This check runs on every layer descent (hot path). Only finding a deleted
-    /// sublayer is rare. The function is tiny (pointer cast + load), so inlining
-    /// is always beneficial.
-    ///
     /// # Safety
     ///
     /// `layer_ptr` must point to a valid node protected by a guard.
@@ -957,29 +695,6 @@ impl NodeCleaner {
     // ============================================================================
 
     /// Shift internode keys and children down after removal.
-    ///
-    /// When a non-leftmost child is removed at position `kp` (`child[kp]` is set to null),
-    /// we need to fill the gap by shifting subsequent entries down:
-    /// - Keys: `ikey[kp-1..nkeys-1) = ikey[kp..nkeys)`
-    /// - Children: `child[kp..nkeys) = child[kp+1..nkeys+1)`
-    /// - Decrement nkeys by 1
-    ///
-    /// # Example
-    ///
-    /// Before (nkeys=3, kp=2):
-    /// ```text
-    /// keys:     [k0, k1, k2]
-    /// children: [c0, c1, NULL, c3]  <- c2 was removed
-    ///
-    /// After shift_down(2):
-    /// ```text
-    /// keys:     [k0, k2, _]      <- k1 removed (was separator for c1/c2)
-    /// children: [c0, c1, c3, _]  <- gap filled
-    /// nkeys = 2
-    ///
-    /// # C++ Reference
-    ///
-    /// `masstree_remove.hh:231`: `p->shift_down(kp - 1, kp, p->nkeys_ - kp)`
     #[cold]
     #[inline(never)]
     fn shift_internode_down_generic<I>(inode: &I, removed_pos: usize)
@@ -1014,20 +729,6 @@ impl NodeCleaner {
     }
 
     /// Redirect ikey bounds in ancestor internodes after leftmost child removal.
-    ///
-    /// When the leftmost child of an internode is removed, the separator keys
-    /// stored in ancestor internodes may reference the old ikey bound,. This
-    /// function walks up the tree updating these bounds.
-    ///
-    /// # Lock Coupling
-    /// This function uses hand-over-hand locking matching C++ pattern:
-    /// - Start with `start_internode` locked (caller holds the lock)
-    /// - Lock parent, then unlock current
-    /// - Continue until we reach a position where updates are no longer needed
-    ///
-    /// # C++ Reference
-    ///
-    /// See `masstree_remove.hh:257-276` (`tcursor<P>::redirect`)
     #[cold]
     #[inline(never)]
     #[expect(clippy::cast_sign_loss)]
@@ -1040,40 +741,22 @@ impl NodeCleaner {
         // kp starts at -1 to indicate first iteration (don't unlock current yet)
         let mut kp: i32 = -1;
 
-        // Using Option to track whether we own a lock that needs dropping
-        // On first iter, caller owns the lock (passed in start_lock)
-        // On subsequent iters, we own the lock
         let mut owned_lock: Option<LockGuard<'_>> = None;
 
         loop {
-            // Step 1: Lock parent (current is still locked)
             // SAFETY: current is a valid internode pointer
             let parent_result: LockedParentResult<'_> =
                 unsafe { Self::locked_parent_generic::<P>(current) };
 
-            // Check if we reached root or hit retry exhaustion
             let (parent_lock, parent_ptr) = match parent_result {
                 LockedParentResult::Locked(lock, ptr) => (lock, ptr),
 
-                LockedParentResult::NoParent => {
-                    // No parent, we're at layer root
-                    // Drop our owned lock if we have one (but not the caller's lock)
-                    drop(owned_lock);
-                    return;
-                }
-
-                LockedParentResult::RetryExhausted => {
-                    // Retry exhaustion during separator key update is not as critical
-                    // as during node retirement. The separator keys may be stale but
-                    // the tree is still consistent (B-link traversal will still work).
-                    // Just abort the redirect and return.
+                LockedParentResult::NoParent | LockedParentResult::RetryExhausted => {
                     drop(owned_lock);
                     return;
                 }
             };
 
-            // Step 2: unlock previous node if this isn't the first iteration
-            // C++ `if (kp >= 0) { n->unlock(); }`
             if kp >= 0 {
                 // Drop our owned lock from previous iteration
                 drop(owned_lock.take());
@@ -1082,7 +765,6 @@ impl NodeCleaner {
             // SAFETY: parent_ptr is valid and point to an internode
             let parent: &InternodeNode = unsafe { &*(parent_ptr.cast::<InternodeNode>()) };
 
-            // Step 3: Find position of current node in parent
             #[expect(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
             {
                 kp = upper_bound_internode_generic(old_ikey, parent) as i32;
@@ -1096,25 +778,16 @@ impl NodeCleaner {
             );
 
             if kp > 0 {
-                // NOTE: The C++ comment says 'p->ikey0_[kp - 1] might not equal ikey'
-                // This is because we're looking up by the bound, not exact match
                 parent.set_ikey((kp - 1) as usize, new_ikey);
             }
 
-            // Step 5: Move up: parent becomes current
             current = parent_ptr;
             owned_lock = Some(parent_lock);
 
-            // Step 6: Check termination condition
-            // C++ `while (kp == 0 || (kp == 1 && !n->child_[0]))`
-            // Continue if:
-            // - kp == 0: we're at the leftmost position, may need to update higher
-            // - kp == 1 && child[0] is null: leftmost child was removed, may need to update higher
             let should_continue: bool =
                 (kp == 0) || ((kp == 1) && TreeInternode::child(parent, 0).is_null());
 
             if !should_continue {
-                // Done - drop the lock and return
                 drop(owned_lock);
                 return;
             }
@@ -1141,51 +814,6 @@ impl NodeCleaner {
         }
     }
 
-    /// This matches the C++ `node_base<P>::locked_parent()` from `masstree_struct.hh`.
-    ///
-    /// # Algorithm
-    /// 1. Read parent pointer from current node
-    /// 2. If null, return (None, null) - we've reached layer root
-    /// 3. Lock the parent
-    /// 4. Validate that `current.parent() == parent` still holds
-    /// 5. If validation fails (parent changed due to split), unlock and retry
-    ///
-    /// # Returns
-    /// `(Some(LockGuard), parent_ptr)` if parent exists and is locked,
-    /// `(None, null)` if current is a root (no parent)
-    ///
-    /// # Safety
-    /// - `current_ptr` must ppint to a valid, locked node (leaf or internode)
-    /// - The caller must hold a lock on the current code
-    ///
-    /// ```cpp
-    /// template <typename P>
-    ///
-    /// internode<P>* node_base<P>::locked_parent(threadinfo& ti) const {
-    ///     node_base<P>* p;
-    ///     masstree_precondition(!this->concurrent || this->locked());
-    ///
-    ///     while (true) {
-    ///         p = this->parent();
-    ///
-    ///         if (!this->parent_exists(p)) {
-    ///             break;
-    ///         }
-    ///
-    ///         nodeversion_type pv = p->lock(*p, ti.lock_fence(tc_internode_lock));
-    ///
-    ///         if (p == this->parent()) {
-    ///             masstree_invariant(!p->isleaf());
-    ///             break;
-    ///         }
-    ///
-    ///         p->unlock(pv);
-    ///         relax_fence();
-    ///     }
-    ///
-    ///     return static_cast<internode<P>*>(p);
-    /// }
-    /// ```
     unsafe fn locked_parent_generic<'a, P: LeafPolicy>(
         current_ptr: *mut u8,
     ) -> LockedParentResult<'a> {
@@ -1200,10 +828,6 @@ impl NodeCleaner {
             }
 
             // Step 3: Lock the parent with pure spin (must be an internode).
-            // Parent internode locks are held only for pointer swing + version bump,
-            // the shortest critical section in the write path. Parent contention is
-            // rare since only concurrent removes/splits targeting siblings under the
-            // same parent compete here.
             // SAFETY: parent_ptr is non-null and points to an internode.
             let parent: &InternodeNode = unsafe { &*(parent_ptr.cast::<InternodeNode>()) };
             let parent_lock: LockGuard<'_> = parent.version().lock();
@@ -1218,6 +842,7 @@ impl NodeCleaner {
                     !parent.version().is_leaf(),
                     "locked_parent: parent must be an internode"
                 );
+
                 return LockedParentResult::Locked(parent_lock, parent_ptr);
             }
 
@@ -1228,20 +853,10 @@ impl NodeCleaner {
             StdHint::spin_loop();
         }
 
-        // Retry limit exceeded - DO NOT treat this as "no parent".
-        // The parent likely exists but is under extreme contention.
-        // Caller must handle this case safely (do not retire the node).
         LockedParentResult::RetryExhausted
     }
 
     /// Set the parent pointer on a node (leaf or internode).
-    ///
-    /// This dispatches based on [`NodeVersion::is_leaf`] to call the appropriate
-    /// `set_parent` method.
-    ///
-    /// # Safety
-    /// - `node_ptr` must point to a valid leaf or internode
-    /// - The node's type must match what [`NodeVersion::is_leaf`] reports
     #[inline(always)]
     unsafe fn set_parent_erased<P: LeafPolicy>(node_ptr: *mut u8, new_parent: *mut u8) {
         // SAFETY: Caller guarantees node_ptr points to valid leaf or internode.
