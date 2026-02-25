@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use seize::{Guard, LocalGuard};
 
-use crate::TreePermutation;
 use crate::suffix::{InlineSuffixBag, SideCarUtils, SuffixBag};
+use crate::TreePermutation;
 
 use super::SuffixStore;
 
@@ -47,12 +47,6 @@ impl EmbeddedSuffix {
         // the leaf lock.
         unsafe { &*self.inline_ksuf.get() }
     }
-
-    /// Get the external bag pointer (may be null).
-    #[inline(always)]
-    fn external_ptr(&self) -> *mut SuffixBag {
-        self.external_ksuf.load(AtomicOrdering::Acquire)
-    }
 }
 
 impl SuffixStore for EmbeddedSuffix {
@@ -70,36 +64,22 @@ impl SuffixStore for EmbeddedSuffix {
 
     #[inline(always)]
     fn get(&self, slot: usize) -> Option<&[u8]> {
-        // Try inline first (common case, no pointer dereference).
-        if let Some(suffix) = self.inline_bag().get(slot) {
-            return Some(suffix);
-        }
-
-        // Check external overflow.
-        let external: *mut SuffixBag = self.external_ptr();
-
-        if external.is_null() {
-            None
-        } else {
-            // SAFETY: external is non-null and valid (we own it).
-            // Readers rely on leaf OCC validation; writers mutate under lock.
-            unsafe { &*external }.get(slot)
-        }
+        super::suffix_ops::get_suffix(self.inline_bag(), &self.external_ksuf, slot)
     }
 
     #[inline(always)]
     fn suffix_equals(&self, slot: usize, suffix: &[u8]) -> bool {
-        self.get(slot) == Some(suffix)
+        super::suffix_ops::suffix_equals(self.inline_bag(), &self.external_ksuf, slot, suffix)
     }
 
     #[inline(always)]
     fn suffix_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering> {
-        self.get(slot).map(|stored| stored.cmp(suffix))
+        super::suffix_ops::suffix_compare(self.inline_bag(), &self.external_ksuf, slot, suffix)
     }
 
     #[inline(always)]
     fn has_external(&self) -> bool {
-        !self.external_ptr().is_null()
+        super::suffix_ops::has_external(&self.external_ksuf)
     }
 
     // ========================================================================
@@ -114,58 +94,30 @@ impl SuffixStore for EmbeddedSuffix {
         perm: &impl TreePermutation,
         _guard: &LocalGuard<'_>,
     ) -> *mut u8 {
-        if suffix.is_empty() {
-            return StdPtr::null_mut();
-        }
-
-        let inline: &InlineSuffixBag = self.inline_bag();
-
-        if inline.try_assign(slot, suffix) {
-            return StdPtr::null_mut(); // No retirement needed.
-        }
-
-        let old_ext: *mut SuffixBag = self.external_ptr();
-
-        if !old_ext.is_null() {
-            // SAFETY: old_ext is valid, caller holds lock.
-            let bag: &mut SuffixBag = unsafe { &mut *old_ext };
-            if bag.try_assign_in_place(slot, suffix) {
-                inline.clear(slot);
-
-                return StdPtr::null_mut();
-            }
-        }
-
         // SAFETY: Caller holds leaf lock.
-        unsafe { self.drain_and_rebuild(slot, suffix, perm) }
+        unsafe {
+            super::suffix_ops::assign_suffix(
+                self.inline_bag(),
+                &self.external_ksuf,
+                slot,
+                suffix,
+                perm,
+            )
+        }
     }
 
     #[inline(always)]
     unsafe fn assign_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
-        if suffix.is_empty() {
-            return;
-        }
-
-        let inline: &InlineSuffixBag = self.inline_bag();
-
-        if inline.try_assign(slot, suffix) {
-            return;
-        }
-
-        let old_ext: *mut SuffixBag = self.external_ptr();
-
-        if !old_ext.is_null() {
-            // SAFETY: old_ext is valid, caller holds lock.
-            let bag: &mut SuffixBag = unsafe { &mut *old_ext };
-
-            if bag.try_assign_in_place(slot, suffix) {
-                inline.clear(slot);
-                return;
-            }
-        }
-
         // SAFETY: Caller holds leaf lock, guard is valid.
-        unsafe { self.assign_init_slow(slot, suffix, guard) }
+        unsafe {
+            super::suffix_ops::assign_suffix_init(
+                self.inline_bag(),
+                &self.external_ksuf,
+                slot,
+                suffix,
+                guard,
+            );
+        }
     }
 
     #[inline(always)]
@@ -177,45 +129,29 @@ impl SuffixStore for EmbeddedSuffix {
         _guard: &LocalGuard<'_>,
         prealloc: Vec<u8>,
     ) -> *mut u8 {
-        let inline: &InlineSuffixBag = self.inline_bag();
-
-        if inline.try_assign(slot, suffix) {
-            return StdPtr::null_mut();
-        }
-
-        let old_ext: *mut SuffixBag = self.external_ptr();
-
-        if !old_ext.is_null() {
-            // SAFETY: old_ext is valid, caller holds lock.
-            let bag: &mut SuffixBag = unsafe { &mut *old_ext };
-
-            if bag.try_assign_in_place(slot, suffix) {
-                inline.clear(slot);
-                return StdPtr::null_mut();
-            }
-        }
-
         // SAFETY: Caller holds leaf lock.
-        unsafe { self.drain_and_rebuild_prealloc(slot, suffix, perm, prealloc) }
+        unsafe {
+            super::suffix_ops::assign_suffix_prealloc(
+                self.inline_bag(),
+                &self.external_ksuf,
+                slot,
+                suffix,
+                perm,
+                prealloc,
+            )
+        }
     }
 
     #[inline(always)]
     unsafe fn ensure_external(&self) -> *mut SuffixBag {
-        unsafe { self.ensure_external_inner() }
+        // SAFETY: Caller holds leaf lock.
+        unsafe { super::suffix_ops::ensure_external_bag(&self.external_ksuf) }
     }
 
     #[inline(always)]
     unsafe fn clear(&self, slot: usize, _guard: &LocalGuard<'_>) {
-        self.inline_bag().clear(slot);
-
-        let external: *mut SuffixBag = self.external_ptr();
-
-        if !external.is_null() {
-            // SAFETY: external is valid, caller holds lock.
-            let external_ref: &mut SuffixBag = unsafe { &mut *external };
-
-            external_ref.clear(slot);
-        }
+        // SAFETY: Caller holds leaf lock.
+        unsafe { super::suffix_ops::clear_suffix(self.inline_bag(), &self.external_ksuf, slot) }
     }
 
     #[inline(always)]
@@ -255,107 +191,6 @@ impl SuffixStore for EmbeddedSuffix {
         unsafe {
             let bag_ptr: *mut InlineSuffixBag = StdPtr::addr_of_mut!((*ptr).inline_ksuf).cast();
             StdPtr::write(bag_ptr, InlineSuffixBag::new());
-        }
-    }
-}
-
-// ============================================================================
-//  Private Helpers
-// ============================================================================
-
-impl EmbeddedSuffix {
-    /// Get or create external overflow storage.
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold leaf lock.
-    #[inline(always)]
-    unsafe fn ensure_external_inner(&self) -> *mut SuffixBag {
-        let ptr: *mut SuffixBag = self.external_ksuf.load(AtomicOrdering::Acquire);
-
-        if !ptr.is_null() {
-            return ptr;
-        }
-
-        let new_external: Box<SuffixBag> = Box::default();
-        let new_ptr: *mut SuffixBag = Box::into_raw(new_external);
-        self.external_ksuf.store(new_ptr, AtomicOrdering::Release);
-
-        new_ptr
-    }
-
-    /// Drain inline+external suffixes to a new external bag, assign the
-    /// new suffix, and install it.
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold leaf lock.
-    #[cold]
-    #[inline(never)]
-    unsafe fn drain_and_rebuild(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        perm: &impl TreePermutation,
-    ) -> *mut u8 {
-        // SAFETY: Caller holds leaf lock. inline_bag() and external_ksuf are valid.
-        unsafe {
-            super::drain_rebuild::drain_and_rebuild(
-                self.inline_bag(),
-                &self.external_ksuf,
-                slot,
-                suffix,
-                perm,
-            )
-        }
-    }
-
-    /// Same as [`drain_and_rebuild`](Self::drain_and_rebuild) but uses a
-    /// pre-allocated `Vec<u8>` buffer to reduce allocation inside the
-    /// critical section.
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold leaf lock.
-    #[cold]
-    #[inline(never)]
-    unsafe fn drain_and_rebuild_prealloc(
-        &self,
-        slot: usize,
-        suffix: &[u8],
-        perm: &impl TreePermutation,
-        prealloc: Vec<u8>,
-    ) -> *mut u8 {
-        // SAFETY: Caller holds leaf lock.
-        unsafe {
-            super::drain_rebuild::drain_and_rebuild_prealloc(
-                self.inline_bag(),
-                &self.external_ksuf,
-                slot,
-                suffix,
-                perm,
-                prealloc,
-            )
-        }
-    }
-
-    /// Slow path for suffix assignment during node initialization.
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold leaf lock. Guard must come from this tree's collector.
-    #[cold]
-    #[inline(never)]
-    unsafe fn assign_init_slow(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
-        // SAFETY: Caller holds leaf lock, guard is valid.
-        unsafe {
-            super::drain_rebuild::drain_and_rebuild_init(
-                self.inline_bag(),
-                &self.external_ksuf,
-                slot,
-                suffix,
-                guard,
-            );
         }
     }
 }

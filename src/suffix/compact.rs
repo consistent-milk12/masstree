@@ -42,7 +42,15 @@ impl SuffixBag {
             return;
         }
 
-        entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
+        // Suffixes are appended sequentially, so offsets are naturally monotonic.
+        // Sort is only needed after in-place slot reuse.
+        let already_sorted: bool = entries
+            .windows(2)
+            .all(|w: &[CompactEntry]| w[0].offset <= w[1].offset);
+
+        if !already_sorted {
+            entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
+        }
 
         let mut write_pos: usize = 0;
 
@@ -116,7 +124,13 @@ impl SuffixBag {
             return old_used;
         }
 
-        entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
+        let already_sorted: bool = entries
+            .windows(2)
+            .all(|w: &[CompactEntry]| w[0].offset <= w[1].offset);
+
+        if !already_sorted {
+            entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
+        }
 
         let mut new_slots: [SlotMeta; WIDTH] = [SlotMeta::EMPTY; WIDTH];
 

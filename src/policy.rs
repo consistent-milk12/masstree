@@ -4,7 +4,7 @@
 //! its value and suffix storage strategy.
 
 mod box_values;
-mod drain_rebuild;
+mod suffix_ops;
 #[cfg(not(feature = "sidecar-suffix"))]
 mod embedded_suffix;
 mod inline_values;

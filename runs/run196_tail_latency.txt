@@ -1,0 +1,37 @@
+pbench: timer=tsc, precision=10.01 ns
+tail_latency                 p50      │ p95      │ p99      │ p99.9    │ p99.99   │ mean
+├─ get_1_indexset            300.5 ns │ 440.5 ns │ 621 ns   │ 861.6 ns │ 7.196 µs │ 315.2 ns
+├─ get_1_masstree            152.5 ns │ 257.7 ns │ 323 ns   │ 453.1 ns │ 2.314 µs │ 165.5 ns
+├─ get_1_skipmap             380.6 ns │ 591.3 ns │ 751.6 ns │ 1.001 µs │ 7.667 µs │ 403.5 ns
+├─ get_1_treeindex           280.3 ns │ 420.6 ns │ 581.1 ns │ 751.6 ns │ 6.152 µs │ 298.4 ns
+├─ get_1m_1t_indexset        550.9 ns │ 861.6 ns │ 1.061 µs │ 1.402 µs │ 6.504 µs │ 577.3 ns
+├─ get_1m_1t_masstree        380.6 ns │ 601 ns   │ 741.3 ns │ 1.041 µs │ 5.931 µs │ 382.6 ns
+├─ get_1m_1t_skipmap         671.2 ns │ 1.041 µs │ 1.262 µs │ 1.803 µs │ 7.036 µs │ 703.5 ns
+├─ get_1m_1t_treeindex       480.7 ns │ 681.4 ns │ 841.7 ns │ 1.092 µs │ 6.352 µs │ 495.3 ns
+├─ get_8t_indexset           651.2 ns │ 1.032 µs │ 1.283 µs │ 3.698 µs │ 10.41 µs │ 690.2 ns
+├─ get_8t_masstree           510.7 ns │ 801.2 ns │ 971.7 ns │ 1.323 µs │ 6.643 µs │ 530.1 ns
+├─ get_8t_skipmap            691.1 ns │ 1.001 µs │ 1.222 µs │ 1.913 µs │ 6.766 µs │ 714.5 ns
+├─ get_8t_treeindex          561.1 ns │ 791.5 ns │ 941.5 ns │ 1.242 µs │ 7.356 µs │ 575.5 ns
+├─ get_zipf_8t_indexset      541.1 ns │ 991.7 ns │ 1.292 µs │ 2.594 µs │ 6.643 µs │ 588.6 ns
+├─ get_zipf_8t_masstree      320.5 ns │ 681.4 ns │ 881.6 ns │ 1.172 µs │ 5.251 µs │ 377.2 ns
+├─ get_zipf_8t_skipmap       541.1 ns │ 962 ns   │ 1.262 µs │ 2.105 µs │ 6.713 µs │ 584.7 ns
+├─ get_zipf_8t_treeindex     400.6 ns │ 751.6 ns │ 931.8 ns │ 1.262 µs │ 6.103 µs │ 441.4 ns
+├─ insert_1_indexset         540.7 ns │ 751.1 ns │ 1.131 µs │ 2.795 µs │ 8.055 µs │ 573.8 ns
+├─ insert_1_masstree         109.9 ns │ 250.2 ns │ 290.2 ns │ 560.8 ns │ 4.858 µs │ 123.7 ns
+├─ insert_1_skipmap          473.1 ns │ 597.1 ns │ 703.5 ns │ 1.267 µs │ 9.43 µs  │ 457.6 ns
+├─ insert_1_treeindex        210.1 ns │ 490.6 ns │ 650.9 ns │ 1.101 µs │ 5.49 µs  │ 234.2 ns
+├─ insert_8t_indexset        5.73 µs  │ 25.19 µs │ 33.34 µs │ 44.88 µs │ 95.72 µs │ 8.84 µs
+├─ insert_8t_masstree        620.9 ns │ 2.354 µs │ 3.506 µs │ 96.8 µs  │ 138.8 µs │ 1.016 µs
+├─ insert_8t_skipmap         3.76 µs  │ 4.717 µs │ 5.118 µs │ 5.829 µs │ 9.931 µs │ 3.311 µs
+├─ insert_8t_treeindex       650.9 ns │ 3.035 µs │ 6.071 µs │ 32.52 µs │ 369.3 µs │ 1.193 µs
+├─ mixed_50_50_8t_indexset   831.4 ns │ 1.222 µs │ 1.442 µs │ 2.785 µs │ 6.733 µs │ 855.3 ns
+├─ mixed_50_50_8t_masstree   570.8 ns │ 871.4 ns │ 1.061 µs │ 1.402 µs │ 6.946 µs │ 592.4 ns
+├─ mixed_50_50_8t_skipmap    1.192 µs │ 2.094 µs │ 2.846 µs │ 10.19 µs │ 33.4 µs  │ 1.3 µs
+├─ mixed_50_50_8t_treeindex  1.041 µs │ 2.656 µs │ 5.39 µs  │ 9.207 µs │ 92.93 µs │ 1.314 µs
+├─ mixed_90_10_8t_indexset   731.1 ns │ 1.112 µs │ 1.323 µs │ 1.853 µs │ 6.754 µs │ 761.5 ns
+├─ mixed_90_10_8t_masstree   541.1 ns │ 841.7 ns │ 1.021 µs │ 1.323 µs │ 5.824 µs │ 560.7 ns
+├─ mixed_90_10_8t_skipmap    811.5 ns │ 1.723 µs │ 2.244 µs │ 6.492 µs │ 13.27 µs │ 929.8 ns
+├─ mixed_90_10_8t_treeindex  601 ns   │ 1.763 µs │ 2.766 µs │ 4.78 µs  │ 11.26 µs │ 738.9 ns
+├─ scan_50_8t_masstree       530.7 ns │ 851.3 ns │ 1.021 µs │ 1.382 µs │ 6.421 µs │ 556.8 ns
+├─ scan_50_8t_skipmap        4.508 µs │ 7.413 µs │ 8.706 µs │ 11.89 µs │ 18.55 µs │ 4.694 µs
+╰─ scan_50_8t_treeindex      921.4 ns │ 1.352 µs │ 1.622 µs │ 4.337 µs │ 7.814 µs │ 957.1 ns

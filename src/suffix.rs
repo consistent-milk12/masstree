@@ -162,6 +162,24 @@ impl SuffixBag {
     //  Smart Assignment with Compaction
     // ========================================================================
 
+    /// Append suffix data and update slot metadata + count.
+    #[expect(clippy::indexing_slicing, reason = "Checked by caller")]
+    #[expect(clippy::cast_possible_truncation)]
+    fn append_and_record(&mut self, slot: usize, suffix: &[u8]) {
+        if !self.slots[slot].has_suffix() {
+            self.suffix_count += 1;
+        }
+
+        let offset: usize = self.data.len();
+        self.data.extend_from_slice(suffix);
+
+        self.slots[slot] = SlotMeta {
+            offset: offset as u32,
+            len: suffix.len() as u16,
+            _pad: 0,
+        };
+    }
+
     /// Assign a suffix with smart space management.
     ///
     /// # Panics
@@ -181,6 +199,7 @@ impl SuffixBag {
 
         let meta: SlotMeta = self.slots[slot];
 
+        // Fast path: reuse existing slot space if new suffix fits.
         if meta.has_suffix() && (suffix_len <= (meta.len as usize)) {
             let start: usize = meta.offset as usize;
             self.data[start..(start + suffix_len)].copy_from_slice(suffix);
@@ -197,69 +216,23 @@ impl SuffixBag {
             return true;
         }
 
-        let new_offset: usize = self.data.len();
-
-        if (new_offset + suffix_len) <= self.data.capacity() {
-            self.data.extend_from_slice(suffix);
-
-            // Update count if this is a new suffix
-            if !meta.has_suffix() {
-                self.suffix_count += 1;
-            }
-
-            #[expect(clippy::cast_possible_truncation)]
-            {
-                self.slots[slot] = SlotMeta {
-                    offset: new_offset as u32,
-                    len: suffix_len as u16,
-                    _pad: 0,
-                };
-            }
-
+        // Try append to end of buffer.
+        if (self.data.len() + suffix_len) <= self.data.capacity() {
+            self.append_and_record(slot, suffix);
             return true;
         }
 
+        // Compact and retry.
         self.compact_in_place();
 
-        let new_offset: usize = self.data.len();
-
-        if (new_offset + suffix_len) <= self.data.capacity() {
-            self.data.extend_from_slice(suffix);
-
-            if !self.slots[slot].has_suffix() {
-                self.suffix_count += 1;
-            }
-
-            #[expect(clippy::cast_possible_truncation)]
-            {
-                self.slots[slot] = SlotMeta {
-                    offset: new_offset as u32,
-                    len: suffix_len as u16,
-                    _pad: 0,
-                };
-            }
-
+        if (self.data.len() + suffix_len) <= self.data.capacity() {
+            self.append_and_record(slot, suffix);
             return true;
         }
 
-        // Still not enough space - must grow (aborts on OOM)
+        // Still not enough space, grow (aborts on OOM).
         self.data.reserve(suffix_len);
-
-        let new_offset: usize = self.data.len();
-        self.data.extend_from_slice(suffix);
-
-        if !self.slots[slot].has_suffix() {
-            self.suffix_count += 1;
-        }
-
-        #[expect(clippy::cast_possible_truncation)]
-        {
-            self.slots[slot] = SlotMeta {
-                offset: new_offset as u32,
-                len: suffix_len as u16,
-                _pad: 0,
-            };
-        }
+        self.append_and_record(slot, suffix);
 
         false // Buffer grew
     }

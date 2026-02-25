@@ -24,10 +24,14 @@ impl SideCarUtils {
 }
 
 /// Heap-allocated suffix storage for leaves with long keys.
+///
+/// Contains inline storage plus an atomic pointer to external overflow.
+/// Production reads and writes go through `suffix_ops` free functions;
+/// the methods below are retained for unit tests only.
 #[derive(Debug)]
 #[repr(C)]
 pub struct SuffixSidecar {
-    /// Inline suffix storage (256 bytes capacity)
+    /// Inline suffix storage.
     pub(crate) inline: InlineSuffixBag,
 
     /// External overflow for large suffixes.
@@ -43,18 +47,17 @@ impl SuffixSidecar {
             external: AtomicPtr::new(StdPtr::null_mut()),
         }
     }
+}
 
+// Test-only convenience methods (production code uses suffix_ops).
+#[cfg(test)]
+impl SuffixSidecar {
     /// Get suffix for slot, checking both inline and external.
-    ///
-    /// Tries inline first (common case), then falls back to external.
-    #[inline(always)]
     pub fn get(&self, slot: usize) -> Option<&[u8]> {
-        // Try inline first (common case)
         if let Some(suffix) = self.inline.get(slot) {
             return Some(suffix);
         }
 
-        // Check external
         let external: *mut SuffixBag = self.external.load(Ordering::Acquire);
 
         if external.is_null() {
@@ -65,13 +68,11 @@ impl SuffixSidecar {
         }
     }
 
-    /// Get or create external storage (fallible).
+    /// Get or create external storage.
     ///
     /// # Safety
     ///
-    /// Caller must hold leaf lock. The returned pointer is valid for the
-    /// lifetime of the sidecar (until [`Drop`] or the next swap).
-    #[inline(always)]
+    /// Caller must hold leaf lock.
     pub unsafe fn ensure_external(&self) -> *mut SuffixBag {
         let ptr: *mut SuffixBag = self.external.load(Ordering::Acquire);
 
@@ -79,7 +80,6 @@ impl SuffixSidecar {
             return ptr;
         }
 
-        // Allocate new external bag (aborts on OOM)
         let new_external: Box<SuffixBag> = Box::default();
         let new_ptr: *mut SuffixBag = Box::into_raw(new_external);
         self.external.store(new_ptr, Ordering::Release);
@@ -88,7 +88,6 @@ impl SuffixSidecar {
     }
 
     /// Check if slot has a suffix (inline or external).
-    #[cfg(test)]
     pub fn has_suffix(&self, slot: usize) -> bool {
         if self.inline.has_suffix(slot) {
             return true;
@@ -113,25 +112,13 @@ impl Default for SuffixSidecar {
 
 impl Drop for SuffixSidecar {
     fn drop(&mut self) {
-        // SAFETY: When external bags are swapped (via drain_to_external), the old
-        // bag is retired via guard.defer_retire, and a new bag is stored
-        // in self.external. This Drop only ever sees the current (most recent)
-        // external bag, never the old one that was retired.
-        //
-        // The sequence during swap is:
-        // 1. Create new external bag with all suffixes
-        // 2. atomic_swap() stores new ptr, returns old ptr
-        // 3. Old ptr is retired via defer_retire (deferred drop)
-        // 4. self.external now holds new ptr
-        //
-        // So when Drop runs, self.external is either:
-        // - null (no external ever created), or
-        // - the most recent bag (all previous ones were retired separately)
+        // SAFETY: self.external is either null (no external ever created) or
+        // the most recent bag (all previous ones were retired separately via
+        // defer_retire during drain-and-rebuild).
         let external: *mut SuffixBag = self.external.load(Ordering::Acquire);
 
         if !external.is_null() {
             // SAFETY: We own this external bag exclusively during drop.
-            // Any previously swaped-out bags were retired via BatchedRetire.
             unsafe {
                 drop(Box::from_raw(external));
             }

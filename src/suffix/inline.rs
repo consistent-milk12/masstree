@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering as AtomicOrdering};
 
 use super::{SuffixBag, TreePermutation};
 
@@ -126,28 +126,15 @@ impl InlineSuffixBag {
     //  Constructor
     // ========================================================================
 
+    /// Packed empty sentinel for const array initialization.
+    const EMPTY_PACKED: u32 = InlineSlotMeta::EMPTY_PACKED;
+
     /// Create an empty inline suffix bag.
     #[must_use]
     #[inline(always)]
     pub const fn new() -> Self {
         Self {
-            slots: [
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-                AtomicU32::new(InlineSlotMeta::EMPTY_PACKED),
-            ],
+            slots: [const { AtomicU32::new(Self::EMPTY_PACKED) }; WIDTH],
             size: AtomicU16::new(0),
             suffix_count: AtomicU8::new(0),
             _pad: 0,
@@ -217,18 +204,21 @@ impl InlineSuffixBag {
     //  Fallible Operations
     // ========================================================================
 
-    /// Drain inline suffixes to external bag (normal operation).
+    /// Core drain logic: gather active inline suffixes, copy them + new suffix
+    /// into a [`SuffixBag`], and return it.
     ///
-    /// Uses the permutation to find active slots. This is the common case
-    /// for suffix overflow during normal inserts.
-    pub fn drain_to_external(
+    /// `active_slots` yields `(slot_index, skip_new_slot)` tuples representing
+    /// which inline slots to copy. `buffer` optionally provides a pre-allocated
+    /// `Vec<u8>` to reuse.
+    #[expect(clippy::indexing_slicing)]
+    fn drain_core(
         &self,
-        perm: &impl TreePermutation,
+        active_slots: impl Iterator<Item = usize>,
         new_slot: usize,
         new_suffix: &[u8],
+        buffer: Option<Vec<u8>>,
     ) -> SuffixBag {
         let mut required_capacity: usize = new_suffix.len();
-        let perm_size: usize = perm.size();
 
         let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
         let mut copy_count: usize = 0;
@@ -236,10 +226,7 @@ impl InlineSuffixBag {
         // SAFETY: We hold the lock, so data buffer is stable
         let data: &[u8; CAPACITY] = unsafe { &*self.data.get() };
 
-        #[expect(clippy::indexing_slicing)]
-        for i in 0..perm_size {
-            let slot: usize = perm.get(i);
-
+        for slot in active_slots {
             if (slot != new_slot) && (slot < WIDTH) {
                 let meta: InlineSlotMeta = self.load_meta(slot);
 
@@ -256,10 +243,18 @@ impl InlineSuffixBag {
             }
         }
 
-        let mut external: SuffixBag = SuffixBag::with_capacity(required_capacity);
+        let mut external: SuffixBag = match buffer {
+            Some(vec) => {
+                let mut bag: SuffixBag = SuffixBag::from_vec(vec);
+                if bag.capacity() < required_capacity {
+                    bag.reserve(required_capacity.saturating_sub(bag.used()));
+                }
+                bag
+            }
+            None => SuffixBag::with_capacity(required_capacity),
+        };
 
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
-            // SAFETY: start and len come from valid InlineSlotMeta entries
             let suffix: &[u8] = &data[start..(start + len)];
             external.assign(slot, suffix);
         }
@@ -267,6 +262,24 @@ impl InlineSuffixBag {
         external.assign(new_slot, new_suffix);
 
         external
+    }
+
+    /// Drain inline suffixes to external bag (normal operation).
+    ///
+    /// Uses the permutation to find active slots. This is the common case
+    /// for suffix overflow during normal inserts.
+    pub fn drain_to_external(
+        &self,
+        perm: &impl TreePermutation,
+        new_slot: usize,
+        new_suffix: &[u8],
+    ) -> SuffixBag {
+        self.drain_core(
+            (0..perm.size()).map(|i: usize| perm.get(i)),
+            new_slot,
+            new_suffix,
+            None,
+        )
     }
 
     /// Drain inline suffixes to external bag, reusing a pre-allocated buffer.
@@ -281,97 +294,18 @@ impl InlineSuffixBag {
         new_suffix: &[u8],
         buffer: Vec<u8>,
     ) -> SuffixBag {
-        let mut required_capacity: usize = new_suffix.len();
-        let perm_size: usize = perm.size();
-        let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
-        let mut copy_count: usize = 0;
-
-        // SAFETY: We hold the lock, so data buffer is stable
-        let data: &[u8; CAPACITY] = unsafe { &*self.data.get() };
-
-        #[expect(clippy::indexing_slicing)]
-        for i in 0..perm_size {
-            let slot: usize = perm.get(i);
-
-            if (slot != new_slot) && (slot < WIDTH) {
-                let meta: InlineSlotMeta = self.load_meta(slot);
-
-                if meta.has_suffix() {
-                    let start: usize = meta.offset as usize;
-                    let len: usize = meta.len as usize;
-                    required_capacity += len;
-
-                    if copy_count < WIDTH {
-                        slots_to_copy[copy_count] = (slot, start, len);
-                        copy_count += 1;
-                    }
-                }
-            }
-        }
-
-        let mut external: SuffixBag = SuffixBag::from_vec(buffer);
-
-        if external.capacity() < required_capacity {
-            external.reserve(required_capacity.saturating_sub(external.used()));
-        }
-
-        debug_assert!(
-            external.capacity() >= required_capacity,
-            "drain_to_external_with_vec: reserve insufficient: cap={} required={required_capacity}",
-            external.capacity()
-        );
-
-        for &(slot, start, len) in &slots_to_copy[..copy_count] {
-            let suffix: &[u8] = &data[start..(start + len)];
-            external.assign(slot, suffix);
-        }
-
-        external.assign(new_slot, new_suffix);
-        external
+        self.drain_core(
+            (0..perm.size()).map(|i: usize| perm.get(i)),
+            new_slot,
+            new_suffix,
+            Some(buffer),
+        )
     }
 
     /// Drain inline suffixes to external bag during node initialization.
     #[cold]
     pub fn drain_to_external_init(&self, new_slot: usize, new_suffix: &[u8]) -> SuffixBag {
-        let mut required_capacity: usize = new_suffix.len();
-
-        let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
-        let mut copy_count: usize = 0;
-
-        // SAFETY: We hold the lock, so data buffer is stable
-        let data: &[u8; CAPACITY] = unsafe { &*self.data.get() };
-
-        #[expect(clippy::indexing_slicing)]
-        for slot in 0..new_slot {
-            if slot >= WIDTH {
-                break;
-            }
-
-            let meta: InlineSlotMeta = self.load_meta(slot);
-
-            if meta.has_suffix() {
-                let start: usize = meta.offset as usize;
-                let len: usize = meta.len as usize;
-                required_capacity += len;
-
-                if copy_count < WIDTH {
-                    slots_to_copy[copy_count] = (slot, start, len);
-                    copy_count += 1;
-                }
-            }
-        }
-
-        let mut external: SuffixBag = SuffixBag::with_capacity(required_capacity);
-
-        for &(slot, start, len) in &slots_to_copy[..copy_count] {
-            let suffix: &[u8] = &data[start..(start + len)];
-            external.assign(slot, suffix);
-        }
-
-        // Assign new suffix
-        external.assign(new_slot, new_suffix);
-
-        external
+        self.drain_core(0..new_slot, new_slot, new_suffix, None)
     }
 
     // ========================================================================
@@ -582,23 +516,7 @@ impl Clone for InlineSuffixBag {
         // SAFETY: Clone is typically called under exclusive access or during init
         let data: [u8; CAPACITY] = unsafe { *self.data.get() };
         Self {
-            slots: [
-                AtomicU32::new(self.slots[0].load(RELAXED)),
-                AtomicU32::new(self.slots[1].load(RELAXED)),
-                AtomicU32::new(self.slots[2].load(RELAXED)),
-                AtomicU32::new(self.slots[3].load(RELAXED)),
-                AtomicU32::new(self.slots[4].load(RELAXED)),
-                AtomicU32::new(self.slots[5].load(RELAXED)),
-                AtomicU32::new(self.slots[6].load(RELAXED)),
-                AtomicU32::new(self.slots[7].load(RELAXED)),
-                AtomicU32::new(self.slots[8].load(RELAXED)),
-                AtomicU32::new(self.slots[9].load(RELAXED)),
-                AtomicU32::new(self.slots[10].load(RELAXED)),
-                AtomicU32::new(self.slots[11].load(RELAXED)),
-                AtomicU32::new(self.slots[12].load(RELAXED)),
-                AtomicU32::new(self.slots[13].load(RELAXED)),
-                AtomicU32::new(self.slots[14].load(RELAXED)),
-            ],
+            slots: std::array::from_fn(|i: usize| AtomicU32::new(self.slots[i].load(RELAXED))),
             size: AtomicU16::new(self.size.load(RELAXED)),
             suffix_count: AtomicU8::new(self.suffix_count.load(RELAXED)),
             _pad: 0,
