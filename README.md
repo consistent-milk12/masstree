@@ -18,7 +18,7 @@ Copy types.
 
 ## Status
 
-**v0.8.2** — Core feature complete.
+**v0.9.0** — Core feature complete.
 
 | Feature | Status |
 |---------|--------|
@@ -31,42 +31,29 @@ Copy types.
 | Leaf coalescing | Lazy queue-based cleanup |
 | Memory reclamation | Hyaline scheme via `seize` crate |
 
-## vs C++ Masstree (12T, 10s)
-
-| Benchmark | Rust | C++ | Ratio |
-|-----------|------|-----|-------|
-| **rw3** (forward-seq) | 70.62 | 45.34 | **156%** |
-| **same** (10 hot keys) | 2.82 | 2.07 | **136%** |
-| **rw4** (reverse-seq) | 58.52 | 43.24 | **135%** |
-| **highcontention** (500 keys, 64B) | 78.04 | 58.62 | **133%** |
-| **rw1** (random insert+read) | 9.70 | 8.16 | **119%** |
-| **rw2g98** (98% reads) | 24.10 | 20.70 | **116%** |
-| **uscale** (random 140M) | 10.11 | 8.81 | **115%** |
-| **wscale** (wide random) | 8.93 | 8.12 | **110%** |
-
 ## vs Rust Concurrent Maps (12T SMT)
 
-> Source: `runs/run184_read_write_reworked.txt`
+> Source: `runs/run193_read_write.txt` (masstree), `runs/run184_read_write_reworked.txt` (competitors)
 > **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
 
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **34.80** | 14.49 | 10.80 | 14.94 | **2.33x** |
-| 02_zipfian | **37.63** | 18.86 | 12.92 | 3.28 | **2.00x** |
-| 03_shared_prefix | **24.39** | 14.61 | 11.08 | 14.36 | **1.67x** |
-| 04_high_contention | **58.85** | 21.64 | 16.90 | 1.97 | **2.72x** |
-| 05_large_dataset | **15.15** | 11.35 | 7.50 | 9.17 | **1.34x** |
-| 06_single_hot_key | **14.88** | 6.82 | 7.46 | 2.52 | **2.00x** |
-| 07_mixed_50_50 | **33.27** | 8.73 | 6.46 | 14.86 | **2.24x** |
-| 08_8byte_keys | **54.04** | 24.97 | 14.06 | 19.69 | **2.16x** |
-| 09_pure_read | **49.32** | 24.12 | 14.40 | 17.40 | **2.05x** |
-| 10_remove_heavy | **18.75** | 11.18 | 7.18 | 4.26 | **1.68x** |
-| 13_insert_only_fair | **35.05** | 24.29 | 15.13 | 6.30 | **1.44x** |
-| 14_pure_insert | **13.90** | 11.96 | 9.86 | 2.30 | **1.16x** |
+| 01_uniform | **40.85** | 14.49 | 10.80 | 14.94 | **2.74x** |
+| 02_zipfian | **36.64** | 18.86 | 12.92 | 3.28 | **1.94x** |
+| 03_shared_prefix | **26.97** | 14.61 | 11.08 | 14.36 | **1.85x** |
+| 04_high_contention | **66.13** | 21.64 | 16.90 | 1.97 | **3.06x** |
+| 05_large_dataset | **15.93** | 11.35 | 7.50 | 9.17 | **1.40x** |
+| 06_single_hot_key | **15.21** | 6.82 | 7.46 | 2.52 | **2.04x** |
+| 07_mixed_50_50 | **32.76** | 8.73 | 6.46 | 14.86 | **2.20x** |
+| 08_8byte_keys | **52.67** | 24.97 | 14.06 | 19.69 | **2.11x** |
+| 09_pure_read | **53.36** | 24.12 | 14.40 | 17.40 | **2.21x** |
+| 10_remove_heavy | **21.58** | 11.18 | 7.18 | 4.26 | **1.93x** |
+| 13_insert_only_fair | **34.03** | 24.29 | 15.13 | 6.30 | **1.40x** |
+| 14_pure_insert | **13.06** | 11.96 | 9.86 | 2.30 | **1.09x** |
 
 ## High-Impact Workloads (12T SMT)
 
-> Source: `runs/run180_high_impact.txt`
+> Source: `runs/run188_high_impact.txt`
 > **Config:** 12 threads on 6 physical cores (SMT), 200 samples
 
 Benchmarks targeting Masstree's architectural advantages: long keys, variable-length keys,
@@ -74,68 +61,67 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 | Benchmark | masstree15 | indexset | tree_index | skipmap | MT vs Best |
 |-----------|------------|----------|------------|---------|------------|
-| 01_long_keys_128b | **34.08** | 14.66 | 15.32 | 10.25 | **2.22x** |
-| 02_multiple_hot_keys | **42.11** | 13.85 | 15.47 | 14.47 | **2.72x** |
-| 03_mixed_get_insert_remove | **22.52** | 5.92 | 11.86 | 8.64 | **1.90x** |
-| 04_variable_long_keys | **24.34** | 8.57 | 9.01 | 7.67 | **2.70x** |
-| 05_prefix_queries (Kitem/s) | **849.8** | n/a | 702.7 | 143.1 | **1.21x** |
-| 05_prefix_values (Mitem/s) | **2.193** | n/a | n/a | n/a | — |
-| 06_deep_trie_traversal | **17.91** | 13.87 | 10.97 | 8.56 | **1.29x** |
-| 07_deep_trie_read_only | **26.22** | 14.90 | 16.23 | 11.97 | **1.62x** |
-| 08_variable_keys_arc | **26.17** | 11.14 | 11.14 | 7.94 | **2.35x** |
-| 09_prefix_realistic_mixed | **4.551** | n/a | 3.964 | 0.995 | **1.15x** |
+| 01_long_keys_128b | **34.28** | 14.60 | 12.83 | 10.84 | **2.35x** |
+| 02_multiple_hot_keys | **39.25** | 13.99 | 13.31 | 13.36 | **2.81x** |
+| 03_mixed_get_insert_remove | **21.99** | 5.923 | 10.02 | 8.488 | **2.20x** |
+| 04_variable_long_keys | **25.04** | 9.427 | 8.393 | 7.651 | **2.66x** |
+| 05_prefix_queries (Kitem/s) | **846.9** | n/a | 495.9 | 144.9 | **1.71x** |
+| 06_deep_trie_traversal | **17.66** | 13.49 | 8.102 | 9.308 | **1.31x** |
+| 07_deep_trie_read_only | **27.55** | 14.81 | 14.54 | 13.37 | **1.86x** |
+| 08_variable_keys_arc | **26.26** | 11.67 | 10.45 | 8.875 | **2.25x** |
+| 09_prefix_realistic_mixed | **4.986** | n/a | 2.968 | 1.045 | **1.68x** |
 
 ## Range Scans (6T Physical)
 
-> Source: `runs/run182_range_scan.txt`
-> **Config:** Physical cores only, 100 samples, performance governor
+> Source: `runs/run191_range_scan.txt`
+> **Config:** Physical cores only, 200 samples, performance governor
 
 | Benchmark | masstree15_inline | tree_index | MT vs TI |
 |-----------|-------------------|------------|----------|
-| 01_sequential_full_scan | **29.29** | 13.88 | **2.11x** |
-| 02_reverse_scan | **28.30** | 13.53 | **2.09x** |
-| 03_clustered_scan | **28.93** | 13.85 | **2.09x** |
-| 04_sparse_scan | **29.30** | 13.83 | **2.12x** |
-| 05_shared_prefix_scan | **24.69** | 17.11 | **1.44x** |
-| 06_suffix_differ_scan | **22.04** | 16.97 | **1.30x** |
-| 07_hierarchical_scan | **26.14** | 16.96 | **1.54x** |
-| 08_adversarial_splits | **28.58** | 9.00 | **3.18x** |
-| 09_interleaved_scan | **24.85** | 14.67 | **1.69x** |
-| 10_blink_stress_scan | **28.44** | 14.37 | **1.98x** |
-| 11_random_keys_scan | **28.44** | 14.22 | **2.00x** |
-| 12_long_keys_64b_scan | **27.72** | 17.03 | **1.63x** |
-| 15_full_scan_aggregate | **174.6** | 106.8 | **1.63x** |
-| 16_insert_heavy | **25.41** | 19.39 | **1.31x** |
-| 17_hot_spot | **11.15** | 4.60 | **2.42x** |
+| 01_sequential_full_scan | **26.73** | 13.07 | **2.04x** |
+| 02_reverse_scan | **27.87** | 13.27 | **2.10x** |
+| 03_clustered_scan | **25.16** | 13.08 | **1.92x** |
+| 04_sparse_scan | **22.28** | 12.78 | **1.74x** |
+| 05_shared_prefix_scan | **22.93** | 15.33 | **1.50x** |
+| 06_suffix_differ_scan | **21.28** | 14.55 | **1.46x** |
+| 07_hierarchical_scan | **24.47** | 14.60 | **1.68x** |
+| 08_adversarial_splits | **26.83** | 8.807 | **3.05x** |
+| 09_interleaved_scan | **22.41** | 12.86 | **1.74x** |
+| 10_blink_stress_scan | **24.48** | 12.81 | **1.91x** |
+| 11_random_keys_scan | **26.02** | 12.36 | **2.10x** |
+| 12_long_keys_64b_scan | **26.06** | 14.24 | **1.83x** |
+| 15_full_scan_aggregate | **183.1** | 84.59 | **2.16x** |
+| 16_insert_heavy | **23.18** | 17.38 | **1.33x** |
+| 17_hot_spot | **11.24** | 5.318 | **2.11x** |
 
 ## Range Scans (12T SMT)
 
-> Source: `runs/run182_range_scan.txt`
-> **Config:** 12 threads on 6 physical cores (SMT), 100 samples
+> Source: `runs/run191_range_scan.txt`
+> **Config:** 12 threads on 6 physical cores (SMT), 200 samples
 
 | Benchmark | masstree15_inline | tree_index | MT vs TI |
 |-----------|-------------------|------------|----------|
-| 01_sequential_full_scan | **29.53** | 16.49 | **1.79x** |
-| 02_reverse_scan | **28.52** | 16.53 | **1.73x** |
-| 03_clustered_scan | **28.26** | 16.51 | **1.71x** |
-| 04_sparse_scan | **28.80** | 16.61 | **1.73x** |
-| 05_shared_prefix_scan | **25.09** | 20.39 | **1.23x** |
-| 06_suffix_differ_scan | **23.12** | 19.46 | **1.19x** |
-| 07_hierarchical_scan | **27.04** | 20.29 | **1.33x** |
-| 08_adversarial_splits | **28.55** | 11.54 | **2.47x** |
-| 09_interleaved_scan | **24.39** | 15.54 | **1.57x** |
-| 10_blink_stress_scan | **29.64** | 15.93 | **1.86x** |
-| 11_random_keys_scan | **29.25** | 15.27 | **1.92x** |
-| 12_long_keys_64b_scan | **27.75** | 19.30 | **1.44x** |
-| 15_full_scan_aggregate | **226.7** | 124.8 | **1.82x** |
-| 16_insert_heavy | **25.15** | 23.16 | **1.09x** |
-| 17_hot_spot | **10.39** | 5.34 | **1.95x** |
+| 01_sequential_full_scan | **31.77** | 14.49 | **2.19x** |
+| 02_reverse_scan | **29.96** | 14.66 | **2.04x** |
+| 03_clustered_scan | **31.85** | 14.54 | **2.19x** |
+| 04_sparse_scan | **30.95** | 14.58 | **2.12x** |
+| 05_shared_prefix_scan | **24.88** | 18.62 | **1.34x** |
+| 06_suffix_differ_scan | **23.41** | 18.16 | **1.29x** |
+| 07_hierarchical_scan | **26.99** | 18.46 | **1.46x** |
+| 08_adversarial_splits | **29.10** | 11.32 | **2.57x** |
+| 09_interleaved_scan | **24.82** | 15.34 | **1.62x** |
+| 10_blink_stress_scan | **30.05** | 15.12 | **1.99x** |
+| 11_random_keys_scan | **25.62** | 14.70 | **1.74x** |
+| 12_long_keys_64b_scan | **28.29** | 17.77 | **1.59x** |
+| 15_full_scan_aggregate | **230.8** | 111.9 | **2.06x** |
+| 16_insert_heavy | **25.09** | 21.88 | **1.15x** |
+| 17_hot_spot | **10.61** | 6.458 | **1.64x** |
 
 ## Install
 
 ```toml
 [dependencies]
-masstree = { version = "0.8.2", features = ["mimalloc"] }
+masstree = { version = "0.9.0", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

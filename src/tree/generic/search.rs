@@ -75,8 +75,7 @@ where
 
             // Slot 0
             if ik0 == target_ikey {
-                if let Some(result) =
-                    Self::check_slot_for_insert(leaf, key, i, s0, search_keylenx)
+                if let Some(result) = Self::check_slot_for_insert(leaf, key, i, s0, search_keylenx)
                 {
                     return result;
                 }

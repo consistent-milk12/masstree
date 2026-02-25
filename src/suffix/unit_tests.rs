@@ -910,6 +910,56 @@ fn test_clone_empty_bag() {
     assert_eq!(cloned.used(), 0);
 }
 
+#[test]
+fn test_compact_dedup_duplicates() {
+    let mut bag: SuffixBag = SuffixBag::new();
+
+    bag.assign(0, b"aaaa");
+    bag.assign(1, b"bbbb");
+    bag.assign(2, b"cccc");
+    assert_eq!(bag.count(), 3);
+
+    // Includes duplicates; `compact()` should deduplicate.
+    let reclaimed: usize = bag.compact([0, 0, 2, 2].into_iter());
+
+    assert!(reclaimed > 0);
+    assert_eq!(bag.count(), 2);
+    assert_eq!(bag.get(0), Some(b"aaaa".as_slice()));
+    assert_eq!(bag.get(1), None);
+    assert_eq!(bag.get(2), Some(b"cccc".as_slice()));
+}
+
+#[test]
+fn test_inline_drain_to_external_with_vec_reserves_enough() {
+    let bag: InlineSuffixBag = InlineSuffixBag::new();
+
+    // Fill a few slots.
+    assert!(bag.try_assign(0, b"suffix0"));
+    assert!(bag.try_assign(1, b"suffix1_long"));
+    assert!(bag.try_assign(2, b"suffix2"));
+
+    let perm: Permuter15 = Permuter15::make_sorted(3);
+
+    let new_slot: usize = 3;
+    let new_suffix: &[u8] = b"new_suffix";
+
+    // Required capacity = sum(existing) + new.
+    let required_capacity: usize =
+        b"suffix0".len() + b"suffix1_long".len() + b"suffix2".len() + new_suffix.len();
+
+    // Deliberately pick a non-zero but insufficient capacity to catch the
+    // "reserve vs capacity" bug via the debug_assert in the implementation.
+    let buffer: Vec<u8> = Vec::with_capacity(16);
+
+    let external: SuffixBag = bag.drain_to_external_with_vec(&perm, new_slot, new_suffix, buffer);
+
+    assert!(external.capacity() >= required_capacity);
+    assert_eq!(external.get(0), Some(b"suffix0".as_slice()));
+    assert_eq!(external.get(1), Some(b"suffix1_long".as_slice()));
+    assert_eq!(external.get(2), Some(b"suffix2".as_slice()));
+    assert_eq!(external.get(3), Some(new_suffix));
+}
+
 // ============================================================================
 //  SuffixSidecar Tests (Miri-friendly - no iterations, tests Drop correctness)
 // ============================================================================

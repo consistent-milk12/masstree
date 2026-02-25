@@ -13,13 +13,13 @@
 )]
 
 use std::sync::{
-    atomic::{fence, Ordering as AtomicOrdering},
     Barrier,
+    atomic::{Ordering as AtomicOrdering, fence},
 };
 
 use arrayvec::ArrayVec;
 use core_affinity::CoreId;
-use rand::{seq::SliceRandom, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Zipf};
 

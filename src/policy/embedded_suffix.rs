@@ -1,12 +1,4 @@
 //! Embedded suffix storage (always-present, no sidecar indirection).
-//!
-//! Contains `InlineSuffixBag` embedded directly in the leaf struct plus
-//! `AtomicPtr<SuffixBag>` for heap overflow. No lazy allocation, no extra
-//! pointer chase for suffix reads.
-//!
-//! Optimal for string-key workloads with frequent suffixes.
-//!
-//! This is the suffix storage backend for [`InlinePolicy<V>`].
 
 use std::cell::UnsafeCell;
 use std::cmp::Ordering;
@@ -36,7 +28,7 @@ pub struct EmbeddedSuffix {
 
 // SAFETY: EmbeddedSuffix is Send+Sync.
 // - UnsafeCell<InlineSuffixBag>: protected by leaf lock (writes) and OCC (reads).
-//   Suffix bytes are immutable after publication, so concurrent reads are safe.
+//   Readers rely on leaf OCC validation; writers mutate only under the leaf lock.
 // - AtomicPtr<SuffixBag>: thread-safe atomic access.
 unsafe impl Send for EmbeddedSuffix {}
 unsafe impl Sync for EmbeddedSuffix {}
@@ -46,13 +38,13 @@ impl EmbeddedSuffix {
     ///
     /// # Safety
     ///
-    /// For read operations: safe under OCC (suffix bytes are immutable).
+    /// For read operations: safe under leaf OCC validation.
     /// For write operations: caller must hold the leaf lock.
     #[inline(always)]
     fn inline_bag(&self) -> &InlineSuffixBag {
         // SAFETY: InlineSuffixBag uses internal atomics for metadata.
-        // Suffix bytes are immutable after publication. Read access
-        // is safe under OCC validation.
+        // Read access is safe under leaf OCC validation; write access requires
+        // the leaf lock.
         unsafe { &*self.inline_ksuf.get() }
     }
 
@@ -90,7 +82,7 @@ impl SuffixStore for EmbeddedSuffix {
             None
         } else {
             // SAFETY: external is non-null and valid (we own it).
-            // Suffix bytes are immutable after publication.
+            // Readers rely on leaf OCC validation; writers mutate under lock.
             unsafe { &*external }.get(slot)
         }
     }

@@ -1,10 +1,4 @@
 //! True-inline value array implementation.
-//!
-//! Stores `V: InlineBits` values directly as `u64` bits in `[AtomicU64; 15]`.
-//! Uses `InlineSentinel` pointer in a parallel `[AtomicPtr<u8>; 15]` tag array
-//! to distinguish slot states.
-//!
-//! This is the value storage backend for [`InlinePolicy<V>`].
 
 use std::marker::PhantomData;
 use std::ptr as StdPtr;

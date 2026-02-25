@@ -7,7 +7,6 @@ use arrayvec::ArrayVec;
 use super::{PermutationProvider, SlotMeta, SuffixBag, WIDTH};
 
 /// Entry for tracking suffix during compaction.
-/// Stores (`slot_index`, `original_offset`, `length`).
 #[derive(Clone, Copy)]
 struct CompactEntry {
     slot: usize,
@@ -17,18 +16,6 @@ struct CompactEntry {
 
 impl SuffixBag {
     /// Compact in-place by moving data within the existing buffer.
-    ///
-    /// This is a true in-place compaction that:
-    /// 1. Uses stack-allocated [`ArrayVec`] for bookkeeping (no heap allocation)
-    /// 2. Moves data using `copy_within` (memmove, no allocation)
-    /// 3. Truncates the buffer (no allocation)
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Collect active suffixes into [`ArrayVec`], sorted by offset
-    /// 2. Move each suffix to its new position using `copy_within`
-    /// 3. Update slot metadata with new offsets
-    /// 4. Truncate buffer to new size
     #[expect(clippy::indexing_slicing, reason = "Bounds checked via slot iteration")]
     pub(super) fn compact_in_place(&mut self) {
         if self.suffix_count == 0 {
@@ -36,7 +23,6 @@ impl SuffixBag {
             return;
         }
 
-        // Collect active suffixes into stack-allocated array
         let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
 
         for slot in 0..WIDTH {
@@ -56,29 +42,23 @@ impl SuffixBag {
             return;
         }
 
-        // Sort by offset so we can move data in-order without overwriting
         entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
 
-        // Move each suffix to its compacted position
         let mut write_pos: usize = 0;
 
         for entry in &entries {
             let src_start: usize = entry.offset as usize;
             let src_end: usize = src_start + entry.len as usize;
 
-            // Invariant: since entries are sorted by ascending offset and we
-            // advance write_pos by each entry's length, write_pos <= src_start.
             debug_assert!(
                 write_pos <= src_start,
                 "compaction invariant violated: write_pos ({write_pos}) > src_start ({src_start})"
             );
 
-            // Only copy if source and dest differ (avoid no-op copies)
             if write_pos != src_start {
                 self.data.copy_within(src_start..src_end, write_pos);
             }
 
-            // Update slot metadata with new offset
             #[expect(clippy::cast_possible_truncation)]
             {
                 self.slots[entry.slot] = SlotMeta {
@@ -97,28 +77,12 @@ impl SuffixBag {
     }
 
     /// Compact keeping only specified active slots, using in-place moves.
-    ///
-    /// This is a zero-allocation compaction that:
-    /// 1. Uses stack-allocated scratch space for bookkeeping
-    /// 2. Moves data using `copy_within` (memmove)
-    /// 3. Truncates the buffer
-    ///
-    /// # Arguments
-    ///
-    /// * `active_slots` - Iterator yielding physical slot indices that are active.
-    ///   Duplicate slots are handled (deduplicated after collection).
-    ///
-    /// # Returns
-    ///
-    /// The number of bytes reclaimed.
     #[expect(clippy::indexing_slicing, reason = "Slot bounds explicitly checked")]
     pub(super) fn compact(&mut self, active_slots: impl Iterator<Item = usize>) -> usize {
         let old_used: usize = self.data.len();
 
-        // Collect active entries into stack-allocated array.
-        // Use bitmask to handle duplicate slots in the iterator.
         let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
-        let mut seen: u64 = 0; // Bitmask for slots already processed
+        let mut seen: u64 = 0;
 
         for slot in active_slots {
             debug_assert!(
@@ -129,7 +93,6 @@ impl SuffixBag {
                 continue;
             }
 
-            // Skip duplicate slots
             let mask: u64 = 1 << slot;
             if seen & mask != 0 {
                 continue;
@@ -153,20 +116,16 @@ impl SuffixBag {
             return old_used;
         }
 
-        // Sort by offset for in-order movement
         entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
 
-        // Reset slots that will become inactive
         let mut new_slots: [SlotMeta; WIDTH] = [SlotMeta::EMPTY; WIDTH];
 
-        // Move each suffix to its compacted position
         let mut write_pos: usize = 0;
 
         for entry in &entries {
             let src_start: usize = entry.offset as usize;
             let src_end: usize = src_start + entry.len as usize;
 
-            // Invariant: write_pos <= src_start (see compact_in_place for proof)
             debug_assert!(
                 write_pos <= src_start,
                 "compaction invariant violated: write_pos ({write_pos}) > src_start ({src_start})"
@@ -188,7 +147,6 @@ impl SuffixBag {
             write_pos += entry.len as usize;
         }
 
-        // Truncate and update state
         self.data.truncate(write_pos);
         self.slots = new_slots;
 
@@ -201,14 +159,6 @@ impl SuffixBag {
     }
 
     /// Compact using a permutation to determine active slots.
-    ///
-    /// This is the typical usage pattern: compact based on which slots
-    /// are currently in-use according to the leaf's permutation.
-    ///
-    /// # Arguments
-    ///
-    /// * `perm` - Permuter indicating which slots are active
-    /// * `exclude_slot` - Optional slot to exclude (e.g., slot being removed)
     ///
     /// # Returns
     ///

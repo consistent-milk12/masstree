@@ -61,10 +61,6 @@ impl InternodeNode {
     }
 
     /// Get the number of keys using Relaxed ordering.
-    ///
-    /// Use this variant when the caller already holds the node lock or when
-    /// only an approximate count is needed. Avoids the Acquire barrier of
-    /// [`Self::nkeys`].
     #[must_use]
     #[inline(always)]
     pub(crate) fn nkeys_relaxed(&self) -> usize {
@@ -84,41 +80,12 @@ impl InternodeNode {
     }
 
     /// Batch load all ikeys into a local array.
-    ///
-    /// This allows the search loop to operate on a local array without
-    /// per-element atomic load overhead. The compiler can optimize the
-    /// sequential loads and the subsequent search operates on cached data.
-    ///
-    /// # Note
-    ///
-    /// This method is NOT used by `upper_bound_internode_generic` because
-    /// internode search benefits from early exit (most lookups find their
-    /// key in the first few comparisons). Batch loading all 15 keys upfront
-    /// wastes work for the common case.
-    ///
-    /// This method may be useful for other scenarios (e.g., serialization,
-    /// debugging, or operations that need all keys).
-    ///
-    /// # Memory Ordering
-    ///
-    /// Uses Relaxed loads for all 15 keys followed by a single Acquire fence.
-    /// This is more efficient than 15 individual Acquire loads while providing
-    /// the same ordering guarantee: all loads complete before the fence, and
-    /// the fence synchronizes with Release stores from writers.
-    ///
-    /// # Returns
-    ///
-    /// An array of all WIDTH ikeys. Only the first `nkeys` are valid.
     #[must_use]
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "i < WIDTH guaranteed by from_fn")]
     pub fn load_all_ikeys(&self) -> [u64; WIDTH] {
-        // Use Relaxed loads - ordering is established by the fence below
         let ikeys: [u64; WIDTH] = StdArray::from_fn(|i| self.ikey0[i].load(RELAXED));
 
-        // Single Acquire fence ensures all loads above complete before we return,
-        // and synchronizes with Release stores from writers. This is equivalent to
-        // 15 individual Acquire loads but more efficient (1 fence vs 15 barriers).
         fence(AtomicOrdering::Acquire);
 
         ikeys
@@ -143,9 +110,6 @@ impl InternodeNode {
     }
 
     /// Get the tree height.
-    ///
-    /// - `height = 0` means children are leaves
-    /// - `height > 0` means children are internodes
     #[must_use]
     #[inline(always)]
     pub const fn height(&self) -> u32 {
@@ -164,12 +128,6 @@ impl InternodeNode {
     // ========================================================================
 
     /// Get the child pointer at the given index.
-    ///
-    /// Valid indices are `0..=nkeys` (one more child than keys).
-    /// Index 15 (WIDTH) returns the rightmost child.
-    ///
-    /// Uses guard protection to ensure the load participates in seize's
-    /// total order, making it safe on all architectures.
     ///
     /// # Panics
     /// Panics in debug mode if `i > WIDTH`.
@@ -204,44 +162,17 @@ impl InternodeNode {
     }
 
     /// Get the child pointer with prefetch hint for the next likely child.
-    ///
-    /// This is used in the optimized traversal path to hide memory latency.
-    /// Prefetches both the next child node (`child[i+1]`) and its key array
-    /// (cache line 1 at offset 64) while returning `child[i]`.
-    ///
-    /// Uses guard protection for the returned child pointer. The speculative
-    /// prefetch does NOT use protection (it's just a hint, never dereferenced).
-    ///
-    /// # Arguments
-    /// * `i` - Child index to return
-    /// * `nkeys` - Current number of keys (to avoid prefetching beyond valid children)
-    /// * `guard` - Guard for protected load
-    ///
-    /// # Prefetch Strategy
-    ///
-    /// When descending to `child[i]`, we speculatively prefetch `child[i+1]`:
-    /// - Offset 0: Node header + ikey0[0..=5] (cache line 0)
-    /// - Offset 64: ikey0[6..=13] (cache line 1)
-    ///
-    /// Prefetching null pointers is harmless on x86/ARM (becomes a no-op).
     #[must_use]
     #[inline]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
     pub fn child_with_prefetch(&self, i: usize, nkeys: usize, guard: &impl Guard) -> *mut u8 {
         debug_assert!(i <= WIDTH, "child_with_prefetch: index out of bounds");
 
-        // Protected load for the child we're actually returning
         let ptr = guard.protect(&self.child[i], READ_ORD);
 
-        // Speculatively prefetch next child's node header + ikey array
-        // Note: This prefetch is just a hint - we never dereference next_child_ptr
-        // directly, so it doesn't need protection.
         if i < nkeys {
             let next_child_ptr = self.child[i + 1].load(RELAXED);
 
-            // Prefetch cache line 0: header + ikey0[0..5]
-            // Prefetch cache line 1: ikey0[6..=13]
-            // Uses unified wrapper that handles x86_64/aarch64/other architectures.
             prefetch_read(next_child_ptr);
             prefetch_read(next_child_ptr.wrapping_add(64));
         }
@@ -250,29 +181,6 @@ impl InternodeNode {
     }
 
     /// Get the child pointer with depth-first prefetch for tree descent.
-    ///
-    /// Unlike [`Self::child_with_prefetch`] which prefetches the next sibling,
-    /// this method prefetches the target child's internal data (header + keys).
-    /// Use this variant in descent paths where you're going down the tree,
-    /// not sideways through siblings.
-    ///
-    /// # Prefetch Strategy
-    ///
-    /// Prefetches two cache lines of the target child node:
-    /// - CL 0 (offset 0): Header (16B) + ikey0[0..=5] (48B)
-    /// - CL 1 (offset 64): ikey0[6..=13] (64B)
-    ///
-    /// This covers 14 of 15 keys, hiding memory latency for the next level's search.
-    ///
-    /// # When to Use
-    ///
-    /// - **Descent (point lookup)**: Use `child_with_depth_prefetch`
-    /// - **Scan (sibling traversal)**: Use `child_with_prefetch`
-    ///
-    /// # Arguments
-    ///
-    /// * `i` - Child index to return
-    /// * `guard` - Guard for protected load
     #[must_use]
     #[inline]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
@@ -289,14 +197,6 @@ impl InternodeNode {
     }
 
     /// Get the child pointer with full prefetch for tree descent.
-    ///
-    /// Prefetches all three cache lines containing keys (CL 0, 1, 2).
-    /// Use when nodes are expected to be full or nearly full.
-    ///
-    /// # Arguments
-    ///
-    /// * `i` - Child index to return
-    /// * `guard` - Guard for protected load
     #[must_use]
     #[inline]
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
@@ -311,33 +211,13 @@ impl InternodeNode {
     }
 
     /// Prefetch a child node's header and first two key cache lines.
-    ///
-    /// This is a static helper that can be called without a guard,
-    /// enabling use in trait implementations.
-    ///
-    /// # Safety Note
-    ///
-    /// Prefetch is a performance hint only; it must not be relied upon for
-    /// correctness. Prefetching null or invalid addresses is harmless on
-    /// x86/ARM (becomes a no-op). No null check is performed to avoid
-    /// adding a branch on the hot path.
     #[inline(always)]
     pub(super) fn prefetch_child_internal(ptr: *mut u8) {
-        // Prefetch CL 0 (offset 0) and CL 1 (offset 64) of the child node.
-        //
-        // Note: use `wrapping_add` so this remains purely "address arithmetic"
-        // (no in-bounds requirement), and avoid integer casts for provenance.
-        //
-        // Null/invalid pointers are safe: prefetch instructions are no-ops
-        // for unmapped addresses on x86_64/aarch64.
         prefetch_read(ptr);
         prefetch_read(ptr.wrapping_add(64));
     }
 
     /// Prefetch a child node's header and all three key cache lines.
-    ///
-    /// Null/invalid pointers are safe: prefetch instructions are no-ops
-    /// for unmapped addresses on `x86_64` and `aarch64`.
     #[inline(always)]
     pub(super) fn prefetch_child_full(ptr: *mut u8) {
         prefetch_read(ptr);
@@ -346,8 +226,6 @@ impl InternodeNode {
     }
 
     /// Set the child pointer at the given index.
-    ///
-    /// Valid indices are `0..=WIDTH` (16 children for 15 keys).
     ///
     /// # Panics
     /// Panics in debug mode if `i > WIDTH`.
@@ -362,12 +240,6 @@ impl InternodeNode {
     }
 
     /// Assign a key and its right child at position `p`.
-    ///
-    /// Following the C++ pattern:
-    /// - `ikey[p] = ikey`
-    /// - `child[p + 1] = right_child`
-    ///
-    /// The left child (`child[p]`) must already be set.
     ///
     /// # Panics
     /// Panics in debug mode if `p >= WIDTH`.
@@ -390,12 +262,6 @@ impl InternodeNode {
     }
 
     /// Increment the number of keys by 1.
-    ///
-    /// # Precondition
-    ///
-    /// Caller must hold the node lock. This is a load-then-store operation,
-    /// not an atomic increment, because only one writer can modify nkeys
-    /// while the lock is held.
     ///
     /// # Panics
     /// Panics in debug mode if already at WIDTH.

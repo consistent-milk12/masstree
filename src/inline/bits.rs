@@ -8,34 +8,6 @@
 // ============================================================================
 
 /// Trait for values that can be stored inline as 64 bits.
-///
-/// This trait enables true-inline value storage in leaf nodes, where values
-/// are stored in [`std::sync::atomic::AtomicU64`] slots instead of behind heap pointers.
-///
-/// # Safety
-/// Implementations must ensure:
-/// - `to_bits` and `from_bits` are inverses: `from_bits(to_bits(v)) == v`
-/// - The bit representation is deterministic (same value -> same bits)
-/// - The type is `Copy + Send + Sync + 'static`
-///
-/// # Example
-///
-/// ```ignore
-/// use masstree::InlineBits;
-///
-/// #[derive(Clone, Copy)]
-/// struct MyId(u32);
-///
-/// impl InlineBits for MyId {
-///     fn to_bits(self) -> u64 {
-///         self.0 as u64
-///     }
-///
-///     fn from_bits(bits: u64) -> Self {
-///         Self(bits as u32)
-///     }
-/// }
-/// ```
 pub trait InlineBits: Copy + Send + Sync + 'static {
     /// Convert this value to its 64-bit representation.
     fn to_bits(self) -> u64;

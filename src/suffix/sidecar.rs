@@ -1,34 +1,4 @@
 //! Heap-allocated suffix storage sidecar.
-//!
-//! # Key Invariant: Suffix Immutability
-//!
-//! Once a suffix is assigned to a slot via [`LeafNode15::assign_ksuf`], the suffix
-//! bytes are **NEVER modified**. The only operations are:
-//!
-//! 1. **Add**: Assign a new suffix to a slot that doesn't have one
-//! 2. **Remove**: Clear a suffix when the entire key is removed
-//!
-//! This invariant enables the "orphaned inline" optimization: when inline suffixes
-//! are drained to external storage, we do NOT clear the inline data. Readers may
-//! observe inline data for slots that have been drained, but since suffixes are
-//! immutable, this data is still valid.
-//!
-//! # Publication Protocol
-//!
-//! Writers must follow this sequence:
-//! 1. Allocate sidecar (if needed)
-//! 2. Write suffix bytes to inline or external storage
-//! 3. Store sidecar pointer with Release ordering (if newly allocated)
-//! 4. Store `keylenx = KSUF_KEYLENX` with Release ordering (publication point)
-//!
-//! Readers observe via:
-//! 1. Load `keylenx` with Acquire ordering
-//! 2. Load sidecar pointer with Acquire ordering
-//! 3. Read suffix from inline or external
-//!
-//! The `keylenx` store is the linearization point for suffix visibility.
-//!
-//! [`LeafNode15::assign_ksuf`]: crate::leaf15::LeafNode15::assign_ksuf
 
 use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -37,16 +7,12 @@ use seize::Collector;
 
 use super::{InlineSuffixBag, SuffixBag};
 
-// Note: AllocError/AllocResult removed - allocations are now infallible
-
 /// Utility functions for suffix sidecar operations.
 #[derive(Debug)]
 pub struct SideCarUtils;
 
 impl SideCarUtils {
     /// Cleanup function for retiring external suffix bags.
-    ///
-    /// Used with `guard.defer_retire` for safe deferred reclamation.
     ///
     /// # Safety
     ///
@@ -58,17 +24,6 @@ impl SideCarUtils {
 }
 
 /// Heap-allocated suffix storage for leaves with long keys.
-///
-/// Created lazily on first suffix assignment. Contains both inline
-/// storage (fast path) and external overflow (large suffixes).
-///
-/// # Memory Layout
-///
-/// ```text
-/// SuffixSidecar = 328 bytes
-/// ├── inline: InlineSuffixBag  // 320 bytes
-/// └── external: AtomicPtr<SuffixBag>    // 8 bytes
-/// ```
 #[derive(Debug)]
 #[repr(C)]
 pub struct SuffixSidecar {
@@ -111,11 +66,6 @@ impl SuffixSidecar {
     }
 
     /// Get or create external storage (fallible).
-    ///
-    /// Returns a raw pointer to avoid aliasing issues, the caller is
-    /// responsible for ensuring exclusive access when dereferencing.
-    ///
-    /// Aborts on allocation failure (standard Rust OOM behavior).
     ///
     /// # Safety
     ///
@@ -189,12 +139,14 @@ impl Drop for SuffixSidecar {
     }
 }
 
-// SAFETY: `SuffixSIdecar` is `Send` if `SuffixBag` is `Send`.
+// SAFETY: `SuffixSidecar` is `Send` if `SuffixBag` is `Send`.
 // The `AtomicPtr` provides thread-safe access to the external bag.
 // Concurrent access is serialized by the leaf lock.
 unsafe impl Send for SuffixSidecar {}
 
 // SAFETY: `SuffixSidecar` is `Sync` if `SuffixBag` is `Sync`.
-// Read access is safe without synchronization (immutable after publication).
-// Write access requires the leaf lock.
+// Read access is safe as part of the leaf's OCC protocol: readers validate the
+// leaf version after reads, and writers only mutate under the leaf lock while
+// the leaf is marked dirty (INSERTING/SPLITTING), so `stable()` readers won't
+// race with writes.
 unsafe impl Sync for SuffixSidecar {}

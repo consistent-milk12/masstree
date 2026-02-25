@@ -19,7 +19,7 @@ pub use sidecar::{SideCarUtils, SuffixSidecar};
 /// Number of slots (matches `WIDTH_15` leaf node).
 const WIDTH: usize = 15;
 
-/// Initial capacity for suffix storage (matches C++ `INITIAL_KSUF_CAPACITY`).
+/// Initial capacity for suffix storage.
 const INITIAL_CAPACITY: usize = 128;
 
 // ============================================================================
@@ -181,7 +181,6 @@ impl SuffixBag {
 
         let meta: SlotMeta = self.slots[slot];
 
-        // Fast Path 1: Re-use existing slot if new suffix fits
         if meta.has_suffix() && (suffix_len <= (meta.len as usize)) {
             let start: usize = meta.offset as usize;
             self.data[start..(start + suffix_len)].copy_from_slice(suffix);
@@ -195,11 +194,9 @@ impl SuffixBag {
                 };
             }
 
-            // Count unchanged, slot already had suffix
             return true;
         }
 
-        // Fast Path 2: Append if there's room
         let new_offset: usize = self.data.len();
 
         if (new_offset + suffix_len) <= self.data.capacity() {
@@ -222,17 +219,13 @@ impl SuffixBag {
             return true;
         }
 
-        // Slow Path: Need more space, try compacting first
         self.compact_in_place();
 
         let new_offset: usize = self.data.len();
 
         if (new_offset + suffix_len) <= self.data.capacity() {
-            // Compaction freed enough space
             self.data.extend_from_slice(suffix);
 
-            // Note: After compact_in_place, we need to re-check if slot had suffix
-            // The slot metadata was updated by compact_in_place
             if !self.slots[slot].has_suffix() {
                 self.suffix_count += 1;
             }
@@ -341,9 +334,6 @@ impl SuffixBag {
 
     /// Try to assign a suffix to a slot in-place, without growing the buffer.
     ///
-    /// This is an optimization for the common case where we hold the lock
-    /// and can mutate in place. It avoids the clone + box allocation overhead.
-    ///
     /// # Panics
     ///
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
@@ -363,7 +353,6 @@ impl SuffixBag {
 
         let meta: SlotMeta = self.slots[slot];
 
-        // Fast Path 1: Reuse existing slot if new suffix fits in old space
         if meta.has_suffix() && (suffix.len() <= (meta.len as usize)) {
             let start: usize = meta.offset as usize;
             self.data[start..(start + suffix.len())].copy_from_slice(suffix);
@@ -377,15 +366,12 @@ impl SuffixBag {
                 };
             }
 
-            // Count unchanged, slot already had suffix
             return true;
         }
 
-        // Fast Path 2: Append to end if there's room
         let new_offset: usize = self.data.len();
 
         if (new_offset + suffix.len()) <= self.data.capacity() {
-            // Update count if this is a new suffix
             if !meta.has_suffix() {
                 self.suffix_count += 1;
             }
@@ -410,10 +396,6 @@ impl SuffixBag {
 
     /// Assign a suffix to a slot.
     ///
-    /// This always appends to the data buffer. If the buffer is full,
-    /// it will grow automatically. Old suffix data is not reclaimed
-    /// until [`compact()`](Self::compact) is called.
-    ///
     /// # Panics
     ///
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
@@ -433,7 +415,6 @@ impl SuffixBag {
 
         let meta: SlotMeta = self.slots[slot];
 
-        // Update count if this is a new suffix
         if !meta.has_suffix() {
             self.suffix_count += 1;
         }
@@ -441,7 +422,6 @@ impl SuffixBag {
         let offset: usize = self.data.len();
         self.data.extend_from_slice(suffix);
 
-        // Safe casts: offset fits in u32 (Vec max is isize::MAX), len checked above
         #[expect(
             clippy::cast_possible_truncation,
             reason = "offset bounded by Vec capacity, len checked above"
@@ -456,9 +436,6 @@ impl SuffixBag {
     }
 
     /// Clear the suffix for a slot.
-    ///
-    /// This marks the slot as having no suffix but does NOT reclaim
-    /// the data buffer space. Call [`compact()`](Self::compact) to reclaim space.
     ///
     /// # Panics
     ///

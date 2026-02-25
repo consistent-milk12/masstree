@@ -124,6 +124,7 @@ impl ShardedCounter {
     /// Load the current counter value by summing all shards.
     ///
     /// # Panics
+    ///
     /// Debug builds will panic if the total is negative (indicating a bug where
     /// decrements exceeded increments). Release builds return 0 in this case.
     pub fn load(&self) -> usize {

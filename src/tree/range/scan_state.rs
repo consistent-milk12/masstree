@@ -483,7 +483,7 @@ pub struct ScanSnapshot<P: LeafPolicy> {
 
 /// Snapshot of slot data for zero-copy emission.
 ///
-/// Unlike [`ScanSnapshot`] which clones the value (Arc increment for `LeafValue`),
+/// Unlike [`ScanSnapshot`] which clones the value,
 /// this stores a typed pointer and defers dereferencing to the caller.
 #[derive(Debug, Clone, Copy)]
 pub struct ScanSnapshotPtr<V> {

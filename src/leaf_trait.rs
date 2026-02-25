@@ -11,11 +11,28 @@ use crate::policy::{LeafPolicy, RetireHandle, SlotKind, SlotState};
 use seize::LocalGuard;
 
 // ============================================================================
-// Re-exports from value.rs for use in generic code
+//  Split Types
 // ============================================================================
 
-pub use crate::value::InsertTarget;
-pub use crate::value::SplitPoint;
+/// Split point for leaf node splitting.
+#[derive(Debug, Clone, Copy)]
+pub struct SplitPoint {
+    /// Logical position where to split (in post-insert coordinates).
+    pub pos: usize,
+
+    /// The ikey that will be the first key of the new (right) leaf.
+    pub split_ikey: u64,
+}
+
+/// Which leaf to insert into after a split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertTarget {
+    /// Insert into the original (left) leaf.
+    Left,
+
+    /// Insert into the new (right) leaf.
+    Right,
+}
 
 // ============================================================================
 // Split+Insert Types (Atomic Split+Insert Operation)

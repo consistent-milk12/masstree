@@ -3,11 +3,6 @@
 //! Both [`EmbeddedSuffix`] and [`SidecarSuffix`] use the same core algorithm
 //! for their slow-path suffix assignment: drain inline suffixes into a new
 //! external bag, merge entries from an old external bag, and install the result.
-//!
-//! This module extracts that shared logic to eliminate ~180 lines of duplication.
-//!
-//! [`EmbeddedSuffix`]: super::EmbeddedSuffix
-//! [`SidecarSuffix`]: super::SidecarSuffix
 
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
@@ -18,9 +13,6 @@ use crate::suffix::{InlineSuffixBag, SuffixBag};
 
 /// Drain inline suffixes + new suffix into a new external bag, merge old
 /// external entries, and install the new bag.
-///
-/// Returns the old external bag pointer (cast to `*mut u8`) for deferred
-/// retirement. Returns null if no previous external bag existed.
 ///
 /// # Safety
 ///
@@ -37,19 +29,14 @@ pub(super) unsafe fn drain_and_rebuild(
     suffix: &[u8],
     perm: &impl TreePermutation,
 ) -> *mut u8 {
-    // Drain all inline suffixes + new suffix into new bag.
-    // drain_to_external pre-calculates capacity for zero reallocations.
     let mut new_bag: SuffixBag = inline.drain_to_external(perm, slot, suffix);
 
-    // Merge active suffixes from old external (not in inline).
     let old_external: *mut SuffixBag = external_slot.load(AtomicOrdering::Relaxed);
     merge_old_external_perm(&mut new_bag, old_external, slot, perm);
 
-    // Install new external bag.
     let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
     external_slot.store(new_ptr, AtomicOrdering::Release);
 
-    // Return old external for retirement (may be null).
     old_external.cast::<u8>()
 }
 
@@ -69,10 +56,8 @@ pub(super) unsafe fn drain_and_rebuild_prealloc(
     perm: &impl TreePermutation,
     prealloc: Vec<u8>,
 ) -> *mut u8 {
-    // Drain using pre-allocated buffer.
     let mut new_bag: SuffixBag = inline.drain_to_external_with_vec(perm, slot, suffix, prealloc);
 
-    // Merge old external entries.
     let old_external: *mut SuffixBag = external_slot.load(AtomicOrdering::Relaxed);
     merge_old_external_perm(&mut new_bag, old_external, slot, perm);
 
@@ -83,10 +68,6 @@ pub(super) unsafe fn drain_and_rebuild_prealloc(
 }
 
 /// Slow path for suffix assignment during node initialization.
-///
-/// Uses [`InlineSuffixBag::drain_to_external_init()`] which iterates
-/// slots `0..slot` sequentially (no permutation needed). Retires the
-/// old external bag internally via the guard.
 ///
 /// # Safety
 ///
@@ -100,18 +81,14 @@ pub(super) unsafe fn drain_and_rebuild_init(
     suffix: &[u8],
     guard: &LocalGuard<'_>,
 ) {
-    // Drain inline using sequential iteration (0..slot).
     let mut new_bag: SuffixBag = inline.drain_to_external_init(slot, suffix);
 
-    // Merge old external entries (if any).
     let old_external: *mut SuffixBag = external_slot.load(AtomicOrdering::Relaxed);
     merge_old_external_init(&mut new_bag, old_external, slot);
 
-    // Install new external bag.
     let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
     external_slot.store(new_ptr, AtomicOrdering::Release);
 
-    // Retire old external bag (if any).
     if !old_external.is_null() {
         // SAFETY: old_external was a valid Box<SuffixBag> from a prior drain.
         unsafe {
@@ -123,8 +100,6 @@ pub(super) unsafe fn drain_and_rebuild_init(
 }
 
 /// Merge active suffixes from old external bag into new bag (permutation-based).
-///
-/// Skips `skip_slot` (the slot being assigned) since it's already in the new bag.
 fn merge_old_external_perm(
     new_bag: &mut SuffixBag,
     old_external: *mut SuffixBag,
@@ -142,6 +117,7 @@ fn merge_old_external_perm(
         let phys: usize = perm.get(i);
 
         if phys != skip_slot
+            && !new_bag.has_suffix(phys)
             && let Some(s) = old_ref.get(phys)
         {
             new_bag.assign(phys, s);
@@ -150,8 +126,6 @@ fn merge_old_external_perm(
 }
 
 /// Merge active suffixes from old external bag into new bag (sequential init).
-///
-/// Iterates slots `0..slot` sequentially.
 fn merge_old_external_init(new_bag: &mut SuffixBag, old_external: *mut SuffixBag, slot: usize) {
     if old_external.is_null() {
         return;
@@ -161,7 +135,9 @@ fn merge_old_external_init(new_bag: &mut SuffixBag, old_external: *mut SuffixBag
     let old_ref: &SuffixBag = unsafe { &*old_external };
 
     for s in 0..slot {
-        if let Some(ext_suffix) = old_ref.get(s) {
+        if !new_bag.has_suffix(s)
+            && let Some(ext_suffix) = old_ref.get(s)
+        {
             new_bag.assign(s, ext_suffix);
         }
     }

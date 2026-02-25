@@ -1,9 +1,9 @@
 use std::ptr as StdPtr;
 
+use crate::leaf_trait::SplitPoint;
 use crate::leaf_trait::{SplitInsertData, SplitInsertResult};
 use crate::leaf15::LeafNode15;
 use crate::nodeversion::LockGuard;
-use crate::value::SplitPoint;
 
 use super::{
     AtomicOrdering, InsertError, LeafPolicy, LocalGuard, MassTreeGeneric, Propagation,

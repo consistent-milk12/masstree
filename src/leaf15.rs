@@ -1,6 +1,6 @@
 //! Filepath: src/leaf15.rs
 //!
-//! Unified leaf node for `MassTree`](crate::MassTree) with WIDTH=15 (15 slots).
+//! Unified leaf node for `MassTree` with WIDTH=15 (15 slots).
 //!
 //! This module provides [`LeafNode15<P>`], a leaf node parameterized over a
 //! [`LeafPolicy`] that determines how values and suffixes are stored.
@@ -20,16 +20,16 @@ use crate::internode::InternodeNode;
 use crate::key::IKEY_SIZE;
 use crate::key::Key;
 use crate::ksearch::scalar::Scalar;
+use crate::leaf_trait::InsertTarget;
 use crate::leaf_trait::SplitInsertData;
 use crate::leaf_trait::SplitInsertResult;
+use crate::leaf_trait::SplitPoint;
 use crate::leaf_trait::TreeLeafNode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use crate::permuter::{AtomicPermuter15, Permuter15};
 use crate::policy::{LeafPolicy, RetireHandle, SlotKind, SlotState, SuffixStore, ValueArray};
 use crate::prefetch::prefetch_read;
-use crate::value::InsertTarget;
-use crate::value::SplitPoint;
 use seize::Guard;
 
 mod layout;

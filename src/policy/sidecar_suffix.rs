@@ -25,7 +25,7 @@ pub struct SidecarSuffix {
 // SAFETY: SidecarSuffix is Send+Sync.
 // The AtomicPtr provides thread-safe access to the sidecar pointer.
 // Sidecar contents are protected by:
-// - OCC protocol for reads (immutable after publication)
+// - OCC protocol for reads (version-validated)
 // - Leaf lock for writes
 unsafe impl Send for SidecarSuffix {}
 unsafe impl Sync for SidecarSuffix {}
@@ -80,7 +80,7 @@ impl SuffixStore for SidecarSuffix {
 
         // SAFETY: ptr is non-null and was allocated by us. The sidecar
         // is never deallocated while the leaf is alive (only in Drop).
-        // Suffix bytes are immutable after publication.
+        // Readers rely on leaf OCC validation; writers mutate under lock.
         unsafe { &*ptr }.get(slot)
     }
 

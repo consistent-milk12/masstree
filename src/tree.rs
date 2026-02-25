@@ -7,7 +7,6 @@ use std::marker::PhantomData;
 
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
-// Note: AllocError/AllocKind removed - allocations are now infallible
 use crate::shard_counter::ShardedCounter;
 
 use crate::alloc_trait::TreeAllocator;
@@ -30,10 +29,6 @@ pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use remove::RemoveError;
 
 /// Batch insert utilities and helpers.
-///
-/// This module provides utility functions for preparing and analyzing
-/// batch insert operations. The `insert_batch()` method is available
-/// directly on all tree types.
 ///
 /// # Example
 ///
@@ -61,23 +56,18 @@ pub mod batch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertError {
     /// Leaf node is full and cannot accept more keys.
-    /// Caller should trigger a split.
     LeafFull,
 
     /// Split required (generic path).
-    /// Leaf is full and needs to be split.
     SplitRequired,
 
     /// Layer creation required (generic path).
-    /// Key conflict requires creating a new sublayer.
     LayerCreationRequired,
 
     /// Split operation failed (generic path).
-    /// Internal error during split - should not happen in normal operation.
     SplitFailed,
 
     /// Split propagation to parent failed (generic path).
-    /// Parent internode is full and needs cascading split.
     SplitPropagationRequired,
 }
 
@@ -112,9 +102,6 @@ impl std::error::Error for InsertError {}
 // ============================================================================
 
 /// A high-performance generic trie of B+trees.
-///
-/// This is the generic version parameterized over leaf policy and allocator.
-/// Use `MassTree<V>` for the standard inline storage implementation.
 ///
 /// # Type Parameters
 ///
@@ -244,9 +231,6 @@ pub type MassTree<V> = MassTree15Inline<V>;
 
 /// Box-based storage for non-Copy types (String, Vec<u8>, etc.).
 ///
-/// Values are stored as `Box<V>` raw pointers. Returns [`ValuePtr<V>`] — a
-/// zero-cost `Copy` pointer valid for the lifetime of the EBR guard.
-///
 /// # Example
 ///
 /// ```rust
@@ -256,16 +240,9 @@ pub type MassTree<V> = MassTree15Inline<V>;
 /// let guard = tree.guard();
 /// tree.insert_with_guard(b"key", "hello".to_string(), &guard);
 /// ```
-///
-/// [`ValuePtr<V>`]: crate::policy::ValuePtr
 pub type MassTree15<V> = MassTreeGeneric<BoxPolicy<V>, SeizeAllocator<BoxPolicy<V>>>;
 
 /// True-inline storage for Copy types (u64, i32, *const T, etc.).
-///
-/// Values are stored directly in `[AtomicU64; 15]` arrays within leaf nodes—no heap
-/// allocation per insert. Best for small types like `u64`, `i32`, tuples fitting in 64 bits.
-///
-/// [`InlineBits`]: crate::inline::bits::InlineBits
 pub type MassTree15Inline<V> = MassTreeGeneric<InlinePolicy<V>, SeizeAllocator<InlinePolicy<V>>>;
 
 // ============================================================================

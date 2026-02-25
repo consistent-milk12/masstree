@@ -77,7 +77,7 @@ unsafe fn bucket_layout(nl: usize) -> Layout {
 //  Freelist
 // ============================================================================
 
-/// Intrusive freelist — first 8 bytes of each freed block store the next pointer.
+/// Intrusive freelist.
 struct Freelist {
     head: *mut u8,
     count: usize,
@@ -162,7 +162,7 @@ impl ThreadPool {
         }
     }
 
-    /// Returns null on OOM; caller is responsible for aborting.
+    /// Returns null on OOM.
     #[inline]
     fn alloc(&mut self, layout: Layout) -> *mut u8 {
         let Some(nl) = size_class(layout) else {
@@ -172,7 +172,7 @@ impl ThreadPool {
         self.alloc_from_bucket(nl)
     }
 
-    /// Fast path for known size class — skips `size_class()` computation.
+    /// Fast path for known size class.
     #[inline(always)]
     fn alloc_from_bucket(&mut self, nl: usize) -> *mut u8 {
         // SAFETY: nl in [1, MAX_SIZE_CLASSES]
@@ -201,7 +201,7 @@ impl ThreadPool {
         unsafe { self.dealloc_to_bucket(ptr, nl) };
     }
 
-    /// Fast path for known size class — skips `size_class()` computation.
+    /// Fast path for known size class.
     ///
     /// # Safety
     ///
@@ -288,9 +288,6 @@ pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
 // ============================================================================
 
 /// Allocate a `LeafNode15<P>` from the thread-local pool. Aborts on OOM.
-///
-/// Faster than `pool_alloc(Layout::new::<LeafNode15<P>>())` — the size class
-/// is computed at compile time, skipping `size_class()` and its `Option` branch.
 #[inline]
 #[must_use]
 pub fn pool_alloc_leaf<P: LeafPolicy>() -> *mut u8 {
@@ -363,13 +360,7 @@ pub unsafe fn pool_dealloc_internode(ptr: *mut u8) {
 //  Teardown-Specific Dealloc
 // ============================================================================
 
-/// Deallocate during tree teardown — bypasses the thread-local pool.
-///
-/// During `teardown_tree`, the dropping thread frees ALL nodes but never
-/// allocates new ones. Caching blocks in its pool is pure waste: the first
-/// 512 would fill the bucket and 97%+ would overflow to `dealloc()` anyways.
-/// This function skips the pool entirely, avoiding thread-local access,
-/// capacity checks, and useless freelist pushes.
+/// Deallocate during tree teardown.
 ///
 /// # Safety
 ///
@@ -426,7 +417,7 @@ pub unsafe fn pool_teardown_dealloc_internode(ptr: *mut u8) {
 //  Capture-Free Reclaimers (for `guard.defer_retire()`)
 // ============================================================================
 
-/// Reclaim a `LeafNode15<P>` — runs Drop, returns memory to pool.
+/// Reclaim a `LeafNode15<P>`.
 ///
 /// # Safety
 ///

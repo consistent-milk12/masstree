@@ -35,13 +35,6 @@ const RELAXED: AtomicOrdering = AtomicOrdering::Relaxed;
 // ============================================================================
 
 /// Metadata for a single slot's suffix in inline storage.
-///
-/// Uses `u16` for offset to keep metadata compact (4 bytes per slot).
-/// Maximum inline capacity is 65535 bytes.
-///
-/// Packed into `AtomicU32` for concurrent access:
-/// - High 16 bits: offset
-/// - Low 16 bits: length
 #[derive(Clone, Copy, Debug)]
 struct InlineSlotMeta {
     /// Offset into the data buffer (`u16::MAX` if no suffix).
@@ -99,65 +92,23 @@ impl Default for InlineSlotMeta {
 // ============================================================================
 
 /// Fixed-capacity suffix storage embedded directly in a leaf node.
-///
-/// This is an optimization to avoid heap allocation for the common case
-/// where total suffix data is small. Based on C++ Masstree's `iksuf_`
-/// (internal key suffix) design.
-///
-/// # Concurrency
-///
-/// This structure uses interior mutability for safe concurrent access:
-/// - Slot metadata uses `AtomicU32` (Acquire/Release ordering)
-/// - Size and count use atomics for writer updates under lock
-/// - Data buffer uses `UnsafeCell` (writers hold lock, readers use version validation)
-///
-/// **Writers** must hold the leaf lock before calling mutation methods.
-/// **Readers** may call read methods without the lock, using OCC validation.
-///
-/// # Design
-///
-/// - Embedded in the leaf node (no heap allocation)
-/// - Fixed capacity: 256 bytes for data, 15 slots
-/// - Append-only with slot reuse when new suffix fits in old space
-/// - When full, caller must drain to external `SuffixBag`
-///
-/// # Memory Layout
-///
-/// ```text
-/// InlineSuffixBag (320 bytes total)
-/// ├── slots: [AtomicU32; 15]        // 60 bytes (4 bytes each)
-/// ├── size: AtomicU16               // 2 bytes
-/// ├── suffix_count: AtomicU8        // 1 byte
-/// ├── _pad: u8                      // 1 byte padding
-/// └── data: UnsafeCell<[u8; 256]>   // 256 bytes
-/// ```
 #[repr(C)]
 pub struct InlineSuffixBag {
     /// Per-slot metadata: packed (offset, length) pairs.
-    /// Accessed atomically for concurrent read/write safety.
     slots: [AtomicU32; WIDTH],
 
     /// Current write position in data buffer.
-    /// Writers update under lock, readers don't need this.
     size: AtomicU16,
 
     /// Cached count of slots with suffixes.
-    /// Writers update under lock, readers don't need this.
     suffix_count: AtomicU8,
 
     /// Padding for alignment.
     _pad: u8,
 
     /// Fixed-size data buffer.
-    /// Writers update under lock, readers access with OCC validation.
     data: UnsafeCell<[u8; CAPACITY]>,
 }
-
-// SAFETY: InlineSuffixBag is Sync because:
-// - slots use AtomicU32 for thread-safe access
-// - size/suffix_count use atomics (writers hold lock)
-// - data is protected by OCC protocol (readers validate version after read)
-unsafe impl Sync for InlineSuffixBag {}
 
 impl Debug for InlineSuffixBag {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
@@ -169,6 +120,7 @@ impl Debug for InlineSuffixBag {
     }
 }
 
+#[allow(dead_code)]
 impl InlineSuffixBag {
     // ========================================================================
     //  Constructor
@@ -212,6 +164,7 @@ impl InlineSuffixBag {
     #[expect(clippy::indexing_slicing, reason = "Bounds checked via debug_assert")]
     fn load_meta(&self, slot: usize) -> InlineSlotMeta {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+
         // SAFETY: slot bounds checked above
         let packed: u32 = self.slots[slot].load(READ_ORD);
         InlineSlotMeta::unpack(packed)
@@ -222,6 +175,7 @@ impl InlineSuffixBag {
     #[expect(clippy::indexing_slicing, reason = "Bounds checked via debug_assert")]
     fn store_meta(&self, slot: usize, meta: InlineSlotMeta) {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+
         // SAFETY: slot bounds checked above
         self.slots[slot].store(meta.pack(), WRITE_ORD);
     }
@@ -230,9 +184,10 @@ impl InlineSuffixBag {
     //  Capacity & Size
     // ========================================================================
 
-    /// Return the fixed capacity of this inline bag (256 bytes).
+    /// Return the fixed data capacity of this inline bag.
     #[must_use]
     #[inline(always)]
+    #[expect(clippy::unused_self)]
     pub const fn capacity(&self) -> usize {
         CAPACITY
     }
@@ -266,32 +221,15 @@ impl InlineSuffixBag {
     ///
     /// Uses the permutation to find active slots. This is the common case
     /// for suffix overflow during normal inserts.
-    ///
-    /// # Atomicity
-    ///
-    /// This function does NOT clear inline state. The caller must:
-    /// 1. Store the returned external bag pointer (Release)
-    /// 2. Only then is it safe to clear inline state (if desired)
-    ///
-    /// This ensures readers always see either:
-    /// - Valid inline data, OR
-    /// - Valid external data (after Acquire load of external pointer)
-    ///
-    /// The inline state becomes "orphaned" metadata after drain, but this is
-    /// safe - readers will find the suffix in external storage.
-    ///
-    /// Aborts on allocation failure (standard Rust OOM behavior).
     pub fn drain_to_external(
         &self,
         perm: &impl TreePermutation,
         new_slot: usize,
         new_suffix: &[u8],
     ) -> SuffixBag {
-        // Pass 1: Calculate required capacity and collect slot data
         let mut required_capacity: usize = new_suffix.len();
         let perm_size: usize = perm.size();
 
-        // Stack-allocated storage for slots to copy
         let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
         let mut copy_count: usize = 0;
 
@@ -318,22 +256,15 @@ impl InlineSuffixBag {
             }
         }
 
-        // Allocate external bag with capacity (aborts on OOM)
         let mut external: SuffixBag = SuffixBag::with_capacity(required_capacity);
 
-        // Pass 2: Copy suffixes to external bag using collected data
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
             // SAFETY: start and len come from valid InlineSlotMeta entries
             let suffix: &[u8] = &data[start..(start + len)];
             external.assign(slot, suffix);
         }
 
-        // Assign new suffix
         external.assign(new_slot, new_suffix);
-
-        // NOTE: We deliberately do NOT clear inline state here.
-        // The caller must publish the external pointer first, then
-        // may optionally clear inline state.
 
         external
     }
@@ -350,7 +281,6 @@ impl InlineSuffixBag {
         new_suffix: &[u8],
         buffer: Vec<u8>,
     ) -> SuffixBag {
-        // Pass 1: Calculate required capacity and collect slot data.
         let mut required_capacity: usize = new_suffix.len();
         let perm_size: usize = perm.size();
         let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
@@ -381,10 +311,15 @@ impl InlineSuffixBag {
 
         let mut external: SuffixBag = SuffixBag::from_vec(buffer);
 
-        // Reserve capacity if needed (aborts on OOM)
         if external.capacity() < required_capacity {
-            external.reserve(required_capacity - external.capacity());
+            external.reserve(required_capacity.saturating_sub(external.used()));
         }
+
+        debug_assert!(
+            external.capacity() >= required_capacity,
+            "drain_to_external_with_vec: reserve insufficient: cap={} required={required_capacity}",
+            external.capacity()
+        );
 
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
             let suffix: &[u8] = &data[start..(start + len)];
@@ -396,23 +331,10 @@ impl InlineSuffixBag {
     }
 
     /// Drain inline suffixes to external bag during node initialization.
-    ///
-    /// Unlike `drain_to_external`, this assumes slots `0..new_slot` are
-    /// already filled sequentially and doesn't rely on the permutation.
-    /// Used during split operations when the new node's permutation hasn't
-    /// been set up yet.
-    ///
-    /// # Atomicity
-    ///
-    /// Same as `drain_to_external` - does NOT clear inline state.
-    ///
-    /// Aborts on allocation failure (standard Rust OOM behavior).
     #[cold]
     pub fn drain_to_external_init(&self, new_slot: usize, new_suffix: &[u8]) -> SuffixBag {
-        // Calculate required capacity
         let mut required_capacity: usize = new_suffix.len();
 
-        // Collect existing suffixes (slots 0..new_slot filled sequentially)
         let mut slots_to_copy: [(usize, usize, usize); WIDTH] = [(0, 0, 0); WIDTH];
         let mut copy_count: usize = 0;
 
@@ -439,10 +361,8 @@ impl InlineSuffixBag {
             }
         }
 
-        // Allocate external bag (aborts on OOM)
         let mut external: SuffixBag = SuffixBag::with_capacity(required_capacity);
 
-        // Copy existing suffixes
         for &(slot, start, len) in &slots_to_copy[..copy_count] {
             let suffix: &[u8] = &data[start..(start + len)];
             external.assign(slot, suffix);
@@ -472,11 +392,6 @@ impl InlineSuffixBag {
 
     /// Get the suffix for a slot, or `None` if no suffix.
     ///
-    /// # Safety Contract
-    ///
-    /// Readers must use OCC validation after calling this method.
-    /// The returned slice is only valid if the version check passes.
-    ///
     /// # Panics
     ///
     /// Panics in debug mode if `slot >= 15`.
@@ -501,10 +416,6 @@ impl InlineSuffixBag {
             start + len
         );
 
-        // Use raw pointer to create slice directly, avoiding a retag of the entire array.
-        // This allows concurrent readers while a writer (holding the lock) modifies
-        // a different region. Readers use OCC validation to detect modifications.
-        //
         // SAFETY:
         // - Metadata bounds are validated by invariant (debug_assert above)
         // - Readers retry if version changed (OCC protocol)
@@ -528,20 +439,6 @@ impl InlineSuffixBag {
 
     /// Try to assign a suffix to a slot in-place.
     ///
-    /// This is the fast path matching C++ `stringbag::assign()`:
-    /// 1. If new suffix fits in old slot's space, reuse it
-    /// 2. Otherwise, append to end if there's room
-    /// 3. If no room, return `false` (caller should use external bag)
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold the leaf lock.
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the suffix was assigned successfully
-    /// - `false` if there's not enough capacity (caller should drain to external)
-    ///
     /// # Panics
     ///
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
@@ -551,19 +448,16 @@ impl InlineSuffixBag {
 
         let suffix_len: usize = suffix.len();
 
-        // Suffix must fit in u16
         if suffix_len > U16_MAX {
             return false;
         }
 
         let meta: InlineSlotMeta = self.load_meta(slot);
 
-        // Use raw pointer to avoid creating &mut that conflicts with concurrent readers.
         // SAFETY: We hold the lock, exclusive write access to data buffer.
         // Readers use OCC validation to detect our writes.
         let data_ptr: *mut u8 = self.data.get().cast::<u8>();
 
-        // Fast Path 1: Reuse existing slot if new suffix fits in old space
         if meta.has_suffix() && (suffix_len <= (meta.len as usize)) {
             let start: usize = meta.offset as usize;
             // SAFETY: start + suffix_len <= meta.len <= CAPACITY (invariant)
@@ -584,7 +478,6 @@ impl InlineSuffixBag {
             return true;
         }
 
-        // Fast Path 2: Append to end if there's room
         let current_size: usize = self.size.load(RELAXED) as usize;
 
         if (current_size + suffix_len) <= CAPACITY {
@@ -626,10 +519,6 @@ impl InlineSuffixBag {
     }
 
     /// Clear the suffix for a slot.
-    ///
-    /// This marks the slot as having no suffix but does not reclaim
-    /// the data buffer space. Space is only reclaimed when draining
-    /// to an external bag.
     ///
     /// # Safety
     ///

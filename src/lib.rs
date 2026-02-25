@@ -59,16 +59,6 @@
 //!
 //! - Keys must be 0-256 bytes. Longer keys will panic.
 //! - Keys are byte slices (`&[u8]`), not generic types.
-//!
-//! ### `MassTree<V>` (Default, True-Inline)
-//! - Values stored directly in leaf nodes (zero allocation per insert)
-//! - Returns `V` by copy: `get_with_guard() → Option<V>`
-//! - Use `scan()` for range iteration
-//!
-//! ### `MassTree15<V>` (Box-Based)
-//! - Values stored as `Box<V>` raw pointers (heap allocation per insert)
-//! - Returns [`ValuePtr<V>`] — zero-cost `Copy` pointer valid under EBR guard
-//! - Use `get_ref()` / `scan_ref()` for zero-copy reference access
 
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]
@@ -111,27 +101,20 @@ pub fn init_tracing() {
     use std::sync::OnceLock;
     use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-    // Store the guard in a static to keep the non-blocking writer alive.
-    // The guard ensures logs are flushed on process exit.
     static GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
-    // OnceLock::get_or_init ensures this runs exactly once
     GUARD.get_or_init(|| {
-        // Configuration from environment
         let log_dir: String =
             StdEnv::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
         let console_enabled: bool = false;
         let filter_str: String =
             StdEnv::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
 
-        // Create log directory
         let _ = StdFs::create_dir_all(&log_dir);
 
-        // File appender - non-rotating, writes to masstree.jsonl (NDJSON)
         let file_appender = tracing_appender::rolling::never(&log_dir, "masstree.jsonl");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-        // File layer - JSON format for structured analysis
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
             .with_thread_ids(true)
@@ -144,7 +127,6 @@ pub fn init_tracing() {
                 EnvFilter::try_new(&filter_str).unwrap_or_else(|_| EnvFilter::new("info")),
             );
 
-        // Console layer - compact format for human reading
         let console_layer = if console_enabled {
             Some(
                 tracing_subscriber::fmt::layer()
@@ -158,44 +140,40 @@ pub fn init_tracing() {
             None
         };
 
-        // Use try_init to avoid panic if tests set their own subscriber
         let _ = tracing_subscriber::registry()
             .with(file_layer)
             .with(console_layer)
             .try_init();
 
-        // Return the guard to be stored in OnceLock
         guard
     });
 }
 
-/// No-op when tracing feature is disabled.
+/// No-op when the `tracing` feature is disabled.
 #[cfg(not(feature = "tracing"))]
 pub const fn init_tracing() {}
 
 // All modules are crate-internal. Public types are re-exported below.
 pub(crate) mod alloc15;
 pub(crate) mod alloc_trait;
+pub(crate) mod hints;
 pub(crate) mod inline;
 pub(crate) mod internode;
 pub(crate) mod key;
+pub(crate) mod ksearch;
 pub(crate) mod leaf15;
 pub(crate) mod leaf_trait;
-pub(crate) mod nodeversion;
-pub(crate) mod permuter;
-pub(crate) mod suffix;
-pub(crate) mod tree;
-pub(crate) mod value;
-
-pub(crate) mod hints;
-pub(crate) mod ksearch;
 pub(crate) mod link;
 pub(crate) mod node_pool;
+pub(crate) mod nodeversion;
 pub(crate) mod ordering;
+pub(crate) mod permuter;
 pub(crate) mod policy;
 pub(crate) mod prefetch;
 mod retirement;
 mod shard_counter;
+pub(crate) mod suffix;
+pub(crate) mod tree;
 
 // ============================================================================
 //  Public API Re-exports
@@ -213,7 +191,6 @@ pub use tree::{MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};
 pub use inline::bits::InlineBits;
 pub use policy::RefPolicy as RefLeafPolicy;
 pub use policy::{BoxPolicy, LeafPolicy, ValuePtr};
-pub use value::LeafValue;
 
 // Key types and constants
 pub use key::{IKEY_SIZE, Key, MAX_KEY_LENGTH};
@@ -226,7 +203,9 @@ pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
 pub use leaf15::LeafNode15;
 pub use nodeversion::NodeVersion;
 pub use permuter::{AtomicPermuter, AtomicPermuter15, MAX_WIDTH, Permuter, Permuter15};
-pub use suffix::{InlineSuffixBag, PermutationProvider, SuffixBag};
+// InlineSuffixBag is intentionally not re-exported: it relies on the leaf's
+// lock/OCC protocol and is not meant to be used as a standalone concurrent type.
+pub use suffix::{PermutationProvider, SuffixBag};
 
 // Memory reclamation
 pub use retirement::BatchedRetire;
