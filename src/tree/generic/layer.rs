@@ -47,8 +47,6 @@ where
 
         match cmp {
             Ordering::Less => {
-                // existing_key.ikey() < new_key.ikey()
-                // existing goes in slot 0, new goes in slot 1
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
                     final_leaf.assign_from_key(0, existing_key, existing_output, guard);
@@ -57,8 +55,6 @@ where
             }
 
             Ordering::Greater => {
-                // new_key.ikey() < existing_key.ikey()
-                // new goes in slot 0, existing goes in slot 1
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
                     final_leaf.assign_from_key(0, new_key, new_arc, guard);
@@ -67,18 +63,13 @@ where
             }
 
             Ordering::Equal => {
-                // Keys have same ikey at this level.
-                // This happens when one key is a prefix of the other.
-                // Convention: shorter key first (prefix before extension).
                 if existing_key.current_len() <= new_key.current_len() {
-                    // existing is shorter or equal length -> existing first
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
                         final_leaf.assign_from_key(0, existing_key, existing_output, guard);
                         final_leaf.assign_from_key(1, new_key, new_arc, guard);
                     }
                 } else {
-                    // new is shorter -> new first
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
                         final_leaf.assign_from_key(0, new_key, new_arc, guard);
@@ -95,21 +86,6 @@ where
     }
 
     /// Create a new layer for suffix conflict (generic version).
-    ///
-    /// Called when two keys share the same 8-byte ikey but have different suffixes.
-    /// Creates a twig chain if needed, ending in a leaf with both keys.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Extract existing key's suffix and value from conflict slot
-    /// 2. While both keys have matching ikeys AND both have more bytes:
-    ///    - Create intermediate twig layer node
-    ///    - Chain twig nodes together via layer pointers
-    /// 3. Create final leaf with both keys (now diverged)
-    /// 4. Link twig chain to final leaf
-    /// 5. Return head of chain (or final leaf if no chain)
-    ///
-    /// Aborts on allocation failure (standard Rust OOM behavior).
     ///
     /// # Safety
     ///
@@ -140,23 +116,18 @@ where
             "try_create_layer_concurrent_generic: conflict slot should contain a value"
         );
 
-        // STEP: 2 - Shift new_key past the matching ikey
         if new_key.has_suffix() {
             new_key.shift();
         }
 
-        // STEP: 3 - Compare keys
         let mut cmp: Ordering = existing_key.compare(new_key.ikey(), new_key.current_len());
 
-        // STEP: 4 - Create twig chain while ikeys match and both have more bytes
         let mut twig_head: Option<*mut LeafNode15<P>> = None;
         let mut twig_tail: *mut LeafNode15<P> = StdPtr::null_mut();
 
         while (cmp == Ordering::Equal) && existing_key.has_suffix() && new_key.has_suffix() {
-            // Allocate twig node (aborts on OOM)
             let twig_ptr: *mut LeafNode15<P> = self.allocator.alloc_leaf_direct(false, true);
 
-            // Initialize twig with matching ikey in slot 0
             // SAFETY: twig_ptr is valid, we just allocated it
             unsafe {
                 (*twig_ptr).set_ikey(0, existing_key.ikey());
@@ -165,7 +136,6 @@ where
                 );
             }
 
-            // Link to previous twig in chain
             if twig_head.is_some() {
                 // SAFETY: twig_tail is valid from previous iteration
                 unsafe {
@@ -184,11 +154,9 @@ where
             cmp = existing_key.compare(new_key.ikey(), new_key.current_len());
         }
 
-        // STEP: 5 - Allocate final leaf (aborts on OOM)
         let final_ptr: *mut LeafNode15<P> = self.allocator.alloc_leaf_direct(false, true);
 
-        // Assign both entries to the final leaf
-        //  SAFETY: final_ptr is valid, guard is from caller
+        // SAFETY: final_ptr is valid, guard is from caller
         unsafe {
             self.assign_final_layer_entries(
                 final_ptr,
@@ -201,7 +169,6 @@ where
             );
         }
 
-        // STEP: 6 - Link twig chain to final leaf
         let result_ptr: *mut u8 = twig_head.map_or_else(
             || final_ptr.cast::<u8>(),
             |head: *mut LeafNode15<P>| {

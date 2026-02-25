@@ -27,7 +27,7 @@ use super::cursor_key::CursorDebugState;
 use super::cursor_key::CursorKey;
 use super::find::LeafBatchResult;
 use super::helper::{
-    ForwardScanHelper, KeyIndexedPosition, lower_with_position, lower_with_suffix,
+    KeyIndexedPosition, initial_ksuf_match, lower_with_position, lower_with_suffix,
 };
 use super::iterator::RangeBound;
 use super::iterator::iter_flags::ForwardFlags;
@@ -281,7 +281,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             let cursor_suffix: &[u8] = cursor_key.suffix();
             let cmp = stored_suffix.cmp(cursor_suffix);
 
-            if ForwardScanHelper::initial_ksuf_match(cmp, emit_equal)
+            if initial_ksuf_match(cmp, emit_equal)
                 && let Some(output) = leaf.load_value(slot)
             {
                 let key_len = IKEY_SIZE + stored_suffix.len();
@@ -590,9 +590,9 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = next_leaf.permutation();
 
-        let kx = lower_with_suffix(&self.cursor_key, next_leaf, &perm);
+        let pos: usize = lower_with_suffix(&self.cursor_key, next_leaf, &perm);
 
-        self.stack.update_state(next_version, perm, kx.i);
+        self.stack.update_state(next_version, perm, pos);
 
         (ScanState::FindNext, None)
     }
@@ -662,9 +662,9 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = next_leaf.permutation();
 
-        let kx: KeyIndexedPosition = lower_with_suffix(&self.cursor_key, next_leaf, &perm);
+        let pos: usize = lower_with_suffix(&self.cursor_key, next_leaf, &perm);
 
-        self.stack.update_state(next_version, perm, kx.i);
+        self.stack.update_state(next_version, perm, pos);
 
         (ScanState::FindNext, None)
     }
@@ -693,9 +693,9 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
-        let kx: KeyIndexedPosition = lower_with_suffix(&self.cursor_key, leaf, &perm);
+        let pos: usize = lower_with_suffix(&self.cursor_key, leaf, &perm);
 
-        self.stack.update_state(version, perm, kx.i);
+        self.stack.update_state(version, perm, pos);
 
         ScanState::FindNext
     }
@@ -729,8 +729,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         let version: u32 = leaf.version().stable();
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
-        let kx: KeyIndexedPosition = lower_with_suffix(&self.cursor_key, leaf, &perm);
-        self.stack.update_state(version, perm, kx.i);
+        let pos: usize = lower_with_suffix(&self.cursor_key, leaf, &perm);
+        self.stack.update_state(version, perm, pos);
 
         self.stack.set_last_ikey(0);
 

@@ -1,24 +1,3 @@
-//! ========================================================================
-//!  Batch Insert Implementation
-//! ========================================================================
-//!
-//! Provides high-throughput batch insertion by:
-//! - Sorting entries by ikey for cache locality
-//! - Grouping entries by target leaf
-//! - Acquiring a single lock per leaf group
-//! - Amortizing traversal overhead across multiple inserts
-//!
-//! # Performance Characteristics
-//!
-//! - **Best case:** 3-10x faster than individual inserts for bulk loads
-//! - **Worst case:** Same as individual inserts (random keys, every key in different leaf)
-//!
-//! # Limitations
-//!
-//! - Entries are processed in ikey order, not insertion order
-//! - Old values are returned in batch, not per-insert
-//! - Layer descent (keys > 8 bytes pointing to sublayers) falls back to single insert
-
 use std::sync::atomic::Ordering as AtomicOrdering;
 
 use seize::LocalGuard;
@@ -37,10 +16,6 @@ use super::{FindSlotResult, InsertSearchResultGeneric};
 // ============================================================================
 
 /// A single entry in a batch insert operation.
-///
-/// Contains the key bytes and the pre-converted output value.
-/// The output is created via `P::into_output()` before sorting to ensure
-/// allocation happens exactly once per entry.
 #[must_use]
 #[expect(
     missing_debug_implementations,
@@ -51,9 +26,6 @@ pub struct BatchEntry<P: LeafPolicy> {
     pub key: Vec<u8>,
 
     /// The pre-converted output value.
-    ///
-    /// Created via `P::into_output(value)` to ensure the Arc (if any)
-    /// is allocated once and reused across retries.
     pub output: P::Output,
 
     /// Cached ikey for the first 8 bytes (used for sorting).
@@ -72,9 +44,6 @@ impl<P: LeafPolicy> BatchEntry<P> {
     }
 
     /// Create a batch entry from key and pre-converted output.
-    ///
-    /// Use this when you already have an `P::Output` (e.g., from a previous
-    /// failed batch that needs retry).
     #[inline(always)]
     pub fn from_output(key: Vec<u8>, output: P::Output) -> Self {
         let ikey = Self::compute_ikey(&key);
@@ -126,15 +95,9 @@ pub struct BatchInsertResult<O> {
     pub updated: usize,
 
     /// Old values from updated keys (in no particular order).
-    ///
-    /// For `MassTree15<V>`, this is `Vec<ValuePtr<V>>`.
-    /// For `MassTree15Inline<V>`, this is `Vec<V>`.
     pub old_values: Vec<O>,
 
     /// Number of entries that failed and need individual retry.
-    ///
-    /// Entries fail when they require layer descent (sublayer operations).
-    /// The caller should retry these entries individually via `insert()`.
     pub failed: usize,
 }
 
@@ -241,24 +204,6 @@ where
 
     /// Insert multiple key-value pairs in a single batch operation.
     ///
-    /// This is the main public API for batch inserts. It:
-    /// 1. Converts all values to outputs (single allocation per entry)
-    /// 2. Sorts entries by ikey for cache locality
-    /// 3. Groups entries by target leaf
-    /// 4. Inserts with minimal lock acquisitions
-    ///
-    /// # Arguments
-    ///
-    /// * `entries` - Iterator of (key, value) pairs to insert
-    ///
-    /// # Returns
-    ///
-    /// A `BatchInsertResult` containing:
-    /// - Number of new keys inserted
-    /// - Number of existing keys updated
-    /// - Old values from updated keys
-    /// - Number of failed entries (require individual retry)
-    ///
     /// # Example
     ///
     /// ```rust
@@ -276,19 +221,6 @@ where
     /// assert_eq!(result.inserted, 3);
     /// assert_eq!(result.updated, 0);
     /// ```
-    ///
-    /// # Performance
-    ///
-    /// For N entries going to M leaves:
-    /// - Lock acquisitions: O(M) instead of O(N)
-    /// - Tree traversals: O(M) instead of O(N)
-    /// - Best when entries cluster by key prefix
-    ///
-    /// # Note on Clone Bound
-    ///
-    /// This method requires `P::Output: Clone` because entries may need to be
-    /// retried after a split. For `ValuePtr<V>`, cloning is trivial (Copy).
-    /// For `Copy` types in `Inline` mode, cloning is also cheap.
     ///
     /// # Panics
     ///
@@ -316,15 +248,6 @@ where
     ///
     /// Use this when performing multiple batch operations under the same
     /// guard to amortize guard creation overhead.
-    ///
-    /// # Arguments
-    ///
-    /// * `entries` - Iterator of (key, value) pairs to insert
-    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
-    ///
-    /// # Returns
-    ///
-    /// A `BatchInsertResult` with insertion statistics.
     ///
     /// # Panics
     ///
@@ -359,15 +282,6 @@ where
     /// Takes ownership of the entries to avoid cloning keys and outputs.
     /// Use this when you need finer control over the batch entries,
     /// or when retrying failed entries from a previous batch.
-    ///
-    /// # Arguments
-    ///
-    /// * `entries` - Batch entries (will be sorted by ikey internally)
-    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
-    ///
-    /// # Returns
-    ///
-    /// A `BatchInsertResult` with insertion statistics.
     pub fn insert_batch_entries(
         &self,
         mut entries: Vec<BatchEntry<P>>,
@@ -432,14 +346,8 @@ where
                 leaf_ptr = advanced_ptr;
                 let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
-                // Capture pre-lock state for OCC validation
                 let pre_lock_version = leaf.version().stable();
                 let pre_lock_perm_raw = leaf.permutation_raw();
-
-                // Lock the leaf with pure spin (no yield).
-                // Batch inserts optimize for throughput over fairness — yielding causes
-                // syscall overhead that dominates the short critical section.
-                // See insert.rs which uses lock_bounded() for the opposite tradeoff.
                 let mut lock = leaf.version().lock();
 
                 // Validate post-lock state
@@ -493,11 +401,10 @@ where
                 break 'retry processed;
             };
 
-            // If we made no progress, fall back to individual insert for this entry
-            // This triggers a split if needed
             if entries_processed == 0 {
                 let entry = &batch[index];
                 let mut key = Key::new(&entry.key);
+
                 match self.insert_concurrent_generic(&mut key, entry.output.clone(), guard) {
                     Ok(old) => {
                         if let Some(old_value) = old {
@@ -506,11 +413,12 @@ where
                             result.record_insert();
                         }
                     }
+
                     Err(e) => {
-                        // Internal errors indicate bugs - should not happen in normal operation
                         panic!("Batch insert failed unexpectedly: {e:?}. This indicates a bug.");
                     }
                 }
+
                 index += 1;
             } else {
                 index += entries_processed;
@@ -521,10 +429,6 @@ where
     }
 
     /// Insert as many entries as possible into a locked leaf.
-    ///
-    /// Returns the number of entries processed (inserted, updated, or marked failed).
-    /// Deferred suffix bag pointers are collected in `deferred_retires` and must be
-    /// retired via `retire_suffix_bag_ptr` after the lock is dropped.
     #[expect(
         clippy::too_many_arguments,
         reason = "Batch insertion requires context"
@@ -557,7 +461,6 @@ where
             Some(unsafe { (*next_ptr).ikey_bound() })
         };
 
-        // Handle empty leaf reuse
         if leaf.is_empty() && start_index < batch.len() {
             let entry: &BatchEntry<P> = &batch[start_index];
             let key: Key<'_> = Key::new(&entry.key);
@@ -576,28 +479,22 @@ where
             }
         }
 
-        // Process entries that belong to this leaf
         while start_index + processed < batch.len() {
             let entry = &batch[start_index + processed];
 
-            // Check if this entry belongs to a sibling leaf
             if let Some(bound) = upper_bound
                 && entry.ikey() >= bound
             {
                 break;
             }
 
-            // Check if leaf has space - if not, stop and let caller retry
-            // The next iteration of process_sorted_batch will handle the split
             if perm.size() >= LeafNode15::<P>::WIDTH {
                 break;
             }
 
-            // Create key for this entry
             let key: Key<'_> = Key::new(&entry.key);
             let is_single_layer: bool = !key.has_suffix();
 
-            // Try to insert this entry
             let insert_result = self.try_insert_entry(
                 leaf,
                 lock,
@@ -623,21 +520,9 @@ where
                     processed += 1;
                 }
 
-                BatchEntryResult::NeedsSplit => {
-                    // Leaf is full - stop processing
-                    // Caller will retry and trigger split via normal insert
-                    break;
-                }
-
-                BatchEntryResult::NeedsLayerDescent => {
-                    // Layer descent needed - stop and fall back to individual insert
-                    // This ensures the output is properly transferred to the tree
-                    // instead of being leaked when BatchEntry is dropped.
-                    break;
-                }
-
-                BatchEntryResult::Retry => {
-                    // Slot being modified - stop and retry
+                BatchEntryResult::NeedsSplit
+                | BatchEntryResult::NeedsLayerDescent
+                | BatchEntryResult::Retry => {
                     break;
                 }
             }
@@ -651,10 +536,6 @@ where
     // ========================================================================
 
     /// Try to insert a single entry into a locked leaf.
-    ///
-    /// Dispatches between single-layer search (`keys ≤ 8 bytes`) and multi-layer
-    /// search (`keys > 8 bytes`) based on `single_layer_mode`. The Found/NotFound
-    /// handling is identical for both paths.
     #[inline]
     #[expect(clippy::too_many_arguments, reason = "Insertion requires full context")]
     fn try_insert_entry(
@@ -725,37 +606,8 @@ where
         }
     }
 
-    // ========================================================================
-    //  Batch-Specific Helpers
-    // ========================================================================
-    //
-    // Helpers shared with insert.rs (find_usable_slot, validate_post_lock,
-    // validate_membership, can_reuse_empty_leaf, update_existing_value,
-    // insert_new_value) are defined in insert.rs with pub(crate) visibility.
-    //
-    // Intentional divergences from insert.rs (do not unify):
-    //
-    // 1. Lock acquisition: batch uses lock() (pure spin) because it amortizes
-    //    one lock hold across multiple entries. insert.rs uses lock_bounded()
-    //    which yields after MAX_SPINS=16, appropriate for single-key inserts
-    //    where fairness matters more than throughput.
-    //
-    // 2. Suffix retirement: insert.rs retires suffix bags inline after dropping
-    //    the lock per entry. batch.rs collects deferred_retire pointers and
-    //    retires them all after the batch loop, keeping retirements outside
-    //    the critical section.
-    //
-    // 3. Return types / control flow: insert.rs returns Result<Option<P::Output>>
-    //    directly per key with its own lock/unlock cycle. batch.rs returns
-    //    BatchEntryResult per entry, with the caller managing lock lifetime
-    //    across the entire leaf batch.
-
     /// Insert into an empty leaf. Returns a pointer to a suffix bag that must be
     /// retired after the lock is dropped (null if none).
-    ///
-    /// See also: [`insert_into_empty_leaf`](Self::insert_into_empty_leaf) in
-    /// insert.rs — same core logic but takes `pre_allocated` and returns
-    /// `(Result, *mut u8)`.
     fn insert_into_empty_leaf_batch(
         &self,
         leaf: &LeafNode15<P>,

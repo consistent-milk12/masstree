@@ -1,12 +1,11 @@
 //! Filepath: src/tree/range/helper.rs
 //!
-//! Forward scan helper and lower bound search functions.
+//! Lower bound search functions and scan helpers.
 
 use std::cmp::Ordering;
 
 use seize::LocalGuard;
 
-use crate::key::IKEY_SIZE;
 use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
@@ -19,6 +18,9 @@ use super::cursor_key::CursorKey;
 // ============================================================================
 
 /// Result of a lower bound search within a leaf.
+///
+/// Contains both the logical insertion position and optionally the physical
+/// slot if an exact ikey match was found.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyIndexedPosition {
     /// Logical position for insertion (`0..=perm.size()`).
@@ -43,80 +45,18 @@ impl KeyIndexedPosition {
 }
 
 // ============================================================================
-//  ForwardScanHelper
+//  Forward Scan Helpers
 // ============================================================================
 
-/// Helper for forward (ascending) range scans.
-#[derive(Debug, Clone, Copy)]
-pub struct ForwardScanHelper;
-
-impl ForwardScanHelper {
-    /// Advance to the next logical position.
-    ///
-    /// For forward scans: `ki + 1`.
-    #[inline(always)]
-    #[allow(dead_code, reason = "Forward scan helper API")]
-    pub const fn next(ki: usize) -> usize {
-        ki + 1
-    }
-
-    /// Advance to the next leaf in the B-link chain.
-    ///
-    /// For forward scans: `leaf.safe_next()`.
-    ///
-    /// # Safety
-    ///
-    /// The returned pointer is only valid while the guard is held.
-    #[inline(always)]
-    #[allow(dead_code, reason = "Forward scan helper API")]
-    pub fn advance<P>(leaf: &LeafNode15<P>) -> *mut LeafNode15<P>
-    where
-        P: LeafPolicy,
-    {
-        // SAFETY: Leaf pointer is valid, called during OCC read where
-        // version validation catches concurrent modifications.
-        unsafe { leaf.safe_next_unguarded() }
-    }
-
-    /// Wait for a stable version (spin until not dirty).
-    ///
-    /// Used when repositioning after a version change.
-    #[inline(always)]
-    #[allow(dead_code, reason = "Forward scan helper API")]
-    pub fn stable<P>(leaf: &LeafNode15<P>) -> u32
-    where
-        P: LeafPolicy,
-    {
-        leaf.version().stable()
-    }
-
-    /// Check if suffix comparison result allows emit for initial position.
-    #[inline(always)]
-    pub const fn initial_ksuf_match(ksuf_compare: Ordering, emit_equal: bool) -> bool {
-        match ksuf_compare {
-            Ordering::Greater => true,
-
-            Ordering::Equal => emit_equal,
-
-            Ordering::Less => false,
-        }
-    }
-
-    /// Check if a slot is a duplicate of the last emitted key.
-    #[inline(always)]
-    #[allow(dead_code, reason = "Forward scan helper API")]
-    pub fn is_duplicate(cursor_key: &CursorKey, ikey: u64, keylenx: u8) -> bool {
-        // For forward scan: duplicate if cursor >= slot
-        // cursor.compare returns: Less if cursor < slot, Equal/Greater if cursor >= slot
-        cursor_key.compare(ikey, keylenx as usize) != Ordering::Less
-    }
-
-    /// Check if a slot with suffix is a duplicate, considering suffix bytes.
-    #[inline(always)]
-    #[allow(dead_code, reason = "Forward scan helper API")]
-    pub fn is_duplicate_with_suffix(cursor_key: &CursorKey, stored_suffix: &[u8]) -> bool {
-        // For forward scan: duplicate if cursor suffix >= stored suffix
-        cursor_key.compare_suffix(stored_suffix) != Ordering::Less
+/// Check if suffix comparison result allows emit for initial position.
+///
+/// For forward scans: emit if stored > search, or stored == search and `emit_equal`.
+#[inline(always)]
+pub const fn initial_ksuf_match(ksuf_compare: Ordering, emit_equal: bool) -> bool {
+    match ksuf_compare {
+        Ordering::Greater => true,
+        Ordering::Equal => emit_equal,
+        Ordering::Less => false,
     }
 }
 
@@ -162,16 +102,17 @@ where
     KeyIndexedPosition::not_found(size)
 }
 
-/// Find the lower bound with full key comparison (ikey + suffix).
+/// Find the lower bound position with full key comparison (ikey + suffix).
 ///
-/// This is used when we need to find the exact position considering suffix
-/// bytes, not just ikey matching.
+/// Returns the logical position (`0..=perm.size()`) where scanning should
+/// resume after accounting for suffix ordering. Unlike [`lower_with_position`],
+/// the physical slot is not returned because callers only need the position.
 #[inline]
 pub fn lower_with_suffix<P>(
     cursor_key: &CursorKey,
     leaf: &LeafNode15<P>,
     perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-) -> KeyIndexedPosition
+) -> usize
 where
     P: LeafPolicy,
 {
@@ -179,7 +120,7 @@ where
 
     // If no ikey match, position is correct
     let Some(slot) = base_pos.p else {
-        return base_pos;
+        return base_pos.i;
     };
 
     // Check if suffix comparison is needed
@@ -190,9 +131,9 @@ where
     if keylenx >= LAYER_KEYLENX {
         if cursor_key.has_suffix() {
             // Cursor has suffix (or is post-unshift sentinel) -> skip layer pointer
-            return KeyIndexedPosition::not_found(base_pos.i + 1);
+            return base_pos.i + 1;
         }
-        return base_pos;
+        return base_pos.i;
     }
 
     // Handle inline keys (no suffix on either side)
@@ -202,10 +143,10 @@ where
         let slot_len = keylenx as usize;
 
         return match cursor_len.cmp(&slot_len) {
-            Ordering::Less => base_pos, // cursor < slot, position correct
+            Ordering::Less => base_pos.i, // cursor < slot, position correct
             Ordering::Equal => {
                 // Exact match - skip to next position
-                KeyIndexedPosition::not_found(base_pos.i + 1)
+                base_pos.i + 1
             }
             Ordering::Greater => {
                 // cursor > slot, find position after slots with same ikey
@@ -223,12 +164,12 @@ where
         match cursor_suffix.cmp(stored_suffix) {
             Ordering::Less => {
                 // Cursor suffix < stored: position is correct (insert before)
-                return base_pos;
+                return base_pos.i;
             }
 
             Ordering::Equal => {
                 // Exact match - we already emitted this key, skip to next position
-                return KeyIndexedPosition::not_found(base_pos.i + 1);
+                return base_pos.i + 1;
             }
 
             Ordering::Greater => {
@@ -256,7 +197,7 @@ fn find_position_after_inline<P>(
     leaf: &LeafNode15<P>,
     perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     start_i: usize,
-) -> KeyIndexedPosition
+) -> usize
 where
     P: LeafPolicy,
 {
@@ -269,28 +210,23 @@ where
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
         if slot_ikey != search_ikey {
-            // Different ikey: insert before it
-            return KeyIndexedPosition::not_found(i);
+            return i;
         }
 
         // Same ikey: check length/suffix
         let keylenx: u8 = leaf.keylenx(slot);
 
         if keylenx == KSUF_KEYLENX || keylenx >= LAYER_KEYLENX {
-            // Slot has suffix or is layer pointer: cursor (inline) < slot
-            return KeyIndexedPosition::not_found(i);
+            return i;
         }
 
         // Both inline: compare lengths
         if cursor_len <= keylenx as usize {
-            return KeyIndexedPosition::not_found(i);
+            return i;
         }
-
-        // cursor_len > slot_len, continue scanning
     }
 
-    // Cursor is greater than all slots
-    KeyIndexedPosition::not_found(size)
+    size
 }
 
 /// When cursor suffix > stored suffix (or cursor has suffix but slot doesn't),
@@ -302,7 +238,7 @@ fn find_position_after_suffix<P>(
     leaf: &LeafNode15<P>,
     perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     start_i: usize,
-) -> KeyIndexedPosition
+) -> usize
 where
     P: LeafPolicy,
 {
@@ -314,8 +250,7 @@ where
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
         if slot_ikey != search_ikey {
-            // Found a slot with different ikey: insert before it
-            return KeyIndexedPosition::not_found(i);
+            return i;
         }
 
         // Same ikey: check suffix
@@ -325,46 +260,11 @@ where
             && let Some(stored_suffix) = leaf.ksuf(slot)
             && cursor_key.suffix() <= stored_suffix
         {
-            // Found a slot where cursor suffix <= stored: insert before
-            return KeyIndexedPosition::not_found(i);
+            return i;
         }
     }
 
-    // Cursor is greater than all slots
-    KeyIndexedPosition::not_found(size)
-}
-
-// ============================================================================
-//  Keylenx Classification Helpers
-// ============================================================================
-
-/// Check if a keylenx indicates a layer pointer.
-#[inline(always)]
-#[allow(dead_code, reason = "Keylenx classification API")]
-pub const fn is_layer_keylenx(keylenx: u8) -> bool {
-    keylenx >= LAYER_KEYLENX
-}
-
-/// Check if a keylenx indicates a suffix key.
-#[inline(always)]
-#[allow(dead_code, reason = "Keylenx classification API")]
-pub const fn has_suffix_keylenx(keylenx: u8) -> bool {
-    keylenx == KSUF_KEYLENX
-}
-
-/// Get the inline key length from keylenx.
-///
-/// For inline keys (keylenx 0-8), returns the key length.
-/// For suffix/layer keys, returns 8 (the ikey portion).
-#[inline(always)]
-#[allow(dead_code, reason = "Keylenx classification API")]
-#[expect(clippy::cast_possible_truncation, reason = "Known Value")]
-pub const fn inline_key_len(keylenx: u8) -> usize {
-    if keylenx <= (IKEY_SIZE as u8) {
-        keylenx as usize
-    } else {
-        IKEY_SIZE
-    }
+    size
 }
 
 // ============================================================================

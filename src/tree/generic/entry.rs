@@ -2,28 +2,6 @@
 //!
 //! Provides [`Entry`], [`OccupiedEntry`], and [`VacantEntry`] types for
 //! ergonomic conditional insertion and modification patterns.
-//!
-//! # Performance
-//!
-//! Entry operations are optimized for single tree traversals:
-//! - `entry_with_guard()`: 1 traversal (lookup)
-//! - `or_insert()` on Vacant: 1 traversal (insert with pre-cloned output)
-//! - `and_modify()` on Occupied: 1 traversal (insert with pre-cloned output)
-//!
-//! # Concurrency
-//!
-//! Entry operations are **NOT atomic**. Between lookup and modification,
-//! other threads may modify the same key. This follows "last-writer-wins"
-//! semantics.
-//! - `or_insert` may overwrite a value inserted concurrently another thread
-//! - `or_insert` on [`Occupied`] may return a stale cached value without reinsertion
-//!   (if the key was deleted between `entry_with_guard` and `or_insert`)
-//! - `and_modify` may lose updates from concurrent mods
-//! - `or_insert_key` closure runs eagerly for vacant entries, even if the key
-//!   becomes occupied before the actual insert (wasted work + overwrite)
-//! - [`Occupied`]/[`Vacant`] classification may change before operations complete
-//!
-//! For atomic operations, use external synchronization.
 
 use std::fmt::{self as StdFmt, Debug, Formatter};
 
@@ -32,35 +10,9 @@ use seize::LocalGuard;
 use crate::{MassTreeGeneric, TreeAllocator, policy::LeafPolicy, tree::RemoveError};
 
 /// Result type for [`OccupiedEntry::try_remove_entry`].
-///
-/// - `Ok(Some((key, value)))` - Entry was removed successfully
-/// - `Ok(None)` - Key was already deleted by another thread
-/// - `Err(RemoveError)` - Removal failed (retry limit exceeded)
 pub type RemoveEntryResult<O> = Result<Option<(Vec<u8>, O)>, RemoveError>;
 
 /// A view into a single entry in a tree, which may either be vacant or occupied.
-///
-/// This enum is constructed using [`entry_with_guard()`](MassTreeGeneric::entry_with_guard).
-///
-/// # Differences from [`HashMap::Entry`](std::collections::HashMap)
-///
-/// - Returns values by-value (`P::Output`), not by mutable reference
-/// - Requires a guard for concurrent access
-/// - `and_modify` takes a transform function `FnOnce(&P::Output) -> P::Value`
-/// - Key is borrowed, not owned (zero allocation for entry creation)
-/// - Provides fallible `try_*` variants that return `Result`
-///
-/// # Concurrency Warning
-///
-/// Entry operations are NOT atomic. The occupied/vacant classification is
-/// best-effort and may change due to concurrent modifications. Notably:
-///
-/// - `or_insert` may overwrite a concurrently inserted value
-/// - `or_insert` on Occupied returns cached value without reinserting (stale if deleted)
-/// - `or_insert_with` closure runs eagerly, may waste work under races
-/// - Methods handle races gracefully without panicking
-///
-/// See module documentation for details.
 ///
 /// # Example
 ///
@@ -92,13 +44,6 @@ where
 }
 
 /// A view into an occupied entry in a tree.
-///
-/// Created by [`Entry::Occupied`] variant from
-/// [`entry_with_guard`](MassTreeGeneric::entry_with_guard).
-///
-/// NOTE: The "occupied" status was determined at entry creation time.
-/// Under concurrency, the key may have been deleted since then. Methods
-/// handle this gracefully by returning [`Option`] or [`Result`].
 pub struct OccupiedEntry<'t, 'e, P, A>
 where
     P: LeafPolicy,
@@ -118,13 +63,6 @@ where
 }
 
 /// A view into a vacant entry in a tree.
-///
-/// Created by [`Entry::Vacant`] variant from
-/// [`entry_with_guard`](MassTreeGeneric::entry_with_guard).
-///
-/// NOTE: The "vacant" status was determined at entry creation time.
-/// Under concurrency, another thread may have inserted a value since then.
-/// `insert` will overwrite any such value (last-writer-wins).
 pub struct VacantEntry<'t, 'e, P, A>
 where
     P: LeafPolicy,
@@ -299,10 +237,6 @@ where
     }
 
     /// Gets a reference to the value in the entry.
-    ///
-    /// NOTE: This is the value at entry creation time (or last modification
-    /// via this entry). If another thread has modified the key since then,
-    /// this may be stale.
     #[inline(always)]
     pub const fn get(&self) -> &P::Output {
         &self.value
@@ -315,11 +249,6 @@ where
     }
 
     /// Sets the value of the entry, and returns the old value.
-    ///
-    /// # Returns
-    ///
-    /// - `Some(old)` - Key existed, old value returned
-    /// - `None` - Key was deleted concurrently, new value inserted anyway
     #[inline(always)]
     pub fn insert(&mut self, value: P::Value) -> Option<P::Output> {
         // Convert to output before insert
@@ -329,16 +258,12 @@ where
             .tree
             .insert_output_with_guard(self.key, output, self.guard);
 
-        // Update cached value
         self.value = return_output;
 
         old
     }
 
     /// Removes the entry from the tree and returns the actually removed value.
-    ///
-    /// Unlike some Entry implementations, this returns the value that was
-    /// actually in the tree at removal time, not a stale snapshot.
     ///
     /// # Panics
     ///
@@ -368,8 +293,6 @@ where
     }
 
     /// Removes the entry from the tree and returns the key and removed value.
-    ///
-    /// NOTE: Returns the key as a [`Vec<u8>`] copy since the [`Entry`] borrows the key.
     ///
     /// # Panics
     ///
@@ -426,17 +349,6 @@ where
     }
 
     /// Inserts the value into the vacant entry and returns it.
-    ///
-    /// # Performance
-    ///
-    /// Single tree traversal. The output is created and cloned before insertion,
-    /// eliminating the need for a second lookup.
-    ///
-    /// # Concurrency Warning
-    ///
-    /// If another thread inserted a value for this key between `entry_with_guard()`
-    /// and `insert()`, this method will **overwrite** that value. This is
-    /// "last-writer-wins" semantics.
     #[inline(always)]
     pub fn insert(self, value: P::Value) -> P::Output {
         // Convert to output before insert, clone for return value
@@ -508,13 +420,6 @@ where
     A: TreeAllocator<P>,
 {
     /// Create an Entry by looking up the key.
-    ///
-    /// This is called by `MassTreeGeneric::entry_with_guard`.
-    ///
-    /// # Performance
-    ///
-    /// One tree traversal for the initial lookup. Key is borrowed,
-    /// not copied (zero allocation).
     #[inline]
     pub(crate) fn new(
         tree: &'t MassTreeGeneric<P, A>,

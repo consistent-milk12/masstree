@@ -1,12 +1,3 @@
-//! ========================================================================
-//!  Generic Optimistic Read Path
-//! ========================================================================
-//!
-//! Refactored for performance with:
-//! - `#[inline(always)]` on hot path helpers
-//! - Linear search (predictable branches, cache-friendly)
-//! - Unified implementation via closure for value extraction
-
 use std::ptr as StdPtr;
 
 use super::{Key, LeafPolicy, LocalGuard, MassTreeGeneric, NodeVersion, TreeAllocator};
@@ -89,20 +80,6 @@ enum TwigDescentResult<Leaf> {
 // ============================================================================
 
 /// Search a leaf for a key in multi-layer mode (keys > 8 bytes).
-///
-/// Handles:
-/// - Suffix comparison for keys with same 8-byte prefix
-/// - Layer pointer detection for descent
-///
-/// Optimized with loop unrolling (3 at a time).
-///
-/// Uses Relaxed ordering for ikey loads after the initial Acquire on permutation.
-/// This is safe because:
-/// 1. `permutation()` uses Acquire ordering, synchronizing with writer's Release
-/// 2. OCC version validation at the end catches any races
-///
-/// Uses `#[inline]` - medium-sized function with loop unrolling; let compiler
-/// decide based on call-site context to avoid I-cache pressure.
 #[inline]
 #[expect(
     clippy::collapsible_if,
@@ -124,27 +101,19 @@ where
         key.current_len() as u8
     };
 
-    // OPTIM: Fast path flag - if search key has no suffix, skip suffix/layer checks
-    // For inline keys (≤8 bytes), we don't need to compare suffixes or check for layer pointers
     let needs_suffix_check: bool = key.has_suffix();
 
     let mut i: usize = 0;
 
-    // Unrolled loop: process 3 slots per iteration
-    // Speculative batch load: load all slots and ikeys upfront for better ILP
-    // Use Relaxed ordering - synchronization already established by permutation load
     while i + 3 <= size {
-        // Batch load slots (bit extraction only, no memory access)
         let s0: usize = perm.get(i);
         let s1: usize = perm.get(i + 1);
         let s2: usize = perm.get(i + 2);
 
-        // Batch load ikeys with Relaxed ordering (safe after permutation Acquire)
         let ikey0: u64 = leaf.ikey_relaxed(s0);
         let ikey1: u64 = leaf.ikey_relaxed(s1);
         let ikey2: u64 = leaf.ikey_relaxed(s2);
 
-        // Now check sequentially with early exit
         if ikey0 == target_ikey {
             if let Some(result) =
                 check_slot_match(leaf, s0, search_keylenx, key, needs_suffix_check)
@@ -172,7 +141,6 @@ where
         i += 3;
     }
 
-    // Handle remainder (0-2 elements)
     while i < size {
         let slot: usize = perm.get(i);
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
@@ -192,15 +160,6 @@ where
 }
 
 /// Optimized slot match check with suffix-check bypass.
-///
-/// When `needs_suffix_check` is false (inline keys ≤8 bytes), skips:
-/// - Suffix comparison (no suffix exists)
-/// - Layer pointer detection (inline keys can't be layer pointers)
-///
-/// # Prefetch Strategy
-///
-/// Prefetches the value/layer pointer target immediately after loading it.
-/// This hides memory latency while suffix comparison runs.
 #[inline(always)]
 fn check_slot_match<P>(
     leaf: &LeafNode15<P>,
@@ -219,14 +178,9 @@ where
         return None;
     }
 
-    // Prefetch value target to hide memory latency during suffix check.
-    // For Arc: prefetches the heap allocation behind the pointer.
-    // For inline: no-op (value is already in the leaf's cache lines).
     leaf.prefetch_value(slot);
 
     if slot_keylenx == search_keylenx {
-        // Potential exact match
-        // OPTIM: Only check suffix if the search key has one
         if needs_suffix_check
             && slot_keylenx == KSUF_KEYLENX
             && !leaf.ksuf_equals(slot, key.suffix())
@@ -238,14 +192,9 @@ where
         return Some(LookupResult::ValueSlot(slot));
     }
 
-    // OPTIM: Layer pointer check only relevant if search key has suffix
     if needs_suffix_check && slot_keylenx >= LAYER_KEYLENX {
         let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
 
-        // Null check: concurrent gc_layer can null the value between is_value_empty
-        // and load_layer_raw (TOCTOU). has_changed() misses in-progress modifications
-        // (lock bits only), so null can slip past OCC validation. Skip slot and let
-        // the caller's version check detect the change after the writer unlocks.
         if layer_ptr.is_null() {
             return None;
         }
@@ -269,10 +218,6 @@ where
     ///
     /// Called when version validation fails. Follows B-link chain if split
     /// occurred, otherwise returns new version for retry.
-    ///
-    /// Returns `(new_leaf_ptr, should_restart_leaf_loop)`:
-    /// - If leaf changed: `(new_ptr, true)`
-    /// - If same leaf, new version: `(same_ptr, false)` with updated version
     #[cold]
     #[inline(never)]
     fn handle_version_change(
@@ -294,9 +239,6 @@ where
     }
 
     /// OCC version validation for single-layer read paths.
-    ///
-    /// Checks if the version changed since our read phase. If a split occurred,
-    /// B-link advances to find the correct leaf. Returns the action to take.
     #[inline(always)]
     fn validate_version_single(
         &self,
@@ -328,9 +270,6 @@ where
     }
 
     /// OCC version validation for multi-layer read paths.
-    ///
-    /// Uses `handle_version_change` which encapsulates the B-link advance
-    /// and leaf comparison logic.
     #[inline(always)]
     fn validate_version_multi(
         &self,
@@ -374,9 +313,6 @@ where
     ) -> Option<*mut LeafNode15<P>> {
         let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
 
-        // If leaf is deleted, we gotta follow the next ptr (unmarked) to find our key.
-        // C++ ref: masstree_struct.hh:704 - "while (likely(!v.deleted()) && ..."
-        // When deleted, the next ptr is marked but still valid.
         if leaf.version().is_deleted() {
             let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
 
@@ -384,12 +320,9 @@ where
                 return Some(next_ptr);
             }
 
-            // Deleted leaf with no successor, key can not exist
             return None;
         }
 
-        // Normal case: follow B-link if key >= next leaf's bound
-        // only follow unmarked ptr's (marked = being unlinked)
         let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
 
         if !next_ptr.is_null() && !Linker::is_marked(next_raw) {
@@ -405,12 +338,6 @@ where
     }
 
     /// Check if sublayer is deleted before descending.
-    ///
-    /// Returns `true` if sublayer is valid, `false` if deleted (key not found).
-    ///
-    /// This check runs on every layer descent (hot path). Only finding a deleted
-    /// sublayer is rare. The function is tiny (pointer cast + load), so inlining
-    /// is always beneficial.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_sublayer_valid(&self, layer_ptr: *mut u8) -> bool {
@@ -429,23 +356,6 @@ where
     }
 
     /// Descend through a chain of trivial twigs (single-entry layer leaves).
-    ///
-    /// A "trivial twig" is a leaf node with exactly one entry that is a layer pointer,
-    /// still marked as a layer root. These form when keys share multiple 8-byte prefix chunks.
-    ///
-    /// This method loops through consecutive twigs without restarting `'layer_loop`,
-    /// avoiding repeated overhead. It maintains all OCC safety invariants and exits
-    /// to the normal path on any concurrent modification or unexpected structure.
-    ///
-    /// # Preconditions
-    ///
-    /// - `initial_ptr` is non-null and points to a valid node (caller must verify)
-    /// - The node at `initial_ptr` has already passed `is_deleted()` check
-    ///
-    /// # Safety
-    ///
-    /// This function performs unsafe pointer casts. The caller must ensure `initial_ptr`
-    /// is a valid pointer to a node protected by the guard's epoch.
     #[inline]
     #[expect(
         clippy::too_many_lines,
@@ -462,48 +372,31 @@ where
         loop {
             key.shift();
 
-            // ------------------------------------------------------------------
-            // STEP 1: Read version and validate node type BEFORE casting to leaf
-            // ------------------------------------------------------------------
-            // Layer pointers can point to internodes after splits. We must check
-            // is_leaf() before assuming we can treat this as a leaf node.
-
             // SAFETY: ptr is non-null (checked by caller or previous iteration)
             #[expect(clippy::cast_ptr_alignment, reason = "NodeVersion is first field")]
             let node_version: &NodeVersion = unsafe { &*ptr.cast::<NodeVersion>() };
 
-            // Check if sublayer was deleted (return None, matching line 698-701 behavior)
             if node_version.is_deleted() {
                 return TwigDescentResult::ReturnNone;
             }
 
-            // Check if node is still a leaf (layer roots can become internodes after splits)
             if !node_version.is_leaf() {
-                // Not a leaf - must use normal traversal via reach_leaf_concurrent_generic
                 return TwigDescentResult::RestartLayerLoop {
                     layer_root: ptr.cast_const(),
                     in_sublayer: true,
                 };
             }
 
-            // Check if node is still a layer root (skipping reach_leaf is only safe for roots)
-            // Twigs are allocated with ROOT_BIT set (try_alloc_leaf(false, true))
             if !node_version.is_root() {
-                // No longer a root - must use normal traversal
                 return TwigDescentResult::RestartLayerLoop {
                     layer_root: ptr.cast_const(),
                     in_sublayer: true,
                 };
             }
-
-            // ------------------------------------------------------------------
-            // STEP 2: Now safe to cast to leaf and read leaf-specific fields
-            // ------------------------------------------------------------------
 
             // SAFETY: Verified is_leaf() above, ptr is valid sublayer pointer
             let twig: &LeafNode15<P> = unsafe { &*ptr.cast::<LeafNode15<P>>() };
 
-            // Check for deleted_layer (sublayer was GC'd - must restart from main root)
             if twig.deleted_layer() {
                 key.unshift_all();
                 let root = self.load_root_ptr_generic(guard);
@@ -514,37 +407,18 @@ where
                 };
             }
 
-            // ------------------------------------------------------------------
-            // STEP 3: Version stabilization
-            // ------------------------------------------------------------------
-            // Use stable() which spins until dirty bits clear. This is acceptable
-            // in this niche path because:
-            // 1. Twigs are rarely contended (single-entry nodes with no values)
-            // 2. If contention is high, we'll exit fast path via has_changed() anyway
-            // 3. Avoiding try_stable() simplifies the code (no B-link fallback needed)
             let twig_version: u32 = twig.version().stable();
-
-            // Prefetch for next iteration (hides memory latency)
             twig.prefetch_for_search();
 
-            // ------------------------------------------------------------------
-            // STEP 4: "Too-right" detection (concurrent split moved our key)
-            // ------------------------------------------------------------------
             let target_ikey: u64 = key.ikey();
 
             if !twig.prev(guard).is_null() && target_ikey < twig.ikey_bound() {
-                // We're on a leaf that's to the right of where key should be.
-                // Exit to normal leaf_loop which will handle this (either via
-                // the early too-right check or NotFound → too-right recovery).
                 return TwigDescentResult::ContinueLeafLoop {
                     layer_root: ptr.cast_const(),
                     leaf_ptr: ptr.cast::<LeafNode15<P>>(),
                 };
             }
 
-            // ------------------------------------------------------------------
-            // STEP 5: Check if this is a trivial twig we can fast-path through
-            // ------------------------------------------------------------------
             let twig_perm = twig.permutation();
 
             // Exit fast path if not single-entry
@@ -558,7 +432,6 @@ where
             let slot: usize = twig_perm.get(0);
             let twig_ikey: u64 = twig.ikey_relaxed(slot);
 
-            // Verify ikey matches (detects concurrent modification)
             if twig_ikey != target_ikey {
                 return TwigDescentResult::ContinueLeafLoop {
                     layer_root: ptr.cast_const(),
@@ -568,7 +441,6 @@ where
 
             let twig_keylenx: u8 = twig.keylenx(slot);
 
-            // Exit fast path if not a layer pointer (it's a value)
             if twig_keylenx < LAYER_KEYLENX {
                 return TwigDescentResult::ContinueLeafLoop {
                     layer_root: ptr.cast_const(),
@@ -576,20 +448,15 @@ where
                 };
             }
 
-            // ------------------------------------------------------------------
-            // STEP 6: Extract next pointer and validate
-            // ------------------------------------------------------------------
-            // Empty slot means slot is being modified (matches check_slot_match)
             if twig.is_value_empty(slot) {
                 return TwigDescentResult::ContinueLeafLoop {
                     layer_root: ptr.cast_const(),
                     leaf_ptr: ptr.cast::<LeafNode15<P>>(),
                 };
             }
+
             let next_ptr: *mut u8 = twig.load_layer_raw(slot);
 
-            // Null check: concurrent gc_layer can null the value between
-            // is_value_empty and load_layer_raw (TOCTOU race).
             if next_ptr.is_null() {
                 return TwigDescentResult::ContinueLeafLoop {
                     layer_root: ptr.cast_const(),
@@ -597,43 +464,21 @@ where
                 };
             }
 
-            // ------------------------------------------------------------------
-            // STEP 7: Version validation before following pointer
-            // ------------------------------------------------------------------
             if twig.version().has_changed(twig_version) {
-                // Concurrent modification detected - fall back to safe path
                 return TwigDescentResult::ContinueLeafLoop {
                     layer_root: ptr.cast_const(),
                     leaf_ptr: ptr.cast::<LeafNode15<P>>(),
                 };
             }
 
-            // ------------------------------------------------------------------
-            // STEP 8: Check if search key has more layers to descend
-            // ------------------------------------------------------------------
-            // CRITICAL: This mirrors the check in search_leaf_multi_layer/check_slot_match
-            // (line 210-211) that only returns LookupResult::Layer when needs_suffix_check
-            // is true. Without this, we'd call key.shift() on a key with no suffix,
-            // triggering a debug assertion panic (src/key.rs:238).
-            //
-            // Scenario: search key is a strict prefix of longer keys that created
-            // a deeper twig chain. Normal lookup would stop here (search returns
-            // NotFound), but we must also stop the fast path.
             if !key.has_suffix() {
-                // Search key has no more layers - it's a prefix of stored keys.
-                // Exit to normal search which will return NotFound.
                 return TwigDescentResult::ContinueLeafLoop {
                     layer_root: ptr.cast_const(),
                     leaf_ptr: ptr.cast::<LeafNode15<P>>(),
                 };
             }
 
-            // ------------------------------------------------------------------
-            // STEP 9: Follow the layer pointer to next node
-            // ------------------------------------------------------------------
             ptr = next_ptr;
-
-            // Loop continues: check if next node is also a trivial twig
         }
     }
 }
@@ -648,18 +493,6 @@ where
     A: TreeAllocator<P>,
 {
     /// Get a value by key.
-    ///
-    /// Creates a guard internally. For bulk operations, prefer
-    /// [`get_with_guard`](Self::get_with_guard) to amortize guard creation cost.
-    ///
-    /// Returns an owned clone of the value. The internal EBR guard is
-    /// released before returning, so the value is cloned to ensure
-    /// independent ownership.
-    ///
-    /// # Returns
-    ///
-    /// * `Some(V)` - If the key was found (owned clone)
-    /// * `None` - If the key was not found
     #[must_use]
     #[inline]
     pub fn get(&self, key: &[u8]) -> Option<P::Value>
@@ -672,10 +505,6 @@ where
     }
 
     /// Check if a key exists in the tree.
-    ///
-    /// Creates a guard internally. For bulk operations, prefer
-    /// [`contains_key_with_guard`](Self::contains_key_with_guard) to amortize
-    /// guard creation cost.
     ///
     /// # Example
     ///
@@ -694,9 +523,6 @@ where
     }
 
     /// Check if a key exists using an existing guard.
-    ///
-    /// Use this when performing multiple lookups under the same guard
-    /// to amortize guard creation overhead.
     ///
     /// # Example
     ///
@@ -766,8 +592,6 @@ where
             return next_ptr;
         }
 
-        // No successor mean we must restart from root
-        // This can happen if the deleted leaf was the last in its layer
         self.reach_leaf_concurrent_generic(layer_root, key, is_sublayer, guard)
     }
 
@@ -795,17 +619,12 @@ where
             // SAFETY: leaf_ptr protected by guard
             let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
-            // If we landed on a deleted leaf, follow B-link to successor.
-            // This can happen during concurrent coalesce operations.
             if leaf.version().is_deleted() {
                 leaf_ptr = self.handle_deleted_leaf(leaf, layer_root, key, false, guard);
 
                 continue 'leaf_loop;
             }
 
-            // OPTIM: Use try_stable() to avoid spinning on locked leaf.
-            // If leaf is locked, opportunistically check B-link chain - under
-            // high contention, our key may have moved to a sibling leaf.
             let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
                 // Prefetch AFTER successful try_stable to avoid cache pollution
                 leaf.prefetch_for_search();
@@ -823,12 +642,7 @@ where
                 leaf.version().stable()
             };
 
-            // EARLY too-right check: detect if we descended to a leaf that's
-            // to the right of where the key should be. This can happen during
-            // concurrent splits when internode routing is momentarily inconsistent.
-            // Check BEFORE searching to avoid wasting cycles on the wrong leaf.
             if !leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound() {
-                // Reload root to get latest pointer after concurrent modifications
                 layer_root = self.load_root_ptr_generic(guard);
                 leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
 
@@ -840,16 +654,13 @@ where
                 let size: usize = perm.size();
                 let mut found_ptr: *mut u8 = StdPtr::null_mut();
 
-                // Simple linear search - let LLVM decide optimal unrolling.
                 for i in 0..size {
                     let slot: usize = perm.get(i);
 
-                    // Use Relaxed ordering - permutation() Acquire already synchronizes
                     if (leaf.ikey_relaxed(slot) == target_ikey)
                         && (leaf.keylenx(slot) == search_keylenx)
                         && !leaf.is_value_empty(slot)
                     {
-                        // Prefetch value target while version validation runs.
                         leaf.prefetch_value(slot);
                         found_ptr = leaf.load_value_raw(slot);
 
@@ -876,18 +687,12 @@ where
                     return Some(extract(found_ptr));
                 }
 
-                // Not found, check dirty or B-link (also handles deleted via check_blink_chain)
                 if unlikely(leaf.version().is_dirty()) {
                     version = leaf.version().stable();
 
                     continue 'search_loop;
                 }
 
-                // Check lower bound for non-leftmost leaves ("too-right" detection).
-                // If key < ikey_bound and prev != null, we descended to a leaf that's
-                // to the right of where the key should be. Recovery requires restart
-                // from layer root (can't safely walk left in a B-link tree).
-                // NOTE: This is a fallback; the early check above should usually catch this.
                 if unlikely(!leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound()) {
                     // Reload root to get latest pointer after concurrent modifications
                     layer_root = self.load_root_ptr_generic(guard);
@@ -931,20 +736,11 @@ where
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             'leaf_loop: loop {
-                // OPTIM: Compute ikey once per leaf iteration.
-                // key.shift() mutates on layer descent, so this must be per-iteration.
                 let target_ikey: u64 = key.ikey();
 
                 let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
-                // If we landed on a deleted leaf, follow B-link to successor.
-                // This can happen during concurrent coalesce operations.
                 if leaf.version().is_deleted() {
-                    // If entire sublayer was GC'd (deleted_layer modstate), restart
-                    // from tree root. handle_deleted_leaf cannot recover from this:
-                    // the sublayer root has no B-link successor and
-                    // reach_leaf_concurrent_generic returns the same deleted node,
-                    // causing an infinite leaf_loop.
                     if in_sublayer && leaf.deleted_layer() {
                         key.unshift_all();
                         layer_root = self.load_root_ptr_generic(guard);
@@ -958,9 +754,7 @@ where
                     continue 'leaf_loop;
                 }
 
-                // OPTIMIZATION: Use try_stable() to avoid spinning on locked leaf.
                 let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
-                    // Prefetch AFTER successful try_stable to avoid cache pollution
                     leaf.prefetch_for_search();
                     v
                 } else {
@@ -975,10 +769,7 @@ where
                     leaf.version().stable()
                 };
 
-                // EARLY too-right check: detect if we descended to a leaf that's
-                // to the right of where the key should be. Check BEFORE searching.
                 if !leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound() {
-                    // Reload root to get latest pointer after concurrent modifications
                     layer_root = self.load_root_ptr_generic(guard);
                     leaf_ptr =
                         self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
@@ -996,7 +787,6 @@ where
                         continue 'layer_loop;
                     }
 
-                    // target_ikey already computed at start of 'leaf_loop
                     let result: LookupResult = search_leaf_multi_layer::<P>(leaf, key);
 
                     match self.validate_version_multi(leaf, leaf.version(), key, version, guard) {
@@ -1020,10 +810,6 @@ where
                         }
 
                         LookupResult::Layer(ptr) => {
-                            // Defense-in-depth null check: concurrent gc_layer can null
-                            // the value between is_value_empty and load_layer_raw in
-                            // check_slot_match (TOCTOU race). check_slot_match has its
-                            // own null guard, but we keep this as a safety net.
                             if ptr.is_null() {
                                 continue 'search_loop;
                             }
@@ -1040,10 +826,6 @@ where
                                 return None;
                             }
 
-                            // === TWIG-CHAIN FAST PATH ===
-                            // Collapse consecutive single-entry layer pointers without
-                            // full outer-loop restart. Falls back to normal path on any
-                            // concurrent modification or non-trivial structure.
                             match self.descend_twig_chain(ptr, key, guard) {
                                 TwigDescentResult::ContinueLeafLoop {
                                     layer_root: new_root,
@@ -1079,13 +861,7 @@ where
                                 continue 'search_loop;
                             }
 
-                            // Check lower bound for non-leftmost leaves ("too-right" detection).
-                            // If key < ikey_bound and prev != null, we descended to a leaf that's
-                            // to the right of where the key should be. Recovery requires restart
-                            // from layer root (can't safely walk left in a B-link tree).
-                            // NOTE: This is a fallback; the early check above should usually catch this.
                             if !leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound() {
-                                // Reload root to get latest pointer after concurrent modifications
                                 layer_root = self.load_root_ptr_generic(guard);
                                 leaf_ptr = self.reach_leaf_concurrent_generic(
                                     layer_root,
@@ -1097,7 +873,6 @@ where
                                 continue 'leaf_loop;
                             }
 
-                            // check_blink_chain now also handles deleted leaves
                             if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey, guard)
                             {
                                 leaf_ptr = next_ptr;
@@ -1127,26 +902,6 @@ where
     ///
     /// This is significantly faster than [`Self::get_with_guard`] for read-heavy workloads
     /// because it avoids atomic reference count operations (Arc clone/drop).
-    ///
-    /// # Note
-    ///
-    /// This method is only available for pointer-backed storage modes (Currently only `MassTree15`,
-    /// which uses `Box`)
-    ///
-    /// It is not available for true-inline storage (`MassTree15Inline`) because
-    /// values are stored as atomic bits, not at stable addresses.
-    ///
-    /// For true-inline trees, use `get`/`get_with_guard` instead (returns by copy).
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to look up (byte slice)
-    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
-    ///
-    /// # Returns
-    ///
-    /// * `Some(&V)` - A reference to the value, valid for the guard's lifetime
-    /// * `None` - If the key was not found
     #[must_use]
     #[inline(always)]
     pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g P::Value> {

@@ -17,16 +17,6 @@ where
     ///
     /// This is the main read path for all storage modes, including true-inline.
     /// Uses optimistic concurrency control with version validation.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to look up (byte slice)
-    /// * `guard` - A guard from [`MassTreeGeneric::guard()`]
-    ///
-    /// # Returns
-    ///
-    /// * `Some(output)` - The value if found
-    /// * `None` - If the key was not found
     #[inline(always)]
     pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<P::Output> {
         let mut key: Key<'_> = Key::new(key);
@@ -80,9 +70,6 @@ where
                 continue 'leaf_loop;
             }
 
-            // OPTIM: Use try_stable() to avoid spinning on locked leaf.
-            //
-            // If locked, check B-link chain, key may have moved to sibling.
             let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
                 leaf.prefetch_for_search();
                 v
@@ -210,11 +197,6 @@ where
 
                 // Handle deleted leaf (concurrent coalesce) - rare condition
                 if unlikely(leaf.version().is_deleted()) {
-                    // If entire sublayer was GC'd (deleted_layer modstate), restart
-                    // from tree root. handle_deleted_leaf cannot recover from this:
-                    // the sublayer root has no B-link successor and
-                    // reach_leaf_concurrent_generic returns the same deleted node,
-                    // causing an infinite leaf_loop.
                     if in_sublayer && leaf.deleted_layer() {
                         key.unshift_all();
                         layer_root = self.load_root_ptr_generic(guard);
@@ -347,10 +329,6 @@ where
                                 continue 'leaf_loop;
                             }
 
-                            // Fallback too-right check: If key < ikey_bound and prev != null,
-                            // we descended to a leaf that's to the right of where the key should be.
-                            // Recovery requires restart from layer root (can't safely walk left).
-                            // NOTE: This is defense-in-depth; the early check above catches most cases.
                             if unlikely(
                                 !leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound(),
                             ) {
