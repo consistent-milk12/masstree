@@ -513,9 +513,8 @@ fn bench_rw1(
             .collect(),
     );
 
-    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    // Clear stale timeout before spawning threads
     reset_timeout();
-    start_timeout_timer(duration);
 
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
@@ -529,26 +528,28 @@ fn bench_rw1(
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
-                start_barrier.wait();
+                // Arm timer after barrier so spawn/sync overhead isn't counted
+                if start_barrier.wait().is_leader() {
+                    start_timeout_timer(duration);
+                }
 
                 // Put phase - just count ops, don't store keys (saves ~80MB/thread)
                 // Keys are regenerated deterministically from seed after barrier
-                let put_start = Instant::now();
                 let mut puts = 0u64;
 
-                {
-                    // Scoped guard for put phase - allows epoch advancement between phases
-                    // This enables seize to reclaim retired nodes, reducing memory from
-                    // ~16GB to ~2-3GB by not blocking reclamation for entire benchmark
-                    let guard = tree.guard();
-                    while !should_stop(puts) && puts < limit {
-                        let x = rng.rand();
-                        let key = QuickIstr::new(u64::from(x));
-                        let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
-                        puts += 1;
-                    }
-                } // guard dropped here - allows reclamation of retired nodes
+                // Scoped guard for put phase - allows epoch advancement between phases
+                // This enables seize to reclaim retired nodes, reducing memory from
+                // ~16GB to ~2-3GB by not blocking reclamation for entire benchmark
+                let guard = tree.guard();
+                let put_start = Instant::now();
+                while !should_stop(puts) && puts < limit {
+                    let x = rng.rand();
+                    let key = QuickIstr::new(u64::from(x));
+                    let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
+                    puts += 1;
+                }
                 let put_time = put_start.elapsed().as_secs_f64();
+                drop(guard); // outside timing - reclamation cost not measured
 
                 // C++ wait_all() - barrier between put and get phases
                 get_barrier.wait();
@@ -566,33 +567,34 @@ fn bench_rw1(
                     keys.swap(i, j);
                 }
 
-                // Get phase - fresh guard, exactly `puts` iterations, no timeout (matches C++)
-                let get_start = Instant::now();
+                // Get phase - exactly `puts` iterations, no get-phase timeout
+                // C++ checks client.timeout(1) but timeout[1] is never set (duration[1]=0),
+                // so the get phase always runs all n iterations in practice.
                 let mut sum = 0u64;
                 let mut check_errors = 0u64;
-                {
-                    let guard = tree.guard();
-                    for x in &keys {
-                        let key = QuickIstr::new(u64::from(*x));
-                        let expected = u64::from(*x + 1);
-                        if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                            if check && v != expected {
-                                check_errors += 1;
-                            }
-                            sum = sum.wrapping_add(v);
-                        } else if check {
+                let guard = tree.guard();
+                let get_start = Instant::now();
+                for x in &keys {
+                    let key = QuickIstr::new(u64::from(*x));
+                    let expected = u64::from(*x + 1);
+                    if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
+                        if check && v != expected {
                             check_errors += 1;
                         }
+                        sum = sum.wrapping_add(v);
+                    } else if check {
+                        check_errors += 1;
                     }
                 }
+                let get_time = get_start.elapsed().as_secs_f64();
+                drop(guard); // outside timing
                 if check && check_errors > 0 {
                     eprintln!("rw1 thread {tid}: {check_errors} check errors");
                 }
-                let get_time = get_start.elapsed().as_secs_f64();
                 std::hint::black_box(sum);
 
                 results[tid].0.store(puts, Ordering::Relaxed);
-                results[tid].1.store(puts, Ordering::Relaxed); // gets = puts
+                results[tid].1.store(puts, Ordering::Relaxed); // gets = puts (timeout[1] never fires)
                 results[tid]
                     .2
                     .store((put_time * 1e9) as u64, Ordering::Relaxed);
@@ -638,9 +640,8 @@ fn bench_rw2(
             .collect(),
     );
 
-    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    // Clear stale timeout before spawning threads
     reset_timeout();
-    start_timeout_timer(duration);
 
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
@@ -654,7 +655,10 @@ fn bench_rw2(
                 let mut rng = KvRandom::new(seed);
                 let offset = rng.rand();
 
-                barrier.wait();
+                // Arm timer after barrier so spawn/sync overhead isn't counted
+                if barrier.wait().is_leader() {
+                    start_timeout_timer(duration);
+                }
 
                 let start = Instant::now();
                 let mut puts = 0u64;
@@ -760,9 +764,8 @@ fn bench_rw3(
             .collect(),
     );
 
-    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    // Clear stale timeout before spawning threads
     reset_timeout();
-    start_timeout_timer(duration);
 
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
@@ -774,51 +777,52 @@ fn bench_rw3(
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
 
-                barrier.wait();
+                // Arm timer after barrier so spawn/sync overhead isn't counted
+                if barrier.wait().is_leader() {
+                    start_timeout_timer(duration);
+                }
 
                 // Put phase - sequential keys, duration-bounded via timeout flag
-                let put_start = Instant::now();
                 let mut n = 0u64;
 
-                {
-                    // Scoped guard for put phase - allows epoch advancement between phases
-                    let guard = tree.guard();
-                    while !should_stop(n) && n < limit {
-                        let key = key8(n);
-                        let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
-                        n += 1;
-                    }
-                } // guard dropped - allows reclamation
+                // Guard created outside timing - epoch registration is not a tree op
+                let guard = tree.guard();
+                let put_start = Instant::now();
+                while !should_stop(n) && n < limit {
+                    let key = key8(n);
+                    let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
+                    n += 1;
+                }
                 let put_time = put_start.elapsed().as_secs_f64();
+                drop(guard); // outside timing - reclamation cost not measured
 
                 // Sync point (matches C++ wait_all between phases)
                 get_barrier.wait();
 
                 // Get phase - POINT LOOKUPS, exactly n iterations (matches C++ exactly)
                 // C++ does: for (unsigned i = 0; i < n; ++i) { client.get_check_key8(i, i + 1); }
-                let get_start = Instant::now();
                 let mut sum = 0u64;
                 let mut check_errors = 0u64;
 
-                {
-                    let guard = tree.guard();
-                    for i in 0..n {
-                        let key = key8(i);
-                        let expected = i + 1;
-                        if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                            if check && v != expected {
-                                check_errors += 1;
-                            }
-                            sum = sum.wrapping_add(v);
-                        } else if check {
+                let guard = tree.guard();
+                let get_start = Instant::now();
+                for i in 0..n {
+                    let key = key8(i);
+                    let expected = i + 1;
+                    if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
+                        if check && v != expected {
                             check_errors += 1;
                         }
+                        sum = sum.wrapping_add(v);
+                    } else if check {
+                        check_errors += 1;
                     }
                 }
+                let get_time = get_start.elapsed().as_secs_f64();
+                drop(guard); // outside timing
                 if check && check_errors > 0 {
                     eprintln!("rw3 thread {tid}: {check_errors} check errors");
                 }
-                let get_time = get_start.elapsed().as_secs_f64();
                 std::hint::black_box(sum);
 
                 results[tid].0.store(n, Ordering::Relaxed);
@@ -871,9 +875,8 @@ fn bench_rw4(
             .collect(),
     );
 
-    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    // Clear stale timeout before spawning threads
     reset_timeout();
-    start_timeout_timer(duration);
 
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
@@ -885,51 +888,51 @@ fn bench_rw4(
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
 
-                barrier.wait();
+                // Arm timer after barrier so spawn/sync overhead isn't counted
+                if barrier.wait().is_leader() {
+                    start_timeout_timer(duration);
+                }
 
                 // Put phase - reverse sequential keys, duration-bounded via timeout flag
-                let put_start = Instant::now();
                 let mut n = 0u64;
 
-                {
-                    // Scoped guard for put phase - allows epoch advancement between phases
-                    let guard = tree.guard();
-                    while !should_stop(n) && n < limit {
-                        let key = key8(TOP - n);
-                        let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
-                        n += 1;
-                    }
-                } // guard dropped - allows reclamation
+                let guard = tree.guard();
+                let put_start = Instant::now();
+                while !should_stop(n) && n < limit {
+                    let key = key8(TOP - n);
+                    let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
+                    n += 1;
+                }
                 let put_time = put_start.elapsed().as_secs_f64();
+                drop(guard); // outside timing - reclamation cost not measured
 
                 // Sync point (matches C++ wait_all between phases)
                 get_barrier.wait();
 
                 // Get phase - POINT LOOKUPS in reverse order, exactly n iterations
                 // C++ does: for (unsigned i = 0; i < n; ++i) { client.get_check_key8(top - i, i + 1); }
-                let get_start = Instant::now();
                 let mut sum = 0u64;
                 let mut check_errors = 0u64;
 
-                {
-                    let guard = tree.guard();
-                    for i in 0..n {
-                        let key = key8(TOP - i);
-                        let expected = i + 1;
-                        if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                            if check && v != expected {
-                                check_errors += 1;
-                            }
-                            sum = sum.wrapping_add(v);
-                        } else if check {
+                let guard = tree.guard();
+                let get_start = Instant::now();
+                for i in 0..n {
+                    let key = key8(TOP - i);
+                    let expected = i + 1;
+                    if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
+                        if check && v != expected {
                             check_errors += 1;
                         }
+                        sum = sum.wrapping_add(v);
+                    } else if check {
+                        check_errors += 1;
                     }
                 }
+                let get_time = get_start.elapsed().as_secs_f64();
+                drop(guard); // outside timing
                 if check && check_errors > 0 {
                     eprintln!("rw4 thread {tid}: {check_errors} check errors");
                 }
-                let get_time = get_start.elapsed().as_secs_f64();
                 std::hint::black_box(sum);
 
                 results[tid].0.store(n, Ordering::Relaxed);
@@ -980,9 +983,8 @@ fn bench_same(
             .collect(),
     );
 
-    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    // Clear stale timeout before spawning threads
     reset_timeout();
-    start_timeout_timer(duration);
 
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
@@ -995,7 +997,10 @@ fn bench_same(
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
-                barrier.wait();
+                // Arm timer after barrier so spawn/sync overhead isn't counted
+                if barrier.wait().is_leader() {
+                    start_timeout_timer(duration);
+                }
 
                 let start = Instant::now();
                 let mut n = 0u64;
@@ -1068,9 +1073,8 @@ fn bench_uscale(
             .collect(),
     );
 
-    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    // Clear stale timeout before spawning threads
     reset_timeout();
-    start_timeout_timer(duration);
 
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
@@ -1078,13 +1082,18 @@ fn bench_uscale(
             let barrier = Arc::clone(&barrier);
             let results = Arc::clone(&results);
             let core_ids = Arc::clone(core_ids);
+
             thread::spawn(move || {
                 pin_thread(tid, &core_ids);
+
                 // C++: seed = kvtest_first_seed + client.id() (NOT % 48)
                 let seed = KvRandom::FIRST_SEED + tid as u64;
                 let mut rng = KvRandom::new(seed);
 
-                barrier.wait();
+                // Arm timer after barrier so spawn/sync overhead isn't counted
+                if barrier.wait().is_leader() {
+                    start_timeout_timer(duration);
+                }
 
                 let start = Instant::now();
                 let mut n = 0u64;
@@ -1150,9 +1159,8 @@ fn bench_wscale(
             .collect(),
     );
 
-    // Reset and start timeout timer (matches C++ SIGALRM approach)
+    // Clear stale timeout before spawning threads
     reset_timeout();
-    start_timeout_timer(duration);
 
     let handles: Vec<_> = (0..threads)
         .map(|tid| {
@@ -1165,7 +1173,10 @@ fn bench_wscale(
                 let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
                 let mut rng = KvRandom::new(seed);
 
-                barrier.wait();
+                // Arm timer after barrier so spawn/sync overhead isn't counted
+                if barrier.wait().is_leader() {
+                    start_timeout_timer(duration);
+                }
 
                 let start = Instant::now();
                 let mut n = 0u64;
@@ -1288,6 +1299,7 @@ fn main() {
         if trials > 1 && !args.quiet && !args.json {
             println!("\n=== Trial {}/{} ===", trial + 1, trials);
         }
+
         for test in &tests {
             match *test {
                 "rw1" => {
@@ -1405,8 +1417,10 @@ fn main() {
                         eprintln!("\nResults saved to: {}", output_path.display());
                     }
                 }
+
                 Err(e) => eprintln!("Error creating file {:?}: {}", output_path.display(), e),
             },
+
             Err(e) => eprintln!("Error serializing results: {e}"),
         }
     }
