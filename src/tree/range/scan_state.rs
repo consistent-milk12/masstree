@@ -611,6 +611,7 @@ impl<P: LeafPolicy> LayerStack<P> {
 
     /// Remove all elements from the stack.
     #[inline]
+    #[allow(dead_code, reason = "API completeness")]
     pub fn clear(&mut self) {
         self.overflow = None;
         self.inline.clear();
@@ -619,10 +620,9 @@ impl<P: LeafPolicy> LayerStack<P> {
     /// Returns the total number of elements.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        match self.overflow {
-            Some(ref overflow) => overflow.len(),
-            None => self.inline.len(),
-        }
+        self.overflow
+            .as_ref()
+            .map_or_else(|| self.inline.len(), Vec::len)
     }
 }
 
@@ -649,6 +649,7 @@ pub struct ScanSnapshot<P: LeafPolicy> {
     ///
     /// For inline keys: 0-8 (actual length)
     /// For suffix keys: `8 + suffix.len()`
+    #[allow(dead_code, reason = "Used in tests and part of snapshot API")]
     pub key_len: usize,
 }
 
@@ -741,64 +742,6 @@ impl<P: LeafPolicy> ScanSnapshot<P> {
     #[inline(always)]
     pub const fn new(value: P::Output, key_len: usize) -> Self {
         Self { value, key_len }
-    }
-}
-
-// ============================================================================
-//  FindResult - Optimized return type for find operations
-// ============================================================================
-
-/// Result from find operations - optimized for the common non-Emit cases.
-///
-/// Replaces `(ScanState, Option<ScanSnapshot<P>>)` with a discriminated union
-/// that doesn't waste space on `None` for non-Emit states.
-///
-/// # Size Optimization
-///
-/// - Old: `(ScanState, Option<ScanSnapshot<P>>)` = 1 + 1 + `size_of(ScanSnapshot)`
-/// - New: `FindResult<P>` = `max(1, size_of(ScanSnapshot))` with discriminant
-///
-/// For typical `P::Output` sizes (8-16 bytes), this saves ~8 bytes per return.
-pub enum FindResult<P: LeafPolicy> {
-    /// Found a value to emit.
-    Emit(ScanSnapshot<P>),
-    /// State transition without payload.
-    Transition(ScanState),
-}
-
-impl<P: LeafPolicy> Clone for FindResult<P>
-where
-    P::Output: Clone,
-{
-    fn clone(&self) -> Self {
-        match self {
-            Self::Emit(snap) => Self::Emit(ScanSnapshot::new(snap.value.clone(), snap.key_len)),
-            Self::Transition(state) => Self::Transition(*state),
-        }
-    }
-}
-
-impl<P: LeafPolicy> FindResult<P> {
-    /// Create an Emit result with the given snapshot.
-    #[inline(always)]
-    pub const fn emit(snapshot: ScanSnapshot<P>) -> Self {
-        Self::Emit(snapshot)
-    }
-
-    /// Create a state transition result.
-    #[inline(always)]
-    pub const fn transition(state: ScanState) -> Self {
-        debug_assert!(!matches!(state, ScanState::Emit));
-        Self::Transition(state)
-    }
-
-    /// Convert to the legacy tuple format for gradual migration.
-    #[inline(always)]
-    pub fn into_parts(self) -> (ScanState, Option<ScanSnapshot<P>>) {
-        match self {
-            Self::Emit(snap) => (ScanState::Emit, Some(snap)),
-            Self::Transition(state) => (state, None),
-        }
     }
 }
 

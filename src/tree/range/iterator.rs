@@ -78,7 +78,7 @@
 mod adapters;
 mod batch_forward;
 mod batch_reverse;
-mod iter_flags;
+pub(super) mod iter_flags;
 mod range_bound;
 mod scan_entry;
 
@@ -113,17 +113,11 @@ use crate::tree::MassTreeGeneric;
 use super::cursor_key::CursorDebugState;
 
 use super::cursor_key::CursorKey;
-use super::find::{
-    find_initial, find_next, find_next_with_duplicate_check, find_retry, handle_down, handle_up,
-};
-use super::find_rev::{ReverseScan, find_prev_single_layer};
-use super::helper::ReverseScanHelper;
+use super::forward_ctx::ForwardScanCtx;
+use super::reverse_ctx::ReverseScanCtx;
 use super::scan_state::{
-    BackStackElement, LayerContext, LayerStack, ScanSnapshot, ScanStackElement, ScanState,
-    ScanStateBack,
+    LayerContext, ScanSnapshot, ScanState, ScanStateBack,
 };
-
-use iter_flags::IterFlags;
 
 // ============================================================================
 //  RangeIter
@@ -186,63 +180,24 @@ where
     A: TreeAllocator<P>,
 {
     // ========================================================================
-    //  Forward iteration state
+    //  Forward iteration state (bundled into ForwardScanCtx)
     // ========================================================================
     /// Memory reclamation guard.
     pub(super) guard: &'g LocalGuard<'a>,
 
-    /// Current scan position (forward).
-    pub(super) stack: ScanStackElement<P>,
-
-    /// Parent layer stack for sublayer navigation (forward).
-    pub(super) layer_stack: LayerStack<P>,
-
-    /// Cursor tracking current key position (forward).
-    pub(super) cursor_key: CursorKey,
-
-    /// Current state machine state (forward).
-    pub(super) state: ScanState,
-
-    /// Captured snapshot for current entry (forward, if in Emit state).
-    pub(super) snapshot: Option<ScanSnapshot<P>>,
-
-    /// Tracks the output from `initialize()`'s snapshot.
-    ///
-    /// This field is **only** used for the first entry case in `advance_no_alloc_ref`,
-    /// where we keep the `P::Output` alive so that `output_as_ref` can return
-    /// a borrowed `&P::Value` from it.
-    ///
-    /// For `BoxPolicy<V>` (Arc types), this tracks the cloned Arc that needs
-    /// to be decremented when no longer needed.
-    ///
-    /// # Why Only First Entry?
-    ///
-    /// After the first entry, `find_next_ptr` returns `ScanSnapshotPtr` with
-    /// pointers directly into the leaf node (protected by guard), so no
-    /// allocation tracking is needed. Only the `initialize()` snapshot path
-    /// requires allocation tracking because it holds the `P::Output` alive.
-    pub(super) last_output: Option<P::Output>,
+    /// Forward scan context — owns stack, `layer_stack`, `cursor_key`, state,
+    /// snapshot, `last_output`, forward flags, and debug fields.
+    pub(super) fwd: ForwardScanCtx<P>,
 
     // ========================================================================
-    //  Reverse iteration state (for DoubleEndedIterator)
+    //  Reverse iteration state (bundled into ReverseScanCtx)
     // ========================================================================
-    /// Current scan position (backward).
-    pub(super) back_stack: BackStackElement<P>,
-
-    /// Parent layer stack for sublayer navigation (backward).
-    pub(super) back_layer_stack: LayerStack<P>,
-
-    /// Cursor tracking current key position (backward).
-    pub(super) back_cursor_key: CursorKey,
-
-    /// Reverse scan helper (tracks `upper_bound` state).
-    pub(super) back_helper: ReverseScanHelper,
-
-    /// Current state machine state (backward).
-    pub(super) back_state: ScanStateBack,
-
-    /// Captured snapshot for current entry (backward, if in Emit state).
-    pub(super) back_snapshot: Option<ScanSnapshot<P>>,
+    /// Reverse scan context — `None` for forward-only iterators.
+    ///
+    /// Lazily materialized when `next_back()`/`.rev()` is called on a
+    /// forward-only iterator. `None` saves ~300+ bytes of stack vs a
+    /// default-initialized `ReverseScanCtx`.
+    pub(super) rev: Option<ReverseScanCtx<P>>,
 
     // ========================================================================
     //  Shared state
@@ -256,41 +211,6 @@ where
     /// End bound for the range (needed for forward bound checking).
     pub(super) end_bound: RangeBound<'a>,
 
-    /// Packed boolean flags.
-    ///
-    /// Contains: exhausted, initialized, `emit_equal`, `needs_duplicate_check`, `single_layer_mode`,
-    /// `back_initialized`, `back_exhausted`, `back_emit_equal`, `forward_only`
-    pub(super) flags: IterFlags,
-
-    // ========================================================================
-    //  Debug-only fields for ordering violation detection
-    // ========================================================================
-    /// Last emitted key for forward iteration (debug builds only).
-    ///
-    /// Used to assert that keys are emitted in strictly increasing order.
-    /// This catches ordering violations at the exact point they occur.
-    #[cfg(debug_assertions)]
-    pub(super) debug_last_emitted_key: Option<Vec<u8>>,
-
-    /// Last emitted key for backward iteration (debug builds only).
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(super) debug_last_emitted_key_back: Option<Vec<u8>>,
-
-    /// Cursor state at last emission (debug builds only).
-    ///
-    /// Captures the full cursor state when a key is emitted, useful for
-    /// diagnosing what went wrong when an ordering violation is detected.
-    #[cfg(debug_assertions)]
-    pub(super) debug_last_cursor_state: Option<CursorDebugState>,
-
-    /// Ring buffer of recent state transitions for debugging (debug builds only).
-    ///
-    /// Stores the last N state transitions (Retry, Down, Up) to help diagnose
-    /// what happened before an ordering violation.
-    #[cfg(debug_assertions)]
-    pub(super) debug_transition_history: Vec<String>,
-
     /// Marker for lifetime and type parameter covariance.
     _marker: PhantomData<&'a A>,
 }
@@ -301,14 +221,20 @@ where
     A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
-        f.debug_struct("RangeIter")
-            .field("exhausted", &self.flags.exhausted())
-            .field("initialized", &self.flags.initialized())
-            .field("state", &self.state)
-            .field("back_exhausted", &self.flags.back_exhausted())
-            .field("back_initialized", &self.flags.back_initialized())
-            .field("back_state", &self.back_state)
-            .finish_non_exhaustive()
+        let mut s = f.debug_struct("RangeIter");
+        s.field("exhausted", &self.fwd.flags.exhausted())
+            .field("initialized", &self.fwd.flags.initialized())
+            .field("state", &self.fwd.state);
+
+        if let Some(rev) = &self.rev {
+            s.field("back_exhausted", &rev.flags.exhausted())
+                .field("back_initialized", &rev.flags.initialized())
+                .field("back_state", &rev.state);
+        } else {
+            s.field("reverse", &"forward-only");
+        }
+
+        s.finish_non_exhaustive()
     }
 }
 
@@ -336,7 +262,6 @@ where
         let (start_key, emit_equal) = start.to_start_params();
         let cursor_key = CursorKey::from_slice(start_key);
         let root = tree.load_root_ptr_generic(guard);
-        let stack = ScanStackElement::new(root);
 
         let single_layer_mode = {
             let start_ok = start_key.len() <= IKEY_SIZE;
@@ -348,38 +273,12 @@ where
         };
 
         Self {
-            // Forward iteration state (fully initialized)
             guard,
-            stack,
-            layer_stack: LayerStack::new(),
-            cursor_key,
-            state: ScanState::FindNext,
-            snapshot: None,
-            last_output: None,
-
-            // Backward state: cheap defaults (never accessed by forward batch methods)
-            back_stack: BackStackElement::default(),
-            back_layer_stack: LayerStack::new(),
-            back_cursor_key: CursorKey::empty(),
-            back_helper: ReverseScanHelper::new(),
-            back_state: ScanStateBack::FindPrev,
-            back_snapshot: None,
-
-            // Shared state
+            fwd: ForwardScanCtx::new(root, cursor_key, emit_equal, single_layer_mode),
+            rev: None,
             tree_root: root,
             start_bound: start,
             end_bound: end,
-            flags: IterFlags::with_forward_only(emit_equal, single_layer_mode),
-
-            #[cfg(debug_assertions)]
-            debug_last_emitted_key: None,
-            #[cfg(debug_assertions)]
-            debug_last_emitted_key_back: None,
-            #[cfg(debug_assertions)]
-            debug_last_cursor_state: None,
-            #[cfg(debug_assertions)]
-            debug_transition_history: Vec::with_capacity(32),
-
             _marker: PhantomData,
         }
     }
@@ -395,41 +294,13 @@ where
         end_bound: RangeBound<'a>,
         guard: &'g LocalGuard<'a>,
     ) -> Self {
-        let stack = ScanStackElement::new(layer_root);
-
         Self {
-            // Forward iteration state (fully initialized except lazy initialize())
             guard,
-            stack,
-            layer_stack: LayerStack::new(),
-            cursor_key,
-            state: ScanState::FindNext,
-            snapshot: None,
-            last_output: None,
-
-            // Backward state: cheap defaults (forward path)
-            back_stack: BackStackElement::default(),
-            back_layer_stack: LayerStack::new(),
-            back_cursor_key: CursorKey::empty(),
-            back_helper: ReverseScanHelper::new(),
-            back_state: ScanStateBack::FindPrev,
-            back_snapshot: None,
-
-            // Shared state
+            fwd: ForwardScanCtx::new(layer_root, cursor_key, true, false),
+            rev: None,
             tree_root: layer_root,
             start_bound,
             end_bound,
-            flags: IterFlags::with_forward_only(true, false),
-
-            #[cfg(debug_assertions)]
-            debug_last_emitted_key: None,
-            #[cfg(debug_assertions)]
-            debug_last_emitted_key_back: None,
-            #[cfg(debug_assertions)]
-            debug_last_cursor_state: None,
-            #[cfg(debug_assertions)]
-            debug_transition_history: Vec::with_capacity(32),
-
             _marker: PhantomData,
         }
     }
@@ -452,23 +323,10 @@ where
         end: RangeBound<'a>,
         guard: &'g LocalGuard<'a>,
     ) -> Self {
-        // Convert start bound to cursor key and emit_equal flag
         let (start_key, emit_equal) = start.to_start_params();
         let cursor_key = CursorKey::from_slice(start_key);
-
-        // Get root pointer
         let root = tree.load_root_ptr_generic(guard);
 
-        // Create initial stack element
-        let stack = ScanStackElement::new(root);
-
-        // Determine if we can use single-layer fast path.
-        // Single-layer mode is valid when both bounds fit within a single ikey.
-        // If we encounter a layer pointer during iteration, we fall back.
-        //
-        // Note: Unbounded end bounds are considered "ok" because the fallback
-        // mechanism (setting `single_layer_mode = false` on Down) handles
-        // unexpected layer pointers gracefully.
         let single_layer_mode = {
             let start_ok = start_key.len() <= IKEY_SIZE;
             let end_ok = match &end {
@@ -478,55 +336,63 @@ where
             start_ok && end_ok
         };
 
-        // Determine back_emit_equal from end bound
-        // For reverse iteration starting at end bound:
-        // - Included: emit_equal = true (include the boundary key)
-        // - Excluded: emit_equal = false (exclude the boundary key)
-        // - Unbounded: emit_equal = true (start from max, emit everything)
         let back_emit_equal = match &end {
             RangeBound::Unbounded | RangeBound::Included(_) => true,
             RangeBound::Excluded(_) => false,
         };
 
         Self {
-            // Forward iteration state
             guard,
-            stack,
-            layer_stack: LayerStack::new(),
-            cursor_key,
-            state: ScanState::FindNext, // Will be set properly in first iteration
-            snapshot: None,
-            last_output: None,
-
-            // Reverse iteration state (lazily initialized)
-            back_stack: BackStackElement::new(root),
-            back_layer_stack: LayerStack::new(),
-            back_cursor_key: CursorKey::for_reverse_scan(&end),
-            back_helper: ReverseScanHelper::new(),
-            back_state: ScanStateBack::FindPrev,
-            back_snapshot: None,
-
-            // Shared state
+            fwd: ForwardScanCtx::new(root, cursor_key, emit_equal, single_layer_mode),
+            rev: Some(ReverseScanCtx::new_with_bound(
+                root,
+                CursorKey::for_reverse_scan(&end),
+                back_emit_equal,
+            )),
             tree_root: root,
             start_bound: start,
             end_bound: end,
-            flags: IterFlags::with_both_bounds(emit_equal, single_layer_mode, back_emit_equal),
-
-            // Debug-only fields for ordering violation detection
-            #[cfg(debug_assertions)]
-            debug_last_emitted_key: None,
-
-            #[cfg(debug_assertions)]
-            debug_last_emitted_key_back: None,
-
-            #[cfg(debug_assertions)]
-            debug_last_cursor_state: None,
-
-            #[cfg(debug_assertions)]
-            debug_transition_history: Vec::with_capacity(32),
-
             _marker: PhantomData,
         }
+    }
+
+    // ========================================================================
+    //  Helper methods for Option<ReverseScanCtx> access
+    // ========================================================================
+
+    /// Returns `true` if the back iterator is exhausted.
+    ///
+    /// `None` (forward-only, not yet lazily initialized) returns `false` —
+    /// the caller must attempt `initialize_back()` before concluding exhaustion.
+    #[inline(always)]
+    const fn back_exhausted(&self) -> bool {
+        match &self.rev {
+            Some(rev) => rev.flags.exhausted(),
+            None => false,
+        }
+    }
+
+    /// Returns `true` if the back iterator has been initialized.
+    #[inline(always)]
+    const fn back_initialized(&self) -> bool {
+        match &self.rev {
+            Some(rev) => rev.flags.initialized(),
+            None => false,
+        }
+    }
+
+    /// Mark the back iterator as exhausted (if present).
+    #[inline(always)]
+    const fn mark_back_exhausted(&mut self) {
+        if let Some(rev) = &mut self.rev {
+            rev.flags.mark_exhausted();
+        }
+    }
+
+    /// Disable single-layer mode (writes `fwd.flags` only — canonical source).
+    #[inline(always)]
+    const fn disable_single_layer_mode(&mut self) {
+        self.fwd.flags.disable_single_layer_mode();
     }
 
     /// Initialize the iterator (lazy initialization on first `next()` call).
@@ -542,56 +408,40 @@ where
     /// - `Retry`: Re-traverse after version conflict
     /// - Other: Ready to iterate
     pub(super) fn initialize(&mut self) {
-        if self.flags.initialized() {
+        if self.fwd.flags.initialized() {
             return;
         }
-        self.flags.mark_initialized();
+        self.fwd.flags.mark_initialized();
 
         // Handle empty tree
-        if self.stack.root().is_null() {
-            self.flags.mark_exhausted();
+        if self.fwd.stack.root().is_null() {
+            self.fwd.flags.mark_exhausted();
             return;
         }
 
         // Run initial descent loop
         loop {
-            // Save parent ROOT before find_initial modifies it.
-            // We need the original root for the LayerContext when descending,
-            // since find_initial overwrites stack.root with the layer pointer.
-            // Note: stack.leaf remains valid (points to parent leaf with layer pointer).
-            let parent_root: *const u8 = self.stack.root();
+            let parent_root: *const u8 = self.fwd.stack.root();
 
-            let (state, snapshot) = find_initial(
-                self.stack.root(),
-                &mut self.stack,
-                &mut self.cursor_key,
-                &mut self.layer_stack,
-                self.flags.emit_equal(),
+            let (state, snapshot) = self.fwd.find_initial(
+                self.fwd.stack.root(),
+                self.fwd.flags.emit_equal(),
                 self.guard,
             );
 
             match state {
                 ScanState::Down => {
                     // Entering a sublayer invalidates single-layer assumptions.
-                    self.flags.disable_single_layer_mode();
+                    self.disable_single_layer_mode();
 
-                    // Start key descends into a sublayer.
-                    // - parent_root: saved before find_initial modified stack.root
-                    // - stack.leaf_ptr(): still points to the parent leaf (not modified)
-                    // find_initial already set stack.root to the layer pointer.
-                    self.layer_stack
-                        .push(LayerContext::new(parent_root, self.stack.leaf_ptr()));
+                    self.fwd.layer_stack
+                        .push(LayerContext::new(parent_root, self.fwd.stack.leaf_ptr()));
 
-                    // If the key has more bytes (suffix), shift to use them.
-                    // Otherwise, the prefix exactly matches the layer pointer's ikey,
-                    // so we shift_clear to scan all keys in the sublayer.
-                    if self.cursor_key.has_suffix() {
-                        self.cursor_key.shift();
+                    if self.fwd.cursor_key.has_suffix() {
+                        self.fwd.cursor_key.shift();
                     } else {
-                        self.cursor_key.shift_clear();
+                        self.fwd.cursor_key.shift_clear();
                     }
-
-                    // Continue loop to descend further into the new layer
                 }
 
                 ScanState::Retry => {
@@ -600,8 +450,8 @@ where
 
                 _ => {
                     // Ready to iterate (Emit, FindNext, Up)
-                    self.state = state;
-                    self.snapshot = snapshot;
+                    self.fwd.state = state;
+                    self.fwd.snapshot = snapshot;
                     break;
                 }
             }
@@ -625,44 +475,42 @@ where
     )]
     fn advance(&mut self) -> Option<ScanEntry<P::Output>> {
         loop {
-            match self.state {
+            match self.fwd.state {
                 ScanState::Emit => {
-                    // Check end bound
                     // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-                    let key = unsafe { self.cursor_key.full_key_unchecked() };
+                    let key = unsafe { self.fwd.cursor_key.full_key_unchecked() };
 
                     if !self.end_bound.contains(key) {
-                        self.flags.mark_exhausted();
+                        self.fwd.flags.mark_exhausted();
                         return None;
                     }
 
                     // Check meeting condition: front caught up to back
-                    if self.flags.back_initialized() && !self.flags.back_exhausted() {
-                        // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-                        let back_key = unsafe { self.back_cursor_key.full_key_unchecked() };
+                    if self.back_initialized() && !self.back_exhausted() {
+                        // SAFETY: rev is Some when back_initialized() is true
+                        let back_key = unsafe {
+                            self.rev.as_ref().unwrap_unchecked().cursor_key.full_key_unchecked()
+                        };
 
                         if key >= back_key {
-                            self.flags.mark_exhausted();
-                            self.flags.mark_back_exhausted();
+                            self.fwd.flags.mark_exhausted();
+                            self.mark_back_exhausted();
                             return None;
                         }
                     }
 
-                    // DEBUG: Assert strict ordering - key must be greater than last emitted
                     #[cfg(debug_assertions)]
                     #[allow(
                         clippy::panic,
                         reason = "Intentional panic for debug-only ordering violation detection"
                     )]
                     {
-                        if let Some(ref last_key) = self.debug_last_emitted_key
+                        if let Some(ref last_key) = self.fwd.debug_last_emitted_key
                             && key <= last_key.as_slice()
                         {
-                            // Capture current state for diagnosis
-                            let current_state = self.cursor_key.debug_state();
-                            let last_state = self.debug_last_cursor_state.as_ref();
+                            let current_state = self.fwd.cursor_key.debug_state();
+                            let last_state = self.fwd.debug_last_cursor_state.as_ref();
 
-                            // Log detailed information before panicking
                             eprintln!("\n=== ORDERING VIOLATION DETECTED ===");
                             eprintln!("Current key:  {:?}", String::from_utf8_lossy(key));
                             eprintln!("Last key:     {:?}", String::from_utf8_lossy(last_key));
@@ -681,70 +529,47 @@ where
                             );
                         }
 
-                        // Update tracking state
-                        self.debug_last_emitted_key = Some(key.to_vec());
-                        self.debug_last_cursor_state = Some(self.cursor_key.debug_state());
+                        self.fwd.debug_last_emitted_key = Some(key.to_vec());
+                        self.fwd.debug_last_cursor_state = Some(self.fwd.cursor_key.debug_state());
                     }
 
-                    // Take snapshot (should always be Some when in Emit state)
                     debug_assert!(
-                        self.snapshot.is_some(),
+                        self.fwd.snapshot.is_some(),
                         "Emit state entered without snapshot - state machine bug"
                     );
 
-                    let snapshot = self.snapshot.take()?;
-
-                    // Build entry
+                    let snapshot = self.fwd.snapshot.take()?;
                     let entry = ScanEntry::new(key.to_vec(), snapshot.value);
-
-                    // Transition to FindNext
-                    self.state = ScanState::FindNext;
+                    self.fwd.state = ScanState::FindNext;
 
                     return Some(entry);
                 }
 
                 ScanState::FindNext => {
-                    // Call find_next (with or without duplicate check)
-                    let (new_state, snapshot) = if self.flags.needs_duplicate_check() {
-                        self.flags.clear_duplicate_check();
-                        find_next_with_duplicate_check(
-                            &mut self.stack,
-                            &mut self.cursor_key,
-                            &mut self.layer_stack,
-                            self.guard,
-                        )
-                        .into_parts()
+                    let (new_state, snapshot) = if self.fwd.flags.needs_duplicate_check() {
+                        self.fwd.flags.clear_duplicate_check();
+                        self.fwd.find_next_with_dup_check(self.guard)
                     } else {
-                        find_next(
-                            &mut self.stack,
-                            &mut self.cursor_key,
-                            &mut self.layer_stack,
-                            self.guard,
-                        )
-                        .into_parts()
+                        self.fwd.find_next(self.guard)
                     };
 
-                    // FUSED OPTIMIZATION: If find_next returns Emit, process inline
-                    // instead of looping back. This eliminates one state machine
-                    // iteration per entry (the common case).
                     if new_state == ScanState::Emit {
-                        // Emit logic inline (same as Emit arm above)
-                        // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-                        let key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
+                        let key: &[u8] = unsafe { self.fwd.cursor_key.full_key_unchecked() };
 
                         if !self.end_bound.contains(key) {
-                            self.flags.mark_exhausted();
+                            self.fwd.flags.mark_exhausted();
                             return None;
                         }
 
-                        if self.flags.back_initialized() && !self.flags.back_exhausted() {
-                            // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-                            let back_key: &[u8] =
-                                unsafe { self.back_cursor_key.full_key_unchecked() };
+                        if self.back_initialized() && !self.back_exhausted() {
+                            // SAFETY: rev is Some when back_initialized() is true
+                            let back_key: &[u8] = unsafe {
+                                self.rev.as_ref().unwrap_unchecked().cursor_key.full_key_unchecked()
+                            };
 
                             if key >= back_key {
-                                self.flags.mark_exhausted();
-                                self.flags.mark_back_exhausted();
+                                self.fwd.flags.mark_exhausted();
+                                self.mark_back_exhausted();
                                 return None;
                             }
                         }
@@ -755,12 +580,12 @@ where
                             reason = "Intentional panic for debug-only ordering violation detection"
                         )]
                         {
-                            if let Some(ref last_key) = self.debug_last_emitted_key
+                            if let Some(ref last_key) = self.fwd.debug_last_emitted_key
                                 && key <= last_key.as_slice()
                             {
-                                let current_state: CursorDebugState = self.cursor_key.debug_state();
+                                let current_state: CursorDebugState = self.fwd.cursor_key.debug_state();
                                 let last_state: Option<&CursorDebugState> =
-                                    self.debug_last_cursor_state.as_ref();
+                                    self.fwd.debug_last_cursor_state.as_ref();
 
                                 eprintln!("\n=== ORDERING VIOLATION DETECTED (FUSED) ===");
                                 eprintln!("Current key:  {:?}", String::from_utf8_lossy(key));
@@ -780,53 +605,37 @@ where
                                 );
                             }
 
-                            self.debug_last_emitted_key = Some(key.to_vec());
-                            self.debug_last_cursor_state = Some(self.cursor_key.debug_state());
+                            self.fwd.debug_last_emitted_key = Some(key.to_vec());
+                            self.fwd.debug_last_cursor_state = Some(self.fwd.cursor_key.debug_state());
                         }
 
-                        // snapshot is guaranteed Some when new_state == Emit
-                        // (find_next only returns Emit with Some(snapshot))
                         let snapshot: ScanSnapshot<P> = snapshot?;
                         return Some(ScanEntry::new(key.to_vec(), snapshot.value));
                     }
 
-                    // Not Emit - continue state machine normally
-                    self.state = new_state;
-                    self.snapshot = snapshot;
+                    self.fwd.state = new_state;
+                    self.fwd.snapshot = snapshot;
                 }
 
                 ScanState::Down => {
-                    handle_down(&mut self.stack, &mut self.cursor_key);
-                    self.state = ScanState::Retry;
-
-                    // After layer descent, we need duplicate check
-                    self.flags.require_duplicate_check();
+                    self.fwd.handle_down();
+                    self.fwd.state = ScanState::Retry;
+                    self.fwd.flags.require_duplicate_check();
                 }
 
                 ScanState::Up => {
-                    if !handle_up(
-                        &mut self.stack,
-                        &mut self.cursor_key,
-                        &mut self.layer_stack,
-                        self.guard,
-                    ) {
-                        // No parent layer, scan complete
-                        self.flags.mark_exhausted();
-
+                    if !self.fwd.handle_up(self.guard) {
+                        self.fwd.flags.mark_exhausted();
                         return None;
                     }
 
-                    self.state = ScanState::FindNext;
-
-                    // After layer ascent, we need duplicate check
-                    self.flags.require_duplicate_check();
+                    self.fwd.state = ScanState::FindNext;
+                    self.fwd.flags.require_duplicate_check();
                 }
 
                 ScanState::Retry => {
-                    self.state = find_retry(&mut self.stack, &self.cursor_key, self.guard);
-
-                    // After retry, we need duplicate check on next FindNext
-                    self.flags.require_duplicate_check();
+                    self.fwd.state = self.fwd.find_retry(self.guard);
+                    self.fwd.flags.require_duplicate_check();
                 }
             }
         }
@@ -840,59 +649,56 @@ where
     ///
     /// Called lazily on the first `next_back()` call.
     pub(super) fn initialize_back(&mut self) {
-        if self.flags.back_initialized() {
+        if self.back_initialized() {
             return;
         }
 
         // Forward-only constructor path: lazily materialize reverse state
         // when callers request `next_back`/`.rev()`.
-        let mut back_emit_equal = self.flags.back_emit_equal();
-        if self.flags.forward_only() {
-            back_emit_equal = matches!(
+        if self.rev.is_none() {
+            let back_emit_equal = matches!(
                 self.end_bound,
                 RangeBound::Unbounded | RangeBound::Included(_)
             );
-            self.back_stack = BackStackElement::new(self.tree_root);
-            self.back_layer_stack.clear();
-            self.back_cursor_key = CursorKey::for_reverse_scan(&self.end_bound);
-            self.back_helper = ReverseScanHelper::new();
-            self.back_state = ScanStateBack::FindPrev;
-            self.back_snapshot = None;
-            self.flags.clear_forward_only();
+            self.rev = Some(ReverseScanCtx::new_with_bound(
+                self.tree_root,
+                CursorKey::for_reverse_scan(&self.end_bound),
+                back_emit_equal,
+            ));
         }
 
-        self.flags.mark_back_initialized();
+        // SAFETY: rev is always Some after the block above
+        let rev = unsafe { self.rev.as_mut().unwrap_unchecked() };
+        let back_emit_equal = rev.flags.emit_equal();
+
+        rev.flags.mark_initialized();
 
         // Handle empty tree
         if self.tree_root.is_null() {
-            self.flags.mark_back_exhausted();
+            rev.flags.mark_exhausted();
             return;
         }
 
         // For unbounded end, set upper_bound so lower_reverse returns last slot
         if self.end_bound.is_unbounded() {
-            self.back_helper.upper_bound = true;
+            rev.helper.upper_bound = true;
         }
 
         // Run initial reverse descent loop
         loop {
-            let (state, snapshot) = ReverseScan::find_initial_reverse(
-                self.back_stack.get_root(),
-                &mut self.back_stack,
-                &mut self.back_cursor_key,
-                &mut self.back_layer_stack,
+            let (state, snapshot) = rev.find_initial_reverse(
+                rev.stack.get_root(),
                 back_emit_equal,
-                &mut self.back_helper,
                 self.guard,
             );
 
             match state {
                 ScanStateBack::Down => {
                     // Entering a sublayer invalidates single-layer assumptions.
-                    self.flags.disable_single_layer_mode();
+                    self.fwd.flags.disable_single_layer_mode();
 
                     // Descend into sublayer
-                    ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
+                    rev.handle_down_back();
 
                     // Continue loop to call find_initial_reverse with new layer root
                 }
@@ -905,17 +711,17 @@ where
                     // `find_initial_reverse` performs iterative layer descent internally.
                     // If it descended, `back_layer_stack` is non-empty even though we
                     // did not observe an explicit `Down` state here.
-                    if !self.back_layer_stack.is_empty() {
-                        self.flags.disable_single_layer_mode();
+                    if !rev.layer_stack.is_empty() {
+                        self.fwd.flags.disable_single_layer_mode();
                     }
 
                     // Ready to iterate (Emit, FindPrev, Up)
-                    self.back_state = state;
-                    self.back_snapshot = snapshot;
+                    rev.state = state;
+                    rev.snapshot = snapshot;
 
                     // Clear upper_bound after first successful positioning
-                    if self.back_state.is_emit() {
-                        self.back_helper.mark_key_complete();
+                    if rev.state.is_emit() {
+                        rev.helper.mark_key_complete();
                     }
 
                     break;
@@ -931,42 +737,46 @@ where
         reason = "State machine benefits from unified logic"
     )]
     fn advance_back(&mut self) -> Option<ScanEntry<P::Output>> {
+        // SAFETY: advance_back is only called after initialize_back, which
+        // guarantees self.rev is Some.
+        let rev = unsafe { self.rev.as_mut().unwrap_unchecked() };
+
         loop {
-            match self.back_state {
+            match rev.state {
                 ScanStateBack::Emit => {
                     // Check start bound (reverse of end bound check)
                     // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-                    let key: &[u8] = unsafe { self.back_cursor_key.full_key_unchecked() };
+                    let key: &[u8] = unsafe { rev.cursor_key.full_key_unchecked() };
 
                     if !self.start_bound.contains_reverse(key) {
-                        self.flags.mark_back_exhausted();
+                        rev.flags.mark_exhausted();
                         return None;
                     }
 
                     // Check meeting condition: back caught up to front
-                    if self.flags.initialized() && !self.flags.exhausted() {
+                    if self.fwd.flags.initialized() && !self.fwd.flags.exhausted() {
                         // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-                        let front_key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
+                        let front_key: &[u8] = unsafe { self.fwd.cursor_key.full_key_unchecked() };
 
                         if key <= front_key {
-                            self.flags.mark_back_exhausted();
-                            self.flags.mark_exhausted();
+                            rev.flags.mark_exhausted();
+                            self.fwd.flags.mark_exhausted();
 
                             return None;
                         }
                     }
 
                     // Take snapshot
-                    let snapshot: ScanSnapshot<P> = self.back_snapshot.take()?;
+                    let snapshot: ScanSnapshot<P> = rev.snapshot.take()?;
 
                     // Build entry
                     let entry = ScanEntry::new(key.to_vec(), snapshot.value);
 
                     // CRITICAL: Clear upper_bound on every emission
-                    self.back_helper.mark_key_complete();
+                    rev.helper.mark_key_complete();
 
                     // Transition to FindPrev
-                    self.back_state = ScanStateBack::FindPrev;
+                    rev.state = ScanStateBack::FindPrev;
 
                     return Some(entry);
                 }
@@ -975,36 +785,31 @@ where
                     // ================================================================
                     // Single-layer fast path (keys ≤ 8 bytes)
                     // ================================================================
-                    if self.flags.single_layer_mode() {
-                        let needs_dup_check = self.flags.back_needs_duplicate_check();
+                    if self.fwd.flags.single_layer_mode() {
+                        let needs_dup_check = rev.flags.needs_duplicate_check();
                         if needs_dup_check {
-                            self.flags.clear_back_duplicate_check();
+                            rev.flags.clear_duplicate_check();
                         }
 
-                        let (new_state, snapshot) = find_prev_single_layer(
-                            &mut self.back_stack,
-                            &mut self.back_cursor_key,
-                            &mut self.back_helper,
-                            self.guard,
-                            needs_dup_check,
-                        );
+                        let (new_state, snapshot) =
+                            rev.find_prev_single_layer(self.guard, needs_dup_check);
 
-                        self.back_state = new_state;
-                        self.back_snapshot = snapshot;
+                        rev.state = new_state;
+                        rev.snapshot = snapshot;
 
                         match new_state {
                             ScanStateBack::FindPrev => {
                                 // Check for exhausted (null stack in single-layer = done)
-                                if self.back_stack.get_leaf_ptr().is_null() {
-                                    self.flags.mark_back_exhausted();
+                                if rev.stack.get_leaf_ptr().is_null() {
+                                    rev.flags.mark_exhausted();
                                     return None;
                                 }
                             }
                             ScanStateBack::Down => {
                                 // Encountered suffix key or layer pointer - fall back to
                                 // multi-layer mode and re-process this slot with find_prev
-                                self.flags.disable_single_layer_mode();
-                                self.back_state = ScanStateBack::FindPrev;
+                                self.fwd.flags.disable_single_layer_mode();
+                                rev.state = ScanStateBack::FindPrev;
                                 // Don't require duplicate check - slot hasn't been emitted
                             }
                             _ => {}
@@ -1018,87 +823,59 @@ where
                     // ================================================================
                     // OPTIMIZATION: Only check for duplicates after a Retry,
                     // not in normal reverse iteration
-                    let (new_state, snapshot) = if self.flags.back_needs_duplicate_check() {
-                        self.flags.clear_back_duplicate_check();
-
-                        ReverseScan::find_prev_with_duplicate_check(
-                            &mut self.back_stack,
-                            &mut self.back_cursor_key,
-                            &mut self.back_layer_stack,
-                            &mut self.back_helper,
-                            self.guard,
-                        )
+                    let (new_state, snapshot) = if rev.flags.needs_duplicate_check() {
+                        rev.flags.clear_duplicate_check();
+                        rev.find_prev_with_dup_check(self.guard)
                     } else {
-                        ReverseScan::find_prev(
-                            &mut self.back_stack,
-                            &mut self.back_cursor_key,
-                            &mut self.back_layer_stack,
-                            &mut self.back_helper,
-                            self.guard,
-                        )
+                        rev.find_prev(self.guard)
                     };
 
-                    self.back_state = new_state;
-                    self.back_snapshot = snapshot;
+                    rev.state = new_state;
+                    rev.snapshot = snapshot;
                 }
 
                 ScanStateBack::Down => {
                     // Disable single-layer mode when descending into sublayer
-                    self.flags.disable_single_layer_mode();
+                    self.fwd.flags.disable_single_layer_mode();
 
                     // Handle sublayer descent
-                    ReverseScan::handle_down_back(&mut self.back_cursor_key, &mut self.back_helper);
+                    rev.handle_down_back();
 
                     // Call find_initial_reverse for the sublayer
-                    let (state, snapshot) = ReverseScan::find_initial_reverse(
-                        self.back_stack.get_root(),
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_layer_stack,
+                    let (state, snapshot) = rev.find_initial_reverse(
+                        rev.stack.get_root(),
                         false, // emit_equal: false for scan-discovered descent
-                        &mut self.back_helper,
                         self.guard,
                     );
 
-                    self.back_state = state;
-                    self.back_snapshot = snapshot;
+                    rev.state = state;
+                    rev.snapshot = snapshot;
 
                     // After layer descent, we need duplicate check
-                    self.flags.require_back_duplicate_check();
+                    rev.flags.require_duplicate_check();
                 }
 
                 ScanStateBack::Up => {
-                    if !ReverseScan::handle_up_back(
-                        &mut self.back_stack,
-                        &mut self.back_cursor_key,
-                        &mut self.back_layer_stack,
-                        &mut self.back_helper,
-                        self.guard,
-                    ) {
+                    if !rev.handle_up_back(self.guard) {
                         // No parent layer, scan complete
-                        self.flags.mark_back_exhausted();
+                        rev.flags.mark_exhausted();
 
                         return None;
                     }
 
-                    self.back_state = ScanStateBack::FindPrev;
+                    rev.state = ScanStateBack::FindPrev;
 
                     // After layer ascent, we need duplicate check
-                    self.flags.require_back_duplicate_check();
+                    rev.flags.require_duplicate_check();
                 }
 
                 ScanStateBack::Retry => {
-                    let (new_state, _) = ReverseScan::reposition_back(
-                        &mut self.back_stack,
-                        &self.back_cursor_key,
-                        self.back_helper,
-                        self.guard,
-                    );
+                    let (new_state, _) = rev.reposition_back(self.guard);
 
-                    self.back_state = new_state;
+                    rev.state = new_state;
 
                     // After retry, we need duplicate check on next FindPrev
-                    self.flags.require_back_duplicate_check();
+                    rev.flags.require_duplicate_check();
                 }
             }
         }
@@ -1114,70 +891,6 @@ where
         ValuesIter { inner: self }
     }
 
-    /// Assert that keys are emitted in strictly increasing order (debug builds only).
-    ///
-    /// This catches ordering violations at the exact point they occur, providing
-    /// detailed diagnostic information about the cursor state.
-    #[cfg(debug_assertions)]
-    #[inline]
-    #[allow(
-        clippy::panic,
-        reason = "Intentional panic for debug-only ordering violation detection"
-    )]
-    pub(super) fn assert_ordering(&mut self, key: &[u8]) {
-        if let Some(ref last_key) = self.debug_last_emitted_key
-            && key <= last_key.as_slice()
-        {
-            // Capture current state for diagnosis
-            let current_state: CursorDebugState = self.cursor_key.debug_state();
-            let last_state: Option<&CursorDebugState> = self.debug_last_cursor_state.as_ref();
-
-            // Log detailed information before panicking
-            eprintln!("\n=== ORDERING VIOLATION DETECTED (batch path) ===");
-            eprintln!("Current key:  {:?}", String::from_utf8_lossy(key));
-            eprintln!("Last key:     {:?}", String::from_utf8_lossy(last_key));
-            eprintln!("Current key bytes: {key:?}");
-            eprintln!("Last key bytes:    {last_key:?}");
-            eprintln!("Current cursor: {current_state}");
-            if let Some(last) = last_state {
-                eprintln!("Last cursor:    {last}");
-            }
-
-            // Print recent state transitions
-            eprintln!("\n--- Recent state transitions ---");
-            for (i, transition) in self.debug_transition_history.iter().enumerate() {
-                eprintln!("[{i}] {transition}");
-            }
-            eprintln!("--- End transitions ---");
-            eprintln!("=== END ORDERING VIOLATION ===\n");
-
-            panic!(
-                "Scan ordering violation: emitted key {:?} is not > last emitted key {:?}",
-                String::from_utf8_lossy(key),
-                String::from_utf8_lossy(last_key)
-            );
-        }
-
-        // Update tracking state and record emission
-        self.debug_last_emitted_key = Some(key.to_vec());
-        self.debug_last_cursor_state = Some(self.cursor_key.debug_state());
-        self.record_transition(format!(
-            "EMIT: {:?} cursor={}",
-            String::from_utf8_lossy(key),
-            self.cursor_key.debug_state()
-        ));
-    }
-
-    /// Record a state transition for debugging (debug builds only).
-    #[cfg(debug_assertions)]
-    #[inline]
-    pub(super) fn record_transition(&mut self, description: String) {
-        // Keep last 32 transitions
-        if self.debug_transition_history.len() >= 32 {
-            self.debug_transition_history.remove(0);
-        }
-        self.debug_transition_history.push(description);
-    }
 }
 
 // ============================================================================
@@ -1193,30 +906,32 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.flags.exhausted() {
+        if self.fwd.flags.exhausted() {
             return None;
         }
 
         // Lazy initialization
-        if !self.flags.initialized() {
+        if !self.fwd.flags.initialized() {
             self.initialize();
 
-            if self.flags.exhausted() {
+            if self.fwd.flags.exhausted() {
                 return None;
             }
         }
 
         // Meeting detection: if back is initialized, check if we've crossed
-        if self.flags.back_initialized() && !self.flags.back_exhausted() {
+        if self.back_initialized() && !self.back_exhausted() {
             // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-            let front_key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
-            // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-            let back_key: &[u8] = unsafe { self.back_cursor_key.full_key_unchecked() };
+            let front_key: &[u8] = unsafe { self.fwd.cursor_key.full_key_unchecked() };
+            // SAFETY: rev is Some when back_initialized() is true
+            let back_key: &[u8] = unsafe {
+                self.rev.as_ref().unwrap_unchecked().cursor_key.full_key_unchecked()
+            };
 
             if front_key >= back_key {
                 // Mark both as exhausted when they meet
-                self.flags.mark_exhausted();
-                self.flags.mark_back_exhausted();
+                self.fwd.flags.mark_exhausted();
+                self.mark_back_exhausted();
                 return None;
             }
         }
@@ -1226,7 +941,7 @@ where
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.flags.exhausted() {
+        if self.fwd.flags.exhausted() {
             (0, Some(0))
         } else {
             // We can't know the exact count without iterating
@@ -1243,30 +958,32 @@ where
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         // Check if back cursor is exhausted
-        if self.flags.back_exhausted() {
+        if self.back_exhausted() {
             return None;
         }
 
         // Lazy initialization of back cursor
-        if !self.flags.back_initialized() {
+        if !self.back_initialized() {
             self.initialize_back();
 
-            if self.flags.back_exhausted() {
+            if self.back_exhausted() {
                 return None;
             }
         }
 
         // Check meeting condition: if front has advanced past where back would be
-        if self.flags.initialized() && !self.flags.exhausted() {
+        if self.fwd.flags.initialized() && !self.fwd.flags.exhausted() {
             // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-            let front_key: &[u8] = unsafe { self.cursor_key.full_key_unchecked() };
-            // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-            let back_key: &[u8] = unsafe { self.back_cursor_key.full_key_unchecked() };
+            let front_key: &[u8] = unsafe { self.fwd.cursor_key.full_key_unchecked() };
+            // SAFETY: rev is Some after initialize_back
+            let back_key: &[u8] = unsafe {
+                self.rev.as_ref().unwrap_unchecked().cursor_key.full_key_unchecked()
+            };
 
             if back_key <= front_key {
                 // Mark both as exhausted when they meet
-                self.flags.mark_back_exhausted();
-                self.flags.mark_exhausted();
+                self.mark_back_exhausted();
+                self.fwd.flags.mark_exhausted();
 
                 return None;
             }

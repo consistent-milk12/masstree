@@ -2,20 +2,29 @@
 //!
 //! Extracted to eliminate key-building duplication across `find.rs` and `find_rev.rs`.
 //!
+//! # `ScanEmitter` Trait
+//!
+//! Abstracts clone vs zero-copy value emission for per-entry scanning.
+//! Used by both forward (`find_next_generic`) and reverse (`find_prev_generic`).
+//! Two implementations:
+//! - [`CloneEmitter`]: calls `load_value()`, returns `ScanSnapshot<P>`. Requires `P::Output: Clone`.
+//! - [`PtrEmitter`]: calls `load_value_raw()` + null check, returns `ScanSnapshotPtr<P::Value>`.
+//!
 //! # `SlotVisitor` Trait
 //!
-//! Abstracts the ref vs copy value-loading difference. Two implementations:
+//! Abstracts the ref vs copy value-loading difference for batch processing. Two implementations:
 //! - [`RefSlotVisitor`]: loads `&P::Value` via pointer dereference (zero-copy)
 //! - [`CopySlotVisitor`]: loads `P::Output` via `load_value()` (universal)
 //!
-//! After monomorphization, the trait dispatch is fully inlined — zero overhead.
+//! After monomorphization, all trait dispatch is fully inlined — zero overhead.
 
 use crate::key::IKEY_SIZE;
-use crate::leaf15::LeafNode15;
 use crate::leaf15::KSUF_KEYLENX;
+use crate::leaf15::LeafNode15;
 use crate::policy::LeafPolicy;
 
 use super::cursor_key::CursorKey;
+use super::scan_state::{ScanSnapshot, ScanSnapshotPtr};
 
 /// Build the full key in `cursor_key` from slot data.
 ///
@@ -102,5 +111,65 @@ where
         // concurrently removed between is_value_empty check and here.
         let output = leaf.load_value(slot)?;
         Some((self.0)(key, output))
+    }
+}
+
+// ============================================================================
+//  ScanEmitter Trait - Clone vs Zero-Copy Abstraction
+// ============================================================================
+
+/// Abstracts clone vs zero-copy value emission for per-entry scanning.
+///
+/// Used by both forward (`find_next_generic`) and reverse (`find_prev_generic`).
+/// Two implementations:
+/// - [`CloneEmitter`]: calls `load_value()`, returns `ScanSnapshot<P>`. Requires `P::Output: Clone`.
+/// - [`PtrEmitter`]: calls `load_value_raw()` + null check, returns `ScanSnapshotPtr<P::Value>`.
+///
+/// After monomorphization, trait dispatch is fully inlined — zero overhead.
+pub trait ScanEmitter<P: LeafPolicy> {
+    type Snapshot;
+
+    /// Load a value from `leaf[slot]` and wrap it with `key_len`.
+    ///
+    /// Returns `None` if the value was concurrently removed (TOCTOU race).
+    fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<Self::Snapshot>;
+}
+
+/// Clone-based emitter: calls `leaf.load_value(slot)`, returns `ScanSnapshot<P>`.
+pub struct CloneEmitter;
+
+impl<P: LeafPolicy> ScanEmitter<P> for CloneEmitter
+where
+    P::Output: Clone,
+{
+    type Snapshot = ScanSnapshot<P>;
+
+    #[inline(always)]
+    fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<ScanSnapshot<P>> {
+        let output = leaf.load_value(slot)?;
+        Some(ScanSnapshot {
+            value: output,
+            key_len,
+        })
+    }
+}
+
+/// Zero-copy emitter: calls `leaf.load_value_raw(slot)`, returns `ScanSnapshotPtr<P::Value>`.
+pub struct PtrEmitter;
+
+impl<P: LeafPolicy> ScanEmitter<P> for PtrEmitter {
+    type Snapshot = ScanSnapshotPtr<P::Value>;
+
+    #[inline(always)]
+    fn emit_value(
+        leaf: &LeafNode15<P>,
+        slot: usize,
+        key_len: usize,
+    ) -> Option<ScanSnapshotPtr<P::Value>> {
+        let ptr = leaf.load_value_raw(slot);
+        if ptr.is_null() {
+            return None;
+        }
+        Some(ScanSnapshotPtr::from_raw(ptr, key_len))
     }
 }

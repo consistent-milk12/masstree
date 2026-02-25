@@ -1,28 +1,26 @@
 //! Filepath: `src/tree/range/iterator/iter_flags.rs`
 //!
-//! Packed boolean flags for iterator state.
+//! Packed boolean flags for forward and reverse scan contexts.
 
-/// Packed boolean flags for iterator state.
+// ============================================================================
+//  ForwardFlags — flags for ForwardScanCtx
+// ============================================================================
+
+/// Packed boolean flags for forward scan context state.
 ///
-/// Uses a u16 bitfield to store 10 boolean flags efficiently.
+/// Uses a u8 bitfield to store 5 boolean flags efficiently.
+/// Lives inside `ForwardScanCtx`. The `SINGLE_LAYER_MODE` flag is the
+/// canonical source for both forward and reverse paths.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct IterFlags(u16);
+pub struct ForwardFlags(u8);
 
 #[allow(dead_code, reason = "API Completeness")]
-impl IterFlags {
-    // Bit Positions (forward iteration)
-    const EXHAUSTED: u16 = 1 << 0;
-    const INITIALIZED: u16 = 1 << 1;
-    const EMIT_EQUAL: u16 = 1 << 2;
-    const NEEDS_DUPLICATE_CHECK: u16 = 1 << 3;
-    const SINGLE_LAYER_MODE: u16 = 1 << 4;
-    // Bit Positions (reverse iteration for DoubleEndedIterator)
-    const BACK_EXHAUSTED: u16 = 1 << 5;
-    const BACK_INITIALIZED: u16 = 1 << 6;
-    const BACK_EMIT_EQUAL: u16 = 1 << 7;
-    const BACK_NEEDS_DUPLICATE_CHECK: u16 = 1 << 8;
-    // Constructor mode
-    const FORWARD_ONLY: u16 = 1 << 9;
+impl ForwardFlags {
+    const EXHAUSTED: u8 = 1 << 0;
+    const INITIALIZED: u8 = 1 << 1;
+    const EMIT_EQUAL: u8 = 1 << 2;
+    const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
+    const SINGLE_LAYER_MODE: u8 = 1 << 4;
 
     /// Create new flags with all bits cleared.
     #[inline(always)]
@@ -33,7 +31,7 @@ impl IterFlags {
     /// Create flags with initial values for forward iteration.
     #[inline(always)]
     pub const fn with_values(emit_equal: bool, single_layer_mode: bool) -> Self {
-        let mut bits: u16 = 0;
+        let mut bits: u8 = 0;
 
         if emit_equal {
             bits |= Self::EMIT_EQUAL;
@@ -41,38 +39,6 @@ impl IterFlags {
 
         if single_layer_mode {
             bits |= Self::SINGLE_LAYER_MODE;
-        }
-
-        Self(bits)
-    }
-
-    /// Create flags for forward-only constructors.
-    #[inline(always)]
-    pub const fn with_forward_only(emit_equal: bool, single_layer_mode: bool) -> Self {
-        let mut bits = Self::with_values(emit_equal, single_layer_mode).0;
-        bits |= Self::FORWARD_ONLY;
-        Self(bits)
-    }
-
-    /// Create flags with initial values for both forward and backward iteration.
-    #[inline(always)]
-    pub const fn with_both_bounds(
-        emit_equal: bool,
-        single_layer_mode: bool,
-        back_emit_equal: bool,
-    ) -> Self {
-        let mut bits: u16 = 0;
-
-        if emit_equal {
-            bits |= Self::EMIT_EQUAL;
-        }
-
-        if single_layer_mode {
-            bits |= Self::SINGLE_LAYER_MODE;
-        }
-
-        if back_emit_equal {
-            bits |= Self::BACK_EMIT_EQUAL;
         }
 
         Self(bits)
@@ -107,32 +73,6 @@ impl IterFlags {
         self.0 & Self::SINGLE_LAYER_MODE != 0
     }
 
-    // Back iteration getters
-    #[inline(always)]
-    pub const fn back_exhausted(self) -> bool {
-        self.0 & Self::BACK_EXHAUSTED != 0
-    }
-
-    #[inline(always)]
-    pub const fn back_initialized(self) -> bool {
-        self.0 & Self::BACK_INITIALIZED != 0
-    }
-
-    #[inline(always)]
-    pub const fn back_emit_equal(self) -> bool {
-        self.0 & Self::BACK_EMIT_EQUAL != 0
-    }
-
-    #[inline(always)]
-    pub const fn back_needs_duplicate_check(self) -> bool {
-        self.0 & Self::BACK_NEEDS_DUPLICATE_CHECK != 0
-    }
-
-    #[inline(always)]
-    pub const fn forward_only(self) -> bool {
-        self.0 & Self::FORWARD_ONLY != 0
-    }
-
     // ========================================================================
     //  Setters
     // ========================================================================
@@ -152,33 +92,6 @@ impl IterFlags {
             self.0 |= Self::INITIALIZED;
         } else {
             self.0 &= !Self::INITIALIZED;
-        }
-    }
-
-    #[inline(always)]
-    pub const fn set_emit_equal(&mut self, value: bool) {
-        if value {
-            self.0 |= Self::EMIT_EQUAL;
-        } else {
-            self.0 &= !Self::EMIT_EQUAL;
-        }
-    }
-
-    #[inline(always)]
-    pub const fn set_needs_duplicate_check(&mut self, value: bool) {
-        if value {
-            self.0 |= Self::NEEDS_DUPLICATE_CHECK;
-        } else {
-            self.0 &= !Self::NEEDS_DUPLICATE_CHECK;
-        }
-    }
-
-    #[inline(always)]
-    pub const fn set_single_layer_mode(&mut self, value: bool) {
-        if value {
-            self.0 |= Self::SINGLE_LAYER_MODE;
-        } else {
-            self.0 &= !Self::SINGLE_LAYER_MODE;
         }
     }
 
@@ -215,47 +128,115 @@ impl IterFlags {
     pub const fn disable_single_layer_mode(&mut self) {
         self.0 &= !Self::SINGLE_LAYER_MODE;
     }
+}
+
+// ============================================================================
+//  ReverseFlags — extracted reverse-only flags for ReverseScanCtx
+// ============================================================================
+
+/// Packed boolean flags for reverse scan context state.
+///
+/// Uses a u8 bitfield to store 4 boolean flags efficiently.
+/// Lives inside `ReverseScanCtx`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReverseFlags(u8);
+
+#[allow(dead_code, reason = "API Completeness")]
+impl ReverseFlags {
+    const EXHAUSTED: u8 = 1 << 0;
+    const INITIALIZED: u8 = 1 << 1;
+    const EMIT_EQUAL: u8 = 1 << 2;
+    const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
+
+    /// Create new flags with all bits cleared.
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    /// Create flags with initial values for reverse iteration.
+    #[inline(always)]
+    pub const fn with_values(emit_equal: bool) -> Self {
+        let mut bits: u8 = 0;
+
+        if emit_equal {
+            bits |= Self::EMIT_EQUAL;
+        }
+
+        Self(bits)
+    }
 
     // ========================================================================
-    //  Back iteration convenience methods
+    //  Getters
     // ========================================================================
 
-    /// Mark back iterator as exhausted.
     #[inline(always)]
-    pub const fn mark_back_exhausted(&mut self) {
-        self.0 |= Self::BACK_EXHAUSTED;
+    pub const fn exhausted(self) -> bool {
+        self.0 & Self::EXHAUSTED != 0
     }
 
-    /// Mark back iterator as initialized.
     #[inline(always)]
-    pub const fn mark_back_initialized(&mut self) {
-        self.0 |= Self::BACK_INITIALIZED;
+    pub const fn initialized(self) -> bool {
+        self.0 & Self::INITIALIZED != 0
     }
 
-    /// Check if both front and back are exhausted (completely consumed).
     #[inline(always)]
-    pub const fn fully_exhausted(self) -> bool {
-        (self.0 & Self::EXHAUSTED != 0) && (self.0 & Self::BACK_EXHAUSTED != 0)
+    pub const fn emit_equal(self) -> bool {
+        self.0 & Self::EMIT_EQUAL != 0
     }
 
-    /// Clear `back_needs_duplicate_check` flag.
     #[inline(always)]
-    pub const fn clear_back_duplicate_check(&mut self) {
-        self.0 &= !Self::BACK_NEEDS_DUPLICATE_CHECK;
+    pub const fn needs_duplicate_check(self) -> bool {
+        self.0 & Self::NEEDS_DUPLICATE_CHECK != 0
     }
 
-    /// Set `back_needs_duplicate_check` flag.
+    // ========================================================================
+    //  Setters
+    // ========================================================================
+
     #[inline(always)]
-    pub const fn require_back_duplicate_check(&mut self) {
-        self.0 |= Self::BACK_NEEDS_DUPLICATE_CHECK;
+    pub const fn set_exhausted(&mut self, value: bool) {
+        if value {
+            self.0 |= Self::EXHAUSTED;
+        } else {
+            self.0 &= !Self::EXHAUSTED;
+        }
     }
 
-    /// Mark this iterator as no longer forward-only.
-    ///
-    /// Used when a forward-only iterator receives a reverse call and lazily
-    /// initializes reverse state.
     #[inline(always)]
-    pub const fn clear_forward_only(&mut self) {
-        self.0 &= !Self::FORWARD_ONLY;
+    pub const fn set_initialized(&mut self, value: bool) {
+        if value {
+            self.0 |= Self::INITIALIZED;
+        } else {
+            self.0 &= !Self::INITIALIZED;
+        }
+    }
+
+    // ========================================================================
+    //  Convenience methods
+    // ========================================================================
+
+    /// Mark as exhausted.
+    #[inline(always)]
+    pub const fn mark_exhausted(&mut self) {
+        self.0 |= Self::EXHAUSTED;
+    }
+
+    /// Mark as initialized.
+    #[inline(always)]
+    pub const fn mark_initialized(&mut self) {
+        self.0 |= Self::INITIALIZED;
+    }
+
+    /// Clear `needs_duplicate_check` flag.
+    #[inline(always)]
+    pub const fn clear_duplicate_check(&mut self) {
+        self.0 &= !Self::NEEDS_DUPLICATE_CHECK;
+    }
+
+    /// Set `needs_duplicate_check` flag.
+    #[inline(always)]
+    pub const fn require_duplicate_check(&mut self) {
+        self.0 |= Self::NEEDS_DUPLICATE_CHECK;
     }
 }

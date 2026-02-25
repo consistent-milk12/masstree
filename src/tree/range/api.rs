@@ -4,16 +4,16 @@
 
 use seize::LocalGuard;
 
-use crate::Permuter;
 use crate::alloc_trait::TreeAllocator;
 use crate::key::{IKEY_SIZE, MAX_KEY_LENGTH};
-use crate::leaf15::{LAYER_KEYLENX, LeafNode15};
+use crate::leaf15::{LeafNode15, LAYER_KEYLENX};
 use crate::nodeversion::NodeVersion;
 use crate::policy::LeafPolicy;
 use crate::tree::MassTreeGeneric;
+use crate::Permuter;
 
 use super::cursor_key::CursorKey;
-use super::helper::{KeyIndexedPosition, lower_with_position};
+use super::helper::{lower_with_position, KeyIndexedPosition};
 use super::iterator::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 use super::traversal::reach_leaf_for_scan;
 
@@ -568,79 +568,16 @@ where
     where
         F: FnMut(&[u8], P::Output) -> bool,
     {
-        assert!(
-            prefix.len() <= MAX_KEY_LENGTH,
-            "key length {} exceeds maximum {}",
-            prefix.len(),
-            MAX_KEY_LENGTH
-        );
-
-        // Compute exclusive upper bound on the stack (no heap allocation).
-        // Increments the rightmost non-0xFF byte: "abc" -> "abd", "ab\xff" -> "ac".
-        let mut upper_buf = [0u8; MAX_KEY_LENGTH];
-        let upper_len: Option<usize> = compute_prefix_upper_bound_into(prefix, &mut upper_buf);
-
-        let end: RangeBound<'_> = upper_len.map_or(RangeBound::Unbounded, |len| {
-            RangeBound::Excluded(&upper_buf[..len])
-        });
-
-        // Trie-aware fast path: descend through exact 8-byte chunks when
-        // matching layer pointers exist, then scan from that sublayer root.
-        if let Some((layer_root, descended_chunks)) = self.descend_prefix_layers(prefix, guard)
-            && descended_chunks > 0
-        {
-            let mut cursor = CursorKey::from_slice(prefix);
-            for _ in 0..descended_chunks {
-                if cursor.has_suffix() {
-                    cursor.shift();
-                } else {
-                    cursor.shift_clear();
-                }
-            }
-
-            let prefix_at_chunk_boundary = prefix.len() == descended_chunks * IKEY_SIZE;
-            let mut count = 0usize;
-
-            // Exact prefix key sorts before descendants and may live in the
-            // parent layer (outside the descended sublayer).
-            if prefix_at_chunk_boundary && let Some(value) = self.get_with_guard(prefix, guard) {
+        self.scan_prefix_inner(prefix, guard, |exact_value, iter| {
+            let mut count = 0;
+            if let Some(value) = exact_value {
                 count += 1;
                 if !visitor(prefix, value) {
                     return count;
                 }
             }
-
-            // All descendants in this sublayer share the consumed chunk-prefix.
-            // For exact chunk-boundary prefixes, no additional prefix filtering
-            // is needed inside this sublayer.
-            if prefix_at_chunk_boundary {
-                return count
-                    + self
-                        .range_forward_from_root(
-                            layer_root,
-                            cursor,
-                            RangeBound::Unbounded,
-                            RangeBound::Unbounded,
-                            guard,
-                        )
-                        .for_each_intra_leaf_batch(visitor);
-            }
-
-            return count
-                + self
-                    .range_forward_from_root(
-                        layer_root,
-                        cursor,
-                        RangeBound::Included(prefix),
-                        end,
-                        guard,
-                    )
-                    .for_each_intra_leaf_batch(visitor);
-        }
-
-        // Forward-only iterator with intra-leaf batch processing
-        self.range_forward(RangeBound::Included(prefix), end, guard)
-            .for_each_intra_leaf_batch(|key, value| visitor(key, value))
+            count + iter.for_each_intra_leaf_batch(visitor)
+        })
     }
 
     /// Value-only prefix scan (no key materialization).
@@ -667,10 +604,45 @@ where
     /// # Panics
     ///
     /// Panics if `prefix.len()` exceeds `MAX_KEY_LENGTH` (256 bytes).
-    pub fn scan_prefix_values<F>(&self, prefix: &[u8], visitor: F, guard: &LocalGuard<'_>) -> usize
+    pub fn scan_prefix_values<F>(
+        &self,
+        prefix: &[u8],
+        mut visitor: F,
+        guard: &LocalGuard<'_>,
+    ) -> usize
     where
         F: FnMut(P::Output) -> bool,
     {
+        self.scan_prefix_inner(prefix, guard, |exact_value, iter| {
+            let mut count = 0;
+            if let Some(value) = exact_value {
+                count += 1;
+                if !visitor(value) {
+                    return count;
+                }
+            }
+            count + iter.for_each_values_batch(visitor)
+        })
+    }
+
+    // ========================================================================
+    //  Shared Prefix Scan Logic
+    // ========================================================================
+
+    /// Shared implementation for `scan_prefix` and `scan_prefix_values`.
+    ///
+    /// Performs prefix validation, upper-bound computation, and trie-aware
+    /// fast-path descent. Delegates visitor-specific logic to `scan_fn`:
+    /// - First argument: `Some(value)` if the exact prefix key exists at a
+    ///   chunk boundary, `None` otherwise.
+    /// - Second argument: a forward-only `RangeIter` positioned for the scan.
+    #[inline]
+    fn scan_prefix_inner(
+        &self,
+        prefix: &[u8],
+        guard: &LocalGuard<'_>,
+        scan_fn: impl FnOnce(Option<P::Output>, RangeIter<'_, '_, P, A>) -> usize,
+    ) -> usize {
         assert!(
             prefix.len() <= MAX_KEY_LENGTH,
             "key length {} exceeds maximum {}",
@@ -678,20 +650,21 @@ where
             MAX_KEY_LENGTH
         );
 
-        let mut upper_buf: [u8; 256] = [0u8; MAX_KEY_LENGTH];
-        let upper_len: Option<usize> = compute_prefix_upper_bound_into(prefix, &mut upper_buf);
+        // Compute exclusive upper bound on the stack (no heap allocation).
+        // Increments the rightmost non-0xFF byte: "abc" -> "abd", "ab\xff" -> "ac".
+        let mut upper_buf = [0u8; MAX_KEY_LENGTH];
+        let upper_len = compute_prefix_upper_bound_into(prefix, &mut upper_buf);
 
         let end: RangeBound<'_> = upper_len.map_or(RangeBound::Unbounded, |len| {
             RangeBound::Excluded(&upper_buf[..len])
         });
 
-        // Trie-aware fast path mirrors scan_prefix:
-        // descend through exact 8-byte chunks and scan from the descended root.
+        // Trie-aware fast path: descend through exact 8-byte chunks when
+        // matching layer pointers exist, then scan from that sublayer root.
         if let Some((layer_root, descended_chunks)) = self.descend_prefix_layers(prefix, guard)
             && descended_chunks > 0
         {
-            let mut cursor: CursorKey = CursorKey::from_slice(prefix);
-
+            let mut cursor = CursorKey::from_slice(prefix);
             for _ in 0..descended_chunks {
                 if cursor.has_suffix() {
                     cursor.shift();
@@ -700,44 +673,32 @@ where
                 }
             }
 
-            let prefix_at_chunk_boundary: bool = prefix.len() == descended_chunks * IKEY_SIZE;
-            let mut count: usize = 0usize;
-            let mut visitor: F = visitor;
+            let prefix_at_chunk_boundary = prefix.len() == descended_chunks * IKEY_SIZE;
 
             if prefix_at_chunk_boundary {
-                if let Some(value) = self.get_with_guard(prefix, guard) {
-                    count += 1;
-                    if !visitor(value) {
-                        return count;
-                    }
-                }
-
-                return count
-                    + self
-                        .range_forward_from_root(
-                            layer_root,
-                            cursor,
-                            RangeBound::Unbounded,
-                            RangeBound::Unbounded,
-                            guard,
-                        )
-                        .for_each_values_batch(visitor);
+                let exact_value = self.get_with_guard(prefix, guard);
+                let iter = self.range_forward_from_root(
+                    layer_root,
+                    cursor,
+                    RangeBound::Unbounded,
+                    RangeBound::Unbounded,
+                    guard,
+                );
+                return scan_fn(exact_value, iter);
             }
 
-            return count
-                + self
-                    .range_forward_from_root(
-                        layer_root,
-                        cursor,
-                        RangeBound::Included(prefix),
-                        end,
-                        guard,
-                    )
-                    .for_each_values_batch(visitor);
+            let iter = self.range_forward_from_root(
+                layer_root,
+                cursor,
+                RangeBound::Included(prefix),
+                end,
+                guard,
+            );
+            return scan_fn(None, iter);
         }
 
-        self.range_forward(RangeBound::Included(prefix), end, guard)
-            .for_each_values_batch(visitor)
+        let iter = self.range_forward(RangeBound::Included(prefix), end, guard);
+        scan_fn(None, iter)
     }
 
     // ========================================================================

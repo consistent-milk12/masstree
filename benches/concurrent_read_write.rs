@@ -24,7 +24,7 @@ use bench_utils::{
 };
 use crossbeam_skiplist::SkipMap;
 use divan::counter::ItemsCount;
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
 use masstree::MassTree15Inline;
 use scc::TreeIndex;

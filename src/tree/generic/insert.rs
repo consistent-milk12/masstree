@@ -7,13 +7,13 @@
 //! - `#[cold]` on retry/error paths
 //! - Unified slot allocation and value update logic
 
-use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::leaf15::KSUF_KEYLENX;
+use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::policy::RetireHandle;
 
 use super::{
-    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker,
-    LocalGuard, MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
+    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LeafPolicy, Linker, LocalGuard,
+    MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation, LAYER_KEYLENX,
 };
 
 use crate::leaf15::LeafNode15;
@@ -229,6 +229,10 @@ where
     ///
     /// This is the fast path for lazy coalescing: when a leaf becomes empty
     /// after removes, subsequent inserts can reuse it.
+    ///
+    /// See also: [`insert_into_empty_leaf_batch`](Self::insert_into_empty_leaf_batch) in
+    /// batch.rs — same core logic but simpler signature (no `pre_allocated`, returns
+    /// `*mut u8` only).
     ///
     /// # Returns
     ///

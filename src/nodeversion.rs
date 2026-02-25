@@ -47,7 +47,7 @@ use std::hint as StdHint;
 use std::marker::PhantomData;
 use std::ptr as StdPtr;
 use std::sync::atomic as StdAtomic;
-use std::sync::atomic::{fence, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::thread as StdThread;
 use std::time::{Duration, Instant};
 

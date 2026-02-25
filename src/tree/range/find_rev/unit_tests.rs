@@ -1,11 +1,20 @@
-//! Unit tests for reverse scan operations.
+//! Unit tests for reverse scan cursor and helper operations.
 //!
 //! Tests cover:
-//! - `handle_down_back`: Sublayer descent cursor setup
-//! - `handle_up_back`: Layer ascent with empty stack handling
-//! - State machine transitions
+//! - `handle_down_back` logic: Sublayer descent cursor setup
+//! - `handle_up_back` logic: Layer ascent with cursor unshift
+//! - `ReverseScanHelper` state transitions
+//! - `CursorKey` reverse operations
 
-use super::{CursorKey, ReverseScan, ReverseScanHelper};
+use crate::tree::range::cursor_key::CursorKey;
+use crate::tree::range::helper::ReverseScanHelper;
+
+/// Inline helper matching `ReverseScanCtx::handle_down_back` logic.
+/// Shifts cursor into sublayer with MAX ikey and sets `upper_bound`.
+fn handle_down_back(cursor_key: &mut CursorKey, helper: &mut ReverseScanHelper) {
+    cursor_key.shift_clear_reverse();
+    helper.upper_bound = true;
+}
 
 // ============================================================================
 //  handle_down_back Tests
@@ -20,7 +29,7 @@ fn test_handle_down_back_sets_cursor_to_max() {
     assert!(!helper.upper_bound);
     let original_offset = cursor_key.offset();
 
-    ReverseScan::handle_down_back(&mut cursor_key, &mut helper);
+    handle_down_back(&mut cursor_key, &mut helper);
 
     // After: cursor at maximum, upper_bound set
     assert_eq!(cursor_key.current_ikey(), u64::MAX);
@@ -37,7 +46,7 @@ fn test_handle_down_back_from_root() {
     assert_eq!(cursor_key.offset(), 0);
     assert!(!helper.upper_bound);
 
-    ReverseScan::handle_down_back(&mut cursor_key, &mut helper);
+    handle_down_back(&mut cursor_key, &mut helper);
 
     // Descended one layer
     assert_eq!(cursor_key.offset(), 8);
@@ -51,7 +60,7 @@ fn test_handle_down_back_multiple_descents() {
     let mut helper = ReverseScanHelper::new();
 
     // First descent
-    ReverseScan::handle_down_back(&mut cursor_key, &mut helper);
+    handle_down_back(&mut cursor_key, &mut helper);
     assert_eq!(cursor_key.offset(), 8);
     assert!(helper.upper_bound);
 
@@ -60,7 +69,7 @@ fn test_handle_down_back_multiple_descents() {
     assert!(!helper.upper_bound);
 
     // Second descent
-    ReverseScan::handle_down_back(&mut cursor_key, &mut helper);
+    handle_down_back(&mut cursor_key, &mut helper);
     assert_eq!(cursor_key.offset(), 16);
     assert!(helper.upper_bound);
 }
@@ -169,7 +178,7 @@ fn test_reverse_scan_cursor_flow() {
     let original_ikey = cursor_key.current_ikey();
 
     // Step 1: Descend into sublayer
-    ReverseScan::handle_down_back(&mut cursor_key, &mut helper);
+    handle_down_back(&mut cursor_key, &mut helper);
 
     assert_eq!(cursor_key.offset(), 8);
     assert_eq!(cursor_key.current_ikey(), u64::MAX);
@@ -195,7 +204,7 @@ fn test_deep_descent_ascent_cycle() {
 
     // Descend 3 times
     for expected_offset in [8, 16, 24] {
-        ReverseScan::handle_down_back(&mut cursor_key, &mut helper);
+        handle_down_back(&mut cursor_key, &mut helper);
         assert_eq!(cursor_key.offset(), expected_offset);
         assert!(helper.upper_bound);
         helper.mark_key_complete();

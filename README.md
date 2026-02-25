@@ -18,7 +18,7 @@ Copy types.
 
 ## Status
 
-**v0.8.1** — Core feature complete.
+**v0.8.2** — Core feature complete.
 
 | Feature | Status |
 |---------|--------|
@@ -135,7 +135,7 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 ```toml
 [dependencies]
-masstree = { version = "0.8.1", features = ["mimalloc"] }
+masstree = { version = "0.8.2", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

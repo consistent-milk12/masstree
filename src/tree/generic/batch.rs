@@ -598,18 +598,15 @@ where
             let is_single_layer: bool = !key.has_suffix();
 
             // Try to insert this entry
-            let insert_result = if is_single_layer {
-                self.try_insert_entry_single_layer(
-                    leaf,
-                    lock,
-                    &key,
-                    &entry.output,
-                    &mut perm,
-                    guard,
-                )
-            } else {
-                self.try_insert_entry_multi_layer(leaf, lock, &key, &entry.output, &mut perm, guard)
-            };
+            let insert_result = self.try_insert_entry(
+                leaf,
+                lock,
+                &key,
+                &entry.output,
+                &mut perm,
+                is_single_layer,
+                guard,
+            );
 
             match insert_result {
                 BatchEntryResult::Inserted(deferred) => {
@@ -653,18 +650,28 @@ where
     //  Single Entry Insertion Helpers
     // ========================================================================
 
-    /// Try to insert a single entry in single-layer mode (keys ≤ 8 bytes).
+    /// Try to insert a single entry into a locked leaf.
+    ///
+    /// Dispatches between single-layer search (`keys ≤ 8 bytes`) and multi-layer
+    /// search (`keys > 8 bytes`) based on `single_layer_mode`. The Found/NotFound
+    /// handling is identical for both paths.
+    #[inline]
     #[expect(clippy::too_many_arguments, reason = "Insertion requires full context")]
-    fn try_insert_entry_single_layer(
+    fn try_insert_entry(
         &self,
         leaf: &LeafNode15<P>,
         lock: &mut LockGuard<'_>,
         key: &Key<'_>,
         value: &P::Output,
         perm: &mut <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        single_layer_mode: bool,
         guard: &LocalGuard<'_>,
     ) -> BatchEntryResult<P::Output> {
-        let search_result = self.search_for_insert_single_layer(leaf, key, perm);
+        let search_result = if single_layer_mode {
+            self.search_for_insert_single_layer(leaf, key, perm)
+        } else {
+            self.search_for_insert_generic(leaf, key, perm)
+        };
 
         match search_result {
             InsertSearchResultGeneric::Found { slot } => {
@@ -672,7 +679,6 @@ where
                     return BatchEntryResult::Retry;
                 }
 
-                // Update existing value and return old value
                 let old_value = self.update_existing_value(leaf, lock, slot, value, guard);
                 BatchEntryResult::Updated(old_value)
             }
@@ -707,74 +713,14 @@ where
 
             InsertSearchResultGeneric::Layer { .. }
             | InsertSearchResultGeneric::Conflict { .. } => {
-                // These shouldn't happen in single-layer mode
-                BatchEntryResult::Retry
-            }
-        }
-    }
-
-    /// Try to insert a single entry in multi-layer mode (keys > 8 bytes).
-    #[expect(clippy::too_many_arguments, reason = "Insertion requires full context")]
-    fn try_insert_entry_multi_layer(
-        &self,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        key: &Key<'_>,
-        value: &P::Output,
-        perm: &mut <LeafNode15<P> as TreeLeafNode<P>>::Perm,
-        guard: &LocalGuard<'_>,
-    ) -> BatchEntryResult<P::Output> {
-        let search_result = self.search_for_insert_generic(leaf, key, perm);
-
-        match search_result {
-            InsertSearchResultGeneric::Found { slot } => {
-                if leaf.is_value_empty(slot) {
-                    return BatchEntryResult::Retry;
+                if single_layer_mode {
+                    // Layer/Conflict shouldn't occur in single-layer mode
+                    BatchEntryResult::Retry
+                } else {
+                    // Layer descent or suffix conflict — too complex for batch,
+                    // fall back to individual insert
+                    BatchEntryResult::NeedsLayerDescent
                 }
-
-                // Update existing value and return old value
-                let old_value = self.update_existing_value(leaf, lock, slot, value, guard);
-                BatchEntryResult::Updated(old_value)
-            }
-
-            InsertSearchResultGeneric::NotFound { logical_pos } => {
-                let ikey = key.ikey();
-
-                match self.find_usable_slot(leaf, perm, ikey) {
-                    FindSlotResult::Found { slot, back_offset } => {
-                        let deferred_retire = self.insert_new_value(
-                            leaf,
-                            lock,
-                            slot,
-                            back_offset,
-                            logical_pos,
-                            *perm,
-                            key,
-                            value,
-                            guard,
-                            None,
-                        );
-                        self.count.increment();
-
-                        // Update perm for next iteration
-                        *perm = leaf.permutation();
-                        BatchEntryResult::Inserted(deferred_retire)
-                    }
-
-                    FindSlotResult::NeedsSplit => BatchEntryResult::NeedsSplit,
-                }
-            }
-
-            InsertSearchResultGeneric::Layer { .. } => {
-                // Layer descent needed - can't handle in batch mode
-                BatchEntryResult::NeedsLayerDescent
-            }
-
-            InsertSearchResultGeneric::Conflict { slot } => {
-                // Suffix conflict - create layer
-                // This is complex, mark for individual retry
-                let _ = slot; // suppress unused warning
-                BatchEntryResult::NeedsLayerDescent
             }
         }
     }
@@ -786,9 +732,30 @@ where
     // Helpers shared with insert.rs (find_usable_slot, validate_post_lock,
     // validate_membership, can_reuse_empty_leaf, update_existing_value,
     // insert_new_value) are defined in insert.rs with pub(crate) visibility.
+    //
+    // Intentional divergences from insert.rs (do not unify):
+    //
+    // 1. Lock acquisition: batch uses lock() (pure spin) because it amortizes
+    //    one lock hold across multiple entries. insert.rs uses lock_bounded()
+    //    which yields after MAX_SPINS=16, appropriate for single-key inserts
+    //    where fairness matters more than throughput.
+    //
+    // 2. Suffix retirement: insert.rs retires suffix bags inline after dropping
+    //    the lock per entry. batch.rs collects deferred_retire pointers and
+    //    retires them all after the batch loop, keeping retirements outside
+    //    the critical section.
+    //
+    // 3. Return types / control flow: insert.rs returns Result<Option<P::Output>>
+    //    directly per key with its own lock/unlock cycle. batch.rs returns
+    //    BatchEntryResult per entry, with the caller managing lock lifetime
+    //    across the entire leaf batch.
 
     /// Insert into an empty leaf. Returns a pointer to a suffix bag that must be
     /// retired after the lock is dropped (null if none).
+    ///
+    /// See also: [`insert_into_empty_leaf`](Self::insert_into_empty_leaf) in
+    /// insert.rs — same core logic but takes `pre_allocated` and returns
+    /// `(Result, *mut u8)`.
     fn insert_into_empty_leaf_batch(
         &self,
         leaf: &LeafNode15<P>,
