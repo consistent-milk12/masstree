@@ -169,16 +169,16 @@ where
             );
         }
 
-        let result_ptr: *mut u8 = twig_head.map_or_else(
-            || final_ptr.cast::<u8>(),
-            |head: *mut LeafNode15<P>| {
+        let result_ptr: *mut u8 = match twig_head {
+            Some(head) => {
                 unsafe {
                     (*twig_tail).set_keylenx(0, LAYER_KEYLENX);
                     (*twig_tail).store_layer(0, final_ptr.cast::<u8>());
                 }
                 head.cast::<u8>()
-            },
-        );
+            }
+            None => final_ptr.cast::<u8>(),
+        };
 
         result_ptr
     }

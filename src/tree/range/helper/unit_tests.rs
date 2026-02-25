@@ -1,4 +1,4 @@
-use super::{initial_ksuf_match, CursorKey, Ordering};
+use super::{CursorKey, Ordering, initial_ksuf_match};
 
 #[test]
 fn test_initial_ksuf_match() {

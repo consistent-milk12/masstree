@@ -380,9 +380,10 @@ impl<P: LeafPolicy> LeafNode15<P> {
         }
 
         // Terminal value or empty — delegate to value array
-        self.values
-            .load(slot)
-            .map_or_else(|| SlotKind::Empty, SlotKind::Value)
+        match self.values.load(slot) {
+            Some(v) => SlotKind::Value(v),
+            None => SlotKind::Empty,
+        }
     }
 
     /// Lightweight slot classification without value extration.
@@ -450,8 +451,10 @@ impl<P: LeafPolicy> LeafNode15<P> {
     pub fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
         debug_assert!(slot < WIDTH_15, "ksuf_equals: slot {slot} out of bounds");
 
-        self.ksuf(slot)
-            .map_or_else(|| suffix.is_empty(), |stored: &[u8]| stored == suffix)
+        match self.ksuf(slot) {
+            Some(stored) => stored == suffix,
+            None => suffix.is_empty(),
+        }
     }
 
     /// Compare a slot's suffix with the given bytes.

@@ -6,7 +6,6 @@
 //! and the remaining bytes are stored in a [`SuffixBag`].
 
 use crate::TreePermutation;
-// Note: AllocError/AllocResult removed - allocations are now infallible
 
 mod clone;
 mod compact;

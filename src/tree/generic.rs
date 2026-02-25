@@ -85,8 +85,10 @@ where
         // Create root leaf directly in allocator memory (bypasses Box for pool allocators).
         let root_ptr: *mut LeafNode15<P> = allocator.alloc_leaf_direct(true, false);
 
-        let collector: Collector =
-            batch_size.map_or_else(Collector::new, |size| Collector::new().batch_size(size));
+        let collector: Collector = match batch_size {
+            Some(size) => Collector::new().batch_size(size),
+            None => Collector::new(),
+        };
 
         Self {
             collector,
@@ -734,10 +736,12 @@ where
         if key.has_suffix() {
             leaf.set_keylenx_relaxed(slot, KSUF_KEYLENX);
 
-            pre_allocated.map_or_else(
-                || unsafe { leaf.assign_ksuf(slot, key.suffix(), guard) },
-                |buffer| unsafe { leaf.assign_ksuf_prealloc(slot, key.suffix(), guard, buffer) },
-            )
+            match pre_allocated {
+                Some(buffer) => unsafe {
+                    leaf.assign_ksuf_prealloc(slot, key.suffix(), guard, buffer)
+                },
+                None => unsafe { leaf.assign_ksuf(slot, key.suffix(), guard) },
+            }
         } else {
             // Inline key (0-8 bytes total, no suffix)
             #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
@@ -773,12 +777,8 @@ where
     ///
     /// // Increment counter, defaulting to 0
     /// let _value = tree.entry_with_guard(b"counter", &guard)
-    ///     .and_modify(|v| v + 1)
+    ///     .and_modify(|v| *v + 1)
     ///     .or_insert(0);
-    ///
-    /// // Fallible insertion
-    /// let _result = tree.entry_with_guard(b"key", &guard)
-    ///     .or_try_insert(100);
     ///
     /// // Pattern matching
     /// match tree.entry_with_guard(b"maybe", &guard) {

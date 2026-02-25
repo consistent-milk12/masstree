@@ -320,8 +320,10 @@ where
     pub fn try_remove_entry(self) -> RemoveEntryResult<P::Output> {
         let key_owned: Vec<u8> = self.key.to_vec();
 
-        (self.tree.remove_with_guard(self.key, self.guard)?)
-            .map_or_else(|| Ok(None), |value: P::Output| Ok(Some((key_owned, value))))
+        match self.tree.remove_with_guard(self.key, self.guard)? {
+            Some(value) => Ok(Some((key_owned, value))),
+            None => Ok(None),
+        }
     }
 }
 
@@ -426,17 +428,15 @@ where
         key: &'e [u8],
         guard: &'e LocalGuard<'t>,
     ) -> Self {
-        tree.get_with_guard(key, guard).map_or_else(
-            || Entry::Vacant(VacantEntry { key, tree, guard }),
-            |value: P::Output| {
-                Entry::Occupied(OccupiedEntry {
-                    key,
-                    value,
-                    tree,
-                    guard,
-                })
-            },
-        )
+        match tree.get_with_guard(key, guard) {
+            Some(value) => Entry::Occupied(OccupiedEntry {
+                key,
+                value,
+                tree,
+                guard,
+            }),
+            None => Entry::Vacant(VacantEntry { key, tree, guard }),
+        }
     }
 }
 

@@ -5,43 +5,20 @@
 //! [`NodeVersion`] combines lock state, version counters, and metadata flags
 //! in a single `u32`. Readers use optimistic validation, writers acquire locks.
 //!
-//! # Synchronization Architecture
+//! # Synchronization
 //!
-//! Masstree uses a **dual synchronization model**:
+//! - **OCC (this module)**: version counters detect structural changes;
+//!   dirty flags signal in-flight modifications.
+//!   Readers: `stable()` -> read -> `has_changed()`.
+//!   Writers: `lock()` -> `mark_insert()` -> modify -> drop guard.
 //!
-//! ## 1. `NodeVersion` (this module) — OCC at Node Level
-//! - **Version counters** (VINSERT/VSPLIT) detect structural changes
-//! - **Dirty flags** (INSERTING/SPLITTING) signal "modification in flight"
-//! - Readers: `stable()` → read → `has_changed()` validation
-//! - Writers: `lock()` → `mark_insert()` → modify → `drop(guard)`
-//!
-//! ## 2. Permutation (leaf15.rs) — Atomic Publish at Slot Level
-//! - **Permutation store (Release)** is the linearization point for new slots
-//! - Slot data (ikey, keylenx, value) written with Relaxed ordering
-//! - Readers load permutation (Acquire) to see all prior slot writes
-//!
-//! ## How They Work Together
-//! - `NodeVersion` gates access (readers wait for clean state via `stable()`)
-//! - Permutation publishes slot contents atomically
-//! - Both are necessary: version for change detection, permutation for slot visibility
-//!
-//! # Concurrency Model
-//! 1. Readers: Call `stable()` to get version, perform read, call `has_changed()`
-//! 2. Writers: Call `lock()` to get a [`LockGuard`], modify node, let guard drop.
+//! - **Permutation (`leaf15.rs`)**: Release store is the linearization point
+//!   for new slots; readers Acquire-load permutation to see slot writes.
 //!
 //! # Type-State Pattern
-//! The [`LockGuard`] type provides compile-time verification that the lock is held.
-//! Operations that require the lock take `&mut LockGuard` as proof. The guard
-//! automatically unlocks on drop (panic-safe).
 //!
-//! ```rust
-//! use masstree::NodeVersion;
-//!
-//! let version = NodeVersion::new(true);
-//! let mut guard = version.lock();
-//! guard.mark_insert();
-//! // Lock released when guard drops
-//! ```
+//! [`LockGuard`] provides compile-time proof that the lock is held.
+//! Auto-unlocks on drop (panic-safe).
 
 use std::hint as StdHint;
 use std::marker::PhantomData;
@@ -54,37 +31,18 @@ use std::time::{Duration, Instant};
 mod bounded;
 
 // ============================================================================
-//  Bit Constants (matching C++ nodeversion_parameters<uint32_t>)
+//  Bit Constants
 // ============================================================================
 
-/// Lock bit: node is locked for modification.
 const LOCK_BIT: u32 = 1 << 0;
-
-/// Inserting bit: node is being inserted into.
 const INSERTING_BIT: u32 = 1 << 1;
-
-/// Splitting bit: node is being split.
 const SPLITTING_BIT: u32 = 1 << 2;
-
-/// Dirty mask: either inserting or splitting.
 const DIRTY_MASK: u32 = INSERTING_BIT | SPLITTING_BIT;
-
-/// Low bit of insert version counter.
 const VINSERT_LOWBIT: u32 = 1 << 3;
-
-/// Low bit of split version counter.
 const VSPLIT_LOWBIT: u32 = 1 << 9;
-
-/// Unused bit (reserved).
 const UNUSED1_BIT: u32 = 1 << 28;
-
-/// Deleted bit: node is logically deleted.
 const DELETED_BIT: u32 = 1 << 29;
-
-/// Root bit: node is a tree root.
 const ROOT_BIT: u32 = 1 << 30;
-
-/// Is-leaf bit: node is a leaf (vs internode).
 const ISLEAF_BIT: u32 = 1 << 31;
 
 /// Mask for unlock after split: clears root, unused, and version bits below vsplit.
@@ -97,47 +55,27 @@ const UNLOCK_MASK: u32 = !(UNUSED1_BIT | (VINSERT_LOWBIT - 1));
 //  Backoff (for spin loops)
 // ============================================================================
 
-/// Exponential backoff for spin loops.
-///
-/// Matches C++ `backoff_fence_function` from `reference/compiler.hh:133-143`.
-/// Each call to `spin()` executes `count+1` pause instructions, then doubles
-/// the count (capped at 15).
-///
-/// Sequence: 0 → 1 → 3 → 7 → 15 (capped)
+/// Exponential backoff
 struct Backoff {
     count: u32,
 }
 
 impl Backoff {
-    /// Create a new backoff with count = 0.
     #[inline(always)]
     const fn new() -> Self {
         Self { count: 0 }
     }
 
-    /// Spin for `count+1` iterations using CPU pause hints, then increase count.
-    ///
-    /// Uses [`StdHint::spin_loop()`] which maps to the x86 `PAUSE` instruction,
-    /// improving performance on hyper-threaded CPUs by hinting that we're in
-    /// a spin-wait loop.
-    ///
-    /// Includes a compiler fence after spinning to match C++ `relax_fence()`
-    /// which uses `asm volatile("pause" : : : "memory")`. The `"memory"` clobber
-    /// acts as a compiler barrier preventing reordering around the pause.
+    /// Spin for `count+1` iterations with CPU pause hints, then double count.
     #[inline(always)]
     fn spin(&mut self) {
         for _ in 0..=self.count {
             StdHint::spin_loop();
         }
 
-        // Single compiler fence after all spins.
-        // Matches C++ "memory" clobber semantics while reducing fence overhead.
-        // The fence prevents compiler from reordering loads/stores across the spin.
         StdAtomic::compiler_fence(Ordering::SeqCst);
 
         // Double count, cap at 15: 0 -> 1 -> 3 -> 7 -> 15 -> 15
-        // Matches C++ backoff_fence_function (compiler.hh:141).
-        // Lower cap yields faster under SMT contention.
         self.count = ((self.count << 1) | 1) & 15;
     }
 }
@@ -148,23 +86,9 @@ impl Backoff {
 
 /// A versioned lock for tree nodes.
 ///
-/// Combines lock state, dirty flags, version counters, and node metadata.
-///
 /// # Layout
 /// Bit 31: `is_leaf` | Bit 30: `root` | Bit 29: `deleted` | BITS 9-27: `split_version`
 /// Bits 3-8: `insert_version` | Bit 2: `splitting` | Bit 1: `inserting` | Bit 0: `locked`
-///
-/// # Example
-///
-/// ```rust
-/// use masstree::NodeVersion;
-///
-/// // Create a leaf node version
-/// let v = NodeVersion::new(true);
-///
-/// assert!(v.is_leaf());
-/// assert!(!v.is_locked());
-/// ```
 #[derive(Debug)]
 pub struct NodeVersion {
     value: AtomicU32,
@@ -176,26 +100,10 @@ pub struct NodeVersion {
 
 /// Zero-sized proof that a lock is held.
 ///
-/// Cannot be constructed except by calling [`NodeVersion::lock()`].
-/// Operations that require the lock take `&mut LockGuard` as proof.
-/// The lock is automatically released when the guard drops.
+/// Cannot be constructed except by [`NodeVersion::lock()`]. The lock is
+/// automatically released on drop, even during unwinding.
 ///
-/// # Panic Safety
-/// The guard releases the lock on drop, even during unwinding. This ensures
-/// the lock is never held after a panic.
-///
-/// # Thread Safety
-/// Guards are `!Send` and `!Sync` via `PhantomData<*mut ()>` to prevent them
-/// from crossing thread boundaries.
-///
-/// We use `PhantomData`<*mut ()> which makes the type !Send + !Sync because
-/// raw pointers are neither Send nor Sync. This is the standard stable Rust
-/// pattern for preventing types from being transferred across threads, at least
-/// until 1.92.0.
-///
-/// NOTE: This is sufficient for our use case. The guard holds a reference to
-/// `NodeVersion` (via a lifetime marker) which already prevents the guard from
-/// outliving the version.
+/// `!Send + !Sync` via `PhantomData<*mut ()>`.
 #[derive(Debug)]
 #[must_use = "releasing a lock without using the guard is a logic error"]
 pub struct LockGuard<'a> {
@@ -203,32 +111,23 @@ pub struct LockGuard<'a> {
     locked_value: u32,
 
     _lifetime: PhantomData<&'a NodeVersion>,
-    // PhantomData<*mut ()> makes this type !Send + !Sync (these are still nightly features)
     _marker: PhantomData<*mut ()>,
 }
 
 impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
         // Version counter increment depends on dirty bits:
-        // - If splitting: increment split counter, clear all dirty/lock bits
-        // - If inserting: increment insert counter, clear inserting/lock bits
-        //
-        // INSERTING_BIT is set for mutation paths (mark_insert), but not for validation-only
-        // locks (e.g., parent validation in remove). When INSERTING_BIT is unset and
-        // SPLITTING_BIT is unset, the shift produces 0, so no version increment occurs --
-        // correct for locks that didn't mutate the node.
+        // - Splitting: increment vsplit, clear all dirty/lock bits
+        // - Inserting: increment vinsert, clear inserting/lock bits
+        // - Neither (validation-only lock): no version increment
         let new_value: u32 = if self.locked_value & SPLITTING_BIT != 0 {
             (self.locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK
         } else {
-            // The expression `(inserting << 2)` equals `vinsert_lowbit` when inserting.
-            // When INSERTING_BIT is 0 (validation-only lock), shift produces 0 and
-            // no version increment occurs -- correct for non-mutating locks.
+            // (inserting << 2) == vinsert_lowbit when INSERTING_BIT is set, 0 otherwise.
             (self.locked_value + ((self.locked_value & INSERTING_BIT) << 2)) & UNLOCK_MASK
         };
 
-        // SAFETY: The guard's lifetime is tied to the `NodeVersion` it was created from.
-        // Nodes are only freed via deferred reclamation; holding the lock implies the node
-        // remains valid until this guard is dropped.
+        // SAFETY: Guard lifetime tied to NodeVersion; nodes freed via deferred reclamation.
         unsafe { (*self.version).value.store(new_value, Ordering::Release) };
     }
 }
@@ -236,10 +135,8 @@ impl Drop for LockGuard<'_> {
 impl LockGuard<'_> {
     #[inline(always)]
     const fn version(&self) -> &NodeVersion {
-        // SAFETY: `self.version` is valid for the guard's lifetime because:
-        // - LockGuard<'a> holds PhantomData<&'a NodeVersion>, enforcing lifetime
-        // - The pointer was created from a valid reference in lock()/try_lock()
-        // - Nodes are freed via deferred reclamation, never while locked
+        // SAFETY: Pointer valid for guard's lifetime (PhantomData<&'a NodeVersion>).
+        // Nodes freed via deferred reclamation, never while locked.
         unsafe { &*self.version }
     }
 
@@ -250,99 +147,53 @@ impl LockGuard<'_> {
         self.locked_value
     }
 
-    /// Mark the node as being inserted into.
+    /// Mark node as being inserted into. Sets INSERTING dirty bit.
+    /// Version counter increments on unlock. Idempotent.
     ///
-    /// Sets the inserting dirty bit. Version counter will increment on unlock.
-    /// This must be called before modifying node contents during insert.
-    ///
-    /// # C++ Reference
-    /// Matches `nodeversion.hh:143-147` - `mark_insert()` method.
-    ///
-    /// # Memory Ordering
-    /// Uses [`Ordering::Release`] followed by [`Ordering::Acquire`] fence.
-    /// This ensures readers calling `stable()` will wait for our modifications.
-    ///
-    /// # Idempotent
-    /// Multiple calls have no additional effect.
+    /// ORDERING: Release store + Acquire fence ensures readers see the dirty bit
+    /// before any subsequent modifications become visible.
     #[inline(always)]
     pub fn mark_insert(&mut self) {
-        // Skip if already set (idempotent)
         if (self.locked_value & INSERTING_BIT) != 0 {
             return;
         }
 
-        // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version().value.load(Ordering::Relaxed);
-
         self.version()
             .value
             .store(value | INSERTING_BIT, Ordering::Release);
-
-        // Acquire fence ensures subsequent modifications cannot be reordered
-        // before the dirty bit becomes visible to readers.
         fence(Ordering::Acquire);
-
-        // Update tracked value for unlock logic
         self.locked_value |= INSERTING_BIT;
     }
 
-    /// Mark the node as being split.
+    /// Mark node as being split. Sets SPLITTING dirty bit.
+    /// Split version counter increments on unlock.
     ///
-    /// Sets the splitting dirty bit. Version counter will increment on unlock.
-    ///
-    /// NOTE: Must be called explicitly
-    ///
-    /// Unlike `mark_insert()` (which is now auto set due to new strategy), `mark_split()`
-    /// must be called explicitly before split operations. This is because:
-    /// 1. Not all inserts require splits
-    /// 2. The `SPLITTING_BIT` affects version increment logic differently
-    /// 3. Split operations need the split version counter incremented
-    ///
-    /// # Memory Ordering
-    /// Uses [`Ordering::Release`] followed by [`Ordering::Acquire`] fence.
+    /// Must be called explicitly (not all inserts cause splits).
     #[inline(always)]
     pub fn mark_split(&mut self) {
-        // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version().value.load(Ordering::Relaxed);
-
         self.version()
             .value
             .store(value | SPLITTING_BIT, Ordering::Release);
-
-        // Acquire fence ensures subsequent structural modifications
-        // cannot be reordered before the dirty bit becomes visible.
         fence(Ordering::Acquire);
-
         self.locked_value |= SPLITTING_BIT;
     }
 
-    /// Mark the node as deleted.
-    ///
-    /// Also sets the splitting bit to bump version on unlock.
-    ///
-    /// # Memory Ordering
-    /// Same as [`Self::mark_insert`]: Release store followed by Acquire fence.
+    /// Mark node as deleted. Also sets `SPLITTING_BIT` to bump version on unlock.
     #[inline(always)]
     pub fn mark_deleted(&mut self) {
-        // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version().value.load(Ordering::Relaxed);
         let new_value: u32 = value | DELETED_BIT | SPLITTING_BIT;
-
         self.version().value.store(new_value, Ordering::Release);
-
-        // Acquire fence ensures subsequent structural modifications
-        // cannot be reordered before the dirty bit becomes visible.
         fence(Ordering::Acquire);
-
         self.locked_value = new_value;
     }
 
     /// Clear the root bit.
     #[inline(always)]
     pub fn mark_nonroot(&mut self) {
-        // INVARIANT: lock is held, so no concurrent modifications possible.
         let value: u32 = self.version().value.load(Ordering::Relaxed);
-
         self.version()
             .value
             .store(value & !ROOT_BIT, Ordering::Release);
@@ -352,22 +203,16 @@ impl LockGuard<'_> {
 
 impl NodeVersion {
     /// Create a new node version.
-    ///
-    /// # Arguments
-    /// - `is_leaf` - true for leaf nodes, false for internodes
     #[must_use]
     #[inline(always)]
     pub const fn new(is_leaf: bool) -> Self {
         let initial: u32 = if is_leaf { ISLEAF_BIT } else { 0 };
-
         Self {
             value: AtomicU32::new(initial),
         }
     }
 
-    /// Create a node version from a raw value.
-    ///
-    ///  WARN: ONLY FOR TESTING.
+    /// Create from raw value. **Testing only.**
     #[must_use]
     #[inline(always)]
     pub const fn from_value(value: u32) -> Self {
@@ -401,20 +246,7 @@ impl NodeVersion {
         (self.value.load(Ordering::Relaxed) & DELETED_BIT) != 0
     }
 
-    /// Check if a version value indicates the node is deleted.
-    ///
-    /// This is a static check on an already-loaded version value, avoiding
-    /// an additional atomic load. Use after calling [`NodeVersion::stable`] when you
-    /// need to check both version stability and deleted status.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let version = node.version().stable();
-    /// if NodeVersion::is_deleted_version(version) {
-    ///     // Node was deleted, need to retry
-    /// }
-    /// ```
+    /// Static check on an already-loaded version value.
     #[must_use]
     #[inline(always)]
     pub const fn is_deleted_version(version: u32) -> bool {
@@ -428,20 +260,11 @@ impl NodeVersion {
         (self.value.load(Ordering::Relaxed) & LOCK_BIT) != 0
     }
 
-    /// Check if this node is in initial/unpublished state.
-    ///
-    /// A node is "unpublished" if it has never been modified (version counters
-    /// are zero). This means it was just allocated and hasn't been linked into
-    /// the tree yet, so no other thread can see it.
-    ///
-    /// Used to allow lock-free initialization of newly allocated nodes.
+    /// True if version counters are zero (freshly allocated, not yet linked into tree).
     #[must_use]
     #[inline(always)]
     pub fn is_unpublished(&self) -> bool {
         let v = self.value.load(Ordering::Relaxed);
-        // A newly created leaf has value = ISLEAF_BIT (possibly | ROOT_BIT)
-        // A newly created internode has value = 0 (possibly | ROOT_BIT)
-        // Mask out the allowed initial flags and check if result is zero
         let mask = ISLEAF_BIT | ROOT_BIT;
         (v & !mask) == 0
     }
@@ -474,10 +297,7 @@ impl NodeVersion {
         self.value.load(Ordering::Relaxed)
     }
 
-    /// Get a raw pointer to this `NodeVersion`.
-    ///
-    /// Used for APIs that need to lock nodes via raw pointers
-    /// (e.g., `PropagationContext::lock_node`).
+    /// Raw pointer for APIs that lock nodes via pointers (e.g., `PropagationContext`).
     #[must_use]
     #[inline(always)]
     pub const fn as_ptr(&self) -> *const Self {
@@ -485,167 +305,75 @@ impl NodeVersion {
     }
 
     // ========================================================================
-    // Stable Version (for optimistic reads)
+    //  Stable Version (for optimistic reads)
     // ========================================================================
 
-    /// Get a stable version value for optimistic reading.
+    /// Get a stable version for optimistic reading.
     ///
-    /// Spins while dirty bits (inserting or splitting) are set, then returns
-    /// a version with no dirty bits. Use with [`Self::has_changed`] after reading
-    /// to detect concurrent modifications.
+    /// Spins while dirty bits are set, then returns a clean version.
+    /// Validate with [`has_changed()`](Self::has_changed) after reading.
     ///
-    /// # Algorithm (Hybrid Spin+Yield)
-    ///
-    /// Uses a two-phase approach to reduce spin convoy effects:
-    /// 1. **Spin phase**: Brief exponential backoff (up to `SPINS_BEFORE_YIELD` iterations)
-    /// 2. **Yield phase**: Yields CPU to other threads, then resets spin count
-    ///
-    /// This prevents the convoy effect where 11 reader threads spin-wait on a
-    /// single writer, burning CPU and causing tail latency spikes.
-    ///
-    /// # Memory Ordering
-    /// Uses `Relaxed` loads during spinning for efficiency (especially on ARM),
-    /// then issues an `Acquire` fence only on success. This is equivalent to
-    /// `Acquire` on every load on x86, but saves ~1 cycle per spin on ARM.
-    ///
-    /// # Reference
-    /// C++ `nodeversion.hh:36-48` - `stable()` template method
-    ///
-    /// # Returns
-    /// A version value with no dirty bits set.
+    /// Uses Relaxed loads during spinning, Acquire fence on success.
     #[must_use]
     #[inline(always)]
     pub fn stable(&self) -> u32 {
-        // Fast path: single load, no allocation.
-        // In uncontended workloads (90%+ of reads), we avoid allocating Backoff.
         let value: u32 = self.value.load(Ordering::Relaxed);
 
         if (value & DIRTY_MASK) == 0 {
-            // Acquire fence after successful read - matches C++ acquire_fence()
-            // This establishes synchronizes-with relationship with writer's Release.
             StdAtomic::fence(Ordering::Acquire);
             return value;
         }
 
-        // Slow path: contention detected, delegate to cold function
         self.stable_contended()
     }
 
-    /// Slow path for [`stable()`] when contention is detected.
-    ///
-    /// This is marked `#[cold]` to hint to the compiler that it's rarely taken,
-    /// improving branch prediction and instruction cache usage on the fast path.
+    /// Slow path: hybrid spin + yield to reduce convoy effects.
     #[cold]
     #[inline(never)]
     fn stable_contended(&self) -> u32 {
-        // Number of backoff iterations before yielding the CPU.
-        // Tuned for sub-microsecond lock hold times on modern CPUs.
-        // Higher values (8 vs 2) reduce yield_now() context switch overhead
-        // under SMT contention where lock holders finish quickly but OS
-        // yields cost 1-5µs — far exceeding the ~100ns critical sections.
         const SPINS_BEFORE_YIELD: u32 = 2;
 
         let mut backoff = Backoff::new();
         let mut spin_count: u32 = 0;
 
         loop {
-            // Relaxed load like C++ - only need compiler barrier at the end.
-            // C++ nodeversion.hh:40-47 uses plain reads with acquire_fence() after loop.
-            // On x86, Relaxed compiles to same `mov` as Acquire.
             let value: u32 = self.value.load(Ordering::Relaxed);
 
             if (value & DIRTY_MASK) == 0 {
-                // Acquire fence after successful read - matches C++ acquire_fence()
-                // This establishes synchronizes-with relationship with writer's Release.
                 StdAtomic::fence(Ordering::Acquire);
-
                 return value;
             }
 
             spin_count += 1;
 
             if spin_count < SPINS_BEFORE_YIELD {
-                // Phase 1: Exponential backoff with PAUSE instructions
                 backoff.spin();
             } else {
-                // Phase 2: Yield CPU to reduce convoy effect
-                // This allows the lock holder to make progress instead of
-                // having 11 threads spin-waiting and burning CPU.
                 StdThread::yield_now();
                 spin_count = 0;
-                backoff = Backoff::new(); // Reset backoff for next spin phase
+                backoff = Backoff::new();
             }
         }
     }
 
-    /// Acquire a version value without spinning on dirty bits.
+    /// Load version without spinning on dirty bits.
     ///
-    /// Unlike [`stable()`](Self::stable), this method returns immediately with
-    /// whatever value is currently stored, even if dirty bits are set.
-    ///
-    /// # Use Cases
-    ///
-    /// Use this when you want to detect concurrent modification and retry at
-    /// a higher level rather than spinning locally. For example:
-    ///
-    /// ```rust,ignore
-    /// let v = version.acquire_raw();
-    /// if NodeVersion::is_dirty_value(v) {
-    ///     continue 'retry;  // Let outer loop handle retry
-    /// }
-    /// // ... proceed with read ...
-    /// ```
-    ///
-    /// # Memory Ordering
-    ///
-    /// Uses `Ordering::Acquire` to synchronize with writer's Release store.
-    /// The returned value may have dirty bits set.
+    /// Returns immediately even if dirty. Use when you want to detect
+    /// concurrent modification and retry at a higher level.
     #[must_use]
     #[inline(always)]
     pub fn acquire_raw(&self) -> u32 {
         self.value.load(Ordering::Acquire)
     }
 
-    /// Check if a version value has dirty bits set.
-    ///
-    /// This is a static helper for checking values returned by [`acquire_raw()`](Self::acquire_raw).
+    /// Static check: does this version value have dirty bits set?
     #[must_use]
     #[inline(always)]
     pub const fn is_dirty_value(v: u32) -> bool {
         (v & DIRTY_MASK) != 0
     }
 
-    /// Try to get a stable version without spinning.
-    ///
-    /// Returns `Some(version)` if the node is not dirty (not being modified).
-    /// Returns `None` if the node is currently being modified (dirty bits set).
-    ///
-    /// # Use Cases
-    ///
-    /// Use this for opportunistic reads where you want to skip nodes that are
-    /// currently being modified rather than waiting for them:
-    ///
-    /// ```rust,ignore
-    /// loop {
-    ///     match version.try_stable() {
-    ///         Some(v) => {
-    ///             // Node is clean, proceed with read
-    ///             // ... read data ...
-    ///             if !version.has_changed(v) {
-    ///                 return result;
-    ///             }
-    ///         }
-    ///         None => {
-    ///             // Node is dirty, retry from higher level
-    ///             continue 'retry;
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// # Memory Ordering
-    ///
-    /// Uses `Ordering::Acquire` on success to synchronize with writer's Release.
+    /// Non-spinning stable: returns `Some(version)` if clean, `None` if dirty.
     #[must_use]
     #[inline(always)]
     pub fn try_stable(&self) -> Option<u32> {
@@ -658,22 +386,7 @@ impl NodeVersion {
         }
     }
 
-    /// Get a stable version, with a hint to yield on contention.
-    ///
-    /// This is a variant of [`stable()`](Self::stable) that yields the CPU
-    /// after a few spin iterations rather than using exponential backoff.
-    /// This can be more efficient when there's high contention on a node.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Try to read a clean version
-    /// 2. If dirty, spin briefly with `spin_loop` hints
-    /// 3. After a few spins, yield the CPU to other threads
-    /// 4. Repeat until clean version obtained
-    ///
-    /// # Memory Ordering
-    ///
-    /// Same as [`stable()`](Self::stable): Acquire fence on success.
+    /// Variant of [`stable()`](Self::stable) that yields instead of exponential backoff.
     #[must_use]
     pub fn stable_yield(&self) -> u32 {
         const SPINS_BEFORE_YIELD: u32 = 2;
@@ -706,183 +419,74 @@ impl NodeVersion {
     ///
     /// # C++ Divergence (INTENTIONAL)
     ///
-    /// The C++ reference uses `(x.v_ ^ v_) > lock_bit` (ignores only bit 0).
-    /// Our Rust implementation uses `> (LOCK_BIT | INSERTING_BIT)` (ignores bits 0-1).
+    /// C++ uses `(x.v_ ^ v_) > lock_bit` (ignores bit 0).
+    /// We use `> (LOCK_BIT | INSERTING_BIT)` (ignores bits 0-1).
     ///
-    /// ## Why This Is Safe
+    /// This is safe because version COUNTERS (VINSERT/VSPLIT) are the source of truth.
+    /// `INSERTING_BIT` is only a progress indicator set while modifications are in-flight
+    /// (not yet visible). If writer acquires lock after `stable()` but before this check,
+    /// no data has been modified yet so returning false is correct. If writer has released,
+    /// the version counter increment is detected.
     ///
-    /// This divergence is safe due to the "always-dirty-on-lock" strategy:
+    /// # Compiler Fence
     ///
-    /// 1. **Version counters are the source of truth**: `VINSERT` (bits 3-8) and
-    ///    `VSPLIT` (bits 9-27) are the actual change indicators. They are incremented
-    ///    atomically when the lock is released, AFTER all modifications are complete.
-    ///
-    /// 2. **`INSERTING_BIT` is a progress indicator, not a change indicator**:
-    ///    - Set atomically with `LOCK_BIT` by `lock()`
-    ///    - Cleared when lock releases (version counter increments)
-    ///    - If `INSERTING_BIT` is set, modification is in-progress but NOT YET VISIBLE
-    ///
-    /// 3. **Reader's snapshot is consistent**:
-    ///    - Reader got `old` from `stable()` which spins until `DIRTY_MASK == 0`
-    ///    - If writer acquires lock AFTER `stable()` but BEFORE `has_changed()`:
-    ///      - Writer hasn't modified data yet (just acquired lock)
-    ///      - Reader's prior reads are valid (taken before modification)
-    ///      - Returning `false` is correct — no actual change to validate
-    ///    - If writer releases lock BEFORE `has_changed()`:
-    ///      - `VINSERT` or `VSPLIT` incremented → XOR detects it → returns `true`
-    ///
-    /// 4. **CAS operations use `has_changed_or_locked()` instead**: Operations that
-    ///    race with writers (not just read) use the stricter check that detects
-    ///    `DIRTY_MASK` being set.
-    ///
-    /// # Compiler Fence Requirement
-    ///
-    /// This method includes a **compiler fence** before the version load.
-    /// This is critical for correctness: the optimistic read protocol is
-    /// "read fields → validate version". Without the fence, the compiler
-    /// could reorder field reads to occur AFTER the version check, defeating
-    /// the validation.
-    ///
-    /// ## C++ Reference
-    ///
-    /// The C++ `nodeversion.hh:72-74` uses `fence()` (compiler barrier):
-    /// ```cpp
-    /// bool has_changed(nodeversion x) const {
-    ///     fence();  // compiler barrier from compiler.hh:77
-    ///     return (x.v_ ^ v_) > lock_bit;
-    /// }
-    /// ```
-    ///
-    /// ## Why Acquire Alone Is Insufficient
-    ///
-    /// `Ordering::Acquire` on the load only prevents reordering of operations
-    /// AFTER the load. It does NOT prevent the compiler from moving reads
-    /// that occurred BEFORE the `has_changed()` call to occur after it.
-    ///
-    /// The compiler fence ensures all prior reads (slot data) complete before
-    /// we load the version for validation.
+    /// Critical: prevents compiler from reordering field reads past the version check.
     #[must_use]
     #[inline(always)]
     pub fn has_changed(&self, old: u32) -> bool {
-        // Compiler fence: ensures all prior reads complete before version check.
-        // This matches C++ fence() in nodeversion.hh:72.
         StdAtomic::compiler_fence(Ordering::Acquire);
-
-        // Relaxed load like C++ - the compiler fence above prevents reordering.
-        //
-        // SAFETY (C++ Divergence): We use `> (LOCK_BIT | INSERTING_BIT)` instead of
-        // C++'s `> lock_bit`. This ignores both bits 0 and 1. See doc comment above
-        // for the full safety argument. TL;DR: version COUNTERS (VINSERT/VSPLIT) are
-        // the source of truth; INSERTING_BIT is a progress indicator that's only set
-        // while modifications are in-flight (not yet visible to readers).
         (old ^ self.value.load(Ordering::Relaxed)) > (LOCK_BIT | INSERTING_BIT)
     }
 
     /// Check if a split has occurred since `old`.
     ///
-    /// Returns true if the split version counter changed.
-    ///
-    /// Uses the same compiler fence as `has_changed()` for correctness.
-    /// See [`Self::has_changed`] for the full explanation.
+    /// Includes compiler fence. See [`has_changed()`](Self::has_changed).
     #[must_use]
     #[inline(always)]
     pub fn has_split(&self, old: u32) -> bool {
-        // Compiler fence: ensures all prior reads complete before version check.
-        // This matches C++ fence() in nodeversion.hh:80.
         StdAtomic::compiler_fence(Ordering::Acquire);
-
-        // Relaxed load like C++ - the compiler fence above prevents reordering.
         (old ^ self.value.load(Ordering::Relaxed)) >= VSPLIT_LOWBIT
     }
 
-    /// Check if a split has occurred since `old`, without a compiler fence.
-    ///
-    /// This is a faster variant of [`Self::has_split`] that omits the compiler fence.
-    /// Use this only when you've already issued a fence (e.g., after an Acquire load)
-    /// that ensures all prior reads are complete.
-    ///
-    /// # Ordering Note
-    ///
-    /// This method still uses `Ordering::Acquire` on the load, which provides
-    /// hardware memory ordering on ARM. The difference from [`Self::has_split`] is
-    /// the absence of the **compiler fence** that prevents the compiler from
-    /// reordering prior reads to after this check.
-    ///
-    /// # Safety (Logical)
-    ///
-    /// The caller must ensure that all reads that need to be validated have
-    /// already been completed and are visible before calling this method.
-    /// Typically this means you've already done an Acquire load or fence.
-    ///
-    /// # Reference
-    ///
-    /// C++ `nodeversion.hh` has `simple_has_split()` for this purpose.
+    /// Like [`has_split()`](Self::has_split) but without compiler fence.
+    /// Caller must ensure prior reads are already ordered (e.g., after Acquire load).
     #[must_use]
     #[inline(always)]
     pub fn has_split_no_compiler_fence(&self, old: u32) -> bool {
         (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
     }
 
-    /// Check if the version has changed OR if a modification is in progress.
+    /// Stronger than [`has_changed()`](Self::has_changed): also returns true if
+    /// dirty bits are set (modification in progress).
     ///
-    /// This is a stronger check than [`Self::has_changed`] for CAS operations.
-    /// It returns true if:
-    /// - The version counter has changed (same as `has_changed`), OR
-    /// - The node is currently being modified (`INSERTING_BIT` or `SPLITTING_BIT` set)
-    ///
-    /// CAS inserts should use this instead of `has_changed` to avoid racing
-    /// with locked splits. The race scenario:
-    /// 1. CAS insert reads version V via `stable()` (no dirty bits)
-    /// 2. Locked thread acquires lock, sets `INSERTING_BIT`
-    /// 3. CAS insert checks `has_changed(V)` - returns false (ignores `INSERTING_BIT`)
-    /// 4. CAS insert proceeds, racing with the split
-    ///
-    /// By checking `INSERTING_BIT` directly, we catch this race.
+    /// Used by CAS inserts to avoid racing with locked splits.
     #[must_use]
     #[inline(always)]
     pub fn has_changed_or_locked(&self, old: u32) -> bool {
-        // OPTIMIZATION: Acquire fence is sufficient for preventing read reordering.
         StdAtomic::compiler_fence(Ordering::Acquire);
 
         let current: u32 = self.value.load(Ordering::Acquire);
 
-        // Check if version changed (ignoring lock/dirty bits)
         if (old ^ current) > (LOCK_BIT | INSERTING_BIT) {
             return true;
         }
 
-        // Check if modification in progress (INSERTING_BIT or SPLITTING_BIT set)
-        // This catches the race where we got a stable version but then a lock was acquired
-        if (current & DIRTY_MASK) != 0 {
-            return true;
-        }
-
-        false
+        (current & DIRTY_MASK) != 0
     }
 
     // ========================================================================
-    // Lock Operations (Type-State Pattern)
+    //  Lock Operations
     // ========================================================================
 
-    /// Acquire the lock and return a guard.
+    /// Acquire the lock with exponential backoff. Returns a guard.
     ///
-    /// Strategy: Exponential Backoff
-    ///
-    /// Uses exponential backoff to reduce cache line contention under high
-    /// contention scenarios. This is critical for workloads like `same` where
-    /// multiple threads compete for the same keys.
-    ///
-    /// # Memory Ordering
-    /// Uses `Acquire` ordering on successful CAS to synchronize with the
-    /// `Release` store in [`Drop::drop`] of the previous lock holder.
-    ///
-    /// # Reference
-    /// C++ `nodeversion.hh:87-109` - `lock()` template method
+    /// Only waits for `LOCK_BIT` (not dirty bits) - caller validates version after.
+    /// Only sets `LOCK_BIT`, `INSERTING_BIT` deferred to `mark_insert()` to avoid
+    /// making `stable()` callers spin for the entire lock duration.
     #[must_use = "releasing a lock without using the guard is a logic error"]
     #[inline(always)]
     pub fn lock(&self) -> LockGuard<'_> {
-        // Fast path: try to acquire immediately without backoff allocation.
-        // In uncontended cases, this avoids Backoff::new() overhead.
+        // Fast path: try immediate acquire.
         let value: u32 = self.value.load(Ordering::Relaxed);
 
         if (value & LOCK_BIT) == 0 {
@@ -902,14 +506,9 @@ impl NodeVersion {
             }
         }
 
-        // Slow path: contention detected
         self.lock_contended()
     }
 
-    /// Slow path for [`lock()`] when contention is detected.
-    ///
-    /// This is marked `#[cold]` to hint to the compiler that it's rarely taken,
-    /// improving branch prediction and instruction cache usage on the fast path.
     #[cold]
     #[inline(never)]
     fn lock_contended(&self) -> LockGuard<'_> {
@@ -918,24 +517,9 @@ impl NodeVersion {
         loop {
             let value: u32 = self.value.load(Ordering::Relaxed);
 
-            // OPTIMISTIC LOCKING: Only wait for LOCK_BIT to clear.
-            // We DON'T wait for dirty bits (INSERTING_BIT, SPLITTING_BIT).
-            // After acquiring, caller must validate version hasn't changed.
-            // This matches C++ nodeversion.hh:96 which only checks lock_bit.
             if (value & LOCK_BIT) == 0 {
-                // Only set LOCK_BIT here. INSERTING_BIT is set later via mark_insert().
-                // This matches C++ nodeversion.hh:97-98 which only sets lock_bit in lock().
-                //
-                // Critical for performance: stable() waits for dirty_mask (inserting|splitting).
-                // If we set INSERTING_BIT here, other threads calling stable() would spin
-                // for the entire lock duration, causing convoy effects under contention.
-                // By deferring INSERTING_BIT to mark_insert(), threads can race for lock()
-                // without waiting in stable().
                 let locked: u32 = value | LOCK_BIT;
 
-                // CAS to acquire lock.
-                // Acquire on success ensures we see all prior writes from previous holder.
-                // Relaxed on failure is fine, we'll retry.
                 if self
                     .value
                     .compare_exchange_weak(value, locked, Ordering::Acquire, Ordering::Relaxed)
@@ -943,7 +527,6 @@ impl NodeVersion {
                 {
                     return LockGuard {
                         version: StdPtr::from_ref(self),
-                        // locked_value tracks current state; mark_insert() will update it
                         locked_value: locked,
                         _lifetime: PhantomData,
                         _marker: PhantomData,
@@ -951,37 +534,22 @@ impl NodeVersion {
                 }
             }
 
-            // Exponential backoff reduces cache line contention under heavy load.
             backoff.spin();
         }
     }
 
     /// Try to acquire the lock without blocking.
-    ///
-    /// Returns `Some(guard)` if the lock was acquired, `None` if the lock
-    /// is already held.
-    ///
-    /// # Memory Ordering
-    /// Uses `Acquire` ordering on successful CAS.
-    ///
-    /// # Reference
-    /// C++ `nodeversion.hh:111-127` - `try_lock()` template method
     #[must_use]
     #[inline(always)]
     pub fn try_lock(&self) -> Option<LockGuard<'_>> {
         let value: u32 = self.value.load(Ordering::Relaxed);
 
-        // OPTIMISTIC: Fail fast only if locked (not if dirty).
-        // Matches lock() behavior - caller must validate after acquiring.
         if (value & LOCK_BIT) != 0 {
             return None;
         }
 
-        // Only set LOCK_BIT here. INSERTING_BIT is set later via mark_insert().
-        // Same rationale as lock() - avoids convoy effects in stable().
         let locked: u32 = value | LOCK_BIT;
 
-        // Single CAS attempt (use strong CAS for single-shot).
         match self
             .value
             .compare_exchange(value, locked, Ordering::Acquire, Ordering::Relaxed)
@@ -997,16 +565,8 @@ impl NodeVersion {
         }
     }
 
-    /// Try to acquire the lock with a timeout.
+    /// Try to acquire the lock within `timeout`.
     ///
-    /// Returns `Some(guard)` if the lock was acquired within `timeout`,
-    /// `None` if the timeout expired.
-    ///
-    /// # Use Cases
-    /// - Deadlock detection in tests
-    /// - Bounded wait times in production
-    ///
-    /// # Example
     /// ```rust
     /// use std::time::Duration;
     /// use masstree::NodeVersion;
@@ -1014,22 +574,16 @@ impl NodeVersion {
     /// let version = NodeVersion::new(true);
     /// if let Some(_guard) = version.try_lock_for(Duration::from_millis(100)) {
     ///     // Lock acquired within 100ms
-    /// } else {
-    ///     // Timeout expired, lock not acquired
     /// }
     /// ```
     #[must_use]
     pub fn try_lock_for(&self, timeout: Duration) -> Option<LockGuard<'_>> {
-        // Number of lock attempts before checking the deadline.
-        // Instant::now() can be expensive (VDSO/syscall), so we amortize
-        // the cost by trying multiple times before checking time.
         const ATTEMPTS_BEFORE_TIME_CHECK: u32 = 8;
 
         let deadline = Instant::now() + timeout;
         let mut backoff = Backoff::new();
 
         loop {
-            // Try multiple times before checking the clock
             for _ in 0..ATTEMPTS_BEFORE_TIME_CHECK {
                 if let Some(guard) = self.try_lock() {
                     return Some(guard);
@@ -1037,38 +591,16 @@ impl NodeVersion {
                 backoff.spin();
             }
 
-            // Check timeout after batch of attempts
             if Instant::now() >= deadline {
                 return None;
             }
         }
     }
 
-    /// Acquire the lock using try-lock with yield.
+    /// Acquire lock with yield-on-contention instead of exponential backoff.
     ///
-    /// Unlike [`Self::lock`] which spins with exponential backoff, this method
-    /// yields the CPU to other threads when the lock is contended. This is
-    /// more efficient for lock convoy situations where multiple threads are
-    /// waiting on the same lock.
-    /// # When to Use
-    ///
-    /// Use `lock_with_yield()` for:
-    /// - Split propagation (longer critical sections, high thread counts)
-    /// - Operations where fairness matters more than throughput
-    ///
-    /// Use [`lock_bounded()`](Self::lock_bounded) for:
-    /// - Leaf-level inserts (short critical sections, transient contention)
-    /// - Sequential insert workloads (rw3 pattern)
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Try to acquire the lock with `try_lock()`
-    /// 2. If failed, do 1 spin-loop hint
-    /// 3. On the next failure, yield the CPU with `thread::yield_now()`
-    /// 4. Reset and repeat until lock acquired
-    ///
-    /// # Memory Ordering
-    /// Uses `Acquire` ordering on successful lock acquisition.
+    /// Better for split propagation (longer critical sections, high thread counts).
+    /// Use [`lock_bounded()`](Self::lock_bounded) for leaf-level inserts.
     #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock_with_yield(&self) -> LockGuard<'_> {
         const SPINS_BEFORE_YIELD: u32 = 2;
@@ -1076,7 +608,6 @@ impl NodeVersion {
         let mut spin_count: u32 = 0;
 
         loop {
-            // Try to acquire the lock
             if let Some(guard) = self.try_lock() {
                 return guard;
             }
@@ -1084,79 +615,41 @@ impl NodeVersion {
             spin_count += 1;
 
             if spin_count < SPINS_BEFORE_YIELD {
-                // Brief spin before yielding
                 for _ in 0..spin_count {
                     StdHint::spin_loop();
                 }
             } else {
-                // Yield CPU to other threads - reduces lock convoy
                 StdThread::yield_now();
-                spin_count = 0; // Reset for next cycle
+                spin_count = 0;
             }
         }
     }
 
     // ========================================================================
-    // Non-Locking Operations
+    //  Non-Locking Operations
     // ========================================================================
 
-    /// Mark the node as a root.
-    ///
-    /// Does not require the lock. Used during tree initialization.
-    ///
-    /// # Implementation Note
-    /// Uses `fetch_or` for atomic read-modify-write. The previous implementation
-    /// used separate load/store which could lose concurrent modifications.
+    /// Mark as root. Does not require lock.
     #[inline(always)]
     pub fn mark_root(&self) {
         self.value.fetch_or(ROOT_BIT, Ordering::Release);
     }
 
-    /// Clear the root bit.
-    ///
-    /// Called when a layer root leaf is demoted (layer root split).
-    ///
-    /// # Implementation Note
-    /// Uses `fetch_and` for atomic read-modify-write. The previous implementation
-    /// used separate load/store which could lose concurrent modifications.
+    /// Clear root bit. Used when layer root is demoted.
     #[inline(always)]
     pub fn mark_nonroot(&self) {
         self.value.fetch_and(!ROOT_BIT, Ordering::Release);
     }
 
     // ========================================================================
-    // Split-Locked Node Creation (Help-Along Protocol)
+    //  Split-Locked Node Creation
     // ========================================================================
 
-    /// Create a new node version for a split sibling.
+    /// Create a version for a split sibling: locked + `SPLITTING_BIT` + same ISLEAF,
+    /// zero version counters.
     ///
-    /// The new version is:
-    /// - Locked (`LOCK_BIT` set)
-    /// - Marked as splitting (`SPLITTING_BIT` set)
-    /// - Has the same `ISLEAF_BIT` as the source
-    /// - Has zeroed version counters (fresh node)
-    ///
-    /// This is used during splits to create a right sibling that starts locked.
-    /// The sibling remains locked until its parent pointer is set, preventing
-    /// other threads from trying to split it while parent is NULL.
-    ///
-    /// # C++ Reference
-    ///
-    /// Matches `child->assign_version(*n_)` in `masstree_split.hh:198`.
-    /// However, we use `SPLITTING_BIT` instead of copying `INSERTING_BIT` because
-    /// the right sibling's unlock should increment the split counter.
-    ///
-    /// # Safety Considerations
-    ///
-    /// The caller must ensure:
-    /// 1. The source node is locked
-    /// 2. `unlock_for_split()` will be called on this node exactly once
-    /// 3. The new node is not visible to other threads until after `link_sibling()`
-    ///
-    /// # Memory Ordering
-    ///
-    /// Uses Relaxed ordering because the new node is not yet visible to other threads.
-    /// The fence in `link_sibling()` establishes visibility.
+    /// Caller must ensure source is locked and `unlock_for_split()` is called
+    /// exactly once after the parent pointer is set.
     #[must_use]
     #[inline(always)]
     pub fn new_for_split(source: &Self) -> Self {
@@ -1166,16 +659,6 @@ impl NodeVersion {
             "new_for_split: source must be locked"
         );
 
-        // New version has:
-        // - ISLEAF_BIT from source (preserved)
-        // - LOCK_BIT (locked)
-        // - SPLITTING_BIT (will increment split counter on unlock)
-        // - Zero version counters (fresh node)
-        //
-        // We deliberately use SPLITTING_BIT (not INSERTING_BIT) because:
-        // 1. This is a split operation
-        // 2. unlock_for_split should increment vsplit, not vinsert
-        // 3. SPLIT_UNLOCK_MASK clears ROOT_BIT which is correct for split children
         let new_value: u32 = (source_value & ISLEAF_BIT) | LOCK_BIT | SPLITTING_BIT;
 
         Self {
@@ -1183,27 +666,10 @@ impl NodeVersion {
         }
     }
 
-    /// Unlock a node that was created with `new_for_split`.
+    /// Unlock a node created with `new_for_split`. Increments split version counter.
     ///
-    /// This performs a split unlock (increments split version counter).
-    /// Must be called exactly once after the node's parent pointer is set.
-    ///
-    /// # C++ Reference
-    ///
-    /// Matches the unlock in `masstree_split.hh:280`: `child->unlock()`.
-    /// The C++ version uses the hand-over-hand pattern where the child
-    /// is unlocked after the parent insert completes.
-    ///
-    /// # Memory Ordering
-    ///
-    /// Issues a compiler fence before the store to ensure all prior writes
-    /// (parent pointer, data) are complete before the unlock is visible.
-    /// Uses Release ordering on the store to synchronize with readers'
-    /// Acquire loads in `stable()` and `has_changed()`.
-    ///
-    /// # Panics
-    ///
-    /// Debug-asserts that the node is locked with `SPLITTING_BIT` set.
+    /// Compiler fence ensures all prior writes (parent pointer, data) complete
+    /// before the Release store makes the unlock visible.
     #[inline(always)]
     pub fn unlock_for_split(&self) {
         let locked_value = self.value.load(Ordering::Relaxed);
@@ -1218,24 +684,13 @@ impl NodeVersion {
             "unlock_for_split: node must have SPLITTING_BIT, got value={locked_value:#010x}"
         );
 
-        // Compute unlocked value: increment split counter, clear dirty/lock/root bits
-        // This matches the SPLITTING_BIT branch in LockGuard::drop
         let new_value = (locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK;
 
-        // Compiler fence: ensures all prior writes are ordered before version store.
-        // This is critical - parent pointer and all data must be visible to readers
-        // before we unlock. Without this, a reader could see the unlocked version
-        // but read stale/missing parent pointer.
         StdAtomic::compiler_fence(Ordering::SeqCst);
-
-        // Release store: synchronizes with Acquire loads in stable()/has_changed()
         self.value.store(new_value, Ordering::Release);
     }
 
-    /// Check if this node was created for a split and hasn't been unlocked yet.
-    ///
-    /// Returns true if `LOCK_BIT` and `SPLITTING_BIT` are both set.
-    /// Used for debugging and assertions.
+    /// True if `LOCK_BIT` and `SPLITTING_BIT` are both set. For debugging.
     #[must_use]
     #[inline(always)]
     pub fn is_split_locked(&self) -> bool {
@@ -1253,7 +708,6 @@ impl Clone for NodeVersion {
 }
 
 impl Default for NodeVersion {
-    /// Creates a new leaf node version.
     fn default() -> Self {
         Self::new(true)
     }
@@ -1262,12 +716,9 @@ impl Default for NodeVersion {
 #[cfg(test)]
 mod unit_tests;
 
-// Concurrent tests live in a submodule to keep this file lean.
-// Guarded with `#[cfg(not(miri))]` because Miri doesn't support multi-threading well.
 #[cfg(test)]
 #[cfg(not(miri))]
 mod concurrent_tests;
 
-// Loom tests for deterministic concurrency verification.
 #[cfg(all(test, loom, not(miri)))]
 mod loom_tests;

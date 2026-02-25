@@ -76,6 +76,7 @@
 #![allow(clippy::inline_always)]
 #![allow(clippy::multiple_crate_versions)]
 #![allow(clippy::cast_ptr_alignment)]
+#![allow(clippy::option_if_let_else)]
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]

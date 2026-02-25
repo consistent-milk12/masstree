@@ -454,10 +454,11 @@ impl<P: LeafPolicy> LayerStack<P> {
 
     /// Returns the total number of elements.
     #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.overflow
-            .as_ref()
-            .map_or_else(|| self.inline.len(), Vec::len)
+    pub const fn len(&self) -> usize {
+        match self.overflow.as_ref() {
+            Some(v) => v.len(),
+            None => self.inline.len(),
+        }
     }
 }
 

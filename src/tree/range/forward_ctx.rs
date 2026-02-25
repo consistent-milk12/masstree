@@ -90,7 +90,15 @@ pub struct ForwardScanCtx<P: LeafPolicy> {
 
     /// Ring buffer of recent state transitions for debugging.
     #[cfg(debug_assertions)]
-    pub(crate) debug_transition_history: Vec<String>,
+    pub(crate) debug_transition_history: [Option<String>; 32],
+
+    /// Write index into `debug_transition_history`.
+    #[cfg(debug_assertions)]
+    pub(crate) debug_transition_idx: usize,
+
+    /// Number of entries written (saturates at 32).
+    #[cfg(debug_assertions)]
+    pub(crate) debug_transition_count: usize,
 }
 
 // ============================================================================
@@ -120,7 +128,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             #[cfg(debug_assertions)]
             debug_last_cursor_state: None,
             #[cfg(debug_assertions)]
-            debug_transition_history: Vec::with_capacity(32),
+            debug_transition_history: [const { None }; 32],
+            #[cfg(debug_assertions)]
+            debug_transition_idx: 0,
+            #[cfg(debug_assertions)]
+            debug_transition_count: 0,
         }
     }
 
@@ -149,8 +161,17 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             }
 
             eprintln!("\n--- Recent state transitions ---");
-            for (i, transition) in self.debug_transition_history.iter().enumerate() {
-                eprintln!("[{i}] {transition}");
+            let count = self.debug_transition_count;
+            let start = if count < 32 {
+                0
+            } else {
+                self.debug_transition_idx
+            };
+            for i in 0..count {
+                let idx = (start + i) % 32;
+                if let Some(ref transition) = self.debug_transition_history[idx] {
+                    eprintln!("[{i}] {transition}");
+                }
             }
             eprintln!("--- End transitions ---");
             eprintln!("=== END ORDERING VIOLATION ===\n");
@@ -175,10 +196,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     #[cfg(debug_assertions)]
     #[inline]
     pub(crate) fn record_transition(&mut self, description: String) {
-        if self.debug_transition_history.len() >= 32 {
-            self.debug_transition_history.remove(0);
+        self.debug_transition_history[self.debug_transition_idx] = Some(description);
+        self.debug_transition_idx = (self.debug_transition_idx + 1) % 32;
+        if self.debug_transition_count < 32 {
+            self.debug_transition_count += 1;
         }
-        self.debug_transition_history.push(description);
     }
 }
 
@@ -222,21 +244,19 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         let kx: KeyIndexedPosition = lower_with_position(&self.cursor_key, leaf, &perm);
 
-        let (next_state, snapshot) = kx.p.map_or_else(
-            || (ScanState::FindNext, None),
-            |slot| {
-                Self::handle_initial_match(
-                    leaf,
-                    slot,
-                    &mut self.cursor_key,
-                    &mut self.stack,
-                    emit_equal,
-                    version,
-                    &perm,
-                    kx.i,
-                )
-            },
-        );
+        let (next_state, snapshot) = match kx.p {
+            Some(slot) => Self::handle_initial_match(
+                leaf,
+                slot,
+                &mut self.cursor_key,
+                &mut self.stack,
+                emit_equal,
+                version,
+                &perm,
+                kx.i,
+            ),
+            None => (ScanState::FindNext, None),
+        };
 
         if leaf.version().has_changed(version) {
             return (ScanState::Retry, None);
