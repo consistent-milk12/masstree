@@ -4,16 +4,16 @@
 
 use seize::LocalGuard;
 
+use crate::Permuter;
 use crate::alloc_trait::TreeAllocator;
 use crate::key::{IKEY_SIZE, MAX_KEY_LENGTH};
-use crate::leaf15::{LeafNode15, LAYER_KEYLENX};
+use crate::leaf15::{LAYER_KEYLENX, LeafNode15};
 use crate::nodeversion::NodeVersion;
 use crate::policy::LeafPolicy;
 use crate::tree::MassTreeGeneric;
-use crate::Permuter;
 
 use super::cursor_key::CursorKey;
-use super::helper::{lower_with_position, KeyIndexedPosition};
+use super::helper::{KeyIndexedPosition, lower_with_position};
 use super::iterator::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 use super::traversal::reach_leaf_for_scan;
 

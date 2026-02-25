@@ -518,3 +518,155 @@ fn test_meeting_detection_even_count() {
     assert!(iter.next().is_none());
     assert!(iter.next_back().is_none());
 }
+
+// ============================================================================
+//  P0-1 Regression: KSUF keys in single-layer mode
+//
+//  Keys >8 bytes with unique 8-byte prefixes stay as KSUF in root layer
+//  (no layer pointers). Single-layer mode (enabled by unbounded/short bounds)
+//  must bail to multi-layer path instead of treating these as layer pointers.
+// ============================================================================
+
+#[test]
+fn test_ksuf_keys_single_layer_forward_scan() {
+    use std::collections::BTreeMap;
+
+    let tree = MassTree::<u64>::default();
+
+    // Keys where first 8 bytes are unique but keys are >8 bytes.
+    // This creates KSUF entries in root layer (no layer pointers).
+    let mut expected = BTreeMap::new();
+    for i in 0u64..100 {
+        let key = format!("{i:08}suffix");
+        tree.insert(key.as_bytes(), i);
+        expected.insert(key.into_bytes(), i);
+    }
+
+    // Forward scan with unbounded bounds (enables single-layer mode)
+    let guard = tree.guard();
+    let mut results = Vec::new();
+    tree.scan(
+        RangeBound::Unbounded,
+        RangeBound::Unbounded,
+        |key, value| {
+            results.push((key.to_vec(), value));
+            true
+        },
+        &guard,
+    );
+    assert_eq!(results.len(), expected.len());
+    for ((got_key, got_val), (exp_key, exp_val)) in results.iter().zip(expected.iter()) {
+        assert_eq!(got_key, exp_key);
+        assert_eq!(*got_val, *exp_val);
+    }
+}
+
+#[test]
+fn test_ksuf_keys_single_layer_iterator() {
+    use std::collections::BTreeMap;
+
+    let tree = MassTree::<u64>::default();
+
+    let mut expected = BTreeMap::new();
+    for i in 0u64..100 {
+        let key = format!("{i:08}suffix");
+        tree.insert(key.as_bytes(), i);
+        expected.insert(key.into_bytes(), i);
+    }
+
+    let guard = tree.guard();
+
+    // Iterator-based forward scan (uses advance with single-layer fast path)
+    let results: Vec<_> = tree
+        .range_forward(RangeBound::Unbounded, RangeBound::Unbounded, &guard)
+        .map(|e| (e.key().to_vec(), *e.value()))
+        .collect();
+    assert_eq!(results.len(), expected.len());
+    for ((got_key, got_val), (exp_key, exp_val)) in results.iter().zip(expected.iter()) {
+        assert_eq!(got_key, exp_key);
+        assert_eq!(*got_val, *exp_val);
+    }
+}
+
+#[test]
+fn test_ksuf_keys_single_layer_reverse() {
+    use std::collections::BTreeMap;
+
+    let tree = MassTree::<u64>::default();
+
+    let mut expected = BTreeMap::new();
+    for i in 0u64..100 {
+        let key = format!("{i:08}suffix");
+        tree.insert(key.as_bytes(), i);
+        expected.insert(key.into_bytes(), i);
+    }
+
+    let guard = tree.guard();
+
+    // Reverse iterator
+    let rev_results: Vec<_> = tree
+        .range(RangeBound::Unbounded, RangeBound::Unbounded, &guard)
+        .rev()
+        .map(|e| (e.key().to_vec(), *e.value()))
+        .collect();
+    assert_eq!(rev_results.len(), expected.len());
+
+    // Reverse should be descending — flip and compare with ascending BTreeMap
+    let mut ascending = rev_results;
+    ascending.reverse();
+    for ((got_key, got_val), (exp_key, exp_val)) in ascending.iter().zip(expected.iter()) {
+        assert_eq!(got_key, exp_key);
+        assert_eq!(*got_val, *exp_val);
+    }
+}
+
+#[test]
+fn test_ksuf_mixed_with_inline_keys_single_layer() {
+    use std::collections::BTreeMap;
+
+    let tree = MassTree::<u64>::default();
+
+    // Mix of inline keys (≤8 bytes) and KSUF keys (>8 bytes, unique prefixes)
+    let mut expected = BTreeMap::new();
+
+    // Inline keys (≤8 bytes)
+    for i in 0u64..20 {
+        let key = format!("k{i:02}");
+        tree.insert(key.as_bytes(), i);
+        expected.insert(key.into_bytes(), i);
+    }
+
+    // KSUF keys (>8 bytes with unique 8-byte prefixes)
+    for i in 20u64..50 {
+        let key = format!("{i:08}longsuffix");
+        tree.insert(key.as_bytes(), i);
+        expected.insert(key.into_bytes(), i);
+    }
+
+    let guard = tree.guard();
+
+    // Forward scan — single-layer mode must handle inline keys and bail
+    // correctly for KSUF keys
+    let fwd: Vec<_> = tree
+        .range_forward(RangeBound::Unbounded, RangeBound::Unbounded, &guard)
+        .map(|e| (e.key().to_vec(), *e.value()))
+        .collect();
+    assert_eq!(fwd.len(), expected.len());
+    for ((got_key, got_val), (exp_key, exp_val)) in fwd.iter().zip(expected.iter()) {
+        assert_eq!(got_key, exp_key);
+        assert_eq!(*got_val, *exp_val);
+    }
+
+    // Reverse scan
+    let mut rev: Vec<_> = tree
+        .range(RangeBound::Unbounded, RangeBound::Unbounded, &guard)
+        .rev()
+        .map(|e| (e.key().to_vec(), *e.value()))
+        .collect();
+    assert_eq!(rev.len(), expected.len());
+    rev.reverse();
+    for ((got_key, got_val), (exp_key, exp_val)) in rev.iter().zip(expected.iter()) {
+        assert_eq!(got_key, exp_key);
+        assert_eq!(*got_val, *exp_val);
+    }
+}

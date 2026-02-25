@@ -7,7 +7,7 @@ use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
-use crate::hints::{likely, unlikely};
+use crate::hints::likely;
 use crate::key::IKEY_SIZE;
 use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
@@ -19,8 +19,8 @@ use crate::policy::RefPolicy as RefLeafPolicy;
 use crate::prefetch::prefetch_read;
 
 use super::batch_common::{
-    CloneEmitter, CopySlotVisitor, PtrEmitter, RefSlotVisitor, ScanEmitter, SlotVisitor,
-    build_slot_key,
+    BatchCtx, CloneEmitter, CopySlotVisitor, Forward, PtrEmitter, RefSlotVisitor, ScanEmitter,
+    process_batch_keyed, process_batch_values,
 };
 #[cfg(debug_assertions)]
 use super::cursor_key::CursorDebugState;
@@ -33,6 +33,7 @@ use super::iterator::RangeBound;
 use super::iterator::iter_flags::ForwardFlags;
 use super::scan_state::{
     LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr, ScanStackElement, ScanState,
+    StepResult,
 };
 use super::traversal::reach_leaf_for_scan;
 
@@ -475,6 +476,13 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return (ScanState::Retry, None);
         }
 
+        // Check if leaf was concurrently modified since we cached the version.
+        // Symmetric with reverse's find_prev_single_layer (reverse_ctx.rs).
+        let version: u32 = self.stack.version();
+        if leaf.version().has_changed(version) {
+            return (ScanState::Retry, None);
+        }
+
         let Some(slot) = self.stack.kp() else {
             return self.advance_leaf_single_layer(guard);
         };
@@ -496,13 +504,21 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             }
         }
 
-        if slot_keylenx > IKEY_SIZE as u8 {
-            if slot_keylenx >= LAYER_KEYLENX {
-                self.cursor_key.assign_store_ikey(slot_ikey);
-                let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-                prefetch_read(layer_ptr);
-            }
+        // True layer pointer — prepare for descent
+        if slot_keylenx >= LAYER_KEYLENX {
+            self.cursor_key.assign_store_ikey(slot_ikey);
+            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+            prefetch_read(layer_ptr);
             return (ScanState::Down, None);
+        }
+
+        // Suffix key (KSUF) or other non-inline — bail to multi-layer path.
+        // Returning FindNext after disabling single-layer mode causes the caller
+        // to re-enter the loop and fall through to the multi-layer path which
+        // handles KSUF correctly via find_next_ptr.
+        if slot_keylenx > IKEY_SIZE as u8 {
+            self.flags.disable_single_layer_mode();
+            return (ScanState::FindNext, None);
         }
 
         let slot_ptr: *mut u8 = leaf.load_value_raw(slot);
@@ -720,6 +736,39 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         true
     }
+
+    /// Handle Down/Up/Retry transitions in a single method.
+    ///
+    /// Centralizes the state-machine transition logic shared across all five
+    /// forward scan entry points (`run_batch`, `advance_no_alloc`,
+    /// `advance_no_alloc_ref`, `RangeIter::advance`, `for_each_batch_ref`).
+    #[inline(always)]
+    pub(crate) fn step_transitions(&mut self, guard: &LocalGuard<'_>) -> StepResult {
+        match self.state {
+            ScanState::Down => {
+                self.flags.disable_single_layer_mode();
+                self.handle_down();
+                self.state = ScanState::Retry;
+                self.flags.require_duplicate_check();
+                StepResult::Continue
+            }
+            ScanState::Up => {
+                if !self.handle_up(guard) {
+                    self.flags.mark_exhausted();
+                    return StepResult::Exhausted;
+                }
+                self.state = ScanState::FindNext;
+                self.flags.require_duplicate_check();
+                StepResult::Continue
+            }
+            ScanState::Retry => {
+                self.state = self.find_retry(guard);
+                self.flags.require_duplicate_check();
+                StepResult::Continue
+            }
+            ScanState::Emit | ScanState::FindNext => StepResult::Ready,
+        }
+    }
 }
 
 // ============================================================================
@@ -728,8 +777,6 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
 impl<P: LeafPolicy> ForwardScanCtx<P> {
     /// Process remaining entries in current leaf, returning `&P::Value` references.
-    ///
-    /// Corresponds to `find::process_leaf_batch_ptr`.
     #[inline]
     pub fn process_leaf_batch_ptr<F>(
         &mut self,
@@ -741,20 +788,24 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     where
         F: FnMut(&[u8], &P::Value) -> bool,
     {
-        Self::process_leaf_batch_keyed(
-            &mut self.stack,
-            &mut self.cursor_key,
-            &mut self.layer_stack,
-            end_bound,
-            end_bound_ikey,
-            &mut RefSlotVisitor(visitor),
-            count,
-        )
+        let (result, ki, root) = {
+            let mut ctx = self.build_batch_ctx();
+            let r = process_batch_keyed::<Forward, _, P>(
+                &mut ctx,
+                end_bound,
+                end_bound_ikey,
+                &mut RefSlotVisitor(visitor),
+                count,
+                &mut (),
+            );
+            (r, ctx.ki, ctx.root)
+        };
+        self.stack.set_ki(ki.cast_unsigned());
+        self.stack.set_root(root);
+        result
     }
 
     /// Process remaining entries in current leaf, returning `P::Output` by value.
-    ///
-    /// Corresponds to `find::process_leaf_batch`.
     #[inline]
     pub fn process_leaf_batch<F>(
         &mut self,
@@ -766,20 +817,24 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     where
         F: FnMut(&[u8], P::Output) -> bool,
     {
-        Self::process_leaf_batch_keyed(
-            &mut self.stack,
-            &mut self.cursor_key,
-            &mut self.layer_stack,
-            end_bound,
-            end_bound_ikey,
-            &mut CopySlotVisitor(visitor),
-            count,
-        )
+        let (result, ki, root) = {
+            let mut ctx = self.build_batch_ctx();
+            let r = process_batch_keyed::<Forward, _, P>(
+                &mut ctx,
+                end_bound,
+                end_bound_ikey,
+                &mut CopySlotVisitor(visitor),
+                count,
+                &mut (),
+            );
+            (r, ctx.ki, ctx.root)
+        };
+        self.stack.set_ki(ki.cast_unsigned());
+        self.stack.set_root(root);
+        result
     }
 
     /// Process leaf batch without key materialization (values only).
-    ///
-    /// Corresponds to `find::process_leaf_batch_values`.
     #[inline]
     pub fn process_leaf_batch_values(
         &mut self,
@@ -787,151 +842,41 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         visitor: &mut impl FnMut(P::Output) -> bool,
         count: &mut usize,
     ) -> LeafBatchResult {
-        let leaf_ptr: *const LeafNode15<P> = self.stack.leaf_ptr();
+        let (result, ki, root) = {
+            let mut ctx = self.build_batch_ctx();
+            let r = process_batch_values::<Forward, P>(
+                &mut ctx,
+                end_bound_ikey,
+                visitor,
+                count,
+                &mut (),
+            );
+            (r, ctx.ki, ctx.root)
+        };
+        self.stack.set_ki(ki.cast_unsigned());
+        self.stack.set_root(root);
+        result
+    }
+
+    /// Build a [`BatchCtx`] from the forward scan stack.
+    #[inline(always)]
+    fn build_batch_ctx(&mut self) -> BatchCtx<'_, P> {
+        let leaf_ptr: *mut LeafNode15<P> = self.stack.leaf_ptr();
         // SAFETY: leaf_ptr is valid - protected by guard in caller
         let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
         let perm = self.stack.perm();
         let perm_size = perm.size();
-        let cached_version = self.stack.version();
-
-        if leaf.version().is_deleted() {
-            return LeafBatchResult::VersionChanged;
+        BatchCtx {
+            leaf,
+            perm,
+            perm_size,
+            cached_version: self.stack.version(),
+            ki: self.stack.ki().cast_signed(),
+            root: self.stack.root(),
+            leaf_ptr,
+            cursor_key: &mut self.cursor_key,
+            layer_stack: &mut self.layer_stack,
         }
-
-        while self.stack.ki() < perm_size {
-            let slot = perm.get(self.stack.ki());
-            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-            let slot_keylenx: u8 = leaf.keylenx(slot);
-
-            if unlikely(slot_keylenx >= LAYER_KEYLENX) {
-                let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-                self.layer_stack
-                    .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
-                self.cursor_key.assign_store_ikey(slot_ikey);
-                prefetch_read(layer_ptr);
-                self.stack.set_root(layer_ptr);
-                return LeafBatchResult::LayerEncountered;
-            }
-
-            if let Some(bound_ikey) = end_bound_ikey
-                && slot_ikey > bound_ikey
-            {
-                return LeafBatchResult::EndBoundExceeded;
-            }
-
-            if unlikely(leaf.is_value_empty(slot)) {
-                self.stack.next();
-                continue;
-            }
-
-            let Some(output) = leaf.load_value(slot) else {
-                self.stack.next();
-                continue;
-            };
-
-            *count += 1;
-            self.stack.next();
-
-            if !visitor(output) {
-                return LeafBatchResult::Stopped;
-            }
-        }
-
-        if leaf.version().has_changed(cached_version) {
-            return LeafBatchResult::VersionChanged;
-        }
-
-        LeafBatchResult::LeafExhausted
-    }
-
-    /// Unified keyed batch processor for forward scans.
-    #[inline]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Batch processor threading mutable scan state"
-    )]
-    fn process_leaf_batch_keyed<V>(
-        stack: &mut ScanStackElement<P>,
-        cursor_key: &mut CursorKey,
-        layer_stack: &mut LayerStack<P>,
-        end_bound: &RangeBound<'_>,
-        end_bound_ikey: Option<u64>,
-        slot_visitor: &mut V,
-        count: &mut usize,
-    ) -> LeafBatchResult
-    where
-        V: SlotVisitor<P>,
-    {
-        let leaf_ptr: *const LeafNode15<P> = stack.leaf_ptr();
-        // SAFETY: leaf_ptr is valid - protected by guard in caller
-        let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-        let perm = stack.perm();
-        let perm_size = perm.size();
-        let cached_version = stack.version();
-
-        if leaf.version().is_deleted() {
-            return LeafBatchResult::VersionChanged;
-        }
-
-        while stack.ki() < perm_size {
-            let slot = perm.get(stack.ki());
-            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-            let slot_keylenx: u8 = leaf.keylenx(slot);
-
-            if slot_keylenx >= LAYER_KEYLENX {
-                let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-                layer_stack.push(LayerContext::new(stack.root(), stack.leaf_ptr()));
-                cursor_key.assign_store_ikey(slot_ikey);
-                prefetch_read(layer_ptr);
-                stack.set_root(layer_ptr);
-                return LeafBatchResult::LayerEncountered;
-            }
-
-            let mut needs_full_end_check = true;
-            if end_bound_ikey.is_none() {
-                needs_full_end_check = false;
-            } else if cursor_key.is_at_root_layer()
-                && let Some(bound_ikey) = end_bound_ikey
-            {
-                match slot_ikey.cmp(&bound_ikey) {
-                    Ordering::Greater => return LeafBatchResult::EndBoundExceeded,
-                    Ordering::Less => needs_full_end_check = false,
-                    Ordering::Equal => {}
-                }
-            }
-
-            if unlikely(leaf.is_value_empty(slot)) {
-                stack.next();
-                continue;
-            }
-
-            build_slot_key(cursor_key, leaf, slot, slot_ikey, slot_keylenx);
-            cursor_key.mark_key_complete();
-
-            let key: &[u8] = cursor_key.full_key();
-            if needs_full_end_check && !end_bound.contains(key) {
-                return LeafBatchResult::EndBoundExceeded;
-            }
-
-            match slot_visitor.visit(leaf, slot, key) {
-                None => {
-                    stack.next();
-                }
-                Some(should_continue) => {
-                    *count += 1;
-                    stack.next();
-                    if !should_continue {
-                        return LeafBatchResult::Stopped;
-                    }
-                }
-            }
-        }
-
-        if leaf.version().has_changed(cached_version) {
-            return LeafBatchResult::VersionChanged;
-        }
-
-        LeafBatchResult::LeafExhausted
     }
 }
 
@@ -997,7 +942,6 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     ///
     /// Callers must handle exhausted/initialized checks before calling this.
     #[inline]
-    #[expect(clippy::too_many_lines, reason = "Unified state machine skeleton")]
     pub(crate) fn run_batch<S: ForwardBatchStrategy<P>>(
         &mut self,
         strategy: &mut S,
@@ -1024,32 +968,10 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         loop {
             // Handle rare states (layer transitions, retries)
-            match self.state {
-                ScanState::Down => {
-                    self.flags.disable_single_layer_mode();
-                    self.handle_down();
-                    self.state = ScanState::Retry;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Up => {
-                    if !self.handle_up(guard) {
-                        self.flags.mark_exhausted();
-                        return count;
-                    }
-                    self.state = ScanState::FindNext;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    self.state = self.find_retry(guard);
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Emit | ScanState::FindNext => {}
+            match self.step_transitions(guard) {
+                StepResult::Exhausted => return count,
+                StepResult::Continue => continue,
+                StepResult::Ready => {}
             }
 
             // Check for null stack (layer exhausted)
@@ -1405,10 +1327,6 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     /// This function inlines the common case `(FindNext → Emit)` to avoid
     /// state machine dispatch overhead.
     #[inline(always)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "State machine with debug instrumentation"
-    )]
     pub fn advance_no_alloc(
         &mut self,
         end_bound: &RangeBound<'_>,
@@ -1441,70 +1359,25 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         }
 
         loop {
-            match self.state {
-                ScanState::Down => {
+            #[cfg(debug_assertions)]
+            let (pre_state, pre_cursor) = (self.state, self.cursor_key.debug_state());
+
+            match self.step_transitions(guard) {
+                StepResult::Exhausted => {
                     #[cfg(debug_assertions)]
-                    let pre_cursor = self.cursor_key.debug_state();
-
-                    self.handle_down();
-                    self.state = ScanState::Retry;
-                    self.flags.require_duplicate_check();
-
-                    #[cfg(debug_assertions)]
-                    self.record_transition(format!(
-                        "Down -> Retry: pre={}, post={}",
-                        pre_cursor,
-                        self.cursor_key.debug_state()
-                    ));
-
-                    continue;
+                    self.record_transition(format!("Up -> Exhausted: pre={pre_cursor}"));
+                    return None;
                 }
-
-                ScanState::Up => {
-                    #[cfg(debug_assertions)]
-                    let pre_cursor = self.cursor_key.debug_state();
-
-                    if !self.handle_up(guard) {
-                        self.flags.mark_exhausted();
-
-                        #[cfg(debug_assertions)]
-                        self.record_transition(format!("Up -> Exhausted: pre={pre_cursor}"));
-
-                        return None;
-                    }
-
-                    self.state = ScanState::FindNext;
-                    self.flags.require_duplicate_check();
-
+                StepResult::Continue => {
                     #[cfg(debug_assertions)]
                     self.record_transition(format!(
-                        "Up -> FindNext: pre={}, post={}",
-                        pre_cursor,
-                        self.cursor_key.debug_state()
-                    ));
-
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    #[cfg(debug_assertions)]
-                    let pre_cursor = self.cursor_key.debug_state();
-
-                    self.state = self.find_retry(guard);
-                    self.flags.require_duplicate_check();
-
-                    #[cfg(debug_assertions)]
-                    self.record_transition(format!(
-                        "Retry -> {:?}: pre={}, post={}",
+                        "{pre_state:?} -> {:?}: pre={pre_cursor}, post={}",
                         self.state,
-                        pre_cursor,
                         self.cursor_key.debug_state()
                     ));
-
                     continue;
                 }
-
-                ScanState::Emit | ScanState::FindNext => {}
+                StepResult::Ready => {}
             }
 
             // Main hot path: FindNext
@@ -1663,36 +1536,10 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             // Multi-layer path (handles Down/Up transitions)
             // ================================================================
 
-            match self.state {
-                ScanState::Down => {
-                    self.handle_down();
-                    self.state = ScanState::Retry;
-                    self.flags.require_duplicate_check();
-
-                    continue;
-                }
-
-                ScanState::Up => {
-                    if !self.handle_up(guard) {
-                        self.flags.mark_exhausted();
-
-                        return None;
-                    }
-
-                    self.state = ScanState::FindNext;
-                    self.flags.require_duplicate_check();
-
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    self.state = self.find_retry(guard);
-                    self.flags.require_duplicate_check();
-
-                    continue;
-                }
-
-                ScanState::Emit | ScanState::FindNext => {}
+            match self.step_transitions(guard) {
+                StepResult::Exhausted => return None,
+                StepResult::Continue => continue,
+                StepResult::Ready => {}
             }
 
             let (new_state, snapshot_ptr) = if self.flags.needs_duplicate_check() {

@@ -532,7 +532,9 @@ pub const fn inline_key_len(keylenx: u8) -> usize {
 
 /// Helper for reverse (descending) range scans.
 ///
-/// Provides direction-specific operations for backward iteration.
+/// Provides direction-specific **stateless** operations for backward iteration.
+/// The `upper_bound` flag that was previously stored here now lives in
+/// [`ReverseFlags`](super::iterator::iter_flags::ReverseFlags).
 ///
 /// # Critical Implementation notes (from C++ comments)
 /// > We run ki backwards, referring to perm.size() each time through,
@@ -540,24 +542,9 @@ pub const fn inline_key_len(keylenx: u8) -> usize {
 /// > Therefore, if we decremented ki, starting from a node's original
 /// > size(), we might miss some concurrently inserted keys.
 #[derive(Clone, Copy, Debug)]
-pub struct ReverseScanHelper {
-    /// Tracks whether we're at an upper bound position.
-    ///
-    /// When true:
-    /// - `lower()` returns `size - 1` (start from last slot)
-    /// - `is_duplicate()` returns false (no filtering needed)
-    ///
-    /// Set true by `shift_clear_reverse()`, cleared by `mark_key_complete()`.
-    pub upper_bound: bool,
-}
+pub struct ReverseScanHelper;
 
 impl ReverseScanHelper {
-    /// Create a new reverse scan helper.
-    #[inline(always)]
-    pub const fn new() -> Self {
-        Self { upper_bound: false }
-    }
-
     /// Retreat to the previous logical position.
     ///
     /// For rev scans: `ki - 1`. Returns -1 when `ki == 0`.
@@ -658,20 +645,22 @@ impl ReverseScanHelper {
 
     /// Find lower bound position for reverse scan.
     ///
+    /// When `upper_bound` is true, returns `size - 1` (start from last slot).
+    ///
     /// # Returns
     ///
     /// Position as `isize` which can be -1 (before first slot).
     #[inline]
     pub fn lower_reverse<P>(
-        self,
         cursor_key: &CursorKey,
         leaf: &LeafNode15<P>,
         perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        upper_bound: bool,
     ) -> isize
     where
         P: LeafPolicy,
     {
-        if self.upper_bound {
+        if upper_bound {
             return perm.size().cast_signed() - 1;
         }
 
@@ -685,12 +674,6 @@ impl ReverseScanHelper {
         } else {
             kx.i.cast_signed() - 1
         }
-    }
-
-    /// Mark key as complete (clear `upper_bound` flag).
-    #[inline(always)]
-    pub const fn mark_key_complete(&mut self) {
-        self.upper_bound = false;
     }
 }
 

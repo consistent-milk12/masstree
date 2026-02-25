@@ -9,39 +9,30 @@ license = "MIT"
 repository = "https://github.com/consistent-milk12/masstree"
 documentation = "https://docs.rs/masstree"
 keywords = [
-  "data-structures",
-  "concurrent",
-  "ordered-map",
-  "range-scans",
-  "trie",
+	"data-structures",
+	"concurrent",
+	"ordered-map",
+	"range-scans",
+	"trie",
 ]
-categories = ["data-structures", "concurrency", "database-implementations"]
+categories = ["data-structures", "concurrency"]
 readme = "README.md"
 include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md"]
 
 [features]
 default = []
-# Optimal Allocator for this data structure based on current benchmarks.
+# mimalloc is the optimal allocator for this data structure based on current benchmarks.
 # Even though the original implementation prefers tcmalloc.
 mimalloc = ["dep:mimalloc"]
 tcmalloc = ["dep:tcmalloc"]
 
-# When disabled (default), all tracing calls compile to no-ops with zero overhead.
-# When enabled, auto-initializes a subscriber that writes NDJSON logs to logs/masstree.jsonl.
-# Respects RUST_LOG env var (default: info). Set MASSTREE_LOG_CONSOLE=0 to disable console.
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
-debug-routing = []                                                          # Enable routing debug output for bug investigation
-no-prefetch = []                                                            # Disable all software prefetching for A/B benchmarking
-insert-stats = []                                                           # Enable insert retry statistics collection
+debug-routing = []
+no-prefetch = []
 
 # Use 256-byte inline suffix bags (vs 512-byte default).
-# Reduces embedded leaf size: 1152 → 896 bytes. Also reduces sidecar heap
-# allocation size when `sidecar-suffix` is enabled.
 small-suffix-capacity = []
 
-# Use sidecar (pointer-indirect) suffix storage for InlinePolicy instead of embedded.
-# Shrinks InlinePolicy leaves: 1152 → 576 bytes (better cache for short-key/read-heavy workloads).
-# Tradeoff: adds a pointer chase on every suffix read (worse for string-key workloads).
 sidecar-suffix = []
 
 [dependencies]
@@ -57,9 +48,9 @@ tcmalloc = { version = "0.3.0", optional = true }
 # Optional tracing (enabled via features) - zero overhead when disabled
 tracing = { version = "0.1.44", features = ["attributes"], optional = true }
 tracing-subscriber = { version = "0.3.22", features = [
-  "env-filter",
-  "fmt",
-  "json",
+	"env-filter",
+	"fmt",
+	"json",
 ], optional = true }
 tracing-appender = { version = "0.2.4", optional = true }
 
@@ -82,15 +73,15 @@ scc = "3.6.5"
 sdd = "4.6.3"
 tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.22", features = [
-  "env-filter",
-  "fmt",
-  "json",
-  "parking_lot",
+	"env-filter",
+	"fmt",
+	"json",
+	"parking_lot",
 ] }
 criterion = { version = "0.8.2", features = [
-  "html_reports",
-  "csv_output",
-  "real_blackbox",
+	"html_reports",
+	"csv_output",
+	"real_blackbox",
 ] }
 pbench = "0.2.0"
 
@@ -103,7 +94,6 @@ hdrhistogram = "7.5.4"
 minstant = "0.1.7"
 
 [lints.rust]
-# Allow loom and shuttle cfg for deterministic concurrency testing
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(shuttle)'] }
 
 [profile.dev]
@@ -129,15 +119,12 @@ debug = 2
 strip = "none"
 lto = false
 
-# Profiling profile - optimized for flamegraph/perf
-# Frame pointers required for accurate stack traces
 [profile.profiling]
 inherits = "release"
 debug = 2
 strip = "none"
 lto = false
 
-# Force frame pointers in our code (dependencies need RUSTFLAGS)
 [profile.profiling.package."*"]
 debug = true
 
@@ -145,51 +132,7 @@ debug = true
 inherits = "release"
 
 [[bench]]
-name = "concurrent_maps15"
-harness = false
-
-[[bench]]
 name = "concurrent_read_write"
-harness = false
-
-[[bench]]
-name = "concurrent_read_write_scaled"
-harness = false
-
-[[bench]]
-name = "concurrent_read_write_masstree"
-harness = false
-
-[[bench]]
-name = "concurrent_read_write_masstree_arc"
-harness = false
-
-[[bench]]
-name = "concurrent_read_write_masstree_arc_ref"
-harness = false
-
-[[bench]]
-name = "concurrent_read_write_masstree_scaled"
-harness = false
-
-[[bench]]
-name = "concurrent_masstree15"
-harness = false
-
-[[bench]]
-name = "range_masstree15"
-harness = false
-
-[[bench]]
-name = "range_masstree15_inline"
-harness = false
-
-[[bench]]
-name = "mttest"
-harness = false
-
-[[bench]]
-name = "extreme_stress"
 harness = false
 
 [[bench]]
@@ -197,15 +140,11 @@ name = "high_impact"
 harness = false
 
 [[bench]]
-name = "high_impact_masstree"
+name = "mttest"
 harness = false
 
 [[bench]]
-name = "rwlock_btreemap_vs_masstree15"
-harness = false
-
-[[bench]]
-name = "rwlock_btreemap_vs_masstree15_inline"
+name = "range_masstree15"
 harness = false
 
 [[bench]]
@@ -213,7 +152,7 @@ name = "tail_latency"
 harness = false
 
 # =========================================================================
-# Examples
+#  Examples
 # =========================================================================
 
 [[example]]

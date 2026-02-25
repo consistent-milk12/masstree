@@ -1,9 +1,6 @@
 //! Key search algorithms for `MassTree`.
 //!
 //! Provides scalar ikey matching for internode routing.
-//!
-//! # Reference
-//! Based on `ksearch.hh` from the C++ Masstree implementation.
 
 use crate::ksearch::scalar::Scalar;
 use crate::leaf_trait::TreeInternode;

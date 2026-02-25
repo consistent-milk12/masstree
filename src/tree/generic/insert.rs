@@ -7,55 +7,18 @@
 //! - `#[cold]` on retry/error paths
 //! - Unified slot allocation and value update logic
 
-use crate::leaf15::KSUF_KEYLENX;
 use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
+use crate::leaf15::KSUF_KEYLENX;
 use crate::policy::RetireHandle;
 
 use super::{
-    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LeafPolicy, Linker, LocalGuard,
-    MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation, LAYER_KEYLENX,
+    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker,
+    LocalGuard, MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
 };
 
 use crate::leaf15::LeafNode15;
 use crate::nodeversion::LockGuard;
 
-// Conditional instrumentation macros - compile to no-ops when feature disabled
-#[cfg(feature = "insert-stats")]
-macro_rules! stat {
-    (attempt) => {
-        crate::insert_stats::record_attempt()
-    };
-
-    (validation_failure) => {
-        crate::insert_stats::record_validation_failure()
-    };
-
-    (membership_failure) => {
-        crate::insert_stats::record_membership_failure()
-    };
-
-    (null_ptr_retry) => {
-        crate::insert_stats::record_null_ptr_retry()
-    };
-
-    (successful_insert) => {
-        crate::insert_stats::record_successful_insert()
-    };
-
-    (successful_update) => {
-        crate::insert_stats::record_successful_update()
-    };
-
-    (hop_limit_exceeded) => {
-        crate::insert_stats::record_hop_limit_exceeded()
-    };
-
-    (deleted_layer_retry) => {
-        crate::insert_stats::record_deleted_layer_retry()
-    };
-}
-
-#[cfg(not(feature = "insert-stats"))]
 macro_rules! stat {
     ($name:ident) => {};
 }

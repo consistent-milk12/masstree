@@ -212,7 +212,7 @@ impl SessionStore {
     /// consider using interior mutability (e.g., `RwLock` inside Session).
     fn update_session_data(&self, session_id: &str, key: &str, value: &str) -> bool {
         self.get_session(session_id).is_some_and(|session| {
-            let mut updated = session.clone();
+            let mut updated = session;
             updated.touch();
             updated.set_data(key, value);
 

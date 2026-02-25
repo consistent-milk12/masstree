@@ -2,18 +2,6 @@
 //!
 //! This module defines [`TreePermutation`] and [`TreeLeafNode`] traits that
 //! enable generic tree operations.
-//!
-//! # Design
-//!
-//! The traits use static dispatch (generics) for zero-cost abstraction:
-//! - No vtable overhead
-//! - Full monomorphization
-//! - Compiler can inline all trait methods
-//!
-//! # Implementors
-//!
-//! - [`TreePermutation`]: `Permuter<WIDTH>`, `Permuter24` (not in dev anymore)
-//! - [`TreeLeafNode`]: `LeafNode<S, WIDTH>`
 
 use std::cmp::Ordering;
 use std::fmt::Debug;
@@ -34,27 +22,6 @@ pub use crate::value::SplitPoint;
 // ============================================================================
 
 /// Data for inserting a key during a split operation.
-///
-/// Bundles all information needed to insert a new key atomically during a
-/// leaf split. The value is carried as a typed `P::Output` — no raw pointer
-/// conversion needed.
-///
-/// # Construction (in insert path)
-///
-/// ```rust,ignore
-/// let insert_data = SplitInsertData {
-///     ikey,
-///     keylenx,
-///     suffix,
-///     value: output, // P::Output directly — ValuePtr<V> or V
-/// };
-/// ```
-///
-/// # Consumption (in `split_and_insert`)
-///
-/// ```rust,ignore
-/// new_leaf.store_value_relaxed(slot, &insert_data.value);
-/// ```
 #[derive(Debug)]
 pub struct SplitInsertData<'a, P: LeafPolicy> {
     /// The 8-byte key to insert.
@@ -67,27 +34,13 @@ pub struct SplitInsertData<'a, P: LeafPolicy> {
     pub suffix: Option<&'a [u8]>,
 
     /// The typed value to insert.
-    ///
-    /// For `BoxPolicy<V>`: `ValuePtr<V>` — ownership transfers to the leaf during split.
-    /// For `InlinePolicy<V>`: `V` — copied into the leaf's inline storage.
-    ///
-    /// Replaces the old `value_ptr: *mut u8` which required:
-    /// - `output_consume_to_raw()` at construction
-    /// - XOR decode at consumption (true-inline)
-    /// - `output_from_raw()` for rollback
     pub value: P::Output,
 }
 
 /// Result of an atomic split+insert operation.
-///
-/// Contains the split key for parent propagation and information about
-/// where the new key was inserted.
 #[derive(Debug, Clone, Copy)]
 pub struct SplitInsertResult {
     /// The key that separates the left and right leaves.
-    ///
-    /// This is the first ikey of the right leaf and becomes the
-    /// separator key in the parent internode.
     pub split_ikey: u64,
 
     /// Which leaf received the new key.
@@ -99,18 +52,8 @@ pub struct SplitInsertResult {
 // ============================================================================
 
 /// Trait for permutation types used in leaf nodes.
-///
-/// # Associated Types
-///
-/// - `Raw`: The underlying storage type (`u64` or `u128`)
-///
-/// # Implementors
-///
-/// - `Permuter<WIDTH>` for WIDTH in 1..=15
 pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'static {
     /// Raw storage type for atomic operations.
-    ///
-    /// - `Permuter<WIDTH>`: `u64`
     type Raw: Copy + Clone + Eq + Debug + Send + Sync + 'static;
 
     /// Number of slots this permutation supports.
@@ -121,49 +64,12 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
     // ========================================================================
 
     /// Create an empty permutation with size = 0.
-    ///
-    /// Slots are arranged so `back()` returns slot 0 initially.
     fn empty() -> Self;
 
     /// Create a sorted permutation with `n` elements in slots `0..n`.
-    ///
-    /// The permutation will have size `n` with logical positions `0..n`
-    /// mapping to physical slots 0..n in order.
-    ///
-    /// This is used when creating layer nodes during suffix conflict resolution,
-    /// where we need a small number of pre-positioned entries.
-    ///
-    /// # Arguments
-    ///
-    /// * `n` - Number of elements (`0 <= n <= WIDTH`)
-    ///
-    /// # Panics
-    ///
-    /// Panics in debug mode if `n > WIDTH`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Create a permutation with 2 sorted entries
-    /// let perm = Permuter::<15>::make_sorted(2);
-    /// assert_eq!(perm.size(), 2);
-    ///
-    /// // Position 0 -> Slot 0
-    /// assert_eq!(perm.get(0), 0);
-    ///
-    /// // Position 1 -> Slot 1
-    /// assert_eq!(perm.get(1), 1);
-    /// ```
     fn make_sorted(n: usize) -> Self;
 
     /// Create a permutation from a raw storage value.
-    ///
-    /// Used when loading from atomic storage.
-    ///
-    /// # Safety Note
-    ///
-    /// The raw value should be a valid permutation encoding. Invalid values
-    /// may cause debug assertions to fail but won't cause undefined behavior.
     fn from_value(raw: Self::Raw) -> Self;
 
     // ========================================================================
@@ -171,32 +77,18 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
     // ========================================================================
 
     /// Get the raw storage value.
-    ///
-    /// Used for atomic store/CAS operations.
     fn value(&self) -> Self::Raw;
 
     /// Get the number of slots in use.
     fn size(&self) -> usize;
 
     /// Get the physical slot at logical position `i`.
-    ///
-    /// # Panics
-    ///
-    /// Debug-panics if `i >= WIDTH`.
     fn get(&self, i: usize) -> usize;
 
     /// Get the slot at the back (next free slot to allocate).
-    ///
-    /// Equivalent to `get(WIDTH - 1)`.
     fn back(&self) -> usize;
 
     /// Get the slot at `back()` with an offset into the free region.
-    ///
-    /// `back_at_offset(0)` == `back()`.
-    ///
-    /// # Panics
-    ///
-    /// Debug-panics if `size() + offset >= WIDTH`.
     fn back_at_offset(&self, offset: usize) -> usize;
 
     // ========================================================================
@@ -204,37 +96,18 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
     // ========================================================================
 
     /// Allocate a slot from back and insert at position `i`.
-    ///
-    /// Returns the allocated physical slot index.
-    ///
-    /// # Panics
-    ///
-    /// Debug-panics if `i > size()` or `size() >= WIDTH`.
     fn insert_from_back(&mut self, i: usize) -> usize;
 
     /// Compute insert result without mutation (for CAS operations).
-    ///
-    /// Returns `(new_permutation, allocated_slot)`.
-    ///
-    /// This is used in lock-free CAS insert paths where we need to compute
-    /// the new permutation value before attempting an atomic CAS.
     fn insert_from_back_immutable(&self, i: usize) -> (Self, usize);
 
     /// Swap two slots in the free region (positions >= size).
-    ///
-    /// Used to skip slot 0 when it can't be reused due to `ikey_bound` constraints.
     fn swap_free_slots(&mut self, pos_i: usize, pos_j: usize);
 
     /// Set the size without changing slot positions.
     fn set_size(&mut self, n: usize);
 
     /// Remove the slot at logical position `i`.
-    ///
-    /// The slot is moved to the free region (back) and size is decremented.
-    ///
-    /// # Panics
-    ///
-    /// Debug-panics if `i >= size()`.
     fn remove(&mut self, i: usize);
 }
 
@@ -243,19 +116,6 @@ pub trait TreePermutation: Copy + Clone + Eq + Debug + Send + Sync + Sized + 'st
 // ============================================================================
 
 /// Trait for internode types used in a `MassTree`.
-///
-/// Abstracts over `InternodeNode` for generic tree operations.
-/// Internode WIDTH is fixed at 15 (matching leaf WIDTH for optimal B+tree fanout).
-///
-/// # Note on Generic Parameter
-///
-/// Unlike leaf nodes, internodes don't store values - only `u64` keys and `*mut u8`
-/// child pointers. The internode type is therefore non-generic, reducing code
-/// monomorphization (one `InternodeNode` implementation regardless of slot type).
-///
-/// # Implementors
-///
-/// - `InternodeNode` (fixed WIDTH=15)
 pub trait TreeInternode: Sized + Send + Sync + 'static {
     /// Node width (max number of children).
     const WIDTH: usize;
@@ -271,25 +131,6 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     fn new_root_boxed(height: u32) -> Box<Self>;
 
     /// Create a new internode sibling for a split operation.
-    ///
-    /// The new internode is created with a **split-locked** version copied from the
-    /// locked parent. This prevents other threads from locking the sibling until
-    /// it is installed into the tree and its parent pointer is set.
-    ///
-    /// # Help-Along Protocol
-    ///
-    /// This is the internode equivalent of leaf `NodeVersion::new_for_split()`.
-    /// The caller MUST call `version().unlock_for_split()` exactly once after:
-    /// 1. The sibling is inserted into its parent (grandparent or new root)
-    /// 2. The sibling's parent pointer is set
-    ///
-    /// # C++ Reference
-    ///
-    /// Matches `next_child->assign_version(*p)` in `masstree_split.hh:234`.
-    ///
-    /// # Safety
-    ///
-    /// The `parent_version` must be from a locked node (the parent being split).
     fn new_boxed_for_split(parent_version: &NodeVersion, height: u32) -> Box<Self>;
 
     // ========================================================================
@@ -313,9 +154,6 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     fn nkeys(&self) -> usize;
 
     /// Get number of keys using Relaxed ordering.
-    ///
-    /// Use this variant when the value is only needed for hints/speculation
-    /// (e.g., prefetch index calculation) and correctness doesn't depend on it.
     fn nkeys_relaxed(&self) -> usize;
 
     /// Set number of keys.
@@ -335,39 +173,9 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     fn ikey(&self, idx: usize) -> u64;
 
     /// Get key at index using Relaxed ordering.
-    ///
-    /// # Safety Justification
-    ///
-    /// Callers must have already established ordering via `version.stable()`
-    /// or equivalent fence. The Acquire fence from `stable()` synchronizes
-    /// with writer's Release stores, making Relaxed loads safe.
-    ///
-    /// This is safe because:
-    /// 1. Call sites do `stable()` which spins until `DIRTY_MASK == 0`
-    /// 2. `stable()` issues `fence(Acquire)` before returning
-    /// 3. The fence synchronizes with writer's `Release` stores
-    /// 4. Therefore, Relaxed loads see fully-published values
     fn ikey_relaxed(&self, idx: usize) -> u64;
 
     /// Get raw pointer to the ikey array for SIMD operations.
-    ///
-    /// Returns a pointer to the first element of the contiguous ikey array.
-    /// The pointer is valid for reading `Self::WIDTH` `u64` values.
-    ///
-    /// # Safety Context
-    ///
-    /// Caller must ensure:
-    /// 1. Memory ordering established via `stable()` before reading
-    /// 2. No concurrent writes to the ikey array (ensured by OCC protocol)
-    ///
-    /// # Implementation Notes
-    /// The pointer targets [`AtomicU64`](std::sync::atomic::AtomicU64) storage, but SIMD treats it as plain
-    /// `u64`.
-    ///
-    /// This is safe because:
-    /// - [`AtomicU64`](std::sync::atomic::AtomicU64) has identical layout to `u64` (guaranted by Rust)
-    /// - Aligned 64-bit loads are atomic on `x86_64`
-    /// - Caller has established ordering via `stable()` fence
     fn ikey_ptr(&self) -> *const u64;
 
     /// Set key at index.
@@ -416,30 +224,6 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize);
 
     /// Split this internode into a new sibling while inserting a key/child.
-    ///
-    /// This method performs the split AND updates all children's parent pointers
-    /// in `new_right` to point to `new_right_ptr`. This is critical for correctness:
-    /// parent updates must happen inside `split_into` (before returning) to prevent
-    /// races where a thread sees a child with a stale parent pointer.
-    ///
-    /// # Arguments
-    ///
-    /// * `new_right` - The new right sibling (pre-allocated, mutable reference)
-    /// * `new_right_ptr` - Raw pointer to `new_right` for setting parent pointers
-    /// * `insert_pos` - Position where the new key/child should be inserted
-    /// * `insert_ikey` - The key to insert
-    /// * `insert_child` - The child pointer to insert
-    ///
-    /// # Returns
-    ///
-    /// `(popup_key, insert_went_left)` where:
-    /// - `popup_key` is the key that goes to the parent
-    /// - `insert_went_left` is true if the insert went to the left sibling
-    ///
-    /// # Safety
-    ///
-    /// * `new_right_ptr` must point to `new_right`
-    /// * The caller must hold the lock on `self`
     #[must_use = "popup_key must be inserted into parent node to complete the split"]
     fn split_into(
         &self,
@@ -455,19 +239,6 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
 //  TreeLeafNode Trait
 // ============================================================================
 /// Trait for abstracting over leaf node WIDTH variants.
-///
-/// This trait enables generic tree operations over leaf nodes parameterized
-/// by a [`LeafPolicy`]. The policy determines value storage (Arc vs inline)
-/// and suffix storage (sidecar vs embedded).
-///
-/// # Type Parameters
-///
-/// - `P`: The leaf policy (e.g., `BoxPolicy<V>` or `InlinePolicy<V>`)
-///
-/// # Associated Types
-///
-/// - `Perm`: The permutation type for this leaf
-/// - `Internode`: The internode type for this tree variant
 pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     /// The permutation type for this leaf.
     type Perm: TreePermutation;
@@ -482,12 +253,6 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     const SPLIT_THRESHOLD: usize;
 
     /// Inline suffix storage capacity in bytes.
-    ///
-    /// Controls the `InlineSuffixBag` capacity inside the sidecar (for both
-    /// `BoxPolicy` and `InlinePolicy`). Larger values reduce drain-to-external
-    /// frequency at the cost of a larger sidecar heap allocation.
-    ///
-    /// Does NOT affect leaf node size (suffix is behind a pointer for both policies).
     #[cfg(not(feature = "small-suffix-capacity"))]
     const INLINE_KSUF_CAPACITY: usize = 512;
 
@@ -501,8 +266,10 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
 
     /// Create a new leaf node (boxed, non-root).
     fn new_boxed() -> Box<Self>;
+
     /// Create a new root leaf node (boxed).
     fn new_root_boxed() -> Box<Self>;
+
     /// Create a new layer root leaf node (boxed).
     fn new_layer_root_boxed() -> Box<Self>;
 
@@ -670,9 +437,6 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     fn set_parent(&self, parent: *mut u8);
 
     /// Unlink this leaf from the doubly-linked chain.
-    ///
-    /// # Safety
-    /// Caller must hold the lock and ensure neighbors are valid.
     unsafe fn unlink_from_chain(&self);
 
     /// Get the raw next pointer including mark bit (unguarded).

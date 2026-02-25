@@ -147,6 +147,7 @@ impl ReverseFlags {
     const INITIALIZED: u8 = 1 << 1;
     const EMIT_EQUAL: u8 = 1 << 2;
     const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
+    const UPPER_BOUND: u8 = 1 << 4;
 
     /// Create new flags with all bits cleared.
     #[inline(always)]
@@ -188,6 +189,19 @@ impl ReverseFlags {
     #[inline(always)]
     pub const fn needs_duplicate_check(self) -> bool {
         self.0 & Self::NEEDS_DUPLICATE_CHECK != 0
+    }
+
+    /// Whether we're at an upper bound position (scanning from maximum).
+    ///
+    /// When true:
+    /// - `lower_reverse()` returns `size - 1` (start from last slot)
+    /// - `is_duplicate_reverse()` returns false (no filtering needed)
+    ///
+    /// Set true on sublayer descent via `shift_clear_reverse()`,
+    /// cleared by `clear_upper_bound()` after successful emission.
+    #[inline(always)]
+    pub const fn upper_bound(self) -> bool {
+        self.0 & Self::UPPER_BOUND != 0
     }
 
     // ========================================================================
@@ -238,5 +252,17 @@ impl ReverseFlags {
     #[inline(always)]
     pub const fn require_duplicate_check(&mut self) {
         self.0 |= Self::NEEDS_DUPLICATE_CHECK;
+    }
+
+    /// Set `upper_bound` flag (scanning from maximum position).
+    #[inline(always)]
+    pub const fn set_upper_bound(&mut self) {
+        self.0 |= Self::UPPER_BOUND;
+    }
+
+    /// Clear `upper_bound` flag after successful key emission.
+    #[inline(always)]
+    pub const fn clear_upper_bound(&mut self) {
+        self.0 &= !Self::UPPER_BOUND;
     }
 }

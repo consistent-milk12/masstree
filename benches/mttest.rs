@@ -1410,11 +1410,4 @@ fn main() {
             Err(e) => eprintln!("Error serializing results: {e}"),
         }
     }
-
-    // Print insert retry statistics if feature is enabled
-    #[cfg(feature = "insert-stats")]
-    {
-        eprintln!();
-        masstree::insert_stats::print_stats();
-    }
 }

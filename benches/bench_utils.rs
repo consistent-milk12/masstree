@@ -12,16 +12,18 @@
     clippy::expect_used
 )]
 
-use std::sync::atomic::{Ordering as AtomicOrdering, fence};
+use std::sync::{
+    Barrier,
+    atomic::{Ordering as AtomicOrdering, fence},
+};
 
 use arrayvec::ArrayVec;
+use core_affinity::CoreId;
 use rand::{RngExt, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Zipf};
 
 /// Multipliers for deterministic key chunk generation.
-/// Each chunk uses a different multiplier to ensure variation across chunks.
-/// Extended to 16 entries to support keys up to 128 bytes.
 const MULTIPLIERS: [u64; 16] = [
     1,
     0x517c_c1b7_2722_0a95,
@@ -42,9 +44,6 @@ const MULTIPLIERS: [u64; 16] = [
 ];
 
 /// Deterministically generate fixed-size byte-array keys.
-///
-/// - `K` must be a multiple of 8, between 8 and 128 (inclusive).
-/// - Keys are built from 8-byte chunks derived from `i` with different multipliers.
 #[must_use]
 pub fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -72,16 +71,6 @@ pub fn keys<const K: usize>(n: usize) -> Vec<[u8; K]> {
 
 /// Deterministically generate fixed-size keys where the first 8 bytes are drawn
 /// from a small bucketed prefix space to force shared prefixes (ikey collisions).
-///
-/// This is useful for benchmarking Masstree behavior when many distinct keys
-/// share the same initial 8-byte chunk and must be disambiguated by deeper
-/// layers.
-///
-/// - `K` must be a multiple of 8, between 16 and 128 (inclusive).
-/// - `prefix_buckets` must be > 0. **Smaller values = harder test for Masstree**:
-///   - `prefix_buckets=1`: All keys share the SAME prefix (maximum trie depth stress)
-///   - `prefix_buckets=10`: ~n/10 keys per prefix bucket (moderate collision)
-///   - `prefix_buckets=n`: Each key has unique prefix (no benefit vs standard keys)
 #[must_use]
 pub fn keys_shared_prefix<const K: usize>(n: usize, prefix_buckets: u64) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -114,15 +103,6 @@ pub fn keys_shared_prefix<const K: usize>(n: usize, prefix_buckets: u64) -> Vec<
 
 /// Like [`keys_shared_prefix`], but forces collisions across the first `prefix_chunks`
 /// 8-byte chunks (not just the first one).
-///
-/// This is a harder Masstree workload when `prefix_chunks` is large and
-/// `prefix_buckets` is small (e.g. `prefix_chunks=3`, `prefix_buckets=1` for 32B),
-/// because many distinct keys share the same prefixes for multiple layers.
-///
-/// Requirements:
-/// - `K` must be a multiple of 8, between 16 and 128 (inclusive).
-/// - `prefix_chunks` must be in `1..chunks` (must leave at least one unique chunk).
-/// - `prefix_buckets` must be > 0.
 #[must_use]
 pub fn keys_shared_prefix_chunks<const K: usize>(
     n: usize,
@@ -146,9 +126,6 @@ pub fn keys_shared_prefix_chunks<const K: usize>(
 
         for c in 0..chunks {
             let v: u64 = if c < prefix_chunks {
-                // Keep each prefix chunk in a small bucket-space.
-                // Using a per-chunk multiplier helps avoid "all prefix chunks identical"
-                // when prefix_buckets > 1, while still keeping collisions high.
                 ((i as u64) % prefix_buckets).wrapping_mul(MULTIPLIERS[c % MULTIPLIERS.len()])
             } else {
                 // Ensure remaining chunks vary with `i` so keys remain distinct.
@@ -168,12 +145,6 @@ pub fn keys_shared_prefix_chunks<const K: usize>(
 }
 
 /// Fast power-law skewed indices (not true Zipfian but similar shape).
-///
-/// Uses `n^(1-u) - 1` which produces a skewed distribution where lower
-/// indices are accessed more frequently. This is faster than true Zipfian
-/// (no precomputation) but doesn't match the exact Zipfian PMF.
-///
-/// For true Zipfian distribution, use [`zipfian_indices`] instead.
 #[must_use]
 pub fn skewed_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
     assert!(n > 0, "n must be > 0");
@@ -190,13 +161,6 @@ pub fn skewed_indices(n: usize, count: usize, seed: u64) -> Vec<usize> {
 }
 
 /// Generate true Zipfian-distributed indices using `rand_distr::Zipf`.
-///
-/// The skew parameter `s` controls the distribution shape:
-/// - `s = 1.0`: Standard Zipf's law (top 20% keys get ~80% accesses)
-/// - `s > 1.0`: More skewed toward lower indices
-/// - `s < 1.0`: Flatter distribution
-///
-/// Uses the well-tested `rand_distr` crate for correct Zipfian sampling.
 #[must_use]
 pub fn zipfian_indices(n: usize, count: usize, s: f64, seed: u64) -> Vec<usize> {
     assert!(n > 0, "n must be > 0");
@@ -230,15 +194,6 @@ pub fn shuffle<T>(slice: &mut [T], seed: u64) {
 }
 
 /// Generate random start indices for range scan benchmarks.
-///
-/// Returns a vector of indices into a key array, allowing scans to start
-/// from random positions rather than always from the beginning.
-/// This provides more realistic benchmarks by:
-/// - Avoiding always scanning the first few leaves (cache-hot)
-/// - Testing different parts of the tree structure
-/// - Reducing measurement bias from predictable access patterns
-///
-/// The indices are pre-generated to avoid RNG overhead during measurement.
 #[must_use]
 pub fn random_start_indices(key_count: usize, ops_count: usize, seed: u64) -> Vec<usize> {
     // Reserve room at the end so scans don't immediately hit end-of-tree
@@ -251,7 +206,6 @@ pub fn random_start_indices(key_count: usize, ops_count: usize, seed: u64) -> Ve
 }
 
 /// Generate random i32 values (like C++ Masstree rw1 test).
-/// Returns (keys, values) where value[i] = key[i] + 1.
 #[must_use]
 pub fn rw1_keys(n: usize, seed: u64) -> (Vec<i32>, Vec<i32>) {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -262,7 +216,6 @@ pub fn rw1_keys(n: usize, seed: u64) -> (Vec<i32>, Vec<i32>) {
 }
 
 /// Generate shuffled lookup order for rw1-style benchmarks.
-/// Returns indices into the keys array, shuffled randomly.
 #[must_use]
 pub fn shuffled_indices(n: usize, seed: u64) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..n).collect();
@@ -275,9 +228,6 @@ pub fn shuffled_indices(n: usize, seed: u64) -> Vec<usize> {
 // =============================================================================
 
 /// Generate sequential (sorted ascending) keys.
-///
-/// Best-case for range scans and sequential access patterns.
-/// Keys are simply `0, 1, 2, ...` in big-endian format.
 #[must_use]
 pub fn keys_sequential<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -297,9 +247,6 @@ pub fn keys_sequential<const K: usize>(n: usize) -> Vec<[u8; K]> {
 }
 
 /// Generate reverse-sorted (descending) keys.
-///
-/// Stress test for insertion (worst-case for some B-tree implementations).
-/// Also useful for reverse range scan benchmarks.
 #[must_use]
 pub fn keys_reverse<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -319,13 +266,6 @@ pub fn keys_reverse<const K: usize>(n: usize) -> Vec<[u8; K]> {
 }
 
 /// Generate clustered keys with hot ranges and gaps.
-///
-/// Simulates real-world access patterns where certain key ranges
-/// are accessed more frequently (e.g., recent timestamps, popular users).
-///
-/// - `clusters`: Number of hot clusters
-/// - `keys_per_cluster`: Keys in each cluster
-/// - `gap_size`: Gap between clusters
 #[must_use]
 pub fn keys_clustered<const K: usize>(
     clusters: usize,
@@ -356,11 +296,6 @@ pub fn keys_clustered<const K: usize>(
 }
 
 /// Generate sparse keys with wide gaps.
-///
-/// Stress test for cache misses and memory access patterns.
-/// Keys are spread across a large keyspace.
-///
-/// - `spacing`: Gap between consecutive keys
 #[must_use]
 pub fn keys_sparse<const K: usize>(n: usize, spacing: u64) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -387,11 +322,6 @@ pub fn keys_sparse<const K: usize>(n: usize, spacing: u64) -> Vec<[u8; K]> {
 // =============================================================================
 
 /// Generate keys where only the last 8-byte chunk differs.
-///
-/// **`MassTree` advantage**: All keys share the same prefix through all layers
-/// except the final one. The suffix mechanism handles this efficiently.
-///
-/// - `K` must be >= 16 (need at least 2 chunks)
 #[must_use]
 pub fn keys_suffix_only_differ<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -424,13 +354,6 @@ pub fn keys_suffix_only_differ<const K: usize>(n: usize) -> Vec<[u8; K]> {
 }
 
 /// Generate hierarchical namespace-style keys.
-///
-/// **`MassTree` advantage**: Trie structure naturally shares common prefixes.
-/// Keys look like: `namespace:category:subcategory:id`
-///
-/// - `namespaces`: Number of top-level namespaces
-/// - `categories_per_ns`: Categories within each namespace
-/// - `items_per_cat`: Items within each category
 #[must_use]
 pub fn keys_hierarchical<const K: usize>(
     namespaces: usize,
@@ -479,9 +402,6 @@ pub fn keys_hierarchical<const K: usize>(
 }
 
 /// Container for variable-length keys using inline storage.
-///
-/// Uses `ArrayVec<u8, 32>` to store keys inline (up to 32 bytes) without
-/// heap allocation per key, eliminating millions of small allocations.
 #[expect(missing_docs)]
 #[derive(Clone, Debug)]
 pub struct VariableLengthKeys {
@@ -490,12 +410,6 @@ pub struct VariableLengthKeys {
 }
 
 /// Generate keys with varying lengths (8, 16, 24, 32 bytes).
-///
-/// **`MassTree` advantage**: Handles variable-length keys naturally through
-/// the trie structure without padding overhead.
-///
-/// Distribution can be uniform or weighted toward certain sizes.
-/// Keys are stored inline using `ArrayVec` to avoid per-key heap allocations.
 #[must_use]
 pub fn keys_variable_length(n: usize, seed: u64) -> VariableLengthKeys {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -589,9 +503,6 @@ pub fn string_keys_paths(n: usize, users: usize, projects_per_user: usize) -> Ve
 // =============================================================================
 
 /// Generate keys designed to force maximum leaf splits.
-///
-/// Creates sequential keys that will fill leaves and force splits,
-/// then inserts keys between existing ones to cause cascading splits.
 #[must_use]
 pub fn keys_adversarial_splits<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -631,13 +542,6 @@ pub fn keys_adversarial_splits<const K: usize>(n: usize) -> Vec<[u8; K]> {
 }
 
 /// Generate interleaved hot/cold ranges for cache thrashing.
-///
-/// Creates alternating bands of keys that, when accessed in order,
-/// will thrash the cache by jumping between distant memory regions.
-///
-/// - `hot_ranges`: Number of hot ranges
-/// - `keys_per_range`: Keys in each range
-/// - `cold_gap`: Gap between hot ranges (cold region)
 #[must_use]
 pub fn keys_interleaved_ranges<const K: usize>(
     hot_ranges: usize,
@@ -667,10 +571,6 @@ pub fn keys_interleaved_ranges<const K: usize>(
 }
 
 /// Generate keys with random lengths for layer transition stress.
-///
-/// Unlike `keys_variable_length`, this returns fixed-size arrays but with
-/// "effective" variable lengths by using different multipliers to make
-/// later chunks "less unique" (simulating shorter keys padded with zeros).
 #[must_use]
 pub fn keys_random_length_simulation<const K: usize>(n: usize, seed: u64) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -702,11 +602,6 @@ pub fn keys_random_length_simulation<const K: usize>(n: usize, seed: u64) -> Vec
 }
 
 /// Generate keys that stress B-link pointer following during scans.
-///
-/// Uses bit-reversal permutation to create maximum fragmentation:
-/// - Keys are logically sequential (0, 1, 2, ...)
-/// - But insertion order causes splits at every level
-/// - Range scans must follow many B-link pointers
 #[must_use]
 pub fn keys_blink_stress<const K: usize>(n: usize) -> Vec<[u8; K]> {
     assert!(K.is_multiple_of(8), "key size must be a multiple of 8");
@@ -733,9 +628,6 @@ pub fn keys_blink_stress<const K: usize>(n: usize) -> Vec<[u8; K]> {
         keys.push(key);
     }
 
-    // Reorder using bit-reversal permutation for maximum split stress
-    // This interleaves keys so that consecutive insertions land in different leaves
-    // Use integer arithmetic to avoid precision loss for large n
     let bits: u32 = usize::BITS - n.saturating_sub(1).leading_zeros();
     let mut reordered: Vec<[u8; K]> = Vec::with_capacity(n);
 
@@ -751,6 +643,7 @@ pub fn keys_blink_stress<const K: usize>(n: usize) -> Vec<[u8; K]> {
 
     // If we lost keys due to dedup, fill with remaining sequential keys
     let mut next_key = n as u64;
+
     while reordered.len() < n {
         let mut key = [0u8; K];
         key[K - 8..].copy_from_slice(&next_key.to_be_bytes());
@@ -762,12 +655,6 @@ pub fn keys_blink_stress<const K: usize>(n: usize) -> Vec<[u8; K]> {
 }
 
 /// Generate keys optimized for testing concurrent range scans.
-///
-/// Creates multiple distinct ranges that can be scanned in parallel
-/// without overlap, plus some overlapping ranges for contention testing.
-///
-/// Returns: (`non_overlapping_ranges`, `overlapping_ranges`)
-/// Each range is a (`start_key`, `end_key`) pair.
 #[must_use]
 #[expect(clippy::type_complexity)]
 pub fn scan_ranges<const K: usize>(
@@ -821,9 +708,6 @@ pub fn scan_ranges<const K: usize>(
 }
 
 /// Generate prefix ranges for prefix scan benchmarks.
-///
-/// Returns prefixes that match different numbers of keys.
-/// Includes 4 additional prefixes that won't match anything (for miss testing).
 #[must_use]
 pub fn scan_prefixes(prefix_buckets: u64) -> Vec<Vec<u8>> {
     let mut prefixes: Vec<Vec<u8>> = Vec::with_capacity(prefix_buckets as usize + 4);
@@ -847,7 +731,6 @@ pub fn scan_prefixes(prefix_buckets: u64) -> Vec<Vec<u8>> {
 // =============================================================================
 
 /// Number of warmup iterations to run before actual measurement.
-/// This ensures CPU caches, branch predictors, and JIT are stable.
 pub const DEFAULT_WARMUP_ITERS: usize = 1000;
 
 /// Perform explicit warmup by running a closure multiple times.
@@ -862,9 +745,6 @@ pub fn warmup<F: FnMut()>(mut f: F, iterations: usize) {
 }
 
 /// Warmup a data structure by accessing random elements.
-///
-/// Generic helper that warms up any data structure with a get-like operation.
-/// Uses the provided indices to touch memory locations.
 #[inline(never)]
 pub fn warmup_with_indices<F: FnMut(usize)>(
     mut access_fn: F,
@@ -883,31 +763,18 @@ pub fn warmup_with_indices<F: FnMut(usize)>(
 }
 
 /// Memory barrier before measurement.
-///
-/// Prevents both compiler and CPU from reordering measured code before this point.
-/// Uses full `fence` for cross-platform correctness (ARM, RISC-V need hardware fence).
 #[inline]
 pub fn pre_measurement_barrier() {
     fence(AtomicOrdering::SeqCst);
 }
 
 /// Memory barrier after measurement.
-///
-/// Prevents both compiler and CPU from reordering measured code after this point.
-/// Uses full `fence` for cross-platform correctness (ARM, RISC-V need hardware fence).
 #[inline]
 pub fn post_measurement_barrier() {
     fence(AtomicOrdering::SeqCst);
 }
 
 /// Helper to run a benchmark with proper setup.
-///
-/// This provides a standard pattern for benchmarks:
-/// 1. Pin thread (if possible)
-/// 2. Run warmup iterations
-/// 3. Insert memory barrier
-/// 4. Run measured iterations
-/// 5. Insert memory barrier
 #[derive(Debug)]
 pub struct BenchmarkRunner {
     pub warmup_iters: usize,
@@ -976,8 +843,8 @@ pub struct ThreadContext<'a> {
     pub tid: usize,
     /// Effective warmup ops (proportional to workload size).
     pub warmup_ops: usize,
-    warmup_done: &'a std::sync::Barrier,
-    start: &'a std::sync::Barrier,
+    warmup_done: &'a Barrier,
+    start: &'a Barrier,
 }
 
 impl ThreadContext<'_> {
@@ -1008,30 +875,15 @@ fn should_pin_cores() -> bool {
 }
 
 /// Run a concurrent benchmark with proper thread management.
-///
-/// Uses `std::thread::scope` for zero-cost borrowing (no Arc needed).
-///
-/// Features:
-/// - Proportional warmup: `min(warmup_ops, ops_per_thread / 5)`
-/// - Optional core pinning via `BENCH_PIN_CORES=1` environment variable
-/// - Two-barrier synchronization: warmup completion + measurement start
-///
-/// The `per_thread` closure receives a [`ThreadContext`] and should follow
-/// this protocol:
-/// 1. Perform warmup using `ctx.warmup_ops` iterations
-/// 2. Call `ctx.finish_warmup()`
-/// 3. Call `ctx.begin_measurement()`
-/// 4. Execute measured operations
-/// 5. Call `ctx.end_measurement()`
 pub fn run_concurrent<F>(threads: usize, warmup_ops: usize, ops_per_thread: usize, per_thread: F)
 where
     F: Fn(&ThreadContext) + Send + Sync,
 {
-    let effective_warmup = warmup_ops.min(ops_per_thread / 5);
-    let warmup_done = std::sync::Barrier::new(threads);
-    let start = std::sync::Barrier::new(threads);
-    let pin = should_pin_cores();
-    let core_ids = if pin {
+    let effective_warmup: usize = warmup_ops.min(ops_per_thread / 5);
+    let warmup_done = Barrier::new(threads);
+    let start = Barrier::new(threads);
+    let pin: bool = should_pin_cores();
+    let core_ids: Vec<CoreId> = if pin {
         core_affinity::get_core_ids().unwrap_or_default()
     } else {
         vec![]
@@ -1039,21 +891,24 @@ where
 
     std::thread::scope(|s| {
         for tid in 0..threads {
-            let warmup_done = &warmup_done;
-            let start = &start;
-            let core_ids = &core_ids;
-            let per_thread = &per_thread;
+            let warmup_done: &Barrier = &warmup_done;
+            let start: &Barrier = &start;
+            let core_ids: &Vec<CoreId> = &core_ids;
+            let per_thread: &F = &per_thread;
+
             s.spawn(move || {
                 if !core_ids.is_empty() {
                     let core_id = core_ids[tid % core_ids.len()];
                     core_affinity::set_for_current(core_id);
                 }
+
                 let ctx = ThreadContext {
                     tid,
                     warmup_ops: effective_warmup,
                     warmup_done,
                     start,
                 };
+
                 per_thread(&ctx);
             });
         }

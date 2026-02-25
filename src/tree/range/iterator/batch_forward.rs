@@ -12,7 +12,7 @@ use super::RangeIter;
 use crate::tree::range::forward_ctx::{
     IntraLeafCopyStrategy, IntraLeafRefStrategy, ValuesOnlyStrategy,
 };
-use crate::tree::range::scan_state::ScanState;
+use crate::tree::range::scan_state::{ScanState, StepResult};
 
 impl<P, A> RangeIter<'_, '_, P, A>
 where
@@ -149,7 +149,6 @@ where
     /// Number of entries visited.
     #[inline]
     #[must_use = "returns the number of entries visited"]
-    #[expect(clippy::too_many_lines, reason = "Complex state management logic")]
     pub fn for_each_batch_ref<F>(mut self, mut visitor: F) -> usize
     where
         P: RefLeafPolicy,
@@ -208,36 +207,10 @@ where
             // ================================================================
 
             // Handle pending state transitions first (like advance_no_alloc_ref)
-            match self.fwd.state {
-                ScanState::Down => {
-                    self.fwd.flags.disable_single_layer_mode();
-                    self.fwd.handle_down();
-                    self.fwd.state = ScanState::Retry;
-                    self.fwd.flags.require_duplicate_check();
-
-                    continue;
-                }
-
-                ScanState::Up => {
-                    if !self.fwd.handle_up(self.guard) {
-                        self.fwd.flags.mark_exhausted();
-
-                        return count;
-                    }
-
-                    self.fwd.state = ScanState::FindNext;
-                    self.fwd.flags.require_duplicate_check();
-
-                    continue;
-                }
-
-                ScanState::Retry => {
-                    self.fwd.state = self.fwd.find_retry(self.guard);
-                    self.fwd.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanState::Emit | ScanState::FindNext => {}
+            match self.fwd.step_transitions(self.guard) {
+                StepResult::Exhausted => return count,
+                StepResult::Continue => continue,
+                StepResult::Ready => {}
             }
 
             // Check for null stack (layer exhausted)

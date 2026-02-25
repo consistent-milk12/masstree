@@ -4,20 +4,6 @@
 //!
 //! This module provides [`LeafNode15<P>`], a leaf node parameterized over a
 //! [`LeafPolicy`] that determines how values and suffixes are stored.
-//!
-//! # Design
-//!
-//! The 15-slot design requires 4 bits per slot (values 0-14).
-//! Total: 4 (size) + 15×4 (slots) = 64 bits, fitting in u64.
-//!
-//! # Policies
-//!
-//! | Policy | Leaf Size | Cache Lines | Use Case |
-//! |--------|-----------|-------------|----------|
-//! | `BoxPolicy<V>` | 448 bytes | 7 | General-purpose, non-Copy values |
-//! | `InlinePolicy<V>` (default) | 1152 bytes | 18 | Embedded suffix, zero-indirection |
-//! | `InlinePolicy<V>` + `small-suffix-capacity` | 896 bytes | 14 | Smaller embedded suffix |
-//! | `InlinePolicy<V>` + `sidecar-suffix` | 576 bytes | 9 | Compact leaves, pointer-indirect |
 
 use seize::LocalGuard;
 use std::array as StdArray;
@@ -67,9 +53,6 @@ pub const MATCH_RESULT_EXACT: i32 = 1;
 pub const MATCH_RESULT_MISMATCH: i32 = 0;
 
 /// Return value from [`LeafNode15::ksuf_match_result`] indicating a layer pointer.
-///
-/// This is `-IKEY_SIZE` (i.e., `-8`), signaling the caller should descend into
-/// the sublayer rather than treating this as a key match or mismatch.
 #[expect(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
@@ -91,16 +74,6 @@ pub const MODSTATE_DELETED_LAYER: u8 = 2;
 pub const MODSTATE_EMPTY: u8 = 3;
 
 /// B-link leaf node with 15 slots, parameterized over [`LeafPolicy`].
-///
-/// `P` controls value storage (Arc vs inline), suffix storage (sidecar vs
-/// embedded), and whether value retirement is needed. All structural
-/// operations are implemented once regardless of policy.
-///
-/// # Layout
-///
-/// `repr(C, align(64))`: cache-line aligned. Fields are ordered to isolate
-/// contention — version (CL0) and permutation (CL1) live on separate cache
-/// lines. Size: 448B with `BoxPolicy`, 896B with `InlinePolicy`.
 #[repr(C, align(64))]
 pub struct LeafNode15<P: LeafPolicy> {
     // — Cache Line 0: read-heavy, rarely written —
@@ -182,13 +155,9 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
     /// Initialize a leaf node directly at the given pointer.
     ///
-    /// Avoids stack allocation and copy by writing directly to the destination.
-    /// Used by pool allocators for maximum performance.
-    ///
     /// # Safety
     ///
-    /// - `ptr` must be valid, properly aligned, and point to uninitialized memory
-    /// - `ptr` must have space for `size_of::<Self>()` bytes
+    /// Inline comments.
     #[inline]
     pub unsafe fn init_at(ptr: *mut Self, is_root: bool) {
         // SAFETY: All operations here are safe because:
@@ -196,10 +165,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
         // - We have exclusive access to the memory
         // - All writes are to properly aligned fields
         unsafe {
-            // Zero the entire struct first (most fields are zero-initialized).
-            // For BoxPolicy, zero = null pointers (empty slots).
-            // For InlinePolicy, zero = null tags (empty slots) + zero bits.
-            // For SidecarSuffix, zero = null sidecar pointer (both policies).
             StdPtr::write_bytes(ptr, 0, 1);
 
             let node: &mut Self = &mut *ptr;
@@ -216,10 +181,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
             // Permutation: empty
             StdPtr::write(&raw mut node.permutation, AtomicPermuter15::new());
 
-            // NOTE: values and suffix fields are correctly zero-initialized:
-            // - BoxValueArray: all AtomicPtr null (zero)
-            // - InlineValueArray: all AtomicPtr null + all AtomicU64 zero
-            // - SidecarSuffix: AtomicPtr null (zero) — no-op init:
             P::Suffix::init_at_zero(StdPtr::addr_of_mut!((*ptr).suffix));
         }
     }
@@ -255,8 +216,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Inherent alias for [`TreeLeafNode::new_boxed`].
-    ///
-    /// Allows calling `LeafNode15::<P>::new_boxed()` without importing the trait.
     #[inline(always)]
     #[must_use]
     pub fn new_boxed() -> Box<Self> {
@@ -264,8 +223,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Inherent alias for [`TreeLeafNode::new_root_boxed`].
-    ///
-    /// Allows calling `LeafNode15::<P>::new_root_boxed()` without importing the trait.
     #[inline(always)]
     #[must_use]
     pub fn new_root_boxed() -> Box<Self> {
@@ -273,8 +230,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Inherent alias for [`TreeLeafNode::new_layer_root_boxed`].
-    ///
-    /// Allows calling `LeafNode15::<P>::new_layer_root_boxed()` without importing the trait.
     #[inline(always)]
     #[must_use]
     pub fn new_layer_root_boxed() -> Box<Self> {
@@ -325,8 +280,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Store a layer pointer at a slot.
-    ///
-    /// Caller must also set `keylenx >= LAYER_KEYLENX`.
     #[inline(always)]
     pub fn store_layer(&self, slot: usize, ptr: *mut u8) {
         self.values.store_layer(slot, ptr);
@@ -339,19 +292,12 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Prefetch the value at a slot to hide memory latency.
-    ///
-    /// For Arc: prefetches the heap allocation behind the pointer.
-    /// For inline: no-op (value is already in the leaf's cache lines).
     #[inline(always)]
     pub fn prefetch_value(&self, slot: usize) {
         P::prefetch_value(&self.values, slot);
     }
 
     /// Load the typed value pointer at a slot.
-    ///
-    /// Returns a `*const P::Value` pointing to the underlying data.
-    /// For Arc: returns the pointer to the heap-allocated `V`.
-    /// For inline: not meaningful (compile-time prevented by `RefPolicy` gating).
     ///
     /// # Safety
     ///
@@ -370,27 +316,18 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Check if a slot has no value stored.
-    ///
-    /// Alias for [`is_slot_empty`](Self::is_slot_empty). Phase 3 tree code
-    /// uses this name for clarity in value-centric contexts.
     #[inline(always)]
     pub fn is_value_empty(&self, slot: usize) -> bool {
         self.is_slot_empty(slot)
     }
 
     /// Update an existing terminal value in place (alias).
-    ///
-    /// Alias for [`update_value_in_place`](Self::update_value_in_place).
-    /// Phase 3 tree code uses this shorter name.
     #[inline(always)]
     pub fn update_in_place(&self, slot: usize, value: &P::Output) -> RetireHandle {
         self.update_value_in_place(slot, value)
     }
 
     /// Load the raw layer pointer at a slot.
-    ///
-    /// Alias for [`load_layer`](Self::load_layer). Phase 3 tree code uses
-    /// this name to communicate that the return type is a raw `*mut u8`.
     #[inline(always)]
     pub fn load_layer_raw(&self, slot: usize) -> *mut u8 {
         self.load_layer(slot)
@@ -411,17 +348,16 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Clear a slot's value, keylenx, and permutation entry.
-    ///
-    /// Atomically removes the slot from the visible permutation and clears
-    /// its data. Used during remove operations.
     #[inline(always)]
     pub fn clear_slot_and_permutation(&self, slot: usize) {
         debug_assert!(
             slot < WIDTH_15,
             "clear_slot_and_permutation: slot out of bounds"
         );
+
         let mut perm: Permuter15 = self.permutation();
         perm.remove_slot(slot);
+
         self.set_permutation(perm);
         self.clear_slot(slot);
     }
@@ -545,11 +481,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Match a slot against a key suffix, returning a result code.
-    ///
-    /// Returns:
-    /// - `MATCH_RESULT_EXACT` (1): exact key match
-    /// - `MATCH_RESULT_MISMATCH` (0): same ikey, different full key
-    /// - `MATCH_RESULT_LAYER` (-8): slot is a layer pointer
     #[must_use]
     #[inline(always)]
     pub fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
@@ -586,8 +517,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// Assign a suffix to a slot.
     ///
     /// # Safety
-    /// - Caller must hold the leaf lock.
-    /// - `guard` must come from this tree's collector.
+    ///
+    /// Inline comments.
     #[inline(always)]
     pub unsafe fn assign_ksuf(
         &self,
@@ -607,13 +538,10 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
         let perm: Permuter15 = self.permutation();
 
-        // Delegate to suffix store — it handles inline/external/drain logic.
         // SAFETY: Caller holds lock.
         let retire_ptr: *mut u8 = unsafe { self.suffix.assign(slot, suffix, &perm, guard) };
 
-        // CRITICAL: Publish suffix presence AFTER bytes are written.
-        // Readers check keylenx with Acquire, which synchronizes with this
-        // Release store, ensuring suffix bytes are visible.
+        // CRITICAL: Publish suffix presence after bytes are written.
         self.keylenx[slot].store(KSUF_KEYLENX, WRITE_ORD);
 
         retire_ptr
@@ -621,10 +549,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
     /// Assign a suffix during node initialization (sequential slots 0..slot).
     ///
-    /// Unlike `assign_ksuf`, this does not return a retire pointer because
-    /// the suffix store handles retirement internally during init.
-    ///
     /// # Safety
+    ///
     /// Same as `assign_ksuf`.
     #[inline(always)]
     pub unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
@@ -651,6 +577,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// Assign a suffix using a pre-allocated buffer.
     ///
     /// # Safety
+    ///
     /// Same as `assign_ksuf`.
     #[inline(always)]
     pub unsafe fn assign_ksuf_prealloc(
@@ -689,6 +616,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// Retire a suffix bag pointer returned by `assign_ksuf`.
     ///
     /// # Safety
+    ///
     /// `ptr` must have come from `assign_ksuf` and must not be null.
     #[inline(always)]
     pub unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
@@ -699,6 +627,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// Clear a slot's suffix.
     ///
     /// # Safety
+    ///
     /// Caller must hold the leaf lock.
     #[inline(always)]
     pub unsafe fn clear_ksuf(&self, slot: usize, guard: &LocalGuard<'_>) {
@@ -723,6 +652,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// Pre-allocate external overflow storage.
     ///
     /// # Safety
+    ///
     /// Caller must hold the leaf lock.
     #[inline(always)]
     pub unsafe fn ensure_external_ksuf(&self) -> *mut crate::suffix::SuffixBag {
@@ -755,6 +685,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// Uses Acquire ordering to synchronize with writer's Release stores.
     ///
     /// # Panics
+    ///
     /// Panics in debug mode if `slot >= WIDTH_15`.
     #[must_use]
     #[inline(always)]
@@ -769,15 +700,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Get the ikey at the given physical slot using Relaxed ordering.
-    ///
-    /// # Safety Justification
-    /// Safe to use Relaxed when:
-    /// 1. Caller has already loaded permutation with Acquire ordering, which
-    ///    synchronizes with the writer's Release fence after modifications
-    /// 2. OCC version validation at the end of the read catches any races
-    ///
-    /// This avoids redundant Acquire fences on each ikey load (up to 15 per search),
-    /// improving read throughput by 10-15%.
     ///
     /// # Panics
     /// Panics in debug mode if `slot >= WIDTH_15`.
@@ -806,11 +728,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Set the ikey at the given physical slot using Relaxed ordering.
-    ///
-    /// # Safety Preconditions
-    /// Only safe when writing to a node that is:
-    /// - Not yet visible to other threads (during split setup), AND
-    /// - Protected by version lock on the source node
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
@@ -988,10 +905,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Store permutation with Relaxed ordering.
-    ///
-    /// # Safety
-    /// Caller must hold the lock on this node. Using Relaxed without the
-    /// lock would create a data race with concurrent readers.
     #[inline(always)]
     pub fn set_permutation_relaxed(&self, perm: Permuter15) {
         self.permutation.store(perm, RELAXED);
@@ -1010,9 +923,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// - The caller must have successfully claimed the slot via `cas_slot_value` and ensured
     ///   the slot still belongs to the CAS attempt (i.e. `leaf_values[slot]` still equals the
     ///   claimed pointer).
-    ///
-    /// NOTE: writing key metadata *before* claiming the slot is not safe in this design because
-    /// multiple concurrent CAS attempts can overwrite each other's metadata before publish.
     #[inline(always)]
     #[expect(clippy::indexing_slicing, reason = "bounds checked by debug_assert")]
     pub unsafe fn store_key_data_for_cas(&self, slot: usize, ikey: u64, keylenx: u8) {
@@ -1069,9 +979,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Get the raw next pointer (including mark bit).
-    ///
-    /// Uses guard protection to ensure the load participates in seize's
-    /// total order, making it safe on all architectures.
     #[must_use]
     #[inline(always)]
     pub fn next_raw(&self, guard: &impl Guard) -> *mut Self {
@@ -1102,10 +1009,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Set the next leaf pointer using Relaxed ordering.
-    ///
-    /// # Safety Preconditions
-    /// Only safe when writing to a node that is not yet visible to other threads
-    /// The subsequent `set_next(Release)` in `link_sibling` ensures visibility.
     #[inline(always)]
     pub(crate) fn set_next_relaxed(&self, next: *mut Self) {
         self.next.store(next, RELAXED);
@@ -1120,28 +1023,16 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Unmark the next pointer.
-    ///
-    /// # Safety Note
-    /// Uses unguarded load internally since we're modifying our own field
-    /// during a locked operation, not traversing to a different node.
     #[inline(always)]
     pub fn unmark_next(&self) {
         // SAFETY: We hold the lock on this node during split/unlink operations,
         // so we're not racing with retirement of the next pointer's target.
         let ptr: *mut Self = unsafe { self.safe_next_unguarded() };
+
         self.next.store(ptr, WRITE_ORD);
     }
 
     /// Wait for an in-progress split to complete.
-    ///
-    /// Spins until the next pointer is unmarked, the version is stable,
-    /// OR the node is marked as deleted.
-    ///
-    /// NOTE: A marked next pointer can mean either:
-    /// 1. A split is in progress (will be unmarked when split completes)
-    /// 2. An unlink is in progress (leaf being deleted, may stay marked)
-    ///
-    /// We check `is_deleted()` to avoid spinning forever on case 2.
     pub fn wait_for_split(&self) {
         while self.next_is_marked() {
             // Check if node was deleted (unlink marks next but never unmarks)
@@ -1198,11 +1089,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
     /// Unlink this leaf from the B-link doubly-linked chain.
     ///
-    /// # Preconditions
-    ///
-    /// - Self is locked (caller holds version lock)
-    /// - Self has a predecessor (`prev` is non-null)
-    ///
     /// # Safety
     /// - Caller must hold the version lock on this leaf
     /// - `self.prev()` must be non-null (not the leftmost leaf)
@@ -1218,10 +1104,11 @@ impl<P: LeafPolicy> LeafNode15<P> {
         let marked_self: *mut Self = Linker::mark_ptr(self_ptr);
 
         let final_prev: *mut Self;
+
         loop {
-            // Re-read prev on each iteration (may change if prev splits)
             // SAFETY: Called under exclusive lock - no concurrent retirement.
             let prev: *mut Self = unsafe { self.prev_unguarded() };
+
             debug_assert!(!prev.is_null(), "unlink_from_chain: prev must be non-null");
 
             // SAFETY: prev is non-null (checked above) and points to a valid leaf
@@ -1287,10 +1174,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Set the previous leaf pointer using Relaxed ordering.
-    ///
-    /// # Safety Preconditions
-    /// Only safe when writing to a node that is not yet visible to other threads
-    /// The subsequent `set_next(Release)` in `link_sibling` ensures visibility.
     #[inline(always)]
     pub(crate) fn set_prev_relaxed(&self, prev: *mut Self) {
         self.prev.store(prev, RELAXED);
@@ -1331,11 +1214,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     // ============================================================================
 
     /// Get the modification state.
-    ///
-    /// Returns one of:
-    /// - `MODSTATE_INSERT` (0): Normal insert mode
-    /// - `MODSTATE_REMOVE` (1): Node is being removed
-    /// - `MODSTATE_DELETED_LAYER` (2): Layer has been garbage collected
     #[must_use]
     #[inline(always)]
     pub fn modstate(&self) -> u8 {
@@ -1402,9 +1280,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     // ============================================================================
 
     /// Check if slot 0 can be reused for a new key.
-    ///
-    /// # Safety
-    /// Called under exclusive lock - uses unguarded prev load.
     #[must_use]
     #[inline(always)]
     pub fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
@@ -1432,16 +1307,10 @@ impl<P: LeafPolicy> LeafNode15<P> {
             return None;
         }
 
-        // Check for forward-sequential pattern: appending to rightmost leaf.
         // SAFETY: Called during insert with lock held, unguarded access is safe.
-        //
-        // Guard: skip this optimization when the last existing entry shares
-        // insert_ikey. A forward-sequential split would set split_ikey = insert_ikey,
-        // routing lookups for that ikey to the right leaf while the matching
-        // entry remains stranded on the left. Fall through to midpoint split
-        // which places both entries on the same side.
         if insert_pos == size && unsafe { self.next_raw_unguarded() }.is_null() {
             let last_slot = perm.get(size - 1);
+
             if self.ikey(last_slot) != insert_ikey {
                 return Some(SplitPoint {
                     pos: size,
@@ -1450,13 +1319,11 @@ impl<P: LeafPolicy> LeafNode15<P> {
             }
         }
 
-        // Check for reverse-sequential pattern: prepending to leftmost leaf.
         // SAFETY: Called during insert with lock held, unguarded access is safe.
-        //
-        // Guard: skip when split_ikey would equal insert_ikey (same stranding issue).
         if insert_pos == 0 && unsafe { self.prev_unguarded() }.is_null() && size > 1 {
             let split_slot = perm.get(1);
             let split_ikey = self.ikey(split_slot);
+
             if split_ikey != insert_ikey {
                 return Some(SplitPoint { pos: 1, split_ikey });
             }
@@ -1481,6 +1348,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
                     Ordering::Equal => {
                         split_pos += 1;
                     }
+
                     Ordering::Less | Ordering::Greater => {
                         split_pos -= 1;
                     }
@@ -1499,13 +1367,17 @@ impl<P: LeafPolicy> LeafNode15<P> {
         // on the right side. Left entries then have strictly smaller ikeys.
         if insert_pos == split_pos && split_pos > 0 {
             let last_left_slot = perm.get(split_pos - 1);
+
             if self.ikey(last_left_slot) == insert_ikey {
                 split_pos -= 1;
+
                 while split_pos > 0 {
                     let check_slot = perm.get(split_pos - 1);
+
                     if self.ikey(check_slot) != insert_ikey {
                         break;
                     }
+
                     split_pos -= 1;
                 }
             }
@@ -1525,9 +1397,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Split entries from position `split_pos..size` into a new leaf.
-    ///
-    /// Returns the split key (first ikey of right leaf) and which leaf
-    /// should receive a subsequent insert.
     ///
     /// # Safety
     ///
@@ -1583,6 +1452,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
                     // SAFETY: We hold lock on both leaves.
                     unsafe { new_leaf.assign_ksuf_init(new_slot, suffix, guard) };
                 }
+
                 // SAFETY: We hold lock.
                 unsafe { self.clear_ksuf(old_slot, guard) };
             }
@@ -1615,6 +1485,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
         guard: &LocalGuard<'_>,
     ) -> (u64, InsertTarget) {
         let split_version = NodeVersion::new_for_split(&self.version);
+
         // SAFETY: new_leaf_ptr is not yet visible to other threads (caller guarantee).
         // Writing the version field initializes the new leaf before publication.
         unsafe {
@@ -1626,6 +1497,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
         let perm: Permuter15 = self.permutation();
         let size: usize = perm.size();
+
         // SAFETY: new_leaf_ptr is valid and properly aligned (caller guarantee).
         let new_leaf: &Self = unsafe { &*new_leaf_ptr };
 
@@ -1652,6 +1524,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
                     // Suffix data is copied to new_leaf's storage.
                     unsafe { new_leaf.assign_ksuf_init(new_slot, suffix, guard) };
                 }
+
                 // SAFETY: We hold lock on self. Clearing old suffix after copy
                 // retires the old bag pointer via the guard for deferred reclamation.
                 unsafe { self.clear_ksuf(old_slot, guard) };

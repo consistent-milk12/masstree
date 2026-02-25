@@ -17,23 +17,6 @@ use crate::prefetch::prefetch_read;
 use super::cursor_key::CursorKey;
 
 /// Traverse from layer root to target leaf for range scans.
-///
-/// Similar to `reach_leaf_concurrent_generic` but optimized for
-/// range scan access patterns:
-/// - No root fix-up (scans always start from known root)
-/// - Single-pointer traversal (simpler for sequential access)
-/// - Minimal prefetch (scan will access sequentially anyway)
-///
-/// # Arguments
-///
-/// - `start`: Layer root pointer
-/// - `cursor_key`: Cursor containing target ikey
-/// - `_guard`: Memory reclamation guard (lifetime binding)
-///
-/// # Returns
-///
-/// Pointer to the leaf containing (or that should contain) the key.
-/// Returns null if `start` is null.
 #[inline]
 pub fn reach_leaf_for_scan<P>(
     start: *const u8,

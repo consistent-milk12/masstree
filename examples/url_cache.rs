@@ -281,7 +281,7 @@ fn get_user(cache: &UrlCache, user_id: u32) -> String {
 
     // Try cache first
     if let Some(cached) = cache.get(&url) {
-        return cached.body.clone();
+        return cached.body;
     }
 
     // Cache miss - fetch from "database"

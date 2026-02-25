@@ -73,11 +73,8 @@
 #![deny(missing_docs)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
-// We use extensive benchmarking to verify #[inline(always)] placement is correct.
 #![allow(clippy::inline_always)]
 #![allow(clippy::multiple_crate_versions)]
-// Allocation code casts *mut u8 to node pointers after allocating with correct Layout.
-// The memory is always properly aligned before casting.
 #![allow(clippy::cast_ptr_alignment)]
 
 #[cfg(feature = "mimalloc")]
@@ -198,10 +195,6 @@ pub(crate) mod policy;
 pub(crate) mod prefetch;
 mod retirement;
 mod shard_counter;
-
-#[cfg(feature = "insert-stats")]
-#[allow(dead_code)]
-pub mod insert_stats;
 
 // ============================================================================
 //  Public API Re-exports
