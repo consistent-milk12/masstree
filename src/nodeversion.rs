@@ -513,28 +513,35 @@ impl NodeVersion {
     #[inline(never)]
     fn lock_contended(&self) -> LockGuard<'_> {
         let mut backoff = Backoff::new();
+        let mut value: u32 = self.value.load(Ordering::Relaxed);
 
         loop {
-            let value: u32 = self.value.load(Ordering::Relaxed);
-
             if (value & LOCK_BIT) == 0 {
                 let locked: u32 = value | LOCK_BIT;
 
-                if self
-                    .value
-                    .compare_exchange_weak(value, locked, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    return LockGuard {
-                        version: StdPtr::from_ref(self),
-                        locked_value: locked,
-                        _lifetime: PhantomData,
-                        _marker: PhantomData,
-                    };
+                match self.value.compare_exchange_weak(
+                    value,
+                    locked,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        return LockGuard {
+                            version: StdPtr::from_ref(self),
+                            locked_value: locked,
+                            _lifetime: PhantomData,
+                            _marker: PhantomData,
+                        };
+                    }
+                    Err(v) => {
+                        value = v;
+                        continue; // Retry immediately with fresh value
+                    }
                 }
             }
 
             backoff.spin();
+            value = self.value.load(Ordering::Relaxed);
         }
     }
 

@@ -143,9 +143,6 @@ where
     // ========================================================================
 
     /// Check if an empty leaf can be reused for the given key.
-    ///
-    /// Empty leaves (from which all keys were removed) can be reused instead
-    /// of allocating new leaves, which saves memory and improves performance.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     pub(crate) fn can_reuse_empty_leaf(&self, leaf: &LeafNode15<P>, key: &Key<'_>) -> bool {
@@ -158,9 +155,6 @@ where
     }
 
     /// Insert a value into an empty leaf, reusing it instead of allocating.
-    ///
-    /// This is the fast path for lazy coalescing: when a leaf becomes empty
-    /// after removes, subsequent inserts can reuse it.
     #[inline]
     #[expect(
         clippy::type_complexity,
@@ -212,7 +206,7 @@ where
     }
 
     /// Validate membership: check if key should be in this leaf or a sibling.
-    #[inline] // Not #[inline(always)] - 35+ lines with multiple branches
+    #[inline]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     pub(crate) fn validate_membership(
         &self,
@@ -222,7 +216,6 @@ where
         // SAFETY: Called under lock - no concurrent retirement.
         let next_raw: *mut LeafNode15<P> = unsafe { leaf.next_raw_unguarded() };
 
-        // Check for split in progress
         if Linker::is_marked(next_raw) {
             leaf.wait_for_split();
             return Err(MembershipError::SplitInProgress);
@@ -236,7 +229,6 @@ where
             }
         }
 
-        // Check upper bound (key hasn't moved to right sibling)
         let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
 
         if !next_ptr.is_null() {
@@ -251,9 +243,7 @@ where
         Ok(())
     }
 
-    /// Handle a suffix conflict by creating a new layer.
     #[cold]
-    #[rustfmt::skip]
     #[inline(never)]
     #[expect(
         clippy::too_many_arguments,
@@ -268,30 +258,23 @@ where
         value: P::Output,
         guard: &LocalGuard<'_>,
     ) {
-        // Mark insert before modifying the node
         lock.mark_insert();
 
-        // Create new layer for the conflicting keys (infallible - aborts on OOM)
-        //
         // SAFETY: We hold the lock on `leaf`, guard is from this tree's collector
-        let layer_ptr: *mut u8 = unsafe {
-            self.create_layer_concurrent_generic(leaf, slot, key, value, guard)
-        };
+        let layer_ptr: *mut u8 =
+            unsafe { self.create_layer_concurrent_generic(leaf, slot, key, value, guard) };
 
-        // Retire old terminal value, then install layer pointer.
         // SAFETY: We hold the lock. Slot transitions from terminal → layer.
         let retire: RetireHandle = leaf.take_value_for_layer(slot);
+
         // SAFETY: handle was produced by take_value_for_layer() on this leaf.
         unsafe { P::retire_handle(retire, guard) };
 
-        // Clear any existing suffix before layer installation.
         // SAFETY: We hold the lock
         unsafe {
             leaf.clear_ksuf(slot, guard);
         };
 
-        // Install layer: set keylenx FIRST, then the layer pointer.
-        // store_layer only stores the pointer — keylenx must be set separately.
         leaf.set_keylenx(slot, LAYER_KEYLENX);
         leaf.store_layer(slot, layer_ptr);
     }
@@ -342,7 +325,6 @@ where
 
             let mut pre_allocated_vec: Option<Vec<u8>> = None;
 
-            // Inner loop: local retry with B-link advance (no full traversal)
             'forward: loop {
                 let has_suffix: bool = key.has_suffix();
 
@@ -350,7 +332,6 @@ where
                 let pre_lock_perm = leaf.permutation();
                 let pre_lock_perm_raw = pre_lock_perm.value(); // Avoid second atomic load
 
-                // Do optimistic search BEFORE locking
                 let optimistic_search: InsertSearchResultGeneric = if single_layer_mode {
                     self.search_for_insert_single_layer(leaf, key, &pre_lock_perm)
                 } else {
@@ -361,18 +342,27 @@ where
                     let suffix_len: usize = key.suffix().len();
                     let inline_capacity: usize = LeafNode15::<P>::INLINE_KSUF_CAPACITY;
 
-                    let threshold: usize = if suffix_len > inline_capacity {
-                        0
-                    } else {
-                        inline_capacity / suffix_len
-                    };
+                    let threshold_exceeded: bool = suffix_len > inline_capacity
+                        || pre_lock_perm.size() * suffix_len >= inline_capacity;
 
-                    if pre_lock_perm.size() >= threshold {
+                    if threshold_exceeded {
                         let estimated_capacity: usize = LeafNode15::<P>::WIDTH * suffix_len;
                         let mut v: Vec<u8> = Vec::new();
+
                         if v.try_reserve(estimated_capacity).is_ok() {
                             pre_allocated_vec = Some(v);
                         }
+                    }
+                }
+
+                if let InsertSearchResultGeneric::Layer { slot } = optimistic_search {
+                    let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+
+                    if !leaf.version().has_changed(pre_lock_version) {
+                        key.shift();
+                        layer_root = layer_ptr;
+                        in_sublayer = true;
+                        continue 'retry;
                     }
                 }
 
@@ -407,7 +397,6 @@ where
                 match self.validate_membership(leaf, key) {
                     Ok(()) => { /* continue to search */ }
                     Err(MembershipError::SplitInProgress | MembershipError::KeyMovedToSibling) => {
-                        // Existing recovery: B-link advance (walk right)
                         drop(lock);
 
                         let (advanced_ptr, exceeded) =
@@ -423,7 +412,6 @@ where
                         continue 'forward;
                     }
                     Err(MembershipError::KeyBelowLowerBound) => {
-                        // Cannot walk left - must restart from layer root
                         drop(lock);
                         continue 'retry;
                     }
@@ -481,8 +469,6 @@ where
                                 );
                                 drop(lock);
 
-                                // Retire old suffix bag OUTSIDE the lock to avoid
-                                // sys_membarrier syscall inside the critical section.
                                 if !deferred_retire.is_null() {
                                     // SAFETY: deferred_retire came from assign_ksuf
                                     // and guard is from this tree's collector.
@@ -499,11 +485,6 @@ where
                             }
 
                             FindSlotResult::NeedsSplit => {
-                                // Atomic split+insert - no retry needed!
-
-                                // Compute keylenx from key's current length:
-                                // - If has suffix (>8 bytes remaining), keylenx = KSUF_KEYLENX (64)
-                                // - Otherwise keylenx = current_len as u8
                                 let keylenx: u8 = if has_suffix {
                                     KSUF_KEYLENX
                                 } else {
@@ -516,11 +497,9 @@ where
                                     }
                                 };
 
-                                // Get suffix if present
                                 let suffix: Option<&[u8]> =
                                     if has_suffix { Some(key.suffix()) } else { None };
 
-                                // SplitInsertData<P> carries typed P::Output — no raw pointer conversion.
                                 let insert_data = SplitInsertData {
                                     ikey,
                                     keylenx,
@@ -528,9 +507,6 @@ where
                                     value,
                                 };
 
-                                // Atomic split+insert (FALLIBLE allocation for sibling)
-                                // SplitInsertData owns the typed value. On error, its Drop
-                                // handles cleanup automatically via P::Output's Drop impl.
                                 match self.handle_leaf_split_and_insert_generic(
                                     leaf_ptr,
                                     lock,
@@ -540,13 +516,10 @@ where
                                 ) {
                                     Ok(_result) => {}
                                     Err(e) => {
-                                        // No cleanup needed — SplitInsertData<P> drops its
-                                        // typed value automatically.
                                         return Err(e);
                                     }
                                 }
 
-                                // Insert completed during split - done!
                                 self.count.increment();
                                 return Ok(None);
                             }

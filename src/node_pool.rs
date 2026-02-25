@@ -1,19 +1,7 @@
 //! Thread-local node pools using size-class buckets.
 //!
-//! Based on C++ Masstree's `threadinfo::pool_allocate()` (`kvthread.hh:226-259`).
-//! Pools are bucketed by cache-line count (1–20), not concrete type, enabling
-//! reuse across node types within the same size class.
-//!
 //! Pool access is thread-local (no synchronization on fast path). Nodes may
 //! return to a different thread's pool due to seize's batch reclamation.
-//!
-//! ## Divergences from C++
-//!
-//! - **Capacity-bounded**: each bucket caps at 512 entries, spilling to the
-//!   global allocator. C++ freelists are unbounded.
-//! - **Individual refill**: allocates 128 blocks individually via `alloc()`.
-//!   C++ carves a single 2 MB `posix_memalign` slab (with optional hugepages).
-//! - **OOM**: aborts via `handle_alloc_error`. C++ returns null.
 
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::cell::UnsafeCell;

@@ -13,7 +13,7 @@ use crate::{
     internode::InternodeNode,
     key::Key,
     leaf_trait::TreeLeafNode,
-    leaf15::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode15},
+    leaf15::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode15, MODSTATE_INSERT},
     nodeversion::{LockGuard, NodeVersion},
     policy::LeafPolicy,
     prefetch::prefetch_read,
@@ -727,8 +727,10 @@ where
 
         let ikey: u64 = key.ikey();
 
-        // Mark insert dirty
-        lock.mark_insert();
+        if leaf.modstate_relaxed() != MODSTATE_INSERT {
+            lock.mark_insert();
+            leaf.set_modstate_relaxed(MODSTATE_INSERT);
+        }
 
         leaf.set_ikey_relaxed(slot, ikey);
         leaf.store_value_relaxed(slot, value);

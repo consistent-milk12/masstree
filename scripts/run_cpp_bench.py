@@ -23,11 +23,6 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple, List
 
-# Minimum Python version check
-if sys.version_info < (3, 9):
-    print("Error: Python 3.9+ required", file=sys.stderr)
-    sys.exit(1)
-
 # ANSI color codes
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -151,13 +146,6 @@ def run_cpp_benchmark(
     output = result.stderr
 
     # Parse JSON lines from stderr
-    # C++ mttest outputs one JSON line per phase per thread. For multi-phase tests
-    # (rw1, rw3, rw4), the final phase outputs ops_per_sec which is the COMBINED
-    # throughput (puts + gets). For single-phase tests (same, wscale), only
-    # puts_per_sec is output.
-    #
-    # IMPORTANT: We must NOT sum ops_per_sec + puts_per_sec, as ops_per_sec already
-    # includes the puts. We prefer ops_per_sec when available.
     ops_per_sec_values: List[float] = []
     puts_per_sec_values: List[float] = []
     gets_per_sec_values: List[float] = []
@@ -365,7 +353,6 @@ def main() -> None:
     mttest_path = project_dir / "reference" / "mttest"
 
     run_cpp = not args.rust_only
-    run_rust = args.compare or args.rust_only
 
     # Validate C++ binary exists
     if run_cpp and not mttest_path.exists():

@@ -1229,6 +1229,19 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.modstate.store(state, AtomicOrdering::Release);
     }
 
+    /// Get the modification state (relaxed, for use under lock).
+    #[must_use]
+    #[inline(always)]
+    pub fn modstate_relaxed(&self) -> u8 {
+        self.modstate.load(RELAXED)
+    }
+
+    /// Set the modification state (relaxed, for use under lock).
+    #[inline(always)]
+    pub fn set_modstate_relaxed(&self, state: u8) {
+        self.modstate.store(state, RELAXED);
+    }
+
     /// Check if this layer has been deleted (garbage collected).
     #[must_use]
     #[inline(always)]
@@ -2310,18 +2323,6 @@ impl<P: LeafPolicy> Drop for LeafNode15<P> {
             }
         }
 
-        // For InlinePolicy (NEEDS_RETIREMENT = false):
-        //   - inline_values are AtomicU64 bits, dropped automatically
-        //   - tags are AtomicPtr with sentinel pointers, no ownership
-        //   - No value cleanup needed
-
-        // ====================================================================
-        //  Suffix Cleanup
-        // ====================================================================
-        //
-        // Drops the heap-allocated SuffixSidecar (which in turn drops its
-        // InlineSuffixBag and external SuffixBag if allocated).
-        //
         // SAFETY: We have &mut self (exclusive access via Drop).
         unsafe {
             self.suffix.drop_storage();
@@ -2369,12 +2370,11 @@ impl<P: LeafPolicy> LeafNode15<P> {
         // Store key.
         self.set_ikey(slot, key.ikey());
 
-        // Store value — typed, no raw pointer conversion.
         self.store_value(slot, &output);
 
-        // Store keylenx and suffix.
         if key.has_suffix() {
             self.set_keylenx(slot, KSUF_KEYLENX);
+
             // SAFETY: Caller holds lock.
             unsafe { self.assign_ksuf(slot, key.suffix(), guard) };
         } else {
