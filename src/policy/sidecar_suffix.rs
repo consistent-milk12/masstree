@@ -1,17 +1,4 @@
 //! Lazy-allocated sidecar suffix storage.
-//!
-//! The leaf struct contains only an 8-byte `AtomicPtr<SuffixSidecar>`.
-//! The sidecar (containing `InlineSuffixBag` + `AtomicPtr<SuffixBag>`) is
-//! heap-allocated on first suffix assignment. Leaves that never store
-//! suffixes pay zero memory overhead.
-//!
-//! Optimal for integer-key workloads where most leaves have no suffixes.
-//!
-//! This is the suffix storage backend for both [`BoxPolicy<V>`] and
-//! [`InlinePolicy<V>`].
-//!
-//! [`BoxPolicy<V>`]: super::BoxPolicy
-//! [`InlinePolicy<V>`]: super::InlinePolicy
 
 use std::cmp::Ordering;
 use std::ptr as StdPtr;
@@ -30,25 +17,6 @@ use super::SuffixStore;
 // ============================================================================
 
 /// Suffix storage via lazy-allocated heap sidecar.
-///
-/// # Memory Footprint
-///
-/// - In leaf struct: 8 bytes (`AtomicPtr<SuffixSidecar>`)
-/// - On first suffix assignment: 328 bytes heap (`SuffixSidecar`)
-/// - On external overflow: additional heap (`SuffixBag`)
-///
-/// # Publication Protocol
-///
-/// Writers must follow this sequence:
-/// 1. Ensure sidecar is allocated (lazy init)
-/// 2. Write suffix bytes to inline or external storage
-/// 3. Store sidecar pointer with Release ordering (if newly allocated)
-/// 4. Store `keylenx = KSUF_KEYLENX` with Release ordering (publication point)
-///
-/// Readers observe via:
-/// 1. Load `keylenx` with Acquire (checked by leaf, not by this type)
-/// 2. Load sidecar pointer with Acquire
-/// 3. Read suffix from inline or external
 #[repr(C)]
 pub struct SidecarSuffix {
     sidecar: AtomicPtr<SuffixSidecar>,
@@ -82,7 +50,6 @@ impl SidecarSuffix {
             return ptr;
         }
 
-        // Caller holds lock, no race possible.
         let new_sidecar: Box<SuffixSidecar> = Box::default();
         let ptr: *mut SuffixSidecar = Box::into_raw(new_sidecar);
         self.sidecar.store(ptr, AtomicOrdering::Release);
@@ -152,8 +119,6 @@ impl SuffixStore for SidecarSuffix {
         perm: &impl TreePermutation,
         _guard: &LocalGuard<'_>,
     ) -> *mut u8 {
-        // Empty suffix is accepted and results in a no-op, consistent with
-        // the policy-wide suffix contract.
         if suffix.is_empty() {
             return StdPtr::null_mut();
         }
@@ -164,15 +129,12 @@ impl SuffixStore for SidecarSuffix {
         // SAFETY: sidecar_ptr is valid (just ensured).
         let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
 
-        // Fast path: inline assignment.
         if sidecar.inline.try_assign(slot, suffix) {
             return StdPtr::null_mut(); // No retirement needed.
         }
 
-        // Middle path: try in-place assignment on existing external.
-        // Avoids drain-and-rebuild when the external bag can accommodate
-        // the suffix directly (reuse or compact existing space).
         let ext_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
+
         if !ext_ptr.is_null() {
             // SAFETY: ext_ptr is valid, caller holds lock.
             let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
@@ -182,7 +144,6 @@ impl SuffixStore for SidecarSuffix {
             }
         }
 
-        // Slow path: drain inline to new external bag, merge old external.
         // SAFETY: Caller holds leaf lock.
         unsafe { self.drain_and_rebuild(sidecar, slot, suffix, perm) }
     }
@@ -198,15 +159,12 @@ impl SuffixStore for SidecarSuffix {
         let sidecar_ptr: *mut SuffixSidecar = unsafe { self.ensure_sidecar() };
         let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
 
-        // Fast path: inline assignment.
         if sidecar.inline.try_assign(slot, suffix) {
             return;
         }
 
-        // Middle path: try in-place on existing external (if allocated and has room).
-        // This avoids the expensive drain-and-rebuild when the external bag can
-        // accommodate the suffix directly. Matches actual leaf15.rs 3-tier init path.
         let ext_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
+
         if !ext_ptr.is_null() {
             // SAFETY: ext_ptr is valid, caller holds lock.
             let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
@@ -215,7 +173,6 @@ impl SuffixStore for SidecarSuffix {
             }
         }
 
-        // Slow path: drain inline to external using sequential iteration.
         // SAFETY: Caller holds leaf lock, guard is valid.
         unsafe { self.assign_init_slow(sidecar, slot, suffix, guard) }
     }
@@ -233,23 +190,21 @@ impl SuffixStore for SidecarSuffix {
         let sidecar_ptr: *mut SuffixSidecar = unsafe { self.ensure_sidecar() };
         let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
 
-        // Fast path: inline assignment.
         if sidecar.inline.try_assign(slot, suffix) {
             return StdPtr::null_mut();
         }
 
-        // Middle path: try in-place assignment on existing external.
         let ext_ptr: *mut SuffixBag = sidecar.external.load(RELAXED);
         if !ext_ptr.is_null() {
             // SAFETY: ext_ptr is valid, caller holds lock.
             let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
+
             if bag.try_assign_in_place(slot, suffix) {
                 sidecar.inline.clear(slot);
                 return StdPtr::null_mut();
             }
         }
 
-        // Slow path with pre-allocated buffer.
         // SAFETY: Caller holds leaf lock.
         unsafe { self.drain_and_rebuild_prealloc(sidecar, slot, suffix, perm, prealloc) }
     }
@@ -331,9 +286,6 @@ impl SuffixStore for SidecarSuffix {
 impl SidecarSuffix {
     /// Drain inline suffixes to a new external bag, assign the new suffix,
     /// merge old external entries, and install the new bag.
-    ///
-    /// Returns the old external bag pointer for deferred retirement
-    /// (null if no previous external bag existed).
     ///
     /// # Safety
     ///

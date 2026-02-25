@@ -50,8 +50,8 @@ where
 
     /// Linear search for insert position (small leaves, WIDTH ≤ 16).
     ///
-    /// For small leaves, linear search outperforms binary search due to
-    /// sequential memory access and better branch prediction.
+    /// 3-at-a-time unrolled to reduce loop overhead. The permutation is sorted,
+    /// so we can early-exit when any slot's ikey exceeds the target.
     #[inline]
     fn linear_search_insert(
         leaf: &LeafNode15<P>,
@@ -61,10 +61,57 @@ where
     ) -> InsertSearchResultGeneric {
         let target_ikey: u64 = key.ikey();
         let size: usize = perm.size();
+        let mut i: usize = 0;
 
-        for i in 0..size {
+        // 3-at-a-time unrolled loop
+        while i + 3 <= size {
+            let s0: usize = perm.get(i);
+            let s1: usize = perm.get(i + 1);
+            let s2: usize = perm.get(i + 2);
+
+            let ik0: u64 = leaf.ikey_relaxed(s0);
+            let ik1: u64 = leaf.ikey_relaxed(s1);
+            let ik2: u64 = leaf.ikey_relaxed(s2);
+
+            // Slot 0
+            if ik0 == target_ikey {
+                if let Some(result) =
+                    Self::check_slot_for_insert(leaf, key, i, s0, search_keylenx)
+                {
+                    return result;
+                }
+            } else if ik0 > target_ikey {
+                return InsertSearchResultGeneric::NotFound { logical_pos: i };
+            }
+
+            // Slot 1
+            if ik1 == target_ikey {
+                if let Some(result) =
+                    Self::check_slot_for_insert(leaf, key, i + 1, s1, search_keylenx)
+                {
+                    return result;
+                }
+            } else if ik1 > target_ikey {
+                return InsertSearchResultGeneric::NotFound { logical_pos: i + 1 };
+            }
+
+            // Slot 2
+            if ik2 == target_ikey {
+                if let Some(result) =
+                    Self::check_slot_for_insert(leaf, key, i + 2, s2, search_keylenx)
+                {
+                    return result;
+                }
+            } else if ik2 > target_ikey {
+                return InsertSearchResultGeneric::NotFound { logical_pos: i + 2 };
+            }
+
+            i += 3;
+        }
+
+        // Tail: 0-2 remaining slots
+        while i < size {
             let slot: usize = perm.get(i);
-
             let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
             if slot_ikey == target_ikey {
@@ -76,6 +123,8 @@ where
             } else if slot_ikey > target_ikey {
                 return InsertSearchResultGeneric::NotFound { logical_pos: i };
             }
+
+            i += 1;
         }
 
         InsertSearchResultGeneric::NotFound { logical_pos: size }

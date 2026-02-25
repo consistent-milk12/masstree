@@ -136,6 +136,10 @@ name = "concurrent_read_write"
 harness = false
 
 [[bench]]
+name = "concurrent_read_write_masstree"
+harness = false
+
+[[bench]]
 name = "high_impact"
 harness = false
 

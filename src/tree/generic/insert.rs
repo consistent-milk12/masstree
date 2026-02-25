@@ -2,13 +2,13 @@
 //! - `#[cold]` on retry/error paths
 //! - Unified slot allocation and value update logic
 
-use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::leaf15::KSUF_KEYLENX;
+use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::policy::RetireHandle;
 
 use super::{
-    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker,
-    LocalGuard, MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
+    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LeafPolicy, Linker, LocalGuard,
+    MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation, LAYER_KEYLENX,
 };
 
 use crate::leaf15::LeafNode15;
@@ -89,7 +89,7 @@ where
 
         lock.mark_insert();
 
-        let retire: RetireHandle = leaf.update_in_place(slot, new_value);
+        let retire: RetireHandle = leaf.update_value_in_place(slot, new_value);
 
         // Defer retirement of old value data if needed.
         // SAFETY: handle was produced by update_in_place() on this leaf.

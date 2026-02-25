@@ -7,13 +7,6 @@
 //! Optimal for string-key workloads with frequent suffixes.
 //!
 //! This is the suffix storage backend for [`InlinePolicy<V>`].
-//!
-//! # Size
-//!
-//! - Default (`CAPACITY = 512`): 584 bytes (inline bag: 576 + external ptr: 8)
-//! - `small-suffix-capacity` (`CAPACITY = 256`): 328 bytes (inline bag: 320 + external ptr: 8)
-//!
-//! [`InlinePolicy<V>`]: super::InlinePolicy
 
 use std::cell::UnsafeCell;
 use std::cmp::Ordering;
@@ -32,40 +25,12 @@ use super::SuffixStore;
 // ============================================================================
 
 /// Suffix storage embedded directly in the leaf struct.
-///
-/// # Layout
-///
-/// ```text
-/// EmbeddedSuffix {
-///     inline_ksuf:   UnsafeCell<InlineSuffixBag>  // 320 or 576 bytes
-///     external_ksuf: AtomicPtr<SuffixBag>          // 8 bytes
-/// }
-/// ```
-///
-/// Total: 584 bytes (default) or 328 bytes (`small-suffix-capacity`).
-///
-/// # Advantages over `SidecarSuffix`
-///
-/// - No pointer dereference for inline suffix access (embedded in leaf)
-/// - No lazy allocation overhead (always present)
-/// - Better cache locality for string-key workloads
-///
-/// # Tradeoff
-///
-/// Leaf size increases by 320/576 bytes compared to `SidecarSuffix` (8 bytes).
-/// This is acceptable for inline-value leaves where the value array already
-/// adds 120 bytes (`[AtomicU64; 15]`), making the leaf 896/1152 bytes total.
 #[repr(C)]
 pub struct EmbeddedSuffix {
     /// Inline suffix storage (256 or 512 bytes data capacity).
-    ///
-    /// Uses `UnsafeCell` for interior mutability. Writers hold the leaf lock.
-    /// Readers use OCC validation. Suffix bytes are immutable after publication.
     inline_ksuf: UnsafeCell<InlineSuffixBag>,
 
     /// External overflow for large/many suffixes.
-    ///
-    /// Null until inline capacity is exhausted.
     external_ksuf: AtomicPtr<SuffixBag>,
 }
 
@@ -157,36 +122,28 @@ impl SuffixStore for EmbeddedSuffix {
         perm: &impl TreePermutation,
         _guard: &LocalGuard<'_>,
     ) -> *mut u8 {
-        // Empty suffix is accepted and results in a no-op, consistent with
-        // the policy-wide suffix contract.
         if suffix.is_empty() {
             return StdPtr::null_mut();
         }
 
         let inline: &InlineSuffixBag = self.inline_bag();
 
-        // Fast path: try inline assignment.
         if inline.try_assign(slot, suffix) {
             return StdPtr::null_mut(); // No retirement needed.
         }
 
-        // Middle path: try in-place assignment on existing external.
-        // This avoids drain-and-rebuild when the external bag can accommodate
-        // the suffix by reusing or compacting existing space (no Vec growth).
-        // Matches existing leaf15_true.rs 3-tier pattern.
         let old_ext: *mut SuffixBag = self.external_ptr();
+
         if !old_ext.is_null() {
             // SAFETY: old_ext is valid, caller holds lock.
             let bag: &mut SuffixBag = unsafe { &mut *old_ext };
             if bag.try_assign_in_place(slot, suffix) {
-                // Suffix is now in external; clear the orphaned inline entry
-                // so that get() returns the new external version.
                 inline.clear(slot);
+
                 return StdPtr::null_mut();
             }
         }
 
-        // Slow path: drain inline to new external, merge old external.
         // SAFETY: Caller holds leaf lock.
         unsafe { self.drain_and_rebuild(slot, suffix, perm) }
     }
@@ -199,23 +156,22 @@ impl SuffixStore for EmbeddedSuffix {
 
         let inline: &InlineSuffixBag = self.inline_bag();
 
-        // Fast path: inline assignment.
         if inline.try_assign(slot, suffix) {
             return;
         }
 
-        // Middle path: try in-place on existing external.
         let old_ext: *mut SuffixBag = self.external_ptr();
+
         if !old_ext.is_null() {
             // SAFETY: old_ext is valid, caller holds lock.
             let bag: &mut SuffixBag = unsafe { &mut *old_ext };
+
             if bag.try_assign_in_place(slot, suffix) {
                 inline.clear(slot);
                 return;
             }
         }
 
-        // Slow path: drain and rebuild.
         // SAFETY: Caller holds leaf lock, guard is valid.
         unsafe { self.assign_init_slow(slot, suffix, guard) }
     }
@@ -231,23 +187,22 @@ impl SuffixStore for EmbeddedSuffix {
     ) -> *mut u8 {
         let inline: &InlineSuffixBag = self.inline_bag();
 
-        // Fast path: try inline.
         if inline.try_assign(slot, suffix) {
             return StdPtr::null_mut();
         }
 
-        // Middle path: try in-place on existing external.
         let old_ext: *mut SuffixBag = self.external_ptr();
+
         if !old_ext.is_null() {
             // SAFETY: old_ext is valid, caller holds lock.
             let bag: &mut SuffixBag = unsafe { &mut *old_ext };
+
             if bag.try_assign_in_place(slot, suffix) {
                 inline.clear(slot);
                 return StdPtr::null_mut();
             }
         }
 
-        // Slow path with pre-allocated buffer.
         // SAFETY: Caller holds leaf lock.
         unsafe { self.drain_and_rebuild_prealloc(slot, suffix, perm, prealloc) }
     }
@@ -259,15 +214,14 @@ impl SuffixStore for EmbeddedSuffix {
 
     #[inline(always)]
     unsafe fn clear(&self, slot: usize, _guard: &LocalGuard<'_>) {
-        // Clear inline slot metadata.
         self.inline_bag().clear(slot);
 
-        // Clear external slot if present.
         let external: *mut SuffixBag = self.external_ptr();
 
         if !external.is_null() {
             // SAFETY: external is valid, caller holds lock.
             let external_ref: &mut SuffixBag = unsafe { &mut *external };
+
             external_ref.clear(slot);
         }
     }
@@ -291,7 +245,6 @@ impl SuffixStore for EmbeddedSuffix {
     // ========================================================================
 
     unsafe fn drop_storage(&mut self) {
-        // External bag: drop if allocated.
         let external: *mut SuffixBag = self.external_ksuf.load(AtomicOrdering::Acquire);
 
         if !external.is_null() {
@@ -301,9 +254,6 @@ impl SuffixStore for EmbeddedSuffix {
                 drop(Box::from_raw(external));
             }
         }
-
-        // Inline bag: no heap allocation to free (embedded in struct).
-        // InlineSuffixBag's data is in UnsafeCell<[u8; CAPACITY]>, not heap.
     }
 
     unsafe fn init_at_zero(ptr: *mut Self) {
@@ -344,9 +294,6 @@ impl EmbeddedSuffix {
 
     /// Drain inline+external suffixes to a new external bag, assign the
     /// new suffix, and install it.
-    ///
-    /// Returns the old external bag pointer for deferred retirement
-    /// (null if no previous external bag existed).
     ///
     /// # Safety
     ///

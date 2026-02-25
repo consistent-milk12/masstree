@@ -1,17 +1,4 @@
-//! Concurrent read/write benchmarks with 64-byte keys.
-//!
-//! ## Methodology Notes
-//!
-//! - Thread management: Uses `run_concurrent` (scoped threads) for zero-cost
-//!   borrowing and proper warmup/measurement isolation.
-//! - Warmup: Proportional to workload size, capped at 20% of ops per thread.
-//! - Core pinning: Set `BENCH_PIN_CORES=1` to pin threads to cores.
-//! - TreeIndex upsert: Groups 01-10 use `tree_index_upsert_sync` which emulates
-//!   upsert via remove-then-reinsert (TreeIndex has no native upsert). This adds
-//!   overhead not present in other implementations. For fair write-path comparison,
-//!   use groups 13 (insert-only) and 14 (pure insert).
-//! - Seeds: Fixed for regression tracking reproducibility. All implementations
-//!   receive identical access patterns within each group.
+//! Concurrent read/write benchmarks.
 
 #![expect(clippy::pedantic)]
 #![expect(clippy::indexing_slicing)]
@@ -20,7 +7,7 @@ mod bench_utils;
 
 use bench_utils::{
     keys, keys_shared_prefix_chunks, post_measurement_barrier, pre_measurement_barrier,
-    run_concurrent, uniform_indices, zipfian_indices,
+    run_concurrent, shuffle, uniform_indices, zipfian_indices,
 };
 use crossbeam_skiplist::SkipMap;
 use divan::counter::ItemsCount;
@@ -48,9 +35,6 @@ const WARMUP_OPS: usize = 500;
 const THREAD_COUNTS: [usize; 6] = [1, 2, 4, 6, 8, 12];
 
 /// Base seed for deterministic workload generation.
-/// Fixed seeds ensure reproducible traces for regression tracking.
-/// All implementations receive identical access patterns within each group.
-/// For publication-grade diversity, supplement with seeds [43, 44, 45].
 const BASE_SEED: u64 = 42;
 
 // =============================================================================
@@ -58,11 +42,6 @@ const BASE_SEED: u64 = 42;
 // =============================================================================
 
 /// TreeIndex upsert emulation via remove-then-reinsert.
-///
-/// NOTE: TreeIndex does not support native upsert. This workaround uses up to 3
-/// attempts of `insert_sync` + `remove_sync`, adding overhead not present in other
-/// implementations. For fair write-path comparison, use groups 13 and 14 which use
-/// simple `insert_sync` on disjoint key ranges.
 fn tree_index_upsert_sync(tree: &TreeIndex<[u8; KEY_SIZE], u64>, key: [u8; KEY_SIZE], value: u64) {
     let mut key: [u8; 64] = key;
     let mut value: u64 = value;
@@ -126,35 +105,16 @@ fn setup_tree_index(keys: &[[u8; KEY_SIZE]]) -> TreeIndex<[u8; KEY_SIZE], u64> {
 }
 
 /// Generate a shuffled array of operation types (true = write, false = read).
-/// This avoids the predictable `i % 100 < ratio` pattern which causes all threads
-/// to write simultaneously and creates unrealistic branch prediction behavior.
 fn shuffled_write_decisions(count: usize, write_ratio_percent: usize, seed: u64) -> Vec<bool> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let write_count: usize = (count * write_ratio_percent) / 100;
     let mut decisions: Vec<bool> = vec![false; count];
 
-    // Mark first `write_count` as writes
     for d in decisions.iter_mut().take(write_count) {
         *d = true;
     }
 
-    // Fisher-Yates shuffle with seeded PRNG
-    let mut hasher = DefaultHasher::new();
-    seed.hash(&mut hasher);
-    let mut rng_state: u64 = hasher.finish();
-
-    for i in (1..count).rev() {
-        // Simple xorshift64 PRNG
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-
-        let j: usize = (rng_state as usize) % (i + 1);
-        decisions.swap(i, j);
-    }
-
+    // ChaCha8Rng Fisher-Yates (no modulo bias, consistent with uniform_indices)
+    shuffle(&mut decisions, seed);
     decisions
 }
 
@@ -162,7 +122,7 @@ fn shuffled_write_decisions(count: usize, write_ratio_percent: usize, seed: u64)
 // 01: MIXED 90-10 - Uniform Access Pattern
 // =============================================================================
 
-#[divan::bench_group(name = "01_mixed_90_10_uniform", sample_count = 200)]
+#[divan::bench_group(name = "01_mixed_90_10_uniform", sample_count = 200, sample_size = 1)]
 mod mixed_uniform {
     use super::*;
 
@@ -347,7 +307,7 @@ mod mixed_uniform {
 // 02: MIXED 90-10 - Zipfian Access Pattern (Hot Keys)
 // =============================================================================
 
-#[divan::bench_group(name = "02_mixed_90_10_zipfian", sample_count = 200)]
+#[divan::bench_group(name = "02_mixed_90_10_zipfian", sample_count = 200, sample_size = 1)]
 mod mixed_zipfian {
     use super::*;
 
@@ -364,7 +324,7 @@ mod mixed_zipfian {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_masstree15(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -401,7 +361,7 @@ mod mixed_zipfian {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -437,7 +397,7 @@ mod mixed_zipfian {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_indexset(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -473,7 +433,7 @@ mod mixed_zipfian {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_tree_index(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -507,7 +467,11 @@ mod mixed_zipfian {
 // 03: MIXED 90-10 - Shared Prefix (Masstree Stress Test)
 // =============================================================================
 
-#[divan::bench_group(name = "03_mixed_90_10_shared_prefix", sample_count = 200)]
+#[divan::bench_group(
+    name = "03_mixed_90_10_shared_prefix",
+    sample_count = 200,
+    sample_size = 1
+)]
 mod mixed_shared_prefix {
     use super::*;
 
@@ -530,7 +494,7 @@ mod mixed_shared_prefix {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_masstree15(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -567,7 +531,7 @@ mod mixed_shared_prefix {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -603,7 +567,7 @@ mod mixed_shared_prefix {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_indexset(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -639,7 +603,7 @@ mod mixed_shared_prefix {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_tree_index(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -673,7 +637,11 @@ mod mixed_shared_prefix {
 // 04: HIGH CONTENTION - Small Key Space (500 keys)
 // =============================================================================
 
-#[divan::bench_group(name = "04_mixed_90_10_high_contention", sample_count = 200)]
+#[divan::bench_group(
+    name = "04_mixed_90_10_high_contention",
+    sample_count = 200,
+    sample_size = 1
+)]
 mod mixed_high_contention {
     use super::*;
 
@@ -690,7 +658,7 @@ mod mixed_high_contention {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_masstree15(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -727,7 +695,7 @@ mod mixed_high_contention {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -763,7 +731,7 @@ mod mixed_high_contention {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_indexset(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -799,7 +767,7 @@ mod mixed_high_contention {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_tree_index(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -833,7 +801,11 @@ mod mixed_high_contention {
 // 05: LARGE DATASET - 500K keys
 // =============================================================================
 
-#[divan::bench_group(name = "05_mixed_90_10_large_dataset", sample_count = 200)]
+#[divan::bench_group(
+    name = "05_mixed_90_10_large_dataset",
+    sample_count = 10,
+    sample_size = 1
+)]
 mod mixed_large_dataset {
     use super::*;
 
@@ -850,7 +822,7 @@ mod mixed_large_dataset {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_masstree15(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -887,7 +859,7 @@ mod mixed_large_dataset {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -923,7 +895,7 @@ mod mixed_large_dataset {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_indexset(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -959,7 +931,7 @@ mod mixed_large_dataset {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_tree_index(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -993,7 +965,7 @@ mod mixed_large_dataset {
 // 06: SINGLE HOT KEY - Maximum Contention
 // =============================================================================
 
-#[divan::bench_group(name = "06_single_hot_key", sample_count = 200)]
+#[divan::bench_group(name = "06_single_hot_key", sample_count = 200, sample_size = 1)]
 mod single_hot_key {
     use super::*;
 
@@ -1010,7 +982,7 @@ mod single_hot_key {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_masstree15(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1047,7 +1019,7 @@ mod single_hot_key {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1079,7 +1051,7 @@ mod single_hot_key {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_indexset(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1111,7 +1083,7 @@ mod single_hot_key {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_tree_index(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1145,7 +1117,7 @@ mod single_hot_key {
 // 07: WRITE-HEAVY - 50% reads, 50% writes
 // =============================================================================
 
-#[divan::bench_group(name = "07_mixed_50_50", sample_count = 200)]
+#[divan::bench_group(name = "07_mixed_50_50", sample_count = 200, sample_size = 1)]
 mod mixed_50_50 {
     use super::*;
 
@@ -1162,7 +1134,7 @@ mod mixed_50_50 {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_masstree15(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1199,7 +1171,7 @@ mod mixed_50_50 {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1235,7 +1207,7 @@ mod mixed_50_50 {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_indexset(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1271,7 +1243,7 @@ mod mixed_50_50 {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_tree_index(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1305,7 +1277,7 @@ mod mixed_50_50 {
 // 08: 8-BYTE KEYS - MassTree Single-Layer Fast Path
 // =============================================================================
 
-#[divan::bench_group(name = "08_8byte_keys_uniform", sample_count = 200)]
+#[divan::bench_group(name = "08_8byte_keys_uniform", sample_count = 200, sample_size = 1)]
 mod keys_8byte {
     use super::*;
 
@@ -1379,7 +1351,7 @@ mod keys_8byte {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_masstree15_8(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1416,7 +1388,7 @@ mod keys_8byte {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap_8(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1452,7 +1424,7 @@ mod keys_8byte {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_indexset_8(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1488,7 +1460,7 @@ mod keys_8byte {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_tree_index_8(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1522,7 +1494,7 @@ mod keys_8byte {
 // 09: PURE READ - 100% Reads (No Writes)
 // =============================================================================
 
-#[divan::bench_group(name = "09_pure_read_uniform", sample_count = 200)]
+#[divan::bench_group(name = "09_pure_read_uniform", sample_count = 200, sample_size = 1)]
 mod pure_read {
     use super::*;
 
@@ -1536,7 +1508,7 @@ mod pure_read {
         let tree = setup_masstree15(&keys);
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
                     let guard = tree.guard();
@@ -1567,7 +1539,7 @@ mod pure_read {
         let map = setup_skipmap(&keys);
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
                     let base = ctx.tid * OPS_PER_THREAD;
@@ -1597,7 +1569,7 @@ mod pure_read {
         let map = setup_indexset(&keys);
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
                     let base = ctx.tid * OPS_PER_THREAD;
@@ -1627,7 +1599,7 @@ mod pure_read {
         let tree = setup_tree_index(&keys);
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .bench_local(|| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
                     let guard = SddGuard::new();
@@ -1657,7 +1629,7 @@ mod pure_read {
 // Accounting standardized: all implementations count successful removes (+1)
 // =============================================================================
 
-#[divan::bench_group(name = "10_remove_heavy", sample_count = 200)]
+#[divan::bench_group(name = "10_remove_heavy", sample_count = 200, sample_size = 1)]
 mod remove_heavy {
     use super::*;
 
@@ -1674,7 +1646,7 @@ mod remove_heavy {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_masstree15(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1714,7 +1686,7 @@ mod remove_heavy {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1750,7 +1722,7 @@ mod remove_heavy {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_indexset(&keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1786,7 +1758,7 @@ mod remove_heavy {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_tree_index(&keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -1831,7 +1803,7 @@ mod remove_heavy {
 //
 // Run:  cargo bench --bench concurrent_read_write --features mimalloc -- 11_latency
 
-#[divan::bench_group(name = "11_latency_read", sample_count = 100)]
+#[divan::bench_group(name = "11_latency_read", sample_count = 100, sample_size = 1)]
 mod latency_read {
     use super::*;
     use hdrhistogram::Histogram;
@@ -2009,7 +1981,11 @@ mod latency_read {
 //
 // Run:  cargo bench --bench concurrent_read_write --features mimalloc -- 11b_latency
 
-#[divan::bench_group(name = "11b_latency_read_concurrent", sample_count = 50)]
+#[divan::bench_group(
+    name = "11b_latency_read_concurrent",
+    sample_count = 50,
+    sample_size = 1
+)]
 mod latency_read_concurrent {
     use super::*;
     use hdrhistogram::Histogram;
@@ -2179,7 +2155,7 @@ mod latency_read_concurrent {
 // (Renamed from "memory_footprint" — for actual memory measurement use heaptrack)
 // =============================================================================
 
-#[divan::bench_group(name = "12_build_time", sample_count = 200)]
+#[divan::bench_group(name = "12_build_time", sample_count = 200, sample_size = 1)]
 mod build_time {
     use super::*;
 
@@ -2188,45 +2164,37 @@ mod build_time {
     #[divan::bench]
     fn masstree15_build_time(bencher: Bencher) {
         let keys = keys::<KEY_SIZE>(N);
-        bencher
-            .counter(divan::counter::ItemsCount::new(N))
-            .bench_local(|| {
-                let tree = setup_masstree15(&keys);
-                black_box(tree)
-            });
+        bencher.counter(ItemsCount::new(N)).bench_local(|| {
+            let tree = setup_masstree15(&keys);
+            black_box(tree)
+        });
     }
 
     #[divan::bench]
     fn skipmap_build_time(bencher: Bencher) {
         let keys = keys::<KEY_SIZE>(N);
-        bencher
-            .counter(divan::counter::ItemsCount::new(N))
-            .bench_local(|| {
-                let map = setup_skipmap(&keys);
-                black_box(map)
-            });
+        bencher.counter(ItemsCount::new(N)).bench_local(|| {
+            let map = setup_skipmap(&keys);
+            black_box(map)
+        });
     }
 
     #[divan::bench]
     fn indexset_build_time(bencher: Bencher) {
         let keys = keys::<KEY_SIZE>(N);
-        bencher
-            .counter(divan::counter::ItemsCount::new(N))
-            .bench_local(|| {
-                let map = setup_indexset(&keys);
-                black_box(map)
-            });
+        bencher.counter(ItemsCount::new(N)).bench_local(|| {
+            let map = setup_indexset(&keys);
+            black_box(map)
+        });
     }
 
     #[divan::bench]
     fn tree_index_build_time(bencher: Bencher) {
         let keys = keys::<KEY_SIZE>(N);
-        bencher
-            .counter(divan::counter::ItemsCount::new(N))
-            .bench_local(|| {
-                let tree = setup_tree_index(&keys);
-                black_box(tree)
-            });
+        bencher.counter(ItemsCount::new(N)).bench_local(|| {
+            let tree = setup_tree_index(&keys);
+            black_box(tree)
+        });
     }
 }
 
@@ -2241,7 +2209,7 @@ mod build_time {
 // This eliminates the TreeIndex upsert workaround penalty, providing
 // a fair comparison where all structures use simple insert operations.
 
-#[divan::bench_group(name = "13_insert_only_fair", sample_count = 200)]
+#[divan::bench_group(name = "13_insert_only_fair", sample_count = 200, sample_size = 1)]
 mod insert_only_fair {
     use super::*;
 
@@ -2261,7 +2229,7 @@ mod insert_only_fair {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_masstree15(&read_keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -2310,7 +2278,7 @@ mod insert_only_fair {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap(&read_keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -2357,7 +2325,7 @@ mod insert_only_fair {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_indexset(&read_keys))
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -2404,7 +2372,7 @@ mod insert_only_fair {
             .collect();
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_tree_index(&read_keys))
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -2449,7 +2417,7 @@ mod insert_only_fair {
 // All operations are inserts to new keys. No reads, no upserts.
 // This is the fairest possible write benchmark.
 
-#[divan::bench_group(name = "14_pure_insert", sample_count = 200)]
+#[divan::bench_group(name = "14_pure_insert", sample_count = 200, sample_size = 1)]
 mod pure_insert {
     use crate::bench_utils::ThreadContext;
 
@@ -2462,7 +2430,7 @@ mod pure_insert {
         let keys = keys::<KEY_SIZE>(threads * OPS_PER_THREAD);
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(MassTree15Inline::<u64>::new)
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -2488,7 +2456,7 @@ mod pure_insert {
         let keys = keys::<KEY_SIZE>(threads * OPS_PER_THREAD);
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(SkipMap::<[u8; KEY_SIZE], u64>::new)
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -2512,7 +2480,7 @@ mod pure_insert {
         let keys: Vec<[u8; 64]> = keys::<KEY_SIZE>(threads * OPS_PER_THREAD);
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(IndexSetBTreeMap::<[u8; KEY_SIZE], u64>::new)
             .bench_local_values(|map: IndexSetBTreeMap<[u8; 64], u64>| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
@@ -2536,7 +2504,7 @@ mod pure_insert {
         let keys = keys::<KEY_SIZE>(threads * OPS_PER_THREAD);
 
         bencher
-            .counter(divan::counter::ItemsCount::new(threads * OPS_PER_THREAD))
+            .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(TreeIndex::<[u8; KEY_SIZE], u64>::new)
             .bench_local_values(|tree| {
                 run_concurrent(

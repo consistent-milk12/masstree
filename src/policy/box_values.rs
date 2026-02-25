@@ -16,10 +16,6 @@ use super::ValuePtr;
 // ============================================================================
 
 /// Value array storing `Box<V>` pointers in `[AtomicPtr<u8>; 15]`.
-///
-/// Each slot is null (empty), a terminal `Box<V>` pointer, or a layer pointer
-/// (distinguished by `keylenx` on the leaf). Terminal slots own the heap
-/// allocation; layer slots are owned by the tree's allocator.
 #[repr(C)]
 pub struct BoxValueArray<V> {
     ptrs: [AtomicPtr<u8>; WIDTH_15],
@@ -69,10 +65,6 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     //  Terminal Value Operations
     // ========================================================================
 
-    /// # Prechecked Contract
-    ///
-    /// Caller **must** verify `keylenx < LAYER_KEYLENX`. Calling on a layer
-    /// slot produces a `ValuePtr` to a non-`V` allocation — dereferencing is UB.
     #[inline(always)]
     fn load(&self, slot: usize) -> Option<ValuePtr<V>> {
         debug_assert!(slot < WIDTH_15, "load: slot {slot} out of bounds");
@@ -108,7 +100,6 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
             "update_in_place: slot {slot} out of bounds"
         );
 
-        // Capture old pointer BEFORE storing new — reading after would return the new value.
         let old_ptr: *mut u8 = self.ptrs[slot].load(RELAXED);
         debug_assert!(
             !old_ptr.is_null(),
@@ -176,8 +167,6 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
             "move_slot: dst_slot {dst_slot} out of bounds"
         );
 
-        // Transfer pointer without ownership change.
-        // Caller MUST call self.clear(src_slot) after copying additional data.
         let ptr: *mut u8 = self.ptrs[src_slot].load(RELAXED);
         dst.ptrs[dst_slot].store(ptr, WRITE_ORD);
     }
