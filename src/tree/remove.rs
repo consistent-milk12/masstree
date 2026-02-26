@@ -618,7 +618,6 @@ impl NodeCleaner {
     {
         // SAFETY: leaf_ptr is valid from reach_leaf_concurrent_generic
         let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-
         let lock: LockGuard<'_> = leaf.version().lock();
 
         if leaf.deleted_layer() {
@@ -627,8 +626,8 @@ impl NodeCleaner {
         }
 
         let new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+
         if new_perm.size() <= ki {
-            // Slot was removed by concurrent delete
             drop(lock);
             return RemoveLockResult::Retry;
         }
@@ -711,13 +710,11 @@ impl NodeCleaner {
 
         let count: usize = nkeys - removed_pos;
 
-        // Shift keys: ikey[removed_pos - 1 + i] = ikey[removed_pos + i] for i in 0..count
         for i in 0..count {
             let key: u64 = inode.ikey(removed_pos + i);
             inode.set_ikey(removed_pos - 1 + i, key);
         }
 
-        // Shift children: child[removed_pos + i] = child[removed_pos + 1 + i] for i in 0..count
         for i in 0..count {
             let child: *mut u8 = inode.child(removed_pos + 1 + i);
             inode.set_child(removed_pos + i, child);
@@ -738,7 +735,6 @@ impl NodeCleaner {
     {
         let mut current: *mut u8 = start_internode;
 
-        // kp starts at -1 to indicate first iteration (don't unlock current yet)
         let mut kp: i32 = -1;
 
         let mut owned_lock: Option<LockGuard<'_>> = None;
@@ -758,7 +754,6 @@ impl NodeCleaner {
             };
 
             if kp >= 0 {
-                // Drop our owned lock from previous iteration
                 drop(owned_lock.take());
             }
 
@@ -770,7 +765,6 @@ impl NodeCleaner {
                 kp = upper_bound_internode_generic(old_ikey, parent) as i32;
             }
 
-            // Validate current is at expected position
             debug_assert_eq!(
                 TreeInternode::child(parent, kp as usize),
                 current,
@@ -818,26 +812,21 @@ impl NodeCleaner {
         current_ptr: *mut u8,
     ) -> LockedParentResult<'a> {
         for _ in 0..MAX_PARENT_RETRIES {
-            // Step 1: Read parent pointer
             // SAFETY: current_ptr is valid (guaranteed by caller of unsafe fn).
             let parent_ptr: *mut u8 = unsafe { Self::get_parent_erased::<P>(current_ptr) };
 
-            // Step 2: Check if we've reached root
             if parent_ptr.is_null() {
                 return LockedParentResult::NoParent;
             }
 
-            // Step 3: Lock the parent with pure spin (must be an internode).
             // SAFETY: parent_ptr is non-null and points to an internode.
             let parent: &InternodeNode = unsafe { &*(parent_ptr.cast::<InternodeNode>()) };
             let parent_lock: LockGuard<'_> = parent.version().lock();
 
-            // Step 4: Validate parent hasn't changed (could change due to split/collapse)
             // SAFETY: current_ptr is still valid, re-reading parent to validate.
             let current_parent: *mut u8 = unsafe { Self::get_parent_erased::<P>(current_ptr) };
 
             if current_parent == parent_ptr {
-                // Parent is still valid and locked
                 debug_assert!(
                     !parent.version().is_leaf(),
                     "locked_parent: parent must be an internode"
@@ -846,10 +835,8 @@ impl NodeCleaner {
                 return LockedParentResult::Locked(parent_lock, parent_ptr);
             }
 
-            // Step 5: Parent changed - unlock and retry
             drop(parent_lock);
 
-            // Relax fence like C++ relax_fence()
             StdHint::spin_loop();
         }
 

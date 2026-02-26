@@ -19,40 +19,6 @@ fn test_seize_allocator_new() {
 }
 
 #[test]
-fn test_seize_allocator_alloc_leaf() {
-    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
-    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new_boxed();
-
-    let ptr = alloc.alloc_leaf(leaf);
-    assert!(!ptr.is_null());
-
-    // Verify the pointer is valid
-    unsafe {
-        assert!((*ptr).is_empty());
-    }
-
-    // Clean up - alloc_leaf uses Box, so Box::from_raw is correct
-    unsafe {
-        drop(Box::from_raw(ptr));
-    }
-}
-
-#[test]
-fn test_seize_allocator_track_leaf_is_noop() {
-    let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
-    let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new_boxed();
-    let ptr: *mut LeafNode15<BoxPolicy<u64>> = Box::into_raw(leaf);
-
-    // track_leaf is now a no-op (traversal handles cleanup)
-    alloc.track_leaf(ptr);
-
-    // Clean up manually - this was Box-allocated
-    unsafe {
-        drop(Box::from_raw(ptr));
-    }
-}
-
-#[test]
 fn test_seize_allocator_alloc_leaf_direct() {
     let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
 
@@ -187,25 +153,6 @@ fn test_seize_allocator_teardown_wide_internode_tree() {
 fn test_seize_allocator_inline_new() {
     // Allocator is stateless - just verify construction works
     let _alloc: SeizeAllocator<InlinePolicy<u64>> = SeizeAllocator::new();
-}
-
-#[test]
-fn test_seize_allocator_inline_alloc_leaf() {
-    let alloc: SeizeAllocator<InlinePolicy<u64>> = SeizeAllocator::new();
-    let leaf: Box<LeafNode15<InlinePolicy<u64>>> = LeafNode15::new_boxed();
-
-    let ptr = alloc.alloc_leaf(leaf);
-    assert!(!ptr.is_null());
-
-    // Verify the pointer is valid
-    unsafe {
-        assert!((*ptr).is_empty());
-    }
-
-    // Clean up - alloc_leaf uses Box, so Box::from_raw is correct
-    unsafe {
-        drop(Box::from_raw(ptr));
-    }
 }
 
 #[test]

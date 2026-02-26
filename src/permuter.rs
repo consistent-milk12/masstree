@@ -485,9 +485,6 @@ impl<const WIDTH: usize> PermutationProvider for Permuter<WIDTH> {
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Atomic wrapper for [`Permuter<WIDTH>`] where WIDTH <= 15.
-///
-/// Uses standard library `AtomicU64` since `Permuter<WIDTH>` fits in 64 bits.
-/// This is simpler than `AtomicPermuter24` which requires `portable-atomic` for u128.
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct AtomicPermuter<const WIDTH: usize = 15> {
