@@ -9,7 +9,6 @@ impl NodeVersion {
     /// Acquire the lock with bounded spinning before yielding.
     #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock_bounded(&self) -> LockGuard<'_> {
-        // Fast path: try immediate acquire.
         let value: u32 = self.value.load(Ordering::Relaxed);
 
         if (value & LOCK_BIT) == 0 {
@@ -57,6 +56,7 @@ impl NodeVersion {
                             _marker: PhantomData,
                         };
                     }
+
                     Err(v) => {
                         value = v;
                         continue;

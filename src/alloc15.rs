@@ -20,19 +20,7 @@ use crate::policy::LeafPolicy;
 // Iterative Tree Traversal
 // =============================================================================
 
-/// Work items for iterative tree traversal during teardown.
-enum TraversalWork {
-    /// Visit a node (may be leaf or internode), queuing children/sublayers.
-    Visit(*mut u8),
-
-    /// Free a leaf node after its sublayers have been freed.
-    FreeLeaf(*mut u8),
-
-    /// Free an internode after its children have been freed.
-    FreeInternode(*mut u8),
-}
-
-/// `ArrayVec` capacity for traversal stack.
+/// `ArrayVec` capacity for traversal stack (raw node pointers to visit).
 const STACK_CAPACITY: usize = 128;
 
 /// Overflow Vec initial capacity (only allocated when `ArrayVec` fills).
@@ -79,86 +67,68 @@ unsafe fn find_layer_root<P: LeafPolicy>(mut node_ptr: *mut u8) -> *mut u8 {
 /// - Only safe during `Drop` when tree is quiescent
 #[expect(clippy::cast_ptr_alignment, reason = "Callers guarantee alignment")]
 unsafe fn traverse_and_free_iterative<P: LeafPolicy>(root_ptr: *mut u8) {
-    let mut stack: ArrayVec<TraversalWork, STACK_CAPACITY> = ArrayVec::new();
-    let mut overflow: Option<Vec<TraversalWork>> = None;
+    let mut stack: ArrayVec<*mut u8, STACK_CAPACITY> = ArrayVec::new();
+    let mut overflow: Option<Vec<*mut u8>> = None;
 
-    stack.push(TraversalWork::Visit(root_ptr));
+    stack.push(root_ptr);
 
     loop {
-        let work: TraversalWork = match stack.pop() {
-            Some(w) => w,
+        let node_ptr: *mut u8 = match stack.pop() {
+            Some(p) => p,
 
             None => match overflow.as_mut().and_then(Vec::pop) {
-                Some(w) => w,
+                Some(p) => p,
 
                 None => break,
             },
         };
 
-        match work {
-            TraversalWork::Visit(node_ptr) => {
-                if node_ptr.is_null() {
-                    continue;
-                }
+        if node_ptr.is_null() {
+            continue;
+        }
 
-                // SAFETY: Both leaves and internodes have NodeVersion at offset 0
-                let version: &NodeVersion = unsafe { &*node_ptr.cast::<NodeVersion>() };
+        // SAFETY: Both leaves and internodes have NodeVersion at offset 0
+        let version: &NodeVersion = unsafe { &*node_ptr.cast::<NodeVersion>() };
 
-                if version.is_leaf() {
-                    // SAFETY: version.is_leaf() confirmed
-                    let leaf: &LeafNode15<P> = unsafe { &*node_ptr.cast::<LeafNode15<P>>() };
+        if version.is_leaf() {
+            // SAFETY: version.is_leaf() confirmed
+            let leaf: &LeafNode15<P> = unsafe { &*node_ptr.cast::<LeafNode15<P>>() };
 
-                    push_hybrid(&mut stack, &mut overflow, TraversalWork::FreeLeaf(node_ptr));
+            // Extract sublayer pointers by value before freeing the leaf.
+            for slot in 0..WIDTH_15 {
+                if leaf.is_layer(slot) {
+                    let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
 
-                    for slot in 0..WIDTH_15 {
-                        if leaf.is_layer(slot) {
-                            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+                    if !layer_ptr.is_null() {
+                        // SAFETY: layer_ptr is valid, we have exclusive access
+                        let layer_root: *mut u8 = unsafe { find_layer_root::<P>(layer_ptr) };
 
-                            if !layer_ptr.is_null() {
-                                // SAFETY: layer_ptr is valid, we have exclusive access
-                                let layer_root: *mut u8 =
-                                    unsafe { find_layer_root::<P>(layer_ptr) };
-
-                                push_hybrid(
-                                    &mut stack,
-                                    &mut overflow,
-                                    TraversalWork::Visit(layer_root),
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    // SAFETY: !version.is_leaf() confirmed
-                    let internode: &InternodeNode = unsafe { &*node_ptr.cast::<InternodeNode>() };
-                    let nkeys: usize = internode.nkeys();
-
-                    push_hybrid(
-                        &mut stack,
-                        &mut overflow,
-                        TraversalWork::FreeInternode(node_ptr),
-                    );
-
-                    // SAFETY: During Drop, we have exclusive access
-                    for i in (0..=nkeys).rev() {
-                        let child: *mut u8 = unsafe { internode.child_unguarded(i) };
-                        if !child.is_null() {
-                            push_hybrid(&mut stack, &mut overflow, TraversalWork::Visit(child));
-                        }
+                        push_hybrid(&mut stack, &mut overflow, layer_root);
                     }
                 }
             }
 
-            TraversalWork::FreeLeaf(ptr) => {
-                // SAFETY: ptr is a valid leaf, we have exclusive access.
-                unsafe {
-                    StdPtr::drop_in_place(ptr.cast::<LeafNode15<P>>());
-                    node_pool::pool_teardown_dealloc_leaf::<P>(ptr);
+            // SAFETY: Sublayer pointers extracted above. Safe to free now.
+            unsafe {
+                StdPtr::drop_in_place(node_ptr.cast::<LeafNode15<P>>());
+                node_pool::pool_teardown_dealloc_leaf::<P>(node_ptr);
+            }
+        } else {
+            // SAFETY: !version.is_leaf() confirmed
+            let internode: &InternodeNode = unsafe { &*node_ptr.cast::<InternodeNode>() };
+            let nkeys: usize = internode.nkeys();
+
+            // Extract child pointers by value before freeing the internode.
+            // SAFETY: During Drop, we have exclusive access.
+            for i in (0..=nkeys).rev() {
+                let child: *mut u8 = unsafe { internode.child_unguarded(i) };
+                if !child.is_null() {
+                    push_hybrid(&mut stack, &mut overflow, child);
                 }
             }
 
-            TraversalWork::FreeInternode(ptr) => {
-                unsafe { node_pool::pool_teardown_dealloc_internode(ptr) };
-            }
+            // SAFETY: Child pointers extracted above. Safe to free now.
+            unsafe { node_pool::pool_teardown_dealloc_internode(node_ptr) };
         }
     }
 }
@@ -166,11 +136,11 @@ unsafe fn traverse_and_free_iterative<P: LeafPolicy>(root_ptr: *mut u8) {
 /// Push to hybrid stack: prefer `ArrayVec` (no allocation), fall back to `Vec`.
 #[inline]
 fn push_hybrid(
-    stack: &mut ArrayVec<TraversalWork, STACK_CAPACITY>,
-    overflow: &mut Option<Vec<TraversalWork>>,
-    work: TraversalWork,
+    stack: &mut ArrayVec<*mut u8, STACK_CAPACITY>,
+    overflow: &mut Option<Vec<*mut u8>>,
+    ptr: *mut u8,
 ) {
-    if let Err(cap_err) = stack.try_push(work) {
+    if let Err(cap_err) = stack.try_push(ptr) {
         overflow
             .get_or_insert_with(|| Vec::with_capacity(OVERFLOW_INITIAL_CAPACITY))
             .push(cap_err.element());

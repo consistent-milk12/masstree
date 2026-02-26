@@ -138,19 +138,6 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     const WIDTH: usize;
 
     // ========================================================================
-    //  Construction
-    // ========================================================================
-
-    /// Create a new internode with specified height.
-    fn new_boxed(height: u32) -> Box<Self>;
-
-    /// Create a new root internode with specified height.
-    fn new_root_boxed(height: u32) -> Box<Self>;
-
-    /// Create a new internode sibling for a split operation.
-    fn new_boxed_for_split(parent_version: &NodeVersion, height: u32) -> Box<Self>;
-
-    // ========================================================================
     //  Version / Locking
     // ========================================================================
 

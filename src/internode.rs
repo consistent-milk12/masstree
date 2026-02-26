@@ -7,8 +7,7 @@ use std::array as StdArray;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
 use std::ptr as StdPtr;
-use std::sync::atomic::fence;
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64};
 
 use seize::Guard;
 
@@ -438,8 +437,6 @@ impl InternodeNode {
     pub fn find_insert_position(&self, insert_ikey: u64) -> usize {
         let n: usize = self.nkeys();
 
-        fence(AtomicOrdering::Acquire);
-
         if n > 6 {
             prefetch_read(&raw const self.ikey0[6]);
         }
@@ -525,20 +522,6 @@ impl InternodeNode {
     pub const fn debug_assert_invariants(&self) {}
 }
 
-impl Default for InternodeNode {
-    fn default() -> Self {
-        Self {
-            version: NodeVersion::new(false),
-            nkeys: AtomicU8::new(0),
-            height: 0,
-            _pad: [0; 2],
-            parent: AtomicPtr::new(StdPtr::null_mut()),
-            ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
-            child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-        }
-    }
-}
-
 // ============================================================================
 //  Send + Sync
 // ============================================================================
@@ -578,21 +561,6 @@ unsafe impl Sync for InternodeNode {}
 
 impl TreeInternode for InternodeNode {
     const WIDTH: usize = WIDTH;
-
-    #[inline(always)]
-    fn new_boxed(height: u32) -> Box<Self> {
-        Self::new(height)
-    }
-
-    #[inline(always)]
-    fn new_root_boxed(height: u32) -> Box<Self> {
-        Self::new_root(height)
-    }
-
-    #[inline(always)]
-    fn new_boxed_for_split(parent_version: &NodeVersion, height: u32) -> Box<Self> {
-        Self::new_for_split(parent_version, height)
-    }
 
     #[inline(always)]
     fn version(&self) -> &NodeVersion {
