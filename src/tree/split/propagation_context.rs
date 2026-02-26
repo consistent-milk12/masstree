@@ -1,20 +1,4 @@
 //! Unified-lifetime lock context for split propagation.
-//!
-//! # Problem
-//!
-//! [`LockGuard<'_>`] has a lifetime tied to the node it was acquired from.
-//! When transitioning from leaf to internode level, we need to transfer the lock
-//! (`left_lock = parent_lock`), but Rust lifetimes prevent this assignment.
-//!
-//! # Solution
-//!
-//! [`PropagationContext`] unifies all guard lifetimes to `'op` (the reclamation
-//! guard's lifetime). Since all nodes remain valid for `'op`, extending any
-//! [`LockGuard<'a>`] to [`LockGuard<'op>`] is safe.
-//!
-//! Previous approaches considered:
-//! - No-drop guard type: Lock leaks on panic, hard to audit
-//! - Current approach: RAII-safe, auditable, panic-safe
 
 use crate::nodeversion::{LockGuard, NodeVersion};
 use seize::LocalGuard;
@@ -61,6 +45,7 @@ impl<'op> PropagationContext<'op> {
     /// Prefer [`Self::lock_node_yielding`] for high-contention scenarios.
     ///
     /// # Safety
+    ///
     /// `version_ptr` must point to a valid node protected by the reclamation guard.
     #[inline(always)]
     #[allow(dead_code, reason = "Low-contention API; prefer lock_node_yielding")]
@@ -73,17 +58,8 @@ impl<'op> PropagationContext<'op> {
 
     /// Lock a node using yield-on-contention strategy.
     ///
-    /// Uses [`NodeVersion::lock_with_yield`], which yields the CPU after just
-    /// 1 spin-loop hint. Preferred for split propagation because:
-    ///
-    /// - **Longer critical sections**: split propagation updates child pointers,
-    ///   key fences, and permutations -- more work than a single insert/remove.
-    /// - **Cascading contention**: multiple threads may trigger splits that
-    ///   propagate to the same parent, creating sustained contention.
-    /// - **Thread scaling**: at high thread counts (12+), spinning wastes cores
-    ///   that could be doing useful traversals elsewhere in the tree.
-    ///
     /// # Safety
+    ///
     /// Same as [`Self::lock_node`].
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "Binds output lifetime to context's 'op")]
@@ -96,6 +72,7 @@ impl<'op> PropagationContext<'op> {
     /// Extend a [`LockGuard`]'s lifetime to the unified `'op`.
     ///
     /// # Safety
+    ///
     /// The guard's underlying node must remain valid for `'op`.
     /// This is guaranteed when the node is protected by the reclamation guard.
     #[inline(always)]

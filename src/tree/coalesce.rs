@@ -15,10 +15,7 @@ use crate::leaf15::LeafNode15;
 use crate::policy::LeafPolicy;
 use crate::tree::remove::NodeCleaner;
 
-/// Context for sublayer cleanup - tracks the parent leaf and slot.
-///
-/// When a sublayer's only leaf becomes empty, we need to clear the parent
-/// leaf's layer slot. This struct stores that information.
+/// Context for sublayer cleanup.
 #[derive(Debug, Clone, Copy)]
 pub struct SublayerContext {
     /// Pointer to the parent leaf (type-erased for generics).
@@ -36,10 +33,6 @@ unsafe impl Send for SublayerContext {}
 unsafe impl Sync for SublayerContext {}
 
 /// Maximum number of times an entry can be re-queued before being dropped.
-///
-/// If a leaf stays locked for this many attempts (e.g., due to a crashed thread
-/// holding the lock), we give up and drop the entry. The leaf remains allocated
-/// but logically deleted - a bounded memory leak is preferable to infinite loops.
 const MAX_REQUEUE_COUNT: u8 = 10;
 
 /// Entry in the coalesce queue: pointer to empty leaf and its `ikey_bound`.
@@ -52,13 +45,9 @@ struct CoalesceEntry<L> {
     ikey_bound: u64,
 
     /// Context chain for sublayer cleanup.
-    /// Contains one entry per layer descended. When the leaf is inside a sublayer,
-    /// the last element is the immediate parent; earlier elements are higher ancestors.
-    /// Used by `gc_layer` to cascade cleanup up twig chains.
     layer_contexts: Vec<SublayerContext>,
 
     /// Number of times this entry has been re-queued due to lock contention.
-    /// When this exceeds `MAX_REQUEUE_COUNT`, the entry is dropped.
     requeue_count: u8,
 }
 
@@ -109,7 +98,7 @@ impl<L> CoalesceQueue<L> {
     /// Check if the queue is empty.
     #[must_use]
     #[inline]
-    #[allow(dead_code)] // Public API, may be used by external code
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
