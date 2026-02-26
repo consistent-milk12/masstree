@@ -618,7 +618,7 @@ impl NodeCleaner {
     {
         // SAFETY: leaf_ptr is valid from reach_leaf_concurrent_generic
         let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-        let lock: LockGuard<'_> = leaf.version().lock();
+        let lock: LockGuard<'_> = leaf.version().lock_bounded();
 
         if leaf.deleted_layer() {
             drop(lock);

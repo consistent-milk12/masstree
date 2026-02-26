@@ -348,7 +348,7 @@ where
 
                 let pre_lock_version = leaf.version().stable();
                 let pre_lock_perm_raw = leaf.permutation_raw();
-                let mut lock = leaf.version().lock();
+                let mut lock = leaf.version().lock_bounded();
 
                 // Validate post-lock state
                 if !self.validate_post_lock(leaf, pre_lock_version, pre_lock_perm_raw) {

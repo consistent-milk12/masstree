@@ -2,6 +2,7 @@ use std::ptr as StdPtr;
 
 use super::{Key, LeafPolicy, LocalGuard, MassTreeGeneric, NodeVersion, TreeAllocator};
 
+use crate::Permuter;
 use crate::hints::unlikely;
 use crate::leaf15::KSUF_KEYLENX;
 use crate::leaf15::LAYER_KEYLENX;
@@ -16,35 +17,27 @@ mod get_guarded;
 // ============================================================================
 
 /// Result of OCC version validation after a read phase.
-///
-/// Used by both single-layer and multi-layer read paths to reduce
-/// version validation boilerplate.
 enum VersionCheck<P: LeafPolicy> {
-    /// Version unchanged — reads are valid, proceed with result.
+    /// Version unchanged.
     Valid,
 
-    /// Version changed but same leaf — re-search from `'search_loop`.
+    /// Version changed but same leaf.
     RetrySearch { new_version: u32 },
 
-    /// Leaf changed (split) — restart from `'leaf_loop` with new pointer.
+    /// Leaf changed (split).
     RetryLeaf { new_leaf_ptr: *mut LeafNode15<P> },
 }
 
 // ============================================================================
-//  LookupResult - Search outcome enum
+//  LookupResult
 // ============================================================================
 
 /// Result of searching a leaf node for a key.
-///
-/// This enum captures the three possible outcomes without interpreting
-/// the pointer until after version validation.
 enum LookupResult {
     /// Found a terminal value at the given slot index.
-    /// The `keylenx` confirms it's a value (< [`LAYER_KEYLENX`])
     ValueSlot(usize),
 
     /// Found a layer pointer. Need to descend into sublayer.
-    /// Still returns the raw pointer since layer pointers are always real pointers.
     Layer(*mut u8),
 
     /// Key not found in this leaf.
@@ -52,31 +45,25 @@ enum LookupResult {
 }
 
 /// Result of twig-chain fast descent.
-///
-/// Explicitly encodes the three possible outcomes to avoid sentinel values
-/// and null-pointer pitfalls. The `Leaf` parameter is the leaf node type.
 enum TwigDescentResult<Leaf> {
     /// Continue to `'leaf_loop` with the given leaf pointer.
-    /// The leaf is valid and ready for normal search.
     ContinueLeafLoop {
         layer_root: *const u8,
         leaf_ptr: *mut Leaf,
     },
 
     /// Restart `'layer_loop` with the given layer root.
-    /// Used when: `deleted_layer` detected, or fast path reached a non-leaf/non-root node.
     RestartLayerLoop {
         layer_root: *const u8,
         in_sublayer: bool,
     },
 
     /// Return `None` from `get_impl_multi_layer`.
-    /// Used when: sublayer is deleted (`is_deleted()` check failed).
     ReturnNone,
 }
 
 // ============================================================================
-//  Search Helpers (Hot Path)
+//  Search Helpers
 // ============================================================================
 
 /// Search a leaf for a key in multi-layer mode (keys > 8 bytes).
@@ -90,8 +77,8 @@ where
     P: LeafPolicy,
 {
     // Acquire ordering on permutation synchronizes with writer's Release fence
-    let perm = leaf.permutation();
-    let size = perm.size();
+    let perm: Permuter = leaf.permutation();
+    let size: usize = perm.size();
     let target_ikey: u64 = key.ikey();
 
     #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
@@ -173,7 +160,6 @@ where
 {
     let slot_keylenx: u8 = leaf.keylenx(slot);
 
-    // Empty slot = concurrent modification — skip.
     if leaf.is_value_empty(slot) {
         return None;
     }
@@ -188,7 +174,6 @@ where
             return None;
         }
 
-        // Return slot index, not pointer
         return Some(LookupResult::ValueSlot(slot));
     }
 
@@ -215,9 +200,6 @@ where
     A: TreeAllocator<P>,
 {
     /// Handle version change during optimistic read.
-    ///
-    /// Called when version validation fails. Follows B-link chain if split
-    /// occurred, otherwise returns new version for retry.
     #[cold]
     #[inline(never)]
     fn handle_version_change(
@@ -230,10 +212,8 @@ where
         let (advanced, new_version) = self.advance_to_key_generic(leaf, key, version, guard);
 
         if StdPtr::eq(advanced, leaf) {
-            // Same leaf, new version - retry search
             (StdPtr::from_ref(leaf).cast_mut(), new_version, false)
         } else {
-            // Different leaf - search there
             (StdPtr::from_ref(advanced).cast_mut(), new_version, true)
         }
     }
@@ -341,9 +321,6 @@ where
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "API consistency with other methods")]
     fn check_sublayer_valid(&self, layer_ptr: *mut u8) -> bool {
-        // Defense-in-depth: concurrent gc_layer can produce null layer pointers
-        // via TOCTOU race in check_slot_match (is_value_empty vs load_layer_raw).
-        // Callers should check for null before calling, but guard here too.
         if layer_ptr.is_null() {
             return false;
         }
@@ -399,7 +376,8 @@ where
 
             if twig.deleted_layer() {
                 key.unshift_all();
-                let root = self.load_root_ptr_generic(guard);
+
+                let root: *const u8 = self.load_root_ptr_generic(guard);
 
                 return TwigDescentResult::RestartLayerLoop {
                     layer_root: root,
@@ -499,22 +477,13 @@ where
     where
         P::Value: Clone,
     {
-        let guard = self.guard();
+        let guard: LocalGuard<'_> = self.guard();
+
         self.get_with_guard(key, &guard)
             .map(|output| P::clone_value_from_output(&output))
     }
 
     /// Check if a key exists in the tree.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let tree = MassTree::<u64>::new();
-    /// tree.insert(b"hello", 42);
-    ///
-    /// assert!(tree.contains_key(b"hello"));
-    /// assert!(!tree.contains_key(b"world"));
-    /// ```
     #[must_use]
     #[inline]
     pub fn contains_key(&self, key: &[u8]) -> bool {
@@ -523,20 +492,6 @@ where
     }
 
     /// Check if a key exists using an existing guard.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let tree = MassTree::<u64>::new();
-    /// let guard = tree.guard();
-    ///
-    /// tree.insert_with_guard(b"a", 1, &guard).unwrap();
-    /// tree.insert_with_guard(b"b", 2, &guard).unwrap();
-    ///
-    /// assert!(tree.contains_key_with_guard(b"a", &guard));
-    /// assert!(tree.contains_key_with_guard(b"b", &guard));
-    /// assert!(!tree.contains_key_with_guard(b"c", &guard));
-    /// ```
     #[must_use]
     #[inline]
     pub fn contains_key_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> bool {
@@ -544,9 +499,6 @@ where
     }
 
     /// Unified get implementation.
-    ///
-    /// Both `get_with_guard` and `get_ref` delegate to this function.
-    /// The `extract` closure handles the difference in return type.
     ///
     /// # Type Parameters
     ///
@@ -557,22 +509,14 @@ where
     where
         F: Fn(*mut u8) -> R,
     {
-        // Detect single-layer mode: key <= 8 bytes means no suffix, no layer descent
-        // This enables a completely inline fast path without enum overhead
         if !key.has_suffix() {
             return self.get_impl_single_layer(key, guard, extract);
         }
 
-        // Multi-layer path for keys > 8 bytes
         self.get_impl_multi_layer(key, guard, extract)
     }
 
     /// Handle landing on a deleted leaf during point read.
-    ///
-    /// Called when we detect `is_deleted()` at the start of leaf processing.
-    /// Follows B-link chain to find the correct successor leaf.
-    ///
-    /// Returns the next valid leaf pointer, or restarts from root if no successor.
     #[cold]
     #[inline(never)]
     fn handle_deleted_leaf(
@@ -611,7 +555,6 @@ where
         #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
         let search_keylenx: u8 = key.current_len() as u8;
 
-        // Traverse to leaf
         let mut leaf_ptr: *mut LeafNode15<P> =
             self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
 
@@ -626,18 +569,15 @@ where
             }
 
             let mut version: u32 = if let Some(v) = leaf.version().try_stable() {
-                // Prefetch AFTER successful try_stable to avoid cache pollution
                 leaf.prefetch_for_search();
                 v
             } else {
-                // Leaf is locked - check if key might be in sibling
                 if let Some(next_ptr) = self.check_blink_chain(leaf, target_ikey, guard) {
                     leaf_ptr = next_ptr;
 
                     continue 'leaf_loop;
                 }
 
-                // No B-link escape route, prefetch while waiting
                 leaf.prefetch_for_search();
                 leaf.version().stable()
             };
@@ -668,7 +608,6 @@ where
                     }
                 }
 
-                // Version validation after all reads (common case: unchanged)
                 match self.validate_version_single(leaf, key, version, guard) {
                     VersionCheck::Valid => {}
 
@@ -694,7 +633,6 @@ where
                 }
 
                 if unlikely(!leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound()) {
-                    // Reload root to get latest pointer after concurrent modifications
                     layer_root = self.load_root_ptr_generic(guard);
                     leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
 
@@ -713,8 +651,6 @@ where
     }
 
     /// Multi-layer path for keys > 8 bytes.
-    ///
-    /// Handles layer descent, suffix matching, and complex key structures.
     #[expect(clippy::too_many_lines, reason = "complex multi-layer traversal logic")]
     #[inline]
     fn get_impl_multi_layer<R, F>(
@@ -764,7 +700,6 @@ where
                         continue 'leaf_loop;
                     }
 
-                    // Prefetch while waiting
                     leaf.prefetch_for_search();
                     leaf.version().stable()
                 };
@@ -778,7 +713,6 @@ where
                 }
 
                 'search_loop: loop {
-                    // Check for gc'd sublayer
                     if leaf.deleted_layer() {
                         key.unshift_all();
                         layer_root = self.load_root_ptr_generic(guard);
@@ -890,7 +824,7 @@ where
 }
 
 // ============================================================================
-//  Reference-Returning API (Pointer-Backed Storage Only)
+//  Reference-Returning API
 // ============================================================================
 
 impl<P, A> MassTreeGeneric<P, A>
@@ -899,9 +833,6 @@ where
     A: TreeAllocator<P>,
 {
     /// Get a borrowed reference to a value by key.
-    ///
-    /// This is significantly faster than [`Self::get_with_guard`] for read-heavy workloads
-    /// because it avoids atomic reference count operations (Arc clone/drop).
     #[must_use]
     #[inline(always)]
     pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g P::Value> {

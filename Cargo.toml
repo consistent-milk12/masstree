@@ -9,11 +9,11 @@ license = "MIT"
 repository = "https://github.com/consistent-milk12/masstree"
 documentation = "https://docs.rs/masstree"
 keywords = [
-  "data-structures",
-  "concurrent",
-  "ordered-map",
-  "range-scans",
-  "trie",
+	"data-structures",
+	"concurrent",
+	"ordered-map",
+	"range-scans",
+	"trie",
 ]
 categories = ["data-structures", "concurrency"]
 readme = "README.md"
@@ -48,9 +48,9 @@ tcmalloc = { version = "0.3.0", optional = true }
 # Optional tracing (enabled via features) - zero overhead when disabled
 tracing = { version = "0.1.44", features = ["attributes"], optional = true }
 tracing-subscriber = { version = "0.3.22", features = [
-  "env-filter",
-  "fmt",
-  "json",
+	"env-filter",
+	"fmt",
+	"json",
 ], optional = true }
 tracing-appender = { version = "0.2.4", optional = true }
 
@@ -74,15 +74,15 @@ scc = "3.6.5"
 sdd = "4.6.3"
 tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.22", features = [
-  "env-filter",
-  "fmt",
-  "json",
-  "parking_lot",
+	"env-filter",
+	"fmt",
+	"json",
+	"parking_lot",
 ] }
 criterion = { version = "0.8.2", features = [
-  "html_reports",
-  "csv_output",
-  "real_blackbox",
+	"html_reports",
+	"csv_output",
+	"real_blackbox",
 ] }
 pbench = "0.2.0"
 

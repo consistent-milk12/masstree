@@ -189,7 +189,6 @@ impl Coalesce {
         P: LeafPolicy,
         A: TreeAllocator<P>,
     {
-        // Lock-free pop from the queue
         let Some(entry) = queue.pending.pop() else {
             return false;
         };
@@ -282,7 +281,6 @@ impl Coalesce {
 
         const MAX_LOCK_RETRIES: u32 = 1000;
 
-        // Pop the immediate parent context (last element = deepest ancestor).
         let ctx: SublayerContext = contexts.pop().expect("gc_layer called with empty contexts");
 
         // SAFETY: leaf_ptr is valid and locked (we hold `lock`).
@@ -291,7 +289,6 @@ impl Coalesce {
         leaf.mark_deleted_layer();
         lock.mark_deleted();
 
-        // Get sublayer pointer before releasing lock
         let sublayer_ptr: *mut u8 = leaf_ptr.cast::<u8>();
 
         drop(lock);
