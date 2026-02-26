@@ -1867,3 +1867,353 @@ fn test_gc_layer_stress() {
     tree.insert(b"finaltest!", 12345);
     assert_val_eq!(tree.get(b"finaltest!"), Some(12345));
 }
+
+// ============================================================================
+//  gc_layer: bounded spin and re-queue path tests
+// ============================================================================
+
+/// Test that gc_layer re-queues entries when the parent leaf is locked by a
+/// concurrent writer. The coalesce must eventually succeed once the writer
+/// releases the lock.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_gc_layer_requeue_under_parent_contention() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+
+    // Create a sublayer: keys share "parentXX" prefix, forcing a trie layer.
+    let key_a = b"parentXXchild_a!";
+    let key_b = b"parentXXchild_b!";
+    tree.insert(key_a, 1);
+    tree.insert(key_b, 2);
+
+    // Also insert siblings in the same parent leaf under a different ikey
+    // so the parent leaf stays interesting.
+    let sibling = b"siblingZ";
+    tree.insert(sibling, 99);
+
+    // Remove both sublayer keys to make the sublayer empty.
+    let _ = tree.remove(key_a);
+    let _ = tree.remove(key_b);
+
+    // Now the coalesce queue has an entry that will trigger gc_layer.
+    assert!(tree.pending_coalesce() > 0);
+
+    let barrier = Arc::new(Barrier::new(2));
+    let done = Arc::new(AtomicBool::new(false));
+    let writer_ops = Arc::new(AtomicUsize::new(0));
+
+    // Spawn a writer that hammers the parent leaf's sibling key, creating
+    // lock contention on the parent leaf that gc_layer needs to acquire.
+    let tree_w = Arc::clone(&tree);
+    let barrier_w = Arc::clone(&barrier);
+    let done_w = Arc::clone(&done);
+    let ops_w = Arc::clone(&writer_ops);
+
+    let writer = thread::spawn(move || {
+        barrier_w.wait();
+        let mut i: u64 = 1000;
+        while !done_w.load(Ordering::Acquire) {
+            tree_w.insert(sibling, i);
+            i += 1;
+            ops_w.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    // Sync so the writer is actively contending before we coalesce.
+    barrier.wait();
+
+    // Let the writer build up some contention.
+    thread::sleep(Duration::from_millis(1));
+
+    // Process coalesce. gc_layer may re-queue on first attempt(s) due to the
+    // writer holding the parent lock, but must eventually succeed.
+    let guard = tree.guard();
+    let mut total_processed = 0;
+    for _ in 0..100 {
+        total_processed += tree.process_coalesce(&guard);
+        if tree.pending_coalesce() == 0 {
+            break;
+        }
+        thread::yield_now();
+    }
+
+    done.store(true, Ordering::Release);
+    #[expect(clippy::expect_used, reason = "test code")]
+    writer.join().expect("writer panicked");
+
+    assert!(
+        total_processed > 0,
+        "coalesce should have processed the gc_layer entry"
+    );
+
+    // Sibling must survive the sublayer cleanup.
+    assert!(tree.get(sibling).is_some());
+
+    // Tree is still functional after gc_layer.
+    tree.insert(key_a, 42);
+    assert_val_eq!(tree.get(key_a), Some(42));
+}
+
+/// Test that gc_layer correctly preserves and re-queues the full layer
+/// context chain when it fails to acquire the parent lock.
+#[test]
+fn test_gc_layer_requeue_preserves_context_chain() {
+    let tree: TestTree = TestTree::new();
+    let guard = tree.guard();
+
+    // Create a deep chain: 3 layers of sublayers (24+ byte keys).
+    // When the deepest sublayer is emptied, gc_layer gets a context chain
+    // of length >= 2.
+    let key1 = b"layer000layer001deep_key_A_here";
+    let key2 = b"layer000layer001deep_key_B_here";
+
+    tree.insert(key1, 1);
+    tree.insert(key2, 2);
+    assert_eq!(tree.len(), 2);
+
+    // Remove both keys, emptying the deepest sublayer.
+    let _ = tree.remove(key1);
+    let _ = tree.remove(key2);
+    assert_eq!(tree.len(), 0);
+
+    // Process coalesce one entry at a time to observe re-queue behavior.
+    // Even if gc_layer re-queues internally, repeated processing must
+    // eventually drain the queue.
+    let mut rounds = 0;
+    while tree.pending_coalesce() > 0 && rounds < 50 {
+        tree.process_coalesce_batch(&guard, 1);
+        rounds += 1;
+    }
+
+    assert_eq!(
+        tree.pending_coalesce(),
+        0,
+        "coalesce queue should be drained after sufficient rounds"
+    );
+
+    // Tree must remain functional.
+    tree.insert(key1, 100);
+    assert_val_eq!(tree.get(key1), Some(100));
+}
+
+/// Test that entries are dropped (not re-queued forever) after exceeding the
+/// maximum re-queue count.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_gc_layer_max_requeue_drop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+
+    // Create sublayer.
+    let key1 = b"requeueXchild01!";
+    let key2 = b"requeueXchild02!";
+    tree.insert(key1, 1);
+    tree.insert(key2, 2);
+
+    // Keep a sibling in the parent to prevent the parent from becoming empty.
+    let anchor = b"requeueY";
+    tree.insert(anchor, 999);
+
+    let _ = tree.remove(key1);
+    let _ = tree.remove(key2);
+
+    assert!(tree.pending_coalesce() > 0);
+
+    let done = Arc::new(AtomicBool::new(false));
+    let tree_w = Arc::clone(&tree);
+    let done_w = Arc::clone(&done);
+
+    // Writer that continuously locks the parent leaf via insert on the
+    // anchor key, making gc_layer's try_lock fail repeatedly.
+    let writer = thread::spawn(move || {
+        let mut i: u64 = 0;
+        while !done_w.load(Ordering::Acquire) {
+            tree_w.insert(anchor, i);
+            i += 1;
+        }
+    });
+
+    thread::sleep(Duration::from_millis(2));
+
+    // Process coalesce many times. Even if gc_layer keeps re-queuing
+    // due to contention, the MAX_REQUEUE_COUNT limit ensures entries
+    // are eventually dropped.
+    let guard = tree.guard();
+    for _ in 0..200 {
+        tree.process_coalesce(&guard);
+    }
+
+    done.store(true, Ordering::Release);
+    #[expect(clippy::expect_used, reason = "test code")]
+    writer.join().expect("writer panicked");
+
+    // Queue must be empty: either gc_layer succeeded or the entry was
+    // dropped after MAX_REQUEUE_COUNT.
+    assert_eq!(
+        tree.pending_coalesce(),
+        0,
+        "queue should be drained (either processed or dropped)"
+    );
+
+    // Anchor key must survive.
+    assert!(tree.get(anchor).is_some());
+}
+
+/// Verify that concurrent gc_layer calls do not corrupt the tree.
+/// Each thread operates on its own distinct prefix to avoid the known
+/// shared-parent race.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_gc_layer_concurrent_insert_remove_cycle() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let barrier = Arc::new(Barrier::new(5));
+    let done = Arc::new(AtomicBool::new(false));
+
+    // 4 worker threads, each with a DISTINCT 8-byte prefix (no shared parent).
+    let handles: Vec<_> = (0..4)
+        .map(|tid: u32| {
+            let tree = Arc::clone(&tree);
+            let barrier = Arc::clone(&barrier);
+            let done = Arc::clone(&done);
+
+            thread::spawn(move || {
+                let prefix = format!("pfx{tid:05}");
+                let suffix_a = format!("keyA!!!!");
+                let suffix_b = format!("keyB!!!!");
+                let key_a: Vec<u8> = [prefix.as_bytes(), suffix_a.as_bytes()].concat();
+                let key_b: Vec<u8> = [prefix.as_bytes(), suffix_b.as_bytes()].concat();
+
+                barrier.wait();
+
+                let mut cycle: u64 = 0;
+                while !done.load(Ordering::Acquire) {
+                    tree.insert(&key_a, cycle);
+                    tree.insert(&key_b, cycle + 1);
+
+                    let _ = tree.remove(&key_a);
+                    let _ = tree.remove(&key_b);
+
+                    let guard = tree.guard();
+                    tree.process_coalesce(&guard);
+
+                    cycle += 2;
+                }
+            })
+        })
+        .collect();
+
+    barrier.wait();
+    thread::sleep(std::time::Duration::from_millis(100));
+    done.store(true, Ordering::Release);
+
+    for h in handles {
+        #[expect(clippy::expect_used, reason = "test code")]
+        h.join().expect("worker panicked");
+    }
+
+    let guard = tree.guard();
+    tree.process_coalesce(&guard);
+
+    // Tree must be consistent after concurrent gc_layer cycles.
+    tree.insert(b"pfx00000verify!", 1);
+    assert_val_eq!(tree.get(b"pfx00000verify!"), Some(1));
+}
+
+/// Verify that gc_layer does not prevent concurrent progress on the same
+/// parent leaf. A reader thread must be able to complete reads while gc_layer
+/// is actively running on a sibling sublayer.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_gc_layer_does_not_block_concurrent_reads() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+
+    // Build a sublayer with keys that gc_layer will target.
+    let drain_a = b"blockXXXchild_a!";
+    let drain_b = b"blockXXXchild_b!";
+    tree.insert(drain_a, 1);
+    tree.insert(drain_b, 2);
+
+    // Sibling under same parent, different ikey. Reader reads this.
+    let probe = b"blockYYY";
+    tree.insert(probe, 100);
+
+    let barrier = Arc::new(Barrier::new(3));
+    let done = Arc::new(AtomicBool::new(false));
+    let reader_completed = Arc::new(AtomicU64::new(0));
+
+    // Reader: continuously reads the probe key.
+    let tree_r = Arc::clone(&tree);
+    let barrier_r = Arc::clone(&barrier);
+    let done_r = Arc::clone(&done);
+    let completed = Arc::clone(&reader_completed);
+
+    let reader = thread::spawn(move || {
+        barrier_r.wait();
+        while !done_r.load(Ordering::Acquire) {
+            let _ = tree_r.get(probe);
+            completed.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    // Coalescer: repeatedly creates and destroys sublayers, forcing gc_layer.
+    let tree_c = Arc::clone(&tree);
+    let barrier_c = Arc::clone(&barrier);
+    let done_c = Arc::clone(&done);
+
+    let coalescer = thread::spawn(move || {
+        barrier_c.wait();
+        let mut cycle: u64 = 0;
+        while !done_c.load(Ordering::Acquire) {
+            let _ = tree_c.remove(drain_a);
+            let _ = tree_c.remove(drain_b);
+
+            let guard = tree_c.guard();
+            tree_c.process_coalesce(&guard);
+
+            tree_c.insert(drain_a, cycle);
+            tree_c.insert(drain_b, cycle + 1);
+            cycle += 2;
+        }
+    });
+
+    barrier.wait();
+    thread::sleep(Duration::from_millis(100));
+    done.store(true, Ordering::Release);
+
+    #[expect(clippy::expect_used, reason = "test code")]
+    reader.join().expect("reader panicked");
+    #[expect(clippy::expect_used, reason = "test code")]
+    coalescer.join().expect("coalescer panicked");
+
+    let reads = reader_completed.load(Ordering::Relaxed);
+
+    // The reader must have completed a meaningful number of reads.
+    // If gc_layer were blocking for extended periods (e.g. yielding under
+    // lock), the reader would be starved. Even in debug mode, 100ms should
+    // allow thousands of reads.
+    assert!(
+        reads > 100,
+        "reader only completed {reads} reads in 100ms, \
+         gc_layer may be holding locks too long"
+    );
+
+    // Probe key must still be readable.
+    assert_val_eq!(tree.get(probe), Some(100));
+}

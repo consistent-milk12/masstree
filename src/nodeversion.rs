@@ -55,20 +55,20 @@ const UNLOCK_MASK: u32 = !(UNUSED1_BIT | (VINSERT_LOWBIT - 1));
 //  Backoff (for spin loops)
 // ============================================================================
 
-/// Exponential backoff
-struct Backoff {
+/// Exponential backoff for spin loops.
+pub struct Backoff {
     count: u32,
 }
 
 impl Backoff {
     #[inline(always)]
-    const fn new() -> Self {
+    pub const fn new() -> Self {
         Self { count: 0 }
     }
 
     /// Spin for `count+1` iterations with CPU pause hints, then double count.
     #[inline(always)]
-    fn spin(&mut self) {
+    pub fn spin(&mut self) {
         for _ in 0..=self.count {
             StdHint::spin_loop();
         }
@@ -116,14 +116,9 @@ pub struct LockGuard<'a> {
 
 impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
-        // Version counter increment depends on dirty bits:
-        // - Splitting: increment vsplit, clear all dirty/lock bits
-        // - Inserting: increment vinsert, clear inserting/lock bits
-        // - Neither (validation-only lock): no version increment
         let new_value: u32 = if self.locked_value & SPLITTING_BIT != 0 {
             (self.locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK
         } else {
-            // (inserting << 2) == vinsert_lowbit when INSERTING_BIT is set, 0 otherwise.
             (self.locked_value + ((self.locked_value & INSERTING_BIT) << 2)) & UNLOCK_MASK
         };
 
@@ -162,7 +157,9 @@ impl LockGuard<'_> {
         self.version()
             .value
             .store(value | INSERTING_BIT, Ordering::Release);
+
         fence(Ordering::Acquire);
+
         self.locked_value |= INSERTING_BIT;
     }
 
@@ -176,7 +173,9 @@ impl LockGuard<'_> {
         self.version()
             .value
             .store(value | SPLITTING_BIT, Ordering::Release);
+
         fence(Ordering::Acquire);
+
         self.locked_value |= SPLITTING_BIT;
     }
 
@@ -186,7 +185,9 @@ impl LockGuard<'_> {
         let value: u32 = self.version().value.load(Ordering::Relaxed);
         let new_value: u32 = value | DELETED_BIT | SPLITTING_BIT;
         self.version().value.store(new_value, Ordering::Release);
+
         fence(Ordering::Acquire);
+
         self.locked_value = new_value;
     }
 
@@ -309,11 +310,6 @@ impl NodeVersion {
     // ========================================================================
 
     /// Get a stable version for optimistic reading.
-    ///
-    /// Spins while dirty bits are set, then returns a clean version.
-    /// Validate with [`has_changed()`](Self::has_changed) after reading.
-    ///
-    /// Uses Relaxed loads during spinning, Acquire fence on success.
     #[must_use]
     #[inline(always)]
     pub fn stable(&self) -> u32 {
@@ -357,9 +353,6 @@ impl NodeVersion {
     }
 
     /// Load version without spinning on dirty bits.
-    ///
-    /// Returns immediately even if dirty. Use when you want to detect
-    /// concurrent modification and retry at a higher level.
     #[must_use]
     #[inline(always)]
     pub fn acquire_raw(&self) -> u32 {
@@ -445,6 +438,7 @@ impl NodeVersion {
     #[inline(always)]
     pub fn has_split(&self, old: u32) -> bool {
         StdAtomic::compiler_fence(Ordering::Acquire);
+
         (old ^ self.value.load(Ordering::Relaxed)) >= VSPLIT_LOWBIT
     }
 
@@ -458,8 +452,6 @@ impl NodeVersion {
 
     /// Stronger than [`has_changed()`](Self::has_changed): also returns true if
     /// dirty bits are set (modification in progress).
-    ///
-    /// Used by CAS inserts to avoid racing with locked splits.
     #[must_use]
     #[inline(always)]
     pub fn has_changed_or_locked(&self, old: u32) -> bool {
@@ -479,10 +471,6 @@ impl NodeVersion {
     // ========================================================================
 
     /// Acquire the lock with exponential backoff. Returns a guard.
-    ///
-    /// Only waits for `LOCK_BIT` (not dirty bits) - caller validates version after.
-    /// Only sets `LOCK_BIT`, `INSERTING_BIT` deferred to `mark_insert()` to avoid
-    /// making `stable()` callers spin for the entire lock duration.
     #[must_use = "releasing a lock without using the guard is a logic error"]
     #[inline(always)]
     pub fn lock(&self) -> LockGuard<'_> {
@@ -533,9 +521,10 @@ impl NodeVersion {
                             _marker: PhantomData,
                         };
                     }
+
                     Err(v) => {
                         value = v;
-                        continue; // Retry immediately with fresh value
+                        continue;
                     }
                 }
             }
@@ -573,16 +562,6 @@ impl NodeVersion {
     }
 
     /// Try to acquire the lock within `timeout`.
-    ///
-    /// ```rust
-    /// use std::time::Duration;
-    /// use masstree::NodeVersion;
-    ///
-    /// let version = NodeVersion::new(true);
-    /// if let Some(_guard) = version.try_lock_for(Duration::from_millis(100)) {
-    ///     // Lock acquired within 100ms
-    /// }
-    /// ```
     #[must_use]
     pub fn try_lock_for(&self, timeout: Duration) -> Option<LockGuard<'_>> {
         const ATTEMPTS_BEFORE_TIME_CHECK: u32 = 8;
@@ -605,9 +584,6 @@ impl NodeVersion {
     }
 
     /// Acquire lock with yield-on-contention instead of exponential backoff.
-    ///
-    /// Better for split propagation (longer critical sections, high thread counts).
-    /// Use [`lock_bounded()`](Self::lock_bounded) for leaf-level inserts.
     #[must_use = "releasing a lock without using the guard is a logic error"]
     pub fn lock_with_yield(&self) -> LockGuard<'_> {
         const SPINS_BEFORE_YIELD: u32 = 2;
@@ -674,12 +650,9 @@ impl NodeVersion {
     }
 
     /// Unlock a node created with `new_for_split`. Increments split version counter.
-    ///
-    /// Compiler fence ensures all prior writes (parent pointer, data) complete
-    /// before the Release store makes the unlock visible.
     #[inline(always)]
     pub fn unlock_for_split(&self) {
-        let locked_value = self.value.load(Ordering::Relaxed);
+        let locked_value: u32 = self.value.load(Ordering::Relaxed);
 
         debug_assert!(
             (locked_value & LOCK_BIT) != 0,
@@ -691,11 +664,8 @@ impl NodeVersion {
             "unlock_for_split: node must have SPLITTING_BIT, got value={locked_value:#010x}"
         );
 
-        let new_value = (locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK;
+        let new_value: u32 = (locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK;
 
-        // The Release store below is sufficient: it prevents both compiler and
-        // hardware reordering of prior writes past the unlock, consistent with
-        // the LockGuard::drop unlock path.
         self.value.store(new_value, Ordering::Release);
     }
 
@@ -703,7 +673,7 @@ impl NodeVersion {
     #[must_use]
     #[inline(always)]
     pub fn is_split_locked(&self) -> bool {
-        let value = self.value.load(Ordering::Relaxed);
+        let value: u32 = self.value.load(Ordering::Relaxed);
         (value & (LOCK_BIT | SPLITTING_BIT)) == (LOCK_BIT | SPLITTING_BIT)
     }
 }

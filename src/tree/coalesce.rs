@@ -11,7 +11,8 @@ use crossbeam_queue::SegQueue;
 use seize::LocalGuard;
 
 use crate::alloc_trait::TreeAllocator;
-use crate::leaf15::LeafNode15;
+use crate::leaf15::{LAYER_KEYLENX, LeafNode15};
+use crate::nodeversion::LockGuard;
 use crate::policy::LeafPolicy;
 use crate::tree::remove::NodeCleaner;
 
@@ -85,13 +86,13 @@ impl<L> CoalesceQueue<L> {
         ikey_bound: u64,
         layer_contexts: Vec<SublayerContext>,
     ) {
-        let entry = CoalesceEntry {
+        let entry: CoalesceEntry<L> = CoalesceEntry {
             leaf_ptr,
             ikey_bound,
             layer_contexts,
             requeue_count: 0,
         };
-        // Lock-free push - never blocks!
+
         self.pending.push(entry);
     }
 
@@ -148,7 +149,7 @@ impl Coalesce {
         P: LeafPolicy,
         A: TreeAllocator<P>,
     {
-        let mut processed = 0;
+        let mut processed: usize = 0;
 
         while Self::try_remove_one::<P, A>(queue, allocator, guard) {
             processed += 1;
@@ -170,7 +171,7 @@ impl Coalesce {
         P: LeafPolicy,
         A: TreeAllocator<P>,
     {
-        let mut processed = 0;
+        let mut processed: usize = 0;
 
         while processed < limit && Self::try_remove_one::<P, A>(queue, allocator, guard) {
             processed += 1;
@@ -196,13 +197,39 @@ impl Coalesce {
         let leaf_ptr: *mut LeafNode15<P> = entry.leaf_ptr;
         let entry_ikey_bound: u64 = entry.ikey_bound;
 
+        if !entry.layer_contexts.is_empty() {
+            let last_ctx: &SublayerContext =
+                entry.layer_contexts.last().expect("non-empty contexts");
+
+            // SAFETY: The parent leaf pointer comes from the tree traversal
+            // during remove. The parent is protected by the guard (it contains
+            // other keys or is the tree root, so it was not retired).
+            let parent_leaf: &LeafNode15<P> =
+                unsafe { &*(last_ctx.parent_leaf.cast::<LeafNode15<P>>()) };
+
+            let keylenx: u8 = parent_leaf.keylenx(last_ctx.parent_slot);
+
+            if keylenx < LAYER_KEYLENX {
+                return true;
+            }
+
+            let current_ptr: *mut u8 = parent_leaf.load_layer_raw(last_ctx.parent_slot);
+
+            if current_ptr != leaf_ptr.cast::<u8>() {
+                return true;
+            }
+        }
+
+        // SAFETY: leaf_ptr is valid. For sublayer entries, the parent still
+        // references it (checked above). For chain entries, the leaf is
+        // protected by the guard.
         let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
         let Some(mut lock) = leaf.version().try_lock() else {
-            let new_count = entry.requeue_count.saturating_add(1);
+            let new_count: u8 = entry.requeue_count.saturating_add(1);
 
             if new_count <= MAX_REQUEUE_COUNT {
-                let requeue_entry = CoalesceEntry {
+                let requeue_entry: CoalesceEntry<LeafNode15<P>> = CoalesceEntry {
                     leaf_ptr,
                     ikey_bound: entry_ikey_bound,
                     layer_contexts: entry.layer_contexts,
@@ -216,6 +243,11 @@ impl Coalesce {
         };
 
         if leaf.size() > 0 {
+            drop(lock);
+            return true;
+        }
+
+        if leaf.deleted_layer() {
             drop(lock);
             return true;
         }
@@ -249,9 +281,10 @@ impl Coalesce {
 
         let ikey_bound: u64 = leaf.ikey_bound();
 
-        let parent_cleanup_succeeded = NodeCleaner::remove_leaf_from_parent_for_coalesce::<P, A>(
-            allocator, guard, leaf_ptr, lock, ikey_bound,
-        );
+        let parent_cleanup_succeeded: bool = NodeCleaner::remove_leaf_from_parent_for_coalesce::<
+            P,
+            A,
+        >(allocator, guard, leaf_ptr, lock, ikey_bound);
 
         if parent_cleanup_succeeded {
             // SAFETY: Leaf is now unreachable from tree (marked deleted, unlinked,
@@ -263,6 +296,10 @@ impl Coalesce {
     }
 
     /// Garbage collect an empty sublayer, cascading up twig chains.
+    ///
+    /// Uses lock-coupling: the sublayer lock is held throughout parent lock
+    /// acquisition. The sublayer is only marked deleted after the parent slot
+    /// is cleared, so concurrent readers never see a deleted-but-reachable node.
     #[cold]
     #[inline(never)]
     fn gc_layer<P, A>(
@@ -270,7 +307,7 @@ impl Coalesce {
         guard: &LocalGuard<'_>,
         queue: &CoalesceQueue<LeafNode15<P>>,
         leaf_ptr: *mut LeafNode15<P>,
-        mut lock: crate::nodeversion::LockGuard<'_>,
+        lock: LockGuard<'_>,
         mut contexts: Vec<SublayerContext>,
     ) -> bool
     where
@@ -278,58 +315,75 @@ impl Coalesce {
         A: TreeAllocator<P>,
     {
         use crate::leaf15::LAYER_KEYLENX;
+        use crate::nodeversion::Backoff;
 
-        const MAX_LOCK_RETRIES: u32 = 1000;
+        const MAX_PARENT_LOCK_ITERS: u32 = 64;
 
         let ctx: SublayerContext = contexts.pop().expect("gc_layer called with empty contexts");
 
         // SAFETY: leaf_ptr is valid and locked (we hold `lock`).
         let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-
-        leaf.mark_deleted_layer();
-        lock.mark_deleted();
-
         let sublayer_ptr: *mut u8 = leaf_ptr.cast::<u8>();
-
-        drop(lock);
 
         // SAFETY: ctx.parent_leaf was a valid leaf pointer obtained during traversal
         // and protected by the guard.
         let parent_leaf: &LeafNode15<P> = unsafe { &*(ctx.parent_leaf.cast::<LeafNode15<P>>()) };
 
-        let mut parent_lock = None;
+        let mut parent_lock_opt: Option<LockGuard<'_>> = None;
+        let mut backoff = Backoff::new();
 
-        for _ in 0..MAX_LOCK_RETRIES {
-            if let Some(lock) = parent_leaf.version().try_lock() {
-                parent_lock = Some(lock);
+        for _ in 0..MAX_PARENT_LOCK_ITERS {
+            if let Some(pl) = parent_leaf.version().try_lock() {
+                parent_lock_opt = Some(pl);
                 break;
             }
-
-            std::hint::spin_loop();
+            backoff.spin();
         }
 
-        let Some(mut parent_lock) = parent_lock else {
+        let Some(mut parent_lock) = parent_lock_opt else {
+            drop(lock);
+
+            let requeue_entry: CoalesceEntry<LeafNode15<P>> = CoalesceEntry {
+                leaf_ptr,
+                ikey_bound: leaf.ikey_bound(),
+                layer_contexts: {
+                    contexts.push(ctx);
+                    contexts
+                },
+                requeue_count: 1,
+            };
+
+            queue.pending.push(requeue_entry);
+
             return true;
         };
 
         let current_keylenx: u8 = parent_leaf.keylenx(ctx.parent_slot);
 
         if current_keylenx < LAYER_KEYLENX {
+            leaf.mark_deleted_layer();
             drop(parent_lock);
+            drop(lock);
 
             // SAFETY: leaf_ptr is a valid leaf allocated via allocator.
             unsafe { allocator.retire_leaf(leaf_ptr, guard) };
-
             return true;
         }
 
         let current_layer_ptr: *mut u8 = parent_leaf.load_layer_raw(ctx.parent_slot);
 
         if current_layer_ptr != sublayer_ptr {
+            leaf.mark_deleted_layer();
+
             drop(parent_lock);
+            drop(lock);
+
             unsafe { allocator.retire_leaf(leaf_ptr, guard) };
+
             return true;
         }
+
+        parent_lock.mark_insert();
 
         parent_leaf.clear_slot_and_permutation(ctx.parent_slot);
 
@@ -340,10 +394,11 @@ impl Coalesce {
         }
         let parent_ikey_bound: u64 = parent_leaf.ikey_bound();
 
-        parent_lock.mark_insert();
+        leaf.mark_deleted_layer();
+        drop(lock);
         drop(parent_lock);
 
-        // SAFETY: leaf_ptr is valid, marked deleted_layer, and unlinked from parent.
+        // SAFETY: Sublayer is marked deleted and unreachable from parent.
         unsafe { allocator.retire_leaf(leaf_ptr, guard) };
 
         if parent_now_empty && !contexts.is_empty() {
@@ -351,6 +406,7 @@ impl Coalesce {
             // *const in SublayerContext.
             let parent_leaf_mut: *mut LeafNode15<P> =
                 ctx.parent_leaf.cast_mut().cast::<LeafNode15<P>>();
+
             queue.schedule(parent_leaf_mut, parent_ikey_bound, contexts);
         }
 

@@ -360,7 +360,7 @@ where
                 if let InsertSearchResultGeneric::Layer { slot } = optimistic_search {
                     let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
 
-                    if !leaf.version().has_changed(pre_lock_version) {
+                    if !layer_ptr.is_null() && !leaf.version().has_changed(pre_lock_version) {
                         key.shift();
                         layer_root = layer_ptr;
                         in_sublayer = true;
