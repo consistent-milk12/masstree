@@ -4,32 +4,13 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 **Disclaimer:** This is an independent implementation. It is not endorsed by, affiliated with, or connected to the original Masstree authors or their institutions.
 
-## Features
-
-- Ordered map for byte keys (lexicographic ordering)
-- Lock-free reads with version validation
-- Concurrent inserts and deletes with fine-grained leaf locking
-- Zero-copy range scans with `scan_ref` and `scan_prefix`
-- High-throughput value-only scans with `scan_values` (skips key materialization)
-- Memory reclamation via hyaline scheme (`seize` crate)
-- Lazy leaf coalescing for deleted entries
-- High-performance inline variant `MassTree15Inline`, this is only usable on
-Copy types.
-
 ## Status
 
-**v0.9.0** — Core feature complete.
+Current Version: v0.9.0
 
-| Feature | Status |
-|---------|--------|
-| `get`, `get_ref` | Lock-free with version validation |
-| `insert` | Fine-grained leaf locking |
-| `remove` | Concurrent deletion with memory reclamation |
-| `scan`, `scan_ref`, `scan_prefix` | Zero-copy range iteration |
-| `scan_values`, `scan_values_rev` | High-throughput value-only scans |
-| `DoubleEndedIterator` | Reverse iteration support |
-| Leaf coalescing | Lazy queue-based cleanup |
-| Memory reclamation | Hyaline scheme via `seize` crate |
+Significantly reduced duplicate code through trait based abstractions, while improving performance further. All standard data structure features are implemented and streamlined, on top the specialized features like range scans and prefix queries. From latency analysis, it seems to have a surprisingly strong tail latency profile for a concurrent ordered map. The cache-line aligned layout design and aggressive prefetching seems to have paid off, on top of masstree's original excellent architecture.
+
+The next issues to work on are the memory profile and memcomparable mappings for general key types, before 1.0.
 
 ## vs Rust Concurrent Maps (12T SMT)
 
@@ -38,18 +19,18 @@ Copy types.
 
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | **48.14** | 14.49 | 10.80 | 14.94 | **3.22x** |
-| 02_zipfian | **41.79** | 18.86 | 12.92 | 3.28 | **2.22x** |
-| 03_shared_prefix | **29.48** | 14.61 | 11.08 | 14.36 | **2.02x** |
-| 04_high_contention | **62.40** | 21.64 | 16.90 | 1.97 | **2.88x** |
-| 05_large_dataset | **17.00** | 11.35 | 7.50 | 9.17 | **1.50x** |
-| 06_single_hot_key | **15.42** | 6.82 | 7.46 | 2.52 | **2.07x** |
-| 07_mixed_50_50 | **33.89** | 8.73 | 6.46 | 14.86 | **2.28x** |
-| 08_8byte_keys | **52.92** | 24.97 | 14.06 | 19.69 | **2.12x** |
-| 09_pure_read | **50.77** | 24.12 | 14.40 | 17.40 | **2.11x** |
-| 10_remove_heavy | **20.90** | 11.18 | 7.18 | 4.26 | **1.87x** |
-| 13_insert_only_fair | **35.46** | 24.29 | 15.13 | 6.30 | **1.46x** |
-| 14_pure_insert | **14.08** | 11.96 | 9.86 | 2.30 | **1.18x** |
+| 01_uniform | 48.14 | 14.49 | 10.80 | 14.94 | 3.22x |
+| 02_zipfian | 41.79 | 18.86 | 12.92 | 3.28 | 2.22x |
+| 03_shared_prefix | 29.48 | 14.61 | 11.08 | 14.36 | 2.02x |
+| 04_high_contention | 62.40 | 21.64 | 16.90 | 1.97 | 2.88x |
+| 05_large_dataset | 17.00 | 11.35 | 7.50 | 9.17 | 1.50x |
+| 06_single_hot_key | 15.42 | 6.82 | 7.46 | 2.52 | 2.07x |
+| 07_mixed_50_50 | 33.89 | 8.73 | 6.46 | 14.86 | 2.28x |
+| 08_8byte_keys | 52.92 | 24.97 | 14.06 | 19.69 | 2.12x |
+| 09_pure_read | 50.77 | 24.12 | 14.40 | 17.40 | 2.11x |
+| 10_remove_heavy | 20.90 | 11.18 | 7.18 | 4.26 | 1.87x |
+| 13_insert_only_fair | 35.46 | 24.29 | 15.13 | 6.30 | 1.46x |
+| 14_pure_insert | 14.08 | 11.96 | 9.86 | 2.30 | 1.18x |
 
 ## High-Impact Workloads (12T SMT)
 
@@ -61,15 +42,15 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 | Benchmark | masstree15 | indexset | tree_index | skipmap | MT vs Best |
 |-----------|------------|----------|------------|---------|------------|
-| 01_long_keys_128b | **39.21** | 14.60 | 12.83 | 10.84 | **2.69x** |
-| 02_multiple_hot_keys | **40.31** | 13.99 | 13.31 | 13.36 | **2.88x** |
-| 03_mixed_get_insert_remove | **27.12** | 5.923 | 10.02 | 8.488 | **2.71x** |
-| 04_variable_long_keys | **27.54** | 9.427 | 8.393 | 7.651 | **2.92x** |
-| 05_prefix_queries (Kitem/s) | **1040** | n/a | 495.9 | 144.9 | **2.10x** |
-| 06_deep_trie_traversal | **25.53** | 13.49 | 8.102 | 9.308 | **1.89x** |
-| 07_deep_trie_read_only | **30.99** | 14.81 | 14.54 | 13.37 | **2.09x** |
-| 08_variable_keys_arc | **27.74** | 11.67 | 10.45 | 8.875 | **2.38x** |
-| 09_prefix_realistic_mixed | **4.862** | n/a | 2.968 | 1.045 | **1.64x** |
+| 01_long_keys_128b | 39.21 | 14.60 | 12.83 | 10.84 | 2.69x |
+| 02_multiple_hot_keys | 40.31 | 13.99 | 13.31 | 13.36 | 2.88x |
+| 03_mixed_get_insert_remove | 27.12 | 5.923 | 10.02 | 8.488 | 2.71x |
+| 04_variable_long_keys | 27.54 | 9.427 | 8.393 | 7.651 | 2.92x |
+| 05_prefix_queries (Kitem/s) | 1040 | n/a | 495.9 | 144.9 | 2.10x |
+| 06_deep_trie_traversal | 25.53 | 13.49 | 8.102 | 9.308 | 1.89x |
+| 07_deep_trie_read_only | 30.99 | 14.81 | 14.54 | 13.37 | 2.09x |
+| 08_variable_keys_arc | 27.74 | 11.67 | 10.45 | 8.875 | 2.38x |
+| 09_prefix_realistic_mixed | 4.862 | n/a | 2.968 | 1.045 | 1.64x |
 
 ## Range Scans (6T Physical)
 
@@ -78,21 +59,21 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 | Benchmark | masstree15_inline | tree_index | MT vs TI |
 |-----------|-------------------|------------|----------|
-| 01_sequential_full_scan | **26.73** | 13.07 | **2.04x** |
-| 02_reverse_scan | **27.87** | 13.27 | **2.10x** |
-| 03_clustered_scan | **25.16** | 13.08 | **1.92x** |
-| 04_sparse_scan | **22.28** | 12.78 | **1.74x** |
-| 05_shared_prefix_scan | **22.93** | 15.33 | **1.50x** |
-| 06_suffix_differ_scan | **21.28** | 14.55 | **1.46x** |
-| 07_hierarchical_scan | **24.47** | 14.60 | **1.68x** |
-| 08_adversarial_splits | **26.83** | 8.807 | **3.05x** |
-| 09_interleaved_scan | **22.41** | 12.86 | **1.74x** |
-| 10_blink_stress_scan | **24.48** | 12.81 | **1.91x** |
-| 11_random_keys_scan | **26.02** | 12.36 | **2.10x** |
-| 12_long_keys_64b_scan | **26.06** | 14.24 | **1.83x** |
-| 15_full_scan_aggregate | **183.1** | 84.59 | **2.16x** |
-| 16_insert_heavy | **23.18** | 17.38 | **1.33x** |
-| 17_hot_spot | **11.24** | 5.318 | **2.11x** |
+| 01_sequential_full_scan | 26.73 | 13.07 | 2.04x |
+| 02_reverse_scan | 27.87 | 13.27 | 2.10x |
+| 03_clustered_scan | 25.16 | 13.08 | 1.92x |
+| 04_sparse_scan | 22.28 | 12.78 | 1.74x |
+| 05_shared_prefix_scan | 22.93 | 15.33 | 1.50x |
+| 06_suffix_differ_scan | 21.28 | 14.55 | 1.46x |
+| 07_hierarchical_scan | 24.47 | 14.60 | 1.68x |
+| 08_adversarial_splits | 26.83 | 8.807 | 3.05x |
+| 09_interleaved_scan | 22.41 | 12.86 | 1.74x |
+| 10_blink_stress_scan | 24.48 | 12.81 | 1.91x |
+| 11_random_keys_scan | 26.02 | 12.36 | 2.10x |
+| 12_long_keys_64b_scan | 26.06 | 14.24 | 1.83x |
+| 15_full_scan_aggregate | 183.1 | 84.59 | 2.16x |
+| 16_insert_heavy | 23.18 | 17.38 | 1.33x |
+| 17_hot_spot | 11.24 | 5.318 | 2.11x |
 
 ## Range Scans (12T SMT)
 
@@ -101,21 +82,62 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 | Benchmark | masstree15_inline | tree_index | MT vs TI |
 |-----------|-------------------|------------|----------|
-| 01_sequential_full_scan | **31.77** | 14.49 | **2.19x** |
-| 02_reverse_scan | **29.96** | 14.66 | **2.04x** |
-| 03_clustered_scan | **31.85** | 14.54 | **2.19x** |
-| 04_sparse_scan | **30.95** | 14.58 | **2.12x** |
-| 05_shared_prefix_scan | **24.88** | 18.62 | **1.34x** |
-| 06_suffix_differ_scan | **23.41** | 18.16 | **1.29x** |
-| 07_hierarchical_scan | **26.99** | 18.46 | **1.46x** |
-| 08_adversarial_splits | **29.10** | 11.32 | **2.57x** |
-| 09_interleaved_scan | **24.82** | 15.34 | **1.62x** |
-| 10_blink_stress_scan | **30.05** | 15.12 | **1.99x** |
-| 11_random_keys_scan | **25.62** | 14.70 | **1.74x** |
-| 12_long_keys_64b_scan | **28.29** | 17.77 | **1.59x** |
-| 15_full_scan_aggregate | **230.8** | 111.9 | **2.06x** |
-| 16_insert_heavy | **25.09** | 21.88 | **1.15x** |
-| 17_hot_spot | **10.61** | 6.458 | **1.64x** |
+| 01_sequential_full_scan | 31.77 | 14.49 | 2.19x |
+| 02_reverse_scan | 29.96 | 14.66 | 2.04x |
+| 03_clustered_scan | 31.85 | 14.54 | 2.19x |
+| 04_sparse_scan | 30.95 | 14.58 | 2.12x |
+| 05_shared_prefix_scan | 24.88 | 18.62 | 1.34x |
+| 06_suffix_differ_scan | 23.41 | 18.16 | 1.29x |
+| 07_hierarchical_scan | 26.99 | 18.46 | 1.46x |
+| 08_adversarial_splits | 29.10 | 11.32 | 2.57x |
+| 09_interleaved_scan | 24.82 | 15.34 | 1.62x |
+| 10_blink_stress_scan | 30.05 | 15.12 | 1.99x |
+| 11_random_keys_scan | 25.62 | 14.70 | 1.74x |
+| 12_long_keys_64b_scan | 28.29 | 17.77 | 1.59x |
+| 15_full_scan_aggregate | 230.8 | 111.9 | 2.06x |
+| 16_insert_heavy | 25.09 | 21.88 | 1.15x |
+| 17_hot_spot | 10.61 | 6.458 | 1.64x |
+
+## Tail Latency (Exact Percentiles)
+
+> Source: `runs/run198_tail_latency.txt`
+> **Config:** 50k samples per benchmark (exact sorted-array backend), mimalloc
+
+### Point Lookups
+
+| Benchmark | masstree | dashmap | treeindex | skipmap | indexset |
+|-----------|----------|---------|-----------|---------|----------|
+| get 1T p50 | 117 ns | 57 ns | 228 ns | 340 ns | 260 ns |
+| get 1T p99.99 | 739 ns | 340 ns | 1.68 us | 4.81 us | 4.06 us |
+| get 8T p50 | 302 ns | 437 ns | 436 ns | 581 ns | 591 ns |
+| get 8T p99.99 | 1.02 us | 712 ns | 4.83 us | 3.18 us | 12.1 us |
+| get 1M 1T p50 | 370 ns | 165 ns | 471 ns | 661 ns | 531 ns |
+| get zipf 8T p50 | 310 ns | 205 ns | 295 ns | 541 ns | 521 ns |
+
+### Inserts
+
+| Benchmark | masstree | dashmap | treeindex | skipmap | indexset |
+|-----------|----------|---------|-----------|---------|----------|
+| insert 1T p50 | 110 ns | 80 ns | 210 ns | 180 ns | 541 ns |
+| insert 1T p99.99 | 6.10 us | 32.9 us | 4.33 us | 3.82 us | 5.16 us |
+| insert 8T p50 | 681 ns | 315 ns | 751 ns | 952 ns | 6.65 us |
+| insert 8T p99.99 | 140 us | 15.4 us | 86.4 us | 63.7 us | 158 us |
+
+### Mixed Read/Write (8T)
+
+| Benchmark | masstree | dashmap | treeindex | skipmap | indexset |
+|-----------|----------|---------|-----------|---------|----------|
+| 90/10 p50 | 491 ns | 411 ns | 511 ns | 711 ns | 606 ns |
+| 90/10 p99.99 | 6.22 us | 821 ns | 9.91 us | 10.7 us | 3.77 us |
+| 50/50 p50 | 571 ns | 519 ns | 1.08 us | 1.10 us | 781 ns |
+| 50/50 p99.99 | 5.88 us | 1.51 us | 92.6 us | 45.7 us | 5.81 us |
+
+### Range Scans (8T, 50-key scan)
+
+| Benchmark | masstree | treeindex | skipmap |
+|-----------|----------|-----------|---------|
+| scan p50 | 461 ns | 821 ns | 3.80 us |
+| scan p99.99 | 5.24 us | 5.92 us | 12.5 us |
 
 ## Install
 

@@ -129,17 +129,11 @@ where
         })
     }
 
-    /// Execute propagation and verify it succeeds.
+    /// Execute infallible split propagation.
     ///
-    /// Propagation is designed to be infallible after `mark_split()`. Internode
-    /// allocations abort on OOM rather than returning errors. This function
-    /// wraps propagation and panics on unexpected failures to catch bugs early.
-    ///
-    /// # Panics
-    ///
-    /// Panics if propagation fails, as this indicates a bug in the propagation
-    /// logic or tree corruption. The no-abandon invariant requires that once
-    /// a split sibling is created, propagation MUST complete.
+    /// Propagation cannot fail: root creation uses `store` (not CAS), and
+    /// internode allocations abort on OOM. The no-abandon invariant requires
+    /// that once a split sibling is created, propagation MUST complete.
     #[expect(
         clippy::too_many_arguments,
         reason = "Propagation requires full context"
@@ -154,7 +148,7 @@ where
         is_layer_root: bool,
         guard: &LocalGuard<'_>,
     ) {
-        let result = Propagation::make_split_leaf::<P, A>(
+        Propagation::make_split_leaf::<P, A>(
             &self.root_ptr,
             &self.allocator,
             left_leaf_ptr,
@@ -165,25 +159,6 @@ where
             is_layer_root,
             guard,
         );
-
-        // Propagation is infallible by design - internode allocations abort on OOM.
-        // If this fails, it's a bug in the propagation logic or tree corruption.
-        if let Err(e) = result {
-            // Use cold path to avoid inlining panic code
-            #[cold]
-            #[inline(never)]
-            #[expect(
-                clippy::panic,
-                reason = "Invariant violation - propagation must succeed"
-            )]
-            fn propagation_failed(e: &InsertError) -> ! {
-                panic!(
-                    "Propagation failed unexpectedly: {e:?}. \
-                     This indicates a bug - propagation should be infallible after mark_split()"
-                );
-            }
-            propagation_failed(&e);
-        }
     }
 
     // ========================================================================

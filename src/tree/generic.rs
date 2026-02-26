@@ -41,7 +41,7 @@ pub use batch::{BatchEntry, BatchInsertResult};
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
 
 // ============================================================================
-//  Shared Types (used by insert.rs and batch.rs)
+//  Shared Types
 // ============================================================================
 
 /// Result of finding a usable slot for insertion.
@@ -54,9 +54,6 @@ pub enum FindSlotResult {
 }
 
 /// Errors from membership validation.
-///
-/// Each variant indicates why the key doesn't belong in the current leaf
-/// and how to recover.
 pub enum MembershipError {
     /// A split is in progress on this leaf.
     SplitInProgress,
@@ -82,7 +79,6 @@ where
     /// Create a new empty `MassTreeGeneric` with custom batch size.
     #[must_use]
     pub fn with_allocator_batch_size(allocator: A, batch_size: Option<usize>) -> Self {
-        // Create root leaf directly in allocator memory (bypasses Box for pool allocators).
         let root_ptr: *mut LeafNode15<P> = allocator.alloc_leaf_direct(true, false);
 
         let collector: Collector = match batch_size {
@@ -133,9 +129,6 @@ where
     // ========================================================================
 
     /// Get the number of empty leaves pending cleanup.
-    ///
-    /// This is the number of leaves that became empty after key removal
-    /// and are waiting to be processed by `process_coalesce()`.
     #[must_use]
     #[inline]
     pub fn pending_coalesce(&self) -> usize {
@@ -143,9 +136,6 @@ where
     }
 
     /// Process all pending empty leaf removals.
-    ///
-    /// Call this during low-contention periods to clean up empty leaves.
-    /// This is safe to call concurrently with other operations.
     #[inline]
     pub fn process_coalesce(&self, guard: &LocalGuard<'_>) -> usize {
         self.verify_guard(guard);
@@ -154,8 +144,6 @@ where
     }
 
     /// Process up to `limit` pending empty leaf removals.
-    ///
-    /// Useful for bounded cleanup during normal operations.
     #[inline]
     pub fn process_coalesce_batch(&self, guard: &LocalGuard<'_>, limit: usize) -> usize {
         self.verify_guard(guard);
@@ -179,9 +167,7 @@ where
 
     /// Check if the current root is a leaf node.
     ///
-    /// Verify that a guard was created from this tree's collector.
-    ///
-    /// # Panics (debug builds only)
+    /// # Panics
     ///
     /// Panics if the guard's collector does not match this tree's collector.
     /// This indicates the caller passed a guard from a different tree, which

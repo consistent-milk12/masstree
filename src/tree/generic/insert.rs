@@ -314,7 +314,9 @@ where
                 self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
 
             if exceeded_hop_limit {
+                key.unshift_all();
                 layer_root = self.load_root_ptr_generic(guard);
+                in_sublayer = false;
                 continue 'retry;
             }
 
@@ -376,7 +378,9 @@ where
 
                     if exceeded {
                         // Too many hops, fall back to full re-traversal
+                        key.unshift_all();
                         layer_root = self.load_root_ptr_generic(guard);
+                        in_sublayer = false;
                         continue 'retry;
                     }
 
@@ -403,7 +407,9 @@ where
                             self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
 
                         if exceeded {
+                            key.unshift_all();
                             layer_root = self.load_root_ptr_generic(guard);
+                            in_sublayer = false;
                             continue 'retry;
                         }
 

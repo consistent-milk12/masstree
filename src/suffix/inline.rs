@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering as AtomicOrdering};
 
 use super::{SuffixBag, TreePermutation};
 

@@ -1,0 +1,47 @@
+Reduced samples used to 50k so that pbench uses the lossless native backend instead of hdrrecorder.
+
+pbench: timer=tsc, precision=10.01 ns
+tail_latency                 p50      │ p95      │ p99      │ p99.9    │ p99.99   │ mean
+├─ get_1_dashmap             57.35 ns │ 67.99 ns │ 79.89 ns │ 121.8 ns │ 339.7 ns │ 59.27 ns
+├─ get_1_indexset            260.2 ns │ 360.4 ns │ 470.6 ns │ 701 ns   │ 4.057 µs │ 273.5 ns
+├─ get_1_masstree            117.4 ns │ 148.7 ns │ 173.8 ns │ 289.2 ns │ 738.6 ns │ 121.6 ns
+├─ get_1_skipmap             340.3 ns │ 460.6 ns │ 570.8 ns │ 791.2 ns │ 4.808 µs │ 347.4 ns
+├─ get_1_treeindex           227.6 ns │ 257.7 ns │ 295.3 ns │ 413.1 ns │ 1.675 µs │ 229.4 ns
+├─ get_1m_1t_dashmap         165 ns   │ 207.6 ns │ 221.4 ns │ 625.9 ns │ 815 ns   │ 169.2 ns
+├─ get_1m_1t_indexset        530.7 ns │ 841.3 ns │ 1.021 µs │ 1.262 µs │ 5.64 µs  │ 561.1 ns
+├─ get_1m_1t_masstree        370.4 ns │ 590.8 ns │ 731.1 ns │ 891.4 ns │ 4.979 µs │ 377.5 ns
+├─ get_1m_1t_skipmap         660.9 ns │ 1.011 µs │ 1.242 µs │ 1.692 µs │ 6.001 µs │ 690 ns
+├─ get_1m_1t_treeindex       470.6 ns │ 671 ns   │ 821.3 ns │ 1.001 µs │ 5.189 µs │ 485.2 ns
+├─ get_8t_dashmap            437.1 ns │ 506.9 ns │ 551.4 ns │ 640 ns   │ 712 ns   │ 412.6 ns
+├─ get_8t_indexset           590.8 ns │ 841.3 ns │ 986.6 ns │ 1.287 µs │ 12.06 µs │ 611.1 ns
+├─ get_8t_masstree           301.5 ns │ 369.1 ns │ 413 ns   │ 807.5 ns │ 1.015 µs │ 295.2 ns
+├─ get_8t_skipmap            580.8 ns │ 781.2 ns │ 916.4 ns │ 2.314 µs │ 3.18 µs  │ 596.7 ns
+├─ get_8t_treeindex          435.5 ns │ 570.8 ns │ 633.4 ns │ 1.778 µs │ 4.831 µs │ 441.1 ns
+├─ get_zipf_8t_dashmap       205.1 ns │ 337.8 ns │ 394.2 ns │ 784.9 ns │ 2.061 µs │ 211.6 ns
+├─ get_zipf_8t_indexset      520.7 ns │ 831.3 ns │ 1.061 µs │ 2.123 µs │ 5.49 µs  │ 534.4 ns
+├─ get_zipf_8t_masstree      310.3 ns │ 600.8 ns │ 791.2 ns │ 1.031 µs │ 4.929 µs │ 353 ns
+├─ get_zipf_8t_skipmap       540.7 ns │ 831.3 ns │ 1.051 µs │ 1.632 µs │ 5.41 µs  │ 560.8 ns
+├─ get_zipf_8t_treeindex     295.3 ns │ 410.5 ns │ 473.1 ns │ 1.367 µs │ 1.978 µs │ 302.2 ns
+├─ insert_1_dashmap          79.89 ns │ 190.1 ns │ 450.5 ns │ 11.53 µs │ 32.93 µs │ 151 ns
+├─ insert_1_indexset         540.7 ns │ 681 ns   │ 1.121 µs │ 2.754 µs │ 5.159 µs │ 563 ns
+├─ insert_1_masstree         109.9 ns │ 250.2 ns │ 300.3 ns │ 630.9 ns │ 6.101 µs │ 124.1 ns
+├─ insert_1_skipmap          180 ns   │ 250.2 ns │ 350.4 ns │ 590.8 ns │ 3.816 µs │ 186.6 ns
+├─ insert_1_treeindex        210.1 ns │ 490.6 ns │ 630.9 ns │ 1.081 µs │ 4.327 µs │ 233.2 ns
+├─ insert_8t_dashmap         315.3 ns │ 483.1 ns │ 693.5 ns │ 3.736 µs │ 15.41 µs │ 334.9 ns
+├─ insert_8t_indexset        6.652 µs │ 25.41 µs │ 33.14 µs │ 43.19 µs │ 158.3 µs │ 9.492 µs
+├─ insert_8t_masstree        681 ns   │ 2.264 µs │ 3.436 µs │ 10.82 µs │ 140.4 µs │ 972.7 ns
+├─ insert_8t_skipmap         951.5 ns │ 2.033 µs │ 2.775 µs │ 6.542 µs │ 63.65 µs │ 1.104 µs
+├─ insert_8t_treeindex       751.1 ns │ 3.786 µs │ 6.692 µs │ 26.15 µs │ 86.43 µs │ 1.338 µs
+├─ mixed_50_50_8t_dashmap    518.8 ns │ 621.5 ns │ 686 ns   │ 1.031 µs │ 1.51 µs  │ 489.2 ns
+├─ mixed_50_50_8t_indexset   781.2 ns │ 1.151 µs │ 1.342 µs │ 1.743 µs │ 5.81 µs  │ 814.3 ns
+├─ mixed_50_50_8t_masstree   570.8 ns │ 1.001 µs │ 1.191 µs │ 1.562 µs │ 5.88 µs  │ 614.2 ns
+├─ mixed_50_50_8t_skipmap    1.101 µs │ 1.913 µs │ 2.484 µs │ 10.42 µs │ 45.68 µs │ 1.195 µs
+├─ mixed_50_50_8t_treeindex  1.081 µs │ 2.654 µs │ 5.68 µs  │ 8.435 µs │ 92.58 µs │ 1.314 µs
+├─ mixed_90_10_8t_dashmap    410.5 ns │ 518.2 ns │ 567.6 ns │ 737.3 ns │ 821.2 ns │ 382.8 ns
+├─ mixed_90_10_8t_indexset   605.8 ns │ 891.4 ns │ 1.031 µs │ 2.549 µs │ 3.771 µs │ 636 ns
+├─ mixed_90_10_8t_masstree   490.6 ns │ 881.4 ns │ 1.071 µs │ 1.382 µs │ 6.221 µs │ 536.1 ns
+├─ mixed_90_10_8t_skipmap    711 ns   │ 1.502 µs │ 1.913 µs │ 5.87 µs  │ 10.67 µs │ 807.9 ns
+├─ mixed_90_10_8t_treeindex  510.7 ns │ 1.652 µs │ 2.584 µs │ 4.388 µs │ 9.908 µs │ 638.7 ns
+├─ scan_50_8t_masstree       460.6 ns │ 791.2 ns │ 941.5 ns │ 1.181 µs │ 5.239 µs │ 499.1 ns
+├─ scan_50_8t_skipmap        3.796 µs │ 6.291 µs │ 7.534 µs │ 9.698 µs │ 12.54 µs │ 3.998 µs
+╰─ scan_50_8t_treeindex      821.2 ns │ 1.101 µs │ 1.352 µs │ 3.085 µs │ 5.92 µs  │ 830.9 ns

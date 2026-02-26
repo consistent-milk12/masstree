@@ -41,7 +41,10 @@ pub(super) fn get_suffix<'a>(
 
 /// Check if a slot's suffix equals the given bytes.
 #[inline(always)]
-#[allow(dead_code, reason = "SuffixStore trait plumbing, not all impls call through here")]
+#[allow(
+    dead_code,
+    reason = "SuffixStore trait plumbing, not all impls call through here"
+)]
 pub(super) fn suffix_equals(
     inline: &InlineSuffixBag,
     external: &AtomicPtr<SuffixBag>,
@@ -53,7 +56,10 @@ pub(super) fn suffix_equals(
 
 /// Compare a slot's suffix with the given bytes.
 #[inline(always)]
-#[allow(dead_code, reason = "SuffixStore trait plumbing, not all impls call through here")]
+#[allow(
+    dead_code,
+    reason = "SuffixStore trait plumbing, not all impls call through here"
+)]
 pub(super) fn suffix_compare(
     inline: &InlineSuffixBag,
     external: &AtomicPtr<SuffixBag>,

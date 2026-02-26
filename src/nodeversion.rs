@@ -693,7 +693,9 @@ impl NodeVersion {
 
         let new_value = (locked_value + VSPLIT_LOWBIT) & SPLIT_UNLOCK_MASK;
 
-        StdAtomic::compiler_fence(Ordering::SeqCst);
+        // The Release store below is sufficient: it prevents both compiler and
+        // hardware reordering of prior writes past the unlock, consistent with
+        // the LockGuard::drop unlock path.
         self.value.store(new_value, Ordering::Release);
     }
 

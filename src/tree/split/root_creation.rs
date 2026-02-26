@@ -6,7 +6,6 @@ use crate::TreeAllocator;
 use crate::internode::InternodeNode;
 use crate::leaf15::LeafNode15;
 use crate::policy::LeafPolicy;
-use crate::tree::InsertError;
 
 /// Unit struct namespace for root creation operations.
 pub struct RootCreation;
@@ -20,17 +19,13 @@ impl RootCreation {
     ///
     /// Atomically installs a new root via store on `root_ptr`. Parent pointers
     /// are updated after the store to avoid dangling references.
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "Returns Result for API consistency"
-    )]
     pub fn create_root_from_leaves<P, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
         left_leaf_ptr: *mut LeafNode15<P>,
         right_leaf_ptr: *mut LeafNode15<P>,
         split_ikey: u64,
-    ) -> Result<*mut InternodeNode, InsertError>
+    ) -> *mut InternodeNode
     where
         P: LeafPolicy,
         A: TreeAllocator<P>,
@@ -52,21 +47,17 @@ impl RootCreation {
             (*left_leaf_ptr).version().mark_nonroot();
         }
 
-        Ok(new_root_ptr.cast())
+        new_root_ptr.cast()
     }
 
     /// Create a new main tree root internode from two internodes.
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "Matches create_root_from_leaves signature"
-    )]
     pub fn create_root_from_internodes<P, A>(
         root_ptr: &AtomicPtr<u8>,
         allocator: &A,
         left_inode_ptr: *mut InternodeNode,
         right_inode_ptr: *mut InternodeNode,
         split_ikey: u64,
-    ) -> Result<*mut InternodeNode, InsertError>
+    ) -> *mut InternodeNode
     where
         P: LeafPolicy,
         A: TreeAllocator<P>,
@@ -90,7 +81,7 @@ impl RootCreation {
             (*left_inode_ptr).version().mark_nonroot();
         }
 
-        Ok(new_root_ptr.cast())
+        new_root_ptr.cast()
     }
 
     // =========================================================================

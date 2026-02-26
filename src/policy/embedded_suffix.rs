@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use seize::{Guard, LocalGuard};
 
-use crate::suffix::{InlineSuffixBag, SideCarUtils, SuffixBag};
 use crate::TreePermutation;
+use crate::suffix::{InlineSuffixBag, SideCarUtils, SuffixBag};
 
 use super::SuffixStore;
 
