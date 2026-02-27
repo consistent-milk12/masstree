@@ -248,14 +248,6 @@ for entry in tree.iter(&guard) {
 - Integer keys only → `congee` (ART-based)
 - Read-heavy with rare writes → `RwLock<BTreeMap>`
 
-## Which Tree Type Should I Use?
-
-| Type | Value Requirement | `get_ref()` | Best For |
-|------|-------------------|-------------|----------|
-| `MassTree<V>` | `V: InlineBits` (Copy + ≤64 bits) | Nope | `u64`, `i32`, `f64`, small tuples |
-| `MassTree15<V>` | `V: Send + Sync + 'static` | Yes | `String`, `Vec`, custom structs |
-| `MassTree15Inline<V>` | `V: InlineBits` | Nope | Same as `MassTree<V>` (explicit alias) |
-
 ### `MassTree<V>` (Default, True-Inline)
 
 - Values stored directly in leaf nodes (zero allocation per insert)

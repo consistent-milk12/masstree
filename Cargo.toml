@@ -140,6 +140,10 @@ name = "concurrent_read_write_masstree"
 harness = false
 
 [[bench]]
+name = "concurrent_read_write_general"
+harness = false
+
+[[bench]]
 name = "high_impact"
 harness = false
 
@@ -148,11 +152,19 @@ name = "high_impact_masstree"
 harness = false
 
 [[bench]]
+name = "high_impact_general"
+harness = false
+
+[[bench]]
 name = "mttest"
 harness = false
 
 [[bench]]
 name = "range_masstree15"
+harness = false
+
+[[bench]]
+name = "storage_gap"
 harness = false
 
 [[bench]]
