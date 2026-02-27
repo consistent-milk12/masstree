@@ -16,6 +16,7 @@ use std::sync::atomic as StdAtomic;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering as AtomicOrdering};
 
 use crate::Linker;
+use crate::Permuter;
 use crate::internode::InternodeNode;
 use crate::key::IKEY_SIZE;
 use crate::key::Key;
@@ -72,6 +73,13 @@ pub const MODSTATE_DELETED_LAYER: u8 = 2;
 /// Modification state: node is empty (all keys removed).
 /// Empty nodes can be reused by insert or cleaned up by background task.
 pub const MODSTATE_EMPTY: u8 = 3;
+
+/// Bit flag: this leaf has a pending entry in the coalesce queue.
+/// Orthogonal to the lifecycle value in bits 0-1.
+pub const MODSTATE_QUEUED_BIT: u8 = 0x04;
+
+/// Mask for the lifecycle value (bits 0-1), ignoring the queued flag.
+const MODSTATE_VALUE_MASK: u8 = 0x03;
 
 /// B-link leaf node with 15 slots, parameterized over [`LeafPolicy`].
 #[repr(C, align(64))]
@@ -1196,20 +1204,20 @@ impl<P: LeafPolicy> LeafNode15<P> {
     //  ModState Accessors
     // ============================================================================
 
-    /// Get the modification state.
+    /// Get the raw modification state (includes queued bit).
     #[must_use]
     #[inline(always)]
     pub fn modstate(&self) -> u8 {
         self.modstate.load(AtomicOrdering::Acquire)
     }
 
-    /// Set the modification state.
+    /// Set the modification state (overwrites all bits including queued).
     #[inline(always)]
     pub fn set_modstate(&self, state: u8) {
         self.modstate.store(state, AtomicOrdering::Release);
     }
 
-    /// Get the modification state (relaxed, for use under lock).
+    /// Get the raw modification state (relaxed, for use under lock).
     #[must_use]
     #[inline(always)]
     pub fn modstate_relaxed(&self) -> u8 {
@@ -1222,53 +1230,106 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.modstate.store(state, RELAXED);
     }
 
+    /// Return the lifecycle value (bits 0-1), stripping the queued flag.
+    #[must_use]
+    #[inline(always)]
+    fn modstate_value(&self) -> u8 {
+        self.modstate.load(AtomicOrdering::Acquire) & MODSTATE_VALUE_MASK
+    }
+
     /// Check if this layer has been deleted (garbage collected).
     #[must_use]
     #[inline(always)]
     pub fn deleted_layer(&self) -> bool {
-        self.modstate() == MODSTATE_DELETED_LAYER
+        self.modstate_value() == MODSTATE_DELETED_LAYER
     }
 
-    /// Mark this layer as deleted (for `gc_layer`).
+    /// Mark this layer as deleted (for `gc_layer`). Preserves queued bit.
     #[inline(always)]
     pub fn mark_deleted_layer(&self) {
-        self.set_modstate(MODSTATE_DELETED_LAYER);
+        let old: u8 = self.modstate.load(RELAXED);
+
+        self.modstate.store(
+            (old & MODSTATE_QUEUED_BIT) | MODSTATE_DELETED_LAYER,
+            AtomicOrdering::Release,
+        );
     }
 
-    /// Mark this node as being in remove mode.
+    /// Mark this node as being in remove mode. Preserves queued bit.
     #[inline(always)]
     pub fn mark_remove(&self) {
-        self.set_modstate(MODSTATE_REMOVE);
+        let old: u8 = self.modstate.load(RELAXED);
+
+        self.modstate.store(
+            (old & MODSTATE_QUEUED_BIT) | MODSTATE_REMOVE,
+            AtomicOrdering::Release,
+        );
     }
 
     /// Check if this node is in remove mode.
     #[must_use]
     #[inline(always)]
     pub fn is_removing(&self) -> bool {
-        self.modstate() == MODSTATE_REMOVE
+        self.modstate_value() == MODSTATE_REMOVE
     }
 
     // ============================================================================
     //  Empty State (for lazy coalescing)
     // ============================================================================
 
-    /// Check if this leaf is in empty state (modstate == `MODSTATE_EMPTY`).
+    /// Check if this leaf is in empty state.
     #[must_use]
     #[inline(always)]
     pub fn is_empty_state(&self) -> bool {
-        self.modstate() == MODSTATE_EMPTY
+        self.modstate_value() == MODSTATE_EMPTY
     }
 
-    /// Mark this leaf as empty (all keys removed).
+    /// Mark this leaf as empty (all keys removed). Preserves queued bit.
     #[inline(always)]
     pub fn mark_empty(&self) {
-        self.set_modstate(MODSTATE_EMPTY);
+        let old: u8 = self.modstate.load(RELAXED);
+
+        self.modstate.store(
+            (old & MODSTATE_QUEUED_BIT) | MODSTATE_EMPTY,
+            AtomicOrdering::Release,
+        );
     }
 
     /// Clear empty state, returning to normal insert mode.
+    /// Stores 0, clearing the queued bit. Correct for insert reuse:
+    /// invalidates any pending coalesce entry for this leaf.
     #[inline(always)]
     pub fn clear_empty_state(&self) {
         self.set_modstate(MODSTATE_INSERT);
+    }
+
+    // ============================================================================
+    //  Queued Bit (coalesce dedup)
+    // ============================================================================
+
+    /// Check if this leaf has a pending coalesce queue entry.
+    #[must_use]
+    #[inline(always)]
+    pub fn is_queued(&self) -> bool {
+        self.modstate.load(AtomicOrdering::Acquire) & MODSTATE_QUEUED_BIT != 0
+    }
+
+    /// Atomically set the queued bit. Returns true if the bit was not already
+    /// set (this call won the race). This is the sole enqueue gate.
+    #[inline(always)]
+    pub fn try_mark_queued(&self) -> bool {
+        let old: u8 = self
+            .modstate
+            .fetch_or(MODSTATE_QUEUED_BIT, AtomicOrdering::Release);
+
+        old & MODSTATE_QUEUED_BIT == 0
+    }
+
+    /// Clear the queued bit atomically. Called after gc retires or skips.
+    #[inline(always)]
+    pub fn clear_queued(&self) {
+        self.modstate
+            .fetch_and(!MODSTATE_QUEUED_BIT, AtomicOrdering::Release);
     }
 
     // ============================================================================
@@ -1361,8 +1422,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
     /// Calculate the optimal split point for this leaf.
     pub fn calculate_split_point(&self, insert_pos: usize, insert_ikey: u64) -> Option<SplitPoint> {
-        let perm = self.permutation();
-        let size = perm.size();
+        let perm: Permuter = self.permutation();
+        let size: usize = perm.size();
 
         if size == 0 {
             return None;
@@ -1370,7 +1431,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
         // SAFETY: Called during insert with lock held, unguarded access is safe.
         if insert_pos == size && unsafe { self.next_raw_unguarded() }.is_null() {
-            let last_slot = perm.get(size - 1);
+            let last_slot: usize = perm.get(size - 1);
 
             if self.ikey(last_slot) != insert_ikey {
                 return Some(SplitPoint {
@@ -1382,8 +1443,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
         // SAFETY: Called during insert with lock held, unguarded access is safe.
         if insert_pos == 0 && unsafe { self.prev_unguarded() }.is_null() && size > 1 {
-            let split_slot = perm.get(1);
-            let split_ikey = self.ikey(split_slot);
+            let split_slot: usize = perm.get(1);
+            let split_ikey: u64 = self.ikey(split_slot);
 
             if split_ikey != insert_ikey {
                 return Some(SplitPoint { pos: 1, split_ikey });
@@ -1397,10 +1458,10 @@ impl<P: LeafPolicy> LeafNode15<P> {
         }
 
         while split_pos > 0 && split_pos < size {
-            let left_slot = perm.get(split_pos - 1);
-            let right_slot = perm.get(split_pos);
-            let left_ikey = self.ikey(left_slot);
-            let right_ikey = self.ikey(right_slot);
+            let left_slot: usize = perm.get(split_pos - 1);
+            let right_slot: usize = perm.get(split_pos);
+            let left_ikey: u64 = self.ikey(left_slot);
+            let right_ikey: u64 = self.ikey(right_slot);
 
             if left_ikey == right_ikey {
                 match insert_ikey.cmp(&left_ikey) {
@@ -1418,13 +1479,13 @@ impl<P: LeafPolicy> LeafNode15<P> {
         }
 
         if insert_pos == split_pos && split_pos > 0 {
-            let last_left_slot = perm.get(split_pos - 1);
+            let last_left_slot: usize = perm.get(split_pos - 1);
 
             if self.ikey(last_left_slot) == insert_ikey {
                 split_pos -= 1;
 
                 while split_pos > 0 {
-                    let check_slot = perm.get(split_pos - 1);
+                    let check_slot: usize = perm.get(split_pos - 1);
 
                     if self.ikey(check_slot) != insert_ikey {
                         break;
@@ -1439,8 +1500,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
             return None;
         }
 
-        let split_slot = perm.get(split_pos);
-        let split_ikey = self.ikey(split_slot);
+        let split_slot: usize = perm.get(split_pos);
+        let split_ikey: u64 = self.ikey(split_slot);
 
         Some(SplitPoint {
             pos: split_pos,
@@ -1471,11 +1532,12 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
         for i in 0..entries_to_move {
             let old_slot: usize = perm.get(split_pos + i);
+
             // SAFETY: Caller holds lock on self. new_leaf is not yet visible.
             unsafe { self.move_entry_to(new_leaf, old_slot, i, guard) };
         }
 
-        let mut old_perm = perm;
+        let mut old_perm: Permuter = perm;
         old_perm.set_size(split_pos);
         self.set_permutation(old_perm);
 

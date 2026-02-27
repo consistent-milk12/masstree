@@ -125,7 +125,7 @@ where
     count: ShardedCounter,
 
     /// Queue of empty leaves pending cleanup (lazy coalescing).
-    coalesce_queue: CoalesceQueue<LeafNode15<P>>,
+    coalesce_queue: CoalesceQueue,
 
     /// Marker to indicate policy type.
     _marker: PhantomData<P>,
@@ -136,7 +136,7 @@ where
 // - `A: TreeAllocator<P>`: bound requires Send
 // - `AtomicPtr<u8>`: Send (atomic pointer, no ownership of pointee)
 // - `ShardedCounter`: Send (uses AtomicUsize shards)
-// - `CoalesceQueue<LeafNode15<P>>`: Send (Mutex-protected queue)
+// - `CoalesceQueue`: Send (lock-free SegQueue, no raw pointers stored)
 // - `PhantomData<P>`: Send when P: Send (P: LeafPolicy requires Send)
 // All concurrent mutation is serialized by per-node locks; the tree itself
 // can safely transfer ownership between threads.
@@ -153,7 +153,7 @@ where
 // - Memory reclamation uses epoch-based protection (seize::Collector)
 // - The root pointer is AtomicPtr with proper Acquire/Release ordering
 // - ShardedCounter uses per-shard AtomicUsize (no shared mutable state)
-// - CoalesceQueue is Mutex-protected
+// - CoalesceQueue uses lock-free SegQueue (no raw pointers stored)
 // Multiple threads can safely share a &MassTreeGeneric reference.
 unsafe impl<P, A> Sync for MassTreeGeneric<P, A>
 where

@@ -6,7 +6,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 ## Status
 
-Current Version: v0.9.0
+Current Version: v0.9.1
 
 Significantly reduced duplicate code through trait based abstractions, while improving performance further. All standard data structure features are implemented and streamlined, on top the specialized features like range scans and prefix queries. From latency analysis, it seems to have a surprisingly strong tail latency profile for a concurrent ordered map. The cache-line aligned layout design and aggressive prefetching seems to have paid off, on top of masstree's original excellent architecture.
 
@@ -14,27 +14,27 @@ The next issues to work on are the memory profile and memcomparable mappings for
 
 ## vs Rust Concurrent Maps (12T SMT)
 
-> Source: `runs/run194_read_write.txt` (masstree), `runs/run184_read_write_reworked.txt` (competitors)
+> Source: `runs/run199_read_write.txt` (masstree), `runs/run184_read_write_reworked.txt` (competitors)
 > **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
 
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | 48.14 | 14.49 | 10.80 | 14.94 | 3.22x |
-| 02_zipfian | 41.79 | 18.86 | 12.92 | 3.28 | 2.22x |
-| 03_shared_prefix | 29.48 | 14.61 | 11.08 | 14.36 | 2.02x |
-| 04_high_contention | 62.40 | 21.64 | 16.90 | 1.97 | 2.88x |
-| 05_large_dataset | 17.00 | 11.35 | 7.50 | 9.17 | 1.50x |
-| 06_single_hot_key | 15.42 | 6.82 | 7.46 | 2.52 | 2.07x |
-| 07_mixed_50_50 | 33.89 | 8.73 | 6.46 | 14.86 | 2.28x |
-| 08_8byte_keys | 52.92 | 24.97 | 14.06 | 19.69 | 2.12x |
-| 09_pure_read | 50.77 | 24.12 | 14.40 | 17.40 | 2.11x |
-| 10_remove_heavy | 20.90 | 11.18 | 7.18 | 4.26 | 1.87x |
-| 13_insert_only_fair | 35.46 | 24.29 | 15.13 | 6.30 | 1.46x |
-| 14_pure_insert | 14.08 | 11.96 | 9.86 | 2.30 | 1.18x |
+| 01_uniform | 44.18 | 14.49 | 10.80 | 14.94 | 2.96x |
+| 02_zipfian | 40.48 | 18.86 | 12.92 | 3.28 | 2.15x |
+| 03_shared_prefix | 30.12 | 14.61 | 11.08 | 14.36 | 2.06x |
+| 04_high_contention | 70.85 | 21.64 | 16.90 | 1.97 | 3.27x |
+| 05_large_dataset | 17.94 | 11.35 | 7.50 | 9.17 | 1.58x |
+| 06_single_hot_key | 15.67 | 6.82 | 7.46 | 2.52 | 2.10x |
+| 07_mixed_50_50 | 36.76 | 8.73 | 6.46 | 14.86 | 2.47x |
+| 08_8byte_keys | 58.26 | 24.97 | 14.06 | 19.69 | 2.33x |
+| 09_pure_read | 57.41 | 24.12 | 14.40 | 17.40 | 2.38x |
+| 10_remove_heavy | 22.00 | 11.18 | 7.18 | 4.26 | 1.97x |
+| 13_insert_only_fair | 39.71 | 24.29 | 15.13 | 6.30 | 1.63x |
+| 14_pure_insert | 15.20 | 11.96 | 9.86 | 2.30 | 1.27x |
 
 ## High-Impact Workloads (12T SMT)
 
-> Source: `runs/run195_high_impact.txt` (masstree), `runs/run188_high_impact.txt` (competitors)
+> Source: `runs/run200_high_impact.txt` (masstree), `runs/run188_high_impact.txt` (competitors)
 > **Config:** 12 threads on 6 physical cores (SMT), 200 samples
 
 Benchmarks targeting Masstree's architectural advantages: long keys, variable-length keys,
@@ -42,15 +42,15 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 | Benchmark | masstree15 | indexset | tree_index | skipmap | MT vs Best |
 |-----------|------------|----------|------------|---------|------------|
-| 01_long_keys_128b | 39.21 | 14.60 | 12.83 | 10.84 | 2.69x |
-| 02_multiple_hot_keys | 40.31 | 13.99 | 13.31 | 13.36 | 2.88x |
-| 03_mixed_get_insert_remove | 27.12 | 5.923 | 10.02 | 8.488 | 2.71x |
-| 04_variable_long_keys | 27.54 | 9.427 | 8.393 | 7.651 | 2.92x |
-| 05_prefix_queries (Kitem/s) | 1040 | n/a | 495.9 | 144.9 | 2.10x |
-| 06_deep_trie_traversal | 25.53 | 13.49 | 8.102 | 9.308 | 1.89x |
-| 07_deep_trie_read_only | 30.99 | 14.81 | 14.54 | 13.37 | 2.09x |
-| 08_variable_keys_arc | 27.74 | 11.67 | 10.45 | 8.875 | 2.38x |
-| 09_prefix_realistic_mixed | 4.862 | n/a | 2.968 | 1.045 | 1.64x |
+| 01_long_keys_128b | 34.85 | 14.60 | 12.83 | 10.84 | 2.39x |
+| 02_multiple_hot_keys | 44.76 | 13.99 | 13.31 | 13.36 | 3.20x |
+| 03_mixed_get_insert_remove | 26.79 | 5.923 | 10.02 | 8.488 | 2.67x |
+| 04_variable_long_keys | 33.07 | 9.427 | 8.393 | 7.651 | 3.51x |
+| 05_prefix_queries (Kitem/s) | 1075 | n/a | 495.9 | 144.9 | 2.17x |
+| 06_deep_trie_traversal | 27.51 | 13.49 | 8.102 | 9.308 | 2.04x |
+| 07_deep_trie_read_only | 31.86 | 14.81 | 14.54 | 13.37 | 2.15x |
+| 08_variable_keys_arc | 30.54 | 11.67 | 10.45 | 8.875 | 2.62x |
+| 09_prefix_realistic_mixed | 5.730 | n/a | 2.968 | 1.045 | 1.93x |
 
 ## Range Scans (6T Physical)
 
@@ -98,52 +98,54 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 | 16_insert_heavy | 25.09 | 21.88 | 1.15x |
 | 17_hot_spot | 10.61 | 6.458 | 1.64x |
 
-## Tail Latency (Exact Percentiles)
+## Tail Latency (pbench, Per-Operation)
 
-> Source: `runs/run198_tail_latency.txt`
-> **Config:** 50k samples per benchmark (exact sorted-array backend), mimalloc
+> Source: `runs/run202_tail_latency.txt`
+> **Config:** 200k samples per benchmark, `sample_size=1` (unbatched), TSC timer (10 ns precision)
 
 ### Point Lookups
 
-| Benchmark | masstree | dashmap | treeindex | skipmap | indexset |
-|-----------|----------|---------|-----------|---------|----------|
-| get 1T p50 | 117 ns | 57 ns | 228 ns | 340 ns | 260 ns |
-| get 1T p99.99 | 739 ns | 340 ns | 1.68 us | 4.81 us | 4.06 us |
-| get 8T p50 | 302 ns | 437 ns | 436 ns | 581 ns | 591 ns |
-| get 8T p99.99 | 1.02 us | 712 ns | 4.83 us | 3.18 us | 12.1 us |
-| get 1M 1T p50 | 370 ns | 165 ns | 471 ns | 661 ns | 531 ns |
-| get zipf 8T p50 | 310 ns | 205 ns | 295 ns | 541 ns | 521 ns |
+| Benchmark | masstree | treeindex | skipmap | indexset |
+|-----------|----------|-----------|---------|----------|
+| get 1T p50 | 140 ns | 250 ns | 371 ns | 270 ns |
+| get 1T p99.9 | 541 ns | 641 ns | 871 ns | 701 ns |
+| get 8T p50 | 531 ns | 561 ns | 741 ns | 701 ns |
+| get 8T p99.9 | 1.29 us | 1.43 us | 2.53 us | 1.89 us |
+| get 1M 1T p50 | 330 ns | 461 ns | 681 ns | 541 ns |
+| get deep 8T p50 | 752 ns | 871 ns | 1.02 us | - |
+| get long 8T p50 | 621 ns | 651 ns | 862 ns | - |
 
 ### Inserts
 
-| Benchmark | masstree | dashmap | treeindex | skipmap | indexset |
-|-----------|----------|---------|-----------|---------|----------|
-| insert 1T p50 | 110 ns | 80 ns | 210 ns | 180 ns | 541 ns |
-| insert 1T p99.99 | 6.10 us | 32.9 us | 4.33 us | 3.82 us | 5.16 us |
-| insert 8T p50 | 681 ns | 315 ns | 751 ns | 952 ns | 6.65 us |
-| insert 8T p99.99 | 140 us | 15.4 us | 86.4 us | 63.7 us | 158 us |
+| Benchmark | masstree | treeindex | skipmap | indexset |
+|-----------|----------|-----------|---------|----------|
+| insert 1T p50 | 120 ns | 230 ns | 200 ns | 581 ns |
+| insert 1T p99.9 | 511 ns | 1.29 us | 731 ns | 2.89 us |
+| insert 8T p50 | 631 ns | 781 ns | 992 ns | 4.66 us |
+| insert 8T p99.9 | 99.3 us | 21.2 us | 6.96 us | 59.3 us |
 
 ### Mixed Read/Write (8T)
 
-| Benchmark | masstree | dashmap | treeindex | skipmap | indexset |
-|-----------|----------|---------|-----------|---------|----------|
-| 90/10 p50 | 491 ns | 411 ns | 511 ns | 711 ns | 606 ns |
-| 90/10 p99.99 | 6.22 us | 821 ns | 9.91 us | 10.7 us | 3.77 us |
-| 50/50 p50 | 571 ns | 519 ns | 1.08 us | 1.10 us | 781 ns |
-| 50/50 p99.99 | 5.88 us | 1.51 us | 92.6 us | 45.7 us | 5.81 us |
+| Benchmark | masstree | treeindex | skipmap | indexset |
+|-----------|----------|-----------|---------|----------|
+| 90/10 p50 | 511 ns | 621 ns | 851 ns | 731 ns |
+| 90/10 p99.9 | 1.29 us | 4.46 us | 6.37 us | 1.91 us |
+| 50/50 p50 | 591 ns | 1.06 us | 1.28 us | 781 ns |
+| 50/50 p99.9 | 1.45 us | 7.40 us | 12.6 us | 3.88 us |
 
 ### Range Scans (8T, 50-key scan)
 
 | Benchmark | masstree | treeindex | skipmap |
 |-----------|----------|-----------|---------|
-| scan p50 | 461 ns | 821 ns | 3.80 us |
-| scan p99.99 | 5.24 us | 5.92 us | 12.5 us |
+| scan p50 | 1.08 us | 1.00 us | 3.83 us |
+| scan+write p50 | 1.14 us | 1.16 us | 3.83 us |
+| scan+write p99.9 | 5.34 us | 7.94 us | 11.1 us |
 
 ## Install
 
 ```toml
 [dependencies]
-masstree = { version = "0.9.0", features = ["mimalloc"] }
+masstree = { version = "0.9.1", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).
@@ -283,19 +285,6 @@ let tree_box: MassTree15<String> = MassTree15::new();
 let inline: MassTree15Inline<u64> = MassTree15Inline::new();
 ```
 
-## How It Works
-
-Masstree splits keys into 8-byte chunks, creating a trie where each node is a B+tree:
-
-```text
-Key: "users/alice/profile" (19 bytes)
-     └─ Layer 0: "users/al" (8 bytes)
-        └─ Layer 1: "ice/prof" (8 bytes)
-           └─ Layer 2: "ile" (3 bytes)
-```
-
-Keys with shared prefixes share upper layers, making lookups efficient for hierarchical data.
-
 ## Examples
 
 The `examples/` directory contains comprehensive usage examples:
@@ -387,3 +376,9 @@ MIT. See `LICENSE`.
 
 - [Masstree Paper (EuroSys 2012)](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf)
 - [C++ Reference Implementation](https://github.com/kohler/masstree-beta)
+
+## CHANGELOG
+
+0.9.1: Route based re-traversal for sublayer GC. Fixes UAF from duplicate queue
+entries and stale pointers in deeply nested chains. The correctness fix and
+proper GC path leads to substantial performance improvements.

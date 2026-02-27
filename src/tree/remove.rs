@@ -9,7 +9,7 @@ use seize::LocalGuard;
 
 use crate::ksearch::upper_bound_internode_generic;
 use crate::leaf15::LeafNode15;
-use crate::tree::coalesce::SublayerContext;
+use crate::tree::coalesce::Route;
 use crate::{
     TreeInternode, TreeLeafNode,
     alloc_trait::TreeAllocator,
@@ -66,9 +66,6 @@ enum RemoveSearchResult {
     DescendLayer {
         /// Pointer to the layer root.
         layer_ptr: *mut u8,
-
-        /// Physical slot index containing the layer pointer.
-        slot: usize,
     },
 }
 
@@ -88,12 +85,6 @@ where
     DescendLayer {
         /// Pointer to the sublayer root.
         layer_ptr: *mut u8,
-
-        /// Parent leaf containing the layer slot.
-        parent_leaf: *mut u8,
-
-        /// Physical slot in parent containing the layer pointer.
-        parent_slot: usize,
     },
 
     /// Version changed or slot moved, retry from `reach_leaf`.
@@ -101,20 +92,6 @@ where
 
     /// Leaf is part of a gc'd sublayer, restart from tree root.
     RestartFromRoot,
-}
-
-// ============================================================================
-//  Layer Context
-// ============================================================================
-
-/// Context for tracking layer descent during remove operations.
-#[derive(Debug, Clone, Copy)]
-struct LayerContext {
-    /// Pointer to the parent leaf that contains the layer slot.
-    parent_leaf: *mut u8,
-
-    /// Physical slot index in the parent leaf containing the layer pointer.
-    parent_slot: usize,
 }
 
 // ============================================================================
@@ -149,7 +126,7 @@ enum LockedParentResult<'a> {
 }
 
 // ============================================================================
-//  RemoveCursor — Stateful cursor matching C++ tcursor pattern
+//  RemoveCursor
 // ============================================================================
 
 /// A cursor for remove operations that holds the lock as persistent state.
@@ -172,7 +149,7 @@ where
     /// The locked leaf node. Lock is held for the lifetime of the cursor.
     leaf: *mut LeafNode15<P>,
 
-    /// The lock guard — this is the persistent state matching C++ `v_`.
+    /// The lock guard.
     lock: LockGuard<'t>,
 
     /// Logical position in permutation (0..size).
@@ -181,8 +158,9 @@ where
     /// Physical slot index (0..WIDTH).
     kp: usize,
 
-    /// Context chain for sublayer cleanup (parent leaf + slot at each layer).
-    layer_contexts: Vec<LayerContext>,
+    /// Route from tree root to this leaf's sublayer parent (ikey per layer).
+    /// Empty for top-layer leaves.
+    route: Route,
 
     /// Guard for memory reclamation.
     guard: &'g LocalGuard<'g>,
@@ -202,7 +180,7 @@ where
         lock: LockGuard<'t>,
         ki: usize,
         kp: usize,
-        layer_contexts: Vec<LayerContext>,
+        route: Route,
         guard: &'g LocalGuard<'g>,
     ) -> Self {
         Self {
@@ -211,7 +189,7 @@ where
             lock,
             ki,
             kp,
-            layer_contexts,
+            route,
             guard,
         }
     }
@@ -221,10 +199,7 @@ where
     pub fn finish_remove(mut self) -> Option<P::Output> {
         // SAFETY: leaf is valid and locked by us
         let leaf: &LeafNode15<P> = unsafe { &*self.leaf };
-
-        // Capture keylenx before mutations (for suffix check)
         let slot_keylenx: u8 = leaf.keylenx(self.kp);
-
         self.lock.mark_insert();
 
         let value: Option<P::Output> = leaf.take_value(self.kp);
@@ -253,22 +228,24 @@ where
         if new_perm.size() == 0 {
             leaf.mark_empty();
 
-            let ikey_bound: u64 = leaf.ikey_bound();
+            // Atomic dedup: try_mark_queued() sets the queued bit and returns
+            // true only if it was not already set. This eliminates TOCTOU races
+            // between concurrent finish_remove calls on the same leaf.
+            if leaf.try_mark_queued() {
+                if self.route.is_empty() {
+                    // Non-sublayer: schedule chain coalesce (pointer-based).
+                    let ikey_bound: u64 = leaf.ikey_bound();
 
-            // Convert layer context chain for coalesce queue
-            let sublayer_ctxs: Vec<SublayerContext> = self
-                .layer_contexts
-                .iter()
-                .map(|ctx| SublayerContext {
-                    parent_leaf: ctx.parent_leaf.cast_const(),
-                    parent_slot: ctx.parent_slot,
-                })
-                .collect();
-
-            // Schedule for cleanup (coalesce will handle leftmost and sublayer cases)
-            self.tree
-                .coalesce_queue
-                .schedule(self.leaf, ikey_bound, sublayer_ctxs);
+                    self.tree
+                        .coalesce_queue
+                        .schedule_chain(self.leaf.cast::<u8>(), ikey_bound);
+                } else {
+                    // Sublayer: schedule route-based gc (no pointers stored).
+                    self.tree
+                        .coalesce_queue
+                        .schedule_sublayer(std::mem::take(&mut self.route));
+                }
+            }
         }
 
         value
@@ -375,15 +352,14 @@ impl NodeCleaner {
             if (kp <= 1) && (parent.nkeys() > 0) && TreeInternode::child(parent, 0).is_null() {
                 let new_ikey: u64 = parent.ikey(0);
                 Self::redirect_ikey_bounds_generic::<P>(parent_ptr, current_ikey, new_ikey);
+
                 current_ikey = new_ikey;
             }
 
             drop(current_lock);
 
             if parent.nkeys() > 0 || parent.version().is_root() {
-                // Parent still has children or is root - we're done successfully
                 drop(parent_lock);
-
                 return true;
             }
 
@@ -426,14 +402,14 @@ impl NodeCleaner {
         P: LeafPolicy,
         A: TreeAllocator<P>,
     {
-        let mut key = Key::new(key_bytes);
+        let mut key: Key<'_> = Key::new(key_bytes);
         let mut retry_count: usize = 0;
 
         // Track layer descent for multi-layer keys
         let mut layer_root: *mut u8 = tree.root_ptr.load(AtomicOrdering::Acquire);
 
-        // Track parent layer context chain for gc_layer cleanup
-        let mut layer_contexts: Vec<LayerContext> = Vec::new();
+        // Route from tree root: ikey at each layer level, for sublayer GC.
+        let mut route: Route = Vec::new();
 
         'layer_loop: loop {
             'retry_loop: loop {
@@ -466,12 +442,7 @@ impl NodeCleaner {
                     RemoveSearchResult::Found { ki, kp: _ } => {
                         // Lock, verify, and get cursor or control flow instruction
                         let lock_result = Self::lock_and_verify_for_remove(
-                            tree,
-                            leaf_ptr,
-                            ki,
-                            &key,
-                            &mut layer_contexts,
-                            guard,
+                            tree, leaf_ptr, ki, &key, &mut route, guard,
                         );
 
                         match lock_result {
@@ -483,15 +454,8 @@ impl NodeCleaner {
                                 return Ok(cursor.finish_remove());
                             }
 
-                            RemoveLockResult::DescendLayer {
-                                layer_ptr: lp,
-                                parent_leaf,
-                                parent_slot,
-                            } => {
-                                layer_contexts.push(LayerContext {
-                                    parent_leaf,
-                                    parent_slot,
-                                });
+                            RemoveLockResult::DescendLayer { layer_ptr: lp } => {
+                                route.push(key.ikey());
                                 layer_root = lp;
                                 key.shift();
                                 continue 'layer_loop;
@@ -502,21 +466,18 @@ impl NodeCleaner {
                             RemoveLockResult::RestartFromRoot => {
                                 key.unshift_all();
                                 layer_root = tree.root_ptr.load(AtomicOrdering::Acquire);
-                                layer_contexts.clear();
+                                route.clear();
                                 continue 'layer_loop;
                             }
                         }
                     }
 
-                    RemoveSearchResult::DescendLayer { layer_ptr, slot } => {
+                    RemoveSearchResult::DescendLayer { layer_ptr } => {
                         if !Self::is_sublayer_valid(layer_ptr) {
                             return Ok(None);
                         }
 
-                        layer_contexts.push(LayerContext {
-                            parent_leaf: leaf_ptr.cast::<u8>(),
-                            parent_slot: slot,
-                        });
+                        route.push(key.ikey());
                         layer_root = layer_ptr;
                         key.shift();
                         continue 'layer_loop;
@@ -554,7 +515,6 @@ impl NodeCleaner {
             }
 
             if slot_ikey > target_ikey {
-                // Past the target - key not found
                 return RemoveSearchResult::NotFound;
             }
 
@@ -566,11 +526,9 @@ impl NodeCleaner {
                 if key.has_suffix() {
                     // Key continues - need to descend
                     let layer_ptr: *mut u8 = leaf.load_layer_raw(kp);
-                    return RemoveSearchResult::DescendLayer {
-                        layer_ptr,
-                        slot: kp,
-                    };
+                    return RemoveSearchResult::DescendLayer { layer_ptr };
                 }
+
                 // Short key can't match layer pointer
                 return RemoveSearchResult::NotFound;
             }
@@ -609,7 +567,7 @@ impl NodeCleaner {
         leaf_ptr: *mut LeafNode15<P>,
         ki: usize,
         key: &Key<'_>,
-        layer_contexts: &mut Vec<LayerContext>,
+        route: &mut Route,
         guard: &'g LocalGuard<'g>,
     ) -> RemoveLockResult<'t, 'g, P, A>
     where
@@ -651,20 +609,16 @@ impl NodeCleaner {
                 return RemoveLockResult::NotFound;
             }
 
-            return RemoveLockResult::DescendLayer {
-                layer_ptr: lp,
-                parent_leaf: leaf_ptr.cast::<u8>(),
-                parent_slot: new_kp,
-            };
+            return RemoveLockResult::DescendLayer { layer_ptr: lp };
         }
 
-        let cursor = RemoveCursor::new(
+        let cursor: RemoveCursor<'_, '_, P, A> = RemoveCursor::new(
             tree,
             leaf_ptr,
             lock,
             ki,
             new_kp,
-            std::mem::take(layer_contexts),
+            std::mem::take(route),
             guard,
         );
 

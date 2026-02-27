@@ -140,19 +140,31 @@ where
     pub fn process_coalesce(&self, guard: &LocalGuard<'_>) -> usize {
         self.verify_guard(guard);
 
-        Coalesce::process_all::<P, A>(&self.coalesce_queue, &self.allocator, guard)
+        Coalesce::process_all::<P, A>(self, guard)
     }
 
     /// Process up to `limit` pending empty leaf removals.
     #[inline]
     pub fn process_coalesce_batch(&self, guard: &LocalGuard<'_>, limit: usize) -> usize {
         self.verify_guard(guard);
-        Coalesce::process_batch::<P, A>(&self.coalesce_queue, &self.allocator, guard, limit)
+        Coalesce::process_batch::<P, A>(self, guard, limit)
     }
 
     // ========================================================================
     //  Internal Helpers
     // ========================================================================
+
+    /// Access the coalesce queue.
+    #[inline(always)]
+    pub(crate) const fn coalesce_queue(&self) -> &CoalesceQueue {
+        &self.coalesce_queue
+    }
+
+    /// Access the allocator.
+    #[inline(always)]
+    pub(crate) const fn allocator(&self) -> &A {
+        &self.allocator
+    }
 
     /// Load the root pointer atomically.
     #[inline(always)]
