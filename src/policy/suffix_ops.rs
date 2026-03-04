@@ -3,15 +3,16 @@
 //! Both suffix stores use the same core algorithms for reads (inline-first
 //! fallback to external) and writes (try inline, try external in-place, then
 //! drain-and-rebuild). This module provides free functions that operate on
-//! the common `(&InlineSuffixBag, &AtomicPtr<SuffixBag>)` pair.
+//! the common `(&InlineSuffixBag, &AtomicPtr<SuffixBagCell>)` pair.
 
 use std::cmp::Ordering;
+use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use seize::{Guard, LocalGuard};
 
 use crate::TreePermutation;
-use crate::suffix::{InlineSuffixBag, SuffixBag};
+use crate::suffix::{InlineSuffixBag, SuffixBag, SuffixBagCell};
 
 // ============================================================================
 //  Read Operations (safe, lock-free via OCC)
@@ -21,21 +22,23 @@ use crate::suffix::{InlineSuffixBag, SuffixBag};
 #[inline(always)]
 pub(super) fn get_suffix<'a>(
     inline: &'a InlineSuffixBag,
-    external: &AtomicPtr<SuffixBag>,
+    external: &'a AtomicPtr<SuffixBagCell>,
     slot: usize,
 ) -> Option<&'a [u8]> {
     if let Some(suffix) = inline.get(slot) {
         return Some(suffix);
     }
 
-    let ext_ptr: *mut SuffixBag = external.load(AtomicOrdering::Acquire);
+    let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Acquire);
 
     if ext_ptr.is_null() {
         None
     } else {
         // SAFETY: ext_ptr is non-null and valid (owned by the suffix store).
         // Readers rely on leaf OCC validation; writers mutate under lock.
-        unsafe { &*ext_ptr }.get(slot)
+        // SuffixBagCell::as_ref() forms &SuffixBag through UnsafeCell,
+        // avoiding &mut/& aliasing UB.
+        unsafe { (*ext_ptr).as_ref() }.get(slot)
     }
 }
 
@@ -47,7 +50,7 @@ pub(super) fn get_suffix<'a>(
 )]
 pub(super) fn suffix_equals(
     inline: &InlineSuffixBag,
-    external: &AtomicPtr<SuffixBag>,
+    external: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     suffix: &[u8],
 ) -> bool {
@@ -62,7 +65,7 @@ pub(super) fn suffix_equals(
 )]
 pub(super) fn suffix_compare(
     inline: &InlineSuffixBag,
-    external: &AtomicPtr<SuffixBag>,
+    external: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     suffix: &[u8],
 ) -> Option<Ordering> {
@@ -71,7 +74,7 @@ pub(super) fn suffix_compare(
 
 /// Check if external (overflow) storage has been allocated.
 #[inline(always)]
-pub(super) fn has_external(external: &AtomicPtr<SuffixBag>) -> bool {
+pub(super) fn has_external(external: &AtomicPtr<SuffixBagCell>) -> bool {
     !external.load(AtomicOrdering::Acquire).is_null()
 }
 
@@ -84,7 +87,7 @@ pub(super) fn has_external(external: &AtomicPtr<SuffixBag>) -> bool {
 /// Fast path: try inline, then try external in-place.
 /// Slow path: drain-and-rebuild.
 ///
-/// Returns a pointer to the old external bag (for retirement), or null.
+/// Returns a pointer to the old external cell (for retirement), or null.
 ///
 /// # Safety
 ///
@@ -92,27 +95,31 @@ pub(super) fn has_external(external: &AtomicPtr<SuffixBag>) -> bool {
 #[inline(always)]
 pub(super) unsafe fn assign_suffix(
     inline: &InlineSuffixBag,
-    external: &AtomicPtr<SuffixBag>,
+    external: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     suffix: &[u8],
     perm: &impl TreePermutation,
 ) -> *mut u8 {
     if suffix.is_empty() {
-        return std::ptr::null_mut();
+        return StdPtr::null_mut();
     }
 
     if inline.try_assign(slot, suffix) {
-        return std::ptr::null_mut();
+        return StdPtr::null_mut();
     }
 
-    let ext_ptr: *mut SuffixBag = external.load(AtomicOrdering::Relaxed);
+    let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Relaxed);
 
     if !ext_ptr.is_null() {
-        // SAFETY: ext_ptr is valid, caller holds lock.
-        let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
-        if bag.try_assign_in_place(slot, suffix) {
+        // SAFETY: ext_ptr is valid, caller holds lock. as_mut() through
+        // UnsafeCell provides exclusive write access.
+        // Append-only: never overwrites existing suffix bytes, so concurrent
+        // OCC readers see stable data at old offsets.
+        let bag: &mut SuffixBag = unsafe { (*ext_ptr).as_mut() };
+
+        if bag.try_assign_append_only(slot, suffix) {
             inline.clear(slot);
-            return std::ptr::null_mut();
+            return StdPtr::null_mut();
         }
     }
 
@@ -122,13 +129,18 @@ pub(super) unsafe fn assign_suffix(
 
 /// Assign a suffix during node initialization (sequential slots 0..slot).
 ///
+/// Init paths operate on unpublished leaves with no concurrent readers,
+/// so we can use direct `assign` (which may compact/grow) instead of the
+/// append-only path. This avoids quadratic drain-and-rebuild loops when
+/// filling a leaf with external suffixes.
+///
 /// # Safety
 ///
 /// Caller must hold leaf lock. Guard must come from this tree's collector.
 #[inline(always)]
 pub(super) unsafe fn assign_suffix_init(
     inline: &InlineSuffixBag,
-    external: &AtomicPtr<SuffixBag>,
+    external: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     suffix: &[u8],
     guard: &LocalGuard<'_>,
@@ -141,15 +153,15 @@ pub(super) unsafe fn assign_suffix_init(
         return;
     }
 
-    let ext_ptr: *mut SuffixBag = external.load(AtomicOrdering::Relaxed);
+    let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Relaxed);
 
     if !ext_ptr.is_null() {
-        // SAFETY: ext_ptr is valid, caller holds lock.
-        let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
-        if bag.try_assign_in_place(slot, suffix) {
-            inline.clear(slot);
-            return;
-        }
+        // SAFETY: ext_ptr is valid, caller holds lock. No concurrent readers
+        // on unpublished leaves, so direct assign (with compaction) is safe.
+        let bag: &mut SuffixBag = unsafe { (*ext_ptr).as_mut() };
+        bag.assign(slot, suffix);
+        inline.clear(slot);
+        return;
     }
 
     // SAFETY: Caller holds leaf lock, guard is valid.
@@ -164,24 +176,25 @@ pub(super) unsafe fn assign_suffix_init(
 #[inline(always)]
 pub(super) unsafe fn assign_suffix_prealloc(
     inline: &InlineSuffixBag,
-    external: &AtomicPtr<SuffixBag>,
+    external: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     suffix: &[u8],
     perm: &impl TreePermutation,
     prealloc: Vec<u8>,
 ) -> *mut u8 {
     if inline.try_assign(slot, suffix) {
-        return std::ptr::null_mut();
+        return StdPtr::null_mut();
     }
 
-    let ext_ptr: *mut SuffixBag = external.load(AtomicOrdering::Relaxed);
+    let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Relaxed);
 
     if !ext_ptr.is_null() {
         // SAFETY: ext_ptr is valid, caller holds lock.
-        let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
-        if bag.try_assign_in_place(slot, suffix) {
+        // Append-only: safe for concurrent OCC readers.
+        let bag: &mut SuffixBag = unsafe { (*ext_ptr).as_mut() };
+        if bag.try_assign_append_only(slot, suffix) {
             inline.clear(slot);
-            return std::ptr::null_mut();
+            return StdPtr::null_mut();
         }
     }
 
@@ -197,16 +210,16 @@ pub(super) unsafe fn assign_suffix_prealloc(
 #[inline(always)]
 pub(super) unsafe fn clear_suffix(
     inline: &InlineSuffixBag,
-    external: &AtomicPtr<SuffixBag>,
+    external: &AtomicPtr<SuffixBagCell>,
     slot: usize,
 ) {
     inline.clear(slot);
 
-    let ext_ptr: *mut SuffixBag = external.load(AtomicOrdering::Acquire);
+    let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Acquire);
 
     if !ext_ptr.is_null() {
         // SAFETY: ext_ptr is valid, caller holds lock.
-        let bag: &mut SuffixBag = unsafe { &mut *ext_ptr };
+        let bag: &mut SuffixBag = unsafe { (*ext_ptr).as_mut() };
         bag.clear(slot);
     }
 }
@@ -217,15 +230,17 @@ pub(super) unsafe fn clear_suffix(
 ///
 /// Caller must hold the leaf lock.
 #[inline(always)]
-pub(super) unsafe fn ensure_external_bag(external: &AtomicPtr<SuffixBag>) -> *mut SuffixBag {
-    let ptr: *mut SuffixBag = external.load(AtomicOrdering::Acquire);
+pub(super) unsafe fn ensure_external_bag(
+    external: &AtomicPtr<SuffixBagCell>,
+) -> *mut SuffixBagCell {
+    let ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Acquire);
 
     if !ptr.is_null() {
         return ptr;
     }
 
-    let new_external: Box<SuffixBag> = Box::default();
-    let new_ptr: *mut SuffixBag = Box::into_raw(new_external);
+    let new_cell: Box<SuffixBagCell> = Box::default();
+    let new_ptr: *mut SuffixBagCell = Box::into_raw(new_cell);
     external.store(new_ptr, AtomicOrdering::Release);
 
     new_ptr
@@ -242,23 +257,24 @@ pub(super) unsafe fn ensure_external_bag(external: &AtomicPtr<SuffixBag>) -> *mu
 ///
 /// - Caller must hold the leaf lock.
 /// - `inline` must point to a valid `InlineSuffixBag`.
-/// - `external_slot` must be the `AtomicPtr<SuffixBag>` that stores the
-///   external bag pointer for this suffix store.
+/// - `external_slot` must be the `AtomicPtr<SuffixBagCell>` that stores the
+///   external cell pointer for this suffix store.
 #[cold]
 #[inline(never)]
 unsafe fn drain_and_rebuild(
     inline: &InlineSuffixBag,
-    external_slot: &AtomicPtr<SuffixBag>,
+    external_slot: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     suffix: &[u8],
     perm: &impl TreePermutation,
 ) -> *mut u8 {
     let mut new_bag: SuffixBag = inline.drain_to_external(perm, slot, suffix);
 
-    let old_external: *mut SuffixBag = external_slot.load(AtomicOrdering::Relaxed);
+    let old_external: *mut SuffixBagCell = external_slot.load(AtomicOrdering::Relaxed);
     merge_old_external_perm(&mut new_bag, old_external, slot, perm);
 
-    let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
+    let new_cell: SuffixBagCell = SuffixBagCell::from_bag(new_bag);
+    let new_ptr: *mut SuffixBagCell = Box::into_raw(Box::new(new_cell));
     external_slot.store(new_ptr, AtomicOrdering::Release);
 
     old_external.cast::<u8>()
@@ -274,7 +290,7 @@ unsafe fn drain_and_rebuild(
 #[inline(never)]
 unsafe fn drain_and_rebuild_prealloc(
     inline: &InlineSuffixBag,
-    external_slot: &AtomicPtr<SuffixBag>,
+    external_slot: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     suffix: &[u8],
     perm: &impl TreePermutation,
@@ -282,10 +298,11 @@ unsafe fn drain_and_rebuild_prealloc(
 ) -> *mut u8 {
     let mut new_bag: SuffixBag = inline.drain_to_external_with_vec(perm, slot, suffix, prealloc);
 
-    let old_external: *mut SuffixBag = external_slot.load(AtomicOrdering::Relaxed);
+    let old_external: *mut SuffixBagCell = external_slot.load(AtomicOrdering::Relaxed);
     merge_old_external_perm(&mut new_bag, old_external, slot, perm);
 
-    let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
+    let new_cell: SuffixBagCell = SuffixBagCell::from_bag(new_bag);
+    let new_ptr: *mut SuffixBagCell = Box::into_raw(Box::new(new_cell));
     external_slot.store(new_ptr, AtomicOrdering::Release);
 
     old_external.cast::<u8>()
@@ -300,21 +317,22 @@ unsafe fn drain_and_rebuild_prealloc(
 #[inline(never)]
 unsafe fn drain_and_rebuild_init(
     inline: &InlineSuffixBag,
-    external_slot: &AtomicPtr<SuffixBag>,
+    external_slot: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     suffix: &[u8],
     guard: &LocalGuard<'_>,
 ) {
     let mut new_bag: SuffixBag = inline.drain_to_external_init(slot, suffix);
 
-    let old_external: *mut SuffixBag = external_slot.load(AtomicOrdering::Relaxed);
+    let old_external: *mut SuffixBagCell = external_slot.load(AtomicOrdering::Relaxed);
     merge_old_external_init(&mut new_bag, old_external, slot);
 
-    let new_ptr: *mut SuffixBag = Box::into_raw(Box::new(new_bag));
+    let new_cell: SuffixBagCell = SuffixBagCell::from_bag(new_bag);
+    let new_ptr: *mut SuffixBagCell = Box::into_raw(Box::new(new_cell));
     external_slot.store(new_ptr, AtomicOrdering::Release);
 
     if !old_external.is_null() {
-        // SAFETY: old_external was a valid Box<SuffixBag> from a prior drain.
+        // SAFETY: old_external was a valid Box<SuffixBagCell> from a prior drain.
         unsafe {
             guard.defer_retire(old_external, |ptr, _| {
                 drop(Box::from_raw(ptr));
@@ -330,7 +348,7 @@ unsafe fn drain_and_rebuild_init(
 /// Merge active suffixes from old external bag into new bag (permutation-based).
 fn merge_old_external_perm(
     new_bag: &mut SuffixBag,
-    old_external: *mut SuffixBag,
+    old_external: *mut SuffixBagCell,
     skip_slot: usize,
     perm: &impl TreePermutation,
 ) {
@@ -338,8 +356,10 @@ fn merge_old_external_perm(
         return;
     }
 
-    // SAFETY: old_external is valid, caller holds the lock.
-    let old_ref: &SuffixBag = unsafe { &*old_external };
+    // SAFETY: old_external is valid, caller holds the lock. The old cell is
+    // about to be retired, so no concurrent writers. Readers may still hold
+    // shared references, but we only read from old_ref here.
+    let old_ref: &SuffixBag = unsafe { (*old_external).as_ref() };
 
     for i in 0..perm.size() {
         let phys: usize = perm.get(i);
@@ -354,13 +374,13 @@ fn merge_old_external_perm(
 }
 
 /// Merge active suffixes from old external bag into new bag (sequential init).
-fn merge_old_external_init(new_bag: &mut SuffixBag, old_external: *mut SuffixBag, slot: usize) {
+fn merge_old_external_init(new_bag: &mut SuffixBag, old_external: *mut SuffixBagCell, slot: usize) {
     if old_external.is_null() {
         return;
     }
 
     // SAFETY: old_external is valid, caller holds the lock.
-    let old_ref: &SuffixBag = unsafe { &*old_external };
+    let old_ref: &SuffixBag = unsafe { (*old_external).as_ref() };
 
     for s in 0..slot {
         if !new_bag.has_suffix(s)

@@ -79,8 +79,9 @@ where
             }
         }
 
-        // Set permutation: final leaf now has exactly 2 entries in slots 0 and 1
-        final_leaf.set_permutation(
+        // Relaxed is sufficient: this leaf is not yet visible to other threads.
+        // The store_layer Release in the caller publishes it.
+        final_leaf.set_permutation_relaxed(
             <<LeafNode15<P> as TreeLeafNode<P>>::Perm as TreePermutation>::make_sorted(2),
         );
     }
@@ -131,7 +132,8 @@ where
             // SAFETY: twig_ptr is valid, we just allocated it
             unsafe {
                 (*twig_ptr).set_ikey(0, existing_key.ikey());
-                (*twig_ptr).set_permutation(
+                // Relaxed: twig is not yet visible. store_layer Release publishes it.
+                (*twig_ptr).set_permutation_relaxed(
                     <<LeafNode15<P> as TreeLeafNode<P>>::Perm as TreePermutation>::make_sorted(1),
                 );
             }

@@ -537,16 +537,15 @@ where
             // SAFETY: next_ptr is valid
             let next: &LeafNode15<P> = unsafe { &*next_ptr };
 
-            let next_next_raw: *mut LeafNode15<P> = next.next_raw(guard);
-            let next_next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_next_raw);
-            let prefetch_base: *const u8 = next_next_ptr.cast::<u8>();
-            prefetch_read(prefetch_base);
-            prefetch_read(prefetch_base.wrapping_add(64));
-
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
-                // Key belongs in next leaf or further
+                let next_next_raw: *mut LeafNode15<P> = next.next_raw(guard);
+                let next_next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_next_raw);
+                let prefetch_base: *const u8 = next_next_ptr.cast::<u8>();
+                prefetch_read(prefetch_base);
+                prefetch_read(prefetch_base.wrapping_add(64));
+
                 leaf_ptr = next_ptr;
                 leaf = next;
                 hops += 1;

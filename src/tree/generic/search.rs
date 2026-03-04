@@ -4,6 +4,9 @@ use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 
 /// Threshold for switching from linear to binary search.
+/// With WIDTH=15, the condition `WIDTH <= BINARY_SEARCH_THRESHOLD` is always
+/// true, so the linear path is always taken. The binary search path activates
+/// only if WIDTH exceeds this value in a future configuration.
 const BINARY_SEARCH_THRESHOLD: usize = 16;
 
 impl<P, A> MassTreeGeneric<P, A>

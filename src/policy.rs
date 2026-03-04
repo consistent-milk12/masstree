@@ -29,6 +29,7 @@ use seize::{Guard, LocalGuard};
 
 use crate::inline::bits::InlineBits;
 use crate::prefetch::prefetch_read;
+use crate::suffix::SuffixBagCell;
 
 // ============================================================================
 //  ValuePtr<V>
@@ -325,6 +326,12 @@ pub trait SuffixStore: sealed::SuffixStoreSealed + Send + Sync + Sized + 'static
     /// Check if external (overflow) storage has been allocated.
     fn has_external(&self) -> bool;
 
+    /// Prefetch suffix storage into cache for upcoming access.
+    ///
+    /// For sidecar-based storage, this prefetches the sidecar structure.
+    /// For embedded storage, this is a no-op (data is already in the leaf).
+    fn prefetch(&self);
+
     // ========================================================================
     //  Write Operations (lock required)
     // ========================================================================
@@ -369,7 +376,7 @@ pub trait SuffixStore: sealed::SuffixStoreSealed + Send + Sync + Sized + 'static
     /// # Safety
     ///
     /// Caller must hold the leaf lock.
-    unsafe fn ensure_external(&self) -> *mut crate::suffix::SuffixBag;
+    unsafe fn ensure_external(&self) -> *mut SuffixBagCell;
 
     /// Clear a slot's suffix.
     ///

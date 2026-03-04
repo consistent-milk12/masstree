@@ -279,7 +279,9 @@ impl Coalesce {
         }
 
         if leaf.prev(guard).is_null() {
-            // Leftmost leaf: cannot unlink. If isolated (no next), nothing to do.
+            // Leftmost leaf: cannot unlink. Clear queued bit so it is not
+            // permanently stuck on a leaf that can never be coalesced.
+            leaf.clear_queued();
             drop(lock);
             return true;
         }
@@ -515,7 +517,7 @@ impl Coalesce {
         let leaf_ptr: *mut LeafNode15<P> =
             tree.reach_leaf_concurrent_generic(current_root, &key, true, guard);
 
-        match Self::advance_to_ikey(leaf_ptr, last_ikey, guard) {
+        match Self::walk_chain_to_ikey(leaf_ptr, last_ikey, guard) {
             RouteLookupResult::Found(parent_ptr) => RouteLookupResult::Found(FoundParent {
                 parent_ptr,
                 last_ikey,
@@ -529,108 +531,11 @@ impl Coalesce {
         }
     }
 
-    /// Walk B-link chain from `start` to find the leaf whose key range contains
-    /// `target_ikey`, then search for a layer slot matching that ikey.
-    fn find_layer_in_chain<P: LeafPolicy>(
-        start: *mut LeafNode15<P>,
-        target_ikey: u64,
-        guard: &LocalGuard<'_>,
-    ) -> RouteLookupResult<*mut u8> {
-        let mut leaf_ptr: *mut LeafNode15<P> = start;
-        let mut hops: usize = 0;
-
-        loop {
-            if hops >= MAX_GC_BLINK_HOPS {
-                return RouteLookupResult::HopLimit;
-            }
-
-            // SAFETY: leaf_ptr is valid, protected by guard.
-            let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-
-            // Skip deleted leaves in the chain (version deleted bit).
-            if leaf.version().is_deleted() {
-                let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
-                let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
-
-                if next_ptr.is_null() {
-                    return RouteLookupResult::NotFound;
-                }
-
-                leaf_ptr = next_ptr;
-                hops += 1;
-                continue;
-            }
-
-            // A deleted_layer() leaf was already collected. Treat as Retry.
-            if leaf.deleted_layer() {
-                return RouteLookupResult::Retry;
-            }
-
-            // Handle split-marked next pointer before reading successor's
-            // ikey_bound. Matches advance_to_key_by_bound_generic.
-            let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
-            if Linker::is_marked(next_raw) {
-                leaf.wait_for_split();
-                continue;
-            }
-
-            let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
-
-            if !next_ptr.is_null() {
-                // SAFETY: next_ptr is non-null and protected by guard.
-                let next_leaf: &LeafNode15<P> = unsafe { &*next_ptr };
-                let next_bound: u64 = next_leaf.ikey_bound();
-
-                if target_ikey >= next_bound {
-                    leaf_ptr = next_ptr;
-                    hops += 1;
-                    continue;
-                }
-            }
-
-            // This leaf's range should contain target_ikey. Take OCC snapshot.
-            let version: u32 = match leaf.version().try_stable() {
-                Some(v) => v,
-
-                None => return RouteLookupResult::Retry,
-            };
-
-            let slot: Option<usize> = Self::find_layer_slot(leaf, target_ikey);
-
-            if leaf.version().has_changed_or_locked(version) {
-                return RouteLookupResult::Retry;
-            }
-
-            let Some(kp) = slot else {
-                return RouteLookupResult::NotFound;
-            };
-
-            let layer_ptr: *mut u8 = leaf.load_layer_raw(kp);
-
-            // Re-check version after loading the pointer.
-            if leaf.version().has_changed_or_locked(version) {
-                return RouteLookupResult::Retry;
-            }
-
-            if layer_ptr.is_null() {
-                return RouteLookupResult::NotFound;
-            }
-
-            // Verify the layer root is not already deleted.
-            // SAFETY: layer_ptr points to a valid node, protected by guard.
-            #[expect(clippy::cast_ptr_alignment, reason = "NodeVersion is first field")]
-            let layer_version: &NodeVersion = unsafe { &*layer_ptr.cast::<NodeVersion>() };
-
-            if layer_version.is_deleted() {
-                return RouteLookupResult::Retry;
-            }
-
-            return RouteLookupResult::Found(layer_ptr);
-        }
-    }
-
-    /// Walk B-link chain until we find the leaf whose range contains `target_ikey`.
-    fn advance_to_ikey<P: LeafPolicy>(
+    /// Walk B-link chain from `start` until the leaf whose key range contains
+    /// `target_ikey`. Handles deleted leaves, split-marked pointers, and
+    /// deleted-layer detection. Used by both `find_layer_in_chain` and
+    /// `advance_to_ikey`.
+    fn walk_chain_to_ikey<P: LeafPolicy>(
         start: *mut LeafNode15<P>,
         target_ikey: u64,
         guard: &LocalGuard<'_>,
@@ -643,7 +548,7 @@ impl Coalesce {
                 return RouteLookupResult::HopLimit;
             }
 
-            // SAFETY: leaf_ptr valid, protected by guard.
+            // SAFETY: leaf_ptr is valid, protected by guard.
             let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
             if leaf.version().is_deleted() {
@@ -663,7 +568,6 @@ impl Coalesce {
                 return RouteLookupResult::Retry;
             }
 
-            // Handle split-marked next pointer before reading successor's ikey_bound.
             let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
 
             if Linker::is_marked(next_raw) {
@@ -674,7 +578,7 @@ impl Coalesce {
             let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
 
             if !next_ptr.is_null() {
-                // SAFETY: next_ptr non-null, protected by guard.
+                // SAFETY: next_ptr is non-null, protected by guard.
                 let next_leaf: &LeafNode15<P> = unsafe { &*next_ptr };
 
                 if target_ikey >= next_leaf.ikey_bound() {
@@ -686,6 +590,62 @@ impl Coalesce {
 
             return RouteLookupResult::Found(leaf_ptr);
         }
+    }
+
+    /// Walk B-link chain from `start` to find the leaf whose key range contains
+    /// `target_ikey`, then search for a layer slot matching that ikey.
+    fn find_layer_in_chain<P: LeafPolicy>(
+        start: *mut LeafNode15<P>,
+        target_ikey: u64,
+        guard: &LocalGuard<'_>,
+    ) -> RouteLookupResult<*mut u8> {
+        let leaf_ptr: *mut LeafNode15<P> = match Self::walk_chain_to_ikey(start, target_ikey, guard)
+        {
+            RouteLookupResult::Found(ptr) => ptr,
+            RouteLookupResult::Retry => return RouteLookupResult::Retry,
+            RouteLookupResult::NotFound => return RouteLookupResult::NotFound,
+            RouteLookupResult::HopLimit => return RouteLookupResult::HopLimit,
+        };
+
+        // SAFETY: leaf_ptr is valid, protected by guard.
+        let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
+
+        // OCC snapshot to read layer slot.
+        let version: u32 = match leaf.version().try_stable() {
+            Some(v) => v,
+            None => return RouteLookupResult::Retry,
+        };
+
+        let slot: Option<usize> = Self::find_layer_slot(leaf, target_ikey);
+
+        if leaf.version().has_changed_or_locked(version) {
+            return RouteLookupResult::Retry;
+        }
+
+        let Some(kp) = slot else {
+            return RouteLookupResult::NotFound;
+        };
+
+        let layer_ptr: *mut u8 = leaf.load_layer_raw(kp);
+
+        if leaf.version().has_changed_or_locked(version) {
+            return RouteLookupResult::Retry;
+        }
+
+        if layer_ptr.is_null() {
+            return RouteLookupResult::NotFound;
+        }
+
+        // Verify the layer root is not already deleted.
+        // SAFETY: layer_ptr points to a valid node, protected by guard.
+        #[expect(clippy::cast_ptr_alignment, reason = "NodeVersion is first field")]
+        let layer_version: &NodeVersion = unsafe { &*layer_ptr.cast::<NodeVersion>() };
+
+        if layer_version.is_deleted() {
+            return RouteLookupResult::Retry;
+        }
+
+        RouteLookupResult::Found(layer_ptr)
     }
 }
 

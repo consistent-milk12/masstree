@@ -16,6 +16,10 @@ struct CompactEntry {
 
 impl SuffixBag {
     /// Compact in-place by moving data within the existing buffer.
+    ///
+    /// Only reachable via `SuffixBag::try_assign(&mut self, ...)`, which
+    /// guarantees exclusive access. Not used in concurrent code paths
+    /// (those use `try_assign_append_only` + drain-and-rebuild).
     #[expect(clippy::indexing_slicing, reason = "Bounds checked via slot iteration")]
     pub(super) fn compact_in_place(&mut self) {
         if self.suffix_count == 0 {
@@ -24,10 +28,18 @@ impl SuffixBag {
         }
 
         let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
+        let mut already_sorted: bool = true;
+        let mut last_offset: u32 = 0;
 
         for slot in 0..WIDTH {
             let meta: SlotMeta = self.slots[slot];
+
             if meta.has_suffix() {
+                if meta.offset < last_offset {
+                    already_sorted = false;
+                }
+                last_offset = meta.offset;
+
                 entries.push(CompactEntry {
                     slot,
                     offset: meta.offset,
@@ -41,12 +53,6 @@ impl SuffixBag {
             self.suffix_count = 0;
             return;
         }
-
-        // Suffixes are appended sequentially, so offsets are naturally monotonic.
-        // Sort is only needed after in-place slot reuse.
-        let already_sorted: bool = entries
-            .windows(2)
-            .all(|w: &[CompactEntry]| w[0].offset <= w[1].offset);
 
         if !already_sorted {
             entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
@@ -79,36 +85,44 @@ impl SuffixBag {
             write_pos += entry.len as usize;
         }
 
-        // Truncate buffer to new size (no allocation!)
         self.data.truncate(write_pos);
-        // suffix_count unchanged - we kept all slots that had suffixes
     }
 
     /// Compact keeping only specified active slots, using in-place moves.
     #[expect(clippy::indexing_slicing, reason = "Slot bounds explicitly checked")]
     pub(super) fn compact(&mut self, active_slots: impl Iterator<Item = usize>) -> usize {
         let old_used: usize = self.data.len();
-
         let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
         let mut seen: u64 = 0;
+        let mut already_sorted: bool = true;
+        let mut last_offset: u32 = 0;
 
         for slot in active_slots {
             debug_assert!(
                 slot < WIDTH,
                 "active_slots yielded out-of-bounds slot {slot} (WIDTH={WIDTH})"
             );
+
             if slot >= WIDTH {
                 continue;
             }
 
             let mask: u64 = 1 << slot;
+
             if seen & mask != 0 {
                 continue;
             }
+
             seen |= mask;
 
             let meta: SlotMeta = self.slots[slot];
+
             if meta.has_suffix() {
+                if meta.offset < last_offset {
+                    already_sorted = false;
+                }
+                last_offset = meta.offset;
+
                 entries.push(CompactEntry {
                     slot,
                     offset: meta.offset,
@@ -123,10 +137,6 @@ impl SuffixBag {
             self.suffix_count = 0;
             return old_used;
         }
-
-        let already_sorted: bool = entries
-            .windows(2)
-            .all(|w: &[CompactEntry]| w[0].offset <= w[1].offset);
 
         if !already_sorted {
             entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);

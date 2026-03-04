@@ -14,6 +14,18 @@ pub type RemoveEntryResult<O> = Result<Option<(Vec<u8>, O)>, RemoveError>;
 
 /// A view into a single entry in a tree, which may either be vacant or occupied.
 ///
+/// # Concurrency
+///
+/// Classification (Occupied vs Vacant) is a point-in-time snapshot taken
+/// without holding a lock. A concurrent insert or remove between
+/// classification and the subsequent mutation can cause:
+///
+/// - `and_modify`: lost updates (computation based on stale value).
+/// - `VacantEntry::insert`: silent overwrite of a concurrently inserted key.
+///
+/// For atomic read-modify-write, use `insert_with_guard` directly or an
+/// external synchronization strategy.
+///
 /// # Example
 ///
 /// ```rust
@@ -98,12 +110,8 @@ where
         }
     }
 
-    /// Fallible version [`or_insert`](Self::or_insert).
-    ///
-    /// # Errors
-    ///
-    /// Panics if insertion fails (allocation error). For fallible insertion,
-    /// use [`or_try_insert`](Self::or_try_insert).
+    /// Inserts a default value if the entry is vacant, then returns
+    /// the entry's value.
     ///
     /// # Example
     ///
@@ -158,6 +166,10 @@ where
     }
 
     /// Modifies the value if occupied using the provided function.
+    ///
+    /// The function receives a snapshot of the current value. Under concurrent
+    /// writes, the snapshot may be stale and the resulting store can overwrite
+    /// a newer value. See [`Entry`] concurrency notes.
     #[must_use]
     pub fn and_modify<F>(self, f: F) -> Self
     where

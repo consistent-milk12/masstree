@@ -7,9 +7,11 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::TreePermutation;
-use crate::suffix::{SideCarUtils, SuffixBag, SuffixSidecar};
+use crate::prefetch::prefetch_read;
+use crate::suffix::{SideCarUtils, SuffixBagCell, SuffixSidecar};
 
 use super::SuffixStore;
+use super::suffix_ops as SuffixOps;
 
 // ============================================================================
 //  SidecarSuffix
@@ -80,7 +82,8 @@ impl SuffixStore for SidecarSuffix {
         // SAFETY: ptr is non-null and was allocated by us. The sidecar
         // is never deallocated while the leaf is alive (only in Drop).
         let sidecar: &SuffixSidecar = unsafe { &*ptr };
-        super::suffix_ops::get_suffix(&sidecar.inline, &sidecar.external, slot)
+
+        SuffixOps::get_suffix(&sidecar.inline, &sidecar.external, slot)
     }
 
     #[inline(always)]
@@ -92,7 +95,8 @@ impl SuffixStore for SidecarSuffix {
         }
 
         let sidecar: &SuffixSidecar = unsafe { &*ptr };
-        super::suffix_ops::suffix_equals(&sidecar.inline, &sidecar.external, slot, suffix)
+
+        SuffixOps::suffix_equals(&sidecar.inline, &sidecar.external, slot, suffix)
     }
 
     #[inline(always)]
@@ -104,7 +108,8 @@ impl SuffixStore for SidecarSuffix {
         }
 
         let sidecar: &SuffixSidecar = unsafe { &*ptr };
-        super::suffix_ops::suffix_compare(&sidecar.inline, &sidecar.external, slot, suffix)
+
+        SuffixOps::suffix_compare(&sidecar.inline, &sidecar.external, slot, suffix)
     }
 
     #[inline(always)]
@@ -116,7 +121,28 @@ impl SuffixStore for SidecarSuffix {
         }
 
         let sidecar: &SuffixSidecar = unsafe { &*ptr };
-        super::suffix_ops::has_external(&sidecar.external)
+        SuffixOps::has_external(&sidecar.external)
+    }
+
+    #[inline(always)]
+    fn prefetch(&self) {
+        // Relaxed is sufficient: this is a prefetch hint, not a data read.
+        // The actual data read in get_suffix() does its own Acquire load.
+        let ptr: *mut SuffixSidecar = self.sidecar.load(AtomicOrdering::Relaxed);
+
+        if !ptr.is_null() {
+            // Prefetch the sidecar header (inline suffix data, first cache line).
+            prefetch_read(ptr);
+
+            // Also prefetch the cache line containing the external AtomicPtr,
+            // which sits after the InlineSuffixBag. This way both the inline
+            // check and the external pointer load are cache-warm by the time
+            // get_suffix() runs.
+            let external_offset: usize = std::mem::offset_of!(SuffixSidecar, external);
+            let external_addr: *const u8 = (ptr as *const u8).wrapping_add(external_offset);
+
+            prefetch_read(external_addr);
+        }
     }
 
     // ========================================================================
@@ -136,9 +162,7 @@ impl SuffixStore for SidecarSuffix {
         let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
 
         // SAFETY: Caller holds leaf lock.
-        unsafe {
-            super::suffix_ops::assign_suffix(&sidecar.inline, &sidecar.external, slot, suffix, perm)
-        }
+        unsafe { SuffixOps::assign_suffix(&sidecar.inline, &sidecar.external, slot, suffix, perm) }
     }
 
     #[inline(always)]
@@ -149,13 +173,7 @@ impl SuffixStore for SidecarSuffix {
 
         // SAFETY: Caller holds leaf lock, guard is valid.
         unsafe {
-            super::suffix_ops::assign_suffix_init(
-                &sidecar.inline,
-                &sidecar.external,
-                slot,
-                suffix,
-                guard,
-            );
+            SuffixOps::assign_suffix_init(&sidecar.inline, &sidecar.external, slot, suffix, guard);
         }
     }
 
@@ -174,7 +192,7 @@ impl SuffixStore for SidecarSuffix {
 
         // SAFETY: Caller holds leaf lock.
         unsafe {
-            super::suffix_ops::assign_suffix_prealloc(
+            SuffixOps::assign_suffix_prealloc(
                 &sidecar.inline,
                 &sidecar.external,
                 slot,
@@ -186,11 +204,12 @@ impl SuffixStore for SidecarSuffix {
     }
 
     #[inline(always)]
-    unsafe fn ensure_external(&self) -> *mut SuffixBag {
+    unsafe fn ensure_external(&self) -> *mut SuffixBagCell {
         // SAFETY: Caller holds leaf lock.
         let sidecar_ptr: *mut SuffixSidecar = unsafe { self.ensure_sidecar() };
         let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
-        unsafe { super::suffix_ops::ensure_external_bag(&sidecar.external) }
+
+        unsafe { SuffixOps::ensure_external_bag(&sidecar.external) }
     }
 
     #[inline(always)]
@@ -204,7 +223,7 @@ impl SuffixStore for SidecarSuffix {
         let sidecar: &SuffixSidecar = unsafe { &*ptr };
 
         // SAFETY: Caller holds leaf lock.
-        unsafe { super::suffix_ops::clear_suffix(&sidecar.inline, &sidecar.external, slot) }
+        unsafe { SuffixOps::clear_suffix(&sidecar.inline, &sidecar.external, slot) }
     }
 
     #[inline(always)]
@@ -213,12 +232,12 @@ impl SuffixStore for SidecarSuffix {
             return;
         }
 
-        // SAFETY: ptr came from assign() and is a valid SuffixBag pointer.
+        // SAFETY: ptr came from assign() and is a valid SuffixBagCell pointer.
         unsafe {
             guard.defer_retire(
-                ptr.cast::<SuffixBag>(),
-                |ptr: *mut SuffixBag, collector: &Collector| {
-                    SideCarUtils::retire_suffix_bag(ptr, collector);
+                ptr.cast::<SuffixBagCell>(),
+                |ptr: *mut SuffixBagCell, collector: &Collector| {
+                    SideCarUtils::retire_suffix_bag_cell(ptr, collector);
                 },
             );
         }

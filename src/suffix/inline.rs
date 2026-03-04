@@ -243,15 +243,26 @@ impl InlineSuffixBag {
             }
         }
 
+        // Reserve headroom for future inserts into this leaf, avoiding
+        // repeated drain-and-rebuild cycles as the leaf fills up.
+        // Heuristic: assume remaining slots will need similar-sized suffixes.
+        let avg_suffix: usize = if copy_count > 0 {
+            required_capacity / (copy_count + 1)
+        } else {
+            new_suffix.len()
+        };
+        let headroom: usize = (WIDTH - (copy_count + 1)) * avg_suffix;
+        let target_capacity: usize = required_capacity + headroom;
+
         let mut external: SuffixBag = match buffer {
             Some(vec) => {
                 let mut bag: SuffixBag = SuffixBag::from_vec(vec);
-                if bag.capacity() < required_capacity {
-                    bag.reserve(required_capacity.saturating_sub(bag.used()));
+                if bag.capacity() < target_capacity {
+                    bag.reserve(target_capacity.saturating_sub(bag.used()));
                 }
                 bag
             }
-            None => SuffixBag::with_capacity(required_capacity),
+            None => SuffixBag::with_capacity(target_capacity),
         };
 
         for &(slot, start, len) in &slots_to_copy[..copy_count] {

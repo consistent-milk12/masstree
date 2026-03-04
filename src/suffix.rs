@@ -5,6 +5,9 @@
 //! When a key is longer than 8 bytes, the first 8 bytes are stored as `ikey0`
 //! and the remaining bytes are stored in a [`SuffixBag`].
 
+use std::cell::UnsafeCell;
+use std::fmt::{self, Debug, Formatter};
+
 use crate::TreePermutation;
 
 mod clone;
@@ -191,7 +194,7 @@ impl SuffixBag {
 
         let suffix_len: usize = suffix.len();
 
-        assert!(
+        debug_assert!(
             u16::try_from(suffix_len).is_ok(),
             "suffix too long: {suffix_len} > {}",
             u16::MAX
@@ -305,7 +308,35 @@ impl SuffixBag {
     //  Suffix Assignment
     // ========================================================================
 
+    /// Append-only suffix assignment for concurrent use.
+    ///
+    /// Unlike [`try_assign_in_place`](Self::try_assign_in_place), this method
+    /// never overwrites existing suffix bytes. New data is always appended to
+    /// the end of the buffer, so concurrent OCC readers reading old offsets
+    /// see stable data. Old suffix space becomes dead until drain-and-rebuild.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
+    #[inline]
+    pub fn try_assign_append_only(&mut self, slot: usize, suffix: &[u8]) -> bool {
+        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        debug_assert!(
+            u16::try_from(suffix.len()).is_ok(),
+            "suffix too long: {} > {}",
+            suffix.len(),
+            u16::MAX
+        );
+
+        self.try_append_suffix(slot, suffix)
+    }
+
     /// Try to assign a suffix to a slot in-place, without growing the buffer.
+    ///
+    /// This method may overwrite existing suffix bytes in-place when the new
+    /// suffix fits. It is NOT safe for concurrent use (readers may observe
+    /// partially-written data). Use [`try_assign_append_only`](Self::try_assign_append_only)
+    /// for the concurrent path.
     ///
     /// # Panics
     ///
@@ -317,7 +348,7 @@ impl SuffixBag {
     )]
     pub fn try_assign_in_place(&mut self, slot: usize, suffix: &[u8]) -> bool {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
-        assert!(
+        debug_assert!(
             u16::try_from(suffix.len()).is_ok(),
             "suffix too long: {} > {}",
             suffix.len(),
@@ -342,15 +373,28 @@ impl SuffixBag {
             return true;
         }
 
+        self.try_append_suffix(slot, suffix)
+    }
+
+    /// Append suffix data to the end of the buffer if capacity allows.
+    ///
+    /// Shared by `try_assign_append_only` and the fallback path of
+    /// `try_assign_in_place`.
+    #[inline]
+    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
+    fn try_append_suffix(&mut self, slot: usize, suffix: &[u8]) -> bool {
         let new_offset: usize = self.data.len();
 
         if (new_offset + suffix.len()) <= self.data.capacity() {
-            if !meta.has_suffix() {
+            if !self.slots[slot].has_suffix() {
                 self.suffix_count += 1;
             }
 
             self.data.extend_from_slice(suffix);
 
+            // NOTE: SlotMeta write is non-atomic. Concurrent OCC readers may
+            // observe a torn (offset, len) pair, but they validate the leaf
+            // version after reading, so torn data is always discarded.
             #[expect(clippy::cast_possible_truncation, reason = "offset and len checked")]
             {
                 self.slots[slot] = SlotMeta {
@@ -363,7 +407,6 @@ impl SuffixBag {
             return true;
         }
 
-        // Slow Path: doesn't fit, caller should realloc
         false
     }
 
@@ -379,7 +422,7 @@ impl SuffixBag {
     )]
     pub fn assign(&mut self, slot: usize, suffix: &[u8]) {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
-        assert!(
+        debug_assert!(
             u16::try_from(suffix.len()).is_ok(),
             "suffix too long: {} > {}",
             suffix.len(),
@@ -451,6 +494,90 @@ impl Default for SuffixBag {
     #[inline(always)]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+//  SuffixBagCell (internal concurrent wrapper)
+// ============================================================================
+
+/// Interior-mutable wrapper for [`SuffixBag`] used inside leaf nodes.
+///
+/// Provides `UnsafeCell`-based access so that writers (under the leaf lock)
+/// can mutate through `&self` while readers form `&SuffixBag` for read-only
+/// access under the OCC protocol.
+///
+/// This type is NOT publicly exported. It exists solely to eliminate the
+/// `&mut SuffixBag` / `&SuffixBag` aliasing UB in the tree's concurrent paths.
+pub struct SuffixBagCell {
+    inner: UnsafeCell<SuffixBag>,
+}
+
+// SAFETY: SuffixBagCell is Send because SuffixBag contains Vec<u8> and plain
+// data, all of which are Send. We intentionally do NOT implement Sync. The
+// tree accesses SuffixBagCell only through raw pointers from AtomicPtr, forming
+// short-lived references locally. Writers hold the leaf lock, readers validate
+// via OCC version checks.
+unsafe impl Send for SuffixBagCell {}
+
+impl SuffixBagCell {
+    /// Create a new cell wrapping a default `SuffixBag`.
+    #[inline(always)]
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: UnsafeCell::new(SuffixBag::new()),
+        }
+    }
+
+    /// Create a cell from an existing `SuffixBag`.
+    #[inline(always)]
+    pub(crate) const fn from_bag(bag: SuffixBag) -> Self {
+        Self {
+            inner: UnsafeCell::new(bag),
+        }
+    }
+
+    /// Get a shared reference for read-only access.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure no concurent `as_mut()` call is active on the same
+    /// cell, OR that the access is protected by OCC (readers validate version
+    /// after reading).
+    #[inline(always)]
+    pub(crate) unsafe fn as_ref(&self) -> &SuffixBag {
+        // SAFETY: Caller guarantees no concurrent mutable access, or access
+        // is protected by OCC protocol.
+        unsafe { &*self.inner.get() }
+    }
+
+    /// Get a mutable reference for write access.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock (exclusive write access).
+    #[inline(always)]
+    #[expect(clippy::mut_from_ref, reason = "Interior mutability via UnsafeCell")]
+    pub(crate) unsafe fn as_mut(&self) -> &mut SuffixBag {
+        // SAFETY: Caller holds the leaf lock, guaranteeing exclusive write
+        // access. UnsafeCell allows forming &mut through &self.
+        unsafe { &mut *self.inner.get() }
+    }
+}
+
+impl Default for SuffixBagCell {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Debug for SuffixBagCell {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // SAFETY: Debug is called from single-threaded contexts (tests, logging).
+        let bag: &SuffixBag = unsafe { &*self.inner.get() };
+
+        f.debug_struct("SuffixBagCell").field("inner", bag).finish()
     }
 }
 

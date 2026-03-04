@@ -153,8 +153,8 @@ fn test_modstate_value_constants() {
     assert_eq!(MODSTATE_EMPTY & 0x04, 0);
 
     // Verify all values fit in 2 bits.
-    assert!(MODSTATE_INSERT < 4);
-    assert!(MODSTATE_REMOVE < 4);
-    assert!(MODSTATE_DELETED_LAYER < 4);
-    assert!(MODSTATE_EMPTY < 4);
+    const { assert!(MODSTATE_INSERT < 4) };
+    const { assert!(MODSTATE_REMOVE < 4) };
+    const { assert!(MODSTATE_DELETED_LAYER < 4) };
+    const { assert!(MODSTATE_EMPTY < 4) };
 }

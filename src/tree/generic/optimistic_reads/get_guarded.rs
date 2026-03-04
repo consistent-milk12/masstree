@@ -5,7 +5,9 @@ use crate::{
     LeafPolicy, MassTreeGeneric, NodeVersion, TreeAllocator,
     hints::unlikely,
     key::Key,
-    tree::generic::optimistic_reads::{LookupResult, VersionCheck, search_leaf_multi_layer},
+    tree::generic::optimistic_reads::{
+        LookupResult, TwigDescentResult, VersionCheck, search_leaf_multi_layer,
+    },
 };
 
 impl<P, A> MassTreeGeneric<P, A>
@@ -15,8 +17,13 @@ where
 {
     /// Get a value by key, returning a clone of the output.
     ///
-    /// This is the main read path for all storage modes, including true-inline.
-    /// Uses optimistic concurrency control with version validation.
+    /// Main read path for `get()` and `get_with_guard()`. Returns an owned
+    /// `P::Output` via `load_value` (which copies the value). Includes an
+    /// `is_value_empty` re-check after OCC validation for defense-in-depth.
+    ///
+    /// A separate closure-based implementation (`get_impl` in the parent module)
+    /// exists for `get_ref`, which must return `&'g P::Value` tied to the EBR
+    /// guard lifetime. That path uses `load_value_raw` with an `extract` closure.
     #[inline(always)]
     pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<P::Output> {
         let mut key: Key<'_> = Key::new(key);
@@ -295,11 +302,35 @@ where
                                 return None;
                             }
 
-                            key.shift();
-                            layer_root = layer_ptr;
-                            in_sublayer = true;
+                            // Fast-path: descend through single-entry twig
+                            // leaves without re-entering reach_leaf.
+                            // descend_twig_chain calls key.shift() internally.
+                            match self.descend_twig_chain(layer_ptr, key, guard) {
+                                TwigDescentResult::ContinueLeafLoop {
+                                    layer_root: new_root,
+                                    leaf_ptr: new_leaf,
+                                } => {
+                                    layer_root = new_root;
+                                    leaf_ptr = new_leaf;
+                                    in_sublayer = true;
 
-                            continue 'layer_loop;
+                                    continue 'leaf_loop;
+                                }
+
+                                TwigDescentResult::RestartLayerLoop {
+                                    layer_root: new_root,
+                                    in_sublayer: new_in_sublayer,
+                                } => {
+                                    layer_root = new_root;
+                                    in_sublayer = new_in_sublayer;
+
+                                    continue 'layer_loop;
+                                }
+
+                                TwigDescentResult::ReturnNone => {
+                                    return None;
+                                }
+                            }
                         }
 
                         LookupResult::NotFound => {

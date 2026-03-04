@@ -373,8 +373,8 @@ mod single_hot_key {
                     ctx.begin_measurement();
                     let mut sum = 0u64;
                     let is_write = &write_decisions[ctx.tid];
-                    for i in 0..OPS_PER_THREAD {
-                        if is_write[i] {
+                    for (i, &should_write) in is_write.iter().enumerate().take(OPS_PER_THREAD) {
+                        if should_write {
                             let _ = tree.insert_with_guard(
                                 &hot_key,
                                 (ctx.tid * OPS_PER_THREAD + i) as u64,

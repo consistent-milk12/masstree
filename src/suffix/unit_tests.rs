@@ -988,7 +988,7 @@ fn test_sidecar_drop_inline_only() {
 }
 
 /// Test sidecar creation and drop with external overflow allocation.
-/// This exercises the Drop implementation that frees the external [`SuffixBag`].
+/// This exercises the Drop implementation that frees the external `SuffixBagCell`.
 /// Miri will detect any memory leaks or double-frees.
 #[test]
 fn test_sidecar_drop_with_external() {
@@ -996,14 +996,11 @@ fn test_sidecar_drop_with_external() {
 
     // Force external allocation (infallible - aborts on OOM)
     // SAFETY: Test-only, no concurrent access
-    let external_ptr = unsafe { sidecar.ensure_external() };
+    let external_bag = unsafe { sidecar.ensure_external() };
 
-    // Write to external bag
-    // SAFETY: We have exclusive access in this test
-    unsafe {
-        (*external_ptr).assign(0, b"external_suffix_0");
-        (*external_ptr).assign(1, b"external_suffix_1");
-    }
+    // Write to external bag (we have exclusive access in this test)
+    external_bag.assign(0, b"external_suffix_0");
+    external_bag.assign(1, b"external_suffix_1");
 
     // Verify external is allocated
     assert!(
@@ -1032,14 +1029,11 @@ fn test_sidecar_drop_mixed_inline_external() {
 
     // Force external allocation (infallible - aborts on OOM)
     // SAFETY: Test-only, no concurrent access
-    let external_ptr = unsafe { sidecar.ensure_external() };
+    let external_bag = unsafe { sidecar.ensure_external() };
 
-    // Write to external bag for different slots
-    // SAFETY: We have exclusive access in this test
-    unsafe {
-        (*external_ptr).assign(5, b"external_5");
-        (*external_ptr).assign(10, b"external_10");
-    }
+    // Write to external bag for different slots (we have exclusive access)
+    external_bag.assign(5, b"external_5");
+    external_bag.assign(10, b"external_10");
 
     // Verify inline takes precedence for slots 0, 1
     assert_eq!(sidecar.get(0), Some(b"inline_0".as_slice()));
@@ -1072,21 +1066,19 @@ fn test_sidecar_default() {
     assert_eq!(s2.inline.count(), 0);
 }
 
-/// Test `ensure_external` is idempotent (returns same pointer on repeated calls).
+/// Test `ensure_external` is idempotent (returns same backing allocation).
 #[test]
 fn test_sidecar_ensure_external_idempotent() {
     let sidecar: SuffixSidecar = SuffixSidecar::new();
 
     // SAFETY: Test-only, no concurrent access. Allocation is infallible.
-    let ptr1 = unsafe { sidecar.ensure_external() };
-    let ptr2 = unsafe { sidecar.ensure_external() };
-    let ptr3 = unsafe { sidecar.ensure_external() };
+    let ptr1: *const SuffixBag = unsafe { sidecar.ensure_external() };
+    let ptr2: *const SuffixBag = unsafe { sidecar.ensure_external() };
+    let ptr3: *const SuffixBag = unsafe { sidecar.ensure_external() };
 
-    // All calls should return the same pointer
+    // All calls should return references into the same allocation
     assert_eq!(ptr1, ptr2);
     assert_eq!(ptr2, ptr3);
-
-    // Only one allocation happened
     assert!(!ptr1.is_null());
 
     // Drop frees exactly one allocation - Miri verifies no double-free

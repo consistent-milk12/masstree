@@ -2090,8 +2090,8 @@ fn test_gc_layer_concurrent_insert_remove_cycle() {
 
             thread::spawn(move || {
                 let prefix = format!("pfx{tid:05}");
-                let suffix_a = format!("keyA!!!!");
-                let suffix_b = format!("keyB!!!!");
+                let suffix_a = "keyA!!!!".to_string();
+                let suffix_b = "keyB!!!!".to_string();
                 let key_a: Vec<u8> = [prefix.as_bytes(), suffix_a.as_bytes()].concat();
                 let key_b: Vec<u8> = [prefix.as_bytes(), suffix_b.as_bytes()].concat();
 

@@ -31,6 +31,7 @@ use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use crate::permuter::{AtomicPermuter15, Permuter15};
 use crate::policy::{LeafPolicy, RetireHandle, SlotKind, SlotState, SuffixStore, ValueArray};
 use crate::prefetch::prefetch_read;
+use crate::suffix::SuffixBagCell;
 use seize::Guard;
 
 mod layout;
@@ -303,6 +304,12 @@ impl<P: LeafPolicy> LeafNode15<P> {
     #[inline(always)]
     pub fn prefetch_value(&self, slot: usize) {
         P::prefetch_value(&self.values, slot);
+    }
+
+    /// Prefetch suffix storage into cache for upcoming access.
+    #[inline(always)]
+    pub fn prefetch_suffix(&self) {
+        self.suffix.prefetch();
     }
 
     /// Load the typed value pointer at a slot.
@@ -660,7 +667,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
     ///
     /// Caller must hold the leaf lock.
     #[inline(always)]
-    pub unsafe fn ensure_external_ksuf(&self) -> *mut crate::suffix::SuffixBag {
+    pub(crate) unsafe fn ensure_external_ksuf(&self) -> *mut SuffixBagCell {
         // SAFETY: Caller holds lock.
         unsafe { self.suffix.ensure_external() }
     }

@@ -37,7 +37,7 @@ const NUM_CHILDREN: usize = WIDTH + 1;
 #[repr(C, align(64))]
 pub struct InternodeNode {
     // ========================================================================
-    // Cache Line 0 (64 bytes)
+    // Cache Line 0
     // ========================================================================
     /// Version for optimistic concurrency control.
     version: NodeVersion, // 4 bytes
@@ -55,13 +55,13 @@ pub struct InternodeNode {
     parent: AtomicPtr<u8>, // 8 bytes
 
     // ========================================================================
-    // Cache Lines 0-2 (keys - contiguous for prefetcher)
+    // Cache Lines 0-2
     // ========================================================================
     /// Routing keys in sorted order.
     ikey0: [AtomicU64; WIDTH], // 120 bytes
 
     // ========================================================================
-    // Cache Lines 2-4 (children)
+    // Cache Lines 2-4
     // ========================================================================
     /// Child pointers (16 children for 15 keys).
     /// - child[i] contains keys < ikey0[i]
@@ -441,7 +441,7 @@ impl InternodeNode {
             prefetch_read(&raw const self.ikey0[6]);
         }
 
-        let mut i = 0;
+        let mut i: usize = 0;
 
         while (i + 4) <= n {
             if (i == 8) && (n > 13) {

@@ -34,6 +34,7 @@ const REFILL_BATCH: usize = 128;
 // ============================================================================
 
 /// Size class (1-indexed cache-line count), or `None` if too large.
+#[cfg(test)]
 #[inline]
 const fn size_class(layout: Layout) -> Option<usize> {
     let nl: usize = layout.size().div_ceil(CACHE_LINE);
@@ -163,6 +164,7 @@ impl ThreadPool {
     }
 
     /// Returns null on OOM.
+    #[cfg(test)]
     #[inline]
     fn alloc(&mut self, layout: Layout) -> *mut u8 {
         let Some(nl) = size_class(layout) else {
@@ -190,6 +192,7 @@ impl ThreadPool {
     /// # Safety
     ///
     /// `ptr` must be valid memory allocated with a compatible layout.
+    #[cfg(test)]
     #[inline]
     unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
         let Some(nl) = size_class(layout) else {
@@ -238,12 +241,9 @@ thread_local! {
 }
 
 /// Allocate from the thread-local pool. Aborts on OOM.
+#[cfg(test)]
 #[inline]
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Generic API used by unit tests")
-)]
 pub fn pool_alloc(layout: Layout) -> *mut u8 {
     POOL.with(|cell: &UnsafeCell<ThreadPool>| {
         // SAFETY: thread-local access is single-threaded
@@ -264,11 +264,8 @@ pub fn pool_alloc(layout: Layout) -> *mut u8 {
 ///
 /// - `ptr` must be valid memory with the given layout
 /// - `layout.align()` must not exceed `CACHE_LINE` (64)
+#[cfg(test)]
 #[inline]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Generic API used by unit tests")
-)]
 pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
     debug_assert!(
         layout.align() <= CACHE_LINE,
@@ -292,7 +289,7 @@ pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
 #[must_use]
 pub fn pool_alloc_leaf<P: LeafPolicy>() -> *mut u8 {
     // node_size_class panics at compile time if LeafNode15<P> is too large.
-    let nl: usize = node_size_class::<LeafNode15<P>>();
+    let nl: usize = const { node_size_class::<LeafNode15<P>>() };
 
     POOL.with(|cell: &UnsafeCell<ThreadPool>| {
         let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
@@ -331,7 +328,7 @@ pub fn pool_alloc_internode() -> *mut u8 {
 /// `ptr` must be valid memory originally allocated via `pool_alloc_leaf`.
 #[inline]
 pub unsafe fn pool_dealloc_leaf<P: LeafPolicy>(ptr: *mut u8) {
-    let nl: usize = node_size_class::<LeafNode15<P>>();
+    let nl: usize = const { node_size_class::<LeafNode15<P>>() };
 
     POOL.with(|cell: &UnsafeCell<ThreadPool>| {
         let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
@@ -366,11 +363,8 @@ pub unsafe fn pool_dealloc_internode(ptr: *mut u8) {
 ///
 /// - `ptr` must be valid memory allocated via `pool_alloc` with the given layout
 /// - `layout.align()` must not exceed `CACHE_LINE` (64)
+#[cfg(test)]
 #[inline]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Generic API used by unit tests")
-)]
 pub unsafe fn pool_teardown_dealloc(ptr: *mut u8, layout: Layout) {
     debug_assert!(
         layout.align() <= CACHE_LINE,
@@ -396,7 +390,7 @@ pub unsafe fn pool_teardown_dealloc(ptr: *mut u8, layout: Layout) {
 /// `ptr` must be valid memory allocated via `pool_alloc_leaf`.
 #[inline]
 pub unsafe fn pool_teardown_dealloc_leaf<P: LeafPolicy>(ptr: *mut u8) {
-    let nl: usize = node_size_class::<LeafNode15<P>>();
+    let nl: usize = const { node_size_class::<LeafNode15<P>>() };
     // SAFETY: nl validated at compile time, caller guarantees valid ptr
     unsafe { dealloc(ptr, bucket_layout(nl)) };
 }

@@ -8,9 +8,10 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 use seize::{Guard, LocalGuard};
 
 use crate::TreePermutation;
-use crate::suffix::{InlineSuffixBag, SideCarUtils, SuffixBag};
+use crate::suffix::{InlineSuffixBag, SideCarUtils, SuffixBagCell};
 
 use super::SuffixStore;
+use super::suffix_ops as SuffixOps;
 
 // ============================================================================
 //  EmbeddedSuffix
@@ -22,14 +23,15 @@ pub struct EmbeddedSuffix {
     /// Inline suffix storage (256 or 512 bytes data capacity).
     inline_ksuf: UnsafeCell<InlineSuffixBag>,
 
-    /// External overflow for large/many suffixes.
-    external_ksuf: AtomicPtr<SuffixBag>,
+    /// External overflow for large/many suffixes (wrapped in `SuffixBagCell`
+    /// for interior mutability under the leaf lock).
+    external_ksuf: AtomicPtr<SuffixBagCell>,
 }
 
 // SAFETY: EmbeddedSuffix is Send+Sync.
 // - UnsafeCell<InlineSuffixBag>: protected by leaf lock (writes) and OCC (reads).
 //   Readers rely on leaf OCC validation; writers mutate only under the leaf lock.
-// - AtomicPtr<SuffixBag>: thread-safe atomic access.
+// - AtomicPtr<SuffixBagCell>: thread-safe atomic access.
 unsafe impl Send for EmbeddedSuffix {}
 unsafe impl Sync for EmbeddedSuffix {}
 
@@ -64,22 +66,27 @@ impl SuffixStore for EmbeddedSuffix {
 
     #[inline(always)]
     fn get(&self, slot: usize) -> Option<&[u8]> {
-        super::suffix_ops::get_suffix(self.inline_bag(), &self.external_ksuf, slot)
+        SuffixOps::get_suffix(self.inline_bag(), &self.external_ksuf, slot)
     }
 
     #[inline(always)]
     fn suffix_equals(&self, slot: usize, suffix: &[u8]) -> bool {
-        super::suffix_ops::suffix_equals(self.inline_bag(), &self.external_ksuf, slot, suffix)
+        SuffixOps::suffix_equals(self.inline_bag(), &self.external_ksuf, slot, suffix)
     }
 
     #[inline(always)]
     fn suffix_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering> {
-        super::suffix_ops::suffix_compare(self.inline_bag(), &self.external_ksuf, slot, suffix)
+        SuffixOps::suffix_compare(self.inline_bag(), &self.external_ksuf, slot, suffix)
     }
 
     #[inline(always)]
     fn has_external(&self) -> bool {
-        super::suffix_ops::has_external(&self.external_ksuf)
+        SuffixOps::has_external(&self.external_ksuf)
+    }
+
+    #[inline(always)]
+    fn prefetch(&self) {
+        // No-op: inline suffix data is already embedded in the leaf node.
     }
 
     // ========================================================================
@@ -96,13 +103,7 @@ impl SuffixStore for EmbeddedSuffix {
     ) -> *mut u8 {
         // SAFETY: Caller holds leaf lock.
         unsafe {
-            super::suffix_ops::assign_suffix(
-                self.inline_bag(),
-                &self.external_ksuf,
-                slot,
-                suffix,
-                perm,
-            )
+            SuffixOps::assign_suffix(self.inline_bag(), &self.external_ksuf, slot, suffix, perm)
         }
     }
 
@@ -110,7 +111,7 @@ impl SuffixStore for EmbeddedSuffix {
     unsafe fn assign_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         // SAFETY: Caller holds leaf lock, guard is valid.
         unsafe {
-            super::suffix_ops::assign_suffix_init(
+            SuffixOps::assign_suffix_init(
                 self.inline_bag(),
                 &self.external_ksuf,
                 slot,
@@ -131,7 +132,7 @@ impl SuffixStore for EmbeddedSuffix {
     ) -> *mut u8 {
         // SAFETY: Caller holds leaf lock.
         unsafe {
-            super::suffix_ops::assign_suffix_prealloc(
+            SuffixOps::assign_suffix_prealloc(
                 self.inline_bag(),
                 &self.external_ksuf,
                 slot,
@@ -143,15 +144,15 @@ impl SuffixStore for EmbeddedSuffix {
     }
 
     #[inline(always)]
-    unsafe fn ensure_external(&self) -> *mut SuffixBag {
+    unsafe fn ensure_external(&self) -> *mut SuffixBagCell {
         // SAFETY: Caller holds leaf lock.
-        unsafe { super::suffix_ops::ensure_external_bag(&self.external_ksuf) }
+        unsafe { SuffixOps::ensure_external_bag(&self.external_ksuf) }
     }
 
     #[inline(always)]
     unsafe fn clear(&self, slot: usize, _guard: &LocalGuard<'_>) {
         // SAFETY: Caller holds leaf lock.
-        unsafe { super::suffix_ops::clear_suffix(self.inline_bag(), &self.external_ksuf, slot) }
+        unsafe { SuffixOps::clear_suffix(self.inline_bag(), &self.external_ksuf, slot) }
     }
 
     #[inline(always)]
@@ -160,10 +161,10 @@ impl SuffixStore for EmbeddedSuffix {
             return;
         }
 
-        // SAFETY: ptr came from assign() and is a valid SuffixBag pointer.
+        // SAFETY: ptr came from assign() and is a valid SuffixBagCell pointer.
         unsafe {
-            guard.defer_retire(ptr.cast::<SuffixBag>(), |ptr, collector| {
-                SideCarUtils::retire_suffix_bag(ptr, collector);
+            guard.defer_retire(ptr.cast::<SuffixBagCell>(), |ptr, collector| {
+                SideCarUtils::retire_suffix_bag_cell(ptr, collector);
             });
         }
     }
@@ -173,11 +174,11 @@ impl SuffixStore for EmbeddedSuffix {
     // ========================================================================
 
     unsafe fn drop_storage(&mut self) {
-        let external: *mut SuffixBag = self.external_ksuf.load(AtomicOrdering::Acquire);
+        let external: *mut SuffixBagCell = self.external_ksuf.load(AtomicOrdering::Acquire);
 
         if !external.is_null() {
             // SAFETY: We have exclusive access (&mut self from Drop).
-            // Any previously swapped-out bags were retired separately.
+            // Any previously swapped-out cells were retired separately.
             unsafe {
                 drop(Box::from_raw(external));
             }

@@ -9,6 +9,7 @@ use crate::leaf15::LAYER_KEYLENX;
 use crate::leaf15::LeafNode15;
 use crate::link::Linker;
 use crate::policy::RefPolicy as RefLeafPolicy;
+use crate::prefetch::prefetch_read;
 
 mod get_guarded;
 
@@ -166,6 +167,12 @@ where
 
     leaf.prefetch_value(slot);
 
+    // Prefetch suffix storage (sidecar pointer + external bag) so data
+    // is cache-warm by the time ksuf_equals runs below.
+    if slot_keylenx == KSUF_KEYLENX {
+        leaf.prefetch_suffix();
+    }
+
     if slot_keylenx == search_keylenx {
         if needs_suffix_check
             && slot_keylenx == KSUF_KEYLENX
@@ -183,6 +190,10 @@ where
         if layer_ptr.is_null() {
             return None;
         }
+
+        // Prefetch the next-layer node header (NodeVersion + first cache line)
+        // to hide traversal latency before descend_twig_chain runs.
+        prefetch_read(layer_ptr);
 
         return Some(LookupResult::Layer(layer_ptr));
     }
@@ -498,7 +509,17 @@ where
         self.get_with_guard(key, guard).is_some()
     }
 
-    /// Unified get implementation.
+    /// Closure-based get implementation used by `get_ref`.
+    ///
+    /// This is a separate code path from `get_with_guard` (in `get_guarded.rs`)
+    /// because `get_ref` must return `&'g P::Value` whose lifetime is tied to the
+    /// EBR guard, not an owned `P::Output`. The closure `extract` converts a raw
+    /// pointer to the caller's return type, enabling both `get_ref` (zero-copy
+    /// reference) and type-erased access without duplicating the OCC loop.
+    ///
+    /// `get_with_guard` uses a separate implementation that returns `Option<P::Output>`
+    /// via `load_value` (which copies the value) and includes an extra
+    /// `is_value_empty` re-check after OCC validation for defense-in-depth.
     ///
     /// # Type Parameters
     ///
@@ -723,6 +744,13 @@ where
 
                     let result: LookupResult = search_leaf_multi_layer::<P>(leaf, key);
 
+                    // Read value pointer BEFORE validation (inside OCC read phase),
+                    // matching the single-layer pattern in get_impl_single_layer.
+                    let found_ptr: *mut u8 = match &result {
+                        LookupResult::ValueSlot(slot) => leaf.load_value_raw(*slot),
+                        _ => StdPtr::null_mut(),
+                    };
+
                     match self.validate_version_multi(leaf, leaf.version(), key, version, guard) {
                         VersionCheck::Valid => {}
 
@@ -738,17 +766,18 @@ where
                     }
 
                     match result {
-                        LookupResult::ValueSlot(slot) => {
-                            let ptr: *mut u8 = leaf.load_value_raw(slot);
-                            return Some(extract(ptr));
+                        LookupResult::ValueSlot(_) => {
+                            if !found_ptr.is_null() {
+                                return Some(extract(found_ptr));
+                            }
+
+                            return None;
                         }
 
                         LookupResult::Layer(ptr) => {
-                            if ptr.is_null() {
-                                continue 'search_loop;
-                            }
-
-                            // SAFETY: ptr is non-null, cast to read version
+                            // SAFETY: ptr is non-null (check_slot_match guards
+                            // against null before constructing Layer), cast to
+                            // read version.
                             #[expect(
                                 clippy::cast_ptr_alignment,
                                 reason = "NodeVersion is first field"

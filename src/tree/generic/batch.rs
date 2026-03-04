@@ -308,6 +308,10 @@ where
         clippy::indexing_slicing,
         reason = "Index bounds are checked in the while condition"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Batch processing loop with pre-allocation and retry logic"
+    )]
     fn process_sorted_batch(
         &self,
         batch: &[BatchEntry<P>],
@@ -348,6 +352,32 @@ where
 
                 let pre_lock_version = leaf.version().stable();
                 let pre_lock_perm_raw = leaf.permutation_raw();
+                let pre_lock_perm: Permuter = leaf.permutation();
+
+                // Pre-allocate suffix buffer outside the lock to reduce
+                // critical section time, matching the pattern in insert.rs.
+                let pre_allocated_vec: Option<Vec<u8>> = if key.has_suffix() {
+                    let suffix_len: usize = key.suffix().len();
+                    let inline_capacity: usize = LeafNode15::<P>::INLINE_KSUF_CAPACITY;
+                    let threshold_exceeded: bool = suffix_len > inline_capacity
+                        || pre_lock_perm.size() * suffix_len >= inline_capacity;
+
+                    if threshold_exceeded {
+                        let estimated: usize = LeafNode15::<P>::WIDTH * suffix_len;
+                        let mut v: Vec<u8> = Vec::new();
+
+                        if v.try_reserve(estimated).is_ok() {
+                            Some(v)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 let mut lock = leaf.version().lock_bounded();
 
                 // Validate post-lock state
@@ -379,6 +409,7 @@ where
                     &mut result,
                     &mut deferred_retires,
                     guard,
+                    pre_allocated_vec,
                 );
 
                 drop(lock);
@@ -446,9 +477,11 @@ where
         result: &mut BatchInsertResult<P::Output>,
         deferred_retires: &mut Vec<*mut u8>,
         guard: &LocalGuard<'_>,
+        pre_allocated: Option<Vec<u8>>,
     ) -> usize {
         let mut processed: usize = 0;
         let mut perm: Permuter = leaf.permutation();
+        let mut pre_allocated_vec: Option<Vec<u8>> = pre_allocated;
 
         // Determine the ikey upper bound for this leaf
         // SAFETY: Called under lock - no concurrent retirement.
@@ -503,6 +536,7 @@ where
                 &mut perm,
                 is_single_layer,
                 guard,
+                pre_allocated_vec.take(),
             );
 
             match insert_result {
@@ -547,6 +581,7 @@ where
         perm: &mut <LeafNode15<P> as TreeLeafNode<P>>::Perm,
         single_layer_mode: bool,
         guard: &LocalGuard<'_>,
+        pre_allocated: Option<Vec<u8>>,
     ) -> BatchEntryResult<P::Output> {
         let search_result = if single_layer_mode {
             self.search_for_insert_single_layer(leaf, key, perm)
@@ -579,7 +614,7 @@ where
                             key,
                             value,
                             guard,
-                            None,
+                            pre_allocated,
                         );
                         self.count.increment();
 

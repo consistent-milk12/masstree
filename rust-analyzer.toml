@@ -2,8 +2,9 @@
 # https://rust-analyzer.github.io/manual.html#configuration
 
 [cargo]
-# Analyze with all features enabled
-features = "all"
+# Analyze with specific features (not "all", which enables sidecar-suffix
+# and excludes embedded_suffix from the crate)
+features = ["mimalloc"]
 
 # Build scripts and proc-macros
 buildScripts.enable = true
@@ -17,7 +18,7 @@ command = "clippy"
 
 # Pass all targets and features to clippy
 allTargets = true
-features = "all"
+features = ["mimalloc"]
 
 # Extra arguments for clippy
 extraArgs = ["--", "-W", "clippy::all"]

@@ -369,13 +369,14 @@ impl NodeCleaner {
             // Step 10: Collapse empty parent
             parent_lock.mark_deleted();
 
+            // Clear child pointer before retirement so no write occurs on
+            // memory that has been scheduled for reclamation.
+            parent.set_child(0, StdPtr::null_mut());
+
             // SAFETY: parent_ptr is a valid internode that we hold locked (parent_lock).
             unsafe {
                 allocator.retire_internode_erased(parent_ptr, guard);
             }
-
-            // Clear child pointer (the child will become the replacement)
-            parent.set_child(0, StdPtr::null_mut());
 
             // Continue walking up with the remaining child as replacement
             current = parent_ptr;
@@ -601,8 +602,8 @@ impl NodeCleaner {
         }
 
         if slot_keylenx >= LAYER_KEYLENX {
-            drop(lock);
             let lp: *mut u8 = leaf.load_layer_raw(new_kp);
+            drop(lock);
 
             // Check if sublayer is deleted before descending
             if !Self::is_sublayer_valid(lp) {
@@ -719,11 +720,29 @@ impl NodeCleaner {
                 kp = upper_bound_internode_generic(old_ikey, parent) as i32;
             }
 
-            debug_assert_eq!(
-                TreeInternode::child(parent, kp as usize),
-                current,
-                "redirect: current not found at expected position kp={kp} for old_ikey={old_ikey:#x}"
-            );
+            // Fallback linear scan if binary search landed on the wrong child
+            // (can happen if concurrent splits moved keys between reading
+            // old_ikey and locking the parent).
+            if TreeInternode::child(parent, kp as usize) != current {
+                let nkeys: usize = parent.nkeys();
+                let mut found: bool = false;
+
+                for i in 0..=nkeys {
+                    #[expect(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                    if TreeInternode::child(parent, i) == current {
+                        kp = i as i32;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if !found {
+                    // Child already removed from parent by a concurrent coalesce.
+                    drop(owned_lock);
+                    drop(parent_lock);
+                    return;
+                }
+            }
 
             if kp > 0 {
                 parent.set_ikey((kp - 1) as usize, new_ikey);

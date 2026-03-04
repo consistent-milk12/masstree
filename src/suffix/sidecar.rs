@@ -5,20 +5,20 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 use seize::Collector;
 
-use super::{InlineSuffixBag, SuffixBag};
+use super::{InlineSuffixBag, SuffixBagCell};
 
 /// Utility functions for suffix sidecar operations.
 #[derive(Debug)]
 pub struct SideCarUtils;
 
 impl SideCarUtils {
-    /// Cleanup function for retiring external suffix bags.
+    /// Cleanup function for retiring external suffix bag cells.
     ///
     /// # Safety
     ///
-    /// `ptr` must be a valid [`SuffixBag`] pointer that was allocated via [`Box`].
-    pub unsafe fn retire_suffix_bag(ptr: *mut SuffixBag, _collector: &Collector) {
-        // SAFETY: Caller guarantees ptr is a valid Box-allocated `SuffixBag`
+    /// `ptr` must be a valid [`SuffixBagCell`] pointer allocated via [`Box`].
+    pub unsafe fn retire_suffix_bag_cell(ptr: *mut SuffixBagCell, _collector: &Collector) {
+        // SAFETY: Caller guarantees ptr is a valid Box-allocated `SuffixBagCell`
         unsafe { drop(Box::from_raw(ptr)) };
     }
 }
@@ -34,8 +34,9 @@ pub struct SuffixSidecar {
     /// Inline suffix storage.
     pub(crate) inline: InlineSuffixBag,
 
-    /// External overflow for large suffixes.
-    pub(crate) external: AtomicPtr<SuffixBag>,
+    /// External overflow for large suffixes (wrapped in `SuffixBagCell` for
+    /// interior mutability under the leaf lock).
+    pub(crate) external: AtomicPtr<SuffixBagCell>,
 }
 
 impl SuffixSidecar {
@@ -58,33 +59,39 @@ impl SuffixSidecar {
             return Some(suffix);
         }
 
-        let external: *mut SuffixBag = self.external.load(Ordering::Acquire);
+        let external: *mut SuffixBagCell = self.external.load(Ordering::Acquire);
 
         if external.is_null() {
             None
         } else {
-            // SAFETY: external is valid if non-null (we own it)
-            unsafe { &*external }.get(slot)
+            // SAFETY: external is valid if non-null (we own it). Test-only,
+            // single-threaded access.
+            unsafe { (*external).as_ref() }.get(slot)
         }
     }
 
     /// Get or create external storage.
     ///
+    /// Returns a mutable reference to the inner `SuffixBag` for test use.
+    ///
     /// # Safety
     ///
-    /// Caller must hold leaf lock.
-    pub unsafe fn ensure_external(&self) -> *mut SuffixBag {
-        let ptr: *mut SuffixBag = self.external.load(Ordering::Acquire);
+    /// Caller must have exclusive access (test-only).
+    #[expect(clippy::mut_from_ref, reason = "Interior mutability via UnsafeCell")]
+    pub unsafe fn ensure_external(&self) -> &mut super::SuffixBag {
+        let ptr: *mut SuffixBagCell = self.external.load(Ordering::Acquire);
 
         if !ptr.is_null() {
-            return ptr;
+            // SAFETY: Caller has exclusive access.
+            return unsafe { (*ptr).as_mut() };
         }
 
-        let new_external: Box<SuffixBag> = Box::default();
-        let new_ptr: *mut SuffixBag = Box::into_raw(new_external);
+        let new_cell: Box<SuffixBagCell> = Box::default();
+        let new_ptr: *mut SuffixBagCell = Box::into_raw(new_cell);
         self.external.store(new_ptr, Ordering::Release);
 
-        new_ptr
+        // SAFETY: Just allocated, caller has exclusive access.
+        unsafe { (*new_ptr).as_mut() }
     }
 
     /// Check if slot has a suffix (inline or external).
@@ -93,13 +100,13 @@ impl SuffixSidecar {
             return true;
         }
 
-        let external: *mut SuffixBag = self.external.load(Ordering::Acquire);
+        let external: *mut SuffixBagCell = self.external.load(Ordering::Acquire);
 
         if external.is_null() {
             false
         } else {
-            // SAFETY: external is valid if non-null
-            unsafe { &*external }.has_suffix(slot)
+            // SAFETY: external is valid if non-null. Test-only, single-threaded.
+            unsafe { (*external).as_ref() }.has_suffix(slot)
         }
     }
 }
@@ -113,12 +120,12 @@ impl Default for SuffixSidecar {
 impl Drop for SuffixSidecar {
     fn drop(&mut self) {
         // SAFETY: self.external is either null (no external ever created) or
-        // the most recent bag (all previous ones were retired separately via
+        // the most recent cell (all previous ones were retired separately via
         // defer_retire during drain-and-rebuild).
-        let external: *mut SuffixBag = self.external.load(Ordering::Acquire);
+        let external: *mut SuffixBagCell = self.external.load(Ordering::Acquire);
 
         if !external.is_null() {
-            // SAFETY: We own this external bag exclusively during drop.
+            // SAFETY: We own this external cell exclusively during drop.
             unsafe {
                 drop(Box::from_raw(external));
             }
@@ -126,14 +133,13 @@ impl Drop for SuffixSidecar {
     }
 }
 
-// SAFETY: `SuffixSidecar` is `Send` if `SuffixBag` is `Send`.
+// SAFETY: `SuffixSidecar` is `Send` because `SuffixBagCell` is `Send`.
 // The `AtomicPtr` provides thread-safe access to the external bag.
 // Concurrent access is serialized by the leaf lock.
 unsafe impl Send for SuffixSidecar {}
 
-// SAFETY: `SuffixSidecar` is `Sync` if `SuffixBag` is `Sync`.
-// Read access is safe as part of the leaf's OCC protocol: readers validate the
-// leaf version after reads, and writers only mutate under the leaf lock while
-// the leaf is marked dirty (INSERTING/SPLITTING), so `stable()` readers won't
-// race with writes.
+// SAFETY: `SuffixSidecar` is `Sync` under the leaf's OCC protocol: readers
+// validate the leaf version after reads, and writers only mutate under the
+// leaf lock while the leaf is marked dirty (INSERTING/SPLITTING), so
+// `stable()` readers won't race with writes.
 unsafe impl Sync for SuffixSidecar {}
