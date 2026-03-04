@@ -284,7 +284,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     where
         P::Output: Clone,
     {
-        let keylenx: u8 = leaf.keylenx(slot);
+        let keylenx: u8 = leaf.keylenx_relaxed(slot);
 
         if keylenx >= LAYER_KEYLENX {
             let slot_ikey: u64 = leaf.ikey_relaxed(slot);
@@ -401,7 +401,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         };
 
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = leaf.keylenx(slot);
+        let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
+        leaf.prefetch_value(slot);
 
         if slot_ikey < self.stack.last_ikey() {
             return (ScanState::Retry, None);
@@ -508,7 +509,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         };
 
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = leaf.keylenx(slot);
+        let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
+        leaf.prefetch_value(slot);
 
         if slot_ikey < self.stack.last_ikey() {
             return (ScanState::Retry, None);

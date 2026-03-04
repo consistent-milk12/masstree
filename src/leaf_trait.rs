@@ -325,6 +325,9 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     /// Get keylenx at slot.
     fn keylenx(&self, slot: usize) -> u8;
 
+    /// Get keylenx with Relaxed ordering (for OCC search loops).
+    fn keylenx_relaxed(&self, slot: usize) -> u8;
+
     /// Set keylenx at slot with Release ordering.
     fn set_keylenx(&self, slot: usize, keylenx: u8);
 
@@ -352,6 +355,9 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
 
     /// Update value in place, returning a handle for retiring the old value.
     fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle;
+
+    /// Update value in place with Relaxed store ordering (for use under lock).
+    fn update_value_in_place_relaxed(&self, slot: usize, output: &P::Output) -> RetireHandle;
 
     /// Take the terminal value from a slot, leaving it empty.
     fn take_value(&self, slot: usize) -> Option<P::Output>;

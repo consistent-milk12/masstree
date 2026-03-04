@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "0.9.2"
+version = "0.9.3"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["consistent-milk12"]
@@ -20,11 +20,10 @@ readme = "README.md"
 include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md"]
 
 [features]
-default = []
+default = ["debug-print"]
 # mimalloc is the optimal allocator for this data structure based on current benchmarks.
 # Even though the original implementation prefers tcmalloc.
 mimalloc = ["dep:mimalloc"]
-tcmalloc = ["dep:tcmalloc"]
 
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
 debug-routing = []
@@ -34,6 +33,7 @@ no-prefetch = []
 small-suffix-capacity = []
 
 sidecar-suffix = []
+debug-print = []
 
 [dependencies]
 seize = "0.5.1"
@@ -43,7 +43,6 @@ rustc-hash = "2.1.1"
 crossbeam-queue = "0.3.12"
 
 mimalloc = { version = "0.1.48", optional = true }
-tcmalloc = { version = "0.3.0", optional = true }
 
 # Optional tracing (enabled via features) - zero overhead when disabled
 tracing = { version = "0.1.44", features = ["attributes"], optional = true }
@@ -69,8 +68,8 @@ rand = "0.10.0"
 rand_chacha = "0.10.0"
 rand_distr = "0.6.0"
 indexset = { version = "0.15.0", features = ["concurrent"] }
-scc = "3.6.5"
-sdd = "4.6.3"
+scc = "3.6.6"
+sdd = "4.7.2"
 tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.22", features = [
 	"env-filter",
@@ -88,10 +87,8 @@ pbench = "0.2.0"
 # Examples dependencies
 rayon = "1.11.0"
 core_affinity = "0.8.3"
-tokio = { version = "1.49.0", features = ["full"] }
+tokio = { version = "1.50.0", features = ["full"] }
 dhat = "0.3.3"
-hdrhistogram = "7.5.4"
-minstant = "0.1.7"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(shuttle)'] }
@@ -169,6 +166,14 @@ harness = false
 
 [[bench]]
 name = "tail_latency"
+harness = false
+
+[[bench]]
+name = "memory_total"
+harness = false
+
+[[bench]]
+name = "memory_dhat"
 harness = false
 
 # =========================================================================

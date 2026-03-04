@@ -110,7 +110,8 @@ where
         );
         let existing_suffix: &[u8] = parent_leaf.ksuf(conflict_slot).unwrap_or(&[]);
         let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
-        let existing_output: Option<P::Output> = parent_leaf.try_clone_output(conflict_slot);
+        let existing_output: Option<P::Output> =
+            parent_leaf.try_clone_output_relaxed(conflict_slot);
 
         debug_assert!(
             existing_output.is_some(),

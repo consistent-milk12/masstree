@@ -112,9 +112,13 @@ where
 
                     // Use Relaxed ordering - permutation() Acquire already synchronizes
                     if (leaf.ikey_relaxed(slot) == target_ikey)
-                        && (leaf.keylenx(slot) == search_keylenx)
-                        && !leaf.is_value_empty(slot)
+                        && (leaf.keylenx_relaxed(slot) == search_keylenx)
+                        && !leaf.is_value_empty_relaxed(slot)
                     {
+                        // Policy-specific value prefetch:
+                        // - BoxPolicy: prefetch heap allocation to hide pointer-chase latency
+                        // - InlinePolicy: no-op
+                        leaf.prefetch_value(slot);
                         found_slot = Some(slot);
                         break;
                     }
@@ -262,11 +266,7 @@ where
                         LookupResult::ValueSlot(slot) => {
                             // Read pointer and extract output BEFORE version validation
                             // Store pointer directly - no redundant read via try_load_output
-                            let output: Option<P::Output> = if leaf.is_value_empty(slot) {
-                                None
-                            } else {
-                                leaf.load_value(slot)
-                            };
+                            let output: Option<P::Output> = leaf.load_value(slot);
 
                             match self.validate_version_multi(leaf, ver, key, version, guard) {
                                 VersionCheck::Valid => {}

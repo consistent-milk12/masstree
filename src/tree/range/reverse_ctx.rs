@@ -260,7 +260,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         }
 
         let slot: usize = perm.get(ki.cast_unsigned());
-        let keylenx: u8 = leaf.keylenx(slot);
+        let keylenx: u8 = leaf.keylenx_relaxed(slot);
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
         // Handle layer pointer - must descend
@@ -378,6 +378,8 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     where
         P::Output: Clone,
     {
+        leaf.prefetch_value(slot);
+
         // Handle suffix keys
         if keylenx == KSUF_KEYLENX {
             return Self::try_emit_suffix_slot_reverse(
@@ -399,7 +401,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             return EmitResult::NoMatch;
         }
 
-        if leaf.is_value_empty(slot) {
+        if leaf.is_value_empty_relaxed(slot) {
             return EmitResult::NoMatch;
         }
 
@@ -460,7 +462,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             }
         }
 
-        if leaf.is_value_empty(slot) {
+        if leaf.is_value_empty_relaxed(slot) {
             return EmitResult::NoMatch;
         }
 
@@ -604,7 +606,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     ) -> (ScanStateBack, Option<E::Snapshot>) {
         let slot: usize = perm.get(ki.unsigned_abs());
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let keylenx: u8 = leaf.keylenx(slot);
+        let keylenx: u8 = leaf.keylenx_relaxed(slot);
 
         // Reverse: ikeys should be non-increasing within a leaf
         if slot_ikey > self.stack.last_ikey() {
@@ -691,8 +693,10 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
         ki: isize,
     ) -> (ScanStateBack, Option<E::Snapshot>) {
+        leaf.prefetch_value(slot);
+
         // Get value pointer first (before version check to pipeline loads)
-        if leaf.is_value_empty(slot) {
+        if leaf.is_value_empty_relaxed(slot) {
             // Empty value slot - skip to previous slot
             self.stack.set_ki(ReverseScanHelper::prev(ki));
             return (ScanStateBack::FindPrev, None);
@@ -967,7 +971,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         let mut anchored_ki: Option<isize> = None;
         for pos in 0..perm.size() {
             let slot: usize = perm.get(pos);
-            if leaf.keylenx(slot) >= LAYER_KEYLENX {
+            if leaf.keylenx_relaxed(slot) >= LAYER_KEYLENX {
                 let layer_ptr: *const u8 = leaf.load_layer_raw(slot).cast_const();
                 if layer_ptr == completed_layer_root {
                     anchored_ki = Some(pos.cast_signed() - 1);
@@ -1047,7 +1051,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         // Get current slot
         let slot: usize = perm.get(ki.unsigned_abs());
         let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = leaf.keylenx(slot);
+        let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
 
         // Reverse: ikeys should be non-increasing within a leaf
         if slot_ikey > self.stack.last_ikey() {
@@ -1077,7 +1081,8 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         }
 
         // Value slot - prepare for emit
-        if leaf.is_value_empty(slot) {
+        leaf.prefetch_value(slot);
+        if leaf.is_value_empty_relaxed(slot) {
             self.stack.set_ki(ki - 1);
             return (ScanStateBack::FindPrev, None);
         }

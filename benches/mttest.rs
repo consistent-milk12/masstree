@@ -19,6 +19,9 @@
 #![allow(unused_variables)]
 #![expect(clippy::struct_excessive_bools)]
 
+#[path = "bench_utils.rs"]
+mod bench_utils;
+
 use clap::Parser;
 use core_affinity::CoreId;
 use masstree::MassTree15Inline;
@@ -171,7 +174,7 @@ struct Args {
     #[arg(long = "output", short = 'o')]
     output: Option<PathBuf>,
 
-    /// Tests to run (rw1, rw2, rw2g90, rw2g98, rw3, rw4, same, uscale, wscale, all)
+    /// Tests to run (rw1, rw2, rw2g90, rw2g98, rw3, rw4, same, uscale, wscale, highcontention, highcontention1k, highcontention10, all)
     #[arg(default_value = "all")]
     tests: Vec<String>,
 }
@@ -392,6 +395,9 @@ impl ComputedRates {
         };
         let get_rate = if r.get_time > EPSILON {
             r.gets as f64 / r.get_time
+        } else if r.gets > 0 && r.put_time > EPSILON {
+            // Mixed workload: gets happened in the same time window as puts
+            r.gets as f64 / r.put_time
         } else {
             0.0
         };
@@ -500,6 +506,7 @@ fn bench_rw1(
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let start_barrier = Arc::new(Barrier::new(threads));
     let get_barrier = Arc::new(Barrier::new(threads)); // Barrier between put and get phases (C++ wait_all)
+    let end_barrier = Arc::new(Barrier::new(threads)); // End-of-get-phase barrier (C++ wait_all)
     let results: Arc<Vec<_>> = Arc::new(
         (0..threads)
             .map(|_| {
@@ -521,6 +528,7 @@ fn bench_rw1(
             let tree = Arc::clone(&tree);
             let start_barrier = Arc::clone(&start_barrier);
             let get_barrier = Arc::clone(&get_barrier);
+            let end_barrier = Arc::clone(&end_barrier);
             let results = Arc::clone(&results);
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
@@ -542,17 +550,20 @@ fn bench_rw1(
                 // ~16GB to ~2-3GB by not blocking reclamation for entire benchmark
                 let guard = tree.guard();
                 let put_start = Instant::now();
-                while !should_stop(puts) && puts < limit {
+                while !should_stop(puts) && puts <= limit {
                     let x = rng.rand();
                     let key = QuickIstr::new(u64::from(x));
                     let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
                     puts += 1;
                 }
-                let put_time = put_start.elapsed().as_secs_f64();
-                drop(guard); // outside timing - reclamation cost not measured
 
-                // C++ wait_all() - barrier between put and get phases
+                // C++ wait_all() - barrier between put and get phases (inside timed region)
+                // Guard held across barrier: epoch already held for entire put loop,
+                // a few more microseconds is fine. Dropping before barrier would include
+                // epoch reclamation cost (no C++ equivalent) in timing.
                 get_barrier.wait();
+                let put_time = put_start.elapsed().as_secs_f64();
+                drop(guard);
 
                 // Regenerate keys from seed (deterministic RNG), then shuffle
                 // Allocate exact size needed - no growth during timed phase
@@ -586,12 +597,15 @@ fn bench_rw1(
                         check_errors += 1;
                     }
                 }
-                let get_time = get_start.elapsed().as_secs_f64();
-                drop(guard); // outside timing
                 if check && check_errors > 0 {
                     eprintln!("rw1 thread {tid}: {check_errors} check errors");
                 }
                 std::hint::black_box(sum);
+
+                // C++ wait_all() at end of get phase (inside timed region)
+                end_barrier.wait();
+                let get_time = get_start.elapsed().as_secs_f64();
+                drop(guard);
 
                 results[tid].0.store(puts, Ordering::Relaxed);
                 results[tid].1.store(puts, Ordering::Relaxed); // gets = puts (timeout[1] never fires)
@@ -634,6 +648,7 @@ fn bench_rw2(
 ) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
+    let end_barrier = Arc::new(Barrier::new(threads)); // C++ wait_all at end
     let results: Arc<Vec<_>> = Arc::new(
         (0..threads)
             .map(|_| (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)))
@@ -647,6 +662,7 @@ fn bench_rw2(
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
+            let end_barrier = Arc::clone(&end_barrier);
             let results = Arc::clone(&results);
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
@@ -672,7 +688,7 @@ fn bench_rw2(
                 let mut ops = 0u64;
                 loop {
                     // Check termination conditions with batched timeout check
-                    if should_stop(ops) || ops >= limit {
+                    if should_stop(ops) || ops > limit {
                         break;
                     }
 
@@ -710,8 +726,11 @@ fn bench_rw2(
                 if check && check_errors > 0 {
                     eprintln!("{name} thread {tid}: {check_errors} check errors");
                 }
-                let elapsed = start.elapsed().as_secs_f64();
                 std::hint::black_box(sum);
+
+                // C++ wait_all() at end of benchmark (inside timed region)
+                end_barrier.wait();
+                let elapsed = start.elapsed().as_secs_f64();
 
                 results[tid].0.store(puts, Ordering::Relaxed);
                 results[tid].1.store(gets, Ordering::Relaxed);
@@ -758,6 +777,7 @@ fn bench_rw3(
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
     let get_barrier = Arc::new(Barrier::new(threads)); // Barrier between put and get phases
+    let end_barrier = Arc::new(Barrier::new(threads)); // End-of-get-phase barrier (C++ wait_all)
     let results: Arc<Vec<_>> = Arc::new(
         (0..threads)
             .map(|_| (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)))
@@ -772,6 +792,7 @@ fn bench_rw3(
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
             let get_barrier = Arc::clone(&get_barrier);
+            let end_barrier = Arc::clone(&end_barrier);
             let results = Arc::clone(&results);
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
@@ -788,16 +809,18 @@ fn bench_rw3(
                 // Guard created outside timing - epoch registration is not a tree op
                 let guard = tree.guard();
                 let put_start = Instant::now();
-                while !should_stop(n) && n < limit {
+                while !should_stop(n) && n <= limit {
                     let key = key8(n);
                     let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
                     n += 1;
                 }
-                let put_time = put_start.elapsed().as_secs_f64();
-                drop(guard); // outside timing - reclamation cost not measured
 
-                // Sync point (matches C++ wait_all between phases)
+                // C++ wait_all() between phases (inside timed region)
+                // Guard held across barrier: no C++ equivalent to epoch reclamation,
+                // so drop after timing to avoid measuring Rust-specific cost.
                 get_barrier.wait();
+                let put_time = put_start.elapsed().as_secs_f64();
+                drop(guard);
 
                 // Get phase - POINT LOOKUPS, exactly n iterations (matches C++ exactly)
                 // C++ does: for (unsigned i = 0; i < n; ++i) { client.get_check_key8(i, i + 1); }
@@ -818,12 +841,15 @@ fn bench_rw3(
                         check_errors += 1;
                     }
                 }
-                let get_time = get_start.elapsed().as_secs_f64();
-                drop(guard); // outside timing
                 if check && check_errors > 0 {
                     eprintln!("rw3 thread {tid}: {check_errors} check errors");
                 }
                 std::hint::black_box(sum);
+
+                // C++ wait_all() at end of get phase (inside timed region)
+                end_barrier.wait();
+                let get_time = get_start.elapsed().as_secs_f64();
+                drop(guard);
 
                 results[tid].0.store(n, Ordering::Relaxed);
                 results[tid]
@@ -869,6 +895,7 @@ fn bench_rw4(
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
     let get_barrier = Arc::new(Barrier::new(threads)); // Barrier between put and get phases
+    let end_barrier = Arc::new(Barrier::new(threads)); // End-of-get-phase barrier (C++ wait_all)
     let results: Arc<Vec<_>> = Arc::new(
         (0..threads)
             .map(|_| (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)))
@@ -883,6 +910,7 @@ fn bench_rw4(
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
             let get_barrier = Arc::clone(&get_barrier);
+            let end_barrier = Arc::clone(&end_barrier);
             let results = Arc::clone(&results);
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
@@ -898,16 +926,18 @@ fn bench_rw4(
 
                 let guard = tree.guard();
                 let put_start = Instant::now();
-                while !should_stop(n) && n < limit {
+                while !should_stop(n) && n <= limit {
                     let key = key8(TOP - n);
                     let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
                     n += 1;
                 }
-                let put_time = put_start.elapsed().as_secs_f64();
-                drop(guard); // outside timing - reclamation cost not measured
 
-                // Sync point (matches C++ wait_all between phases)
+                // C++ wait_all() between phases (inside timed region)
+                // Guard held across barrier: no C++ equivalent to epoch reclamation,
+                // so drop after timing to avoid measuring Rust-specific cost.
                 get_barrier.wait();
+                let put_time = put_start.elapsed().as_secs_f64();
+                drop(guard);
 
                 // Get phase - POINT LOOKUPS in reverse order, exactly n iterations
                 // C++ does: for (unsigned i = 0; i < n; ++i) { client.get_check_key8(top - i, i + 1); }
@@ -928,12 +958,15 @@ fn bench_rw4(
                         check_errors += 1;
                     }
                 }
-                let get_time = get_start.elapsed().as_secs_f64();
-                drop(guard); // outside timing
                 if check && check_errors > 0 {
                     eprintln!("rw4 thread {tid}: {check_errors} check errors");
                 }
                 std::hint::black_box(sum);
+
+                // C++ wait_all() at end of get phase (inside timed region)
+                end_barrier.wait();
+                let get_time = get_start.elapsed().as_secs_f64();
+                drop(guard);
 
                 results[tid].0.store(n, Ordering::Relaxed);
                 results[tid]
@@ -977,6 +1010,7 @@ fn bench_same(
 
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
+    let end_barrier = Arc::new(Barrier::new(threads)); // C++ wait_all at end
     let results: Arc<Vec<_>> = Arc::new(
         (0..threads)
             .map(|_| (AtomicU64::new(0), AtomicU64::new(0)))
@@ -990,6 +1024,7 @@ fn bench_same(
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
+            let end_barrier = Arc::clone(&end_barrier);
             let results = Arc::clone(&results);
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
@@ -1008,7 +1043,7 @@ fn bench_same(
                 let mut ops_until_refresh = GUARD_REFRESH_INTERVAL;
 
                 loop {
-                    if should_stop(n) || n >= limit {
+                    if should_stop(n) || n > limit {
                         break;
                     }
                     // Countdown-based guard refresh
@@ -1024,6 +1059,9 @@ fn bench_same(
                     n += 1;
                 }
                 drop(guard);
+
+                // C++ wait_all() at end of benchmark (inside timed region)
+                end_barrier.wait();
                 let elapsed = start.elapsed().as_secs_f64();
 
                 results[tid].0.store(n, Ordering::Relaxed);
@@ -1067,6 +1105,7 @@ fn bench_uscale(
 
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
+    let end_barrier = Arc::new(Barrier::new(threads)); // C++ wait_all at end
     let results: Arc<Vec<_>> = Arc::new(
         (0..threads)
             .map(|_| (AtomicU64::new(0), AtomicU64::new(0)))
@@ -1080,6 +1119,7 @@ fn bench_uscale(
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
+            let end_barrier = Arc::clone(&end_barrier);
             let results = Arc::clone(&results);
             let core_ids = Arc::clone(core_ids);
 
@@ -1101,7 +1141,7 @@ fn bench_uscale(
                 let mut ops_until_refresh = GUARD_REFRESH_INTERVAL;
 
                 loop {
-                    if should_stop(n) || n >= limit {
+                    if should_stop(n) {
                         break;
                     }
                     // Countdown-based guard refresh
@@ -1117,6 +1157,9 @@ fn bench_uscale(
                     n += 1;
                 }
                 drop(guard);
+
+                // C++ wait_all() at end of benchmark (inside timed region)
+                end_barrier.wait();
                 let elapsed = start.elapsed().as_secs_f64();
 
                 results[tid].0.store(n, Ordering::Relaxed);
@@ -1153,6 +1196,7 @@ fn bench_wscale(
 ) -> Vec<ThreadResult> {
     let tree = Arc::new(MassTree15Inline::<u64>::new());
     let barrier = Arc::new(Barrier::new(threads));
+    let end_barrier = Arc::new(Barrier::new(threads)); // C++ wait_all at end
     let results: Arc<Vec<_>> = Arc::new(
         (0..threads)
             .map(|_| (AtomicU64::new(0), AtomicU64::new(0)))
@@ -1166,6 +1210,7 @@ fn bench_wscale(
         .map(|tid| {
             let tree = Arc::clone(&tree);
             let barrier = Arc::clone(&barrier);
+            let end_barrier = Arc::clone(&end_barrier);
             let results = Arc::clone(&results);
             let core_ids = Arc::clone(core_ids);
             thread::spawn(move || {
@@ -1184,7 +1229,7 @@ fn bench_wscale(
                 let mut ops_until_refresh = GUARD_REFRESH_INTERVAL;
 
                 loop {
-                    if should_stop(n) || n >= limit {
+                    if should_stop(n) {
                         break;
                     }
                     // Countdown-based guard refresh
@@ -1200,6 +1245,9 @@ fn bench_wscale(
                     n += 1;
                 }
                 drop(guard);
+
+                // C++ wait_all() at end of benchmark (inside timed region)
+                end_barrier.wait();
                 let elapsed = start.elapsed().as_secs_f64();
 
                 results[tid].0.store(n, Ordering::Relaxed);
@@ -1225,6 +1273,139 @@ fn bench_wscale(
         .collect();
 
     print_results("wscale", threads, &thread_results);
+    thread_results
+}
+
+/// C++ `kvtest_highcontention` semantics:
+/// - Pre-populate tree with `num_keys` 64-byte keys
+/// - Mixed loop: 10% writes, 90% reads (bernoulli(0.1) for write)
+/// - Duration-bounded only (no limit)
+/// - key generation matches C++ multiplier-based 64-byte keys
+fn bench_highcontention(
+    threads: usize,
+    duration: Duration,
+    num_keys: u32,
+    name: &'static str,
+    check: bool,
+    core_ids: &Arc<Vec<CoreId>>,
+) -> Vec<ThreadResult> {
+    let tree = Arc::new(MassTree15Inline::<u64>::new());
+
+    // Pre-populate tree with all keys (matches C++ pre-population before timed region)
+    let keys: Vec<[u8; 64]> = bench_utils::keys::<64>(num_keys as usize);
+    {
+        let guard = tree.guard();
+        for (i, key) in keys.iter().enumerate() {
+            let _ = tree.insert_with_guard(key.as_slice(), i as u64, &guard);
+        }
+    }
+
+    let barrier = Arc::new(Barrier::new(threads));
+    let end_barrier = Arc::new(Barrier::new(threads)); // C++ wait_all at end
+    let results: Arc<Vec<_>> = Arc::new(
+        (0..threads)
+            .map(|_| (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    // Clear stale timeout before spawning threads
+    reset_timeout();
+
+    let keys = Arc::new(keys);
+
+    let handles: Vec<_> = (0..threads)
+        .map(|tid| {
+            let tree = Arc::clone(&tree);
+            let barrier = Arc::clone(&barrier);
+            let end_barrier = Arc::clone(&end_barrier);
+            let results = Arc::clone(&results);
+            let core_ids = Arc::clone(core_ids);
+            let keys = Arc::clone(&keys);
+            thread::spawn(move || {
+                pin_thread(tid, &core_ids);
+                let seed = KvRandom::FIRST_SEED + (tid % 48) as u64;
+                let mut rng = KvRandom::new(seed);
+
+                // Arm timer after barrier so spawn/sync overhead isn't counted
+                if barrier.wait().is_leader() {
+                    start_timeout_timer(duration);
+                }
+
+                let start = Instant::now();
+                let mut puts = 0u64;
+                let mut gets = 0u64;
+                let mut sum = 0u64;
+                let mut guard = tree.guard();
+                let mut ops_until_refresh = GUARD_REFRESH_INTERVAL;
+                let mut check_errors = 0u64;
+                let mut ops = 0u64;
+
+                loop {
+                    if should_stop(ops) {
+                        break;
+                    }
+                    ops_until_refresh -= 1;
+                    if ops_until_refresh == 0 {
+                        drop(guard);
+                        guard = tree.guard();
+                        ops_until_refresh = GUARD_REFRESH_INTERVAL;
+                    }
+
+                    let idx = rng.uniform(num_keys) as usize;
+                    let key = &keys[idx];
+
+                    // 10% writes, 90% reads (C++ uses bernoulli(write_frac))
+                    if rng.bernoulli(0.1) {
+                        let _ = tree.insert_with_guard(key.as_slice(), ops, &guard);
+                        puts += 1;
+                    } else {
+                        if let Some(v) = tree.get_with_guard(key.as_slice(), &guard) {
+                            sum = sum.wrapping_add(v);
+                        } else if check {
+                            check_errors += 1;
+                        }
+                        gets += 1;
+                    }
+                    ops += 1;
+                }
+                drop(guard);
+                if check && check_errors > 0 {
+                    eprintln!("{name} thread {tid}: {check_errors} check errors");
+                }
+                std::hint::black_box(sum);
+
+                // C++ wait_all() at end of benchmark (inside timed region)
+                end_barrier.wait();
+                let elapsed = start.elapsed().as_secs_f64();
+
+                results[tid].0.store(puts, Ordering::Relaxed);
+                results[tid].1.store(gets, Ordering::Relaxed);
+                results[tid]
+                    .2
+                    .store((elapsed * 1e9) as u64, Ordering::Relaxed);
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Same mixed-workload reporting as rw2 (get_time=0, shared time window)
+    let thread_results: Vec<_> = results
+        .iter()
+        .map(|(p, g, t)| {
+            let elapsed = t.load(Ordering::Relaxed) as f64 / 1e9;
+            ThreadResult {
+                puts: p.load(Ordering::Relaxed),
+                gets: g.load(Ordering::Relaxed),
+                put_time: elapsed,
+                get_time: 0.0, // Mixed workload: don't double-count time
+            }
+        })
+        .collect();
+
+    print_results(name, threads, &thread_results);
     thread_results
 }
 
@@ -1254,7 +1435,16 @@ fn main() {
     // Parse tests - use C++ naming conventions
     let tests: Vec<&str> = if args.tests.is_empty() || args.tests[0] == "all" {
         // Default test set matching C++ convention
-        vec!["rw1", "rw2g98", "rw3", "rw4", "same", "uscale", "wscale"]
+        vec![
+            "rw1",
+            "rw2g98",
+            "rw3",
+            "rw4",
+            "same",
+            "uscale",
+            "wscale",
+            "highcontention",
+        ]
     } else {
         args.tests.iter().map(String::as_str).collect()
     };
@@ -1359,6 +1549,45 @@ fn main() {
                         run_results.add_benchmark("wscale", trial, results);
                     }
                 }
+                "highcontention" => {
+                    let results = bench_highcontention(
+                        threads,
+                        duration,
+                        500,
+                        "highcontention",
+                        check,
+                        &core_ids,
+                    );
+                    if should_save {
+                        run_results.add_benchmark("highcontention", trial, results);
+                    }
+                }
+                "highcontention1k" => {
+                    let results = bench_highcontention(
+                        threads,
+                        duration,
+                        1000,
+                        "highcontention1k",
+                        check,
+                        &core_ids,
+                    );
+                    if should_save {
+                        run_results.add_benchmark("highcontention1k", trial, results);
+                    }
+                }
+                "highcontention10" => {
+                    let results = bench_highcontention(
+                        threads,
+                        duration,
+                        10,
+                        "highcontention10",
+                        check,
+                        &core_ids,
+                    );
+                    if should_save {
+                        run_results.add_benchmark("highcontention10", trial, results);
+                    }
+                }
                 "all" => {
                     let r1 = bench_rw1(threads, duration, limit, check, &core_ids);
                     let r2 = bench_rw2(threads, duration, 0.98, "rw2g98", limit, check, &core_ids);
@@ -1367,6 +1596,14 @@ fn main() {
                     let r5 = bench_same(threads, duration, limit, &core_ids);
                     let r6 = bench_uscale(threads, duration, limit, &core_ids);
                     let r7 = bench_wscale(threads, duration, limit, &core_ids);
+                    let r8 = bench_highcontention(
+                        threads,
+                        duration,
+                        500,
+                        "highcontention",
+                        check,
+                        &core_ids,
+                    );
                     if should_save {
                         run_results.add_benchmark("rw1", trial, r1);
                         run_results.add_benchmark("rw2g98", trial, r2);
@@ -1375,6 +1612,7 @@ fn main() {
                         run_results.add_benchmark("same", trial, r5);
                         run_results.add_benchmark("uscale", trial, r6);
                         run_results.add_benchmark("wscale", trial, r7);
+                        run_results.add_benchmark("highcontention", trial, r8);
                     }
                 }
                 _ => eprintln!("Unknown test: {test}"),

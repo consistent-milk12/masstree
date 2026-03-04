@@ -248,11 +248,15 @@ impl BatchDirection for Forward {
 
     #[inline(always)]
     fn prefetch_neighbor<P: LeafPolicy>(
-        _ki: isize,
-        _leaf: &LeafNode15<P>,
-        _perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        ki: isize,
+        leaf: &LeafNode15<P>,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     ) {
-        // Forward scan does not prefetch neighbor slot values.
+        let next_ki: usize = (ki + 1).cast_unsigned();
+        if next_ki < perm.size() {
+            let next_slot: usize = perm.get(next_ki);
+            leaf.prefetch_value(next_slot);
+        }
     }
 
     #[inline(always)]
@@ -402,7 +406,7 @@ where
     while ctx.ki >= 0 && ctx.ki.unsigned_abs() < ctx.perm_size {
         let slot: usize = ctx.perm.get(ctx.ki.unsigned_abs());
         let slot_ikey: u64 = ctx.leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = ctx.leaf.keylenx(slot);
+        let slot_keylenx: u8 = ctx.leaf.keylenx_relaxed(slot);
 
         D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, &ctx.perm);
 
@@ -419,7 +423,7 @@ where
         }
 
         // Empty value check
-        if unlikely(ctx.leaf.is_value_empty(slot)) {
+        if unlikely(ctx.leaf.is_value_empty_relaxed(slot)) {
             ctx.ki = D::step(ctx.ki);
             continue;
         }
@@ -496,7 +500,7 @@ where
     while ctx.ki >= 0 && ctx.ki.unsigned_abs() < ctx.perm_size {
         let slot: usize = ctx.perm.get(ctx.ki.unsigned_abs());
         let slot_ikey: u64 = ctx.leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = ctx.leaf.keylenx(slot);
+        let slot_keylenx: u8 = ctx.leaf.keylenx_relaxed(slot);
 
         D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, &ctx.perm);
 
@@ -520,7 +524,7 @@ where
         }
 
         // Empty value check
-        if unlikely(ctx.leaf.is_value_empty(slot)) {
+        if unlikely(ctx.leaf.is_value_empty_relaxed(slot)) {
             ctx.ki = D::step(ctx.ki);
             continue;
         }

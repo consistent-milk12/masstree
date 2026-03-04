@@ -11,6 +11,10 @@ use crate::{
 
 use super::{FindSlotResult, InsertSearchResultGeneric};
 
+/// Max suffix bag retires per locked batch insert.
+/// One per slot (WIDTH=15) plus one for empty-leaf reuse = 16.
+const MAX_BATCH_RETIRES: usize = crate::leaf15::WIDTH_15 + 1;
+
 // ============================================================================
 //  Batch Entry Types
 // ============================================================================
@@ -399,15 +403,18 @@ where
                     continue 'retry;
                 }
 
-                // Now we hold the lock - process as many entries as fit in this leaf
-                let mut deferred_retires: Vec<*mut u8> = Vec::new();
+                // Now we hold the lock - process as many entries as fit in this leaf.
+                let mut retire_buf: [*mut u8; MAX_BATCH_RETIRES] =
+                    [std::ptr::null_mut(); MAX_BATCH_RETIRES];
+                let mut retire_count: usize = 0;
                 let processed = self.insert_batch_into_locked_leaf(
                     leaf,
                     &mut lock,
                     batch,
                     index,
                     &mut result,
-                    &mut deferred_retires,
+                    &mut retire_buf,
+                    &mut retire_count,
                     guard,
                     pre_allocated_vec,
                 );
@@ -415,7 +422,7 @@ where
                 drop(lock);
 
                 // Retire old suffix bags OUTSIDE the lock
-                for ptr in deferred_retires {
+                for &ptr in &retire_buf[..retire_count] {
                     // SAFETY: ptr is a valid suffix bag pointer from a completed operation.
                     unsafe {
                         LeafNode15::<P>::retire_suffix_bag_ptr(ptr, guard);
@@ -475,7 +482,8 @@ where
         batch: &[BatchEntry<P>],
         start_index: usize,
         result: &mut BatchInsertResult<P::Output>,
-        deferred_retires: &mut Vec<*mut u8>,
+        deferred_retires: &mut [*mut u8; MAX_BATCH_RETIRES],
+        retire_count: &mut usize,
         guard: &LocalGuard<'_>,
         pre_allocated: Option<Vec<u8>>,
     ) -> usize {
@@ -503,7 +511,9 @@ where
                     self.insert_into_empty_leaf_batch(leaf, lock, &key, &entry.output, guard);
 
                 if !deferred.is_null() {
-                    deferred_retires.push(deferred);
+                    debug_assert!(*retire_count < deferred_retires.len());
+                    deferred_retires[*retire_count] = deferred;
+                    *retire_count += 1;
                 }
 
                 result.record_insert();
@@ -542,7 +552,9 @@ where
             match insert_result {
                 BatchEntryResult::Inserted(deferred) => {
                     if !deferred.is_null() {
-                        deferred_retires.push(deferred);
+                        debug_assert!(*retire_count < deferred_retires.len());
+                        deferred_retires[*retire_count] = deferred;
+                        *retire_count += 1;
                     }
 
                     result.record_insert();

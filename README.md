@@ -6,7 +6,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 ## Status
 
-Current Version: v0.9.2
+Current Version: v0.9.3
 
 Significantly reduced duplicate code through trait based abstractions, while improving performance further. All standard data structure features are implemented and streamlined, on top the specialized features like range scans and prefix queries. From latency analysis, it seems to have a surprisingly strong tail latency profile for a concurrent ordered map. The cache-line aligned layout design and aggressive prefetching seems to have paid off, on top of masstree's original excellent architecture.
 
@@ -14,23 +14,23 @@ The next issues to work on are the memory profile and memcomparable mappings for
 
 ## vs Rust Concurrent Maps (12T SMT)
 
-> Source: `runs/run199_read_write.txt` (masstree), `runs/run184_read_write_reworked.txt` (competitors)
+> Source: `runs/run208_read_write.txt` (masstree), `runs/run184_read_write_reworked.txt` (competitors)
 > **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
 
 | Benchmark | masstree15 | tree_index | skipmap | indexset | MT vs Best |
 |-----------|-----------|------------|---------|----------|------------|
-| 01_uniform | 44.18 | 14.49 | 10.80 | 14.94 | 2.96x |
-| 02_zipfian | 40.48 | 18.86 | 12.92 | 3.28 | 2.15x |
-| 03_shared_prefix | 30.12 | 14.61 | 11.08 | 14.36 | 2.06x |
-| 04_high_contention | 70.85 | 21.64 | 16.90 | 1.97 | 3.27x |
-| 05_large_dataset | 17.94 | 11.35 | 7.50 | 9.17 | 1.58x |
-| 06_single_hot_key | 15.67 | 6.82 | 7.46 | 2.52 | 2.10x |
-| 07_mixed_50_50 | 36.76 | 8.73 | 6.46 | 14.86 | 2.47x |
-| 08_8byte_keys | 58.26 | 24.97 | 14.06 | 19.69 | 2.33x |
-| 09_pure_read | 57.41 | 24.12 | 14.40 | 17.40 | 2.38x |
-| 10_remove_heavy | 22.00 | 11.18 | 7.18 | 4.26 | 1.97x |
-| 13_insert_only_fair | 39.71 | 24.29 | 15.13 | 6.30 | 1.63x |
-| 14_pure_insert | 15.20 | 11.96 | 9.86 | 2.30 | 1.27x |
+| 01_uniform | 53.16 | 14.49 | 10.80 | 14.94 | 3.56x |
+| 02_zipfian | 45.54 | 18.86 | 12.92 | 3.28 | 2.42x |
+| 03_shared_prefix | 31.84 | 14.61 | 11.08 | 14.36 | 2.18x |
+| 04_high_contention | 79.81 | 21.64 | 16.90 | 1.97 | 3.69x |
+| 05_large_dataset | 18.72 | 11.35 | 7.50 | 9.17 | 1.65x |
+| 06_single_hot_key | 15.58 | 6.82 | 7.46 | 2.52 | 2.09x |
+| 07_mixed_50_50 | 40.41 | 8.73 | 6.46 | 14.86 | 2.72x |
+| 08_8byte_keys | 62.47 | 24.97 | 14.06 | 19.69 | 2.50x |
+| 09_pure_read | 56.77 | 24.12 | 14.40 | 17.40 | 2.35x |
+| 10_remove_heavy | 26.69 | 11.18 | 7.18 | 4.26 | 2.39x |
+| 13_insert_only_fair | 44.79 | 24.29 | 15.13 | 6.30 | 1.84x |
+| 14_pure_insert | 15.28 | 11.96 | 9.86 | 2.30 | 1.28x |
 
 ## High-Impact Workloads (12T SMT)
 
@@ -100,7 +100,7 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 ## Tail Latency (pbench, Per-Operation)
 
-> Source: `runs/run207_tail_latency.txt`
+> Source: `runs/run213_tail_latency.txt` (8T), `runs/run207_tail_latency.txt` (1T)
 > **Config:** 200k samples per benchmark, `sample_size=1` (unbatched), TSC timer (10 ns precision)
 
 ### Point Lookups
@@ -109,8 +109,8 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 |-----------|----------|-----------|---------|----------|
 | get 1T p50 | 140 ns | 250 ns | 350 ns | 270 ns |
 | get 1T p99.9 | 501 ns | 411 ns | 801 ns | 621 ns |
-| get 8T p50 | 391 ns | 491 ns | 661 ns | 641 ns |
-| get 8T p99.9 | 1.01 us | 1.14 us | 1.66 us | 1.44 us |
+| get 8T p50 | 340 ns | 551 ns | 621 ns | 591 ns |
+| get 8T p99.9 | 922 ns | 1.15 us | 1.36 us | 1.34 us |
 | get 1M 1T p50 | 321 ns | 461 ns | 691 ns | 521 ns |
 | get deep 8T p50 | 661 ns | 741 ns | 831 ns | - |
 | get long 8T p50 | 611 ns | 581 ns | 701 ns | - |
@@ -128,24 +128,35 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 | Benchmark | masstree | treeindex | skipmap | indexset |
 |-----------|----------|-----------|---------|----------|
-| 90/10 p50 | 371 ns | 531 ns | 721 ns | 661 ns |
-| 90/10 p99.9 | 1.01 us | 4.08 us | 5.53 us | 1.49 us |
-| 50/50 p50 | 481 ns | 982 ns | 1.15 us | 711 ns |
-| 50/50 p99.9 | 1.22 us | 6.80 us | 10.9 us | 1.62 us |
+| 90/10 p50 | 381 ns | 601 ns | 681 ns | 621 ns |
+| 90/10 p99.9 | 1.04 us | 4.18 us | 5.95 us | 1.39 us |
+| 50/50 p50 | 421 ns | 1.01 us | 1.09 us | 691 ns |
+| 50/50 p99.9 | 1.04 us | 6.66 us | 10.3 us | 1.57 us |
 
 ### Range Scans (8T, 50-key scan)
 
 | Benchmark | masstree | treeindex | skipmap |
 |-----------|----------|-----------|---------|
-| scan p50 | 982 ns | 851 ns | 3.32 us |
-| scan+write p50 | 982 ns | 1.00 us | 3.58 us |
-| scan+write p99.9 | 3.86 us | 6.73 us | 9.48 us |
+| scan p50 | 972 ns | 862 ns | 3.90 us |
+| scan+write p50 | 902 ns | 1.02 us | 3.97 us |
+| scan+write p99.9 | 2.50 us | 6.66 us | 9.99 us |
+
+## vs C++ Masstree (12T, mttest)
+
+> **Config:** 12 threads, 10s duration, C++ reference from [masstree-beta](https://github.com/kohler/masstree-beta)
+
+| Benchmark | C++ Mops/s | Rust Mops/s | Ratio |
+|-----------|-----------|------------|-------|
+| rw1 (50% read) | 8.90 | 8.78 | 0.99x |
+| rw2g98 (98% read) | 22.12 | 23.39 | 1.06x |
+
+Rust uses the hyaline-based [seize](https://crates.io/crates/seize) crate for memory reclamation, which has cheaper guard acquisition than C++ epoch-based reclamation. This trades slightly slower writes for faster reads. At 98% reads (the typical index workload), Rust pulls ahead.
 
 ## Install
 
 ```toml
 [dependencies]
-masstree = { version = "0.9.2", features = ["mimalloc"] }
+masstree = { version = "0.9.3", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).
@@ -235,18 +246,20 @@ for entry in tree.iter(&guard) {
 
 ## When to Use
 
-**May work well for:**
+Masstree is the fastest concurrent ordered map in Rust for variable-length keys. It wins 12/12 read/write benchmarks against `scc::TreeIndex`, `crossbeam::SkipMap`, and `scc::HashIndex` with margins from 1.28x to 3.79x. Point lookup latency is 140 ns p50 (single-threaded), 340 ns at 8T, and OCC reads stay stable under write pressure (p99.9 flat at 1.04 µs from 90/10 to 50/50 mixed workloads). The trade-off is memory: 79 bytes/entry at scale vs 50 for TreeIndex (1.58x overhead), with shared-prefix keys costing 2-3x more due to deeper trie structure.
 
-- Long keys with shared prefixes (URLs, file paths, UUIDs)
-- Range scans over ordered data
-- Mixed read/write workloads
-- High-contention scenarios (the trie structure helps here)
+**Best for:**
 
-**Consider alternatives for:**
+- Variable-length byte keys (`&[u8]`) with mixed read/write concurrency
+- Range scans and prefix queries over ordered data
+- High-contention hot-key workloads (3.69x over next best at 12T)
+- Long or variable-length keys (3.85x advantage, native slice API avoids cloning)
 
-- Unordered point lookups → `dashmap`
-- Integer keys only → `congee` (ART-based)
-- Read-heavy with rare writes → `RwLock<BTreeMap>`
+**Consider alternatives when:**
+
+- Unordered point lookups only, `dashmap`
+- Fixed integer keys only, `congee` (ART-based)
+- Single-threaded only, `BTreeMap`
 
 ### `MassTree<V>` (Default, True-Inline)
 
@@ -364,8 +377,6 @@ MIT. See `LICENSE`.
 - [Masstree Paper (EuroSys 2012)](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf)
 - [C++ Reference Implementation](https://github.com/kohler/masstree-beta)
 
-## CHANGELOG
+## Changelog
 
-0.9.2: Route based re-traversal for sublayer GC. Fixes UAF from duplicate queue
-entries and stale pointers in deeply nested chains. The correctness fix and
-proper GC path leads to substantial performance improvements.
+See [CHANGELOG.md](CHANGELOG.md).

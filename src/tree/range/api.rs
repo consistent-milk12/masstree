@@ -539,7 +539,7 @@ where
             break;
         }
 
-        if leaf.keylenx(slot) >= LAYER_KEYLENX && !leaf.is_value_empty(slot) {
+        if leaf.keylenx_relaxed(slot) >= LAYER_KEYLENX && !leaf.is_value_empty_relaxed(slot) {
             let layer_ptr: *const u8 = leaf.load_layer_raw(slot).cast_const();
 
             if leaf.version().has_changed(version) {

@@ -159,9 +159,9 @@ fn check_slot_match<P>(
 where
     P: LeafPolicy,
 {
-    let slot_keylenx: u8 = leaf.keylenx(slot);
+    let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
 
-    if leaf.is_value_empty(slot) {
+    if leaf.is_value_empty_relaxed(slot) {
         return None;
     }
 
@@ -428,7 +428,7 @@ where
                 };
             }
 
-            let twig_keylenx: u8 = twig.keylenx(slot);
+            let twig_keylenx: u8 = twig.keylenx_relaxed(slot);
 
             if twig_keylenx < LAYER_KEYLENX {
                 return TwigDescentResult::ContinueLeafLoop {
@@ -437,7 +437,7 @@ where
                 };
             }
 
-            if twig.is_value_empty(slot) {
+            if twig.is_value_empty_relaxed(slot) {
                 return TwigDescentResult::ContinueLeafLoop {
                     layer_root: ptr.cast_const(),
                     leaf_ptr: ptr.cast::<LeafNode15<P>>(),
@@ -619,8 +619,8 @@ where
                     let slot: usize = perm.get(i);
 
                     if (leaf.ikey_relaxed(slot) == target_ikey)
-                        && (leaf.keylenx(slot) == search_keylenx)
-                        && !leaf.is_value_empty(slot)
+                        && (leaf.keylenx_relaxed(slot) == search_keylenx)
+                        && !leaf.is_value_empty_relaxed(slot)
                     {
                         leaf.prefetch_value(slot);
                         found_ptr = leaf.load_value_raw(slot);

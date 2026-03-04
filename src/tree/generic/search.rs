@@ -189,9 +189,9 @@ where
         slot: usize,
         search_keylenx: u8,
     ) -> Option<InsertSearchResultGeneric> {
-        let slot_keylenx: u8 = leaf.keylenx(slot);
+        let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
 
-        if leaf.is_value_empty(slot) {
+        if leaf.is_value_empty_relaxed(slot) {
             return None;
         }
 
@@ -302,9 +302,9 @@ where
         slot: usize,
         search_keylenx: u8,
     ) -> Option<InsertSearchResultGeneric> {
-        let slot_keylenx: u8 = leaf.keylenx(slot);
+        let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
 
-        if leaf.is_value_empty(slot) {
+        if leaf.is_value_empty_relaxed(slot) {
             return None;
         }
 

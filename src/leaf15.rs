@@ -258,6 +258,13 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.values.load(slot)
     }
 
+    /// Load the terminal value with Relaxed ordering.
+    /// For use under lock where the lock's Acquire provides visibility.
+    #[inline(always)]
+    pub fn load_value_relaxed(&self, slot: usize) -> Option<P::Output> {
+        self.values.load_relaxed(slot)
+    }
+
     /// Store a terminal value at a slot.
     #[inline(always)]
     pub fn store_value(&self, slot: usize, output: &P::Output) {
@@ -274,6 +281,13 @@ impl<P: LeafPolicy> LeafNode15<P> {
     #[inline(always)]
     pub fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle {
         self.values.update_in_place(slot, output)
+    }
+
+    /// Update an existing terminal value with Relaxed store ordering.
+    /// For use under lock where the lock's Release on drop provides synchronization.
+    #[inline(always)]
+    pub fn update_value_in_place_relaxed(&self, slot: usize, output: &P::Output) -> RetireHandle {
+        self.values.update_in_place_relaxed(slot, output)
     }
 
     /// Take the terminal value from a slot, leaving it empty.
@@ -336,6 +350,15 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.is_slot_empty(slot)
     }
 
+    /// Relaxed empty check for OCC search loops.
+    ///
+    /// The permutation Acquire load provides synchronization with writers.
+    /// The OCC `has_changed()` check validates after all reads.
+    #[inline(always)]
+    pub fn is_value_empty_relaxed(&self, slot: usize) -> bool {
+        self.values.is_empty_relaxed(slot)
+    }
+
     /// Load the raw layer pointer at a slot.
     #[inline(always)]
     pub fn load_layer_raw(&self, slot: usize) -> *mut u8 {
@@ -348,12 +371,12 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.values.load_raw(slot)
     }
 
-    /// Clear a slot's value and keylenx.
+    /// Clear a slot's value and keylenx (Relaxed ordering, for use under lock).
     #[inline(always)]
     pub fn clear_slot(&self, slot: usize) {
         debug_assert!(slot < WIDTH_15, "clear_slot: slot out of bounds");
-        self.values.clear(slot);
-        self.keylenx[slot].store(0, WRITE_ORD);
+        self.values.clear_relaxed(slot);
+        self.keylenx[slot].store(0, RELAXED);
     }
 
     /// Clear a slot's value, keylenx, and permutation entry.
@@ -424,10 +447,25 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.values.move_slot(&dst.values, src_slot, dst_slot);
     }
 
+    /// Move a slot's value with Relaxed store ordering on the destination.
+    /// For use under lock where the lock's Release on drop provides synchronization.
+    #[inline(always)]
+    pub fn move_value_to_relaxed(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
+        self.values
+            .move_slot_relaxed(&dst.values, src_slot, dst_slot);
+    }
+
     /// Clear a slot's value storage (without touching keylenx).
     #[inline(always)]
     pub fn clear_value(&self, slot: usize) {
         self.values.clear(slot);
+    }
+
+    /// Clear a slot's value with Relaxed ordering.
+    /// For use under lock where the lock's Release on drop provides synchronization.
+    #[inline(always)]
+    pub fn clear_value_relaxed(&self, slot: usize) {
+        self.values.clear_relaxed(slot);
     }
 
     // ========================================================================
@@ -787,6 +825,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
             prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0)));
             prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0) + 64));
             prefetch_read(self_ptr.add(StdMem::offset_of!(Self, values)));
+            prefetch_read(self_ptr.add(StdMem::offset_of!(Self, values) + 64));
         }
     }
 
@@ -808,6 +847,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
             if size > 8 {
                 prefetch_read(self_ptr.add(StdMem::offset_of!(Self, ikey0) + 64));
+                prefetch_read(self_ptr.add(StdMem::offset_of!(Self, values) + 64));
             }
         }
     }
@@ -823,6 +863,20 @@ impl<P: LeafPolicy> LeafNode15<P> {
         debug_assert!(slot < WIDTH_15, "keylenx: slot out of bounds");
 
         self.keylenx[slot].load(READ_ORD)
+    }
+
+    /// Get the keylenx with Relaxed ordering.
+    /// For OCC search loops where the permutation Acquire provides synchronization.
+    #[must_use]
+    #[inline(always)]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "Slot from Permuter15, valid by construction"
+    )]
+    pub fn keylenx_relaxed(&self, slot: usize) -> u8 {
+        debug_assert!(slot < WIDTH_15, "keylenx_relaxed: slot out of bounds");
+
+        self.keylenx[slot].load(RELAXED)
     }
 
     /// Set the keylenx at the given physical slot.
@@ -1412,7 +1466,8 @@ impl<P: LeafPolicy> LeafNode15<P> {
         dst.set_ikey(dst_slot, ikey);
         dst.set_keylenx(dst_slot, keylenx_val);
 
-        self.values.move_slot(&dst.values, src_slot, dst_slot);
+        self.values
+            .move_slot_relaxed(&dst.values, src_slot, dst_slot);
 
         if keylenx_val == KSUF_KEYLENX {
             if let Some(suffix) = self.ksuf(src_slot) {
@@ -1424,7 +1479,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
             unsafe { self.clear_ksuf(src_slot, guard) };
         }
 
-        self.values.clear(src_slot);
+        self.values.clear_relaxed(src_slot);
     }
 
     /// Calculate the optimal split point for this leaf.
@@ -1686,7 +1741,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
             self.set_ikey(actual_slot, insert_data.ikey);
             self.set_keylenx(actual_slot, insert_data.keylenx);
-            self.store_value(actual_slot, &insert_data.value);
+            self.store_value_relaxed(actual_slot, &insert_data.value);
 
             let suffix_retire_ptr: *mut u8 = if insert_data.keylenx == KSUF_KEYLENX
                 && let Some(suffix) = insert_data.suffix
@@ -1864,6 +1919,11 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
     }
 
     #[inline(always)]
+    fn keylenx_relaxed(&self, slot: usize) -> u8 {
+        self.keylenx_relaxed(slot)
+    }
+
+    #[inline(always)]
     fn set_keylenx(&self, slot: usize, keylenx: u8) {
         self.set_keylenx(slot, keylenx);
     }
@@ -1905,6 +1965,11 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
     #[inline(always)]
     fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle {
         self.update_value_in_place(slot, output)
+    }
+
+    #[inline(always)]
+    fn update_value_in_place_relaxed(&self, slot: usize, output: &P::Output) -> RetireHandle {
+        self.update_value_in_place_relaxed(slot, output)
     }
 
     #[inline(always)]
@@ -2263,18 +2328,21 @@ impl<P: LeafPolicy> Drop for LeafNode15<P> {
 // =============================================================================
 
 impl<P: LeafPolicy> LeafNode15<P> {
+    /// Clone the output at a slot, returning None if it contains a layer pointer.
+    /// Uses Relaxed ordering, for use under lock where the lock's Acquire
+    /// already provides visibility.
     #[inline]
-    pub(crate) fn try_clone_output(&self, slot: usize) -> Option<P::Output> {
+    pub(crate) fn try_clone_output_relaxed(&self, slot: usize) -> Option<P::Output> {
         debug_assert!(
             slot < WIDTH_15,
-            "try_clone_output: slot {slot} >= WIDTH_15 {WIDTH_15}"
+            "try_clone_output_relaxed: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
-        if self.keylenx(slot) >= LAYER_KEYLENX {
+        if self.keylenx_relaxed(slot) >= LAYER_KEYLENX {
             return None;
         }
 
-        self.values.load(slot)
+        self.values.load_relaxed(slot)
     }
 
     #[expect(clippy::cast_possible_truncation)]

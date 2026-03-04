@@ -6,17 +6,67 @@
 mod bench_utils;
 
 use bench_utils::{
-    keys, keys_shared_prefix_chunks, post_measurement_barrier, pre_measurement_barrier,
-    run_concurrent, shuffle, uniform_indices, zipfian_indices,
+    keys, keys_shared_prefix_chunks, run_concurrent, shuffle, uniform_indices, zipfian_indices,
 };
 use crossbeam_skiplist::SkipMap;
 use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
 use indexset::concurrent::map::BTreeMap as IndexSetBTreeMap;
-use masstree::MassTree15Inline;
+use masstree::{InlineBits, MassTree15Inline};
 use scc::TreeIndex;
 use sdd::Guard as SddGuard;
 use seize::LocalGuard;
+
+// =============================================================================
+// MyRecord: Custom InlineBits type for benchmarking
+// =============================================================================
+
+/// 8-byte record packed into a u64 via `InlineBits`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+struct MyRecord {
+    a: u8,
+    b: u8,
+    c: u8,
+    d: u8,
+    payload: u32,
+}
+
+impl MyRecord {
+    #[inline(always)]
+    const fn new(seed: u64) -> Self {
+        Self {
+            a: (seed & 0xFF) as u8,
+            b: ((seed >> 8) & 0xFF) as u8,
+            c: ((seed >> 16) & 0xFF) as u8,
+            d: ((seed >> 24) & 0xFF) as u8,
+            payload: (seed >> 32) as u32,
+        }
+    }
+
+    #[inline(always)]
+    fn checksum(&self) -> u64 {
+        u64::from(self.a)
+            .wrapping_add(u64::from(self.b))
+            .wrapping_add(u64::from(self.c))
+            .wrapping_add(u64::from(self.d))
+            .wrapping_add(u64::from(self.payload))
+    }
+}
+
+impl InlineBits for MyRecord {
+    #[inline(always)]
+    fn to_bits(self) -> u64 {
+        // SAFETY: MyRecord is repr(C), 8 bytes, all-bit-patterns valid.
+        unsafe { core::mem::transmute(self) }
+    }
+
+    #[inline(always)]
+    fn from_bits(bits: u64) -> Self {
+        // SAFETY: MyRecord is repr(C), 8 bytes, all-bit-patterns valid.
+        unsafe { core::mem::transmute(bits) }
+    }
+}
 
 fn main() {
     divan::main();
@@ -42,9 +92,13 @@ const BASE_SEED: u64 = 42;
 // =============================================================================
 
 /// TreeIndex upsert emulation via remove-then-reinsert.
-fn tree_index_upsert_sync(tree: &TreeIndex<[u8; KEY_SIZE], u64>, key: [u8; KEY_SIZE], value: u64) {
+fn tree_index_upsert_sync(
+    tree: &TreeIndex<[u8; KEY_SIZE], MyRecord>,
+    key: [u8; KEY_SIZE],
+    value: MyRecord,
+) {
     let mut key: [u8; 64] = key;
-    let mut value: u64 = value;
+    let mut value: MyRecord = value;
 
     for _ in 0..3 {
         match tree.insert_sync(key, value) {
@@ -61,44 +115,44 @@ fn tree_index_upsert_sync(tree: &TreeIndex<[u8; KEY_SIZE], u64>, key: [u8; KEY_S
     let _ = tree.insert_sync(key, value);
 }
 
-fn setup_masstree15(keys: &[[u8; KEY_SIZE]]) -> MassTree15Inline<u64> {
+fn setup_masstree15(keys: &[[u8; KEY_SIZE]]) -> MassTree15Inline<MyRecord> {
     let tree = MassTree15Inline::new();
     {
         let guard = tree.guard();
 
         for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert_with_guard(key, i as u64, &guard);
+            let _ = tree.insert_with_guard(key, MyRecord::new(i as u64), &guard);
         }
     }
 
     tree
 }
 
-fn setup_skipmap(keys: &[[u8; KEY_SIZE]]) -> SkipMap<[u8; KEY_SIZE], u64> {
-    let map: SkipMap<[u8; 64], u64> = SkipMap::new();
+fn setup_skipmap(keys: &[[u8; KEY_SIZE]]) -> SkipMap<[u8; KEY_SIZE], MyRecord> {
+    let map: SkipMap<[u8; 64], MyRecord> = SkipMap::new();
 
     for (i, key) in keys.iter().enumerate() {
-        map.insert(*key, i as u64);
+        map.insert(*key, MyRecord::new(i as u64));
     }
 
     map
 }
 
-fn setup_indexset(keys: &[[u8; KEY_SIZE]]) -> IndexSetBTreeMap<[u8; KEY_SIZE], u64> {
-    let map: IndexSetBTreeMap<[u8; 64], u64> = IndexSetBTreeMap::new();
+fn setup_indexset(keys: &[[u8; KEY_SIZE]]) -> IndexSetBTreeMap<[u8; KEY_SIZE], MyRecord> {
+    let map: IndexSetBTreeMap<[u8; 64], MyRecord> = IndexSetBTreeMap::new();
 
     for (i, key) in keys.iter().enumerate() {
-        map.insert(*key, i as u64);
+        map.insert(*key, MyRecord::new(i as u64));
     }
 
     map
 }
 
-fn setup_tree_index(keys: &[[u8; KEY_SIZE]]) -> TreeIndex<[u8; KEY_SIZE], u64> {
-    let tree: TreeIndex<[u8; 64], u64> = TreeIndex::new();
+fn setup_tree_index(keys: &[[u8; KEY_SIZE]]) -> TreeIndex<[u8; KEY_SIZE], MyRecord> {
+    let tree: TreeIndex<[u8; 64], MyRecord> = TreeIndex::new();
 
     for (i, key) in keys.iter().enumerate() {
-        let _ = tree.insert_sync(*key, i as u64);
+        let _ = tree.insert_sync(*key, MyRecord::new(i as u64));
     }
 
     tree
@@ -164,9 +218,10 @@ mod mixed_uniform {
                         let idx: usize = indices[base + i];
 
                         if is_write[i] {
-                            let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                            let _ =
+                                tree.insert_with_guard(&keys[idx], MyRecord::new(i as u64), &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
 
@@ -189,7 +244,7 @@ mod mixed_uniform {
         bencher
             .counter(ItemsCount::new(threads * OPS_PER_THREAD))
             .with_inputs(|| setup_skipmap(&keys))
-            .bench_local_values(|map: SkipMap<[u8; 64], u64>| {
+            .bench_local_values(|map: SkipMap<[u8; 64], MyRecord>| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
                     let base: usize = ctx.tid * OPS_PER_THREAD;
                     let is_write: &Vec<bool> = &write_decisions[ctx.tid];
@@ -208,9 +263,9 @@ mod mixed_uniform {
                         let idx: usize = indices[base + i];
 
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(e) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(*e.value());
+                            sum = sum.wrapping_add(e.value().checksum());
                         }
                     }
 
@@ -252,9 +307,9 @@ mod mixed_uniform {
                         let idx = indices[base + i];
 
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(r) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(r.get().value);
+                            sum = sum.wrapping_add(r.get().value.checksum());
                         }
                     }
 
@@ -291,9 +346,9 @@ mod mixed_uniform {
                         let idx = indices[base + i];
                         if is_write[i] {
                             // Upsert emulation (see tree_index_upsert_sync doc)
-                            tree_index_upsert_sync(&tree, keys[idx], i as u64);
+                            tree_index_upsert_sync(&tree, keys[idx], MyRecord::new(i as u64));
                         } else if let Some(v) = tree.peek(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(*v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -341,9 +396,10 @@ mod mixed_zipfian {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                            let _ =
+                                tree.insert_with_guard(&keys[idx], MyRecord::new(i as u64), &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -377,9 +433,9 @@ mod mixed_zipfian {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(e) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(*e.value());
+                            sum = sum.wrapping_add(e.value().checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -413,9 +469,9 @@ mod mixed_zipfian {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(r) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(r.get().value);
+                            sum = sum.wrapping_add(r.get().value.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -451,9 +507,9 @@ mod mixed_zipfian {
                         let idx = indices[base + i];
                         if is_write[i] {
                             // Upsert emulation (see tree_index_upsert_sync doc)
-                            tree_index_upsert_sync(&tree, keys[idx], i as u64);
+                            tree_index_upsert_sync(&tree, keys[idx], MyRecord::new(i as u64));
                         } else if let Some(v) = tree.peek(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(*v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -511,9 +567,10 @@ mod mixed_shared_prefix {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                            let _ =
+                                tree.insert_with_guard(&keys[idx], MyRecord::new(i as u64), &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -547,9 +604,9 @@ mod mixed_shared_prefix {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(e) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(*e.value());
+                            sum = sum.wrapping_add(e.value().checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -583,9 +640,9 @@ mod mixed_shared_prefix {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(r) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(r.get().value);
+                            sum = sum.wrapping_add(r.get().value.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -621,9 +678,9 @@ mod mixed_shared_prefix {
                         let idx = indices[base + i];
                         if is_write[i] {
                             // Upsert emulation (see tree_index_upsert_sync doc)
-                            tree_index_upsert_sync(&tree, keys[idx], i as u64);
+                            tree_index_upsert_sync(&tree, keys[idx], MyRecord::new(i as u64));
                         } else if let Some(v) = tree.peek(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(*v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -675,9 +732,10 @@ mod mixed_high_contention {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                            let _ =
+                                tree.insert_with_guard(&keys[idx], MyRecord::new(i as u64), &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -711,9 +769,9 @@ mod mixed_high_contention {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(e) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(*e.value());
+                            sum = sum.wrapping_add(e.value().checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -747,9 +805,9 @@ mod mixed_high_contention {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(r) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(r.get().value);
+                            sum = sum.wrapping_add(r.get().value.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -785,9 +843,9 @@ mod mixed_high_contention {
                         let idx = indices[base + i];
                         if is_write[i] {
                             // Upsert emulation (see tree_index_upsert_sync doc)
-                            tree_index_upsert_sync(&tree, keys[idx], i as u64);
+                            tree_index_upsert_sync(&tree, keys[idx], MyRecord::new(i as u64));
                         } else if let Some(v) = tree.peek(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(*v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -839,9 +897,10 @@ mod mixed_large_dataset {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                            let _ =
+                                tree.insert_with_guard(&keys[idx], MyRecord::new(i as u64), &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -875,9 +934,9 @@ mod mixed_large_dataset {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(e) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(*e.value());
+                            sum = sum.wrapping_add(e.value().checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -911,9 +970,9 @@ mod mixed_large_dataset {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(r) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(r.get().value);
+                            sum = sum.wrapping_add(r.get().value.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -949,9 +1008,9 @@ mod mixed_large_dataset {
                         let idx = indices[base + i];
                         if is_write[i] {
                             // Upsert emulation (see tree_index_upsert_sync doc)
-                            tree_index_upsert_sync(&tree, keys[idx], i as u64);
+                            tree_index_upsert_sync(&tree, keys[idx], MyRecord::new(i as u64));
                         } else if let Some(v) = tree.peek(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(*v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -997,11 +1056,11 @@ mod single_hot_key {
                         if write_decisions[ctx.tid][i] {
                             let _ = tree.insert_with_guard(
                                 &hot_key,
-                                (ctx.tid * OPS_PER_THREAD + i) as u64,
+                                MyRecord::new((ctx.tid * OPS_PER_THREAD + i) as u64),
                                 &guard,
                             );
                         } else if let Some(v) = tree.get_with_guard(&hot_key, &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     });
                     ctx.end_measurement();
@@ -1031,9 +1090,12 @@ mod single_hot_key {
                     let mut sum = 0u64;
                     (0..OPS_PER_THREAD).for_each(|i| {
                         if write_decisions[ctx.tid][i] {
-                            map.insert(hot_key, (ctx.tid * OPS_PER_THREAD + i) as u64);
+                            map.insert(
+                                hot_key,
+                                MyRecord::new((ctx.tid * OPS_PER_THREAD + i) as u64),
+                            );
                         } else if let Some(e) = map.get(&hot_key) {
-                            sum = sum.wrapping_add(*e.value());
+                            sum = sum.wrapping_add(e.value().checksum());
                         }
                     });
                     ctx.end_measurement();
@@ -1063,9 +1125,12 @@ mod single_hot_key {
                     let mut sum = 0u64;
                     (0..OPS_PER_THREAD).for_each(|i| {
                         if write_decisions[ctx.tid][i] {
-                            map.insert(hot_key, (ctx.tid * OPS_PER_THREAD + i) as u64);
+                            map.insert(
+                                hot_key,
+                                MyRecord::new((ctx.tid * OPS_PER_THREAD + i) as u64),
+                            );
                         } else if let Some(r) = map.get(&hot_key) {
-                            sum = sum.wrapping_add(r.get().value);
+                            sum = sum.wrapping_add(r.get().value.checksum());
                         }
                     });
                     ctx.end_measurement();
@@ -1100,10 +1165,10 @@ mod single_hot_key {
                             tree_index_upsert_sync(
                                 &tree,
                                 hot_key,
-                                (ctx.tid * OPS_PER_THREAD + i) as u64,
+                                MyRecord::new((ctx.tid * OPS_PER_THREAD + i) as u64),
                             );
                         } else if let Some(v) = tree.peek(&hot_key, &guard) {
-                            sum = sum.wrapping_add(*v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     });
                     ctx.end_measurement();
@@ -1151,9 +1216,10 @@ mod mixed_50_50 {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                            let _ =
+                                tree.insert_with_guard(&keys[idx], MyRecord::new(i as u64), &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1187,9 +1253,9 @@ mod mixed_50_50 {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(e) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(*e.value());
+                            sum = sum.wrapping_add(e.value().checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1223,9 +1289,9 @@ mod mixed_50_50 {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(r) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(r.get().value);
+                            sum = sum.wrapping_add(r.get().value.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1261,9 +1327,9 @@ mod mixed_50_50 {
                         let idx = indices[base + i];
                         if is_write[i] {
                             // Upsert emulation (see tree_index_upsert_sync doc)
-                            tree_index_upsert_sync(&tree, keys[idx], i as u64);
+                            tree_index_upsert_sync(&tree, keys[idx], MyRecord::new(i as u64));
                         } else if let Some(v) = tree.peek(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(*v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1286,46 +1352,46 @@ mod keys_8byte {
     const OPS_PER_THREAD: usize = 12_500;
     const WRITE_RATIO: usize = 10;
 
-    fn setup_masstree15_8(keys: &[[u8; KEY_SIZE_8]]) -> MassTree15Inline<u64> {
+    fn setup_masstree15_8(keys: &[[u8; KEY_SIZE_8]]) -> MassTree15Inline<MyRecord> {
         let tree = MassTree15Inline::new();
         {
             let guard = tree.guard();
             for (i, key) in keys.iter().enumerate() {
-                let _ = tree.insert_with_guard(key, i as u64, &guard);
+                let _ = tree.insert_with_guard(key, MyRecord::new(i as u64), &guard);
             }
         }
         tree
     }
 
-    fn setup_skipmap_8(keys: &[[u8; KEY_SIZE_8]]) -> SkipMap<[u8; KEY_SIZE_8], u64> {
+    fn setup_skipmap_8(keys: &[[u8; KEY_SIZE_8]]) -> SkipMap<[u8; KEY_SIZE_8], MyRecord> {
         let map = SkipMap::new();
         for (i, key) in keys.iter().enumerate() {
-            map.insert(*key, i as u64);
+            map.insert(*key, MyRecord::new(i as u64));
         }
         map
     }
 
-    fn setup_indexset_8(keys: &[[u8; KEY_SIZE_8]]) -> IndexSetBTreeMap<[u8; KEY_SIZE_8], u64> {
+    fn setup_indexset_8(keys: &[[u8; KEY_SIZE_8]]) -> IndexSetBTreeMap<[u8; KEY_SIZE_8], MyRecord> {
         let map = IndexSetBTreeMap::new();
         for (i, key) in keys.iter().enumerate() {
-            map.insert(*key, i as u64);
+            map.insert(*key, MyRecord::new(i as u64));
         }
         map
     }
 
-    fn setup_tree_index_8(keys: &[[u8; KEY_SIZE_8]]) -> TreeIndex<[u8; KEY_SIZE_8], u64> {
+    fn setup_tree_index_8(keys: &[[u8; KEY_SIZE_8]]) -> TreeIndex<[u8; KEY_SIZE_8], MyRecord> {
         let tree = TreeIndex::new();
         for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert_sync(*key, i as u64);
+            let _ = tree.insert_sync(*key, MyRecord::new(i as u64));
         }
         tree
     }
 
     /// 8-byte key variant of upsert emulation.
     fn tree_index_upsert_sync_8(
-        tree: &TreeIndex<[u8; KEY_SIZE_8], u64>,
+        tree: &TreeIndex<[u8; KEY_SIZE_8], MyRecord>,
         key: [u8; KEY_SIZE_8],
-        value: u64,
+        value: MyRecord,
     ) {
         let mut key = key;
         let mut value = value;
@@ -1368,9 +1434,10 @@ mod keys_8byte {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                            let _ =
+                                tree.insert_with_guard(&keys[idx], MyRecord::new(i as u64), &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1404,9 +1471,9 @@ mod keys_8byte {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(e) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(*e.value());
+                            sum = sum.wrapping_add(e.value().checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1440,9 +1507,9 @@ mod keys_8byte {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if let Some(r) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(r.get().value);
+                            sum = sum.wrapping_add(r.get().value.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1478,9 +1545,9 @@ mod keys_8byte {
                         let idx = indices[base + i];
                         if is_write[i] {
                             // Upsert emulation (see tree_index_upsert_sync_8)
-                            tree_index_upsert_sync_8(&tree, keys[idx], i as u64);
+                            tree_index_upsert_sync_8(&tree, keys[idx], MyRecord::new(i as u64));
                         } else if let Some(v) = tree.peek(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(*v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1523,7 +1590,7 @@ mod pure_read {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1553,7 +1620,7 @@ mod pure_read {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if let Some(e) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(*e.value());
+                            sum = sum.wrapping_add(e.value().checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1583,7 +1650,7 @@ mod pure_read {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if let Some(r) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(r.get().value);
+                            sum = sum.wrapping_add(r.get().value.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1614,7 +1681,7 @@ mod pure_read {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if let Some(v) = tree.peek(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(*v);
+                            sum = sum.wrapping_add(v.checksum());
                         }
                     }
                     ctx.end_measurement();
@@ -1663,7 +1730,8 @@ mod remove_heavy {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                            let _ =
+                                tree.insert_with_guard(&keys[idx], MyRecord::new(i as u64), &guard);
                         } else if tree
                             .remove_with_guard(&keys[idx], &guard)
                             .is_ok_and(|v| v.is_some())
@@ -1702,7 +1770,7 @@ mod remove_heavy {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if map.remove(&keys[idx]).is_some() {
                             sum = sum.wrapping_add(1);
                         }
@@ -1738,7 +1806,7 @@ mod remove_heavy {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if is_write[i] {
-                            map.insert(keys[idx], i as u64);
+                            map.insert(keys[idx], MyRecord::new(i as u64));
                         } else if map.remove(&keys[idx]).is_some() {
                             sum = sum.wrapping_add(1);
                         }
@@ -1776,7 +1844,7 @@ mod remove_heavy {
                         let idx = indices[base + i];
                         if is_write[i] {
                             // Upsert emulation (see tree_index_upsert_sync doc)
-                            tree_index_upsert_sync(&tree, keys[idx], i as u64);
+                            tree_index_upsert_sync(&tree, keys[idx], MyRecord::new(i as u64));
                         } else if tree.remove_sync(&keys[idx]) {
                             sum = sum.wrapping_add(1);
                         }
@@ -1789,370 +1857,7 @@ mod remove_heavy {
 }
 
 // =============================================================================
-// 11: LATENCY DISTRIBUTION — HDR Histogram + minstant
-// =============================================================================
-//
-// Uses `minstant` for low-overhead timestamps (~10ns vs ~27ns for Instant::now())
-// and `hdrhistogram` for O(1) recording into logarithmically-bucketed histograms.
-//
-// Methodology:
-// - 50K pre-populated keys, 10K measured ops per divan sample
-// - 1-in-10 sampling to avoid timing overhead dominating the measurement
-// - Histogram range [1ns, 10ms] at 2 significant figures (~20KB per histogram)
-// - Results emitted to stderr (divan only captures closure wall-clock time)
-//
-// Run:  cargo bench --bench concurrent_read_write --features mimalloc -- 11_latency
-
-#[divan::bench_group(name = "11_latency_read", sample_count = 100, sample_size = 1)]
-mod latency_read {
-    use super::*;
-    use hdrhistogram::Histogram;
-    use minstant::Instant;
-
-    const N: usize = 50_000;
-    const OPS: usize = 10_000;
-    const SAMPLE_EVERY: usize = 10;
-
-    /// Range: 1ns to 10ms (captures OS scheduling jitter).
-    /// 2 significant figures ≈ 20KB per histogram.
-    fn new_hist() -> Histogram<u32> {
-        Histogram::<u32>::new_with_bounds(1, 10_000_000, 2).expect("valid histogram params")
-    }
-
-    fn emit(label: &str, hist: &Histogram<u32>) {
-        eprintln!(
-            "  [{label}] n={} p50={}ns p99={}ns p99.9={}ns p99.99={}ns max={}ns",
-            hist.len(),
-            hist.value_at_quantile(0.50),
-            hist.value_at_quantile(0.99),
-            hist.value_at_quantile(0.999),
-            hist.value_at_quantile(0.9999),
-            hist.max(),
-        );
-    }
-
-    #[divan::bench]
-    fn masstree15(bencher: Bencher) {
-        let keys = keys::<KEY_SIZE>(N);
-        let tree = setup_masstree15(&keys);
-        let indices = uniform_indices(N, OPS, BASE_SEED);
-
-        bencher.bench_local(|| {
-            let guard = tree.guard();
-            let mut hist = new_hist();
-
-            // Warmup
-            for i in 0..WARMUP_OPS {
-                let idx = indices[i % OPS];
-                black_box(tree.get_with_guard(&keys[idx], &guard));
-            }
-            pre_measurement_barrier();
-
-            let mut sum = 0u64;
-            for (i, &idx) in indices.iter().enumerate().take(OPS) {
-                if i % SAMPLE_EVERY == 0 {
-                    let start = Instant::now();
-                    if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                        sum = sum.wrapping_add(v);
-                    }
-                    let _ = hist.record(start.elapsed().as_nanos() as u64);
-                } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                    sum = sum.wrapping_add(v);
-                }
-            }
-
-            post_measurement_barrier();
-            emit("masstree15", &hist);
-            black_box(sum);
-        });
-    }
-
-    #[divan::bench]
-    fn skipmap(bencher: Bencher) {
-        let keys = keys::<KEY_SIZE>(N);
-        let map = setup_skipmap(&keys);
-        let indices = uniform_indices(N, OPS, BASE_SEED);
-
-        bencher.bench_local(|| {
-            let mut hist = new_hist();
-
-            for i in 0..WARMUP_OPS {
-                let idx = indices[i % OPS];
-                black_box(map.get(&keys[idx]));
-            }
-            pre_measurement_barrier();
-
-            let mut sum = 0u64;
-            for (i, &idx) in indices.iter().enumerate().take(OPS) {
-                if i % SAMPLE_EVERY == 0 {
-                    let start = Instant::now();
-                    if let Some(e) = map.get(&keys[idx]) {
-                        sum = sum.wrapping_add(*e.value());
-                    }
-                    let _ = hist.record(start.elapsed().as_nanos() as u64);
-                } else if let Some(e) = map.get(&keys[idx]) {
-                    sum = sum.wrapping_add(*e.value());
-                }
-            }
-
-            post_measurement_barrier();
-            emit("skipmap", &hist);
-            black_box(sum);
-        });
-    }
-
-    #[divan::bench]
-    fn indexset(bencher: Bencher) {
-        let keys = keys::<KEY_SIZE>(N);
-        let map = setup_indexset(&keys);
-        let indices = uniform_indices(N, OPS, BASE_SEED);
-
-        bencher.bench_local(|| {
-            let mut hist = new_hist();
-
-            for i in 0..WARMUP_OPS {
-                let idx = indices[i % OPS];
-                black_box(map.get(&keys[idx]));
-            }
-            pre_measurement_barrier();
-
-            let mut sum = 0u64;
-            for (i, &idx) in indices.iter().enumerate().take(OPS) {
-                if i % SAMPLE_EVERY == 0 {
-                    let start = Instant::now();
-                    if let Some(r) = map.get(&keys[idx]) {
-                        sum = sum.wrapping_add(r.get().value);
-                    }
-                    let _ = hist.record(start.elapsed().as_nanos() as u64);
-                } else if let Some(r) = map.get(&keys[idx]) {
-                    sum = sum.wrapping_add(r.get().value);
-                }
-            }
-
-            post_measurement_barrier();
-            emit("indexset", &hist);
-            black_box(sum);
-        });
-    }
-
-    #[divan::bench]
-    fn tree_index(bencher: Bencher) {
-        let keys = keys::<KEY_SIZE>(N);
-        let tree = setup_tree_index(&keys);
-        let indices = uniform_indices(N, OPS, BASE_SEED);
-
-        bencher.bench_local(|| {
-            let guard = SddGuard::new();
-            let mut hist = new_hist();
-
-            for i in 0..WARMUP_OPS {
-                let idx = indices[i % OPS];
-                black_box(tree.peek(&keys[idx], &guard));
-            }
-            pre_measurement_barrier();
-
-            let mut sum = 0u64;
-            for (i, &idx) in indices.iter().enumerate().take(OPS) {
-                if i % SAMPLE_EVERY == 0 {
-                    let start = Instant::now();
-                    if let Some(v) = tree.peek(&keys[idx], &guard) {
-                        sum = sum.wrapping_add(*v);
-                    }
-                    let _ = hist.record(start.elapsed().as_nanos() as u64);
-                } else if let Some(v) = tree.peek(&keys[idx], &guard) {
-                    sum = sum.wrapping_add(*v);
-                }
-            }
-
-            post_measurement_barrier();
-            emit("tree_index", &hist);
-            black_box(sum);
-        });
-    }
-}
-
-// =============================================================================
-// 11b: LATENCY DISTRIBUTION — Multi-threaded (per-thread histograms, merged)
-// =============================================================================
-//
-// Measures read latency under contention. Each thread records into its own
-// histogram (zero synchronization during measurement), then histograms are
-// merged after threads join.
-//
-// Run:  cargo bench --bench concurrent_read_write --features mimalloc -- 11b_latency
-
-#[divan::bench_group(
-    name = "11b_latency_read_concurrent",
-    sample_count = 50,
-    sample_size = 1
-)]
-mod latency_read_concurrent {
-    use super::*;
-    use hdrhistogram::Histogram;
-    use minstant::Instant;
-    use std::sync::Mutex;
-
-    const N: usize = 50_000;
-    const OPS_PER_THREAD: usize = 10_000;
-    const SAMPLE_EVERY: usize = 10;
-
-    fn new_hist() -> Histogram<u32> {
-        Histogram::<u32>::new_with_bounds(1, 10_000_000, 2).expect("valid histogram params")
-    }
-
-    fn emit(label: &str, hist: &Histogram<u32>) {
-        eprintln!(
-            "  [{label}] n={} p50={}ns p99={}ns p99.9={}ns p99.99={}ns max={}ns",
-            hist.len(),
-            hist.value_at_quantile(0.50),
-            hist.value_at_quantile(0.99),
-            hist.value_at_quantile(0.999),
-            hist.value_at_quantile(0.9999),
-            hist.max(),
-        );
-    }
-
-    #[divan::bench(args = [4, 8, 12])]
-    fn masstree15(bencher: Bencher, threads: usize) {
-        let keys = keys::<KEY_SIZE>(N);
-        let indices = uniform_indices(N, OPS_PER_THREAD * threads, BASE_SEED);
-
-        bencher
-            .with_inputs(|| setup_masstree15(&keys))
-            .bench_local_values(|tree| {
-                let combined = Mutex::new(new_hist());
-
-                run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
-                    let guard = tree.guard();
-                    let base = ctx.tid * OPS_PER_THREAD;
-                    let mut hist = new_hist();
-
-                    for i in 0..ctx.warmup_ops {
-                        let idx = indices[base + (i % OPS_PER_THREAD)];
-                        black_box(tree.get_with_guard(&keys[idx], &guard));
-                    }
-                    ctx.finish_warmup();
-                    ctx.begin_measurement();
-
-                    let mut sum = 0u64;
-                    for i in 0..OPS_PER_THREAD {
-                        let idx = indices[base + i];
-                        if i % SAMPLE_EVERY == 0 {
-                            let start = Instant::now();
-                            if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                sum = sum.wrapping_add(v);
-                            }
-                            let _ = hist.record(start.elapsed().as_nanos() as u64);
-                        } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
-                        }
-                    }
-
-                    ctx.end_measurement();
-                    black_box(sum);
-                    combined.lock().unwrap().add(&hist).unwrap();
-                });
-
-                let merged = combined.lock().unwrap();
-                emit(&format!("masstree15/{threads}T"), &merged);
-            });
-    }
-
-    #[divan::bench(args = [4, 8, 12])]
-    fn skipmap(bencher: Bencher, threads: usize) {
-        let keys = keys::<KEY_SIZE>(N);
-        let indices = uniform_indices(N, OPS_PER_THREAD * threads, BASE_SEED);
-
-        bencher
-            .with_inputs(|| setup_skipmap(&keys))
-            .bench_local_values(|map| {
-                let combined = Mutex::new(new_hist());
-
-                run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
-                    let base = ctx.tid * OPS_PER_THREAD;
-                    let mut hist = new_hist();
-
-                    for i in 0..ctx.warmup_ops {
-                        let idx = indices[base + (i % OPS_PER_THREAD)];
-                        black_box(map.get(&keys[idx]));
-                    }
-                    ctx.finish_warmup();
-                    ctx.begin_measurement();
-
-                    let mut sum = 0u64;
-                    for i in 0..OPS_PER_THREAD {
-                        let idx = indices[base + i];
-                        if i % SAMPLE_EVERY == 0 {
-                            let start = Instant::now();
-                            if let Some(e) = map.get(&keys[idx]) {
-                                sum = sum.wrapping_add(*e.value());
-                            }
-                            let _ = hist.record(start.elapsed().as_nanos() as u64);
-                        } else if let Some(e) = map.get(&keys[idx]) {
-                            sum = sum.wrapping_add(*e.value());
-                        }
-                    }
-
-                    ctx.end_measurement();
-                    black_box(sum);
-                    combined.lock().unwrap().add(&hist).unwrap();
-                });
-
-                let merged = combined.lock().unwrap();
-                emit(&format!("skipmap/{threads}T"), &merged);
-            });
-    }
-
-    #[divan::bench(args = [4, 8, 12])]
-    fn tree_index(bencher: Bencher, threads: usize) {
-        let keys = keys::<KEY_SIZE>(N);
-        let indices = uniform_indices(N, OPS_PER_THREAD * threads, BASE_SEED);
-
-        bencher
-            .with_inputs(|| setup_tree_index(&keys))
-            .bench_local_values(|tree| {
-                let combined = Mutex::new(new_hist());
-
-                run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
-                    let guard = SddGuard::new();
-                    let base = ctx.tid * OPS_PER_THREAD;
-                    let mut hist = new_hist();
-
-                    for i in 0..ctx.warmup_ops {
-                        let idx = indices[base + (i % OPS_PER_THREAD)];
-                        black_box(tree.peek(&keys[idx], &guard));
-                    }
-                    ctx.finish_warmup();
-                    ctx.begin_measurement();
-
-                    let mut sum = 0u64;
-                    for i in 0..OPS_PER_THREAD {
-                        let idx = indices[base + i];
-                        if i % SAMPLE_EVERY == 0 {
-                            let start = Instant::now();
-                            if let Some(v) = tree.peek(&keys[idx], &guard) {
-                                sum = sum.wrapping_add(*v);
-                            }
-                            let _ = hist.record(start.elapsed().as_nanos() as u64);
-                        } else if let Some(v) = tree.peek(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(*v);
-                        }
-                    }
-
-                    ctx.end_measurement();
-                    black_box(sum);
-                    combined.lock().unwrap().add(&hist).unwrap();
-                });
-
-                let merged = combined.lock().unwrap();
-                emit(&format!("tree_index/{threads}T"), &merged);
-            });
-    }
-}
-
-// =============================================================================
 // 12: BUILD TIME - Measure data structure construction time
-// (Renamed from "memory_footprint" — for actual memory measurement use heaptrack)
 // =============================================================================
 
 #[divan::bench_group(name = "12_build_time", sample_count = 200, sample_size = 1)]
@@ -2249,14 +1954,17 @@ mod insert_only_fair {
                         if is_write[i] {
                             let wk_idx = write_base + write_idx;
                             if wk_idx < write_keys.len() {
-                                let _ =
-                                    tree.insert_with_guard(&write_keys[wk_idx], i as u64, &guard);
+                                let _ = tree.insert_with_guard(
+                                    &write_keys[wk_idx],
+                                    MyRecord::new(i as u64),
+                                    &guard,
+                                );
                                 write_idx += 1;
                             }
                         } else {
                             let idx = read_indices[base + i];
                             if let Some(v) = tree.get_with_guard(&read_keys[idx], &guard) {
-                                sum = sum.wrapping_add(v);
+                                sum = sum.wrapping_add(v.checksum());
                             }
                         }
                     }
@@ -2297,13 +2005,13 @@ mod insert_only_fair {
                         if is_write[i] {
                             let wk_idx = write_base + write_idx;
                             if wk_idx < write_keys.len() {
-                                map.insert(write_keys[wk_idx], i as u64);
+                                map.insert(write_keys[wk_idx], MyRecord::new(i as u64));
                                 write_idx += 1;
                             }
                         } else {
                             let idx = read_indices[base + i];
                             if let Some(e) = map.get(&read_keys[idx]) {
-                                sum = sum.wrapping_add(*e.value());
+                                sum = sum.wrapping_add(e.value().checksum());
                             }
                         }
                     }
@@ -2344,13 +2052,13 @@ mod insert_only_fair {
                         if is_write[i] {
                             let wk_idx = write_base + write_idx;
                             if wk_idx < write_keys.len() {
-                                map.insert(write_keys[wk_idx], i as u64);
+                                map.insert(write_keys[wk_idx], MyRecord::new(i as u64));
                                 write_idx += 1;
                             }
                         } else {
                             let idx = read_indices[base + i];
                             if let Some(r) = map.get(&read_keys[idx]) {
-                                sum = sum.wrapping_add(r.get().value);
+                                sum = sum.wrapping_add(r.get().value.checksum());
                             }
                         }
                     }
@@ -2393,13 +2101,14 @@ mod insert_only_fair {
                             // FAIR: Simple insert, no upsert workaround needed
                             let wk_idx = write_base + write_idx;
                             if wk_idx < write_keys.len() {
-                                let _ = tree.insert_sync(write_keys[wk_idx], i as u64);
+                                let _ =
+                                    tree.insert_sync(write_keys[wk_idx], MyRecord::new(i as u64));
                                 write_idx += 1;
                             }
                         } else {
                             let idx = read_indices[base + i];
                             if let Some(v) = tree.peek(&read_keys[idx], &guard) {
-                                sum = sum.wrapping_add(*v);
+                                sum = sum.wrapping_add(v.checksum());
                             }
                         }
                     }
@@ -2431,7 +2140,7 @@ mod pure_insert {
 
         bencher
             .counter(ItemsCount::new(threads * OPS_PER_THREAD))
-            .with_inputs(MassTree15Inline::<u64>::new)
+            .with_inputs(MassTree15Inline::<MyRecord>::new)
             .bench_local_values(|tree| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
                     let guard = tree.guard();
@@ -2444,7 +2153,7 @@ mod pure_insert {
                     ctx.begin_measurement();
                     for i in 0..OPS_PER_THREAD {
                         let idx = base + i;
-                        let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
+                        let _ = tree.insert_with_guard(&keys[idx], MyRecord::new(i as u64), &guard);
                     }
                     ctx.end_measurement();
                 });
@@ -2457,7 +2166,7 @@ mod pure_insert {
 
         bencher
             .counter(ItemsCount::new(threads * OPS_PER_THREAD))
-            .with_inputs(SkipMap::<[u8; KEY_SIZE], u64>::new)
+            .with_inputs(SkipMap::<[u8; KEY_SIZE], MyRecord>::new)
             .bench_local_values(|map| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
                     let base = ctx.tid * OPS_PER_THREAD;
@@ -2468,7 +2177,7 @@ mod pure_insert {
                     ctx.begin_measurement();
                     for i in 0..OPS_PER_THREAD {
                         let idx = base + i;
-                        map.insert(keys[idx], i as u64);
+                        map.insert(keys[idx], MyRecord::new(i as u64));
                     }
                     ctx.end_measurement();
                 });
@@ -2481,8 +2190,8 @@ mod pure_insert {
 
         bencher
             .counter(ItemsCount::new(threads * OPS_PER_THREAD))
-            .with_inputs(IndexSetBTreeMap::<[u8; KEY_SIZE], u64>::new)
-            .bench_local_values(|map: IndexSetBTreeMap<[u8; 64], u64>| {
+            .with_inputs(IndexSetBTreeMap::<[u8; KEY_SIZE], MyRecord>::new)
+            .bench_local_values(|map: IndexSetBTreeMap<[u8; 64], MyRecord>| {
                 run_concurrent(threads, WARMUP_OPS, OPS_PER_THREAD, |ctx| {
                     let base: usize = ctx.tid * OPS_PER_THREAD;
                     for i in 0..ctx.warmup_ops {
@@ -2492,7 +2201,7 @@ mod pure_insert {
                     ctx.begin_measurement();
                     for i in 0..OPS_PER_THREAD {
                         let idx = base + i;
-                        map.insert(keys[idx], i as u64);
+                        map.insert(keys[idx], MyRecord::new(i as u64));
                     }
                     ctx.end_measurement();
                 });
@@ -2505,7 +2214,7 @@ mod pure_insert {
 
         bencher
             .counter(ItemsCount::new(threads * OPS_PER_THREAD))
-            .with_inputs(TreeIndex::<[u8; KEY_SIZE], u64>::new)
+            .with_inputs(TreeIndex::<[u8; KEY_SIZE], MyRecord>::new)
             .bench_local_values(|tree| {
                 run_concurrent(
                     threads,
@@ -2524,7 +2233,7 @@ mod pure_insert {
                         for i in 0..OPS_PER_THREAD {
                             let idx: usize = base + i;
                             // FAIR: Simple insert_sync, no workaround
-                            let _ = tree.insert_sync(keys[idx], i as u64);
+                            let _ = tree.insert_sync(keys[idx], MyRecord::new(i as u64));
                         }
 
                         ctx.end_measurement();

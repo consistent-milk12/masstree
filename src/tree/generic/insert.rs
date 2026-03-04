@@ -83,19 +83,44 @@ where
         new_value: &P::Output,
         guard: &LocalGuard<'_>,
     ) -> P::Output {
-        let old_output: P::Output = leaf
-            .load_value(slot)
-            .expect("slot should have value in Found path");
+        // PERF: For BoxPolicy, `update_in_place()` already reads the old pointer.
+        // Reconstructing the output from that pointer avoids an extra atomic load.
+        if P::NEEDS_RETIREMENT {
+            lock.mark_insert();
 
-        lock.mark_insert();
+            let retire: RetireHandle = leaf.update_value_in_place_relaxed(slot, new_value);
 
-        let retire: RetireHandle = leaf.update_value_in_place(slot, new_value);
+            // `retire` is reused below because `RetireHandle` contains a raw
+            // `*mut u8` which is `Copy`. `output_from_retire_ptr` creates a
+            // non-owning view (`ValuePtr`), while `retire_handle` schedules
+            // deferred deallocation via EBR. The caller must consume the
+            // returned output before the epoch advances.
+            let old_output: P::Output = match retire {
+                // SAFETY: ptr was just returned by `update_value_in_place_relaxed` and points
+                // to the previously stored value. We hold the leaf lock, providing synchronization.
+                RetireHandle::Ptr(ptr) => unsafe { P::output_from_retire_ptr(ptr) },
+                RetireHandle::Noop => unreachable!("NEEDS_RETIREMENT implies Ptr retire handle"),
+            };
 
-        // Defer retirement of old value data if needed.
-        // SAFETY: handle was produced by update_in_place() on this leaf.
-        unsafe { P::retire_handle(retire, guard) };
+            // Defer retirement of old value data.
+            // SAFETY: handle was produced by update_in_place_relaxed() on this leaf.
+            // The same raw pointer is used for both output reconstruction above and
+            // retirement here, which is sound because ValuePtr is non-owning.
+            unsafe { P::retire_handle(retire, guard) };
 
-        old_output
+            old_output
+        } else {
+            let old_output: P::Output = leaf
+                .load_value_relaxed(slot)
+                .expect("slot should have value in Found path");
+
+            lock.mark_insert();
+
+            let retire: RetireHandle = leaf.update_value_in_place_relaxed(slot, new_value);
+            debug_assert_eq!(retire, RetireHandle::Noop);
+
+            old_output
+        }
     }
 
     /// Insert a new value into a slot and update the permutation.

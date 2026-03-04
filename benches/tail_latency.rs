@@ -1,11 +1,14 @@
-//! Tail latency benchmark: masstree vs treeindex vs indexset vs skipmap vs dashmap.
+//! Tail latency benchmark: masstree vs treeindex vs indexset vs skipmap.
 //!
 //! Measures per-operation latency distributions to capture p99/p99.9 tail
 //! behavior. Every benchmark uses `sample_size = 1` so each sample represents
 //! exactly one operation's latency (no batching that would average out spikes).
 //!
+//! Only includes realistic contended workloads where tail latency matters.
+//! Single-threaded and bulk-load benchmarks are excluded since they lack the
+//! contention that causes real tail latency problems.
+//!
 //! Run with: `cargo bench -p masstree --bench tail_latency`
-//! Filter:   `cargo bench -p masstree --bench tail_latency -- --filter get_1_`
 
 #![expect(clippy::pedantic)]
 #![expect(clippy::indexing_slicing)]
@@ -56,7 +59,7 @@ const INDEX_POOL: usize = 500_000;
 // All benchmarks within a category use the same random seed (42 for uniform
 // index pools, 77 for pure-scan start indices, 42 for zipfian) so the only
 // variable between e.g. mixed_90_10 and mixed_50_50 is the read/write ratio.
-// Scan-with-writes (section 14) uses seed 42 to match the mixed benchmarks.
+// Scan-with-writes (section 09) uses seed 42 to match the mixed benchmarks.
 // =============================================================================
 
 // =============================================================================
@@ -155,72 +158,7 @@ const fn is_write_op(i: usize, write_pct: u32) -> bool {
 }
 
 // =============================================================================
-// 01: Single-op GET latency, 100k entries, uniform random (1 thread)
-//
-// Baseline single-threaded read latency. No contention, pure data structure
-// traversal cost. Tail dominated by cache misses on cold nodes.
-// =============================================================================
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_1_masstree(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (tree, keys) = setup_masstree(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: LocalGuard<'_> = tree.guard();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.get_with_guard(&keys[idx], &guard));
-    });
-}
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_1_skipmap(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (map, keys) = setup_skipmap(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(map.get(&keys[idx]));
-    });
-}
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_1_indexset(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (map, keys) = setup_indexset(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(map.get(&keys[idx]));
-    });
-}
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_1_treeindex(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (tree, keys) = setup_tree_index(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: SddGuard = SddGuard::new();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.peek(&keys[idx], &guard));
-    });
-}
-
-// =============================================================================
-// 02: Single-op GET latency, 100k entries, uniform random (8 threads)
+// 01: Concurrent GET latency, 100k entries, uniform random, 8 threads
 //
 // Concurrent reads stress cache coherence and contention on shared nodes.
 // Tail latency increases when multiple threads compete for the same cache lines.
@@ -285,129 +223,7 @@ fn get_8t_treeindex(b: &Bencher<'_>) {
 }
 
 // =============================================================================
-// 03: Single-op INSERT latency, fresh tree, 1 thread
-//
-// Measures insert path including splits. Each sample inserts a unique key into
-// a growing tree, so later samples hit deeper/wider trees. Key pool (500k) is
-// larger than sample_count + warmup to ensure all measured inserts are fresh.
-// =============================================================================
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn insert_1_masstree(b: &Bencher<'_>) {
-    let n: usize = 500_000;
-    let keys: Vec<[u8; KEY_SIZE]> = bench_utils::keys(n);
-    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: LocalGuard<'_> = tree.guard();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed) % n;
-        let _ = tree.insert_with_guard(&keys[i], i as u64, &guard);
-    });
-}
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn insert_1_skipmap(b: &Bencher<'_>) {
-    let n: usize = 500_000;
-    let keys: Vec<[u8; KEY_SIZE]> = bench_utils::keys(n);
-    let map: SkipMap<[u8; KEY_SIZE], u64> = SkipMap::new();
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed) % n;
-        map.insert(keys[i], i as u64);
-    });
-}
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn insert_1_indexset(b: &Bencher<'_>) {
-    let n: usize = 500_000;
-    let keys: Vec<[u8; KEY_SIZE]> = bench_utils::keys(n);
-    let map: IndexSetBTreeMap<[u8; KEY_SIZE], u64> = IndexSetBTreeMap::new();
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed) % n;
-        map.insert(keys[i], i as u64);
-    });
-}
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn insert_1_treeindex(b: &Bencher<'_>) {
-    let n: usize = 500_000;
-    let keys: Vec<[u8; KEY_SIZE]> = bench_utils::keys(n);
-    let tree: TreeIndex<[u8; KEY_SIZE], u64> = TreeIndex::new();
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed) % n;
-        let _ = tree.insert_sync(keys[i], i as u64);
-    });
-}
-
-// =============================================================================
-// 04: Single-op INSERT latency, fresh tree, 8 threads
-//
-// Concurrent inserts cause splits and contention on internal nodes.
-// Tail latency reveals retry/backoff overhead. Key pool (500k) ensures
-// all measured inserts are fresh (no upserts from cursor wrapping).
-// =============================================================================
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn insert_8t_masstree(b: &Bencher<'_>) {
-    let n: usize = 500_000;
-    let keys: Vec<[u8; KEY_SIZE]> = bench_utils::keys(n);
-    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: LocalGuard<'_> = tree.guard();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed) % n;
-        let _ = tree.insert_with_guard(&keys[i], i as u64, &guard);
-    });
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn insert_8t_skipmap(b: &Bencher<'_>) {
-    let n: usize = 500_000;
-    let keys: Vec<[u8; KEY_SIZE]> = bench_utils::keys(n);
-    let map: SkipMap<[u8; KEY_SIZE], u64> = SkipMap::new();
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed) % n;
-        map.insert(keys[i], i as u64);
-    });
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn insert_8t_indexset(b: &Bencher<'_>) {
-    let n: usize = 500_000;
-    let keys: Vec<[u8; KEY_SIZE]> = bench_utils::keys(n);
-    let map: IndexSetBTreeMap<[u8; KEY_SIZE], u64> = IndexSetBTreeMap::new();
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed) % n;
-        map.insert(keys[i], i as u64);
-    });
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn insert_8t_treeindex(b: &Bencher<'_>) {
-    let n: usize = 500_000;
-    let keys: Vec<[u8; KEY_SIZE]> = bench_utils::keys(n);
-    let tree: TreeIndex<[u8; KEY_SIZE], u64> = TreeIndex::new();
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed) % n;
-        let _ = tree.insert_sync(keys[i], i as u64);
-    });
-}
-
-// =============================================================================
-// 05: Mixed read-write under contention, 90/10 read/write, 8 threads
+// 02: Mixed read-write under contention, 90/10 read/write, 8 threads
 //
 // The most realistic tail latency scenario: reads occasionally blocked by
 // concurrent writers. Uses hash-based write decision so threads don't all
@@ -493,7 +309,7 @@ fn mixed_90_10_8t_treeindex(b: &Bencher<'_>) {
 }
 
 // =============================================================================
-// 06: Mixed read-write under contention, 50/50 read/write, 8 threads
+// 03: Mixed read-write under contention, 50/50 read/write, 8 threads
 //
 // Heavy write load. Worst-case scenario for lock-based structures.
 // Reveals how implementations degrade under sustained write pressure.
@@ -578,7 +394,7 @@ fn mixed_50_50_8t_treeindex(b: &Bencher<'_>) {
 }
 
 // =============================================================================
-// 07: Zipfian hotspot GET, 100k entries, skew=1.0, 8 threads
+// 04: Zipfian hotspot GET, 100k entries, skew=1.0, 8 threads
 //
 // Hot keys under Zipfian distribution cause cache-line contention.
 // Tail latency here shows the cost of false sharing and coherence traffic
@@ -644,76 +460,7 @@ fn get_zipf_8t_treeindex(b: &Bencher<'_>) {
 }
 
 // =============================================================================
-// 08: Large tree GET, 1M entries, uniform, 1 thread
-//
-// Large working set exceeds L2 cache, revealing true memory-access latency.
-// Tail latency dominated by TLB misses and DRAM latency.
-//
-// Note: pbench's adaptive tuning phase serves as implicit warmup. The first
-// few collection samples may still show cold-cache effects, but at 50k samples
-// the impact on p50/p95 is negligible (only affects the first ~0.1% of samples).
-// =============================================================================
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, max_time = 60, skip_ext_time)]
-fn get_1m_1t_masstree(b: &Bencher<'_>) {
-    let n: usize = 1_000_000;
-    let (tree, keys) = setup_masstree(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: LocalGuard<'_> = tree.guard();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.get_with_guard(&keys[idx], &guard));
-    });
-}
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, max_time = 60, skip_ext_time)]
-fn get_1m_1t_skipmap(b: &Bencher<'_>) {
-    let n: usize = 1_000_000;
-    let (map, keys) = setup_skipmap(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(map.get(&keys[idx]));
-    });
-}
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, max_time = 60, skip_ext_time)]
-fn get_1m_1t_indexset(b: &Bencher<'_>) {
-    let n: usize = 1_000_000;
-    let (map, keys) = setup_indexset(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(map.get(&keys[idx]));
-    });
-}
-
-#[pbench::bench(threads = [1], sample_count = 200_000, sample_size = 1, max_time = 60, skip_ext_time)]
-fn get_1m_1t_treeindex(b: &Bencher<'_>) {
-    let n: usize = 1_000_000;
-    let (tree, keys) = setup_tree_index(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: SddGuard = SddGuard::new();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.peek(&keys[idx], &guard));
-    });
-}
-
-// =============================================================================
-// 09: Scan latency, 50-key forward scan, 100k entries, 8 threads
+// 05: Scan latency, 50-key forward scan, 100k entries, 8 threads
 //
 // Range scans touch multiple cache lines sequentially. Tail latency reveals
 // cost of B-link pointer chasing and OCC retries under concurrent mutation.
@@ -811,7 +558,7 @@ fn scan_50_8t_treeindex(b: &Bencher<'_>) {
 }
 
 // =============================================================================
-// 10: Churn (50% remove, 50% insert), 100k pre-filled entries, 8 threads
+// 06: Churn (50% remove, 50% insert), 100k pre-filled entries, 8 threads
 //
 // Alternates remove and insert to model entry lifecycle churn. Measures the
 // combined cost of delete-path coalescing and insert-path splits under
@@ -916,7 +663,7 @@ fn churn_8t_treeindex(b: &Bencher<'_>) {
 }
 
 // =============================================================================
-// 11: Mixed read-write-remove (realistic CRUD), 8 threads
+// 07: Mixed read-write-remove (realistic CRUD), 8 threads
 //
 // 70% read, 15% insert, 15% remove. Models a real key-value store workload
 // where entries are created, queried, and eventually expired/deleted.
@@ -1009,7 +756,7 @@ fn crud_8t_treeindex(b: &Bencher<'_>) {
 }
 
 // =============================================================================
-// 12: Zipfian mixed read-write, 100k entries, 8 threads
+// 08: Zipfian mixed read-write, 100k entries, 8 threads
 //
 // Combines hotspot access with writes. Models real caches where popular keys
 // get both read and updated frequently. The interaction between hot-key
@@ -1076,98 +823,7 @@ fn mixed_zipf_90_10_8t_treeindex(b: &Bencher<'_>) {
 }
 
 // =============================================================================
-// 13: 8-byte keys GET, 100k entries, 8 threads
-//
-// Single-layer fast path for masstree (no trie descent). Tests the optimal
-// case where keys fit in one ikey. Tail latency should be minimal for
-// masstree since there is no inter-layer traversal.
-// =============================================================================
-
-const KEY8: usize = 8;
-
-fn setup_masstree_8b(n: usize) -> (MassTree15Inline<u64>, Vec<[u8; KEY8]>) {
-    let keys: Vec<[u8; KEY8]> = bench_utils::keys(n);
-    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
-
-    {
-        let guard: LocalGuard<'_> = tree.guard();
-
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert_with_guard(key, i as u64, &guard);
-        }
-    }
-
-    (tree, keys)
-}
-
-fn setup_skipmap_8b(n: usize) -> (SkipMap<[u8; KEY8], u64>, Vec<[u8; KEY8]>) {
-    let keys: Vec<[u8; KEY8]> = bench_utils::keys(n);
-    let map: SkipMap<[u8; KEY8], u64> = SkipMap::new();
-
-    for (i, key) in keys.iter().enumerate() {
-        map.insert(*key, i as u64);
-    }
-
-    (map, keys)
-}
-
-fn setup_tree_index_8b(n: usize) -> (TreeIndex<[u8; KEY8], u64>, Vec<[u8; KEY8]>) {
-    let keys: Vec<[u8; KEY8]> = bench_utils::keys(n);
-    let tree: TreeIndex<[u8; KEY8], u64> = TreeIndex::new();
-
-    for (i, key) in keys.iter().enumerate() {
-        let _ = tree.insert_sync(*key, i as u64);
-    }
-
-    (tree, keys)
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_8b_8t_masstree(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (tree, keys) = setup_masstree_8b(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: LocalGuard<'_> = tree.guard();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.get_with_guard(&keys[idx], &guard));
-    });
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_8b_8t_skipmap(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (map, keys) = setup_skipmap_8b(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(map.get(&keys[idx]));
-    });
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_8b_8t_treeindex(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (tree, keys) = setup_tree_index_8b(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: SddGuard = SddGuard::new();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.peek(&keys[idx], &guard));
-    });
-}
-
-// =============================================================================
-// 14: Scan under concurrent writes, 50-key scan + 10% writes, 8 threads
+// 09: Scan under concurrent writes, 50-key scan + 10% writes, 8 threads
 //
 // Range scans competing with concurrent inserts. This is the hardest scenario
 // for OCC-based trees: scans must detect version changes mid-traversal and
@@ -1281,104 +937,12 @@ fn scan_write_8t_treeindex(b: &Bencher<'_>) {
 }
 
 // =============================================================================
-// 15: Long key (128B) GET latency, 100k entries, 8 threads
-//
-// 128-byte keys with unique first chunks. Measures suffix comparison overhead
-// in the read path. Each lookup must compare a 120-byte suffix after the
-// 8-byte ikey match. Tail latency captures occasional inline-to-external
-// suffix indirection spikes.
-// =============================================================================
-
-const LONG_KEY: usize = 128;
-
-fn setup_masstree_long(n: usize) -> (MassTree15Inline<u64>, Vec<[u8; LONG_KEY]>) {
-    let keys: Vec<[u8; LONG_KEY]> = bench_utils::keys(n);
-    let tree: MassTree15Inline<u64> = MassTree15Inline::new();
-
-    {
-        let guard: LocalGuard<'_> = tree.guard();
-
-        for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert_with_guard(key, i as u64, &guard);
-        }
-    }
-
-    (tree, keys)
-}
-
-fn setup_skipmap_long(n: usize) -> (SkipMap<[u8; LONG_KEY], u64>, Vec<[u8; LONG_KEY]>) {
-    let keys: Vec<[u8; LONG_KEY]> = bench_utils::keys(n);
-    let map: SkipMap<[u8; LONG_KEY], u64> = SkipMap::new();
-
-    for (i, key) in keys.iter().enumerate() {
-        map.insert(*key, i as u64);
-    }
-
-    (map, keys)
-}
-
-fn setup_tree_index_long(n: usize) -> (TreeIndex<[u8; LONG_KEY], u64>, Vec<[u8; LONG_KEY]>) {
-    let keys: Vec<[u8; LONG_KEY]> = bench_utils::keys(n);
-    let tree: TreeIndex<[u8; LONG_KEY], u64> = TreeIndex::new();
-
-    for (i, key) in keys.iter().enumerate() {
-        let _ = tree.insert_sync(*key, i as u64);
-    }
-
-    (tree, keys)
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_long_8t_masstree(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (tree, keys) = setup_masstree_long(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: LocalGuard<'_> = tree.guard();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.get_with_guard(&keys[idx], &guard));
-    });
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_long_8t_skipmap(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (map, keys) = setup_skipmap_long(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(map.get(&keys[idx]));
-    });
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_long_8t_treeindex(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (tree, keys) = setup_tree_index_long(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: SddGuard = SddGuard::new();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.peek(&keys[idx], &guard));
-    });
-}
-
-// =============================================================================
-// 16: Deep trie GET latency, 100k entries, 8 threads
+// 10: Deep trie mixed read/write latency, 100k entries, 90/10, 8 threads
 //
 // Keys share 4 prefix chunks (32 bytes), forcing multi-layer trie descent.
-// With 16 prefix buckets, ~6250 keys per bucket compete for the same internal
-// nodes. Each read traverses 4+ trie layers, with OCC validation at each.
-// Tail latency reveals retry cost when concurrent writes mutate shared layers.
+// Writers mutate shared internal trie layers, forcing OCC retries on readers
+// traversing the same path. Tail latency directly measures the cost of
+// multi-layer OCC retry under contention.
 // =============================================================================
 
 const DEEP_KEY: usize = 128;
@@ -1447,59 +1011,6 @@ fn tree_index_upsert_sync_deep(
 
     let _ = tree.insert_sync(key, value);
 }
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_deep_8t_masstree(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (tree, keys) = setup_masstree_deep(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: LocalGuard<'_> = tree.guard();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.get_with_guard(&keys[idx], &guard));
-    });
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_deep_8t_skipmap(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (map, keys) = setup_skipmap_deep(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(map.get(&keys[idx]));
-    });
-}
-
-#[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
-fn get_deep_8t_treeindex(b: &Bencher<'_>) {
-    let n: usize = 100_000;
-    let (tree, keys) = setup_tree_index_deep(n);
-    let indices: Vec<usize> = uniform_indices(n, INDEX_POOL, 42);
-    let cursor: AtomicUsize = AtomicUsize::new(0);
-
-    b.bench_refs(|| {
-        let guard: SddGuard = SddGuard::new();
-        let i: usize = cursor.fetch_add(1, Ordering::Relaxed);
-        let idx: usize = indices[i % indices.len()];
-        std::hint::black_box(tree.peek(&keys[idx], &guard));
-    });
-}
-
-// =============================================================================
-// 17: Deep trie mixed read/write latency, 100k entries, 90/10, 8 threads
-//
-// Same deep trie keys as section 16, but with 10% concurrent writes. This is
-// the critical test: writers mutate shared internal trie layers, forcing OCC
-// retries on readers traversing the same path. Tail latency directly measures
-// the cost of multi-layer OCC retry under contention.
-// =============================================================================
 
 #[pbench::bench(threads = [8], sample_count = 200_000, sample_size = 1, skip_ext_time)]
 fn mixed_deep_90_10_8t_masstree(b: &Bencher<'_>) {

@@ -29,6 +29,16 @@ impl<V> BoxValueArray<V> {
         debug_assert!(slot < WIDTH_15, "load_raw: slot {slot} out of bounds");
         self.ptrs[slot].load(READ_ORD)
     }
+
+    /// Load the raw pointer at `slot` with Relaxed ordering (for prefetching).
+    #[inline(always)]
+    pub(crate) fn load_raw_relaxed(&self, slot: usize) -> *mut u8 {
+        debug_assert!(
+            slot < WIDTH_15,
+            "load_raw_relaxed: slot {slot} out of bounds"
+        );
+        self.ptrs[slot].load(RELAXED)
+    }
 }
 
 // SAFETY: AtomicPtr provides thread-safe access; raw pointers are valid
@@ -51,6 +61,15 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     fn is_empty(&self, slot: usize) -> bool {
         debug_assert!(slot < WIDTH_15, "is_empty: slot {slot} out of bounds");
         self.ptrs[slot].load(READ_ORD).is_null()
+    }
+
+    #[inline(always)]
+    fn is_empty_relaxed(&self, slot: usize) -> bool {
+        debug_assert!(
+            slot < WIDTH_15,
+            "is_empty_relaxed: slot {slot} out of bounds"
+        );
+        self.ptrs[slot].load(RELAXED).is_null()
     }
 
     #[inline(always)]
@@ -113,6 +132,25 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     }
 
     #[inline(always)]
+    fn update_in_place_relaxed(&self, slot: usize, output: &ValuePtr<V>) -> RetireHandle {
+        debug_assert!(
+            slot < WIDTH_15,
+            "update_in_place_relaxed: slot {slot} out of bounds"
+        );
+
+        let old_ptr: *mut u8 = self.ptrs[slot].load(RELAXED);
+        debug_assert!(
+            !old_ptr.is_null(),
+            "update_in_place_relaxed called on empty slot {slot}"
+        );
+
+        let new_ptr: *mut u8 = output.as_ptr().cast::<u8>();
+        self.ptrs[slot].store(new_ptr, RELAXED);
+
+        RetireHandle::Ptr(old_ptr)
+    }
+
+    #[inline(always)]
     fn take(&self, slot: usize) -> Option<ValuePtr<V>> {
         debug_assert!(slot < WIDTH_15, "take: slot {slot} out of bounds");
 
@@ -147,6 +185,24 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     }
 
     // ========================================================================
+    //  Relaxed Load (under lock)
+    // ========================================================================
+
+    #[inline(always)]
+    fn load_relaxed(&self, slot: usize) -> Option<ValuePtr<V>> {
+        debug_assert!(slot < WIDTH_15, "load_relaxed: slot {slot} out of bounds");
+
+        let ptr: *mut u8 = self.ptrs[slot].load(RELAXED);
+        if ptr.is_null() {
+            return None;
+        }
+
+        // SAFETY: Caller verified keylenx < LAYER_KEYLENX. ptr was stored via
+        // Box::into_raw. Valid while caller's EBR guard is held.
+        unsafe { Some(ValuePtr::from_raw(ptr.cast::<V>())) }
+    }
+
+    // ========================================================================
     //  Slot Management
     // ========================================================================
 
@@ -154,6 +210,12 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     fn clear(&self, slot: usize) {
         debug_assert!(slot < WIDTH_15, "clear: slot {slot} out of bounds");
         self.ptrs[slot].store(StdPtr::null_mut(), WRITE_ORD);
+    }
+
+    #[inline(always)]
+    fn clear_relaxed(&self, slot: usize) {
+        debug_assert!(slot < WIDTH_15, "clear_relaxed: slot {slot} out of bounds");
+        self.ptrs[slot].store(StdPtr::null_mut(), RELAXED);
     }
 
     #[inline(always)]
@@ -169,6 +231,21 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
 
         let ptr: *mut u8 = self.ptrs[src_slot].load(RELAXED);
         dst.ptrs[dst_slot].store(ptr, WRITE_ORD);
+    }
+
+    #[inline(always)]
+    fn move_slot_relaxed(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
+        debug_assert!(
+            src_slot < WIDTH_15,
+            "move_slot_relaxed: src_slot {src_slot} out of bounds"
+        );
+        debug_assert!(
+            dst_slot < WIDTH_15,
+            "move_slot_relaxed: dst_slot {dst_slot} out of bounds"
+        );
+
+        let ptr: *mut u8 = self.ptrs[src_slot].load(RELAXED);
+        dst.ptrs[dst_slot].store(ptr, RELAXED);
     }
 
     // ========================================================================

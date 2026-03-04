@@ -239,6 +239,9 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// Check if a slot is empty (no value, no layer).
     fn is_empty(&self, slot: usize) -> bool;
 
+    /// Relaxed empty check for use in OCC search loops.
+    fn is_empty_relaxed(&self, slot: usize) -> bool;
+
     /// Check if a slot contains a layer pointer.
     fn is_layer(&self, slot: usize) -> bool;
 
@@ -258,6 +261,10 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// Update an existing terminal value in place, returning a retire handle
     /// for the old value.
     fn update_in_place(&self, slot: usize, output: &O) -> RetireHandle;
+
+    /// Update an existing terminal value with Relaxed store ordering.
+    /// For use under lock where the lock's Release on drop provides synchronization.
+    fn update_in_place_relaxed(&self, slot: usize, output: &O) -> RetireHandle;
 
     /// Take the terminal value, leaving the slot empty.
     fn take(&self, slot: usize) -> Option<O>;
@@ -279,11 +286,23 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     //  Slot Management
     // ========================================================================
 
+    /// Load the terminal value with Relaxed ordering.
+    /// For use under lock where the lock's Acquire provides visibility.
+    fn load_relaxed(&self, slot: usize) -> Option<O>;
+
     /// Clear a slot (set to empty state).
     fn clear(&self, slot: usize);
 
+    /// Clear a slot with Relaxed ordering.
+    /// For use under lock where the lock's Release on drop provides synchronization.
+    fn clear_relaxed(&self, slot: usize);
+
     /// Move a slot's contents from `self[src_slot]` to `dst[dst_slot]`.
     fn move_slot(&self, dst: &Self, src_slot: usize, dst_slot: usize);
+
+    /// Move a slot's contents with Relaxed store ordering on the destination.
+    /// For use under lock where the lock's Release on drop provides synchronization.
+    fn move_slot_relaxed(&self, dst: &Self, src_slot: usize, dst_slot: usize);
 
     // ========================================================================
     //  Lifecycle
@@ -442,6 +461,10 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     /// Check if a slot contains no value (empty or layer).
     fn is_value_empty(values: &Self::Values, slot: usize) -> bool;
 
+    /// Relaxed empty check for OCC search loops where the permutation
+    /// Acquire load provides synchronization and `has_changed()` validates.
+    fn is_value_empty_relaxed(values: &Self::Values, slot: usize) -> bool;
+
     /// Prefetch the value at a slot for upcoming access.
     fn prefetch_value(values: &Self::Values, slot: usize);
 
@@ -472,6 +495,23 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     fn clone_value_from_output(output: &Self::Output) -> Self::Value
     where
         Self::Value: Clone;
+
+    // ========================================================================
+    //  Output Reconstruction
+    // ========================================================================
+
+    /// Reconstruct an `Output` from a raw retired pointer returned by
+    /// [`ValueArray::update_in_place`](ValueArray::update_in_place).
+    ///
+    /// This exists to let hot update paths avoid an extra `load_value()` when
+    /// the old value can be represented directly by the retired pointer
+    /// (e.g., `BoxPolicy`).
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must be a non-null pointer previously stored in a value slot.
+    /// - The caller must ensure appropriate synchronization (typically under lock).
+    unsafe fn output_from_retire_ptr(ptr: *mut u8) -> Self::Output;
 
     // ========================================================================
     //  Retirement
@@ -539,9 +579,17 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
     }
 
     #[inline(always)]
+    fn is_value_empty_relaxed(values: &BoxValueArray<V>, slot: usize) -> bool {
+        values.is_empty_relaxed(slot)
+    }
+
+    #[inline(always)]
     fn prefetch_value(values: &BoxValueArray<V>, slot: usize) {
         // Prefetch the Box<V> target into L1 cache for upcoming dereference.
-        let ptr: *mut u8 = values.load_raw(slot);
+        //
+        // Relaxed is sufficient here: prefetch is a performance hint only and
+        // does not participate in synchronization.
+        let ptr: *mut u8 = values.load_raw_relaxed(slot);
 
         if !ptr.is_null() {
             prefetch_read(ptr.cast::<V>());
@@ -562,7 +610,7 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
 
     #[inline(always)]
     fn take_value_for_layer(values: &BoxValueArray<V>, slot: usize) -> RetireHandle {
-        values.clear(slot);
+        values.clear_relaxed(slot);
         RetireHandle::Noop
     }
 
@@ -579,6 +627,13 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
         V: Clone,
     {
         (**output).clone()
+    }
+
+    #[inline(always)]
+    unsafe fn output_from_retire_ptr(ptr: *mut u8) -> ValuePtr<V> {
+        debug_assert!(!ptr.is_null());
+        // SAFETY: ptr was stored via Box::into_raw in into_output().
+        unsafe { ValuePtr::from_raw(ptr.cast::<V>()) }
     }
 
     #[inline(always)]
@@ -665,6 +720,11 @@ impl<V: InlineBits> LeafPolicy for InlinePolicy<V> {
     }
 
     #[inline(always)]
+    fn is_value_empty_relaxed(values: &InlineValueArray<V>, slot: usize) -> bool {
+        values.is_empty_relaxed(slot)
+    }
+
+    #[inline(always)]
     fn prefetch_value(_values: &InlineValueArray<V>, _slot: usize) {}
 
     #[inline(always)]
@@ -674,7 +734,7 @@ impl<V: InlineBits> LeafPolicy for InlinePolicy<V> {
 
     #[inline(always)]
     fn take_value_for_layer(values: &InlineValueArray<V>, slot: usize) -> RetireHandle {
-        values.clear(slot);
+        values.clear_relaxed(slot);
         RetireHandle::Noop
     }
 
@@ -689,6 +749,11 @@ impl<V: InlineBits> LeafPolicy for InlinePolicy<V> {
         V: Clone,
     {
         *output // V: Copy implies Clone; bitwise copy.
+    }
+
+    #[inline(always)]
+    unsafe fn output_from_retire_ptr(_ptr: *mut u8) -> V {
+        unreachable!("inline values have no retired pointer")
     }
 
     #[inline(always)]

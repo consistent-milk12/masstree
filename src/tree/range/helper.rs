@@ -124,7 +124,7 @@ where
     };
 
     // Check if suffix comparison is needed
-    let keylenx: u8 = leaf.keylenx(slot);
+    let keylenx: u8 = leaf.keylenx_relaxed(slot);
 
     // Layer pointers: if cursor has suffix (including after unshift()),
     // we've already processed this layer and should skip past it
@@ -214,7 +214,7 @@ where
         }
 
         // Same ikey: check length/suffix
-        let keylenx: u8 = leaf.keylenx(slot);
+        let keylenx: u8 = leaf.keylenx_relaxed(slot);
 
         if keylenx == KSUF_KEYLENX || keylenx >= LAYER_KEYLENX {
             return i;
@@ -254,7 +254,7 @@ where
         }
 
         // Same ikey: check suffix
-        let keylenx: u8 = leaf.keylenx(slot);
+        let keylenx: u8 = leaf.keylenx_relaxed(slot);
 
         if keylenx == KSUF_KEYLENX
             && let Some(stored_suffix) = leaf.ksuf(slot)

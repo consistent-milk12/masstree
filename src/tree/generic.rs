@@ -36,6 +36,9 @@ mod optimistic_reads;
 mod search;
 mod split;
 
+#[cfg(feature = "debug-print")]
+mod print;
+
 // Re-export batch types
 pub use batch::{BatchEntry, BatchInsertResult};
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
@@ -108,6 +111,21 @@ where
     pub fn flush(&self, guard: &LocalGuard<'_>) {
         self.verify_guard(guard);
         BatchedRetire::flush(guard);
+    }
+
+    /// Perform maintenance: reclaim retired memory and clean up empty leaves.
+    ///
+    /// Call periodically during long-running single-threaded workloads or
+    /// between batch operations to reclaim memory from deleted entries.
+    /// Requires exclusive access to the guard (no nested guards active).
+    ///
+    /// Internally calls `guard.flush()` + `guard.refresh()` + coalesce processing.
+    #[inline]
+    pub fn maintenance(&self, guard: &mut LocalGuard<'_>) {
+        self.verify_guard(guard);
+        guard.flush();
+        guard.refresh();
+        Coalesce::process_all::<P, A>(self, guard);
     }
 
     /// Get the approximate number of keys in the tree.

@@ -350,7 +350,7 @@ def main() -> None:
 
     script_dir = Path(__file__).parent
     project_dir = script_dir.parent
-    mttest_path = project_dir / "reference" / "mttest"
+    mttest_path = project_dir / "reference" / "build" / "mttest"
 
     run_cpp = not args.rust_only
 
@@ -363,7 +363,9 @@ def main() -> None:
     # Header
     mode = "C++ vs Rust" if args.compare else ("Rust" if args.rust_only else "C++")
     pin_str = ", pinned" if args.pin else ""
-    alloc_str = "" if use_mimalloc else ", system alloc"
+    # alloc_str only applies to Rust benchmarks (C++ allocator is baked into the binary)
+    show_rust = args.compare or args.rust_only
+    alloc_str = ", Rust system alloc" if not use_mimalloc and show_rust else ""
     print(
         f"{mode} Masstree mttest - {args.threads} threads, {args.duration}s{pin_str}{alloc_str}"
     )
