@@ -10,7 +10,9 @@ Current Version: v0.9.3
 
 Significantly reduced duplicate code through trait based abstractions, while improving performance further. All standard data structure features are implemented and streamlined, on top the specialized features like range scans and prefix queries. From latency analysis, it seems to have a surprisingly strong tail latency profile for a concurrent ordered map. The cache-line aligned layout design and aggressive prefetching seems to have paid off, on top of masstree's original excellent architecture.
 
-The next issues to work on are the memory profile and memcomparable mappings for general key types, before 1.0.
+The next issues to work on are the memory profile (some progress) and memcomparable mappings for general key types, before 1.0.
+
+NOTE: All benchmarks were run with `mimalloc` feature.
 
 ## vs Rust Concurrent Maps (12T SMT)
 
@@ -141,17 +143,6 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 | scan+write p50 | 902 ns | 1.02 us | 3.97 us |
 | scan+write p99.9 | 2.50 us | 6.66 us | 9.99 us |
 
-## vs C++ Masstree (12T, mttest)
-
-> **Config:** 12 threads, 10s duration, C++ reference from [masstree-beta](https://github.com/kohler/masstree-beta)
-
-| Benchmark | C++ Mops/s | Rust Mops/s | Ratio |
-|-----------|-----------|------------|-------|
-| rw1 (50% read) | 8.90 | 8.78 | 0.99x |
-| rw2g98 (98% read) | 22.12 | 23.39 | 1.06x |
-
-Rust uses the hyaline-based [seize](https://crates.io/crates/seize) crate for memory reclamation, which has cheaper guard acquisition than C++ epoch-based reclamation. This trades slightly slower writes for faster reads. At 98% reads (the typical index workload), Rust pulls ahead.
-
 ## Install
 
 ```toml
@@ -243,130 +234,6 @@ for entry in tree.iter(&guard) {
     println!("{:?}", entry.key());
 }
 ```
-
-## When to Use
-
-Masstree is the fastest concurrent ordered map in Rust for variable-length keys. It wins 12/12 read/write benchmarks against `scc::TreeIndex`, `crossbeam::SkipMap`, and `scc::HashIndex` with margins from 1.28x to 3.79x. Point lookup latency is 140 ns p50 (single-threaded), 340 ns at 8T, and OCC reads stay stable under write pressure (p99.9 flat at 1.04 µs from 90/10 to 50/50 mixed workloads). The trade-off is memory: 79 bytes/entry at scale vs 50 for TreeIndex (1.58x overhead), with shared-prefix keys costing 2-3x more due to deeper trie structure.
-
-**Best for:**
-
-- Variable-length byte keys (`&[u8]`) with mixed read/write concurrency
-- Range scans and prefix queries over ordered data
-- High-contention hot-key workloads (3.69x over next best at 12T)
-- Long or variable-length keys (3.85x advantage, native slice API avoids cloning)
-
-**Consider alternatives when:**
-
-- Unordered point lookups only, `dashmap`
-- Fixed integer keys only, `congee` (ART-based)
-- Single-threaded only, `BTreeMap`
-
-### `MassTree<V>` (Default, True-Inline)
-
-- Values stored directly in leaf nodes (zero allocation per insert)
-- Returns `V` by copy: `get_with_guard() → Option<V>`
-- Use `scan()` for range iteration
-
-### `MassTree15<V>` (Box-Based)
-
-- Values stored as `Box<V>` raw pointers (heap allocation per insert)
-- Returns `ValuePtr<V>`: a zero-cost `Copy` pointer with `Deref` to `&V`
-- Supports `get_ref() → Option<&V>` for zero-copy access
-- Use `scan_ref()` for zero-copy range iteration
-
-`MassTree<V>` is the recommended default for `Copy` types like `u64`, `i32`, `f64`, pointers, etc.
-Use `MassTree15<V>` explicitly when you need to store non-Copy types like `String`.
-
-```rust
-use masstree::{MassTree, MassTree15, MassTree15Inline};
-
-// Default: inline storage for Copy types (recommended)
-let tree: MassTree<u64> = MassTree::new();
-
-// Box-based storage for non-Copy types
-let tree_box: MassTree15<String> = MassTree15::new();
-
-// Explicit inline storage (same as MassTree)
-let inline: MassTree15Inline<u64> = MassTree15Inline::new();
-```
-
-## Examples
-
-The `examples/` directory contains comprehensive usage examples:
-
-```bash
-cargo run --example basic_usage --features mimalloc --release      # Core API walkthrough
-cargo run --example rayon_parallel --features mimalloc --release   # Parallel processing with Rayon
-cargo run --example tokio_async --features mimalloc --release      # Async integration with Tokio
-cargo run --example url_cache --features mimalloc --release        # Real-world URL cache
-cargo run --example session_store --features mimalloc --release    # Concurrent session store
-```
-
-### Rayon Integration
-
-MassTree works seamlessly with Rayon for parallel bulk operations:
-
-```rust
-use masstree::MassTree15Inline;
-use rayon::prelude::*;
-use std::sync::Arc;
-
-let tree: Arc<MassTree15Inline<u64>> = Arc::new(MassTree15Inline::new());
-
-// Parallel bulk insert
-(0..1_000_000).into_par_iter().for_each(|i| {
-    let key = format!("key/{i:08}");
-    let guard = tree.guard();
-    let _ = tree.insert_with_guard(key.as_bytes(), i, &guard);
-});
-
-// Parallel lookups 
-let sum: u64 = (0..1_000_000).into_par_iter()
-    .map(|i| {
-        let key = format!("key/{i:08}");
-        let guard = tree.guard();
-        tree.get_with_guard(key.as_bytes(), &guard).unwrap_or(0)
-    })
-    .sum();
-```
-
-### Tokio Integration
-
-MassTree is thread-safe but guards cannot be held across `.await` points:
-
-```rust
-use masstree::MassTree15;
-use std::sync::Arc;
-
-let tree: Arc<MassTree15<String>> = Arc::new(MassTree15::new());
-
-let handle = tokio::spawn({
-    let tree = Arc::clone(&tree);
-    async move {
-        {
-            let guard = tree.guard();
-            let _ = tree.insert_with_guard(b"key", "value".to_string(), &guard);
-        } 
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        let guard = tree.guard();
-        tree.get_with_guard(b"key", &guard)
-    }
-});
-
-// For CPU-intensive operations, use spawn_blocking
-let tree_clone = Arc::clone(&tree);
-tokio::task::spawn_blocking(move || {
-    let guard = tree_clone.guard();
-    for entry in tree_clone.iter(&guard) {}
-}).await;
-```
-
-## Crate Features
-
-- `mimalloc` — Use mimalloc as global allocator (recommended)
-- `tracing` — Enable structured logging to `logs/masstree.jsonl`
 
 ## License
 
