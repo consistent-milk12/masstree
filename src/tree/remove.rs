@@ -443,9 +443,9 @@ impl NodeCleaner {
                 let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
                 let search_result: RemoveSearchResult = if single_layer_mode {
-                    Self::search_for_remove_single_layer::<P>(leaf, &key, &perm)
+                    Self::search_for_remove::<true, P>(leaf, &key, &perm)
                 } else {
-                    Self::search_for_remove_generic::<P>(leaf, &key, &perm)
+                    Self::search_for_remove::<false, P>(leaf, &key, &perm)
                 };
 
                 if leaf.version().has_changed(version) {
@@ -518,9 +518,10 @@ impl NodeCleaner {
 
     /// Search for a key within a leaf for removal.
     ///
-    /// Unlike `search_for_insert`, we need to find an exact match.
+    /// When `SINGLE_LAYER` is true, layer/suffix branches are skipped since
+    /// the key fits in a single ikey. The compiler eliminates dead branches.
     #[inline(always)]
-    fn search_for_remove_generic<P>(
+    fn search_for_remove<const SINGLE_LAYER: bool, P>(
         leaf: &LeafNode15<P>,
         key: &Key<'_>,
         perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
@@ -529,6 +530,8 @@ impl NodeCleaner {
         P: LeafPolicy,
     {
         let target_ikey: u64 = key.ikey();
+        #[expect(clippy::cast_possible_truncation, reason = "key.current_len() <= 8")]
+        let search_keylenx: u8 = key.current_len() as u8;
         let size: usize = perm.size();
 
         for ki in 0..size {
@@ -550,79 +553,36 @@ impl NodeCleaner {
             // Relaxed: OCC-validated read, permutation Acquire provides ordering.
             let slot_keylenx: u8 = leaf.keylenx_relaxed(kp);
 
-            if slot_keylenx >= LAYER_KEYLENX {
-                // This is a layer pointer
-                if key.has_suffix() {
-                    // Key continues - need to descend
-                    let layer_ptr: *mut u8 = leaf.load_layer_raw(kp);
-                    return RemoveSearchResult::DescendLayer { layer_ptr };
-                }
-
-                // Short key can't match layer pointer
-                return RemoveSearchResult::NotFound;
-            }
-
-            // Check inline key length
-            #[expect(clippy::cast_possible_truncation, reason = "key.current_len() <= 8")]
-            let key_len: u8 = key.current_len() as u8;
-
-            if slot_keylenx == KSUF_KEYLENX {
-                // Has suffix - compare suffix
-                if !key.has_suffix() {
-                    continue; // Key too short
-                }
-
-                leaf.prefetch_suffix();
-                let suffix: &[u8] = key.suffix();
-                if leaf.ksuf_equals(kp, suffix) {
+            if SINGLE_LAYER {
+                if slot_keylenx == search_keylenx {
                     return RemoveSearchResult::Found { ki, kp };
                 }
-                continue;
-            }
+            } else {
+                if slot_keylenx >= LAYER_KEYLENX {
+                    if key.has_suffix() {
+                        let layer_ptr: *mut u8 = leaf.load_layer_raw(kp);
+                        return RemoveSearchResult::DescendLayer { layer_ptr };
+                    }
 
-            // Inline key (no suffix)
-            if key_len <= IKEY_SIZE && slot_keylenx == key_len {
-                // Exact match for short key
-                return RemoveSearchResult::Found { ki, kp };
-            }
-        }
+                    return RemoveSearchResult::NotFound;
+                }
 
-        RemoveSearchResult::NotFound
-    }
+                if slot_keylenx == KSUF_KEYLENX {
+                    if !key.has_suffix() {
+                        continue;
+                    }
 
-    /// Single-layer fast path: key has no suffix, so skip layer/suffix branches.
-    #[inline(always)]
-    fn search_for_remove_single_layer<P>(
-        leaf: &LeafNode15<P>,
-        key: &Key<'_>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-    ) -> RemoveSearchResult
-    where
-        P: LeafPolicy,
-    {
-        let target_ikey: u64 = key.ikey();
-        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-        let search_keylenx: u8 = key.current_len() as u8;
-        let size: usize = perm.size();
+                    leaf.prefetch_suffix();
+                    let suffix: &[u8] = key.suffix();
+                    if leaf.ksuf_equals(kp, suffix) {
+                        return RemoveSearchResult::Found { ki, kp };
+                    }
+                    continue;
+                }
 
-        for ki in 0..size {
-            let kp: usize = perm.get(ki);
-            let slot_ikey: u64 = leaf.ikey_relaxed(kp);
-
-            if slot_ikey < target_ikey {
-                continue;
-            }
-
-            if slot_ikey > target_ikey {
-                return RemoveSearchResult::NotFound;
-            }
-
-            // ikey matches, prefetch value while checking keylenx
-            leaf.prefetch_value(kp);
-            let slot_keylenx: u8 = leaf.keylenx_relaxed(kp);
-
-            if slot_keylenx == search_keylenx {
-                return RemoveSearchResult::Found { ki, kp };
+                if search_keylenx <= IKEY_SIZE && slot_keylenx == search_keylenx {
+                    return RemoveSearchResult::Found { ki, kp };
+                }
             }
         }
 

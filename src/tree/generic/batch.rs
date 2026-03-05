@@ -2,6 +2,8 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 
 use seize::LocalGuard;
 
+use std::ptr as StdPtr;
+
 use crate::Permuter;
 use crate::leaf15::LeafNode15;
 use crate::{
@@ -14,6 +16,37 @@ use super::{FindSlotResult, InsertSearchResultGeneric};
 /// Max suffix bag retires per locked batch insert.
 /// One per slot (WIDTH=15) plus one for empty-leaf reuse = 16.
 const MAX_BATCH_RETIRES: usize = crate::leaf15::WIDTH_15 + 1;
+
+/// Buffer for deferred suffix bag retirements during batch insertion.
+///
+/// Collects pointers to old suffix bags that must be retired outside the
+/// leaf lock. Bounded by `MAX_BATCH_RETIRES`.
+struct RetireBuf {
+    ptrs: [*mut u8; MAX_BATCH_RETIRES],
+    count: usize,
+}
+
+impl RetireBuf {
+    #[inline]
+    const fn new() -> Self {
+        Self {
+            ptrs: [StdPtr::null_mut(); MAX_BATCH_RETIRES],
+            count: 0,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, ptr: *mut u8) {
+        debug_assert!(self.count < self.ptrs.len());
+        self.ptrs[self.count] = ptr;
+        self.count += 1;
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[*mut u8] {
+        &self.ptrs[..self.count]
+    }
+}
 
 // ============================================================================
 //  Batch Entry Types
@@ -42,15 +75,17 @@ impl<P: LeafPolicy> BatchEntry<P> {
     /// Converts the value to output immediately to ensure single allocation.
     #[inline]
     pub fn new(key: Vec<u8>, value: P::Value) -> Self {
-        let ikey = Self::compute_ikey(&key);
-        let output = P::into_output(value);
+        let ikey: u64 = Self::compute_ikey(&key);
+        let output: P::Output = P::into_output(value);
+
         Self { key, output, ikey }
     }
 
     /// Create a batch entry from key and pre-converted output.
     #[inline(always)]
     pub fn from_output(key: Vec<u8>, output: P::Output) -> Self {
-        let ikey = Self::compute_ikey(&key);
+        let ikey: u64 = Self::compute_ikey(&key);
+
         Self { key, output, ikey }
     }
 
@@ -61,9 +96,10 @@ impl<P: LeafPolicy> BatchEntry<P> {
         reason = "len is bounded by min(key.len(), 8), so slicing is safe"
     )]
     fn compute_ikey(key: &[u8]) -> u64 {
-        let mut buf = [0u8; 8];
-        let len = key.len().min(8);
+        let mut buf: [u8; 8] = [0u8; 8];
+        let len: usize = key.len().min(8);
         buf[..len].copy_from_slice(&key[..len]);
+
         u64::from_be_bytes(buf)
     }
 
@@ -234,15 +270,16 @@ where
         I: IntoIterator<Item = (Vec<u8>, P::Value)>,
         P::Value: Clone,
     {
-        let guard = self.guard();
-        let result = self.insert_batch_with_guard(entries, &guard);
+        let guard: LocalGuard<'_> = self.guard();
+        let result: BatchInsertResult<P::Output> = self.insert_batch_with_guard(entries, &guard);
+
         BatchInsertResult {
             inserted: result.inserted,
             updated: result.updated,
             old_values: result
                 .old_values
                 .iter()
-                .map(|o| P::clone_value_from_output(o))
+                .map(|o: &P::Output| P::clone_value_from_output(o))
                 .collect(),
             failed: result.failed,
         }
@@ -267,7 +304,7 @@ where
         // Convert to BatchEntry (allocates outputs once)
         let mut batch: Vec<BatchEntry<P>> = entries
             .into_iter()
-            .map(|(key, value)| BatchEntry::new(key, value))
+            .map(|(key, value): (Vec<u8>, P::Value)| BatchEntry::new(key, value))
             .collect();
 
         if batch.is_empty() {
@@ -321,19 +358,20 @@ where
         batch: &[BatchEntry<P>],
         guard: &LocalGuard<'_>,
     ) -> BatchInsertResult<P::Output> {
-        let mut result = BatchInsertResult::with_capacity(batch.len() / 4);
-        let mut index = 0;
+        let mut result: BatchInsertResult<P::Output> =
+            BatchInsertResult::with_capacity(batch.len() / 4);
+        let mut index: usize = 0;
 
         while index < batch.len() {
             // Get the current entry to find its leaf
-            let entry = &batch[index];
-            let key = Key::new(&entry.key);
+            let entry: &BatchEntry<P> = &batch[index];
+            let key: Key<'_> = Key::new(&entry.key);
 
             // Load root pointer
             let mut layer_root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 
             // Retry loop for finding and locking the correct leaf
-            let entries_processed = 'retry: loop {
+            let entries_processed: usize = 'retry: loop {
                 // Handle layer root promotion
                 layer_root = self.maybe_parent_generic(layer_root);
 
@@ -354,8 +392,8 @@ where
                 leaf_ptr = advanced_ptr;
                 let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
-                let pre_lock_version = leaf.version().stable();
-                let pre_lock_perm_raw = leaf.permutation_raw();
+                let pre_lock_version: u32 = leaf.version().stable();
+                let pre_lock_perm_raw: u64 = leaf.permutation_raw();
                 let pre_lock_perm: Permuter = leaf.permutation();
 
                 // Pre-allocate suffix buffer outside the lock to reduce
@@ -404,17 +442,14 @@ where
                 }
 
                 // Now we hold the lock - process as many entries as fit in this leaf.
-                let mut retire_buf: [*mut u8; MAX_BATCH_RETIRES] =
-                    [std::ptr::null_mut(); MAX_BATCH_RETIRES];
-                let mut retire_count: usize = 0;
-                let processed = self.insert_batch_into_locked_leaf(
+                let mut retire_buf = RetireBuf::new();
+                let processed: usize = self.insert_batch_into_locked_leaf(
                     leaf,
                     &mut lock,
                     batch,
                     index,
                     &mut result,
                     &mut retire_buf,
-                    &mut retire_count,
                     guard,
                     pre_allocated_vec,
                 );
@@ -422,7 +457,7 @@ where
                 drop(lock);
 
                 // Retire old suffix bags OUTSIDE the lock
-                for &ptr in &retire_buf[..retire_count] {
+                for &ptr in retire_buf.as_slice() {
                     // SAFETY: ptr is a valid suffix bag pointer from a completed operation.
                     unsafe {
                         LeafNode15::<P>::retire_suffix_bag_ptr(ptr, guard);
@@ -440,8 +475,8 @@ where
             };
 
             if entries_processed == 0 {
-                let entry = &batch[index];
-                let mut key = Key::new(&entry.key);
+                let entry: &BatchEntry<P> = &batch[index];
+                let mut key: Key<'_> = Key::new(&entry.key);
 
                 match self.insert_concurrent_generic(&mut key, entry.output.clone(), guard) {
                     Ok(old) => {
@@ -482,8 +517,7 @@ where
         batch: &[BatchEntry<P>],
         start_index: usize,
         result: &mut BatchInsertResult<P::Output>,
-        deferred_retires: &mut [*mut u8; MAX_BATCH_RETIRES],
-        retire_count: &mut usize,
+        retire_buf: &mut RetireBuf,
         guard: &LocalGuard<'_>,
         pre_allocated: Option<Vec<u8>>,
     ) -> usize {
@@ -511,9 +545,7 @@ where
                     self.insert_into_empty_leaf_batch(leaf, lock, &key, &entry.output, guard);
 
                 if !deferred.is_null() {
-                    debug_assert!(*retire_count < deferred_retires.len());
-                    deferred_retires[*retire_count] = deferred;
-                    *retire_count += 1;
+                    retire_buf.push(deferred);
                 }
 
                 result.record_insert();
@@ -523,7 +555,7 @@ where
         }
 
         while start_index + processed < batch.len() {
-            let entry = &batch[start_index + processed];
+            let entry: &BatchEntry<P> = &batch[start_index + processed];
 
             if let Some(bound) = upper_bound
                 && entry.ikey() >= bound
@@ -552,9 +584,7 @@ where
             match insert_result {
                 BatchEntryResult::Inserted(deferred) => {
                     if !deferred.is_null() {
-                        debug_assert!(*retire_count < deferred_retires.len());
-                        deferred_retires[*retire_count] = deferred;
-                        *retire_count += 1;
+                        retire_buf.push(deferred);
                     }
 
                     result.record_insert();
@@ -595,7 +625,7 @@ where
         guard: &LocalGuard<'_>,
         pre_allocated: Option<Vec<u8>>,
     ) -> BatchEntryResult<P::Output> {
-        let search_result = if single_layer_mode {
+        let search_result: InsertSearchResultGeneric = if single_layer_mode {
             self.search_for_insert_single_layer(leaf, key, perm)
         } else {
             self.search_for_insert_generic(leaf, key, perm)
@@ -607,16 +637,18 @@ where
                     return BatchEntryResult::Retry;
                 }
 
-                let old_value = self.update_existing_value(leaf, lock, slot, value, guard);
+                let old_value: P::Output =
+                    self.update_existing_value(leaf, lock, slot, value, guard);
+
                 BatchEntryResult::Updated(old_value)
             }
 
             InsertSearchResultGeneric::NotFound { logical_pos } => {
-                let ikey = key.ikey();
+                let ikey: u64 = key.ikey();
 
                 match self.find_usable_slot(leaf, perm, ikey) {
                     FindSlotResult::Found { slot, back_offset } => {
-                        let deferred_retire = self.insert_new_value(
+                        let deferred_retire: *mut u8 = self.insert_new_value(
                             leaf,
                             lock,
                             slot,
@@ -632,6 +664,7 @@ where
 
                         // Update perm for next iteration
                         *perm = leaf.permutation();
+
                         BatchEntryResult::Inserted(deferred_retire)
                     }
 
@@ -645,8 +678,7 @@ where
                     // Layer/Conflict shouldn't occur in single-layer mode
                     BatchEntryResult::Retry
                 } else {
-                    // Layer descent or suffix conflict — too complex for batch,
-                    // fall back to individual insert
+                    // Layer descent or suffix conflict
                     BatchEntryResult::NeedsLayerDescent
                 }
             }

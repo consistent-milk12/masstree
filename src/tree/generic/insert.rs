@@ -2,14 +2,14 @@
 //! - `#[cold]` on retry/error paths
 //! - Unified slot allocation and value update logic
 
-use crate::Permuter;
-use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::leaf15::KSUF_KEYLENX;
+use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::policy::RetireHandle;
+use crate::Permuter;
 
 use super::{
-    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker,
-    LocalGuard, MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
+    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LeafPolicy, Linker, LocalGuard,
+    MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation, LAYER_KEYLENX,
 };
 
 use crate::leaf15::LeafNode15;
@@ -199,6 +199,30 @@ where
         deferred_retire
     }
 
+    /// Pre-allocate a suffix vec when the heuristic predicts external storage.
+    ///
+    /// Returns `Some(Vec)` if the suffix is too large for inline storage or
+    /// the leaf is filling up enough that inline overflow is likely.
+    #[inline(always)]
+    fn maybe_pre_allocate_suffix(key: &Key<'_>, perm_size: usize) -> Option<Vec<u8>> {
+        let suffix_len: usize = key.suffix().len();
+        let inline_capacity: usize = LeafNode15::<P>::INLINE_KSUF_CAPACITY;
+
+        let threshold_exceeded: bool =
+            suffix_len > inline_capacity || perm_size * suffix_len >= inline_capacity;
+
+        if threshold_exceeded {
+            let estimated_capacity: usize = LeafNode15::<P>::WIDTH * suffix_len;
+            let mut v: Vec<u8> = Vec::new();
+
+            if v.try_reserve(estimated_capacity).is_ok() {
+                return Some(v);
+            }
+        }
+
+        None
+    }
+
     // ========================================================================
     //  Empty Leaf Reuse (Lazy Coalescing Optimization)
     // ========================================================================
@@ -321,20 +345,7 @@ where
                 };
 
                 if pre_allocated_vec.is_none() && has_suffix {
-                    let suffix_len: usize = key.suffix().len();
-                    let inline_capacity: usize = LeafNode15::<P>::INLINE_KSUF_CAPACITY;
-
-                    let threshold_exceeded: bool = suffix_len > inline_capacity
-                        || pre_lock_perm.size() * suffix_len >= inline_capacity;
-
-                    if threshold_exceeded {
-                        let estimated_capacity: usize = LeafNode15::<P>::WIDTH * suffix_len;
-                        let mut v: Vec<u8> = Vec::new();
-
-                        if v.try_reserve(estimated_capacity).is_ok() {
-                            pre_allocated_vec = Some(v);
-                        }
-                    }
+                    pre_allocated_vec = Self::maybe_pre_allocate_suffix(key, pre_lock_perm.size());
                 }
 
                 if let InsertSearchResultGeneric::Layer { slot } = optimistic_search {
@@ -708,20 +719,7 @@ where
                 };
 
                 if pre_allocated_vec.is_none() && has_suffix {
-                    let suffix_len: usize = key.suffix().len();
-                    let inline_capacity: usize = LeafNode15::<P>::INLINE_KSUF_CAPACITY;
-
-                    let threshold_exceeded: bool = suffix_len > inline_capacity
-                        || pre_lock_perm.size() * suffix_len >= inline_capacity;
-
-                    if threshold_exceeded {
-                        let estimated_capacity: usize = LeafNode15::<P>::WIDTH * suffix_len;
-                        let mut v: Vec<u8> = Vec::new();
-
-                        if v.try_reserve(estimated_capacity).is_ok() {
-                            pre_allocated_vec = Some(v);
-                        }
-                    }
+                    pre_allocated_vec = Self::maybe_pre_allocate_suffix(key, pre_lock_perm.size());
                 }
 
                 if let InsertSearchResultGeneric::Layer { slot } = optimistic_search {

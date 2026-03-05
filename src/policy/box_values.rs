@@ -20,6 +20,42 @@ use super::ValuePtr;
 //  Atomic Value Helpers (for write-through: V <= 8 bytes)
 // ============================================================================
 
+/// Dispatch an atomic load by `size_of::<V>()`. Compile-time dead-code
+/// elimination removes the unused arms. Must be called inside `unsafe`.
+macro_rules! atomic_load_dispatch {
+    ($ptr:expr, $ordering:expr) => {
+        match size_of::<V>() {
+            1 => StdMem::transmute_copy(&(*$ptr.cast::<AtomicU8>()).load($ordering)),
+
+            2 => StdMem::transmute_copy(&(*$ptr.cast::<AtomicU16>()).load($ordering)),
+
+            4 => StdMem::transmute_copy(&(*$ptr.cast::<AtomicU32>()).load($ordering)),
+
+            8 => StdMem::transmute_copy(&(*$ptr.cast::<AtomicU64>()).load($ordering)),
+
+            _ => unreachable!(),
+        }
+    };
+}
+
+/// Dispatch an atomic store by `size_of::<V>()`. Compile-time dead-code
+/// elimination removes the unused arms. Must be called inside `unsafe`.
+macro_rules! atomic_store_dispatch {
+    ($ptr:expr, $value:expr, $ordering:expr) => {
+        match size_of::<V>() {
+            1 => (*$ptr.cast::<AtomicU8>()).store(StdMem::transmute_copy($value), $ordering),
+
+            2 => (*$ptr.cast::<AtomicU16>()).store(StdMem::transmute_copy($value), $ordering),
+
+            4 => (*$ptr.cast::<AtomicU32>()).store(StdMem::transmute_copy($value), $ordering),
+
+            8 => (*$ptr.cast::<AtomicU64>()).store(StdMem::transmute_copy($value), $ordering),
+
+            _ => unreachable!(),
+        }
+    };
+}
+
 /// Atomically read V from a Box allocation.
 ///
 /// Dispatches on `size_of::<V>()` at compile time. Dead branches are
@@ -32,33 +68,8 @@ use super::ValuePtr;
 /// - `size_of::<V>()` must be 1, 2, 4, or 8 (enforced by `CAN_WRITE_THROUGH`).
 #[inline(always)]
 pub unsafe fn atomic_read_value<V>(ptr: *const u8, ordering: Ordering) -> V {
-    match size_of::<V>() {
-        1 => {
-            let raw: u8 = unsafe { &*ptr.cast::<AtomicU8>() }.load(ordering);
-
-            unsafe { StdMem::transmute_copy(&raw) }
-        }
-
-        2 => {
-            let raw: u16 = unsafe { &*ptr.cast::<AtomicU16>() }.load(ordering);
-
-            unsafe { StdMem::transmute_copy(&raw) }
-        }
-
-        4 => {
-            let raw: u32 = unsafe { &*ptr.cast::<AtomicU32>() }.load(ordering);
-
-            unsafe { StdMem::transmute_copy(&raw) }
-        }
-
-        8 => {
-            let raw: u64 = unsafe { &*ptr.cast::<AtomicU64>() }.load(ordering);
-
-            unsafe { StdMem::transmute_copy(&raw) }
-        }
-
-        _ => unreachable!(),
-    }
+    // SAFETY: Caller guarantees alignment and size constraints.
+    unsafe { atomic_load_dispatch!(ptr, ordering) }
 }
 
 /// Atomically write V to a Box allocation.
@@ -68,33 +79,8 @@ pub unsafe fn atomic_read_value<V>(ptr: *const u8, ordering: Ordering) -> V {
 /// Same preconditions as `atomic_read_value`.
 #[inline(always)]
 pub(super) unsafe fn atomic_write_value<V>(ptr: *mut u8, value: &V, ordering: Ordering) {
-    match size_of::<V>() {
-        1 => {
-            let raw: u8 = unsafe { StdMem::transmute_copy(value) };
-
-            unsafe { &*ptr.cast::<AtomicU8>() }.store(raw, ordering);
-        }
-
-        2 => {
-            let raw: u16 = unsafe { StdMem::transmute_copy(value) };
-
-            unsafe { &*ptr.cast::<AtomicU16>() }.store(raw, ordering);
-        }
-
-        4 => {
-            let raw: u32 = unsafe { StdMem::transmute_copy(value) };
-
-            unsafe { &*ptr.cast::<AtomicU32>() }.store(raw, ordering);
-        }
-
-        8 => {
-            let raw: u64 = unsafe { StdMem::transmute_copy(value) };
-
-            unsafe { &*ptr.cast::<AtomicU64>() }.store(raw, ordering);
-        }
-
-        _ => unreachable!(),
-    }
+    // SAFETY: Caller guarantees alignment and size constraints.
+    unsafe { atomic_store_dispatch!(ptr, value, ordering) }
 }
 
 // ============================================================================
