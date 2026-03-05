@@ -2,7 +2,41 @@
 
 ## 0.9.3
 
-Relaxed ordering optimization, value prefetch pipeline, and insert fast path.
+Write-through updates, remove path robustness, and performance improvements.
+
+### Write-Through Update Optimization
+
+- New `CAN_WRITE_THROUGH` trait const on `LeafPolicy`: for `BoxPolicy<V>` where V is a naturally-aligned primitive <= 8 bytes, updates modify the value in place through the Box pointer, bypassing Box allocation and EBR retirement (~45ns savings per update)
+- Deferred allocation insert path (`insert_concurrent_value`): takes `P::Value` directly, only allocates `P::Output` on the new-key path. Hot update path is allocation-free.
+- Alignment guard: `CAN_WRITE_THROUGH` requires `size_of::<V>().is_power_of_two() && align_of::<V>() >= size_of::<V>()`, excluding packed structs that lack hardware atomicity guarantees
+- Atomic value access: write-through read/write now uses size-dispatched `AtomicU8/U16/U32/U64` load/store instead of `ptr::read`/`ptr::copy_nonoverlapping`, closing the formal data race UB with concurrent OCC readers. `clone_value_from_output` also uses atomic read for write-through types.
+
+### New Public APIs
+
+- `MassTree15::with_batch_size` / `MassTree15Inline::with_batch_size`: create trees with custom retirement batch size
+- `insert_value_with_guard`: returns `Option<P::Value>` directly, avoiding `ValuePtr` unwrapping for callers that only need the value
+- Default retirement batch size increased to 256 (from seize default of 32), reducing `sys_membarrier` syscall frequency under write-heavy workloads
+
+### Remove Path
+
+- Single-layer search fast path: keys <= 8 bytes skip layer/suffix branches, using Relaxed loads (mirrors insert path)
+- Forward-loop re-scan after lock contention: `Retry` re-reads version and permutation on the same leaf instead of a full top-down internode traversal
+- Value prefetch in remove search: `prefetch_value` after ikey match and `prefetch_suffix` before suffix comparison, hiding cache misses during `finish_remove`
+- Pre-lock prefetch: `prefetch_for_search` called before `lock_bounded` in verify path, warming cache lines during the spin loop
+- Cold path extraction: empty-leaf coalesce scheduling moved to `#[cold] #[inline(never)]` helper, keeping `finish_remove` compact for the common case
+- Added Release ordering comment for permutation store in `finish_remove`: Release is required because concurrent insert threads read the permutation without the lock
+
+### Bug Fixes
+
+- `merge_old_external_perm`: faulty early-exit optimization silently dropped suffix data when rebuilding the external suffix bag. Under concurrent insert/remove/coalesce workloads, this caused a panic in `create_layer_concurrent_generic`: "conflict slot N should have a suffix"
+- Fixed 5 flaky concurrent remove tests: Release/Acquire on done-flags, unconditional read batch before spin loop guarantees progress regardless of scheduling
+- Removed redundant clone in `OccupiedEntry::insert`
+
+### Test Coverage
+
+- ~640 lines of new remove+get edge case tests: multi-layer keys, multi-reader multi-writer, suffix keys, remove-reinsert cycles, single-leaf boundary, split boundary, empty key, guarded API, churn stress
+
+### Relaxed ordering optimization, value prefetch pipeline, and insert fast path
 
 - Relaxed ordering for OCC read paths: keylenx, value emptiness, and value loads downgraded from Acquire to Relaxed (permutation Acquire + `has_changed()` already provides synchronization)
 - Relaxed ordering for under-lock writes: slot clears, moves, and value updates downgraded from Release to Relaxed (lock Acquire/Release provides synchronization)

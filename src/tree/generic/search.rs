@@ -240,7 +240,6 @@ where
             return InsertSearchResultGeneric::Found { slot };
         }
 
-        // Suffix mismatch or missing - need to create layer
         Self::make_conflict(slot)
     }
 

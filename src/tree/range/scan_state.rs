@@ -10,7 +10,9 @@ use arrayvec::ArrayVec;
 
 use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
+use crate::ordering::READ_ORD;
 use crate::policy::LeafPolicy;
+use crate::policy::atomic_read_value;
 
 // ============================================================================
 //  ScanState Enum
@@ -513,10 +515,34 @@ impl<V> ScanSnapshotPtr<V> {
     }
 
     /// Get a reference to the value.
+    ///
+    /// Only sound for non-write-through types. For `CAN_WRITE_THROUGH` types,
+    /// use [`value_copy`](Self::value_copy) instead.
+    ///
+    /// # Safety
+    ///
+    /// Caller ensures pointer is valid, guard is held, and no concurrent
+    /// write-through update can modify the pointed-to data.
     #[inline(always)]
     pub const unsafe fn value_ref(&self) -> &V {
-        // SAFETY: Caller ensures pointer is valid and guard is held
+        // SAFETY: Caller ensures pointer is valid and guard is held.
         unsafe { &*self.value_ptr }
+    }
+
+    /// Atomically read the value by copy.
+    ///
+    /// Sound for `CAN_WRITE_THROUGH` types where the pointed-to data may be
+    /// concurrently modified by `write_through_update`.
+    ///
+    /// # Safety
+    ///
+    /// - Pointer must be valid and the guard must be held.
+    /// - `CAN_WRITE_THROUGH` must be true (size 1/2/4/8, natural alignment).
+    #[inline(always)]
+    pub unsafe fn value_copy(&self) -> V {
+        // SAFETY: CAN_WRITE_THROUGH guarantees size 1/2/4/8 with natural
+        // alignment. Atomic read avoids aliasing violation.
+        unsafe { atomic_read_value::<V>(self.value_ptr.cast(), READ_ORD) }
     }
 }
 

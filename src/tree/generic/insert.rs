@@ -2,6 +2,7 @@
 //! - `#[cold]` on retry/error paths
 //! - Unified slot allocation and value update logic
 
+use crate::Permuter;
 use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::leaf15::KSUF_KEYLENX;
 use crate::policy::RetireHandle;
@@ -83,29 +84,19 @@ where
         new_value: &P::Output,
         guard: &LocalGuard<'_>,
     ) -> P::Output {
-        // PERF: For BoxPolicy, `update_in_place()` already reads the old pointer.
-        // Reconstructing the output from that pointer avoids an extra atomic load.
         if P::NEEDS_RETIREMENT {
             lock.mark_insert();
 
             let retire: RetireHandle = leaf.update_value_in_place_relaxed(slot, new_value);
 
-            // `retire` is reused below because `RetireHandle` contains a raw
-            // `*mut u8` which is `Copy`. `output_from_retire_ptr` creates a
-            // non-owning view (`ValuePtr`), while `retire_handle` schedules
-            // deferred deallocation via EBR. The caller must consume the
-            // returned output before the epoch advances.
             let old_output: P::Output = match retire {
-                // SAFETY: ptr was just returned by `update_value_in_place_relaxed` and points
-                // to the previously stored value. We hold the leaf lock, providing synchronization.
+                // SAFETY: ptr was just returned by update_value_in_place_relaxed and
+                // points to the previously stored value. Lock provides synchronization.
                 RetireHandle::Ptr(ptr) => unsafe { P::output_from_retire_ptr(ptr) },
                 RetireHandle::Noop => unreachable!("NEEDS_RETIREMENT implies Ptr retire handle"),
             };
 
-            // Defer retirement of old value data.
-            // SAFETY: handle was produced by update_in_place_relaxed() on this leaf.
-            // The same raw pointer is used for both output reconstruction above and
-            // retirement here, which is sound because ValuePtr is non-owning.
+            // SAFETY: handle was produced by update_in_place_relaxed on this leaf.
             unsafe { P::retire_handle(retire, guard) };
 
             old_output
@@ -121,6 +112,35 @@ where
 
             old_output
         }
+    }
+
+    /// Write-through update: modify existing value in place without allocation.
+    ///
+    /// Returns the old value by copy. No Box allocation or EBR retirement needed.
+    /// Only callable when `P::CAN_WRITE_THROUGH` is true.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the lock on `leaf`.
+    #[inline(always)]
+    #[expect(clippy::unused_self, reason = "API consistency with other methods")]
+    pub(crate) fn update_existing_value_write_through(
+        &self,
+        leaf: &LeafNode15<P>,
+        lock: &mut LockGuard<'_>,
+        slot: usize,
+        new_value: &P::Value,
+    ) -> P::Value {
+        debug_assert!(
+            P::CAN_WRITE_THROUGH,
+            "write-through update called but CAN_WRITE_THROUGH is false"
+        );
+
+        lock.mark_insert();
+
+        // SAFETY: Caller holds the lock. Slot contains a terminal value.
+        // CAN_WRITE_THROUGH guarantees size_of::<V>() <= 8.
+        unsafe { leaf.write_through_update_value(slot, new_value) }
     }
 
     /// Insert a new value into a slot and update the permutation.
@@ -199,13 +219,329 @@ where
 
         let slot: usize = 0;
 
-        let deferred_retire =
+        let deferred_retire: *mut u8 =
             self.assign_slot_generic(leaf, lock, slot, key, value, guard, pre_allocated);
 
-        let new_perm = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
+        let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
         leaf.set_permutation_relaxed(new_perm);
 
         (Ok(None), deferred_retire)
+    }
+}
+
+// ============================================================================
+//  Write-Through Insert (Value Path)
+// ============================================================================
+
+impl<P, A> MassTreeGeneric<P, A>
+where
+    P: LeafPolicy,
+    P::Value: Clone,
+    A: TreeAllocator<P>,
+{
+    /// Insert with deferred allocation and write-through updates.
+    ///
+    /// Takes `P::Value` directly instead of pre-allocating `P::Output`.
+    /// For updates (key exists): uses write-through to modify the value
+    /// in place, returning the old value without Box allocation or retirement.
+    /// For inserts (new key): converts to `P::Output` at point of storage.
+    ///
+    /// Only called when `P::CAN_WRITE_THROUGH` is true.
+    ///
+    /// NOTE: This function intentionally mirrors `insert_concurrent_generic`.
+    /// The duplication exists because the two paths flow different types
+    /// (`P::Value` vs `P::Output`) through the traversal, and `P::Output`
+    /// for `BoxPolicy` is an owning pointer that cannot be cheaply dropped
+    /// if unused. Any bug fix to the traversal/locking/validation logic
+    /// must be applied to both functions.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Mirrors insert_concurrent_generic structure"
+    )]
+    pub(super) fn insert_concurrent_value(
+        &self,
+        key: &mut Key<'_>,
+        value: P::Value,
+        guard: &LocalGuard<'_>,
+    ) -> Result<Option<P::Value>, InsertError> {
+        let single_layer_mode: bool = !key.has_suffix();
+        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
+        let mut in_sublayer: bool = false;
+
+        'retry: loop {
+            layer_root = self.maybe_parent_generic(layer_root);
+
+            let mut leaf_ptr: *mut LeafNode15<P> =
+                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
+
+            let (advanced_ptr, exceeded_hop_limit) =
+                self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
+
+            if exceeded_hop_limit {
+                key.unshift_all();
+                layer_root = self.load_root_ptr_generic(guard);
+                in_sublayer = false;
+                continue 'retry;
+            }
+
+            leaf_ptr = advanced_ptr;
+
+            // SAFETY: leaf_ptr is valid, protected by guard
+            let mut leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
+
+            let mut pre_allocated_vec: Option<Vec<u8>> = None;
+
+            'forward: loop {
+                let has_suffix: bool = key.has_suffix();
+
+                let pre_lock_version: u32 = leaf.version().stable();
+                let pre_lock_perm: Permuter = leaf.permutation();
+                let pre_lock_perm_raw: u64 = pre_lock_perm.value();
+
+                let optimistic_search: InsertSearchResultGeneric = if single_layer_mode {
+                    self.search_for_insert_single_layer(leaf, key, &pre_lock_perm)
+                } else {
+                    self.search_for_insert_generic(leaf, key, &pre_lock_perm)
+                };
+
+                if pre_allocated_vec.is_none() && has_suffix {
+                    let suffix_len: usize = key.suffix().len();
+                    let inline_capacity: usize = LeafNode15::<P>::INLINE_KSUF_CAPACITY;
+
+                    let threshold_exceeded: bool = suffix_len > inline_capacity
+                        || pre_lock_perm.size() * suffix_len >= inline_capacity;
+
+                    if threshold_exceeded {
+                        let estimated_capacity: usize = LeafNode15::<P>::WIDTH * suffix_len;
+                        let mut v: Vec<u8> = Vec::new();
+
+                        if v.try_reserve(estimated_capacity).is_ok() {
+                            pre_allocated_vec = Some(v);
+                        }
+                    }
+                }
+
+                if let InsertSearchResultGeneric::Layer { slot } = optimistic_search {
+                    let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+
+                    if !layer_ptr.is_null() && !leaf.version().has_changed(pre_lock_version) {
+                        key.shift();
+                        layer_root = layer_ptr;
+                        in_sublayer = true;
+                        continue 'retry;
+                    }
+                }
+
+                let mut lock: LockGuard<'_> = leaf.version().lock_bounded();
+
+                if !self.validate_post_lock(leaf, pre_lock_version, pre_lock_perm_raw) {
+                    drop(lock);
+
+                    let (advanced_ptr, exceeded) =
+                        self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
+
+                    if exceeded {
+                        key.unshift_all();
+                        layer_root = self.load_root_ptr_generic(guard);
+                        in_sublayer = false;
+                        continue 'retry;
+                    }
+
+                    leaf_ptr = advanced_ptr;
+                    leaf = unsafe { &*leaf_ptr };
+                    continue 'forward;
+                }
+
+                if leaf.deleted_layer() {
+                    drop(lock);
+                    key.unshift_all();
+                    layer_root = self.load_root_ptr_generic(guard);
+                    in_sublayer = false;
+                    continue 'retry;
+                }
+
+                match self.validate_membership(leaf, key) {
+                    Ok(()) => {}
+                    Err(MembershipError::SplitInProgress | MembershipError::KeyMovedToSibling) => {
+                        drop(lock);
+
+                        let (advanced_ptr, exceeded) =
+                            self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
+
+                        if exceeded {
+                            key.unshift_all();
+                            layer_root = self.load_root_ptr_generic(guard);
+                            in_sublayer = false;
+                            continue 'retry;
+                        }
+
+                        leaf_ptr = advanced_ptr;
+                        leaf = unsafe { &*leaf_ptr };
+                        continue 'forward;
+                    }
+                    Err(MembershipError::KeyBelowLowerBound) => {
+                        drop(lock);
+                        continue 'retry;
+                    }
+                }
+
+                // Convert value to output for non-update paths (deferred allocation).
+                // Clone the value since it may be needed for retry on the split/conflict path.
+                let make_output = |v: &P::Value| -> P::Output { P::into_output(v.clone()) };
+
+                if pre_lock_perm.size() == 0 && self.can_reuse_empty_leaf(leaf, key) {
+                    let output: P::Output = make_output(&value);
+                    let (result, deferred_retire) = self.insert_into_empty_leaf(
+                        leaf,
+                        &mut lock,
+                        key,
+                        &output,
+                        guard,
+                        pre_allocated_vec.take(),
+                    );
+
+                    drop(lock);
+
+                    if !deferred_retire.is_null() {
+                        // SAFETY: deferred_retire came from assign_ksuf.
+                        unsafe {
+                            LeafNode15::<P>::retire_suffix_bag_ptr(deferred_retire, guard);
+                        }
+                    }
+
+                    self.count.increment();
+
+                    return result.map(|opt: Option<P::Output>| {
+                        opt.map(|o: P::Output| P::clone_value_from_output(&o))
+                    });
+                }
+
+                match optimistic_search {
+                    InsertSearchResultGeneric::Found { slot } => {
+                        if leaf.is_value_empty(slot) {
+                            drop(lock);
+                            continue 'forward;
+                        }
+
+                        // HOT PATH: Write-through update. No allocation, no retirement.
+                        let old_value: P::Value =
+                            self.update_existing_value_write_through(leaf, &mut lock, slot, &value);
+
+                        drop(lock);
+
+                        return Ok(Some(old_value));
+                    }
+
+                    InsertSearchResultGeneric::NotFound { logical_pos } => {
+                        let ikey: u64 = key.ikey();
+
+                        match self.find_usable_slot(leaf, &pre_lock_perm, ikey) {
+                            FindSlotResult::Found { slot, back_offset } => {
+                                let output: P::Output = make_output(&value);
+                                let deferred_retire: *mut u8 = self.insert_new_value(
+                                    leaf,
+                                    &mut lock,
+                                    slot,
+                                    back_offset,
+                                    logical_pos,
+                                    pre_lock_perm,
+                                    key,
+                                    &output,
+                                    guard,
+                                    pre_allocated_vec.take(),
+                                );
+
+                                drop(lock);
+
+                                if !deferred_retire.is_null() {
+                                    unsafe {
+                                        LeafNode15::<P>::retire_suffix_bag_ptr(
+                                            deferred_retire,
+                                            guard,
+                                        );
+                                    }
+                                }
+
+                                self.count.increment();
+
+                                return Ok(None);
+                            }
+
+                            FindSlotResult::NeedsSplit => {
+                                let keylenx: u8 = if has_suffix {
+                                    KSUF_KEYLENX
+                                } else {
+                                    #[expect(
+                                        clippy::cast_possible_truncation,
+                                        reason = "current_len <= 8 when !has_suffix"
+                                    )]
+                                    {
+                                        key.current_len() as u8
+                                    }
+                                };
+
+                                let suffix: Option<&[u8]> =
+                                    if has_suffix { Some(key.suffix()) } else { None };
+
+                                let output: P::Output = make_output(&value);
+                                let insert_data: SplitInsertData<'_, P> = SplitInsertData {
+                                    ikey,
+                                    keylenx,
+                                    suffix,
+                                    value: output,
+                                };
+
+                                match self.handle_leaf_split_and_insert_generic(
+                                    leaf_ptr,
+                                    lock,
+                                    logical_pos,
+                                    &insert_data,
+                                    guard,
+                                ) {
+                                    Ok(_result) => {}
+
+                                    Err(e) => {
+                                        return Err(e);
+                                    }
+                                }
+
+                                self.count.increment();
+
+                                return Ok(None);
+                            }
+                        }
+                    }
+
+                    InsertSearchResultGeneric::Layer { slot, .. } => {
+                        debug_assert!(
+                            !single_layer_mode,
+                            "single-layer search returned Layer variant"
+                        );
+
+                        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+                        drop(lock);
+
+                        key.shift();
+                        layer_root = layer_ptr;
+                        in_sublayer = true;
+                        continue 'retry;
+                    }
+
+                    InsertSearchResultGeneric::Conflict { slot } => {
+                        debug_assert!(
+                            !single_layer_mode,
+                            "single-layer search returned Conflict variant"
+                        );
+
+                        let output: P::Output = make_output(&value);
+                        self.handle_suffix_conflict(leaf, &mut lock, slot, key, output, guard);
+                        self.count.increment();
+
+                        return Ok(None);
+                    }
+                }
+            } // end 'forward
+        } // end 'retry
     }
 }
 
@@ -249,6 +585,7 @@ where
         // SAFETY: Called under lock - no concurrent retirement.
         if !unsafe { leaf.prev_unguarded() }.is_null() {
             let lower_bound: u64 = leaf.ikey_bound();
+
             if key.ikey() < lower_bound {
                 return Err(MembershipError::KeyBelowLowerBound);
             }
@@ -315,6 +652,9 @@ where
     A: TreeAllocator<P>,
 {
     /// Internal concurrent insert with optimistic locking.
+    ///
+    /// NOTE: `insert_concurrent_value` mirrors this function for the
+    /// write-through path. Changes here must be reflected there.
     #[expect(
         clippy::too_many_lines,
         reason = "Complex concurrency logic with dual-loop structure"
@@ -356,8 +696,8 @@ where
                 let has_suffix: bool = key.has_suffix();
 
                 let pre_lock_version: u32 = leaf.version().stable();
-                let pre_lock_perm = leaf.permutation();
-                let pre_lock_perm_raw = pre_lock_perm.value(); // Avoid second atomic load
+                let pre_lock_perm: Permuter = leaf.permutation();
+                let pre_lock_perm_raw: u64 = pre_lock_perm.value(); // Avoid second atomic load
 
                 let optimistic_search: InsertSearchResultGeneric = if single_layer_mode {
                     self.search_for_insert_single_layer(leaf, key, &pre_lock_perm)
@@ -442,6 +782,7 @@ where
                         leaf = unsafe { &*leaf_ptr };
                         continue 'forward;
                     }
+
                     Err(MembershipError::KeyBelowLowerBound) => {
                         drop(lock);
                         continue 'retry;
@@ -475,9 +816,11 @@ where
                             continue 'forward;
                         }
 
-                        let old_value =
+                        let old_value: P::Output =
                             self.update_existing_value(leaf, &mut lock, slot, &value, guard);
+
                         drop(lock);
+
                         return Ok(Some(old_value));
                     }
 
@@ -531,7 +874,7 @@ where
                                 let suffix: Option<&[u8]> =
                                     if has_suffix { Some(key.suffix()) } else { None };
 
-                                let insert_data = SplitInsertData {
+                                let insert_data: SplitInsertData<'_, P> = SplitInsertData {
                                     ikey,
                                     keylenx,
                                     suffix,
@@ -546,6 +889,7 @@ where
                                     guard,
                                 ) {
                                     Ok(_result) => {}
+
                                     Err(e) => {
                                         return Err(e);
                                     }

@@ -1570,10 +1570,15 @@ where
             return ReverseBatchAction::Exhausted;
         }
 
-        let value_ref: &P::Value = P::output_as_ref(&snapshot.value);
         *count += 1;
 
-        if (self.visitor)(key, value_ref) {
+        // SAFETY: Guard protects the output. output_as_ref_sound uses
+        // atomic read for write-through types, avoiding aliasing violation.
+        let mut scratch = std::mem::MaybeUninit::uninit();
+        let value_ref: &P::Value = unsafe { P::output_as_ref_sound(&snapshot.value, &mut scratch) };
+        let should_continue = (self.visitor)(key, value_ref);
+
+        if should_continue {
             ReverseBatchAction::Continue
         } else {
             ReverseBatchAction::Stopped

@@ -106,7 +106,10 @@ where
         // STEP: 1 - Extract existing key's suffix and value
         debug_assert!(
             parent_leaf.ksuf(conflict_slot).is_some(),
-            "conflict slot {conflict_slot} should have a suffix"
+            "conflict slot {conflict_slot} should have a suffix \
+             (keylenx={}, ikey=0x{:016x})",
+            parent_leaf.keylenx(conflict_slot),
+            parent_leaf.ikey(conflict_slot),
         );
         let existing_suffix: &[u8] = parent_leaf.ksuf(conflict_slot).unwrap_or(&[]);
         let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);

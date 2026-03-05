@@ -1,26 +1,4 @@
 //! Shared helpers for forward and reverse batch processing.
-//!
-//! Extracted to eliminate key-building duplication across `find.rs` and `find_rev.rs`.
-//!
-//! # `ScanEmitter` Trait
-//!
-//! Abstracts clone vs zero-copy value emission for per-entry scanning.
-//! Used by both forward (`find_next_generic`) and reverse (`find_prev_generic`).
-//! Two implementations:
-//! - [`CloneEmitter`]: calls `load_value()`, returns `ScanSnapshot<P>`. Requires `P::Output: Clone`.
-//! - [`PtrEmitter`]: calls `load_value_raw()` + null check, returns `ScanSnapshotPtr<P::Value>`.
-//!
-//! # `SlotVisitor` Trait
-//!
-//! Abstracts the ref vs copy value-loading difference for batch processing. Two implementations:
-//! - [`RefSlotVisitor`]: loads `&P::Value` via pointer dereference (zero-copy)
-//! - [`CopySlotVisitor`]: loads `P::Output` via `load_value()` (universal)
-//!
-//! # `BatchDirection` Trait
-//!
-//! Abstracts iteration direction for batch processing. Zero-sized marker types
-//! [`Forward`] and [`Backward`] implement all direction-specific operations.
-//! After monomorphization, all trait dispatch is fully inlined — zero overhead.
 
 use std::cmp::Ordering;
 
@@ -30,7 +8,9 @@ use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::KSUF_KEYLENX;
 use crate::leaf15::LAYER_KEYLENX;
 use crate::leaf15::LeafNode15;
+use crate::ordering::READ_ORD;
 use crate::policy::LeafPolicy;
+use crate::policy::atomic_read_value;
 use crate::prefetch::prefetch_read;
 
 use super::cursor_key::CursorKey;
@@ -41,9 +21,6 @@ use super::iterator::iter_flags::ReverseFlags;
 use super::scan_state::{LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr};
 
 /// Build the full key in `cursor_key` from slot data.
-///
-/// Stores the ikey unconditionally, then handles suffix or inline length.
-/// Callers should call `cursor_key.mark_key_complete()` after this returns.
 #[inline(always)]
 pub fn build_slot_key<P: LeafPolicy>(
     cursor_key: &mut CursorKey,
@@ -68,23 +45,19 @@ pub fn build_slot_key<P: LeafPolicy>(
     }
 }
 
-/// Visitor for batch slot processing — abstracts ref vs copy value loading.
-///
-/// Each implementation defines how to load and deliver a value from a leaf slot
-/// to the user's callback. The batch loop calls [`visit`](SlotVisitor::visit)
-/// after building the key, letting the visitor handle value access.
+/// Visitor for batch slot processing.
 pub trait SlotVisitor<P: LeafPolicy> {
     /// Visit a slot after key has been built in `cursor_key`.
     ///
     /// # Returns
     ///
-    /// - `None`: Value was concurrently removed (TOCTOU race) — skip this slot
+    /// - `None`: Value was concurrently removed
     /// - `Some(true)`: Continue scanning
     /// - `Some(false)`: Visitor requested stop
     fn visit(&mut self, leaf: &LeafNode15<P>, slot: usize, key: &[u8]) -> Option<bool>;
 }
 
-/// Ref visitor: loads `&P::Value` via pointer dereference (zero-copy).
+/// Ref visitor: loads `&P::Value` via pointer dereference.
 ///
 /// For use with `RefLeafPolicy` types where values are pointer-backed (Arc, Box).
 pub struct RefSlotVisitor<F>(pub F);
@@ -96,16 +69,37 @@ where
 {
     #[inline(always)]
     fn visit(&mut self, leaf: &LeafNode15<P>, slot: usize, key: &[u8]) -> Option<bool> {
-        // SAFETY: Guard protects value, slot is valid (in permutation).
-        // Null-check handles TOCTOU race — value may have been concurrently
-        // removed between caller's is_value_empty check and this dereference.
-        let ptr = unsafe { leaf.load_value_ptr(slot) };
-        if ptr.is_null() {
-            return None;
+        if P::CAN_WRITE_THROUGH {
+            // Atomic read avoids aliasing violation with concurrent
+            // write_through_update. The copy lives on the stack, so the
+            // callback's &V is to owned data, not the mutable Box allocation.
+            let raw: *mut u8 = leaf.load_value_raw(slot);
+
+            if raw.is_null() {
+                return None;
+            }
+
+            // SAFETY: CAN_WRITE_THROUGH guarantees size 1/2/4/8 with natural
+            // alignment. Guard protects the allocation from retirement.
+            let v: P::Value = unsafe { atomic_read_value::<P::Value>(raw, READ_ORD) };
+
+            Some((self.0)(key, &v))
+        } else {
+            // SAFETY: Guard protects value, slot is valid (in permutation).
+            // Null-check handles TOCTOU race.
+            let ptr: *const P::Value = unsafe { leaf.load_value_ptr(slot) };
+
+            if ptr.is_null() {
+                return None;
+            }
+
+            // SAFETY: Non-null pointer to a valid P::Value, protected by OCC
+            // guard. No concurrent modification (non-write-through types
+            // allocate a new Box on update).
+            let value_ref: &P::Value = unsafe { &*ptr };
+
+            Some((self.0)(key, value_ref))
         }
-        // SAFETY: Non-null pointer to a valid P::Value, protected by OCC guard.
-        let value_ref: &P::Value = unsafe { &*ptr };
-        Some((self.0)(key, value_ref))
     }
 }
 
@@ -121,27 +115,18 @@ where
 {
     #[inline(always)]
     fn visit(&mut self, leaf: &LeafNode15<P>, slot: usize, key: &[u8]) -> Option<bool> {
-        // Use load_value to handle TOCTOU race — value may have been
-        // concurrently removed between is_value_empty check and here.
-        let output = leaf.load_value(slot)?;
+        // Use load_value to handle TOCTOU race.
+        let output: P::Output = leaf.load_value(slot)?;
+
         Some((self.0)(key, output))
     }
 }
 
 /// Abstracts clone vs zero-copy value emission for per-entry scanning.
-///
-/// Used by both forward (`find_next_generic`) and reverse (`find_prev_generic`).
-/// Two implementations:
-/// - [`CloneEmitter`]: calls `load_value()`, returns `ScanSnapshot<P>`. Requires `P::Output: Clone`.
-/// - [`PtrEmitter`]: calls `load_value_raw()` + null check, returns `ScanSnapshotPtr<P::Value>`.
-///
-/// After monomorphization, trait dispatch is fully inlined — zero overhead.
 pub trait ScanEmitter<P: LeafPolicy> {
     type Snapshot;
 
     /// Load a value from `leaf[slot]` and wrap it with `key_len`.
-    ///
-    /// Returns `None` if the value was concurrently removed (TOCTOU race).
     fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<Self::Snapshot>;
 }
 
@@ -165,6 +150,9 @@ where
 }
 
 /// Zero-copy emitter: calls `leaf.load_value_raw(slot)`, returns `ScanSnapshotPtr<P::Value>`.
+///
+/// For `CAN_WRITE_THROUGH` types, callers must use `ScanSnapshotPtr::value_copy`
+/// (atomic read) instead of `value_ref` to avoid aliasing violations.
 pub struct PtrEmitter;
 
 impl<P: LeafPolicy> ScanEmitter<P> for PtrEmitter {
@@ -430,6 +418,7 @@ where
 
         // Fast bound pre-check using ikey
         let mut needs_full_bound_check = true;
+
         if bound_ikey.is_none() {
             needs_full_bound_check = false;
         } else if ctx.cursor_key.is_at_root_layer()
@@ -437,6 +426,7 @@ where
         {
             match slot_ikey.cmp(&b_ikey) {
                 ord if ord == D::exceeded_ordering() => return D::bound_exceeded(),
+
                 Ordering::Equal => {}
                 _ => needs_full_bound_check = false,
             }
@@ -459,9 +449,11 @@ where
             None => {
                 ctx.ki = D::step(ctx.ki);
             }
+
             Some(should_continue) => {
                 *count += 1;
                 ctx.ki = D::step(ctx.ki);
+
                 if !should_continue {
                     return D::stopped();
                 }

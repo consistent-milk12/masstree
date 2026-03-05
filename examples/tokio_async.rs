@@ -243,7 +243,10 @@ async fn main() {
             let value = {
                 let key = format!("rate/{:05}", i % 10_000);
                 let guard = state.tree.guard();
-                state.tree.get_ref(key.as_bytes(), &guard).cloned()
+                state
+                    .tree
+                    .get_ref(key.as_bytes(), &guard)
+                    .map(|v| v.into_owned())
             }; // guard dropped here
 
             // Simulate some async work - no guard held here

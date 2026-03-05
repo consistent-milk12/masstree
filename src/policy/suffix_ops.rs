@@ -361,11 +361,16 @@ fn merge_old_external_perm(
     // shared references, but we only read from old_ref here.
     let old_ref: &SuffixBag = unsafe { (*old_external).as_ref() };
 
-    for i in 0..perm.size() {
+    let size: usize = perm.size();
+
+    for i in 0..size {
         let phys: usize = perm.get(i);
 
-        if phys != skip_slot
-            && !new_bag.has_suffix(phys)
+        if phys == skip_slot {
+            continue;
+        }
+
+        if !new_bag.has_suffix(phys)
             && let Some(s) = old_ref.get(phys)
         {
             new_bag.assign(phys, s);

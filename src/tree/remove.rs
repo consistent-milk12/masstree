@@ -221,34 +221,48 @@ where
 
         let mut new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
         new_perm.remove(self.ki);
+        // Release is required: concurrent insert threads perform optimistic
+        // searches that read the permutation without holding the lock. The
+        // compiler may reorder a Relaxed store before the preceding suffix and
+        // value clears, making removed-slot data inconsistent to readers that
+        // still see the old permutation. Release ensures all slot clears are
+        // visible before the permutation update.
         leaf.set_permutation(new_perm);
 
         self.tree.dec_count();
 
         if new_perm.size() == 0 {
-            leaf.mark_empty();
-
-            // Atomic dedup: try_mark_queued() sets the queued bit and returns
-            // true only if it was not already set. This eliminates TOCTOU races
-            // between concurrent finish_remove calls on the same leaf.
-            if leaf.try_mark_queued() {
-                if self.route.is_empty() {
-                    // Non-sublayer: schedule chain coalesce (pointer-based).
-                    let ikey_bound: u64 = leaf.ikey_bound();
-
-                    self.tree
-                        .coalesce_queue
-                        .schedule_chain(self.leaf.cast::<u8>(), ikey_bound);
-                } else {
-                    // Sublayer: schedule route-based gc (no pointers stored).
-                    self.tree
-                        .coalesce_queue
-                        .schedule_sublayer(std::mem::take(&mut self.route));
-                }
-            }
+            self.schedule_coalesce_cold(leaf);
         }
 
         value
+    }
+
+    /// Handle empty-leaf coalesce scheduling. Separated from the hot path
+    /// to keep `finish_remove` compact for the common case (size > 0).
+    #[cold]
+    #[inline(never)]
+    fn schedule_coalesce_cold(&mut self, leaf: &LeafNode15<P>) {
+        leaf.mark_empty();
+
+        // Atomic dedup: try_mark_queued() sets the queued bit and returns
+        // true only if it was not already set. This eliminates TOCTOU races
+        // between concurrent finish_remove calls on the same leaf.
+        if leaf.try_mark_queued() {
+            if self.route.is_empty() {
+                // Non-sublayer: schedule chain coalesce (pointer-based).
+                let ikey_bound: u64 = leaf.ikey_bound();
+
+                self.tree
+                    .coalesce_queue
+                    .schedule_chain(self.leaf.cast::<u8>(), ikey_bound);
+            } else {
+                // Sublayer: schedule route-based gc (no pointers stored).
+                self.tree
+                    .coalesce_queue
+                    .schedule_sublayer(std::mem::take(&mut self.route));
+            }
+        }
     }
 }
 
@@ -404,6 +418,7 @@ impl NodeCleaner {
         A: TreeAllocator<P>,
     {
         let mut key: Key<'_> = Key::new(key_bytes);
+        let single_layer_mode: bool = !key.has_suffix();
         let mut retry_count: usize = 0;
 
         // Track layer descent for multi-layer keys
@@ -413,26 +428,29 @@ impl NodeCleaner {
         let mut route: Route = Vec::new();
 
         'layer_loop: loop {
-            'retry_loop: loop {
-                if retry_count >= MAX_RETRIES {
-                    return Err(RemoveError::RetryLimitExceeded);
-                }
-                retry_count += 1;
+            if retry_count >= MAX_RETRIES {
+                return Err(RemoveError::RetryLimitExceeded);
+            }
+            retry_count += 1;
 
-                let leaf_ptr: *mut LeafNode15<P> =
-                    tree.reach_leaf_concurrent_generic(layer_root, &key, false, guard);
+            let leaf_ptr: *mut LeafNode15<P> =
+                tree.reach_leaf_concurrent_generic(layer_root, &key, false, guard);
 
-                // SAFETY: reach_leaf_concurrent_generic returns a valid leaf pointer
-                let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
+            // SAFETY: reach_leaf_concurrent_generic returns a valid leaf pointer
+            let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
+            'forward: loop {
                 let version: u32 = leaf.version().stable();
                 let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
-                let search_result: RemoveSearchResult =
-                    Self::search_for_remove_generic::<P>(leaf, &key, &perm);
+                let search_result: RemoveSearchResult = if single_layer_mode {
+                    Self::search_for_remove_single_layer::<P>(leaf, &key, &perm)
+                } else {
+                    Self::search_for_remove_generic::<P>(leaf, &key, &perm)
+                };
 
                 if leaf.version().has_changed(version) {
-                    continue 'retry_loop;
+                    continue 'forward;
                 }
 
                 match search_result {
@@ -462,7 +480,10 @@ impl NodeCleaner {
                                 continue 'layer_loop;
                             }
 
-                            RemoveLockResult::Retry => {}
+                            RemoveLockResult::Retry => {
+                                // Re-scan same leaf: permutation likely changed
+                                // but leaf itself is still valid.
+                            }
 
                             RemoveLockResult::RestartFromRoot => {
                                 key.unshift_all();
@@ -474,6 +495,10 @@ impl NodeCleaner {
                     }
 
                     RemoveSearchResult::DescendLayer { layer_ptr } => {
+                        debug_assert!(
+                            !single_layer_mode,
+                            "DescendLayer unreachable in single-layer mode"
+                        );
                         if !Self::is_sublayer_valid(layer_ptr) {
                             return Ok(None);
                         }
@@ -519,7 +544,9 @@ impl NodeCleaner {
                 return RemoveSearchResult::NotFound;
             }
 
-            // ikey matches - check key length/type
+            // ikey matches - prefetch value to hide cache miss during keylenx check
+            leaf.prefetch_value(kp);
+
             let slot_keylenx: u8 = leaf.keylenx(kp);
 
             if slot_keylenx >= LAYER_KEYLENX {
@@ -544,6 +571,7 @@ impl NodeCleaner {
                     continue; // Key too short
                 }
 
+                leaf.prefetch_suffix();
                 let suffix: &[u8] = key.suffix();
                 if leaf.ksuf_equals(kp, suffix) {
                     return RemoveSearchResult::Found { ki, kp };
@@ -554,6 +582,45 @@ impl NodeCleaner {
             // Inline key (no suffix)
             if key_len <= IKEY_SIZE && slot_keylenx == key_len {
                 // Exact match for short key
+                return RemoveSearchResult::Found { ki, kp };
+            }
+        }
+
+        RemoveSearchResult::NotFound
+    }
+
+    /// Single-layer fast path: key has no suffix, so skip layer/suffix branches.
+    #[inline(always)]
+    fn search_for_remove_single_layer<P>(
+        leaf: &LeafNode15<P>,
+        key: &Key<'_>,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    ) -> RemoveSearchResult
+    where
+        P: LeafPolicy,
+    {
+        let target_ikey: u64 = key.ikey();
+        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
+        let search_keylenx: u8 = key.current_len() as u8;
+        let size: usize = perm.size();
+
+        for ki in 0..size {
+            let kp: usize = perm.get(ki);
+            let slot_ikey: u64 = leaf.ikey_relaxed(kp);
+
+            if slot_ikey < target_ikey {
+                continue;
+            }
+
+            if slot_ikey > target_ikey {
+                return RemoveSearchResult::NotFound;
+            }
+
+            // ikey matches, prefetch value while checking keylenx
+            leaf.prefetch_value(kp);
+            let slot_keylenx: u8 = leaf.keylenx_relaxed(kp);
+
+            if slot_keylenx == search_keylenx {
                 return RemoveSearchResult::Found { ki, kp };
             }
         }
@@ -577,6 +644,11 @@ impl NodeCleaner {
     {
         // SAFETY: leaf_ptr is valid from reach_leaf_concurrent_generic
         let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
+
+        // Prefetch leaf data (permutation, ikeys, values) before entering the
+        // lock spin loop. By the time the lock is acquired, the cache lines we
+        // need for post-lock verification are likely hot in L1.
+        leaf.prefetch_for_search();
         let lock: LockGuard<'_> = leaf.version().lock_bounded();
 
         if leaf.deleted_layer() {
@@ -592,6 +664,8 @@ impl NodeCleaner {
         }
 
         let new_kp: usize = new_perm.get(ki);
+        // Prefetch the value at this slot while we verify ikey/keylenx below.
+        leaf.prefetch_value(new_kp);
         let slot_ikey: u64 = leaf.ikey(new_kp);
         let slot_keylenx: u8 = leaf.keylenx(new_kp);
 

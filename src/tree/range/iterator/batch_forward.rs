@@ -1,5 +1,7 @@
 //! Forward batch iteration methods for maximum performance.
 
+use std::mem::MaybeUninit;
+
 use crate::alloc_trait::TreeAllocator;
 use crate::leaf15::LeafNode15;
 use crate::policy::LeafPolicy;
@@ -132,11 +134,14 @@ where
                     return 0;
                 }
 
-                let value_ref: &P::Value = P::output_as_ref(&snapshot.value);
-                let should_continue = {
-                    count += 1;
-                    visitor(key, value_ref)
-                };
+                // SAFETY: Guard protects the output. output_as_ref_sound
+                // uses atomic read for write-through types, avoiding
+                // aliasing violation with concurrent write_through_update.
+                let mut scratch = MaybeUninit::uninit();
+                let value_ref: &P::Value =
+                    unsafe { P::output_as_ref_sound(&snapshot.value, &mut scratch) };
+                count += 1;
+                let should_continue = visitor(key, value_ref);
 
                 if !should_continue {
                     return count;
@@ -192,13 +197,22 @@ where
                             return count;
                         }
 
-                        // SAFETY: find_next_ptr validated version, guard protects pointer
-                        let value_ref: &P::Value = unsafe { &*snap.value_ptr };
-
                         count += 1;
                         self.fwd.state = ScanState::FindNext;
 
-                        if !visitor(key, value_ref) {
+                        let should_continue = if P::CAN_WRITE_THROUGH {
+                            // SAFETY: CAN_WRITE_THROUGH guarantees atomic
+                            // read. Avoids aliasing violation.
+                            let v: P::Value = unsafe { snap.value_copy() };
+                            visitor(key, &v)
+                        } else {
+                            // SAFETY: find_next_ptr validated version, guard
+                            // protects pointer. No concurrent modification.
+                            let value_ref: &P::Value = unsafe { &*snap.value_ptr };
+                            visitor(key, value_ref)
+                        };
+
+                        if !should_continue {
                             return count;
                         }
                     }

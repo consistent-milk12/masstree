@@ -263,14 +263,12 @@ where
     /// Sets the value of the entry, and returns the old value.
     #[inline(always)]
     pub fn insert(&mut self, value: P::Value) -> Option<P::Output> {
-        // Convert to output before insert
         let output = P::into_output(value);
-        let return_output = output.clone();
         let old = self
             .tree
-            .insert_output_with_guard(self.key, output, self.guard);
+            .insert_output_with_guard(self.key, output.clone(), self.guard);
 
-        self.value = return_output;
+        self.value = output;
 
         old
     }

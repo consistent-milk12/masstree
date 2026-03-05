@@ -190,7 +190,7 @@ pub use tree::{MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};
 // Value storage policies
 pub use inline::bits::InlineBits;
 pub use policy::RefPolicy as RefLeafPolicy;
-pub use policy::{BoxPolicy, LeafPolicy, ValuePtr};
+pub use policy::{BoxPolicy, LeafPolicy, ValuePtr, ValueRef};
 
 // Key types and constants
 pub use key::{IKEY_SIZE, Key, MAX_KEY_LENGTH};

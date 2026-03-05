@@ -68,7 +68,7 @@ rand = "0.10.0"
 rand_chacha = "0.10.0"
 rand_distr = "0.6.0"
 indexset = { version = "0.15.0", features = ["concurrent"] }
-scc = "3.6.6"
+scc = "3.6.8"
 sdd = "4.7.2"
 tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.22", features = [

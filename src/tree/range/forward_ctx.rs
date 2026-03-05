@@ -7,6 +7,8 @@ use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
+use std::mem::MaybeUninit;
+
 use crate::hints::likely;
 use crate::key::IKEY_SIZE;
 use crate::leaf_trait::TreeLeafNode;
@@ -74,6 +76,13 @@ pub struct ForwardScanCtx<P: LeafPolicy> {
     /// return a borrowed `&P::Value` from it.
     pub(crate) last_output: Option<P::Output>,
 
+    /// Scratch storage for atomic value copies (write-through path).
+    ///
+    /// Used by `advance_no_alloc_ref` to hold an atomically-read value copy
+    /// so a `&P::Value` can be returned without aliasing the mutable Box data.
+    /// Only written when `P::CAN_WRITE_THROUGH` is true (V <= 8 bytes).
+    pub(crate) scratch_value: MaybeUninit<P::Value>,
+
     /// Packed forward-specific boolean flags.
     pub(crate) flags: ForwardFlags,
 
@@ -121,6 +130,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             state: ScanState::FindNext,
             snapshot: None,
             last_output: None,
+            scratch_value: MaybeUninit::uninit(),
             flags: ForwardFlags::with_values(emit_equal, single_layer_mode),
 
             #[cfg(debug_assertions)]
@@ -1466,7 +1476,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             self.state = ScanState::FindNext;
             self.last_output = Some(snapshot.value);
 
-            let value_ref: &P::Value = P::output_as_ref(self.last_output.as_ref().unwrap());
+            // SAFETY: Guard protects the output from retirement.
+            // output_as_ref_sound uses atomic read for write-through types.
+            let value_ref: &P::Value = unsafe {
+                P::output_as_ref_sound(self.last_output.as_ref().unwrap(), &mut self.scratch_value)
+            };
 
             return Some((key, value_ref));
         }
@@ -1503,7 +1517,12 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                             }
 
                             self.state = ScanState::FindNext;
-                            let value_ref: &P::Value = unsafe { &*snap.value_ptr };
+                            let value_ref: &P::Value = if P::CAN_WRITE_THROUGH {
+                                self.scratch_value = MaybeUninit::new(unsafe { snap.value_copy() });
+                                unsafe { self.scratch_value.assume_init_ref() }
+                            } else {
+                                unsafe { &*snap.value_ptr }
+                            };
 
                             return Some((key, value_ref));
                         }
@@ -1586,7 +1605,12 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                 }
 
                 self.state = ScanState::FindNext;
-                let value_ref: &P::Value = unsafe { &*snap.value_ptr };
+                let value_ref: &P::Value = if P::CAN_WRITE_THROUGH {
+                    self.scratch_value = MaybeUninit::new(unsafe { snap.value_copy() });
+                    unsafe { self.scratch_value.assume_init_ref() }
+                } else {
+                    unsafe { &*snap.value_ptr }
+                };
 
                 return Some((key, value_ref));
             }

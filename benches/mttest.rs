@@ -553,7 +553,7 @@ fn bench_rw1(
                 while !should_stop(puts) && puts <= limit {
                     let x = rng.rand();
                     let key = QuickIstr::new(u64::from(x));
-                    let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
+                    let _ = tree.insert_value_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
                     puts += 1;
                 }
 
@@ -703,7 +703,8 @@ fn bench_rw2(
                     if puts == 0 || !rng.bernoulli(get_frac) {
                         let x = (offset.wrapping_add(puts as u32)).wrapping_mul(KNUTH_MULT);
                         let key = QuickIstr::new(u64::from(x));
-                        let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
+                        let _ =
+                            tree.insert_value_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
                         puts += 1;
                     } else {
                         let idx = rng.uniform(puts as u32);
@@ -811,7 +812,7 @@ fn bench_rw3(
                 let put_start = Instant::now();
                 while !should_stop(n) && n <= limit {
                     let key = key8(n);
-                    let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
+                    let _ = tree.insert_value_with_guard(key.as_bytes(), n + 1, &guard);
                     n += 1;
                 }
 
@@ -928,7 +929,7 @@ fn bench_rw4(
                 let put_start = Instant::now();
                 while !should_stop(n) && n <= limit {
                     let key = key8(TOP - n);
-                    let _ = tree.insert_with_guard(key.as_bytes(), n + 1, &guard);
+                    let _ = tree.insert_value_with_guard(key.as_bytes(), n + 1, &guard);
                     n += 1;
                 }
 
@@ -1055,7 +1056,7 @@ fn bench_same(
                     }
                     let x = rng.uniform(NUM_KEYS);
                     let key = QuickIstr::new(u64::from(x));
-                    let _ = tree.insert_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
+                    let _ = tree.insert_value_with_guard(key.as_bytes(), u64::from(x + 1), &guard);
                     n += 1;
                 }
                 drop(guard);
@@ -1153,7 +1154,7 @@ fn bench_uscale(
                     }
                     let x = u64::from(rng.rand()) % NSEQKEYS;
                     let key = QuickIstr::new(x);
-                    let _ = tree.insert_with_guard(key.as_bytes(), x + 1, &guard);
+                    let _ = tree.insert_value_with_guard(key.as_bytes(), x + 1, &guard);
                     n += 1;
                 }
                 drop(guard);
@@ -1241,7 +1242,7 @@ fn bench_wscale(
                     }
                     let x = u64::from(rng.rand());
                     let key = QuickIstr::new(x);
-                    let _ = tree.insert_with_guard(key.as_bytes(), x + 1, &guard);
+                    let _ = tree.insert_value_with_guard(key.as_bytes(), x + 1, &guard);
                     n += 1;
                 }
                 drop(guard);
@@ -1296,7 +1297,7 @@ fn bench_highcontention(
     {
         let guard = tree.guard();
         for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert_with_guard(key.as_slice(), i as u64, &guard);
+            let _ = tree.insert_value_with_guard(key.as_slice(), i as u64, &guard);
         }
     }
 
@@ -1356,7 +1357,7 @@ fn bench_highcontention(
 
                     // 10% writes, 90% reads (C++ uses bernoulli(write_frac))
                     if rng.bernoulli(0.1) {
-                        let _ = tree.insert_with_guard(key.as_slice(), ops, &guard);
+                        let _ = tree.insert_value_with_guard(key.as_slice(), ops, &guard);
                         puts += 1;
                     } else {
                         if let Some(v) = tree.get_with_guard(key.as_slice(), &guard) {

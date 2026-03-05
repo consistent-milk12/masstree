@@ -256,6 +256,16 @@ impl<V: Send + Sync + 'static> MassTree15<V> {
     pub fn new() -> Self {
         Self::with_allocator(SeizeAllocator::new())
     }
+
+    /// Create a new empty [`MassTree15`] with a custom retirement batch size.
+    ///
+    /// Larger values reduce `sys_membarrier` syscall frequency at the cost of
+    /// slightly delayed memory reclamation.
+    #[must_use]
+    #[inline(always)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self::with_allocator_batch_size(SeizeAllocator::new(), Some(batch_size))
+    }
 }
 
 impl<V: Send + Sync + 'static> Default for MassTree15<V> {
@@ -270,6 +280,16 @@ impl<V: InlineBits> MassTree15Inline<V> {
     #[inline(always)]
     pub fn new() -> Self {
         Self::with_allocator(SeizeAllocator::new())
+    }
+
+    /// Create a new empty [`MassTree15Inline`] with a custom retirement batch size.
+    ///
+    /// Larger values reduce `sys_membarrier` syscall frequency at the cost of
+    /// slightly delayed memory reclamation.
+    #[must_use]
+    #[inline(always)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self::with_allocator_batch_size(SeizeAllocator::new(), Some(batch_size))
     }
 }
 

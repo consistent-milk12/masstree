@@ -296,6 +296,21 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.values.take(slot)
     }
 
+    /// Write-through update: atomically read old value and write new value.
+    ///
+    /// Bypasses Box allocation and EBR retirement. Only callable when
+    /// `P::CAN_WRITE_THROUGH` is true.
+    ///
+    /// # Safety
+    ///
+    /// - Caller must hold the leaf lock.
+    /// - Slot must contain a terminal value.
+    #[inline(always)]
+    pub unsafe fn write_through_update_value(&self, slot: usize, new_value: &P::Value) -> P::Value {
+        // SAFETY: Caller guarantees lock held, slot has value, CAN_WRITE_THROUGH.
+        unsafe { P::write_through_update(&self.values, slot, new_value) }
+    }
+
     /// Load the layer pointer at a slot.
     #[inline(always)]
     pub fn load_layer(&self, slot: usize) -> *mut u8 {

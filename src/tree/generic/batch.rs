@@ -668,8 +668,6 @@ where
         let deferred_retire: *mut u8 =
             self.assign_slot_generic(leaf, lock, slot, key, value, guard, None);
 
-        // Use Relaxed ordering since we hold the lock - the lock's Release
-        // fence on drop provides the necessary synchronization.
         let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
         leaf.set_permutation_relaxed(new_perm);
         self.count.increment();

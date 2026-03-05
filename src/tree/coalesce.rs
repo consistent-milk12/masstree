@@ -407,6 +407,7 @@ impl Coalesce {
 
         // Step 6: Clear parent slot (OCC dirty bit BEFORE mutation).
         parent_lock.mark_insert();
+
         parent.clear_slot_and_permutation(parent_slot);
 
         let parent_now_empty: bool = parent.size() == 0;

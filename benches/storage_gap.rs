@@ -49,7 +49,7 @@ fn setup_box(keys: &[[u8; SHORT_KEY_SIZE]]) -> MassTree15<u64> {
     {
         let guard = tree.guard();
         for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert_with_guard(key, i as u64, &guard);
+            let _ = tree.insert_value_with_guard(key, i as u64, &guard);
         }
     }
     tree
@@ -60,7 +60,7 @@ fn setup_inline(keys: &[[u8; SHORT_KEY_SIZE]]) -> MassTree15Inline<u64> {
     {
         let guard = tree.guard();
         for (i, key) in keys.iter().enumerate() {
-            let _ = tree.insert_with_guard(key, i as u64, &guard);
+            let _ = tree.insert_value_with_guard(key, i as u64, &guard);
         }
     }
     tree
@@ -420,7 +420,9 @@ mod mixed_rw {
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
+                                    black_box(
+                                        tree.insert_value_with_guard(&keys[idx], i as u64, &guard),
+                                    );
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(*v);
                                 }
@@ -478,7 +480,9 @@ mod mixed_rw {
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
+                                    black_box(
+                                        tree.insert_value_with_guard(&keys[idx], i as u64, &guard),
+                                    );
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
@@ -552,7 +556,9 @@ mod write_heavy {
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
+                                    black_box(
+                                        tree.insert_value_with_guard(&keys[idx], i as u64, &guard),
+                                    );
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(*v);
                                 }
@@ -610,7 +616,9 @@ mod write_heavy {
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if is_write[i] {
-                                    black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
+                                    black_box(
+                                        tree.insert_value_with_guard(&keys[idx], i as u64, &guard),
+                                    );
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
                                     sum = sum.wrapping_add(v);
                                 }
@@ -664,7 +672,9 @@ mod insert_only {
                             let base = t * OPS_PER_THREAD;
                             for i in 0..OPS_PER_THREAD {
                                 let idx = base + i;
-                                black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
+                                black_box(
+                                    tree.insert_value_with_guard(&keys[idx], i as u64, &guard),
+                                );
                             }
                             post_measurement_barrier();
                         })
@@ -697,7 +707,9 @@ mod insert_only {
                             let base = t * OPS_PER_THREAD;
                             for i in 0..OPS_PER_THREAD {
                                 let idx = base + i;
-                                black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
+                                black_box(
+                                    tree.insert_value_with_guard(&keys[idx], i as u64, &guard),
+                                );
                             }
                             post_measurement_barrier();
                         })

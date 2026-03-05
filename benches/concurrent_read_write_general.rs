@@ -37,13 +37,54 @@ struct Record {
     tags: String,
 }
 
+/// Lookup table for lowercase hex digits.
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Format a u64 as 16-digit lowercase hex into `buf` (must be exactly 16 bytes).
+#[inline]
+fn hex_format_16(buf: &mut [u8; 16], val: u64) {
+    let bytes: [u8; 8] = val.to_be_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        buf[i * 2] = HEX_DIGITS[(b >> 4) as usize];
+        buf[i * 2 + 1] = HEX_DIGITS[(b & 0xF) as usize];
+    }
+}
+
+/// Format a u32 as 8-digit lowercase hex into `buf` (must be exactly 8 bytes).
+#[inline]
+fn hex_format_8(buf: &mut [u8; 8], val: u32) {
+    let bytes: [u8; 4] = val.to_be_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        buf[i * 2] = HEX_DIGITS[(b >> 4) as usize];
+        buf[i * 2 + 1] = HEX_DIGITS[(b & 0xF) as usize];
+    }
+}
+
 impl Record {
     fn new(seed: u64) -> Self {
+        // Stack-based hex formatting avoids the ~12% overhead from fmt machinery.
+        let mut name_buf: [u8; 23] = *b"record_0000000000000000";
+        hex_format_16(
+            <&mut [u8; 16]>::try_from(&mut name_buf[7..23]).unwrap(),
+            seed,
+        );
+
+        let mut tags_buf: [u8; 25] = *b"tag_00000000_cat_00000000";
+        hex_format_8(
+            <&mut [u8; 8]>::try_from(&mut tags_buf[4..12]).unwrap(),
+            (seed & 0xFFFF) as u32,
+        );
+        hex_format_8(
+            <&mut [u8; 8]>::try_from(&mut tags_buf[17..25]).unwrap(),
+            (seed >> 16) as u32,
+        );
+
         Self {
             id: seed,
             score: (seed as f64) * 0.001,
-            name: format!("record_{seed:016x}"),
-            tags: format!("tag_{:08x}_cat_{:08x}", seed & 0xFFFF, seed >> 16),
+            // SAFETY: hex digits + ASCII prefix are always valid UTF-8.
+            name: unsafe { String::from_utf8_unchecked(name_buf.to_vec()) },
+            tags: unsafe { String::from_utf8_unchecked(tags_buf.to_vec()) },
         }
     }
 

@@ -8,7 +8,10 @@ use crate::leaf15::KSUF_KEYLENX;
 use crate::leaf15::LAYER_KEYLENX;
 use crate::leaf15::LeafNode15;
 use crate::link::Linker;
+use crate::ordering::READ_ORD;
 use crate::policy::RefPolicy as RefLeafPolicy;
+use crate::policy::ValueRef;
+use crate::policy::atomic_read_value;
 use crate::prefetch::prefetch_read;
 
 mod get_guarded;
@@ -862,14 +865,31 @@ where
     A: TreeAllocator<P>,
 {
     /// Get a borrowed reference to a value by key.
+    ///
+    /// For write-through types (`V` <= 8 bytes), returns `ValueRef::Owned`
+    /// from an atomic read. For larger types, returns `ValueRef::Borrowed`
+    /// (zero-copy). Use [`Deref`] to access the value in both cases.
     #[must_use]
     #[inline(always)]
-    pub fn get_ref<'g>(&self, key: &[u8], guard: &'g LocalGuard<'_>) -> Option<&'g P::Value> {
+    pub fn get_ref<'g>(
+        &self,
+        key: &[u8],
+        guard: &'g LocalGuard<'_>,
+    ) -> Option<ValueRef<'g, P::Value>> {
         let mut search_key: Key<'_> = Key::new(key);
 
         self.get_impl(&mut search_key, guard, |ptr: *mut u8| {
-            // SAFETY: version validated, guard protects from deallocation
-            unsafe { &*(ptr.cast::<P::Value>()) }
+            if P::CAN_WRITE_THROUGH {
+                // SAFETY: CAN_WRITE_THROUGH guarantees size 1/2/4/8 with
+                // natural alignment. Atomic read avoids aliasing violation
+                // with concurrent write_through_update.
+                ValueRef::Owned(unsafe { atomic_read_value::<P::Value>(ptr, READ_ORD) })
+            } else {
+                // SAFETY: version validated, guard protects from deallocation.
+                // No concurrent modification (non-write-through types allocate
+                // a new Box on update).
+                ValueRef::Borrowed(unsafe { &*(ptr.cast::<P::Value>()) })
+            }
         })
     }
 }

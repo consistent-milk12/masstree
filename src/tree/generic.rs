@@ -73,10 +73,16 @@ where
     P: LeafPolicy,
     A: TreeAllocator<P>,
 {
+    /// Default retirement batch size. Larger values reduce the frequency of
+    /// `sys_membarrier` syscalls at the cost of slightly delayed reclamation.
+    /// 256 is 8 times the [`seize`] default (32) and amortizes well under write-heavy
+    /// workloads while adding negligible peak memory.
+    const DEFAULT_RETIRE_BATCH_SIZE: usize = 256;
+
     /// Create a new empty `MassTreeGeneric` with the given allocator.
     #[must_use]
     pub fn with_allocator(allocator: A) -> Self {
-        Self::with_allocator_batch_size(allocator, None)
+        Self::with_allocator_batch_size(allocator, Some(Self::DEFAULT_RETIRE_BATCH_SIZE))
     }
 
     /// Create a new empty `MassTreeGeneric` with custom batch size.
@@ -341,7 +347,7 @@ where
                 // DEBUG: Trace routing path
                 #[cfg(feature = "debug-routing")]
                 {
-                    let nkeys = inode.nkeys();
+                    let nkeys: usize = inode.nkeys();
                     eprintln!(
                         "[ROUTE] inode={:p} height={} nkeys={} target_ikey={:016x} -> child_idx={}",
                         inode,
@@ -350,13 +356,15 @@ where
                         target_ikey,
                         child_idx
                     );
+
                     // Print separator keys around the chosen child
                     if child_idx > 0 && child_idx <= nkeys {
-                        let left_sep = inode.ikey(child_idx - 1);
+                        let left_sep: u64 = inode.ikey(child_idx - 1);
                         eprintln!("        left_sep[{}]={:016x}", child_idx - 1, left_sep);
                     }
+
                     if child_idx < nkeys {
-                        let right_sep = inode.ikey(child_idx);
+                        let right_sep: u64 = inode.ikey(child_idx);
                         eprintln!("        right_sep[{child_idx}]={right_sep:016x}");
                     }
                 }
@@ -516,7 +524,8 @@ where
         // SAFETY: leaf_ptr is valid, protected by guard
         let mut leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
-        let version = leaf.version();
+        let version: &NodeVersion = leaf.version();
+
         if version.is_splitting() {
             let _ = version.stable();
         }
@@ -529,9 +538,11 @@ where
             if unlikely(leaf.version().is_deleted()) {
                 let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
                 let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
+
                 if next_ptr.is_null() {
                     break;
                 }
+
                 leaf_ptr = next_ptr;
 
                 // SAFETY: next_ptr is valid, protected by guard
@@ -548,19 +559,20 @@ where
             }
 
             let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
+
             if next_ptr.is_null() {
                 break;
             }
 
             // SAFETY: next_ptr is valid
             let next: &LeafNode15<P> = unsafe { &*next_ptr };
-
             let next_bound: u64 = next.ikey_bound();
 
             if key_ikey >= next_bound {
                 let next_next_raw: *mut LeafNode15<P> = next.next_raw(guard);
                 let next_next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_next_raw);
                 let prefetch_base: *const u8 = next_next_ptr.cast::<u8>();
+
                 prefetch_read(prefetch_base);
                 prefetch_read(prefetch_base.wrapping_add(64));
 
@@ -598,8 +610,23 @@ where
         P::Value: Clone,
     {
         let guard = self.guard();
-        let result = self.insert_with_guard(key, value, &guard);
-        result.map(|output| P::clone_value_from_output(&output))
+
+        if P::CAN_WRITE_THROUGH {
+            // Optimized path: deferred allocation with write-through for updates.
+            // Avoids Box::new + defer_retire on the hot update path.
+            let mut key: Key<'_> = Key::new(key);
+            match self.insert_concurrent_value(&mut key, value, &guard) {
+                Ok(result) => result,
+                Err(e) => {
+                    panic!(
+                        "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
+                    );
+                }
+            }
+        } else {
+            let result = self.insert_with_guard(key, value, &guard);
+            result.map(|output| P::clone_value_from_output(&output))
+        }
     }
 
     /// Insert a key-value pair using an explicit guard.
@@ -660,6 +687,54 @@ where
         }
     }
 
+    /// Insert a key-value pair using an explicit guard, returning the old value.
+    ///
+    /// Unlike `insert_with_guard` (which returns `Option<P::Output>`), this
+    /// returns `Option<P::Value>` directly. For policies with `CAN_WRITE_THROUGH`
+    /// (V <= 8 bytes), this avoids Box allocation and EBR retirement on updates.
+    ///
+    /// # Panics
+    ///
+    /// Panics on internal tree corruption.
+    pub fn insert_value_with_guard(
+        &self,
+        key: &[u8],
+        value: P::Value,
+        guard: &LocalGuard<'_>,
+    ) -> Option<P::Value>
+    where
+        P::Value: Clone,
+    {
+        self.verify_guard(guard);
+        let mut key: Key<'_> = Key::new(key);
+
+        if P::CAN_WRITE_THROUGH {
+            // Optimized path: deferred allocation with write-through for updates.
+            match self.insert_concurrent_value(&mut key, value, guard) {
+                Ok(result) => result,
+
+                Err(e) => {
+                    panic!(
+                        "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
+                    );
+                }
+            }
+        } else {
+            // Fallback: standard path, extract value from output.
+            let output: P::Output = P::into_output(value);
+
+            match self.insert_concurrent_generic(&mut key, output, guard) {
+                Ok(result) => result.map(|o| P::clone_value_from_output(&o)),
+
+                Err(e) => {
+                    panic!(
+                        "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
+                    );
+                }
+            }
+        }
+    }
+
     // ========================================================================
     //  Remove Operations
     // ========================================================================
@@ -693,9 +768,10 @@ where
     where
         P::Value: Clone,
     {
-        let guard = self.guard();
-        let result = self.remove_with_guard(key, &guard)?;
-        Ok(result.map(|output| P::clone_value_from_output(&output)))
+        let guard: LocalGuard<'_> = self.guard();
+        let result: Option<P::Output> = self.remove_with_guard(key, &guard)?;
+
+        Ok(result.map(|output: P::Output| P::clone_value_from_output(&output)))
     }
 
     /// Remove a key using an existing guard.
@@ -757,6 +833,7 @@ where
                 Some(buffer) => unsafe {
                     leaf.assign_ksuf_prealloc(slot, key.suffix(), guard, buffer)
                 },
+
                 None => unsafe { leaf.assign_ksuf(slot, key.suffix(), guard) },
             }
         } else {

@@ -835,11 +835,13 @@ fn test_redirect_alternating_removal() {
 #[test]
 #[cfg(not(miri))]
 fn test_concurrent_remove_and_get() {
+    use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
     let tree: Arc<TestTree> = Arc::new(TestTree::new());
     let done = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(2));
 
     // Pre-populate tree
     for i in 0_u64..1000 {
@@ -848,13 +850,27 @@ fn test_concurrent_remove_and_get() {
 
     let tree_clone = Arc::clone(&tree);
     let done_clone = Arc::clone(&done);
+    let barrier_clone = Arc::clone(&barrier);
 
     // Reader thread: continuously get random keys
     let reader = thread::spawn(move || {
         let mut found = 0_u64;
         let mut not_found = 0_u64;
 
-        while !done_clone.load(Ordering::Relaxed) {
+        // Synchronize with writer via barrier (not sleep)
+        barrier_clone.wait();
+
+        // Unconditional batch: guarantees at least one round of reads
+        for i in 0_u64..100 {
+            let key: u64 = (i * 7) % 1000;
+            if tree_clone.get(&key.to_be_bytes()).is_some() {
+                found += 1;
+            } else {
+                not_found += 1;
+            }
+        }
+
+        while !done_clone.load(Ordering::Acquire) {
             for i in 0_u64..100 {
                 let key: u64 = (i * 7) % 1000;
                 if tree_clone.get(&key.to_be_bytes()).is_some() {
@@ -868,15 +884,15 @@ fn test_concurrent_remove_and_get() {
         (found, not_found)
     });
 
-    // Let reader thread start before we begin removing
-    thread::sleep(std::time::Duration::from_millis(1));
+    // Synchronize: both threads start together
+    barrier.wait();
 
-    // Writer thread: remove keys
+    // Writer: remove even keys
     for i in (0_u64..1000).step_by(2) {
         let _ = tree.remove(&i.to_be_bytes());
     }
 
-    done.store(true, Ordering::Relaxed);
+    done.store(true, Ordering::Release);
     let (found, not_found) = reader.join().unwrap();
 
     // Verify: no crashes, reasonable counts
@@ -2216,4 +2232,641 @@ fn test_gc_layer_does_not_block_concurrent_reads() {
 
     // Probe key must still be readable.
     assert_val_eq!(tree.get(probe), Some(100));
+}
+
+// ============================================================================
+//  Extended Remove + Get Edge Case Coverage
+// ============================================================================
+
+/// Concurrent remove + get with multi-layer keys (keys > 8 bytes).
+/// Exercises the multi-layer get path during concurrent deletions.
+#[test]
+#[cfg(not(miri))]
+fn test_concurrent_remove_and_get_long_keys() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let barrier = Arc::new(Barrier::new(3));
+    let done = Arc::new(AtomicBool::new(false));
+
+    // Long keys that span multiple layers (>8 bytes)
+    let make_key = |i: u64| format!("long_key_prefix_{i:06}").into_bytes();
+
+    // Pre-populate with 500 long keys
+    for i in 0_u64..500 {
+        tree.insert(&make_key(i), i);
+    }
+
+    let tree_r = Arc::clone(&tree);
+    let done_r = Arc::clone(&done);
+    let barrier_r = Arc::clone(&barrier);
+
+    // Reader: get keys continuously
+    let reader = thread::spawn(move || {
+        barrier_r.wait();
+        let mut reads = 0_u64;
+        // Unconditional batch: guarantees at least one round of reads
+        for i in 0_u64..500 {
+            let _ = tree_r.get(&make_key(i));
+            reads += 1;
+        }
+        while !done_r.load(Ordering::Acquire) {
+            for i in 0_u64..500 {
+                let _ = tree_r.get(&make_key(i));
+                reads += 1;
+            }
+        }
+        reads
+    });
+
+    let tree_w = Arc::clone(&tree);
+    let barrier_w = Arc::clone(&barrier);
+
+    // Writer: remove even-indexed keys
+    let writer = thread::spawn(move || {
+        barrier_w.wait();
+        for i in (0_u64..500).step_by(2) {
+            let _ = tree_w.remove(&make_key(i));
+        }
+    });
+
+    barrier.wait();
+    writer.join().unwrap();
+    done.store(true, Ordering::Release);
+    let reads = reader.join().unwrap();
+
+    assert!(reads > 0, "reader must complete some reads");
+
+    // Odd keys must survive
+    for i in (1_u64..500).step_by(2) {
+        assert_val_eq!(
+            tree.get(&make_key(i)),
+            Some(i),
+            "odd key {i} missing after concurrent remove"
+        );
+    }
+
+    // Even keys must be gone
+    for i in (0_u64..500).step_by(2) {
+        assert!(
+            tree.get(&make_key(i)).is_none(),
+            "even key {i} still present after remove"
+        );
+    }
+}
+
+/// Multiple readers + multiple writers operating concurrently.
+/// Stresses the OCC retry paths in get and version validation.
+#[test]
+#[cfg(not(miri))]
+fn test_concurrent_multi_reader_multi_writer_remove() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let n_readers = 4_usize;
+    let n_writers = 4_usize;
+    let key_count = 2000_u64;
+    let barrier = Arc::new(Barrier::new(n_readers + n_writers));
+    let done = Arc::new(AtomicBool::new(false));
+
+    for i in 0..key_count {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    let mut handles = vec![];
+
+    // Spawn readers
+    for _ in 0..n_readers {
+        let tree_c = Arc::clone(&tree);
+        let done_c = Arc::clone(&done);
+        let barrier_c = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier_c.wait();
+            let mut reads = 0_u64;
+            // Unconditional batch: guarantees at least one round of reads
+            for i in 0..key_count {
+                let _ = tree_c.get(&i.to_be_bytes());
+                reads += 1;
+            }
+            while !done_c.load(Ordering::Acquire) {
+                for i in 0..key_count {
+                    let _ = tree_c.get(&i.to_be_bytes());
+                    reads += 1;
+                }
+            }
+            reads
+        }));
+    }
+
+    // Spawn writers (each removes a disjoint range)
+    let keys_per_writer = key_count / n_writers as u64;
+    for t in 0..n_writers {
+        let tree_c = Arc::clone(&tree);
+        let barrier_c = Arc::clone(&barrier);
+        let start = t as u64 * keys_per_writer;
+        let end = start + keys_per_writer;
+        handles.push(thread::spawn(move || {
+            barrier_c.wait();
+            for i in start..end {
+                let _ = tree_c.remove(&i.to_be_bytes());
+            }
+            0_u64
+        }));
+    }
+
+    // Wait for writers to finish, then signal readers
+    for h in handles.drain(n_readers..) {
+        h.join().unwrap();
+    }
+    done.store(true, Ordering::Release);
+
+    for h in handles {
+        let reads = h.join().unwrap();
+        assert!(reads > 0, "reader must complete some reads");
+    }
+
+    // All keys should be removed
+    assert_eq!(tree.len(), 0);
+}
+
+/// Remove + get interleaved on the same key set: each key is removed
+/// then immediately re-checked.
+#[test]
+fn test_remove_then_get_immediate() {
+    let tree: TestTree = TestTree::new();
+
+    for i in 0_u64..200 {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    for i in 0_u64..200 {
+        // Key exists before removal
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
+
+        let removed = tree.remove(&i.to_be_bytes()).unwrap();
+        assert_val_eq!(removed, Some(i));
+
+        // Key is gone immediately after removal
+        assert!(tree.get(&i.to_be_bytes()).is_none());
+    }
+
+    assert_eq!(tree.len(), 0);
+}
+
+/// Remove + reinsert + get cycle: verifies that removed slots can be
+/// reused and the new value is returned correctly.
+#[test]
+fn test_remove_reinsert_get_cycle_many() {
+    let tree: TestTree = TestTree::new();
+
+    for i in 0_u64..100 {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    // Remove all, then reinsert with different values, then verify
+    for i in 0_u64..100 {
+        let _ = tree.remove(&i.to_be_bytes());
+    }
+    assert_eq!(tree.len(), 0);
+
+    for i in 0_u64..100 {
+        tree.insert(&i.to_be_bytes(), i + 1000);
+    }
+
+    for i in 0_u64..100 {
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i + 1000));
+    }
+}
+
+/// Concurrent remove + reinsert + get: one thread removes, another
+/// reinserts, readers verify no crashes and eventual consistency.
+#[test]
+#[cfg(not(miri))]
+fn test_concurrent_remove_reinsert_get() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let barrier = Arc::new(Barrier::new(3));
+    let done = Arc::new(AtomicBool::new(false));
+    let key_count = 200_u64;
+
+    for i in 0..key_count {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    let tree_rem = Arc::clone(&tree);
+    let barrier_rem = Arc::clone(&barrier);
+    let done_rem = Arc::clone(&done);
+
+    // Remover: repeatedly remove even keys
+    let remover = thread::spawn(move || {
+        barrier_rem.wait();
+        while !done_rem.load(Ordering::Relaxed) {
+            for i in (0..key_count).step_by(2) {
+                let _ = tree_rem.remove(&i.to_be_bytes());
+            }
+        }
+    });
+
+    let tree_ins = Arc::clone(&tree);
+    let barrier_ins = Arc::clone(&barrier);
+    let done_ins = Arc::clone(&done);
+
+    // Inserter: repeatedly reinsert even keys
+    let inserter = thread::spawn(move || {
+        barrier_ins.wait();
+        while !done_ins.load(Ordering::Relaxed) {
+            for i in (0..key_count).step_by(2) {
+                tree_ins.insert(&i.to_be_bytes(), i + 5000);
+            }
+        }
+    });
+
+    barrier.wait();
+    thread::sleep(std::time::Duration::from_millis(50));
+    done.store(true, Ordering::Relaxed);
+
+    remover.join().unwrap();
+    inserter.join().unwrap();
+
+    // Odd keys must be intact
+    for i in (1..key_count).step_by(2) {
+        assert_val_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(i),
+            "odd key {i} corrupted by concurrent remove+reinsert"
+        );
+    }
+}
+
+/// Remove from a tree with exactly one leaf (no splits triggered).
+/// Exercises the single-leaf remove path with no coalesce needed.
+#[test]
+fn test_remove_single_leaf_boundary() {
+    let tree: TestTree = TestTree::new();
+
+    // 15 keys = exactly one full leaf (WIDTH=15)
+    for i in 0_u64..15 {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    // Remove all one by one, checking get after each
+    for i in 0_u64..15 {
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
+        let _ = tree.remove(&i.to_be_bytes());
+        assert!(tree.get(&i.to_be_bytes()).is_none());
+    }
+
+    assert_eq!(tree.len(), 0);
+}
+
+/// Remove keys that straddle a leaf split boundary.
+/// Inserts enough keys to trigger at least one split, then removes
+/// keys from both the original and split leaf.
+#[test]
+fn test_remove_across_split_boundary() {
+    let tree: TestTree = TestTree::new();
+
+    // 30 keys is enough for 2 leaves via split
+    for i in 0_u64..30 {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+    assert!(tree.len() == 30);
+
+    // Remove first half
+    for i in 0_u64..15 {
+        let removed = tree.remove(&i.to_be_bytes()).unwrap();
+        assert_val_eq!(removed, Some(i));
+    }
+
+    // Second half still accessible
+    for i in 15_u64..30 {
+        assert_val_eq!(tree.get(&i.to_be_bytes()), Some(i));
+    }
+
+    // Remove second half
+    for i in 15_u64..30 {
+        let removed = tree.remove(&i.to_be_bytes()).unwrap();
+        assert_val_eq!(removed, Some(i));
+    }
+
+    assert_eq!(tree.len(), 0);
+}
+
+/// Remove with suffix keys: keys that share the same 8-byte ikey
+/// but differ in the suffix portion (>8 bytes).
+#[test]
+fn test_remove_suffix_keys() {
+    let tree: TestTree = TestTree::new();
+
+    // Keys share the same 8-byte prefix, differ in suffix
+    let keys: Vec<Vec<u8>> = (0_u64..20)
+        .map(|i| {
+            let mut k = b"sameprefix".to_vec();
+            k.extend_from_slice(&i.to_be_bytes());
+            k
+        })
+        .collect();
+
+    for (i, key) in keys.iter().enumerate() {
+        tree.insert(key, i as u64);
+    }
+
+    // Remove even-indexed suffix keys
+    for i in (0..20).step_by(2) {
+        let removed = tree.remove(&keys[i]).unwrap();
+        assert_val_eq!(removed, Some(i as u64));
+    }
+
+    // Odd-indexed suffix keys must remain
+    for i in (1..20).step_by(2) {
+        assert_val_eq!(tree.get(&keys[i]), Some(i as u64));
+    }
+
+    // Even-indexed must be gone
+    for i in (0..20).step_by(2) {
+        assert!(tree.get(&keys[i]).is_none());
+    }
+}
+
+/// Concurrent remove + get with suffix keys, exercising the
+/// multi-layer concurrent read path during suffix slot removal.
+#[test]
+#[cfg(not(miri))]
+fn test_concurrent_remove_and_get_suffix_keys() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let barrier = Arc::new(Barrier::new(2));
+    let done = Arc::new(AtomicBool::new(false));
+
+    let make_key = |i: u64| {
+        let mut k = b"shared__".to_vec(); // exactly 8 bytes
+        k.extend_from_slice(&i.to_be_bytes());
+        k
+    };
+
+    for i in 0_u64..300 {
+        tree.insert(&make_key(i), i);
+    }
+
+    let tree_r = Arc::clone(&tree);
+    let done_r = Arc::clone(&done);
+    let barrier_r = Arc::clone(&barrier);
+
+    let reader = thread::spawn(move || {
+        barrier_r.wait();
+        let mut reads = 0_u64;
+        // Unconditional batch: guarantees at least one round of reads
+        for i in 0_u64..300 {
+            let _ = tree_r.get(&make_key(i));
+            reads += 1;
+        }
+        while !done_r.load(Ordering::Acquire) {
+            for i in 0_u64..300 {
+                let _ = tree_r.get(&make_key(i));
+                reads += 1;
+            }
+        }
+        reads
+    });
+
+    barrier.wait();
+    for i in (0_u64..300).step_by(3) {
+        let _ = tree.remove(&make_key(i));
+    }
+    done.store(true, Ordering::Release);
+    let reads = reader.join().unwrap();
+    assert!(reads > 0);
+
+    // Verify surviving keys
+    for i in 0_u64..300 {
+        if i % 3 == 0 {
+            assert!(
+                tree.get(&make_key(i)).is_none(),
+                "key {i} should be removed"
+            );
+        } else {
+            assert_val_eq!(tree.get(&make_key(i)), Some(i), "key {i} should survive");
+        }
+    }
+}
+
+/// Remove the same key twice: second remove should return None.
+#[test]
+fn test_double_remove_returns_none() {
+    let tree: TestTree = TestTree::new();
+
+    tree.insert(&1_u64.to_be_bytes(), 100);
+
+    let first = tree.remove(&1_u64.to_be_bytes()).unwrap();
+    assert_val_eq!(first, Some(100));
+
+    let second = tree.remove(&1_u64.to_be_bytes()).unwrap();
+    assert!(second.is_none());
+
+    // Get also returns None
+    assert!(tree.get(&1_u64.to_be_bytes()).is_none());
+}
+
+/// Remove with empty key edge case.
+#[test]
+fn test_remove_empty_key_edge() {
+    let tree: TestTree = TestTree::new();
+
+    tree.insert(b"", 999);
+    assert_val_eq!(tree.get(b""), Some(999));
+
+    let removed = tree.remove(b"").unwrap();
+    assert_val_eq!(removed, Some(999));
+    assert!(tree.get(b"").is_none());
+
+    // Remove again
+    let again = tree.remove(b"").unwrap();
+    assert!(again.is_none());
+}
+
+/// Remove with guard: verifies the guarded API path returns correct values.
+#[test]
+fn test_remove_with_guard_correctness() {
+    let tree: TestTree = TestTree::new();
+
+    for i in 0_u64..50 {
+        tree.insert(&i.to_be_bytes(), i * 10);
+    }
+
+    let guard = tree.guard();
+
+    for i in 0_u64..50 {
+        let result = tree.remove_with_guard(&i.to_be_bytes(), &guard);
+        match result {
+            Ok(Some(val)) => assert_eq!(*val, i * 10),
+            other => panic!("expected Ok(Some({}))), got {other:?}", i * 10),
+        }
+
+        // Immediately get should return None
+        assert!(tree.get_with_guard(&i.to_be_bytes(), &guard).is_none());
+    }
+}
+
+/// Concurrent get during rapid remove+insert churn on the same keys.
+/// This is the pattern most likely to trigger OCC retries.
+#[test]
+#[cfg(not(miri))]
+fn test_concurrent_get_during_remove_insert_churn() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::thread;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let barrier = Arc::new(Barrier::new(3));
+    let done = Arc::new(AtomicBool::new(false));
+    let reader_ops = Arc::new(AtomicU64::new(0));
+
+    // Small key set to maximize contention
+    let key_count = 20_u64;
+    for i in 0..key_count {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    let tree_churn = Arc::clone(&tree);
+    let barrier_churn = Arc::clone(&barrier);
+    let done_churn = Arc::clone(&done);
+
+    // Churner: remove then immediately reinsert each key
+    let churner = thread::spawn(move || {
+        barrier_churn.wait();
+        let mut cycles = 0_u64;
+        while !done_churn.load(Ordering::Relaxed) {
+            for i in 0..key_count {
+                let _ = tree_churn.remove(&i.to_be_bytes());
+                tree_churn.insert(&i.to_be_bytes(), i + cycles * 1000);
+            }
+            cycles += 1;
+        }
+        cycles
+    });
+
+    let tree_r = Arc::clone(&tree);
+    let barrier_r = Arc::clone(&barrier);
+    let done_r = Arc::clone(&done);
+    let ops = Arc::clone(&reader_ops);
+
+    // Reader: get all keys repeatedly
+    let reader = thread::spawn(move || {
+        barrier_r.wait();
+        while !done_r.load(Ordering::Relaxed) {
+            for i in 0..key_count {
+                // Value may be the original or any reinserted value,
+                // or None if caught between remove and reinsert.
+                // The key invariant is: no crash, no garbage.
+                let val = tree_r.get(&i.to_be_bytes());
+                if let Some(v) = val {
+                    // Value must be >= i (original or reinserted)
+                    assert!(v >= i, "key {i} returned unexpected value {v}");
+                }
+                ops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+
+    barrier.wait();
+    thread::sleep(std::time::Duration::from_millis(100));
+    done.store(true, Ordering::Relaxed);
+
+    let cycles = churner.join().unwrap();
+    reader.join().unwrap();
+    let total_reads = reader_ops.load(Ordering::Relaxed);
+
+    assert!(cycles > 0, "churner must complete some cycles");
+    assert!(total_reads > 0, "reader must complete some operations");
+}
+
+/// Remove all keys in a tree large enough to have internodes,
+/// then verify get returns None for every key.
+#[test]
+fn test_remove_all_large_tree_then_get() {
+    let tree: TestTree = TestTree::new();
+    let n = 500_u64;
+
+    for i in 0..n {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    // Remove in a non-sequential order (reverse)
+    for i in (0..n).rev() {
+        let removed = tree.remove(&i.to_be_bytes()).unwrap();
+        assert_val_eq!(removed, Some(i));
+    }
+
+    assert_eq!(tree.len(), 0);
+
+    // Every key should be gone
+    for i in 0..n {
+        assert!(tree.get(&i.to_be_bytes()).is_none());
+    }
+}
+
+/// Get with guard on keys being concurrently removed: verifies
+/// the guarded API is safe under concurrent modification.
+#[test]
+#[cfg(not(miri))]
+fn test_concurrent_get_with_guard_during_remove() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let tree: Arc<TestTree> = Arc::new(TestTree::new());
+    let barrier = Arc::new(Barrier::new(2));
+    let done = Arc::new(AtomicBool::new(false));
+
+    for i in 0_u64..1000 {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    let tree_r = Arc::clone(&tree);
+    let done_r = Arc::clone(&done);
+    let barrier_r = Arc::clone(&barrier);
+
+    // Reader using guarded API
+    let reader = thread::spawn(move || {
+        let guard = tree_r.guard();
+        barrier_r.wait();
+        let mut ops = 0_u64;
+        // Unconditional batch: guarantees at least one round of reads
+        for i in 0_u64..1000 {
+            let _ = tree_r.get_with_guard(&i.to_be_bytes(), &guard);
+            ops += 1;
+        }
+        while !done_r.load(Ordering::Acquire) {
+            for i in 0_u64..1000 {
+                let _ = tree_r.get_with_guard(&i.to_be_bytes(), &guard);
+                ops += 1;
+            }
+        }
+        ops
+    });
+
+    barrier.wait();
+
+    // Remove all keys with the writer using its own guard
+    {
+        let guard = tree.guard();
+        for i in 0_u64..1000 {
+            let _ = tree.remove_with_guard(&i.to_be_bytes(), &guard);
+        }
+    }
+
+    done.store(true, Ordering::Release);
+    let ops = reader.join().unwrap();
+    assert!(ops > 0);
+    assert_eq!(tree.len(), 0);
 }
