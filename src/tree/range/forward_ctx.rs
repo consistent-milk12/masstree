@@ -1517,12 +1517,9 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                             }
 
                             self.state = ScanState::FindNext;
-                            let value_ref: &P::Value = if P::CAN_WRITE_THROUGH {
-                                self.scratch_value = MaybeUninit::new(unsafe { snap.value_copy() });
-                                unsafe { self.scratch_value.assume_init_ref() }
-                            } else {
-                                unsafe { &*snap.value_ptr }
-                            };
+                            // SAFETY: Version validated, guard held, snap pointer valid.
+                            let value_ref: &P::Value =
+                                unsafe { snap.resolve_value_ref::<P>(&mut self.scratch_value) };
 
                             return Some((key, value_ref));
                         }
@@ -1605,12 +1602,9 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                 }
 
                 self.state = ScanState::FindNext;
-                let value_ref: &P::Value = if P::CAN_WRITE_THROUGH {
-                    self.scratch_value = MaybeUninit::new(unsafe { snap.value_copy() });
-                    unsafe { self.scratch_value.assume_init_ref() }
-                } else {
-                    unsafe { &*snap.value_ptr }
-                };
+                // SAFETY: Version validated, guard held, snap pointer valid.
+                let value_ref: &P::Value =
+                    unsafe { snap.resolve_value_ref::<P>(&mut self.scratch_value) };
 
                 return Some((key, value_ref));
             }

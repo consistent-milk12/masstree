@@ -386,6 +386,15 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.values.load_raw(slot)
     }
 
+    /// Load the raw value pointer with Relaxed ordering.
+    ///
+    /// Use when Acquire on the pointer is redundant (e.g., write-through
+    /// paths where a subsequent atomic value read provides synchronization).
+    #[inline(always)]
+    pub fn load_value_raw_relaxed(&self, slot: usize) -> *mut u8 {
+        self.values.load_raw_relaxed(slot)
+    }
+
     /// Clear a slot's value and keylenx (Relaxed ordering, for use under lock).
     #[inline(always)]
     pub fn clear_slot(&self, slot: usize) {

@@ -1,15 +1,14 @@
 //! Deletion operations for `MassTree`.
 
+use seize::LocalGuard;
 use std::fmt::{self as StdFmt, Display, Formatter};
 use std::hint as StdHint;
 use std::ptr as StdPtr;
-use std::sync::atomic::Ordering as AtomicOrdering;
-
-use seize::LocalGuard;
 
 use crate::ksearch::upper_bound_internode_generic;
 use crate::leaf15::LeafNode15;
 use crate::tree::coalesce::Route;
+use crate::tree::split::Propagation;
 use crate::{
     TreeInternode, TreeLeafNode,
     alloc_trait::TreeAllocator,
@@ -422,7 +421,7 @@ impl NodeCleaner {
         let mut retry_count: usize = 0;
 
         // Track layer descent for multi-layer keys
-        let mut layer_root: *mut u8 = tree.root_ptr.load(AtomicOrdering::Acquire);
+        let mut layer_root: *mut u8 = tree.load_root_ptr_generic(guard).cast_mut();
 
         // Route from tree root: ikey at each layer level, for sublayer GC.
         let mut route: Route = Vec::new();
@@ -487,7 +486,7 @@ impl NodeCleaner {
 
                             RemoveLockResult::RestartFromRoot => {
                                 key.unshift_all();
-                                layer_root = tree.root_ptr.load(AtomicOrdering::Acquire);
+                                layer_root = tree.load_root_ptr_generic(guard).cast_mut();
                                 route.clear();
                                 continue 'layer_loop;
                             }
@@ -534,7 +533,8 @@ impl NodeCleaner {
 
         for ki in 0..size {
             let kp: usize = perm.get(ki);
-            let slot_ikey: u64 = leaf.ikey(kp);
+            // Relaxed: OCC-validated read, permutation Acquire provides ordering.
+            let slot_ikey: u64 = leaf.ikey_relaxed(kp);
 
             if slot_ikey < target_ikey {
                 continue;
@@ -547,7 +547,8 @@ impl NodeCleaner {
             // ikey matches - prefetch value to hide cache miss during keylenx check
             leaf.prefetch_value(kp);
 
-            let slot_keylenx: u8 = leaf.keylenx(kp);
+            // Relaxed: OCC-validated read, permutation Acquire provides ordering.
+            let slot_keylenx: u8 = leaf.keylenx_relaxed(kp);
 
             if slot_keylenx >= LAYER_KEYLENX {
                 // This is a layer pointer
@@ -705,17 +706,10 @@ impl NodeCleaner {
     // ============================================================================
 
     /// Check if a sublayer is valid (not deleted) before descending.
-    ///
-    /// # Safety
-    ///
-    /// `layer_ptr` must point to a valid node protected by a guard.
     #[inline(always)]
     fn is_sublayer_valid(layer_ptr: *mut u8) -> bool {
-        // SAFETY: layer_ptr came from a valid slot, protected by guard
-        #[expect(clippy::cast_ptr_alignment, reason = "Checked")]
-        let sublayer_version: &NodeVersion = unsafe { &*layer_ptr.cast::<NodeVersion>() };
-
-        !sublayer_version.is_deleted()
+        // SAFETY: layer_ptr came from a valid slot, protected by guard.
+        unsafe { NodeVersion::is_valid_sublayer(layer_ptr) }
     }
 
     // ============================================================================
@@ -837,6 +831,9 @@ impl NodeCleaner {
 
     /// Get the parent internode pointer from a node (leaf or internode).
     ///
+    /// Reads `NodeVersion::is_leaf()` to dispatch, then delegates to
+    /// [`Propagation::get_parent`].
+    ///
     /// # Safety
     /// `node_ptr` must point to a valid leaf or internode.
     unsafe fn get_parent_erased<P: LeafPolicy>(node_ptr: *mut u8) -> *mut u8 {
@@ -844,15 +841,7 @@ impl NodeCleaner {
         #[expect(clippy::cast_ptr_alignment)]
         let version: &NodeVersion = unsafe { &*(node_ptr.cast::<NodeVersion>()) };
 
-        if version.is_leaf() {
-            // SAFETY: version.is_leaf() confirmed node is a leaf.
-            let leaf: &LeafNode15<P> = unsafe { &*(node_ptr.cast::<LeafNode15<P>>()) };
-            TreeLeafNode::parent(leaf)
-        } else {
-            // SAFETY: !version.is_leaf() confirmed node is an internode.
-            let inode: &InternodeNode = unsafe { &*(node_ptr.cast::<InternodeNode>()) };
-            TreeInternode::parent(inode)
-        }
+        Propagation::get_parent::<P>(node_ptr, version.is_leaf())
     }
 
     unsafe fn locked_parent_generic<'a, P: LeafPolicy>(
@@ -891,21 +880,16 @@ impl NodeCleaner {
     }
 
     /// Set the parent pointer on a node (leaf or internode).
+    ///
+    /// Reads `NodeVersion::is_leaf()` to dispatch, then delegates to
+    /// [`Propagation::set_parent`].
     #[inline(always)]
     unsafe fn set_parent_erased<P: LeafPolicy>(node_ptr: *mut u8, new_parent: *mut u8) {
         // SAFETY: Caller guarantees node_ptr points to valid leaf or internode.
         #[expect(clippy::cast_ptr_alignment, reason = "Checked by caller")]
         let version: &NodeVersion = unsafe { &*(node_ptr.cast::<NodeVersion>()) };
 
-        if version.is_leaf() {
-            // SAFETY: version.is_leaf() confirmed node is a leaf.
-            let leaf: &LeafNode15<P> = unsafe { &*(node_ptr.cast::<LeafNode15<P>>()) };
-            leaf.set_parent(new_parent);
-        } else {
-            // SAFETY: !version.is_leaf() confirmed node is an internode.
-            let inode: &InternodeNode = unsafe { &*(node_ptr.cast::<InternodeNode>()) };
-            inode.set_parent(new_parent);
-        }
+        Propagation::set_parent::<P>(node_ptr, new_parent, version.is_leaf());
     }
 }
 

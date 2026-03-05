@@ -254,6 +254,19 @@ impl NodeVersion {
         (version & DELETED_BIT) != 0
     }
 
+    /// Check if a type-erased node pointer is valid (not deleted).
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a valid node whose first field is `NodeVersion`.
+    #[must_use]
+    #[inline(always)]
+    pub(crate) unsafe fn is_valid_sublayer(ptr: *mut u8) -> bool {
+        #[expect(clippy::cast_ptr_alignment, reason = "NodeVersion is first field")]
+        let version: &Self = unsafe { &*ptr.cast::<Self>() };
+        !version.is_deleted()
+    }
+
     /// Check if this node is locked.
     #[must_use]
     #[inline(always)]

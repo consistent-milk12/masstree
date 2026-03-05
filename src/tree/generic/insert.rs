@@ -15,6 +15,22 @@ use super::{
 use crate::leaf15::LeafNode15;
 use crate::nodeversion::LockGuard;
 
+/// Retire a deferred suffix bag pointer if non-null.
+///
+/// # Safety
+///
+/// `deferred_retire` must be null or a valid suffix bag pointer from `assign_ksuf`.
+/// `guard` must be from this tree's collector.
+#[inline(always)]
+unsafe fn maybe_retire_suffix<P: LeafPolicy>(deferred_retire: *mut u8, guard: &LocalGuard<'_>) {
+    if !deferred_retire.is_null() {
+        // SAFETY: deferred_retire came from assign_ksuf and guard protects reclamation.
+        unsafe {
+            LeafNode15::<P>::retire_suffix_bag_ptr(deferred_retire, guard);
+        }
+    }
+}
+
 // ============================================================================
 //  Hot Path Helpers
 // ============================================================================
@@ -385,12 +401,8 @@ where
                     }
                 }
 
-                // Convert value to output for non-update paths (deferred allocation).
-                // Clone the value since it may be needed for retry on the split/conflict path.
-                let make_output = |v: &P::Value| -> P::Output { P::into_output(v.clone()) };
-
                 if pre_lock_perm.size() == 0 && self.can_reuse_empty_leaf(leaf, key) {
-                    let output: P::Output = make_output(&value);
+                    let output: P::Output = P::into_output(value);
                     let (result, deferred_retire) = self.insert_into_empty_leaf(
                         leaf,
                         &mut lock,
@@ -402,12 +414,8 @@ where
 
                     drop(lock);
 
-                    if !deferred_retire.is_null() {
-                        // SAFETY: deferred_retire came from assign_ksuf.
-                        unsafe {
-                            LeafNode15::<P>::retire_suffix_bag_ptr(deferred_retire, guard);
-                        }
-                    }
+                    // SAFETY: deferred_retire from assign_ksuf, guard from tree's collector.
+                    unsafe { maybe_retire_suffix::<P>(deferred_retire, guard) };
 
                     self.count.increment();
 
@@ -437,7 +445,7 @@ where
 
                         match self.find_usable_slot(leaf, &pre_lock_perm, ikey) {
                             FindSlotResult::Found { slot, back_offset } => {
-                                let output: P::Output = make_output(&value);
+                                let output: P::Output = P::into_output(value);
                                 let deferred_retire: *mut u8 = self.insert_new_value(
                                     leaf,
                                     &mut lock,
@@ -453,14 +461,8 @@ where
 
                                 drop(lock);
 
-                                if !deferred_retire.is_null() {
-                                    unsafe {
-                                        LeafNode15::<P>::retire_suffix_bag_ptr(
-                                            deferred_retire,
-                                            guard,
-                                        );
-                                    }
-                                }
+                                // SAFETY: deferred_retire from assign_ksuf, guard from tree's collector.
+                                unsafe { maybe_retire_suffix::<P>(deferred_retire, guard) };
 
                                 self.count.increment();
 
@@ -483,7 +485,7 @@ where
                                 let suffix: Option<&[u8]> =
                                     if has_suffix { Some(key.suffix()) } else { None };
 
-                                let output: P::Output = make_output(&value);
+                                let output: P::Output = P::into_output(value);
                                 let insert_data: SplitInsertData<'_, P> = SplitInsertData {
                                     ikey,
                                     keylenx,
@@ -533,7 +535,7 @@ where
                             "single-layer search returned Conflict variant"
                         );
 
-                        let output: P::Output = make_output(&value);
+                        let output: P::Output = P::into_output(value);
                         self.handle_suffix_conflict(leaf, &mut lock, slot, key, output, guard);
                         self.count.increment();
 
@@ -799,12 +801,8 @@ where
                         pre_allocated_vec.take(),
                     );
                     drop(lock);
-                    if !deferred_retire.is_null() {
-                        // SAFETY: deferred_retire came from assign_ksuf.
-                        unsafe {
-                            LeafNode15::<P>::retire_suffix_bag_ptr(deferred_retire, guard);
-                        }
-                    }
+                    // SAFETY: deferred_retire from assign_ksuf, guard from tree's collector.
+                    unsafe { maybe_retire_suffix::<P>(deferred_retire, guard) };
                     self.count.increment();
                     return result;
                 }
@@ -843,16 +841,8 @@ where
                                 );
                                 drop(lock);
 
-                                if !deferred_retire.is_null() {
-                                    // SAFETY: deferred_retire came from assign_ksuf
-                                    // and guard is from this tree's collector.
-                                    unsafe {
-                                        LeafNode15::<P>::retire_suffix_bag_ptr(
-                                            deferred_retire,
-                                            guard,
-                                        );
-                                    }
-                                }
+                                // SAFETY: deferred_retire from assign_ksuf, guard from tree's collector.
+                                unsafe { maybe_retire_suffix::<P>(deferred_retire, guard) };
 
                                 self.count.increment();
                                 return Ok(None);

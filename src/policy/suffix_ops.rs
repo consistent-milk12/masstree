@@ -268,16 +268,9 @@ unsafe fn drain_and_rebuild(
     suffix: &[u8],
     perm: &impl TreePermutation,
 ) -> *mut u8 {
-    let mut new_bag: SuffixBag = inline.drain_to_external(perm, slot, suffix);
-
-    let old_external: *mut SuffixBagCell = external_slot.load(AtomicOrdering::Relaxed);
-    merge_old_external_perm(&mut new_bag, old_external, slot, perm);
-
-    let new_cell: SuffixBagCell = SuffixBagCell::from_bag(new_bag);
-    let new_ptr: *mut SuffixBagCell = Box::into_raw(Box::new(new_cell));
-    external_slot.store(new_ptr, AtomicOrdering::Release);
-
-    old_external.cast::<u8>()
+    let new_bag: SuffixBag = inline.drain_to_external(perm, slot, suffix);
+    // SAFETY: Caller holds the leaf lock and external_slot is valid.
+    unsafe { install_drained_bag(new_bag, external_slot, slot, perm) }
 }
 
 /// Same as [`drain_and_rebuild`] but uses a pre-allocated `Vec<u8>` buffer
@@ -296,8 +289,25 @@ unsafe fn drain_and_rebuild_prealloc(
     perm: &impl TreePermutation,
     prealloc: Vec<u8>,
 ) -> *mut u8 {
-    let mut new_bag: SuffixBag = inline.drain_to_external_with_vec(perm, slot, suffix, prealloc);
+    let new_bag: SuffixBag = inline.drain_to_external_with_vec(perm, slot, suffix, prealloc);
+    // SAFETY: Caller holds the leaf lock and external_slot is valid.
+    unsafe { install_drained_bag(new_bag, external_slot, slot, perm) }
+}
 
+/// Merge old external data into the new bag, box it, and install atomically.
+///
+/// Returns the old external pointer (caller retires it after unlock).
+///
+/// # Safety
+///
+/// Caller must hold the leaf lock. `external_slot` must be valid.
+#[inline(always)]
+unsafe fn install_drained_bag(
+    mut new_bag: SuffixBag,
+    external_slot: &AtomicPtr<SuffixBagCell>,
+    slot: usize,
+    perm: &impl TreePermutation,
+) -> *mut u8 {
     let old_external: *mut SuffixBagCell = external_slot.load(AtomicOrdering::Relaxed);
     merge_old_external_perm(&mut new_bag, old_external, slot, perm);
 

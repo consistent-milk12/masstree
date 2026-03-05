@@ -363,6 +363,12 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// Load the raw pointer at a slot without any typed interpretation.
     fn load_raw(&self, slot: usize) -> *mut u8;
 
+    /// Load the raw pointer with Relaxed ordering.
+    ///
+    /// Use when a subsequent atomic read provides synchronization
+    /// (e.g., write-through scan where the value read is Acquire).
+    fn load_raw_relaxed(&self, slot: usize) -> *mut u8;
+
     /// Load the layer pointer at a slot.
     fn load_layer(&self, slot: usize) -> *mut u8;
 

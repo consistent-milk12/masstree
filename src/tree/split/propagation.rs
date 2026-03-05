@@ -254,11 +254,10 @@ impl Propagation {
 
     /// Returns parent pointer for a type-erased node.
     ///
-    /// # Safety
-    ///
-    /// `ptr` must point to a valid node matching `is_leaf`.
+    /// `ptr` must point to a valid node matching `is_leaf`. Called under lock
+    /// or during propagation where nodes are locked.
     #[inline]
-    fn get_parent<P>(ptr: *mut u8, is_leaf: bool) -> *mut u8
+    pub(crate) fn get_parent<P>(ptr: *mut u8, is_leaf: bool) -> *mut u8
     where
         P: LeafPolicy,
     {
@@ -272,11 +271,9 @@ impl Propagation {
 
     /// Sets parent pointer for a type-erased node.
     ///
-    /// # Safety
-    ///
     /// `ptr` must point to a valid, locked node matching `is_leaf`.
     #[inline]
-    fn set_parent<P>(ptr: *mut u8, parent: *mut u8, is_leaf: bool)
+    pub(crate) fn set_parent<P>(ptr: *mut u8, parent: *mut u8, is_leaf: bool)
     where
         P: LeafPolicy,
     {

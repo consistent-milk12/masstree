@@ -20,9 +20,6 @@ where
     A: TreeAllocator<P>,
 {
     /// Zero-allocation iteration with a visitor closure.
-    ///
-    /// Faster than `Iterator` trait — avoids `Vec<u8>` allocation per key,
-    /// uses references from internal buffers. Returns entries visited count.
     #[inline]
     #[must_use = "returns the number of entries visited"]
     pub fn for_each<F>(mut self, mut visitor: F) -> usize
@@ -137,16 +134,17 @@ where
                 // SAFETY: Guard protects the output. output_as_ref_sound
                 // uses atomic read for write-through types, avoiding
                 // aliasing violation with concurrent write_through_update.
-                let mut scratch = MaybeUninit::uninit();
+                let mut scratch: MaybeUninit<P::Value> = MaybeUninit::uninit();
                 let value_ref: &P::Value =
                     unsafe { P::output_as_ref_sound(&snapshot.value, &mut scratch) };
                 count += 1;
-                let should_continue = visitor(key, value_ref);
+                let should_continue: bool = visitor(key, value_ref);
 
                 if !should_continue {
                     return count;
                 }
             }
+
             self.fwd.state = ScanState::FindNext;
         }
 
@@ -155,7 +153,9 @@ where
             // Handle rare states (layer transitions, retries, exhaustion)
             match self.fwd.step_transitions(self.guard) {
                 StepResult::Exhausted => return count,
+
                 StepResult::Continue => continue,
+
                 StepResult::Ready => {}
             }
 
@@ -200,17 +200,11 @@ where
                         count += 1;
                         self.fwd.state = ScanState::FindNext;
 
-                        let should_continue = if P::CAN_WRITE_THROUGH {
-                            // SAFETY: CAN_WRITE_THROUGH guarantees atomic
-                            // read. Avoids aliasing violation.
-                            let v: P::Value = unsafe { snap.value_copy() };
-                            visitor(key, &v)
-                        } else {
-                            // SAFETY: find_next_ptr validated version, guard
-                            // protects pointer. No concurrent modification.
-                            let value_ref: &P::Value = unsafe { &*snap.value_ptr };
-                            visitor(key, value_ref)
-                        };
+                        // SAFETY: Version validated, guard held, snap pointer valid.
+                        let mut scratch: MaybeUninit<P::Value> = MaybeUninit::uninit();
+                        let value_ref: &P::Value =
+                            unsafe { snap.resolve_value_ref::<P>(&mut scratch) };
+                        let should_continue: bool = visitor(key, value_ref);
 
                         if !should_continue {
                             return count;
@@ -280,13 +274,7 @@ where
         )
     }
 
-    /// Value-only batch iteration — fastest when keys aren't needed.
-    ///
-    /// Skips key materialization, saving up to 56 bytes per entry for long keys.
-    ///
-    /// End bound uses ikey comparison only — **approximate** for suffixed keys
-    /// (may over-include entries sharing the boundary ikey). Use
-    /// `for_each_intra_leaf_batch` when exact bounds matter.
+    /// Value-only batch iteration.
     ///
     /// ```no_run
     /// use masstree::MassTree;
@@ -309,10 +297,12 @@ where
         }
         if !self.fwd.flags.initialized() {
             self.initialize();
+
             if self.fwd.flags.exhausted() {
                 return 0;
             }
         }
+
         self.fwd.run_batch(
             &mut ValuesOnlyStrategy::new(&mut visitor),
             &self.end_bound,
@@ -321,10 +311,6 @@ where
     }
 
     /// Fallible iteration with zero-copy references.
-    ///
-    /// Like [`for_each_ref`](Self::for_each_ref) but the visitor returns
-    /// `Result<bool, E>` — `Ok(true)` to continue, `Ok(false)` to stop,
-    /// `Err(e)` to abort with error.
     ///
     /// ```ignore
     /// let result = tree.iter(&guard).try_for_each_ref(|key, value| {

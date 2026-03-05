@@ -340,10 +340,7 @@ where
         }
 
         // SAFETY: ptr is non-null (checked above) and protected by guard.
-        #[expect(clippy::cast_ptr_alignment, reason = "Checked")]
-        let sublayer_version: &NodeVersion = unsafe { &*layer_ptr.cast::<NodeVersion>() };
-
-        !sublayer_version.is_deleted()
+        unsafe { NodeVersion::is_valid_sublayer(layer_ptr) }
     }
 
     /// Descend through a chain of trivial twigs (single-entry layer leaves).

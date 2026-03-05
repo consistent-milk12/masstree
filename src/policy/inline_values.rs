@@ -170,6 +170,16 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     }
 
     #[inline(always)]
+    fn load_raw_relaxed(&self, slot: usize) -> *mut u8 {
+        debug_assert!(
+            slot < WIDTH_15,
+            "load_raw_relaxed: slot {slot} out of bounds"
+        );
+
+        self.tags[slot].load(RELAXED)
+    }
+
+    #[inline(always)]
     fn load_layer(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH_15, "load_layer: slot {slot} out of bounds");
 

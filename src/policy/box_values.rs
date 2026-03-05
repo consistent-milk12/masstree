@@ -312,6 +312,11 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     }
 
     #[inline(always)]
+    fn load_raw_relaxed(&self, slot: usize) -> *mut u8 {
+        self.load_raw_relaxed(slot)
+    }
+
+    #[inline(always)]
     fn load_layer(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH_15, "load_layer: slot {slot} out of bounds");
 

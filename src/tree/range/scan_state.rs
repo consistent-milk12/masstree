@@ -4,6 +4,7 @@
 
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::ptr::{self as StdPtr, NonNull};
 
 use arrayvec::ArrayVec;
@@ -59,8 +60,10 @@ impl ScanState {
 pub enum StepResult {
     /// Transition handled (Down/Up/Retry). Caller should `continue`.
     Continue,
+
     /// State is Emit/FindNext. Caller proceeds to hot path.
     Ready,
+
     /// Tree exhausted. Caller should return.
     Exhausted,
 }
@@ -543,6 +546,35 @@ impl<V> ScanSnapshotPtr<V> {
         // SAFETY: CAN_WRITE_THROUGH guarantees size 1/2/4/8 with natural
         // alignment. Atomic read avoids aliasing violation.
         unsafe { atomic_read_value::<V>(self.value_ptr.cast(), READ_ORD) }
+    }
+
+    /// Resolve a value reference, using atomic copy for write-through types.
+    ///
+    /// For write-through policies, atomically copies the value into `scratch`
+    /// and returns a reference to it. For non-write-through policies, returns
+    /// a direct reference to the pointed-to value.
+    ///
+    /// # Safety
+    ///
+    /// - Pointer must be valid and protected by a guard.
+    /// - For write-through: pointer must be valid for atomic read.
+    /// - For non-write-through: no concurrent write-through update may modify
+    ///   the pointed-to data.
+    #[inline(always)]
+    pub unsafe fn resolve_value_ref<'a, P: LeafPolicy<Value = V>>(
+        &self,
+        scratch: &'a mut MaybeUninit<V>,
+    ) -> &'a V {
+        if P::CAN_WRITE_THROUGH {
+            // SAFETY: CAN_WRITE_THROUGH guarantees atomic read is sound.
+            *scratch = MaybeUninit::new(unsafe { self.value_copy() });
+
+            // SAFETY: Just initialized above.
+            unsafe { scratch.assume_init_ref() }
+        } else {
+            // SAFETY: Caller ensures pointer is valid and no concurrent modification.
+            unsafe { &*self.value_ptr }
+        }
     }
 }
 

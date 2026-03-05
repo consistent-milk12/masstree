@@ -73,7 +73,10 @@ where
             // Atomic read avoids aliasing violation with concurrent
             // write_through_update. The copy lives on the stack, so the
             // callback's &V is to owned data, not the mutable Box allocation.
-            let raw: *mut u8 = leaf.load_value_raw(slot);
+            // Relaxed pointer load: the subsequent atomic_read_value(Acquire)
+            // provides synchronization for the value contents. The pointer
+            // itself is stable under write-through (Box is never swapped).
+            let raw: *mut u8 = leaf.load_value_raw_relaxed(slot);
 
             if raw.is_null() {
                 return None;
