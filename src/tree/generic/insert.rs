@@ -204,7 +204,7 @@ where
     /// Returns `Some(Vec)` if the suffix is too large for inline storage or
     /// the leaf is filling up enough that inline overflow is likely.
     #[inline(always)]
-    fn maybe_pre_allocate_suffix(key: &Key<'_>, perm_size: usize) -> Option<Vec<u8>> {
+    pub(super) fn maybe_pre_allocate_suffix(key: &Key<'_>, perm_size: usize) -> Option<Vec<u8>> {
         let suffix_len: usize = key.suffix().len();
         let inline_capacity: usize = LeafNode15::<P>::INLINE_KSUF_CAPACITY;
 
@@ -276,7 +276,6 @@ where
 impl<P, A> MassTreeGeneric<P, A>
 where
     P: LeafPolicy,
-    P::Value: Clone,
     A: TreeAllocator<P>,
 {
     /// Insert with deferred allocation and write-through updates.
@@ -414,7 +413,7 @@ where
 
                 if pre_lock_perm.size() == 0 && self.can_reuse_empty_leaf(leaf, key) {
                     let output: P::Output = P::into_output(value);
-                    let (result, deferred_retire) = self.insert_into_empty_leaf(
+                    let (_result, deferred_retire) = self.insert_into_empty_leaf(
                         leaf,
                         &mut lock,
                         key,
@@ -430,9 +429,7 @@ where
 
                     self.count.increment();
 
-                    return result.map(|opt: Option<P::Output>| {
-                        opt.map(|o: P::Output| P::clone_value_from_output(&o))
-                    });
+                    return Ok(None);
                 }
 
                 match optimistic_search {

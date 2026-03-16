@@ -6,7 +6,7 @@ A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` an
 
 ## Status
 
-Current Version: v0.9.3
+Current Version: v0.9.4
 
 Significantly reduced duplicate code through trait based abstractions, while improving performance further. All standard data structure features are implemented and streamlined, on top the specialized features like range scans and prefix queries. From latency analysis, it seems to have a surprisingly strong tail latency profile for a concurrent ordered map. The cache-line aligned layout design and aggressive prefetching seems to have paid off, on top of masstree's original excellent architecture.
 
@@ -147,7 +147,7 @@ hot key patterns, mixed operations, prefix queries, deep trie traversal, and mix
 
 ```toml
 [dependencies]
-masstree = { version = "0.9.3", features = ["mimalloc"] }
+masstree = { version = "0.9.4", features = ["mimalloc"] }
 ```
 
 MSRV is Rust 1.92+ (Edition 2024).

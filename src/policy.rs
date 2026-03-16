@@ -30,7 +30,7 @@ use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Display, Formatter};
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::mem::{MaybeUninit, align_of, size_of};
+use std::mem::{MaybeUninit, align_of, needs_drop, size_of};
 use std::ops::Deref;
 use std::ptr::NonNull;
 
@@ -718,14 +718,16 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
     const NEEDS_RETIREMENT: bool = true;
     const SUPPORTS_REF: bool = true;
 
-    /// Write-through is supported for naturally-aligned V <= 8 bytes, where
-    /// atomic writes through the Box pointer avoid heap allocation and EBR
-    /// retirement on updates.
+    /// Write-through is supported only for no-drop, naturally-aligned
+    /// value types up to 8 bytes, where atomic writes through the Box pointer
+    /// avoid heap allocation and EBR retirement on updates.
     ///
-    /// The `align_of >= size_of` check excludes packed structs and composite
-    /// types whose size exceeds their alignment (e.g. `#[repr(packed)]`
-    /// structs), which would not have naturally-aligned Box allocations.
-    const CAN_WRITE_THROUGH: bool = size_of::<V>() <= 8
+    /// `needs_drop == false` prevents duplicating ownership-bearing values via
+    /// atomic load. The `align_of >= size_of` check excludes packed structs
+    /// and composite types whose size exceeds their alignment, which would not
+    /// have naturally-aligned Box allocations.
+    const CAN_WRITE_THROUGH: bool = !needs_drop::<V>()
+        && size_of::<V>() <= 8
         && size_of::<V>().is_power_of_two()
         && align_of::<V>() >= size_of::<V>();
 

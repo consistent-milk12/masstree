@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.4
+
+Write-through soundness fixes and deferred-allocation batch insert.
+
+### Soundness Fixes
+
+- `CAN_WRITE_THROUGH` now requires `!needs_drop::<V>()`, preventing write-through for types with `Drop` impls. Without this, atomic load would create a bitwise copy of an ownership-bearing value, risking double-free with concurrent updates.
+- Range scan value reads for write-through types now use `output_as_ref_sound` / `resolve_value_ref` (atomic read into scratch buffer) instead of plain pointer dereference, closing a data race with concurrent write-through stores.
+
+### Write-Through Batch Insert
+
+- New `BatchValueEntry<P>` defers `P::Value -> P::Output` conversion: updates use `value_ref()` (borrow, no allocation), inserts use `take_value()` (move, single allocation). For write-through types, batch updates are fully allocation-free.
+- `insert_batch` and `insert_batch_with_guard` dispatch to the value path when `CAN_WRITE_THROUGH` is true, skipping `clone_value_from_output` entirely.
+
+### Cleanup
+
+- Batch suffix pre-allocation now calls shared `maybe_pre_allocate_suffix` from insert.rs instead of inlining the logic (13 lines removed)
+- Removed `P::Value: Clone` bound from `insert_concurrent_value` impl block (write-through reads the old value atomically, no clone needed)
+- Empty leaf insert in `insert_concurrent_value` simplified: returns `Ok(None)` directly instead of mapping over a guaranteed-`None` result
+
 ## 0.9.3
 
 Write-through updates, remove path robustness, and performance improvements.
@@ -34,7 +54,7 @@ Write-through updates, remove path robustness, and performance improvements.
 
 ### Test Coverage
 
-- ~640 lines of new remove+get edge case tests: multi-layer keys, multi-reader multi-writer, suffix keys, remove-reinsert cycles, single-leaf boundary, split boundary, empty key, guarded API, churn stress
+- New remove+get edge case tests: multi-layer keys, multi-reader multi-writer, suffix keys, remove-reinsert cycles, single-leaf boundary, split boundary, empty key, guarded API, churn stress
 
 ### Relaxed ordering optimization, value prefetch pipeline, and insert fast path
 

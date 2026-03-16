@@ -1113,7 +1113,8 @@ where
             return BatchAction::Exhausted;
         }
 
-        let value_ref: &P::Value = P::output_as_ref(&snapshot.value);
+        let value_ref: &P::Value =
+            unsafe { P::output_as_ref_sound(&snapshot.value, &mut ctx.scratch_value) };
         *count += 1;
 
         if (self.visitor)(key, value_ref) {
@@ -1144,9 +1145,8 @@ where
                 return BatchAction::Exhausted;
             }
 
-            // SAFETY: find_next_with_dup_check_ptr validated version,
-            // guard protects pointer
-            let value_ref: &P::Value = unsafe { &*snap.value_ptr };
+            let value_ref: &P::Value =
+                unsafe { snap.resolve_value_ref::<P>(&mut ctx.scratch_value) };
             *count += 1;
             ctx.state = ScanState::FindNext;
 
