@@ -125,6 +125,32 @@ enum LockedParentResult<'a> {
 }
 
 // ============================================================================
+//  Immediate Parent Result
+// ============================================================================
+
+/// Result of removing a leaf from its immediate parent internode.
+///
+/// Used by the parent-before-delete coalesce ordering: the leaf lock is
+/// borrowed (not consumed), so the caller retains it for `mark_deleted`
+/// and `unlink_from_chain` after a successful parent update.
+#[allow(clippy::redundant_pub_crate)]
+pub(crate) enum ImmediateParentResult<'a> {
+    /// Leaf removed from parent. Parent has remaining keys or is root.
+    Success,
+
+    /// Leaf removed from parent. Parent became empty and is not root.
+    /// Caller should attempt cascade with the returned parent lock.
+    SuccessNeedsCascade {
+        parent_ptr: *mut u8,
+        parent_lock: LockGuard<'a>,
+    },
+
+    /// Failed to lock the leaf's immediate parent (`RetryExhausted`).
+    /// No modifications were made. Safe to retry.
+    Failure,
+}
+
+// ============================================================================
 //  RemoveCursor
 // ============================================================================
 
@@ -220,7 +246,8 @@ where
 
         let mut new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
         new_perm.remove(self.ki);
-        // Release is required: concurrent insert threads perform optimistic
+
+        // NOTE: Release is required. Concurrent insert threads perform optimistic
         // searches that read the permutation without holding the lock. The
         // compiler may reorder a Relaxed store before the preceding suffix and
         // value clears, making removed-slot data inconsistent to readers that
@@ -270,131 +297,225 @@ where
 pub struct NodeCleaner;
 
 impl NodeCleaner {
-    /// Remove a leaf from its parent internode(s) during coalesce.
+    // ========================================================================
+    //  Parent-Before-Delete Coalesce
+    // ========================================================================
+
+    /// Remove a leaf from its immediate parent internode during coalesce.
+    ///
+    /// Unlike `remove_leaf_from_parent_for_coalesce`, this function borrows the
+    /// leaf lock instead of consuming it. It handles only the imediate parent
+    /// (no cascade). The caller retains the leaf lock for `mark_deleted` and
+    /// `unlink_from_chain` after a successful parent update.
     #[cold]
-    #[inline(never)]
-    pub fn remove_leaf_from_parent_for_coalesce<P, A>(
-        allocator: &A,
-        guard: &LocalGuard<'_>,
+    pub(crate) fn remove_leaf_from_immediate_parent<'a, P, A>(
+        _allocator: &A,
+        _guard: &LocalGuard<'_>,
         leaf_ptr: *mut LeafNode15<P>,
-        leaf_lock: LockGuard<'_>, // Consumed - ownership transferred to lock coupling
+        _leaf_lock: &LockGuard<'_>,
         ikey_bound: u64,
-    ) -> bool
+    ) -> ImmediateParentResult<'a>
     where
         P: LeafPolicy,
         A: TreeAllocator<P>,
     {
-        let mut current: *mut u8 = leaf_ptr.cast();
+        let current: *mut u8 = leaf_ptr.cast();
+
+        // SAFETY: current is valid and locked (leaf_lock proves this).
+        let parent_result: LockedParentResult<'_> =
+            unsafe { Self::locked_parent_generic::<P>(current) };
+
+        let (mut parent_lock, parent_ptr) = match parent_result {
+            LockedParentResult::Locked(lock, ptr) => (lock, ptr),
+
+            LockedParentResult::NoParent => {
+                // Layer root, no parent to clean. Caller proceeds with delete.
+                return ImmediateParentResult::Success;
+            }
+
+            LockedParentResult::RetryExhausted => {
+                return ImmediateParentResult::Failure;
+            }
+        };
+
+        // SAFETY: parent_ptr is a valid internode pointer returned by locked_parent_generic.
+        let parent: &InternodeNode = unsafe { &*parent_ptr.cast::<InternodeNode>() };
+
+        parent_lock.mark_insert();
+
+        debug_assert!(
+            !parent.version().is_deleted(),
+            "remove_leaf_from_immediate_parent: parent should not be deleted"
+        );
+
+        // Find child slot pointing to our leaf.
+        let mut kp: usize = upper_bound_internode_generic(ikey_bound, parent);
+
+        if TreeInternode::child(parent, kp) != current {
+            let nkeys: usize = parent.nkeys();
+            let mut found_kp: Option<usize> = None;
+
+            for i in 0..=nkeys {
+                if TreeInternode::child(parent, i) == current {
+                    found_kp = Some(i);
+                    break;
+                }
+            }
+
+            if let Some(actual_kp) = found_kp {
+                kp = actual_kp;
+            } else {
+                // Child already removed by concurrent coalesce.
+                drop(parent_lock);
+                return ImmediateParentResult::Success;
+            }
+        }
+
+        // Remove child from parent.
+        parent.set_child(kp, StdPtr::null_mut());
+
+        if kp > 0 {
+            Self::shift_internode_down_generic::<InternodeNode>(parent, kp);
+        }
+
+        // Handle ikey_bound redirect if the removed child was at position 0 or 1.
+        if (kp <= 1) && (parent.nkeys() > 0) && TreeInternode::child(parent, 0).is_null() {
+            let new_ikey: u64 = parent.ikey(0);
+            Self::redirect_ikey_bounds_generic::<P>(parent_ptr, ikey_bound, new_ikey);
+        }
+
+        if parent.nkeys() > 0 || parent.version().is_root() {
+            drop(parent_lock);
+            ImmediateParentResult::Success
+        } else {
+            // Parent became empty and is not root. Return lock for cascade.
+            ImmediateParentResult::SuccessNeedsCascade {
+                parent_ptr,
+                parent_lock,
+            }
+        }
+    }
+
+    /// Attempt to collapse empty internodes upward from the given parent.
+    ///
+    /// On failure (`RetryExhausted`), the empty internode is left in place.
+    /// This is a pre-existing limitation that does not affect leaf correctness.
+    /// Attempt to collapse empty internodes upward from the given parent.
+    ///
+    /// `ikey_bound` is the routing key used to locate the start internode
+    /// in its parent. It propagates upward and is updated when a redirect
+    /// changes the effective left-edge boundary.
+    ///
+    /// On failure (`RetryExhausted`), the empty internode is left in place.
+    /// This is a pre-existing limitation that does not affect leaf correctness.
+    #[cold]
+    pub(crate) fn try_cascade_internodes<P, A>(
+        allocator: &A,
+        guard: &LocalGuard<'_>,
+        start_ptr: *mut u8,
+        start_lock: LockGuard<'_>,
+        ikey_bound: u64,
+    ) where
+        P: LeafPolicy,
+        A: TreeAllocator<P>,
+    {
+        let mut current: *mut u8 = start_ptr;
+        let mut current_lock: LockGuard<'_> = start_lock;
         let mut current_ikey: u64 = ikey_bound;
-        let mut current_replacement: Option<*mut u8> = None;
-        let mut current_lock: LockGuard<'_> = leaf_lock;
 
         loop {
-            // SAFETY: current is valid and locked; we hold current_lock.
-            let parent_result: LockedParentResult<'_> =
+            // SAFETY: current is valid and locked (current_lock proves this).
+            let parent: &InternodeNode = unsafe { &*current.cast::<InternodeNode>() };
+
+            // Capture the remaining child before collapsing.
+            let child0: *mut u8 = TreeInternode::child(parent, 0);
+
+            // Mark the empty parent deleted.
+            current_lock.mark_deleted();
+
+            // Clear child pointer before retirement.
+            parent.set_child(0, StdPtr::null_mut());
+
+            // SAFETY: current is a valid internode that we hold locked.
+            unsafe { allocator.retire_internode_erased(current, guard) };
+
+            // Try to lock the grandparent.
+            // SAFETY: current is valid (retired but still accessible under guard).
+            let grandparent_result: LockedParentResult<'_> =
                 unsafe { Self::locked_parent_generic::<P>(current) };
 
-            let (mut parent_lock, parent_ptr) = match parent_result {
+            let (mut grandparent_lock, grandparent_ptr) = match grandparent_result {
                 LockedParentResult::Locked(lock, ptr) => (lock, ptr),
 
                 LockedParentResult::NoParent => {
                     drop(current_lock);
-                    return true;
+                    return;
                 }
 
                 LockedParentResult::RetryExhausted => {
+                    // Pre-existing limitation: grandparent still points to retired
+                    // internode. Tree traversal handles this (detects deleted nodes,
+                    // restarts from higher level).
                     drop(current_lock);
-                    return false;
+                    return;
                 }
             };
 
-            // SAFETY: parent_ptr is a valid internode pointer returned by locked_parent_generic.
-            let parent: &InternodeNode = unsafe { &*parent_ptr.cast::<InternodeNode>() };
+            // SAFETY: grandparent_ptr is valid, returned by locked_parent_generic.
+            let grandparent: &InternodeNode = unsafe { &*grandparent_ptr.cast::<InternodeNode>() };
 
-            parent_lock.mark_insert();
+            grandparent_lock.mark_insert();
 
-            debug_assert!(
-                !parent.version().is_deleted(),
-                "remove_leaf_from_parent: parent should not be deleted"
-            );
+            // Find the child slot pointing to current.
+            let nkeys: usize = grandparent.nkeys();
+            let mut kp: Option<usize> = None;
 
-            let mut kp: usize = upper_bound_internode_generic(current_ikey, parent);
-
-            if TreeInternode::child(parent, kp) != current {
-                let nkeys: usize = parent.nkeys();
-                let mut found_kp: Option<usize> = None;
-
-                for i in 0..=nkeys {
-                    if TreeInternode::child(parent, i) == current {
-                        found_kp = Some(i);
-                        break;
-                    }
-                }
-
-                if let Some(actual_kp) = found_kp {
-                    kp = actual_kp;
-                } else {
-                    drop(current_lock);
-                    drop(parent_lock);
-
-                    return true;
+            for i in 0..=nkeys {
+                if TreeInternode::child(grandparent, i) == current {
+                    kp = Some(i);
+                    break;
                 }
             }
 
-            let new_child: *mut u8 = current_replacement.unwrap_or(StdPtr::null_mut());
-            parent.set_child(kp, new_child);
-
-            let should_shift: bool = match current_replacement {
-                Some(repl) if !repl.is_null() => {
-                    // SAFETY: repl is a valid node pointer (the replacement child).
-                    // parent_ptr is valid and we hold parent_lock.
-                    unsafe {
-                        Self::set_parent_erased::<P>(repl, parent_ptr);
-                    }
-
-                    false
-                }
-
-                _ => kp > 0,
+            let Some(kp) = kp else {
+                // Already removed by concurrent operation.
+                drop(current_lock);
+                drop(grandparent_lock);
+                return;
             };
 
-            if should_shift {
-                Self::shift_internode_down_generic::<InternodeNode>(parent, kp);
+            // Replace current with its remaining child in grandparent.
+            grandparent.set_child(kp, child0);
+
+            if !child0.is_null() {
+                // SAFETY: child0 is a valid node pointer.
+                unsafe { Self::set_parent_erased::<P>(child0, grandparent_ptr) };
+            } else if kp > 0 {
+                Self::shift_internode_down_generic::<InternodeNode>(grandparent, kp);
             }
 
-            if (kp <= 1) && (parent.nkeys() > 0) && TreeInternode::child(parent, 0).is_null() {
-                let new_ikey: u64 = parent.ikey(0);
-                Self::redirect_ikey_bounds_generic::<P>(parent_ptr, current_ikey, new_ikey);
-
+            // Redirect ancestor ikey bounds if the replacement created a
+            // null-slot-0 shape. Mirrors the check in
+            // remove_leaf_from_immediate_parent (line 381-384).
+            if (kp <= 1)
+                && (grandparent.nkeys() > 0)
+                && TreeInternode::child(grandparent, 0).is_null()
+            {
+                let new_ikey: u64 = grandparent.ikey(0);
+                Self::redirect_ikey_bounds_generic::<P>(grandparent_ptr, current_ikey, new_ikey);
                 current_ikey = new_ikey;
             }
 
             drop(current_lock);
 
-            if parent.nkeys() > 0 || parent.version().is_root() {
-                drop(parent_lock);
-                return true;
+            if grandparent.nkeys() > 0 || grandparent.version().is_root() {
+                drop(grandparent_lock);
+                return;
             }
 
-            // Parent is empty (nkeys == 0) and not root
-            let child0: *mut u8 = TreeInternode::child(parent, 0);
-
-            // Step 10: Collapse empty parent
-            parent_lock.mark_deleted();
-
-            // Clear child pointer before retirement so no write occurs on
-            // memory that has been scheduled for reclamation.
-            parent.set_child(0, StdPtr::null_mut());
-
-            // SAFETY: parent_ptr is a valid internode that we hold locked (parent_lock).
-            unsafe {
-                allocator.retire_internode_erased(parent_ptr, guard);
-            }
-
-            // Continue walking up with the remaining child as replacement
-            current = parent_ptr;
-            current_replacement = Some(child0);
-            current_lock = parent_lock; // Transfer lock ownership
+            // Grandparent also became empty. Continue cascade.
+            current = grandparent_ptr;
+            current_lock = grandparent_lock;
         }
     }
 

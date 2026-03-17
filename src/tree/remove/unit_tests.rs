@@ -2870,3 +2870,141 @@ fn test_concurrent_get_with_guard_during_remove() {
     assert!(ops > 0);
     assert_eq!(tree.len(), 0);
 }
+
+// ============================================================================
+//  Routing correctness after cascade coalesce
+// ============================================================================
+
+/// End-to-end test: after removing keys that trigger internode cascade,
+/// lookups and inserts in the affected key range still route correctly.
+///
+/// This validates that `try_cascade_internodes` correctly redirects ancestor
+/// ikey bounds when the replacement creates the null-slot-0 shape. Without
+/// the redirect, gets/inserts near the left-edge boundary can misroute.
+#[test]
+fn test_routing_correct_after_cascade_coalesce() {
+    let tree = TestTree::new();
+
+    // Build a tree large enough to have multiple internode levels.
+    // Sequential u64 keys spread across many leaves and internodes.
+    let key_count: u64 = 500;
+    for i in 0..key_count {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    assert_eq!(tree.len(), key_count as usize);
+
+    // Remove keys in a pattern that empties adjacent leaves, forcing
+    // internode collapse (cascade). Remove from the left edge first
+    // to maximize the chance of null-slot-0 shapes in internodes.
+    let guard = tree.guard();
+    for i in 0..key_count / 2 {
+        let _ = tree.remove_with_guard(&i.to_be_bytes(), &guard);
+    }
+    drop(guard);
+
+    // Process coalesce to trigger cascade paths.
+    let guard = tree.guard();
+    tree.process_coalesce(&guard);
+    drop(guard);
+
+    // Verify all remaining keys are still reachable.
+    for i in key_count / 2..key_count {
+        assert_val_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(i),
+            "key {i} should be reachable after cascade coalesce"
+        );
+    }
+
+    // Verify removed keys are gone.
+    for i in 0..key_count / 2 {
+        assert_val_eq!(
+            tree.get(&i.to_be_bytes()),
+            None,
+            "key {i} should be absent after removal"
+        );
+    }
+
+    // Insert new keys in the vacated range. These must route correctly
+    // through ancestors whose separator keys were updated by the cascade.
+    for i in 0..key_count / 2 {
+        tree.insert(&i.to_be_bytes(), i + 1000);
+    }
+
+    // Verify all keys (old survivors + new inserts).
+    for i in 0..key_count / 2 {
+        assert_val_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(i + 1000),
+            "re-inserted key {i} should be reachable"
+        );
+    }
+    for i in key_count / 2..key_count {
+        assert_val_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(i),
+            "surviving key {i} should still be reachable"
+        );
+    }
+
+    assert_eq!(tree.len(), key_count as usize);
+    assert_eq!(tree.coalesce_abandoned(), 0);
+}
+
+/// Verify that multiple rounds of cascade coalesce with interleaved inserts
+/// do not corrupt routing. This exercises multi-level cascade where
+/// `current_ikey` must propagate correctly across levels.
+#[test]
+fn test_multi_round_cascade_routing() {
+    let tree = TestTree::new();
+    let key_count: u64 = 300;
+
+    for i in 0..key_count {
+        tree.insert(&i.to_be_bytes(), i);
+    }
+
+    // Round 1: remove left quarter, coalesce.
+    {
+        let guard = tree.guard();
+        for i in 0..key_count / 4 {
+            let _ = tree.remove_with_guard(&i.to_be_bytes(), &guard);
+        }
+        tree.process_coalesce(&guard);
+    }
+
+    // Round 2: remove second quarter, coalesce again.
+    // This can cascade higher if round 1 already collapsed some internodes.
+    {
+        let guard = tree.guard();
+        for i in key_count / 4..key_count / 2 {
+            let _ = tree.remove_with_guard(&i.to_be_bytes(), &guard);
+        }
+        tree.process_coalesce(&guard);
+    }
+
+    // All surviving keys must be reachable.
+    for i in key_count / 2..key_count {
+        assert_val_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(i),
+            "key {i} should survive two cascade rounds"
+        );
+    }
+
+    // Re-insert into the vacated range.
+    for i in 0..key_count / 2 {
+        tree.insert(&i.to_be_bytes(), i + 5000);
+    }
+
+    for i in 0..key_count / 2 {
+        assert_val_eq!(
+            tree.get(&i.to_be_bytes()),
+            Some(i + 5000),
+            "re-inserted key {i} after multi-round cascade"
+        );
+    }
+
+    assert_eq!(tree.len(), key_count as usize);
+    assert_eq!(tree.coalesce_abandoned(), 0);
+}

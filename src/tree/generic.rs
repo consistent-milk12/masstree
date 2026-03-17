@@ -174,6 +174,21 @@ where
         Coalesce::process_batch::<P, A>(self, guard, limit)
     }
 
+    /// Number of coalesce entries permanently abandoned.
+    /// Non-zero values indicate cleanup debt from sustained contention.
+    #[must_use]
+    #[inline]
+    pub fn coalesce_abandoned(&self) -> usize {
+        self.coalesce_queue.abandoned()
+    }
+
+    /// Number of coalesce entries deferred to the next maintenance call.
+    #[must_use]
+    #[inline]
+    pub fn coalesce_deferred(&self) -> usize {
+        self.coalesce_queue.deferred_len()
+    }
+
     // ========================================================================
     //  Internal Helpers
     // ========================================================================
