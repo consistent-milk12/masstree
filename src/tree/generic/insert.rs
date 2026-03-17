@@ -1,12 +1,14 @@
 //! - `#[inline(always)]` on hot path helpers
 //! - `#[cold]` on retry/error paths
 //! - Unified slot allocation and value update logic
+//! - Strategy-based generic/write-through unification (see `InsertStrategy`)
 
 use crate::Permuter;
 use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::leaf15::KSUF_KEYLENX;
 use crate::policy::RetireHandle;
 
+use super::insert_strategy::{GenericInsert, InsertStrategy, WriteThroughInsert};
 use super::{
     FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker,
     LocalGuard, MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
@@ -270,7 +272,7 @@ where
 }
 
 // ============================================================================
-//  Write-Through Insert (Value Path)
+//  Write-Through Insert (Value Path) - delegates to unified insert_concurrent
 // ============================================================================
 
 impl<P, A> MassTreeGeneric<P, A>
@@ -280,278 +282,16 @@ where
 {
     /// Insert with deferred allocation and write-through updates.
     ///
-    /// Takes `P::Value` directly instead of pre-allocating `P::Output`.
-    /// For updates (key exists): uses write-through to modify the value
-    /// in place, returning the old value without Box allocation or retirement.
-    /// For inserts (new key): converts to `P::Output` at point of storage.
-    ///
+    /// Delegates to `insert_concurrent` with `WriteThroughInsert` strategy.
     /// Only called when `P::CAN_WRITE_THROUGH` is true.
-    ///
-    /// NOTE: This function intentionally mirrors `insert_concurrent_generic`.
-    /// The duplication exists because the two paths flow different types
-    /// (`P::Value` vs `P::Output`) through the traversal, and `P::Output`
-    /// for `BoxPolicy` is an owning pointer that cannot be cheaply dropped
-    /// if unused. Any bug fix to the traversal/locking/validation logic
-    /// must be applied to both functions.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Mirrors insert_concurrent_generic structure"
-    )]
+    #[inline(always)]
     pub(super) fn insert_concurrent_value(
         &self,
         key: &mut Key<'_>,
         value: P::Value,
         guard: &LocalGuard<'_>,
     ) -> Result<Option<P::Value>, InsertError> {
-        let single_layer_mode: bool = !key.has_suffix();
-        let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
-        let mut in_sublayer: bool = false;
-
-        'retry: loop {
-            layer_root = self.maybe_parent_generic(layer_root);
-
-            let mut leaf_ptr: *mut LeafNode15<P> =
-                self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
-
-            let (advanced_ptr, exceeded_hop_limit) =
-                self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
-
-            if exceeded_hop_limit {
-                key.unshift_all();
-                layer_root = self.load_root_ptr_generic(guard);
-                in_sublayer = false;
-                continue 'retry;
-            }
-
-            leaf_ptr = advanced_ptr;
-
-            // SAFETY: leaf_ptr is valid, protected by guard
-            let mut leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-
-            let mut pre_allocated_vec: Option<Vec<u8>> = None;
-
-            'forward: loop {
-                let has_suffix: bool = key.has_suffix();
-
-                let pre_lock_version: u32 = leaf.version().stable();
-                let pre_lock_perm: Permuter = leaf.permutation();
-                let pre_lock_perm_raw: u64 = pre_lock_perm.value();
-
-                let optimistic_search: InsertSearchResultGeneric = if single_layer_mode {
-                    self.search_for_insert_single_layer(leaf, key, &pre_lock_perm)
-                } else {
-                    self.search_for_insert_generic(leaf, key, &pre_lock_perm)
-                };
-
-                if pre_allocated_vec.is_none() && has_suffix {
-                    pre_allocated_vec = Self::maybe_pre_allocate_suffix(key, pre_lock_perm.size());
-                }
-
-                if let InsertSearchResultGeneric::Layer { slot } = optimistic_search {
-                    let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-
-                    if !layer_ptr.is_null() && !leaf.version().has_changed(pre_lock_version) {
-                        key.shift();
-                        layer_root = layer_ptr;
-                        in_sublayer = true;
-                        continue 'retry;
-                    }
-                }
-
-                let mut lock: LockGuard<'_> = leaf.version().lock_bounded();
-
-                if !self.validate_post_lock(leaf, pre_lock_version, pre_lock_perm_raw) {
-                    drop(lock);
-
-                    let (advanced_ptr, exceeded) =
-                        self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
-
-                    if exceeded {
-                        key.unshift_all();
-                        layer_root = self.load_root_ptr_generic(guard);
-                        in_sublayer = false;
-                        continue 'retry;
-                    }
-
-                    leaf_ptr = advanced_ptr;
-                    leaf = unsafe { &*leaf_ptr };
-                    continue 'forward;
-                }
-
-                if leaf.deleted_layer() {
-                    drop(lock);
-                    key.unshift_all();
-                    layer_root = self.load_root_ptr_generic(guard);
-                    in_sublayer = false;
-                    continue 'retry;
-                }
-
-                match self.validate_membership(leaf, key) {
-                    Ok(()) => {}
-                    Err(MembershipError::SplitInProgress | MembershipError::KeyMovedToSibling) => {
-                        drop(lock);
-
-                        let (advanced_ptr, exceeded) =
-                            self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
-
-                        if exceeded {
-                            key.unshift_all();
-                            layer_root = self.load_root_ptr_generic(guard);
-                            in_sublayer = false;
-                            continue 'retry;
-                        }
-
-                        leaf_ptr = advanced_ptr;
-                        leaf = unsafe { &*leaf_ptr };
-                        continue 'forward;
-                    }
-                    Err(MembershipError::KeyBelowLowerBound) => {
-                        drop(lock);
-                        continue 'retry;
-                    }
-                }
-
-                if pre_lock_perm.size() == 0 && self.can_reuse_empty_leaf(leaf, key) {
-                    let output: P::Output = P::into_output(value);
-                    let (_result, deferred_retire) = self.insert_into_empty_leaf(
-                        leaf,
-                        &mut lock,
-                        key,
-                        &output,
-                        guard,
-                        pre_allocated_vec.take(),
-                    );
-
-                    drop(lock);
-
-                    // SAFETY: deferred_retire from assign_ksuf, guard from tree's collector.
-                    unsafe { maybe_retire_suffix::<P>(deferred_retire, guard) };
-
-                    self.count.increment();
-
-                    return Ok(None);
-                }
-
-                match optimistic_search {
-                    InsertSearchResultGeneric::Found { slot } => {
-                        if leaf.is_value_empty(slot) {
-                            drop(lock);
-                            continue 'forward;
-                        }
-
-                        // HOT PATH: Write-through update. No allocation, no retirement.
-                        let old_value: P::Value =
-                            self.update_existing_value_write_through(leaf, &mut lock, slot, &value);
-
-                        drop(lock);
-
-                        return Ok(Some(old_value));
-                    }
-
-                    InsertSearchResultGeneric::NotFound { logical_pos } => {
-                        let ikey: u64 = key.ikey();
-
-                        match self.find_usable_slot(leaf, &pre_lock_perm, ikey) {
-                            FindSlotResult::Found { slot, back_offset } => {
-                                let output: P::Output = P::into_output(value);
-                                let deferred_retire: *mut u8 = self.insert_new_value(
-                                    leaf,
-                                    &mut lock,
-                                    slot,
-                                    back_offset,
-                                    logical_pos,
-                                    pre_lock_perm,
-                                    key,
-                                    &output,
-                                    guard,
-                                    pre_allocated_vec.take(),
-                                );
-
-                                drop(lock);
-
-                                // SAFETY: deferred_retire from assign_ksuf, guard from tree's collector.
-                                unsafe { maybe_retire_suffix::<P>(deferred_retire, guard) };
-
-                                self.count.increment();
-
-                                return Ok(None);
-                            }
-
-                            FindSlotResult::NeedsSplit => {
-                                let keylenx: u8 = if has_suffix {
-                                    KSUF_KEYLENX
-                                } else {
-                                    #[expect(
-                                        clippy::cast_possible_truncation,
-                                        reason = "current_len <= 8 when !has_suffix"
-                                    )]
-                                    {
-                                        key.current_len() as u8
-                                    }
-                                };
-
-                                let suffix: Option<&[u8]> =
-                                    if has_suffix { Some(key.suffix()) } else { None };
-
-                                let output: P::Output = P::into_output(value);
-                                let insert_data: SplitInsertData<'_, P> = SplitInsertData {
-                                    ikey,
-                                    keylenx,
-                                    suffix,
-                                    value: output,
-                                };
-
-                                match self.handle_leaf_split_and_insert_generic(
-                                    leaf_ptr,
-                                    lock,
-                                    logical_pos,
-                                    &insert_data,
-                                    guard,
-                                ) {
-                                    Ok(_result) => {}
-
-                                    Err(e) => {
-                                        return Err(e);
-                                    }
-                                }
-
-                                self.count.increment();
-
-                                return Ok(None);
-                            }
-                        }
-                    }
-
-                    InsertSearchResultGeneric::Layer { slot, .. } => {
-                        debug_assert!(
-                            !single_layer_mode,
-                            "single-layer search returned Layer variant"
-                        );
-
-                        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-                        drop(lock);
-
-                        key.shift();
-                        layer_root = layer_ptr;
-                        in_sublayer = true;
-                        continue 'retry;
-                    }
-
-                    InsertSearchResultGeneric::Conflict { slot } => {
-                        debug_assert!(
-                            !single_layer_mode,
-                            "single-layer search returned Conflict variant"
-                        );
-
-                        let output: P::Output = P::into_output(value);
-                        self.handle_suffix_conflict(leaf, &mut lock, slot, key, output, guard);
-                        self.count.increment();
-
-                        return Ok(None);
-                    }
-                }
-            } // end 'forward
-        } // end 'retry
+        self.insert_concurrent::<WriteThroughInsert>(key, value, guard)
     }
 }
 
@@ -653,7 +393,7 @@ where
 }
 
 // ============================================================================
-//  Main Insert Implementation
+//  Main Insert Implementation - delegates to unified insert_concurrent
 // ============================================================================
 
 impl<P, A> MassTreeGeneric<P, A>
@@ -661,20 +401,45 @@ where
     P: LeafPolicy,
     A: TreeAllocator<P>,
 {
-    /// Internal concurrent insert with optimistic locking.
+    /// Internal concurrent insert with pre-allocated output.
     ///
-    /// NOTE: `insert_concurrent_value` mirrors this function for the
-    /// write-through path. Changes here must be reflected there.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Complex concurrency logic with dual-loop structure"
-    )]
+    /// Delegates to `insert_concurrent` with `GenericInsert` strategy.
+    #[inline(always)]
     pub(super) fn insert_concurrent_generic(
         &self,
         key: &mut Key<'_>,
         value: P::Output,
         guard: &LocalGuard<'_>,
     ) -> Result<Option<P::Output>, InsertError> {
+        self.insert_concurrent::<GenericInsert>(key, value, guard)
+    }
+}
+
+// ============================================================================
+//  Unified Insert Implementation (strategy-parameterized)
+// ============================================================================
+
+impl<P, A> MassTreeGeneric<P, A>
+where
+    P: LeafPolicy,
+    A: TreeAllocator<P>,
+{
+    /// Unified concurrent insert with optimistic locking, parameterized by
+    /// `InsertStrategy` to handle both the generic (`P::Output`) and
+    /// write-through (`P::Value`) paths from a single code path.
+    ///
+    /// Monomorphization with `GenericInsert` or `WriteThroughInsert` produces
+    /// identical machine code to the original hand-duplicated functions.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Complex concurrency logic with dual-loop structure"
+    )]
+    pub(super) fn insert_concurrent<S: InsertStrategy<P, A>>(
+        &self,
+        key: &mut Key<'_>,
+        value: S::Input,
+        guard: &LocalGuard<'_>,
+    ) -> Result<Option<S::OldValue>, InsertError> {
         let single_layer_mode: bool = !key.has_suffix();
         let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
         let mut in_sublayer: bool = false;
@@ -707,7 +472,7 @@ where
 
                 let pre_lock_version: u32 = leaf.version().stable();
                 let pre_lock_perm: Permuter = leaf.permutation();
-                let pre_lock_perm_raw: u64 = pre_lock_perm.value(); // Avoid second atomic load
+                let pre_lock_perm_raw: u64 = pre_lock_perm.value();
 
                 let optimistic_search: InsertSearchResultGeneric = if single_layer_mode {
                     self.search_for_insert_single_layer(leaf, key, &pre_lock_perm)
@@ -739,7 +504,6 @@ where
                         self.advance_to_key_by_bound_generic(leaf_ptr, key, guard);
 
                     if exceeded {
-                        // Too many hops, fall back to full re-traversal
                         key.unshift_all();
                         layer_root = self.load_root_ptr_generic(guard);
                         in_sublayer = false;
@@ -786,12 +550,14 @@ where
                     }
                 }
 
+                // Empty leaf reuse (lazy coalescing optimization)
                 if pre_lock_perm.size() == 0 && self.can_reuse_empty_leaf(leaf, key) {
-                    let (result, deferred_retire) = self.insert_into_empty_leaf(
+                    let output: P::Output = S::into_output(value);
+                    let (_result, deferred_retire) = self.insert_into_empty_leaf(
                         leaf,
                         &mut lock,
                         key,
-                        &value,
+                        &output,
                         guard,
                         pre_allocated_vec.take(),
                     );
@@ -799,7 +565,7 @@ where
                     // SAFETY: deferred_retire from assign_ksuf, guard from tree's collector.
                     unsafe { maybe_retire_suffix::<P>(deferred_retire, guard) };
                     self.count.increment();
-                    return result;
+                    return Ok(None);
                 }
 
                 match optimistic_search {
@@ -809,8 +575,8 @@ where
                             continue 'forward;
                         }
 
-                        let old_value: P::Output =
-                            self.update_existing_value(leaf, &mut lock, slot, &value, guard);
+                        let old_value: S::OldValue =
+                            S::update_existing(self, leaf, &mut lock, slot, &value, guard);
 
                         drop(lock);
 
@@ -822,6 +588,7 @@ where
 
                         match self.find_usable_slot(leaf, &pre_lock_perm, ikey) {
                             FindSlotResult::Found { slot, back_offset } => {
+                                let output: P::Output = S::into_output(value);
                                 let deferred_retire: *mut u8 = self.insert_new_value(
                                     leaf,
                                     &mut lock,
@@ -830,7 +597,7 @@ where
                                     logical_pos,
                                     pre_lock_perm,
                                     key,
-                                    &value,
+                                    &output,
                                     guard,
                                     pre_allocated_vec.take(),
                                 );
@@ -859,11 +626,12 @@ where
                                 let suffix: Option<&[u8]> =
                                     if has_suffix { Some(key.suffix()) } else { None };
 
+                                let output: P::Output = S::into_output(value);
                                 let insert_data: SplitInsertData<'_, P> = SplitInsertData {
                                     ikey,
                                     keylenx,
                                     suffix,
-                                    value,
+                                    value: output,
                                 };
 
                                 match self.handle_leaf_split_and_insert_generic(
@@ -907,7 +675,8 @@ where
                             "single-layer search returned Conflict variant"
                         );
 
-                        self.handle_suffix_conflict(leaf, &mut lock, slot, key, value, guard);
+                        let output: P::Output = S::into_output(value);
+                        self.handle_suffix_conflict(leaf, &mut lock, slot, key, output, guard);
                         self.count.increment();
                         return Ok(None);
                     }

@@ -31,6 +31,7 @@ use super::remove::RemoveError;
 mod batch;
 mod entry;
 mod insert;
+mod insert_strategy;
 mod layer;
 mod optimistic_reads;
 mod search;
