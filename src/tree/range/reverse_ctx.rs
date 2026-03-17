@@ -898,14 +898,9 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             return (ScanStateBack::FindPrev, None);
         }
 
-        // Exceeded max retries
-        debug_assert!(
-            false,
-            "reposition_back exceeded MAX_REPOSITION_RETRIES ({MAX_REPOSITION_RETRIES})"
-        );
-
-        self.stack.set_leaf(StdPtr::null_mut());
-        (ScanStateBack::Up, None)
+        // Internal retries exhausted under heavy contention.
+        // Fall back to outer state machine retry (re-traverse from root).
+        (ScanStateBack::Retry, None)
     }
 }
 
