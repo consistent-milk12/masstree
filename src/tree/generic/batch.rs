@@ -354,6 +354,7 @@ where
     where
         I: IntoIterator<Item = (Vec<u8>, P::Value)>,
     {
+        self.verify_guard(guard);
         if P::CAN_WRITE_THROUGH {
             let value_result: BatchInsertResult<P::Value> =
                 self.insert_batch_values_with_guard(entries, guard);
@@ -418,6 +419,7 @@ where
         mut entries: Vec<BatchEntry<P>>,
         guard: &LocalGuard<'_>,
     ) -> BatchInsertResult<P::Output> {
+        self.verify_guard(guard);
         if entries.is_empty() {
             return BatchInsertResult::new();
         }

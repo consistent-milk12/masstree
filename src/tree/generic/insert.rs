@@ -2,14 +2,14 @@
 //! - `#[cold]` on retry/error paths
 //! - Unified slot allocation and value update logic
 
-use crate::leaf15::KSUF_KEYLENX;
-use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
-use crate::policy::RetireHandle;
 use crate::Permuter;
+use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
+use crate::leaf15::KSUF_KEYLENX;
+use crate::policy::RetireHandle;
 
 use super::{
-    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LeafPolicy, Linker, LocalGuard,
-    MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation, LAYER_KEYLENX,
+    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker,
+    LocalGuard, MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
 };
 
 use crate::leaf15::LeafNode15;

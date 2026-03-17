@@ -873,6 +873,7 @@ where
         key: &[u8],
         guard: &'g LocalGuard<'_>,
     ) -> Option<ValueRef<'g, P::Value>> {
+        self.verify_guard(guard);
         let mut search_key: Key<'_> = Key::new(key);
 
         self.get_impl(&mut search_key, guard, |ptr: *mut u8| {

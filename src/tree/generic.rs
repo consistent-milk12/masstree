@@ -201,7 +201,7 @@ where
         self.root_ptr.load(AtomicOrdering::Acquire)
     }
 
-    /// Check if the current root is a leaf node.
+    /// Verify that the guard was created from this tree's collector.
     ///
     /// # Panics
     ///
@@ -210,8 +210,15 @@ where
     /// is a bug that could lead to use-after-free.
     #[inline(always)]
     pub(crate) fn verify_guard(&self, guard: &LocalGuard<'_>) {
-        debug_assert!(
-            *guard.collector() == self.collector,
+        if *guard.collector() != self.collector {
+            Self::guard_collector_mismatch();
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn guard_collector_mismatch() -> ! {
+        panic!(
             "Guard was created from a different collector. \
              Use tree.guard() to create guards for this tree."
         );

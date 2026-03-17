@@ -267,10 +267,6 @@ impl SuffixBag {
     /// Panics if `slot >= 15`.
     #[must_use]
     #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Bounds checked via debug_assert and invariant maintenance"
-    )]
     pub fn get(&self, slot: usize) -> Option<&[u8]> {
         debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
@@ -283,12 +279,11 @@ impl SuffixBag {
         let start: usize = meta.offset as usize;
         let end: usize = start + meta.len as usize;
 
-        // INVARIANT: Valid metadata points to valid data range.
-        debug_assert!(
-            end <= self.data.len(),
-            "suffix metadata points past data end: {end} > {}",
-            self.data.len()
-        );
+        // Torn SlotMeta reads under OCC can produce out-of-range offsets.
+        // Return None so the caller's OCC retry handles it safely.
+        if end > self.data.len() {
+            return None;
+        }
 
         Some(&self.data[start..end])
     }

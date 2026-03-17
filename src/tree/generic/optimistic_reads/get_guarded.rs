@@ -26,6 +26,7 @@ where
     /// guard lifetime. That path uses `load_value_raw` with an `extract` closure.
     #[inline(always)]
     pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<P::Output> {
+        self.verify_guard(guard);
         let mut key: Key<'_> = Key::new(key);
 
         // Find root

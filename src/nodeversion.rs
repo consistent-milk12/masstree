@@ -434,29 +434,27 @@ impl NodeVersion {
     /// no data has been modified yet so returning false is correct. If writer has released,
     /// the version counter increment is detected.
     ///
-    /// # Compiler Fence
+    /// # Ordering
     ///
-    /// Critical: prevents compiler from reordering field reads past the version check.
+    /// The Acquire load ensures all prior field reads are ordered before the
+    /// version check on all architectures, not just x86/TSO.
     #[must_use]
     #[inline(always)]
     pub fn has_changed(&self, old: u32) -> bool {
-        StdAtomic::compiler_fence(Ordering::Acquire);
-        (old ^ self.value.load(Ordering::Relaxed)) > (LOCK_BIT | INSERTING_BIT)
+        (old ^ self.value.load(Ordering::Acquire)) > (LOCK_BIT | INSERTING_BIT)
     }
 
     /// Check if a split has occurred since `old`.
     ///
-    /// Includes compiler fence. See [`has_changed()`](Self::has_changed).
+    /// Includes Acquire ordering. See [`has_changed()`](Self::has_changed).
     #[must_use]
     #[inline(always)]
     pub fn has_split(&self, old: u32) -> bool {
-        StdAtomic::compiler_fence(Ordering::Acquire);
-
-        (old ^ self.value.load(Ordering::Relaxed)) >= VSPLIT_LOWBIT
+        (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
     }
 
-    /// Like [`has_split()`](Self::has_split) but without compiler fence.
-    /// Caller must ensure prior reads are already ordered (e.g., after Acquire load).
+    /// Identical to [`has_split()`](Self::has_split). Both now use Acquire loads.
+    /// Kept as a separate entry point for callers that document their ordering assumptions.
     #[must_use]
     #[inline(always)]
     pub fn has_split_no_compiler_fence(&self, old: u32) -> bool {
@@ -468,8 +466,6 @@ impl NodeVersion {
     #[must_use]
     #[inline(always)]
     pub fn has_changed_or_locked(&self, old: u32) -> bool {
-        StdAtomic::compiler_fence(Ordering::Acquire);
-
         let current: u32 = self.value.load(Ordering::Acquire);
 
         if (old ^ current) > (LOCK_BIT | INSERTING_BIT) {

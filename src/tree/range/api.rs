@@ -321,6 +321,7 @@ where
     where
         F: FnMut(&[u8], P::Output) -> bool,
     {
+        self.verify_guard(guard);
         self.scan_prefix_inner(prefix, guard, |exact_value, iter| {
             let mut count = 0;
             if let Some(value) = exact_value {
@@ -353,6 +354,7 @@ where
     where
         F: FnMut(P::Output) -> bool,
     {
+        self.verify_guard(guard);
         self.scan_prefix_inner(prefix, guard, |exact_value, iter| {
             let mut count = 0;
             if let Some(value) = exact_value {
