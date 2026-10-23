@@ -1,0 +1,26 @@
+[package]
+name = "insert-split-audit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+masstree = { path = "../.." }
+
+[[test]]
+name = "prepend"
+path = "tests/prepend.rs"
+
+[[test]]
+name = "equal_run"
+path = "tests/equal_run.rs"
+
+[[test]]
+name = "equal_run2"
+path = "tests/equal_run2.rs"
+
+[[test]]
+name = "prepend_impact"
+path = "tests/prepend_impact.rs"
+
+[workspace]
+

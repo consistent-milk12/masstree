@@ -1,0 +1,14 @@
+[package]
+name = "range-repro"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+masstree = { path = "../..", default-features = true }
+
+[[bin]]
+name = "repro"
+path = "src/main.rs"
+
+[workspace]
+

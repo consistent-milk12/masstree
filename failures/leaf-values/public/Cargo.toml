@@ -1,0 +1,9 @@
+[package]
+name = "leaf-values-repro"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+masstree = { path = "../../.." }
+
+[workspace]

@@ -1,0 +1,1 @@
+{"label": "library", "command": ["cargo", "test", "--offline", "--lib"], "cwd": "/home/saad/Desktop/Programming/masstree", "exit": 0, "log": "lib-test.log"}

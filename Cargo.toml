@@ -2,7 +2,6 @@
 name = "masstree"
 version = "0.9.5"
 edition = "2024"
-rust-version = "1.92.0"
 authors = ["consistent-milk12"]
 description = "A high-performance concurrent ordered map (trie of B+trees)"
 license = "MIT"

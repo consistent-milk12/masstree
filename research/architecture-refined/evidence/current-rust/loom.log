@@ -1,0 +1,22 @@
+   Compiling alloca v0.4.0
+   Compiling criterion v0.8.2
+   Compiling masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.21s
+     Running unittests src/lib.rs (target/debug/deps/masstree-938f1678a7a44e11)
+
+running 12 tests
+test nodeversion::loom_tests::test_loom_version_visibility ... ok
+test inline::loom_tests::test_loom_concurrent_reads ... ok
+test internode::loom_tests::test_loom_find_position_concurrent_reads ... ok
+test inline::loom_tests::test_loom_read_clear_read ... ok
+test inline::loom_tests::test_loom_read_during_clear ... ok
+test inline::loom_tests::test_loom_read_during_assign ... ok
+test nodeversion::loom_tests::test_loom_try_lock_fails_when_held ... ok
+test internode::loom_tests::test_loom_find_position_during_insert ... ok
+test nodeversion::loom_tests::test_loom_stable_waits_for_dirty ... ok
+test nodeversion::loom_tests::test_loom_mutual_exclusion ... ok
+test internode::loom_tests::test_loom_concurrent_reads_different_keys ... ok
+test inline::loom_tests::test_loom_multiple_writers_readers ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 610 filtered out; finished in 1.88s
+

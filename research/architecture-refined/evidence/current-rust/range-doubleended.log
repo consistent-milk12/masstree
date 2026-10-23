@@ -1,0 +1,6 @@
+forward=[Some([97]), Some([98]), Some([99]), None]
+backward_after_exhaustion=[[99], [98], [97]]
+
+thread 'main' (1251) panicked at src/bin/doubleended.rs:25:5:
+assertion failed: backward_after_exhaustion.is_empty()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

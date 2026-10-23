@@ -1,0 +1,24 @@
+   Compiling masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+   Compiling audit-remove-coalesce v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/remove-coalesce)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.51s
+     Running tests/sublayer_leak.rs (/tmp/masstree-doc-review/target/debug/deps/sublayer_leak-abe430e43e7f951f)
+
+running 1 test
+before: live leaves=4, live inodes=1
+after: live leaves=4, live inodes=1, pending=0, deferred=0, abandoned=3
+
+thread 'promoted_sublayer_is_leaked' (3806) panicked at tests/sublayer_leak.rs:136:5:
+assertion `left == right` failed: leaked 3 sublayer leaf/leaves (abandoned=3)
+  left: 4
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test promoted_sublayer_is_leaked ... FAILED
+
+failures:
+
+failures:
+    promoted_sublayer_is_leaked
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--test sublayer_leak`

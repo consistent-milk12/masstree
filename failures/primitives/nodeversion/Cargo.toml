@@ -1,0 +1,14 @@
+[package]
+name = "primitives-repro"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+masstree = { path = "../../.." }
+
+[profile.dev]
+debug-assertions = false
+overflow-checks = false
+
+[workspace]
+

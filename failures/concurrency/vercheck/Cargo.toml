@@ -1,0 +1,11 @@
+[package]
+name = "vercheck"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+masstree = { path = "../../.." }
+seize = "0.5.1"
+
+[workspace]
+

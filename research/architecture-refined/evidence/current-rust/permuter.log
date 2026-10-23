@@ -1,0 +1,2 @@
+before raw=0x56432105 size=5 slots=[0, 1, 2, 3, 4, 6, 5]
+after  raw=0x56432105643214 size=4 slots=[1, 2, 3, 4, 6, 5, 0] bits_above_width=0x56432100000000

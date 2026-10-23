@@ -1,0 +1,3 @@
+a..b: vals n=2 [1, 2] | keyed n=1 [[97]]
+a..a: vals n=2 [1, 2] | keyed n=1 [[97]]
+b..c empty-ish: vals n=1 [2] | keyed n=0 []

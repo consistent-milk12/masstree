@@ -1,0 +1,64 @@
+    Checking masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+error: used `debug_assert!` to check that a value is not empty
+   --> src/tree/coalesce.rs:774:9
+    |
+774 |         debug_assert!(!route.is_empty());
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#assert_is_empty
+    = note: `-D clippy::assert-is-empty` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::assert_is_empty)]`
+help: use `debug_assert_ne!` to show the value on failure
+    |
+774 -         debug_assert!(!route.is_empty());
+774 +         debug_assert_ne!(route.as_slice(), []);
+    |
+
+error: could not compile `masstree` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: used `assert!` with an equality comparison
+   --> src/nodeversion/unit_tests.rs:435:5
+    |
+435 |     assert!((v & DIRTY_MASK) == 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_assert_eq
+    = note: `-D clippy::manual-assert-eq` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_assert_eq)]`
+help: replace it with `assert_eq!(..)`
+    |
+435 -     assert!((v & DIRTY_MASK) == 0);
+435 +     assert_eq!((v & DIRTY_MASK), 0);
+    |
+
+error: used `assert!` with an equality comparison
+   --> src/nodeversion/unit_tests.rs:460:5
+    |
+460 |     assert!((stable & DIRTY_MASK) == 0);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_assert_eq
+help: replace it with `assert_eq!(..)`
+    |
+460 -     assert!((stable & DIRTY_MASK) == 0);
+460 +     assert_eq!((stable & DIRTY_MASK), 0);
+    |
+
+error: avoid using `collect()` when not needed
+   --> src/tree/range/iterator/unit_tests.rs:127:49
+    |
+127 |     let items: Vec<_> = tree.iter(&guard).rev().collect();
+    |                                                 ^^^^^^^
+128 |     assert!(items.is_empty());
+    |             ---------------- the iterator could be used here instead
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_collect
+    = note: `-D clippy::needless-collect` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_collect)]`
+help: check if the original Iterator has anything instead of collecting it and seeing if it's empty
+    |
+127 ~     
+128 ~     assert!(tree.iter(&guard).rev().next().is_none());
+    |
+
+error: could not compile `masstree` (lib test) due to 4 previous errors

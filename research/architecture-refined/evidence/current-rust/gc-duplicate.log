@@ -1,0 +1,10 @@
+   Compiling audit-remove-coalesce v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/remove-coalesce)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running tests/double_unlink_deterministic.rs (/tmp/masstree-doc-review/target/debug/deps/double_unlink_deterministic-16f3bf291ff42ec6)
+
+running 1 test
+WEDGED: process_coalesce did not return
+error: test failed, to rerun pass `--test double_unlink_deterministic`
+
+Caused by:
+  process didn't exit successfully: `/tmp/masstree-doc-review/target/debug/deps/double_unlink_deterministic-16f3bf291ff42ec6 --nocapture` (exit status: 42)

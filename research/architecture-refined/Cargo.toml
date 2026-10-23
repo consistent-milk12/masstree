@@ -1,0 +1,26 @@
+[package]
+name = "masstree-architecture-evidence"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+sidecar-suffix = ["masstree/sidecar-suffix"]
+small-suffix-capacity = ["masstree/small-suffix-capacity"]
+
+[dependencies]
+masstree = { path = "../..", default-features = false }
+
+[dev-dependencies]
+loom = "=0.7.2"
+
+[[bin]]
+name = "layout_probe"
+path = "src/bin/layout_probe.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

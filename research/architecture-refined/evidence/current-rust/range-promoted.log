@@ -1,0 +1,27 @@
+all=40
+start idx 0: inc_ok=true n=40 exc_ok=true
+  pfx full: got=1 exp=1 ok=true
+  rev_ok=true
+start idx 5: inc_ok=true n=35 exc_ok=true
+  pfx full: got=1 exp=1 ok=true
+  rev_ok=true
+start idx 15: inc_ok=false n=24 exc_ok=true
+  inc first=Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 16]) expfirst=Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 15])
+  pfx full: got=0 exp=1 ok=false
+  rev_ok=true
+start idx 16: inc_ok=false n=23 exc_ok=true
+  inc first=Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 17]) expfirst=Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 16])
+  pfx full: got=0 exp=1 ok=false
+  rev_ok=true
+start idx 20: inc_ok=false n=19 exc_ok=true
+  inc first=Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 21]) expfirst=Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 20])
+  pfx full: got=0 exp=1 ok=false
+  rev_ok=true
+start idx 30: inc_ok=false n=9 exc_ok=true
+  inc first=Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 31]) expfirst=Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 30])
+  pfx full: got=0 exp=1 ok=false
+  rev_ok=true
+start idx 39: inc_ok=false n=0 exc_ok=true
+  inc first=None expfirst=Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 39])
+  pfx full: got=0 exp=1 ok=false
+  rev_ok=true

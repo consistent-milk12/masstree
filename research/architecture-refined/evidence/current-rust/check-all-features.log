@@ -1,0 +1,4 @@
+   Compiling libmimalloc-sys v0.1.44
+    Checking mimalloc v0.1.48
+    Checking masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.84s

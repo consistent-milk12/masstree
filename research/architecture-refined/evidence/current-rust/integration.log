@@ -1,0 +1,76 @@
+   Compiling alloca v0.4.0
+   Compiling masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+   Compiling criterion v0.8.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.43s
+     Running tests/batch_insert_tests.rs (target/debug/deps/batch_insert_tests-81c87a659e8177dc)
+
+running 28 tests
+test test_batch_arc_mode_old_value_type ... ok
+test test_batch_insert_mixed_with_single_inserts ... ok
+test test_batch_insert_multiple_entries ... ok
+test test_batch_insert_random_keys ... ok
+test test_batch_insert_reverse_sequential ... ok
+test test_batch_insert_same_ikey_different_keylen ... ok
+test test_batch_insert_empty ... ok
+test test_batch_insert_empty_key ... ok
+test test_batch_insert_duplicate_keys_in_batch ... ok
+test test_batch_inline_mode_old_value_type ... ok
+test test_batch_insert_inline_with_updates ... ok
+test test_batch_insert_inline_u64 ... ok
+test test_batch_insert_masstree15 ... ok
+test test_batch_insert_short_keys ... ok
+test test_batch_insert_single_entry ... ok
+test test_batch_insert_long_keys ... ok
+test test_batch_insert_then_read_same_guard ... ok
+test test_batch_insert_all_updates ... ok
+test test_batch_insert_shared_prefix ... ok
+test test_batch_insert_triggers_single_split ... ok
+test test_batch_insert_triggers_multiple_splits ... ok
+test test_batch_insert_with_guard ... ok
+test test_batch_result_total ... ok
+test test_batch_insert_concurrent_batches ... ok
+test test_batch_insert_with_updates ... ok
+test test_batch_result_all_succeeded ... ok
+test test_batch_insert_sequential_keys ... ok
+test test_batch_insert_large_batch ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/leak_tests.rs (target/debug/deps/leak_tests-278ba87705d0f5aa)
+
+running 20 tests
+test box_values::single_sublayer_insert_remove ... ok
+test box_values::partial_sublayer_removal ... ok
+test box_values::twig_chain_two_levels ... ok
+test inline_values::drop_with_pending_coalesce ... ok
+test box_values::twig_chain_three_levels ... ok
+test box_values::mixed_depth_remove_all ... ok
+test box_values::drop_with_pending_coalesce ... ok
+test box_values::remove_all_then_reinsert ... ok
+test box_values::insert_remove_cycle_twig ... ok
+test inline_values::insert_remove_cycle_twig ... ok
+test box_values::sublayer_remove_all_keys ... ok
+test box_values::multiple_independent_sublayers ... ok
+test inline_values::mixed_depth_remove_all ... ok
+test inline_values::partial_sublayer_removal ... ok
+test inline_values::multiple_independent_sublayers ... ok
+test inline_values::remove_all_then_reinsert ... ok
+test inline_values::single_sublayer_insert_remove ... ok
+test inline_values::sublayer_remove_all_keys ... ok
+test inline_values::twig_chain_three_levels ... ok
+test inline_values::twig_chain_two_levels ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/true_inline.rs (target/debug/deps/true_inline-2142a4e938e5afc4)
+
+running 6 tests
+test masstree15_inline_no_leak_with_long_keys ... ok
+test inline_scan_batch_multi_layer ... ok
+test inline_scan_intra_leaf_batch ... ok
+test inline_scan_batch_range ... ok
+test inline_scan_batch_early_stop ... ok
+test inline_scan_for_each ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

@@ -1,0 +1,15 @@
+[package]
+name = "audit-remove-coalesce"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+masstree = { path = "../..", default-features = false }
+seize = "0.5.1"
+
+[profile.release]
+debug = true
+overflow-checks = true
+
+[workspace]
+

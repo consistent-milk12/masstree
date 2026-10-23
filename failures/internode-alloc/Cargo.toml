@@ -1,0 +1,10 @@
+[package]
+name = "leakprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+masstree = { path = "../.." }
+
+[workspace]
+

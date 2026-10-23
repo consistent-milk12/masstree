@@ -1,0 +1,48 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+   Doc-tests masstree
+
+running 34 tests
+test src/lib.rs - (line 45) ... ok
+test src/tree/range.rs - tree::range (line 25) ... ignored
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::first (line 118) ... ignored
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::iter (line 83) ... ignored
+test src/tree/generic.rs - tree::generic::MassTreeGeneric<P,A>::entry_with_guard (line 886) ... ok
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::keys (line 93) ... ignored
+test src/tree.rs - tree::MassTree15 (line 236) ... ok
+test src/tree/generic.rs - tree::generic::MassTreeGeneric<P,A>::remove (line 773) ... ok
+test src/tree/generic/entry.rs - tree::generic::entry::Entry (line 31) ... ok
+test src/lib.rs - (line 18) ... ok
+test src/tree/generic.rs - tree::generic::MassTreeGeneric<P,A>::extend (line 985) ... ok
+test src/tree.rs - tree::MassTree (line 220) ... ok
+test src/tree/generic.rs - tree::generic::MassTreeGeneric<P,A>::from_iter (line 943) ... ok
+test src/tree/generic/batch.rs - tree::generic::batch::MassTreeGeneric<P,A>::insert_batch (line 653) ... ok
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::last (line 143) ... ignored
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::range (line 36) ... ignored
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::scan (line 174) ... ignored
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::scan_intra_leaf_batch (line 205) ... ignored
+test src/tree.rs - tree::batch (line 35) ... ok
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::scan_prefix (line 309) ... ignored
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::scan_rev_batch (line 231) ... ignored
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::scan_values (line 265) ... ignored
+test src/tree/range/api.rs - tree::range::api::MassTreeGeneric<P,A>::values (line 103) ... ignored
+test src/tree/range/api_ref.rs - tree::range::api_ref::MassTreeGeneric<P,A>::scan_batch_ref (line 72) ... ignored
+test src/tree/range/api_ref.rs - tree::range::api_ref::MassTreeGeneric<P,A>::scan_intra_leaf_batch_ref (line 100) ... ignored
+test src/tree/range/api_ref.rs - tree::range::api_ref::MassTreeGeneric<P,A>::scan_ref (line 44) ... ignored
+test src/tree/range/api_ref.rs - tree::range::api_ref::MassTreeGeneric<P,A>::scan_rev_batch_ref (line 128) ... ignored
+test src/tree/generic/entry.rs - tree::generic::entry::Entry<'t,'e,P,A>::or_insert (line 118) ... ok
+test src/tree/range/iterator.rs - tree::range::iterator::RangeIter (line 73) - compile ... ok
+test src/tree/range/iterator/batch_forward.rs - tree::range::iterator::batch_forward::RangeIter<'_,'_,P,A>::try_for_each_ref (line 315) ... ignored
+test src/tree/range/iterator/range_bound.rs - tree::range::iterator::range_bound::RangeBound (line 21) ... ignored
+test src/tree/range/iterator/batch_forward.rs - tree::range::iterator::batch_forward::RangeIter<'_,'_,P,A>::for_each_values_batch (line 279) - compile ... ok
+test src/tree/range/iterator/scan_entry.rs - tree::range::iterator::scan_entry::ScanEntry (line 13) ... ignored
+test src/tree/split/propagation_context.rs - tree::split::propagation_context::PropagationContext (line 18) ... ignored
+
+test result: ok. 14 passed; 0 failed; 20 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test src/tree/range/api_ref.rs - tree::range::api_ref (line 6) - compile fail ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+all doctests ran in 0.67s; merged doctests compilation took 0.61s

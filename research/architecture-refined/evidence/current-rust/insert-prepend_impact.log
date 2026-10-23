@@ -1,0 +1,78 @@
+   Compiling insert-split-audit v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/insert-split)
+warning: unused variable: `bg`
+  --> src/bin/livelock2.rs:23:9
+   |
+23 |     let bg = thread::spawn(move || {
+   |         ^^ help: if this is intentional, prefix it with an underscore: `_bg`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mon`
+  --> src/bin/livelock2.rs:31:9
+   |
+31 |     let mon = thread::spawn(move || {
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_mon`
+
+warning: `insert-split-audit` (bin "livelock2") generated 2 warnings (run `cargo fix --bin "livelock2" -p insert-split-audit` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running tests/prepend_impact.rs (/tmp/masstree-doc-review/target/debug/deps/prepend_impact-453c12d1d21c0aff)
+
+running 1 test
+--- after split: 16 entries, len_counter=16
+  [65, 65, 65] => 16
+  [65, 65, 65, 65, 65, 65, 65, 65] => 1
+  [65, 65, 65, 65, 65, 65, 65, 65, 65] => 2
+  [66] => 100
+  [67] => 101
+  [68] => 102
+  [69] => 103
+  [70] => 104
+  [71] => 105
+  [72] => 106
+  [73] => 107
+  [74] => 108
+  [75] => 109
+  [76] => 110
+  [77] => 111
+  [78] => 112
+get original = None
+second insert old = None
+--- after duplicate insert: 16 entries, len_counter=17
+  [65, 65, 65] => 16
+  [65, 65, 65, 65, 65, 65, 65, 65] => 1
+  [65, 65, 65, 65, 65, 65, 65, 65, 65] => 2
+  [66] => 100
+  [67] => 101
+  [68] => 102
+  [69] => 103
+  [70] => 104
+  [71] => 105
+  [72] => 106
+  [73] => 107
+  [74] => 108
+  [75] => 109
+  [76] => 110
+  [77] => 111
+  [78] => 112
+remove -> Ok(Some(77))
+--- after remove: 16 entries, len_counter=16
+  [65, 65, 65] => 16
+  [65, 65, 65, 65, 65, 65, 65, 65] => 1
+  [65, 65, 65, 65, 65, 65, 65, 65, 65] => 2
+  [66] => 100
+  [67] => 101
+  [68] => 102
+  [69] => 103
+  [70] => 104
+  [71] => 105
+  [72] => 106
+  [73] => 107
+  [74] => 108
+  [75] => 109
+  [76] => 110
+  [77] => 111
+  [78] => 112
+test prepend_split_lost_key_consequences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

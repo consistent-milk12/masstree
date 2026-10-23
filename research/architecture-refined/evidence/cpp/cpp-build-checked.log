@@ -1,0 +1,27 @@
+CONFIG_FILES= /bin/sh ./config.status
+config.status: creating config.h
+config.status: config.h is unchanged
+echo > stamp-h
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/mttest.d -MP -include config.h -c -o mttest.o mttest.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/misc.d -MP -include config.h -c -o misc.o misc.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/checkpoint.d -MP -include config.h -c -o checkpoint.o checkpoint.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/query_masstree.d -MP -include config.h -c -o query_masstree.o query_masstree.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/value_string.d -MP -include config.h -c -o value_string.o value_string.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/value_array.d -MP -include config.h -c -o value_array.o value_array.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/value_versioned_array.d -MP -include config.h -c -o value_versioned_array.o value_versioned_array.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/string_slice.d -MP -include config.h -c -o string_slice.o string_slice.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/testrunner.d -MP -include config.h -c -o testrunner.o testrunner.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/kvio.d -MP -include config.h -c -o kvio.o kvio.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/json.d -MP -include config.h -c -o json.o json.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/string.d -MP -include config.h -c -o string.o string.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/straccum.d -MP -include config.h -c -o straccum.o straccum.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/str.d -MP -include config.h -c -o str.o str.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/msgpack.d -MP -include config.h -c -o msgpack.o msgpack.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/clp.d -MP -include config.h -c -o clp.o clp.c
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/kvrandom.d -MP -include config.h -c -o kvrandom.o kvrandom.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/compiler.d -MP -include config.h -c -o compiler.o compiler.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/memdebug.d -MP -include config.h -c -o memdebug.o memdebug.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/kvthread.d -MP -include config.h -c -o kvthread.o kvthread.cc
+ar cr libjson.a json.o string.o straccum.o str.o msgpack.o clp.o kvrandom.o compiler.o memdebug.o kvthread.o
+ranlib libjson.a
+g++ -g -W -Wall -O3 -pthread -o mttest mttest.o misc.o checkpoint.o query_masstree.o value_string.o value_array.o value_versioned_array.o string_slice.o testrunner.o kvio.o libjson.a   -lm

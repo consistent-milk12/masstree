@@ -1,3 +1,4 @@
-target/
+# Rust build artifacts, including standalone crates under failures/ and research/
+**/target/
 .git/
 

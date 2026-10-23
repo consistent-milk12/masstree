@@ -1,0 +1,55 @@
+CONFIG_FILES= /bin/sh ./config.status
+mkdir -p .deps
+touch .deps/stamp
+config.status: creating config.h
+config.status: config.h is unchanged
+echo > stamp-h
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/mttest.d -MP -include config.h -c -o mttest.o mttest.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/misc.d -MP -include config.h -c -o misc.o misc.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/checkpoint.d -MP -include config.h -c -o checkpoint.o checkpoint.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/query_masstree.d -MP -include config.h -c -o query_masstree.o query_masstree.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/value_string.d -MP -include config.h -c -o value_string.o value_string.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/value_array.d -MP -include config.h -c -o value_array.o value_array.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/value_versioned_array.d -MP -include config.h -c -o value_versioned_array.o value_versioned_array.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/string_slice.d -MP -include config.h -c -o string_slice.o string_slice.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/testrunner.d -MP -include config.h -c -o testrunner.o testrunner.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/kvio.d -MP -include config.h -c -o kvio.o kvio.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/json.d -MP -include config.h -c -o json.o json.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/string.d -MP -include config.h -c -o string.o string.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/straccum.d -MP -include config.h -c -o straccum.o straccum.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/str.d -MP -include config.h -c -o str.o str.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/msgpack.d -MP -include config.h -c -o msgpack.o msgpack.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/clp.d -MP -include config.h -c -o clp.o clp.c
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/kvrandom.d -MP -include config.h -c -o kvrandom.o kvrandom.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/compiler.d -MP -include config.h -c -o compiler.o compiler.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/memdebug.d -MP -include config.h -c -o memdebug.o memdebug.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/kvthread.d -MP -include config.h -c -o kvthread.o kvthread.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/unit-mt.d -MP -include config.h -c -o unit-mt.o unit-mt.cc
+g++  -g -W -Wall -O3 -pthread -MD -MF .deps/scantest.d -MP -include config.h -c -o scantest.o scantest.cc
+ar cr libjson.a json.o string.o straccum.o str.o msgpack.o clp.o kvrandom.o compiler.o memdebug.o kvthread.o
+ranlib libjson.a
+scantest.cc:6:26: error: conflicting declaration ‘volatile mrcu_epoch_type globalepoch’
+    6 | volatile mrcu_epoch_type globalepoch = 1; // global epoch, updated by main thread regularly
+      |                          ^~~~~~~~~~~
+In file included from kvrow.hh:18,
+                 from query_masstree.hh:19,
+                 from scantest.cc:1:
+kvthread.hh:34:40: note: previous declaration as ‘relaxed_atomic<long unsigned int> globalepoch’
+   34 | extern relaxed_atomic<mrcu_epoch_type> globalepoch;  // global epoch, updated regularly
+      |                                        ^~~~~~~~~~~
+unit-mt.cc:167:26: error: conflicting declaration ‘volatile mrcu_epoch_type active_epoch’
+  167 | volatile mrcu_epoch_type active_epoch = 1;
+      |                          ^~~~~~~~~~~~
+In file included from unit-mt.cc:12:
+kvthread.hh:35:40: note: previous declaration as ‘relaxed_atomic<long unsigned int> active_epoch’
+   35 | extern relaxed_atomic<mrcu_epoch_type> active_epoch;
+      |                                        ^~~~~~~~~~~~
+unit-mt.cc:168:19: error: conflicting declaration ‘volatile uint64_t globalepoch’
+  168 | volatile uint64_t globalepoch = 1;
+      |                   ^~~~~~~~~~~
+kvthread.hh:34:40: note: previous declaration as ‘relaxed_atomic<long unsigned int> globalepoch’
+   34 | extern relaxed_atomic<mrcu_epoch_type> globalepoch;  // global epoch, updated regularly
+      |                                        ^~~~~~~~~~~
+make: *** [GNUmakefile:30: scantest.o] Error 1
+make: *** Waiting for unfinished jobs....
+make: *** [GNUmakefile:30: unit-mt.o] Error 1

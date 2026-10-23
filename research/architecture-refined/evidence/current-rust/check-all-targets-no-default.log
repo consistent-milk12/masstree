@@ -1,0 +1,57 @@
+    Checking masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+error[E0277]: `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>` doesn't implement `std::fmt::Display`
+  --> examples/print_tree.rs:17:15
+   |
+17 |     println!("{tree}");
+   |               ^^^^^^ `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>` cannot be formatted with the default formatter
+   |
+   = help: the trait `std::fmt::Display` is not implemented for `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>`
+   = note: in format strings you may be able to use `{:?}` (or `{:#?}` for pretty-print) instead
+   = note: the full name for the type has been written to '/home/saad/Desktop/Programming/masstree/target/debug/examples/print_tree-ab8199f826a5c564.long-type-6917008438079727321.txt'
+   = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>` doesn't implement `std::fmt::Display`
+  --> examples/print_tree.rs:29:15
+   |
+29 |     println!("{tree}");
+   |               ^^^^^^ `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>` cannot be formatted with the default formatter
+   |
+   = help: the trait `std::fmt::Display` is not implemented for `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>`
+   = note: in format strings you may be able to use `{:?}` (or `{:#?}` for pretty-print) instead
+   = note: the full name for the type has been written to '/home/saad/Desktop/Programming/masstree/target/debug/examples/print_tree-ab8199f826a5c564.long-type-6917008438079727321.txt'
+   = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>` doesn't implement `std::fmt::Display`
+  --> examples/print_tree.rs:41:15
+   |
+41 |     println!("{tree2}");
+   |               ^^^^^^^ `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>` cannot be formatted with the default formatter
+   |
+   = help: the trait `std::fmt::Display` is not implemented for `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>`
+   = note: in format strings you may be able to use `{:?}` (or `{:#?}` for pretty-print) instead
+   = note: the full name for the type has been written to '/home/saad/Desktop/Programming/masstree/target/debug/examples/print_tree-ab8199f826a5c564.long-type-6917008438079727321.txt'
+   = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>` doesn't implement `std::fmt::Display`
+  --> examples/print_tree.rs:54:15
+   |
+54 |     println!("{tree3}");
+   |               ^^^^^^^ `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>` cannot be formatted with the default formatter
+   |
+   = help: the trait `std::fmt::Display` is not implemented for `MassTreeGeneric<InlinePolicy<u64>, SeizeAllocator<InlinePolicy<u64>>>`
+   = note: in format strings you may be able to use `{:?}` (or `{:#?}` for pretty-print) instead
+   = note: the full name for the type has been written to '/home/saad/Desktop/Programming/masstree/target/debug/examples/print_tree-ab8199f826a5c564.long-type-6917008438079727321.txt'
+   = note: consider using `--verbose` to print the full type name to the console
+
+error[E0277]: `MassTreeGeneric<BoxPolicy<String>, SeizeAllocator<BoxPolicy<String>>>` doesn't implement `std::fmt::Display`
+  --> examples/print_tree.rs:68:15
+   |
+68 |     println!("{tree4}");
+   |               ^^^^^^^ `MassTreeGeneric<BoxPolicy<String>, SeizeAllocator<BoxPolicy<String>>>` cannot be formatted with the default formatter
+   |
+   = help: the trait `std::fmt::Display` is not implemented for `MassTreeGeneric<BoxPolicy<String>, SeizeAllocator<BoxPolicy<String>>>`
+   = note: in format strings you may be able to use `{:?}` (or `{:#?}` for pretty-print) instead
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `masstree` (example "print_tree") due to 5 previous errors
+warning: build failed, waiting for other jobs to finish...

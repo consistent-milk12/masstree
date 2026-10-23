@@ -1,0 +1,38 @@
+   Compiling leaf-values-repro v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/leaf-values/public)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running `/home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner /tmp/masstree-doc-review/target-miri/miri/x86_64-unknown-linux-gnu/debug/padded_write_through`
+error: Undefined Behavior: reading memory at alloc4515[0x0..0x8], but memory is uninitialized at [0x4..0x8], and this operation requires initialized memory
+  --> /home/saad/Desktop/Programming/masstree/src/policy/box_values.rs:34:42
+   |
+34 |             8 => StdMem::transmute_copy(&(*$ptr.cast::<AtomicU64>()).load($ordering)),
+   |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Undefined Behavior occurred here
+...
+72 |     unsafe { atomic_load_dispatch!(ptr, ordering) }
+   |              ------------------------------------ in this macro invocation
+   |
+   = help: this indicates a bug in the program: it performed an invalid operation, and caused Undefined Behavior
+   = help: see https://doc.rust-lang.org/nightly/reference/behavior-considered-undefined.html for further information
+   = note: stack backtrace:
+           0: masstree::policy::box_values::atomic_read_value::<Padded>
+               at /home/saad/Desktop/Programming/masstree/src/policy/box_values.rs:34:42: 34:85
+           1: <masstree::BoxPolicy<Padded> as masstree::LeafPolicy>::clone_value_from_output
+               at /home/saad/Desktop/Programming/masstree/src/policy.rs:792:22: 792:78
+           2: masstree::tree::generic::optimistic_reads::<impl masstree::MassTreeGeneric<masstree::BoxPolicy<Padded>, masstree::SeizeAllocator<masstree::BoxPolicy<Padded>>>>::get::{closure#0}
+               at /home/saad/Desktop/Programming/masstree/src/tree/generic/optimistic_reads.rs:494:27: 494:62
+           3: std::option::Option::<masstree::ValuePtr<Padded>>::map::<Padded, {closure@masstree::tree::generic::optimistic_reads::<impl masstree::MassTreeGeneric<masstree::BoxPolicy<Padded>, masstree::SeizeAllocator<masstree::BoxPolicy<Padded>>>>::get::{closure#0}}>
+               at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1165:29: 1165:33
+           4: masstree::tree::generic::optimistic_reads::<impl masstree::MassTreeGeneric<masstree::BoxPolicy<Padded>, masstree::SeizeAllocator<masstree::BoxPolicy<Padded>>>>::get
+               at /home/saad/Desktop/Programming/masstree/src/tree/generic/optimistic_reads.rs:493:9: 494:63
+           5: main
+               at src/bin/padded_write_through.rs:15:15: 15:29
+   = note: this error originates in the macro `atomic_load_dispatch` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+Uninitialized memory occurred at alloc4515[0x4..0x8], in this allocation:
+alloc4515 (Rust heap, size: 8, align: 8) {
+    07 00 00 00 __ __ __ __                         │ ....░░░░
+}
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+

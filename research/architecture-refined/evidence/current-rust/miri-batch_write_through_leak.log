@@ -1,0 +1,37 @@
+   Compiling leaf-values-repro v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/leaf-values/public)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `/home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner /tmp/masstree-doc-review/target-miri/miri/x86_64-unknown-linux-gnu/debug/batch_write_through_leak`
+error: memory leaked: alloc6546 (Rust heap, size: 8, align: 8), allocated here:
+   --> /home/saad/Desktop/Programming/masstree/src/policy.rs:777:41
+    |
+777 |         let ptr: *mut V = Box::into_raw(Box::new(value));
+    |                                         ^^^^^^^^^^^^^^^
+    |
+    = note: stack backtrace:
+            0: <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output
+                at /home/saad/Desktop/Programming/masstree/src/policy.rs:777:41: 777:56
+            1: <fn(<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Value) -> <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Output {<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output} as std::ops::FnMut<(u64,)>>::call_mut - shim(fn(<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Value) -> <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Output {<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output})
+                at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:166:5: 166:75
+            2: <std::iter::Map<std::vec::IntoIter<u64>, fn(<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Value) -> <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Output {<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output}> as std::iter::Iterator>::__iterator_get_unchecked
+                at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:138:18: 138:66
+            3: <std::iter::Map<std::vec::IntoIter<u64>, fn(<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Value) -> <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Output {<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output}> as std::vec::in_place_collect::SpecInPlaceCollect<masstree::ValuePtr<u64>, std::iter::Map<std::vec::IntoIter<u64>, fn(<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Value) -> <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Output {<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output}>>>::collect_in_place
+                at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/in_place_collect.rs:404:33: 404:65
+            4: std::vec::in_place_collect::from_iter_in_place::<std::iter::Map<std::vec::IntoIter<u64>, fn(<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Value) -> <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Output {<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output}>, masstree::ValuePtr<u64>>
+                at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/in_place_collect.rs:270:9: 270:97
+            5: std::vec::in_place_collect::<impl std::vec::spec_from_iter::SpecFromIter<masstree::ValuePtr<u64>, std::iter::Map<std::vec::IntoIter<u64>, fn(<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Value) -> <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Output {<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output}>> for std::vec::Vec<masstree::ValuePtr<u64>>>::from_iter
+                at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/in_place_collect.rs:245:9: 245:22
+            6: <std::vec::Vec<masstree::ValuePtr<u64>> as std::iter::FromIterator<masstree::ValuePtr<u64>>>::from_iter::<std::iter::Map<std::vec::IntoIter<u64>, fn(<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Value) -> <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Output {<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output}>>
+                at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4109:9: 4109:76
+            7: <std::iter::Map<std::vec::IntoIter<u64>, fn(<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Value) -> <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::Output {<masstree::BoxPolicy<u64> as masstree::LeafPolicy>::into_output}> as std::iter::Iterator>::collect::<std::vec::Vec<masstree::ValuePtr<u64>>>
+                at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2100:9: 2100:38
+            8: masstree::tree::generic::batch::<impl masstree::MassTreeGeneric<masstree::BoxPolicy<u64>, masstree::SeizeAllocator<masstree::BoxPolicy<u64>>>>::insert_batch_with_guard::<std::vec::Vec<(std::vec::Vec<u8>, u64)>>
+                at /home/saad/Desktop/Programming/masstree/src/tree/generic/batch.rs:721:29: 725:31
+            9: main
+                at src/bin/batch_write_through_leak.rs:9:18: 9:83
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+note: set `MIRIFLAGS=-Zmiri-ignore-leaks` to disable this check
+
+error: aborting due to 1 previous error
+

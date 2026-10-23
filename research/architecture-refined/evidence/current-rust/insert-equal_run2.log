@@ -1,0 +1,38 @@
+   Compiling insert-split-audit v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/insert-split)
+warning: unused variable: `bg`
+  --> src/bin/livelock2.rs:23:9
+   |
+23 |     let bg = thread::spawn(move || {
+   |         ^^ help: if this is intentional, prefix it with an underscore: `_bg`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mon`
+  --> src/bin/livelock2.rs:31:9
+   |
+31 |     let mon = thread::spawn(move || {
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_mon`
+
+warning: `insert-split-audit` (bin "livelock2") generated 2 warnings (run `cargo fix --bin "livelock2" -p insert-split-audit` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/equal_run2.rs (/tmp/masstree-doc-review/target/debug/deps/equal_run2-de6ee2c4eeffe518)
+
+running 1 test
+
+thread 'split_failed_when_insert_pos_is_mid_and_run_starts_at_zero' (2662) panicked at /home/saad/Desktop/Programming/masstree/src/tree/generic.rs:677:17:
+Insert failed unexpectedly: SplitFailed. This indicates a bug in the tree implementation.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+insert A-suffix: Err("PANIC")
+
+thread 'split_failed_when_insert_pos_is_mid_and_run_starts_at_zero' (2662) panicked at tests/equal_run2.rs:30:5:
+insert panicked (SplitFailed)
+test split_failed_when_insert_pos_is_mid_and_run_starts_at_zero ... FAILED
+
+failures:
+
+failures:
+    split_failed_when_insert_pos_is_mid_and_run_starts_at_zero
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--test equal_run2`

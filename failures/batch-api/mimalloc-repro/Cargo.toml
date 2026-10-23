@@ -1,0 +1,10 @@
+[package]
+name = "mimalloc-repro"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+masstree = { path = "../../..", default-features = false, features = ["mimalloc"] }
+
+[workspace]
+

@@ -1,0 +1,58 @@
+   Compiling insert-split-audit v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/insert-split)
+warning: unused variable: `bg`
+  --> src/bin/livelock2.rs:23:9
+   |
+23 |     let bg = thread::spawn(move || {
+   |         ^^ help: if this is intentional, prefix it with an underscore: `_bg`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mon`
+  --> src/bin/livelock2.rs:31:9
+   |
+31 |     let mon = thread::spawn(move || {
+   |         ^^^ help: if this is intentional, prefix it with an underscore: `_mon`
+
+warning: `insert-split-audit` (bin "livelock2") generated 2 warnings (run `cargo fix --bin "livelock2" -p insert-split-audit` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.51s
+     Running tests/prepend.rs (/tmp/masstree-doc-review/target/debug/deps/prepend-a2e9e8f843f8d8da)
+
+running 1 test
+len after split = 16
+scan key=[65, 65, 65] value=16
+scan key=[65, 65, 65, 65, 65, 65, 65, 65] value=1
+scan key=[65, 65, 65, 65, 65, 65, 65, 65, 65] value=2
+scan key=[66] value=100
+scan key=[67] value=101
+scan key=[68] value=102
+scan key=[69] value=103
+scan key=[70] value=104
+scan key=[71] value=105
+scan key=[72] value=106
+scan key=[73] value=107
+scan key=[74] value=108
+scan key=[75] value=109
+scan key=[76] value=110
+scan key=[77] value=111
+scan key=[78] value=112
+get [65, 65, 65] -> Some(16) (want 16)
+get [65, 65, 65, 65, 65, 65, 65, 65] -> None (want 1)
+get [65, 65, 65, 65, 65, 65, 65, 65, 65] -> Some(2) (want 2)
+get [66] -> Some(100) (want 100)
+get [78] -> Some(112) (want 112)
+
+thread 'prepend_split_between_equal_ikeys' (2230) panicked at tests/prepend.rs:44:5:
+assertion `left == right` failed: terminal key sharing ikey with separator
+  left: None
+ right: Some(1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test prepend_split_between_equal_ikeys ... FAILED
+
+failures:
+
+failures:
+    prepend_split_between_equal_ikeys
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--test prepend`

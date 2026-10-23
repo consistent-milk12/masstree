@@ -1,0 +1,31 @@
+   Compiling libc v0.2.191
+   Compiling crossbeam-utils v0.8.23
+   Compiling rustc-hash v2.1.3
+   Compiling static_assertions v1.1.0
+   Compiling arrayvec v0.7.8
+   Compiling crossbeam-queue v0.3.14
+   Compiling seize v0.5.1
+   Compiling masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+   Compiling leaf-values-repro v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/leaf-values/public)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.56s
+     Running `/home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner /tmp/masstree-doc-review/target-miri/miri/x86_64-unknown-linux-gnu/debug/valueptr_escape`
+error: Undefined Behavior: constructing invalid value of type &std::string::String: encountered a dangling reference (use-after-free)
+   --> /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:453:18
+    |
+453 |         unsafe { &*self.as_ptr().cast_const() }
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Undefined Behavior occurred here
+    |
+    = help: this indicates a bug in the program: it performed an invalid operation, and caused Undefined Behavior
+    = help: see https://doc.rust-lang.org/nightly/reference/behavior-considered-undefined.html for further information
+    = note: stack backtrace:
+            0: std::ptr::NonNull::<std::string::String>::as_ref::<'_>
+                at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:453:18: 453:46
+            1: <masstree::ValuePtr<std::string::String> as std::ops::Deref>::deref
+                at /home/saad/Desktop/Programming/masstree/src/policy.rs:89:18: 89:33
+            2: main
+                at src/bin/valueptr_escape.rs:13:24: 13:36
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+

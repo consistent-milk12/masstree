@@ -1,0 +1,10 @@
+small end inc 8pfx: rev_ok=false n=3 exp=0 revbatch_n=3 revbatch_ok=false
+  got first/last Some([97, 98, 99, 100, 101, 102, 103, 104, 88]) Some([97, 98, 99, 100, 101, 102, 103, 104, 90])
+small end exc 8pfx: rev_ok=false n=3 exp=0 revbatch_n=3 revbatch_ok=false
+  got first/last Some([97, 98, 99, 100, 101, 102, 103, 104, 88]) Some([97, 98, 99, 100, 101, 102, 103, 104, 90])
+small start inc 8pfx: rev_ok=true n=3 exp=3 revbatch_n=3 revbatch_ok=true
+big end inc 8pfx: rev_ok=false n=40 exp=0 revbatch_n=40 revbatch_ok=false
+  got first/last Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 0]) Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 39])
+big end exc 8pfx: rev_ok=false n=40 exp=0 revbatch_n=40 revbatch_ok=false
+  got first/last Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 0]) Some([80, 82, 69, 70, 73, 88, 48, 48, 0, 0, 0, 0, 0, 0, 0, 39])
+big start inc 8pfx: rev_ok=true n=40 exp=40 revbatch_n=40 revbatch_ok=true

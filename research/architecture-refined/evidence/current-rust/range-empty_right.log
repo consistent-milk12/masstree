@@ -1,0 +1,7 @@
+len=15 forward=15 reverse=0 last=None
+
+thread 'main' (1391) panicked at src/bin/empty_right.rs:31:5:
+assertion `left == right` failed
+  left: 0
+ right: 15
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -1,0 +1,46 @@
+1/4 rscan1/m
+1: {"table":"mb","test":"rscan1","trial":0,"thread":1}
+0: {"table":"mb","test":"rscan1","trial":0,"thread":0,"ok":true,"scansteps":1071343}
+2/4 rw3/m
+1: now getting
+0: now getting
+1: {"table":"mb","test":"rw3","trial":0,"thread":1,"puts":50001,"puts_per_sec":6510396.24698,"gets":50001,"gets_per_sec":12014172.451,"ops":100002,"ops_per_sec":8444679.55079}
+0: {"table":"mb","test":"rw3","trial":0,"thread":0,"puts":50001,"puts_per_sec":6020537.24246,"gets":50001,"gets_per_sec":11286765.7448,"ops":100002,"ops_per_sec":7852453.21741}
+3/4 scan1/m
+1: {"table":"mb","test":"scan1","trial":0,"thread":1}
+0: {"table":"mb","test":"scan1","trial":0,"thread":0,"ok":true,"scansteps":1107662}
+4/4 rw1/m
+1: now getting
+0: now getting
+1: {"table":"mb","test":"rw1","trial":0,"thread":1,"puts":50001,"puts_per_sec":2716537.27677,"gets":50001,"gets_per_sec":5579869.47729,"ops":100002,"ops_per_sec":3654093.60556}
+0: {"table":"mb","test":"rw1","trial":0,"thread":0,"puts":50001,"puts_per_sec":2616618.97596,"gets":50001,"gets_per_sec":5725501.49619,"ops":100002,"ops_per_sec":3591762.04943}
+set title "saad (2 cores)"
+set terminal png
+set xrange [0.96:1.68]
+set xtics rotate by 45 right ("rw1/mb" 1, "rw3/mb" 1.08, "rw1/mb" 1.28, "rw3/mb" 1.36, "rw1/mb" 1.56, "rw3/mb" 1.64) font "Verdana,9"
+set key top left Left reverse
+set ylabel "count, normalized per test"
+plot  '-' using 1:($3/$6):($2/$6):($5/$6):($4/$6) with candlesticks lt 1 title 'ops_per_sec', \
+ '-' using 1:($2/$3):($2/$3):($2/$3):($2/$3) with candlesticks lt 1 notitle, \
+ '-' using 1:($3/$6):($2/$6):($5/$6):($4/$6) with candlesticks lt 2 title 'puts_per_sec', \
+ '-' using 1:($2/$3):($2/$3):($2/$3):($2/$3) with candlesticks lt 2 notitle, \
+ '-' using 1:($3/$6):($2/$6):($5/$6):($4/$6) with candlesticks lt 3 title 'gets_per_sec', \
+ '-' using 1:($2/$3):($2/$3):($2/$3):($2/$3) with candlesticks lt 3 notitle
+1 3591762.04943 3607344.93846 3638510.71653 3654093.60556 3622927.8275
+1.08 7852453.21741 8000509.80076 8296622.96745 8444679.55079 8148566.3841
+e
+1 3622927.8275 3622927.8275
+1.08 8148566.3841 8148566.3841
+e
+1.28 2616618.97596 2641598.55116 2691557.70157 2716537.27677 2666578.12636
+1.36 6020537.24246 6143001.99359 6387931.49585 6510396.24698 6265466.74472
+e
+1.28 2666578.12636 2666578.12636
+1.36 6265466.74472 6265466.74472
+e
+1.56 5579869.47729 5616277.48201 5689093.49147 5725501.49619 5652685.48674
+1.64 11286765.7448 11468617.4213 11832320.7745 12014172.451 11650469.0979
+e
+1.56 5652685.48674 5652685.48674
+1.64 11650469.0979 11650469.0979
+e

@@ -1,0 +1,33 @@
+   Compiling leaf-values-repro v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/leaf-values/public)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `/home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner /tmp/masstree-doc-review/target-miri/miri/x86_64-unknown-linux-gnu/debug/move_value_same_leaf`
+error: Undefined Behavior: constructing invalid value of type std::boxed::Box<u64>: encountered a dangling box (use-after-free)
+    --> /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1700:9
+     |
+1700 |         Box(unsafe { BoxRaw::new_unchecked(raw) }, alloc)
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Undefined Behavior occurred here
+     |
+     = help: this indicates a bug in the program: it performed an invalid operation, and caused Undefined Behavior
+     = help: see https://doc.rust-lang.org/nightly/reference/behavior-considered-undefined.html for further information
+     = note: stack backtrace:
+             0: std::boxed::Box::<u64>::from_raw_in
+                 at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1700:9: 1700:58
+             1: std::boxed::Box::<u64>::from_raw
+                 at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/boxed.rs:1444:18: 1444:48
+             2: <masstree::policy::box_values::BoxValueArray<u64> as masstree::policy::ValueArray<masstree::ValuePtr<u64>>>::cleanup
+                 at /home/saad/Desktop/Programming/masstree/src/policy/box_values.rs:400:18: 400:48
+             3: <masstree::LeafNode15<masstree::BoxPolicy<u64>> as std::ops::Drop>::drop
+                 at /home/saad/Desktop/Programming/masstree/src/leaf15.rs:2338:21: 2338:46
+             4: std::ptr::drop_glue::<masstree::LeafNode15<masstree::BoxPolicy<u64>>> - shim(Some(masstree::LeafNode15<masstree::BoxPolicy<u64>>))
+                 at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:844:1: 846:25
+             5: std::ptr::drop_glue::<std::boxed::Box<masstree::LeafNode15<masstree::BoxPolicy<u64>>>> - shim(Some(std::boxed::Box<masstree::LeafNode15<masstree::BoxPolicy<u64>>>))
+                 at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:844:1: 846:25
+             6: std::mem::drop::<std::boxed::Box<masstree::LeafNode15<masstree::BoxPolicy<u64>>>>
+                 at /home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/mod.rs:1051:1: 1051:2
+             7: main
+                 at src/bin/move_value_same_leaf.rs:13:5: 13:15
+
+note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
+
+error: aborting due to 1 previous error
+

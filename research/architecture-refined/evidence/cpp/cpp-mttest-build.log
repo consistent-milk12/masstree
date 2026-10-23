@@ -1,0 +1,1 @@
+g++ -g -W -Wall -O3 -pthread -o mttest mttest.o misc.o checkpoint.o query_masstree.o value_string.o value_array.o value_versioned_array.o string_slice.o testrunner.o kvio.o libjson.a   -lm
