@@ -163,7 +163,7 @@ unsafe fn print_node<P, W>(
 ) -> StdFmt::Result
 where
     P: LeafPolicy,
-    P::Output: StdFmt::Debug,
+    P::Value: StdFmt::Debug,
     W: FmtWrite,
 {
     if ptr.is_null() {
@@ -204,7 +204,7 @@ unsafe fn print_leaf_slots<P, W>(
 ) -> Result<Vec<(usize, *mut u8)>, StdFmt::Error>
 where
     P: LeafPolicy,
-    P::Output: StdFmt::Debug,
+    P::Value: StdFmt::Debug,
     W: FmtWrite,
 {
     let widths: [usize; 5] = [COL_POS, COL_IKEY, COL_KLX, COL_SLOT, COL_VAL];
@@ -237,7 +237,15 @@ where
         let value_str = match leaf.classify_slot(slot) {
             SlotKind::Empty => "<empty>".to_owned(),
 
-            SlotKind::Value(v) => format!("{v:?}"),
+            SlotKind::Value(v) => {
+                // SAFETY: `leaf` is EBR-protected by the caller's guard. The
+                // leaf version is validated after the whole table is rendered,
+                // so this is the standard read-then-validate OCC order.
+                // `output_to_value_ref` returns an atomic copy for write-through
+                // values, so `Debug` never aliases a concurrently written Box.
+                let value_ref = unsafe { P::output_to_value_ref(&v) };
+                format!("{:?}", &*value_ref)
+            }
 
             SlotKind::Layer(ptr) => {
                 layer_ptrs.push((pos, ptr));
@@ -274,7 +282,7 @@ unsafe fn print_leaf<P, W>(
 ) -> StdFmt::Result
 where
     P: LeafPolicy,
-    P::Output: StdFmt::Debug,
+    P::Value: StdFmt::Debug,
     W: FmtWrite,
 {
     // SAFETY: caller guarantees leaf_ptr is valid and EBR-protected.
@@ -313,29 +321,64 @@ where
             _ => " [?]",
         };
 
-        ctx.writeln_prefixed(&format!(
-            "Leaf  {size}/15  v=0x{vsn:04x}  bound={}  @ {leaf_ptr:p}{del_tag}{mod_tag}",
-            ikey_display(bound_ikey),
-        ))?;
+        // Render the entire leaf section into a private buffer so the slot
+        // reads can be validated *after* the last one. Writing directly to
+        // `ctx` would expose a torn table on a retry.
+        let mut leaf_buf: String = String::new();
+        let layer_ptrs: Vec<(usize, *mut u8)>;
+        {
+            let mut local = Ctx {
+                out: &mut leaf_buf,
+                depth: ctx.depth,
+                prefix: ctx.prefix.clone(),
+            };
 
-        ctx.writeln_prefixed(&format!(
-            "chain: {} <- {:p} -> {}",
-            ptr_str(prev_ptr),
-            leaf_ptr,
-            ptr_str(next_ptr),
-        ))?;
+            local.writeln_prefixed(&format!(
+                "Leaf  {size}/15  v=0x{vsn:04x}  bound={}  @ {leaf_ptr:p}{del_tag}{mod_tag}",
+                ikey_display(bound_ikey),
+            ))?;
 
-        if size == 0 {
-            ctx.writeln_prefixed("(empty)")?;
-            return Ok(());
+            local.writeln_prefixed(&format!(
+                "chain: {} <- {:p} -> {}",
+                ptr_str(prev_ptr),
+                leaf_ptr,
+                ptr_str(next_ptr),
+            ))?;
+
+            if size == 0 {
+                local.writeln_prefixed("(empty)")?;
+                // SAFETY: leaf is valid and EBR-protected (same as above).
+                if leaf.version().has_changed(vsn) {
+                    if attempt + 1 == MAX_RETRIES {
+                        return ctx.writeln_prefixed(&format!(
+                            "Leaf [CONCURRENT MODIFICATION] @ {leaf_ptr:p}"
+                        ));
+                    }
+                    continue;
+                }
+                ctx.out.write_str(&leaf_buf)?;
+                return Ok(());
+            }
+
+            let perm_slots: Vec<usize> = (0..size).map(|i: usize| perm.get(i)).collect();
+            local.writeln_prefixed(&format!("perm: {perm_slots:?}"))?;
+
+            // SAFETY: leaf is valid and EBR-protected (same as above).
+            layer_ptrs = unsafe { print_leaf_slots::<P, String>(&mut local, leaf, perm, size)? };
         }
 
-        let perm_slots: Vec<usize> = (0..size).map(|i: usize| perm.get(i)).collect();
-        ctx.writeln_prefixed(&format!("perm: {perm_slots:?}"))?;
+        // Validate after the complete slot table has been read. On a change,
+        // retry from a fresh version and discard the buffered section.
+        if leaf.version().has_changed(vsn) {
+            if attempt + 1 == MAX_RETRIES {
+                return ctx
+                    .writeln_prefixed(&format!("Leaf [CONCURRENT MODIFICATION] @ {leaf_ptr:p}"));
+            }
 
-        // SAFETY: leaf is valid and EBR-protected (same as above).
-        let layer_ptrs: Vec<(usize, *mut u8)> =
-            unsafe { print_leaf_slots::<P, W>(ctx, leaf, perm, size)? };
+            continue;
+        }
+
+        ctx.out.write_str(&leaf_buf)?;
 
         // Recurse into sublayers. After layer-root promotion the parent slot
         // still points at the original left leaf; climb to the true root so
@@ -381,7 +424,7 @@ unsafe fn print_internode<P, W>(
 ) -> StdFmt::Result
 where
     P: LeafPolicy,
-    P::Output: StdFmt::Debug,
+    P::Value: StdFmt::Debug,
     W: FmtWrite,
 {
     // SAFETY: caller guarantees ptr is valid InternodeNode, EBR-protected.
@@ -471,7 +514,7 @@ where
 impl<P, A> MassTreeGeneric<P, A>
 where
     P: LeafPolicy,
-    P::Output: StdFmt::Debug,
+    P::Value: StdFmt::Debug,
     A: TreeAllocator<P>,
 {
     /// Write a human-readable tree visualization to `w`.
@@ -521,7 +564,7 @@ where
 impl<P, A> StdFmt::Display for MassTreeGeneric<P, A>
 where
     P: LeafPolicy,
-    P::Output: StdFmt::Debug,
+    P::Value: StdFmt::Debug,
     A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
