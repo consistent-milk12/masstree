@@ -6,7 +6,7 @@
 use crate::Permuter;
 use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::leaf15::KSUF_KEYLENX;
-use crate::policy::RetireHandle;
+use crate::policy::{PreparedValue, RetireHandle};
 
 use super::insert_strategy::{GenericInsert, InsertStrategy, WriteThroughInsert};
 use super::{
@@ -184,8 +184,12 @@ where
         guard: &LocalGuard<'_>,
         pre_allocated: Option<Vec<u8>>,
     ) -> *mut u8 {
+        // INS-04: user value encoding may panic; run it before any slot or
+        // version mutation, and store the resulting token without user code.
+        let prepared: PreparedValue<P> = LeafNode15::<P>::prepare_value(value);
+
         let deferred_retire: *mut u8 =
-            self.assign_slot_generic(leaf, lock, slot, key, value, guard, pre_allocated);
+            self.assign_slot_generic(leaf, lock, slot, key, &prepared, guard, pre_allocated);
 
         if back_offset > 0 {
             let back_pos: usize = LeafNode15::<P>::WIDTH - 1;
@@ -259,12 +263,15 @@ where
         guard: &LocalGuard<'_>,
         pre_allocated: Option<Vec<u8>>,
     ) -> (Result<Option<P::Output>, InsertError>, *mut u8) {
+        // INS-04: encode before clearing the empty state or touching the slot.
+        let prepared: PreparedValue<P> = LeafNode15::<P>::prepare_value(value);
+
         leaf.clear_empty_state();
 
         let slot: usize = 0;
 
         let deferred_retire: *mut u8 =
-            self.assign_slot_generic(leaf, lock, slot, key, value, guard, pre_allocated);
+            self.assign_slot_generic(leaf, lock, slot, key, &prepared, guard, pre_allocated);
 
         let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
         leaf.set_permutation(new_perm);

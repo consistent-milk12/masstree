@@ -8,6 +8,7 @@ use std::ptr as StdPtr;
 
 use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
+use crate::policy::PreparedValue;
 
 use super::{
     Key, LAYER_KEYLENX, LeafPolicy, LocalGuard, MassTreeGeneric, Ordering, TreeAllocator,
@@ -37,8 +38,10 @@ where
         final_ptr: *mut LeafNode15<P>,
         existing_key: &Key<'_>,
         existing_output: Option<P::Output>,
+        existing_prepared: &PreparedValue<P>,
         new_key: &Key<'_>,
         new_arc: Option<P::Output>,
+        new_prepared: &PreparedValue<P>,
         cmp: Ordering,
         guard: &LocalGuard<'_>,
     ) {
@@ -49,16 +52,28 @@ where
             Ordering::Less => {
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
-                    final_leaf.assign_from_key(0, existing_key, existing_output, guard);
-                    final_leaf.assign_from_key(1, new_key, new_arc, guard);
+                    final_leaf.assign_from_key(
+                        0,
+                        existing_key,
+                        existing_output,
+                        existing_prepared,
+                        guard,
+                    );
+                    final_leaf.assign_from_key(1, new_key, new_arc, new_prepared, guard);
                 }
             }
 
             Ordering::Greater => {
                 // SAFETY: guard requirement passed through from caller
                 unsafe {
-                    final_leaf.assign_from_key(0, new_key, new_arc, guard);
-                    final_leaf.assign_from_key(1, existing_key, existing_output, guard);
+                    final_leaf.assign_from_key(0, new_key, new_arc, new_prepared, guard);
+                    final_leaf.assign_from_key(
+                        1,
+                        existing_key,
+                        existing_output,
+                        existing_prepared,
+                        guard,
+                    );
                 }
             }
 
@@ -66,14 +81,26 @@ where
                 if existing_key.current_len() <= new_key.current_len() {
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
-                        final_leaf.assign_from_key(0, existing_key, existing_output, guard);
-                        final_leaf.assign_from_key(1, new_key, new_arc, guard);
+                        final_leaf.assign_from_key(
+                            0,
+                            existing_key,
+                            existing_output,
+                            existing_prepared,
+                            guard,
+                        );
+                        final_leaf.assign_from_key(1, new_key, new_arc, new_prepared, guard);
                     }
                 } else {
                     // SAFETY: guard requirement passed through from caller
                     unsafe {
-                        final_leaf.assign_from_key(0, new_key, new_arc, guard);
-                        final_leaf.assign_from_key(1, existing_key, existing_output, guard);
+                        final_leaf.assign_from_key(0, new_key, new_arc, new_prepared, guard);
+                        final_leaf.assign_from_key(
+                            1,
+                            existing_key,
+                            existing_output,
+                            existing_prepared,
+                            guard,
+                        );
                     }
                 }
             }
@@ -120,6 +147,15 @@ where
             existing_output.is_some(),
             "try_create_layer_concurrent_generic: conflict slot should contain a value"
         );
+
+        // INS-04: encode both user values before allocating any twig or final
+        // layer leaf, so a panicking encoder cannot leak an unpublished layer.
+        let existing_prepared: PreparedValue<P> = LeafNode15::<P>::prepare_value(
+            existing_output
+                .as_ref()
+                .expect("conflict slot must contain a value"),
+        );
+        let new_prepared: PreparedValue<P> = LeafNode15::<P>::prepare_value(&new_value);
 
         if new_key.has_suffix() {
             new_key.shift();
@@ -168,8 +204,10 @@ where
                 final_ptr,
                 &existing_key,
                 existing_output,
+                &existing_prepared,
                 new_key,
                 Some(new_value),
+                &new_prepared,
                 cmp,
                 guard,
             );

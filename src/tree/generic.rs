@@ -15,7 +15,7 @@ use crate::{
     leaf_trait::TreeLeafNode,
     leaf15::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode15, MODSTATE_INSERT},
     nodeversion::{LockGuard, NodeVersion},
-    policy::LeafPolicy,
+    policy::{LeafPolicy, PreparedValue},
     prefetch::prefetch_read,
     shard_counter::ShardedCounter,
     tree::{
@@ -872,7 +872,7 @@ where
         lock: &mut LockGuard<'_>,
         slot: usize,
         key: &Key<'_>,
-        value: &P::Output,
+        prepared: &PreparedValue<P>,
         guard: &LocalGuard<'_>,
         pre_allocated: Option<Vec<u8>>,
     ) -> *mut u8 {
@@ -897,7 +897,7 @@ where
         }
 
         leaf.set_ikey_relaxed(slot, ikey);
-        leaf.store_value_relaxed(slot, value);
+        leaf.store_prepared_value_relaxed(slot, prepared);
 
         if key.has_suffix() {
             leaf.set_keylenx_relaxed(slot, KSUF_KEYLENX);

@@ -8,8 +8,11 @@ use std::ptr as StdPtr;
 use crate::Permuter;
 use crate::leaf15::LeafNode15;
 use crate::{
-    Linker, MassTreeGeneric, TreeAllocator, ValueRef, key::Key, leaf_trait::TreeLeafNode,
-    nodeversion::LockGuard, policy::LeafPolicy,
+    Linker, MassTreeGeneric, TreeAllocator, ValueRef,
+    key::Key,
+    leaf_trait::TreeLeafNode,
+    nodeversion::LockGuard,
+    policy::{LeafPolicy, PreparedValue},
 };
 
 use super::{FindSlotResult, InsertSearchResultGeneric};
@@ -1165,10 +1168,13 @@ where
         value: &P::Output,
         guard: &LocalGuard<'_>,
     ) -> *mut u8 {
+        // INS-04: encode before clearing the empty state or touching the slot.
+        let prepared: PreparedValue<P> = LeafNode15::<P>::prepare_value(value);
+
         leaf.clear_empty_state();
         let slot: usize = 0;
         let deferred_retire: *mut u8 =
-            self.assign_slot_generic(leaf, lock, slot, key, value, guard, None);
+            self.assign_slot_generic(leaf, lock, slot, key, &prepared, guard, None);
 
         let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
         leaf.set_permutation(new_perm);

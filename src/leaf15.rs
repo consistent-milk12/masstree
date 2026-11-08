@@ -2500,6 +2500,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
         slot: usize,
         key: &Key<'_>,
         value: Option<P::Output>,
+        prepared: &PreparedValue<P>,
         guard: &LocalGuard<'_>,
     ) {
         debug_assert!(
@@ -2507,15 +2508,15 @@ impl<P: LeafPolicy> LeafNode15<P> {
             "assign_from_key: slot {slot} >= WIDTH_15 {WIDTH_15}"
         );
 
-        let output: P::Output = value.expect(
+        let _output: P::Output = value.expect(
             "assign_from_key: value cannot be None (source slot was not a value); \
              this indicates a bug in conflict detection",
         );
 
-        // Store key.
+        // Store key and the already-encoded value token; no user code here.
         self.set_ikey(slot, key.ikey());
 
-        self.store_value(slot, &output);
+        self.store_prepared_value_relaxed(slot, prepared);
 
         if key.has_suffix() {
             // This leaf is freshly allocated (a layer leaf), so use the init
