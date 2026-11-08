@@ -10,13 +10,11 @@ use seize::{Collector, Guard, LocalGuard};
 use crate::{
     BatchedRetire, Linker, MassTreeGeneric, TreeAllocator, TreePermutation, ValueRef,
     hints::{likely, unlikely},
-    internode::InternodeNode,
     key::Key,
     leaf_trait::TreeLeafNode,
     leaf15::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode15, MODSTATE_INSERT},
     nodeversion::{LockGuard, NodeVersion},
     policy::{LeafPolicy, PreparedValue},
-    prefetch::prefetch_read,
     shard_counter::ShardedCounter,
     tree::{
         InsertError, InsertSearchResultGeneric,
@@ -277,26 +275,9 @@ where
             .expect("invalid layer parent chain")
     }
 
-    /// Single-step parent traversal for the descent retry path.
-    #[inline(always)]
-    #[expect(clippy::unused_self, reason = "Method signature pattern")]
-    fn maybe_parent_one_step(&self, node: *const u8, guard: &LocalGuard<'_>) -> *const u8 {
-        // SAFETY: Descent keeps every visited node alive under `guard`.
-        let parent = unsafe { super::traversal::node_parent::<P>(node, guard) };
-        if parent.is_null() {
-            node
-        } else {
-            parent.cast_const()
-        }
-    }
-
-    /// Double-buffer traversal from root to leaf. A null result means the
-    /// cached layer root was retired; callers must restart from the tree root.
-    #[expect(clippy::indexing_slicing, reason = "sense is always 0 or 1")]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "hot-path tree traversal, logically cohesive and performance-critical"
-    )]
+    /// Descend through the shared guarded traversal kernel. A null result
+    /// requests a restart from the main root with the key's layer offset reset.
+    #[expect(clippy::unused_self, reason = "Shared wrapper for tree callers")]
     pub(crate) fn reach_leaf_concurrent_generic(
         &self,
         start: *const u8,
@@ -304,159 +285,10 @@ where
         _is_sublayer: bool,
         guard: &LocalGuard<'_>,
     ) -> *mut LeafNode15<P> {
-        use crate::ksearch::upper_bound_internode_generic;
-        use crate::prefetch::prefetch_read;
-
-        if start.is_null() {
-            return StdPtr::null_mut();
-        }
         #[cfg(test)]
         REACH_COUNT.with(|count| count.set(count.get() + 1));
-
-        let target_ikey: u64 = key.ikey();
-
-        let mut n: [*const u8; 2] = [StdPtr::null(); 2];
-        let mut v: [u32; 2] = [0; 2];
-
-        #[expect(unused_assignments, reason = "sense is set at top of retry loop")]
-        let mut sense: usize = 0;
-
-        'retry: loop {
-            sense = 0;
-            n[sense] = start;
-
-            loop {
-                // SAFETY: n[sense] is valid, NodeVersion is first field
-                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-                let version: &NodeVersion = unsafe { &*(n[sense].cast::<NodeVersion>()) };
-                v[sense] = version.stable();
-
-                if version.is_deleted() {
-                    return StdPtr::null_mut();
-                }
-                if version.is_root() {
-                    break;
-                }
-
-                // Walk up to parent
-                n[sense] = self.maybe_parent_one_step(n[sense], guard);
-            }
-
-            loop {
-                // SAFETY: n[sense] is valid, NodeVersion is first field
-                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-                let version: &NodeVersion = unsafe { &*(n[sense].cast::<NodeVersion>()) };
-
-                v[sense] = match version.try_stable() {
-                    Some(v) => v,
-                    None => continue 'retry, // Node is locked, restart from root
-                };
-
-                if version.is_deleted() {
-                    return StdPtr::null_mut();
-                }
-
-                // Check if we've reached a leaf
-                if version.is_leaf() {
-                    return n[sense].cast_mut().cast::<LeafNode15<P>>();
-                }
-
-                // It's an internode - traverse down
-                // SAFETY: !is_leaf() confirmed above
-                let inode: &InternodeNode = unsafe { &*(n[sense].cast::<InternodeNode>()) };
-
-                prefetch_read(
-                    StdPtr::from_ref::<InternodeNode>(inode)
-                        .cast::<u8>()
-                        .wrapping_add(64),
-                );
-
-                // Binary/linear search for child pointer
-                let child_idx: usize =
-                    upper_bound_internode_generic::<InternodeNode>(target_ikey, inode);
-
-                // DEBUG: Trace routing path
-                #[cfg(feature = "debug-routing")]
-                {
-                    let nkeys: usize = inode.nkeys();
-                    eprintln!(
-                        "[ROUTE] inode={:p} height={} nkeys={} target_ikey={:016x} -> child_idx={}",
-                        inode,
-                        inode.height(),
-                        nkeys,
-                        target_ikey,
-                        child_idx
-                    );
-
-                    // Print separator keys around the chosen child
-                    if child_idx > 0 && child_idx <= nkeys {
-                        let left_sep: u64 = inode.ikey(child_idx - 1);
-                        eprintln!("        left_sep[{}]={:016x}", child_idx - 1, left_sep);
-                    }
-
-                    if child_idx < nkeys {
-                        let right_sep: u64 = inode.ikey(child_idx);
-                        eprintln!("        right_sep[{child_idx}]={right_sep:016x}");
-                    }
-                }
-
-                let other: usize = sense ^ 1;
-                let child: *mut u8 = inode.child(child_idx, guard);
-                n[other] = child.cast_const();
-
-                if unlikely(child.is_null()) {
-                    continue 'retry;
-                }
-
-                prefetch_read(child);
-
-                if !inode.children_are_leaves() {
-                    // SAFETY: children_are_leaves() is false, so child is an internode
-                    let child_inode: &InternodeNode = unsafe { &*(child.cast::<InternodeNode>()) };
-                    prefetch_read(
-                        StdPtr::from_ref::<InternodeNode>(child_inode)
-                            .cast::<u8>()
-                            .wrapping_add(64),
-                    );
-
-                    // Prefetch is safe even for null/invalid pointers (no-op on x86/ARM)
-                    let grandchild_ptr: *mut u8 = child_inode.child(0, guard);
-                    prefetch_read(grandchild_ptr);
-                }
-
-                // SAFETY: child is non-null and valid
-                #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-                let child_version: &NodeVersion = unsafe { &*(child.cast::<NodeVersion>()) };
-                v[other] = child_version.stable();
-
-                // A cascade can leave a DELETED internode linked until the
-                // parent update completes (or after RetryExhausted). Descending
-                // into it would route into a zero-key node with a null child
-                // and spin forever. Restart from the root instead.
-                if child_version.is_deleted() {
-                    continue 'retry;
-                }
-
-                if likely(!inode.version().has_changed(v[sense])) {
-                    sense = other;
-                    continue;
-                }
-
-                let old_v: u32 = v[sense];
-                v[sense] = inode.version().stable();
-
-                if unlikely(inode.version().has_split(old_v)) {
-                    let nkeys: usize = inode.nkeys();
-
-                    if nkeys > 0 {
-                        let last_key: u64 = inode.ikey(nkeys - 1);
-                        if target_ikey > last_key {
-                            continue 'retry;
-                        }
-                    }
-                }
-            }
-        }
+        // SAFETY: Callers supply a node loaded from this tree under guard.
+        unsafe { super::traversal::reach_leaf::<P>(start, key.ikey(), guard) }.0
     }
 
     /// Compare a key with the last key in a leaf, retrying until stable.
@@ -545,92 +377,16 @@ where
         (leaf, version)
     }
 
-    /// Maximum B-link hops before giving up and signaling re-descent.
-    const MAX_BLINK_HOPS: usize = 128;
-
-    /// Advance to correct leaf via B-link (generic version).
-    /// Used by insert path before locking.
+    /// Follow B-link bounds through the shared point/scan helper.
     #[expect(clippy::unused_self, reason = "API Consistency")]
     pub(crate) fn advance_to_key_by_bound_generic(
         &self,
-        mut leaf_ptr: *mut LeafNode15<P>,
+        leaf_ptr: *mut LeafNode15<P>,
         key: &Key<'_>,
         guard: &LocalGuard<'_>,
     ) -> (*mut LeafNode15<P>, bool) {
-        if leaf_ptr.is_null() {
-            return (leaf_ptr, true);
-        }
-        let key_ikey: u64 = key.ikey();
-        let mut hops: usize = 0;
-
-        // SAFETY: leaf_ptr is valid, protected by guard
-        let mut leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-
-        let version: &NodeVersion = leaf.version();
-
-        if version.is_splitting() {
-            let _ = version.stable();
-        }
-
-        loop {
-            if hops >= Self::MAX_BLINK_HOPS {
-                return (leaf_ptr, true);
-            }
-
-            if unlikely(leaf.version().is_deleted()) {
-                let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
-                let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
-
-                if next_ptr.is_null() {
-                    // A deleted rightmost leaf has no successor. Returning it
-                    // again would make the caller re-enter the same leaf
-                    // forever; force a restart from the root instead.
-                    return (leaf_ptr, true);
-                }
-
-                leaf_ptr = next_ptr;
-
-                // SAFETY: next_ptr is valid, protected by guard
-                leaf = unsafe { &*leaf_ptr };
-                hops += 1;
-                continue;
-            }
-
-            let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
-
-            if Linker::is_marked(next_raw) {
-                leaf.wait_for_split();
-                continue;
-            }
-
-            let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
-
-            if next_ptr.is_null() {
-                break;
-            }
-
-            // SAFETY: next_ptr is valid
-            let next: &LeafNode15<P> = unsafe { &*next_ptr };
-            let next_bound: u64 = next.ikey_bound();
-
-            if key_ikey >= next_bound {
-                let next_next_raw: *mut LeafNode15<P> = next.next_raw(guard);
-                let next_next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_next_raw);
-                let prefetch_base: *const u8 = next_next_ptr.cast::<u8>();
-
-                prefetch_read(prefetch_base);
-                prefetch_read(prefetch_base.wrapping_add(64));
-
-                leaf_ptr = next_ptr;
-                leaf = next;
-                hops += 1;
-                continue;
-            }
-
-            break;
-        }
-
-        (leaf_ptr, false)
+        // SAFETY: Callers supply a leaf loaded from this tree under guard.
+        unsafe { super::traversal::advance_by_bound(leaf_ptr, key.ikey(), guard) }
     }
 
     // ========================================================================

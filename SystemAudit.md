@@ -3320,8 +3320,10 @@ refreshed opportunistically by point reads, inserts and removals. A try-lock
 with no sublayer lock held revalidates slot membership/key/tag/pointer before
 publication. Tests verify zero subsequent parent hops, progress when the lock is
 unavailable, and reclamation after promotion for both policies. Existing GC is
-already root-kind agnostic. Full internode/B-link descent consolidation remains
-tracked under Proposal 2 / RNG-09.
+already root-kind agnostic. RNG-09's duplicate scan descent is now removed: point operations and scans share
+`tree::traversal::{reach_leaf, advance_by_bound}` with the same deleted-node,
+parent validation and split-sibling handling. Range comparison and focused Miri
+cover both directions and promoted multi-height layers.
 
 OCC-04 cached-root follow-up: traversal from an internode root retired by whole
 sublayer GC repeatedly retried the same deleted subtree. The focused

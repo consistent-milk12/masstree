@@ -1158,7 +1158,13 @@ promotion.
 
 ## 8. Operations
 
-### 8.1 Concurrent traversal (`reach_leaf_concurrent_generic`)
+### 8.1 Concurrent traversal (`tree::traversal`)
+
+`reach_leaf_concurrent_generic` is a tree wrapper over the shared `reach_leaf`
+kernel, also used by range positioning. It returns both a guarded leaf and the
+resolved layer root; scans cache the root for retries. Point writes and scans
+also share `advance_by_bound`, including the deleted-rightmost escape and a
+128-hop bound. Scan positioning re-descends if the leaf is too far right.
 
 `src/tree/generic.rs` implements the core descent used by reads, writes, remove,
 and scans:

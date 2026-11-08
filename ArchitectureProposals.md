@@ -25,7 +25,7 @@ implementation must verify those observations against the current source.
 | --- | --- | --- | --- |
 | 1 | Proposal 3: suffix sizing, split reservation, initialization, raw ownership | Churn 42 → 6 allocations; middle split 3 → 0 reallocations; native, feature, Miri tests | Complete |
 | 2 | Proposal 4: batch/Extend pipeline, write-through, Entry leaf hints | Preconstructed updates 6 → 3 allocations; guarded updates 264 → 0; Entry avoids a second descent | Complete |
-| 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Shared root resolver; scan contexts now cache roots and retry with zero parent hops | In progress |
+| 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Shared root/descent/B-link kernels; cached roots give zero parent hops; native and Miri coverage | Complete |
 | 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Layout assertions, point workloads, Loom and Miri | Pending |
 | 5 | Proposal 5: stack remove routes and remove cleanup | Zero-allocation non-emptying layered removal | Pending |
 | 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, layer contention tests, feature checks | Pending |
@@ -87,7 +87,14 @@ The required retired-root escape also landed: a deterministic traversal of a
 guard-protected root after sublayer GC timed out before the fix (15-second
 watchdog, exit 124). It now requests a restart; point reads, writes, and GC all
 handle that result before dereferencing a leaf.
-Internode/B-link descent consolidation remains open.
+Point operations and scans now share the same internode descent and bounded
+B-link advance kernels. This removes the weaker scan-specific descent; cached
+roots, deleted nodes and split siblings all use the same guarded protocol.
+All 606 library tests, 18 concurrency regressions, 27 range tests, the promoted
+BTreeMap probe and focused Miri pass, as do strict Clippy and feature builds.
+Proposal 2 Tier 1 is complete. The conditional LayerAnchor tier is deferred:
+zero-hop caching works for the tested multi-height layers, and no workload
+measurement establishes the required sustained parent-lock miss bottleneck.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user
