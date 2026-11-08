@@ -23,8 +23,8 @@ pub type RemoveEntryResult<'g, V> = Result<Option<(Vec<u8>, ValueRef<'g, V>)>, R
 /// - `and_modify`: lost updates (computation based on stale value).
 /// - `VacantEntry::insert`: silent overwrite of a concurrently inserted key.
 ///
-/// For atomic read-modify-write, use `insert_with_guard` directly or an
-/// external synchronization strategy.
+/// For atomic read-modify-write, use `insert_with_guard` together with
+/// external synchronization, or use the tree's write-through update path.
 ///
 /// # Example
 ///

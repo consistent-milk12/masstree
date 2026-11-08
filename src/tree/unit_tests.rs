@@ -637,11 +637,8 @@ fn test_insert_at_capacity() {
 
 #[test]
 fn test_insert_error_display() {
-    let err = InsertError::LeafFull;
-    assert_eq!(format!("{err}"), "leaf node is full");
-    //
-    // let err = InsertError::AllocationFailed;
-    // assert_eq!(format!("{err}"), "memory allocation failed");
+    let err = InsertError::SplitFailed;
+    assert_eq!(format!("{err}"), "split operation failed");
 }
 
 #[test]

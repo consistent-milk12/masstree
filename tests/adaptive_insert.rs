@@ -196,7 +196,6 @@ fn test_batch_shared_prefix() {
                 let result = tree.insert_batch(entries);
                 // With short keys, all should succeed (no suffix conflicts)
                 assert_eq!(result.inserted + result.updated, ENTRIES_PER_BATCH);
-                assert_eq!(result.failed, 0, "no failures expected with short keys");
             })
         })
         .collect();
@@ -244,7 +243,7 @@ fn test_batch_long_keys_with_conflicts() {
 
     // Total processed should equal ENTRIES
     assert_eq!(
-        result.inserted + result.updated + result.failed,
+        result.inserted + result.updated,
         ENTRIES,
         "all entries should be accounted for"
     );

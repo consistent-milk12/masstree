@@ -24,7 +24,9 @@ mod range;
 pub mod remove;
 mod split;
 
-pub use generic::{BatchEntry, BatchInsertResult, Entry, OccupiedEntry, VacantEntry};
+pub use generic::{
+    BatchEntry, BatchInsertResult, Entry, OccupiedEntry, RemoveEntryResult, VacantEntry,
+};
 pub use range::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use remove::RemoveError;
 
@@ -53,44 +55,20 @@ pub mod batch {
 // ============================================================================
 
 /// Errors that can occur during insert operations.
+///
+/// The tree's public insert wrappers retry internally and panic if they
+/// exhaust the retry budget; this type remains for the internal propagation
+/// paths and for callers of the lower-level batch machinery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InsertError {
-    /// Leaf node is full and cannot accept more keys.
-    LeafFull,
-
-    /// Split required (generic path).
-    SplitRequired,
-
-    /// Layer creation required (generic path).
-    LayerCreationRequired,
-
     /// Split operation failed (generic path).
     SplitFailed,
-
-    /// Split propagation to parent failed (generic path).
-    SplitPropagationRequired,
 }
 
 impl StdFmt::Display for InsertError {
     fn fmt(&self, f: &mut StdFmt::Formatter<'_>) -> StdFmt::Result {
         match self {
-            Self::LeafFull => write!(f, "leaf node is full"),
-
-            Self::SplitRequired => {
-                write!(f, "split required (leaf full)")
-            }
-
-            Self::LayerCreationRequired => {
-                write!(f, "layer creation required (key conflict)")
-            }
-
-            Self::SplitFailed => {
-                write!(f, "split operation failed")
-            }
-
-            Self::SplitPropagationRequired => {
-                write!(f, "split propagation required (parent full)")
-            }
+            Self::SplitFailed => write!(f, "split operation failed"),
         }
     }
 }

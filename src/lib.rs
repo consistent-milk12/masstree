@@ -183,7 +183,9 @@ pub(crate) mod tree;
 // ============================================================================
 
 // Core tree types
-pub use tree::{BatchEntry, BatchInsertResult, Entry, OccupiedEntry, VacantEntry, batch};
+pub use tree::{
+    BatchEntry, BatchInsertResult, Entry, OccupiedEntry, RemoveEntryResult, VacantEntry, batch,
+};
 pub use tree::{InsertError, RemoveError};
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use tree::{MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};

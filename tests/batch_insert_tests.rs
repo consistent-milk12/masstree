@@ -30,7 +30,6 @@ fn test_batch_insert_empty() {
 
     assert_eq!(result.inserted, 0);
     assert_eq!(result.updated, 0);
-    assert_eq!(result.failed, 0);
     assert!(result.old_values.is_empty());
     assert_eq!(tree.len(), 0);
 }
@@ -44,7 +43,6 @@ fn test_batch_insert_single_entry() {
 
     assert_eq!(result.inserted, 1);
     assert_eq!(result.updated, 0);
-    assert_eq!(result.failed, 0);
     assert_eq!(tree.len(), 1);
 
     let value = tree.get(b"hello").unwrap();
@@ -63,7 +61,6 @@ fn test_batch_insert_multiple_entries() {
 
     assert_eq!(result.inserted, 100);
     assert_eq!(result.updated, 0);
-    assert_eq!(result.failed, 0);
     assert_eq!(tree.len(), 100);
 
     // Verify all entries
@@ -93,7 +90,6 @@ fn test_batch_insert_with_updates() {
 
     assert_eq!(result.inserted, 25); // keys 50-74 are new
     assert_eq!(result.updated, 25); // keys 25-49 are updates
-    assert_eq!(result.failed, 0);
     assert_eq!(tree.len(), 75);
 
     // Verify old values were returned (they are owned u64)
@@ -271,7 +267,7 @@ fn test_batch_insert_shared_prefix() {
     let result = tree.insert_batch(entries);
 
     // With layer descent fallback, all entries should eventually be inserted
-    assert_eq!(result.inserted + result.failed, 500);
+    assert_eq!(result.inserted + result.updated, 500);
     // Verify tree has correct count
     assert_eq!(tree.len(), result.inserted);
 }
@@ -329,7 +325,7 @@ fn test_batch_insert_long_keys() {
     let result = tree.insert_batch(entries);
 
     // Some may fail due to layer descent - that's expected
-    assert!(result.inserted + result.failed == 100);
+    assert_eq!(result.inserted + result.updated, 100);
     assert!(tree.len() >= result.inserted);
 }
 
@@ -372,7 +368,7 @@ fn test_batch_insert_triggers_single_split() {
 
     let result = tree.insert_batch(entries);
 
-    assert_eq!(result.inserted + result.failed, 20);
+    assert_eq!(result.inserted + result.updated, 20);
     assert!(tree.len() >= result.inserted);
 
     // Verify accessible keys
@@ -395,7 +391,7 @@ fn test_batch_insert_triggers_multiple_splits() {
 
     let result = tree.insert_batch(entries);
 
-    assert_eq!(result.inserted + result.failed, 200);
+    assert_eq!(result.inserted + result.updated, 200);
     assert!(tree.len() >= result.inserted);
 }
 
@@ -609,8 +605,7 @@ fn test_batch_result_all_succeeded() {
 
     let result = tree.insert_batch(entries);
 
-    assert!(result.all_succeeded());
-    assert_eq!(result.failed, 0);
+    assert_eq!(result.inserted + result.updated, 10);
 }
 
 // ============================================================================

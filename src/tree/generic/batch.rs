@@ -8,7 +8,7 @@ use std::ptr as StdPtr;
 use crate::Permuter;
 use crate::leaf15::LeafNode15;
 use crate::{
-    Linker, MassTreeGeneric, TreeAllocator, key::Key, leaf_trait::TreeLeafNode,
+    Linker, MassTreeGeneric, TreeAllocator, ValueRef, key::Key, leaf_trait::TreeLeafNode,
     nodeversion::LockGuard, policy::LeafPolicy,
 };
 
@@ -73,8 +73,20 @@ pub struct BatchEntry<P: LeafPolicy> {
 
 impl<P: LeafPolicy> BatchEntry<P> {
     /// Create a new batch entry from key and value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `key` is longer than [`MAX_KEY_LENGTH`](crate::key::MAX_KEY_LENGTH).
+    /// Validation happens here, before any tree mutation.
     #[inline]
     pub fn new(key: Vec<u8>, value: P::Value) -> Self {
+        assert!(
+            key.len() <= crate::key::MAX_KEY_LENGTH,
+            "batch key length {} exceeds maximum {}",
+            key.len(),
+            crate::key::MAX_KEY_LENGTH
+        );
+
         let ikey: u64 = Self::compute_ikey(&key);
 
         Self {
@@ -150,21 +162,44 @@ struct OutputEntry<P: LeafPolicy> {
     key: Vec<u8>,
     output: P::Output,
     ikey: u64,
+    /// Original input position, used as the final sort tiebreaker so equal
+    /// keys are processed in input order (last value wins deterministically).
+    seq: usize,
 }
 
 impl<P: LeafPolicy> OutputEntry<P> {
     #[inline]
-    fn from_value(key: Vec<u8>, value: P::Value) -> Self {
+    fn from_value(key: Vec<u8>, value: P::Value, seq: usize) -> Self {
+        assert!(
+            key.len() <= crate::key::MAX_KEY_LENGTH,
+            "batch key length {} exceeds maximum {}",
+            key.len(),
+            crate::key::MAX_KEY_LENGTH
+        );
+
         let ikey: u64 = BatchEntry::<P>::compute_ikey(&key);
         let output: P::Output = P::into_output(value);
 
-        Self { key, output, ikey }
+        Self {
+            key,
+            output,
+            ikey,
+            seq,
+        }
     }
 
     #[inline(always)]
     const fn ikey(&self) -> u64 {
         self.ikey
     }
+}
+
+/// Sort key for a batch entry: ikey cluster, then full key bytes, then input
+/// order. Sorting by only the cached ikey lets an unstable sort reorder equal
+/// keys arbitrarily, changing which duplicate value wins.
+#[inline(always)]
+fn batch_sort_key(ikey: u64, key: &[u8], seq: usize) -> (u64, &[u8], usize) {
+    (ikey, key, seq)
 }
 
 /// A single entry in a batch insert operation that defers output allocation.
@@ -179,23 +214,39 @@ struct BatchValueEntry<P: LeafPolicy> {
 
     /// Cached ikey for the first 8 bytes (used for sorting).
     ikey: u64,
+
+    /// Original input position (stable duplicate ordering).
+    seq: usize,
 }
 
 impl<P: LeafPolicy> BatchValueEntry<P> {
     #[inline]
-    fn new(key: Vec<u8>, value: P::Value) -> Self {
+    fn new(key: Vec<u8>, value: P::Value, seq: usize) -> Self {
+        assert!(
+            key.len() <= crate::key::MAX_KEY_LENGTH,
+            "batch key length {} exceeds maximum {}",
+            key.len(),
+            crate::key::MAX_KEY_LENGTH
+        );
+
         let ikey: u64 = BatchEntry::<P>::compute_ikey(&key);
 
         Self {
             key,
             value: Some(value),
             ikey,
+            seq,
         }
     }
 
     #[inline(always)]
     const fn ikey(&self) -> u64 {
         self.ikey
+    }
+
+    #[inline(always)]
+    const fn seq(&self) -> usize {
+        self.seq
     }
 
     #[inline(always)]
@@ -223,7 +274,9 @@ impl<P: LeafPolicy> BatchValueEntry<P> {
 ///
 /// # Type Parameter
 ///
-/// * `O` - The output type (`ValuePtr<V>` for Box mode, `V` for Inline mode)
+/// * `O` - The value representation returned for updated keys. `insert_batch`
+///   returns owned `P::Value`s; the guard-scoped variants return
+///   [`ValueRef`](crate::ValueRef)s tied to the caller's guard.
 #[derive(Debug, Clone)]
 #[must_use]
 pub struct BatchInsertResult<O> {
@@ -235,9 +288,6 @@ pub struct BatchInsertResult<O> {
 
     /// Old values from updated keys (in no particular order).
     pub old_values: Vec<O>,
-
-    /// Number of entries that failed and need individual retry.
-    pub failed: usize,
 }
 
 impl<O> Default for BatchInsertResult<O> {
@@ -246,7 +296,6 @@ impl<O> Default for BatchInsertResult<O> {
             inserted: 0,
             updated: 0,
             old_values: Vec::new(),
-            failed: 0,
         }
     }
 }
@@ -265,7 +314,6 @@ impl<O> BatchInsertResult<O> {
             inserted: 0,
             updated: 0,
             old_values: Vec::with_capacity(capacity),
-            failed: 0,
         }
     }
 
@@ -282,24 +330,24 @@ impl<O> BatchInsertResult<O> {
         self.old_values.push(old_value);
     }
 
-    /// Record a failed entry.
-    #[inline(always)]
-    pub const fn record_failure(&mut self) {
-        self.failed += 1;
-    }
-
-    /// Total entries processed (inserted + updated + failed).
+    /// Total entries processed (inserted + updated).
+    ///
+    /// A batch either applies an entry or panics on an internal invariant
+    /// violation; there is no per-entry failure counter.
     #[must_use]
     #[inline(always)]
     pub const fn total(&self) -> usize {
-        self.inserted + self.updated + self.failed
+        self.inserted + self.updated
     }
 
-    /// Check if all entries succeeded.
-    #[must_use]
-    #[inline(always)]
-    pub const fn all_succeeded(&self) -> bool {
-        self.failed == 0
+    /// Transform every old value with `f`, preserving the counters.
+    #[inline]
+    pub fn map_old_values<U>(self, f: impl FnMut(O) -> U) -> BatchInsertResult<U> {
+        BatchInsertResult {
+            inserted: self.inserted,
+            updated: self.updated,
+            old_values: self.old_values.into_iter().map(f).collect(),
+        }
     }
 }
 
@@ -699,6 +747,8 @@ where
 
     /// Insert multiple key-value pairs in a single batch operation.
     ///
+    /// Returns owned old values, so the result is independent of any guard.
+    ///
     /// # Example
     ///
     /// ```rust
@@ -719,45 +769,38 @@ where
     ///
     /// # Panics
     ///
-    /// Panics on internal tree corruption (should not happen in normal operation).
+    /// Panics if a key exceeds the maximum key length (before mutating the
+    /// tree) or on internal tree corruption.
     pub fn insert_batch<I>(&self, entries: I) -> BatchInsertResult<P::Value>
     where
         I: IntoIterator<Item = (Vec<u8>, P::Value)>,
         P::Value: Clone,
     {
         let guard: LocalGuard<'_> = self.guard();
-        if P::can_write_through() {
-            self.insert_batch_values_with_guard(entries, &guard)
-        } else {
-            let result: BatchInsertResult<P::Output> =
-                self.insert_batch_with_guard(entries, &guard);
+        let result: BatchInsertResult<ValueRef<'_, P::Value>> =
+            self.insert_batch_with_guard(entries, &guard);
 
-            BatchInsertResult {
-                inserted: result.inserted,
-                updated: result.updated,
-                old_values: result
-                    .old_values
-                    .iter()
-                    .map(|o: &P::Output| unsafe { P::clone_value_from_output(o) })
-                    .collect(),
-                failed: result.failed,
-            }
-        }
+        result.map_old_values(ValueRef::into_owned)
     }
 
     /// Insert multiple key-value pairs using an existing guard.
+    ///
+    /// Old values are guard-scoped [`ValueRef`](crate::ValueRef)s: write-through
+    /// values are atomic copies, boxed values stay alive until the guard is
+    /// dropped even after retirement.
     ///
     /// Use this when performing multiple batch operations under the same
     /// guard to amortize guard creation overhead.
     ///
     /// # Panics
     ///
-    /// Panics on internal tree corruption.
-    pub fn insert_batch_with_guard<I>(
+    /// Panics if a key exceeds the maximum key length (before mutating the
+    /// tree) or on internal tree corruption.
+    pub fn insert_batch_with_guard<'g, I>(
         &self,
         entries: I,
-        guard: &LocalGuard<'_>,
-    ) -> BatchInsertResult<P::Output>
+        guard: &'g LocalGuard<'_>,
+    ) -> BatchInsertResult<ValueRef<'g, P::Value>>
     where
         I: IntoIterator<Item = (Vec<u8>, P::Value)>,
     {
@@ -766,33 +809,36 @@ where
             let value_result: BatchInsertResult<P::Value> =
                 self.insert_batch_values_with_guard(entries, guard);
 
-            return BatchInsertResult {
-                inserted: value_result.inserted,
-                updated: value_result.updated,
-                old_values: value_result
-                    .old_values
-                    .into_iter()
-                    .map(P::into_output)
-                    .collect(),
-                failed: value_result.failed,
-            };
+            return value_result.map_old_values(ValueRef::Owned);
         }
 
         // Convert to OutputEntry (allocates outputs once)
         let mut batch: Vec<OutputEntry<P>> = entries
             .into_iter()
-            .map(|(key, value): (Vec<u8>, P::Value)| OutputEntry::from_value(key, value))
+            .enumerate()
+            .map(|(seq, (key, value)): (usize, (Vec<u8>, P::Value))| {
+                OutputEntry::from_value(key, value, seq)
+            })
             .collect();
 
         if batch.is_empty() {
             return BatchInsertResult::new();
         }
 
-        // Sort by ikey for cache locality and leaf clustering
-        batch.sort_unstable_by_key(OutputEntry::ikey);
+        // Sort by ikey for cache locality, full key, and original position so
+        // duplicate keys keep input order (deterministic last-wins).
+        batch.sort_unstable_by(|a: &OutputEntry<P>, b: &OutputEntry<P>| {
+            batch_sort_key(a.ikey, &a.key, a.seq).cmp(&batch_sort_key(b.ikey, &b.key, b.seq))
+        });
 
-        // Process the sorted batch
-        self.process_sorted_batch(&mut batch, guard)
+        let output_result: BatchInsertResult<P::Output> =
+            self.process_sorted_batch(&mut batch, guard);
+
+        output_result.map_old_values(|output: P::Output| {
+            // SAFETY: Each old value was retired under `guard`; the allocation
+            // cannot be reclaimed until the guard is dropped.
+            unsafe { P::output_to_value_ref(&output) }
+        })
     }
 
     fn insert_batch_values_with_guard<I>(
@@ -805,14 +851,19 @@ where
     {
         let mut batch: Vec<BatchValueEntry<P>> = entries
             .into_iter()
-            .map(|(key, value): (Vec<u8>, P::Value)| BatchValueEntry::new(key, value))
+            .enumerate()
+            .map(|(seq, (key, value)): (usize, (Vec<u8>, P::Value))| {
+                BatchValueEntry::new(key, value, seq)
+            })
             .collect();
 
         if batch.is_empty() {
             return BatchInsertResult::new();
         }
 
-        batch.sort_unstable_by_key(BatchValueEntry::ikey);
+        batch.sort_unstable_by(|a: &BatchValueEntry<P>, b: &BatchValueEntry<P>| {
+            batch_sort_key(a.ikey, &a.key, a.seq()).cmp(&batch_sort_key(b.ikey, &b.key, b.seq()))
+        });
         self.process_sorted_value_batch(&mut batch, guard)
     }
 
@@ -821,30 +872,44 @@ where
     /// Takes ownership of the entries. Each entry owns a real user value; the
     /// value is converted to its storage representation only here, once, and
     /// the entry no longer aliases any value still stored in the tree.
-    pub fn insert_batch_entries(
+    ///
+    /// Old values are guard-scoped [`ValueRef`](crate::ValueRef)s.
+    pub fn insert_batch_entries<'g>(
         &self,
-        mut entries: Vec<BatchEntry<P>>,
-        guard: &LocalGuard<'_>,
-    ) -> BatchInsertResult<P::Output> {
+        entries: Vec<BatchEntry<P>>,
+        guard: &'g LocalGuard<'_>,
+    ) -> BatchInsertResult<ValueRef<'g, P::Value>> {
         self.verify_guard(guard);
         if entries.is_empty() {
             return BatchInsertResult::new();
         }
 
-        // Sort by ikey for cache locality, then convert to internal outputs.
-        entries.sort_unstable_by_key(BatchEntry::ikey);
+        // Convert to internal outputs; the input order supplies the duplicate
+        // tiebreaker.
         let mut outputs: Vec<OutputEntry<P>> = entries
             .into_iter()
-            .map(|entry: BatchEntry<P>| {
+            .enumerate()
+            .map(|(seq, entry): (usize, BatchEntry<P>)| {
                 let key: Vec<u8> = entry.key;
                 let value: P::Value = entry
                     .value
                     .expect("BatchEntry value already consumed before insertion");
-                OutputEntry::from_value(key, value)
+                OutputEntry::from_value(key, value, seq)
             })
             .collect();
 
-        self.process_sorted_batch(&mut outputs, guard)
+        outputs.sort_unstable_by(|a: &OutputEntry<P>, b: &OutputEntry<P>| {
+            batch_sort_key(a.ikey, &a.key, a.seq).cmp(&batch_sort_key(b.ikey, &b.key, b.seq))
+        });
+
+        let output_result: BatchInsertResult<P::Output> =
+            self.process_sorted_batch(&mut outputs, guard);
+
+        output_result.map_old_values(|output: P::Output| {
+            // SAFETY: Each old value was retired under `guard`; it remains
+            // allocated until the guard is dropped.
+            unsafe { P::output_to_value_ref(&output) }
+        })
     }
 
     // ========================================================================

@@ -42,7 +42,7 @@ mod print;
 
 // Re-export batch types
 pub use batch::{BatchEntry, BatchInsertResult};
-pub use entry::{Entry, OccupiedEntry, VacantEntry};
+pub use entry::{Entry, OccupiedEntry, RemoveEntryResult, VacantEntry};
 
 // ============================================================================
 //  Shared Types
@@ -986,8 +986,8 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if memory allocation fails during tree construction.
-    /// This matches std collection behavior.
+    /// Panics on an internal tree invariant violation. A memory-allocation
+    /// failure aborts the process, matching std collection behavior.
     ///
     /// # Example
     ///
@@ -1054,8 +1054,9 @@ where
         let guard: LocalGuard<'_> = self.guard();
 
         for (key, value) in iter {
-            // Skip failed inserts, Extend returns () so we can't propagate errors
-            let _ = self.insert_with_guard(key.as_ref(), value, &guard);
+            // Inserts either apply or panic on an internal invariant violation;
+            // OOM aborts. Extend has no way to report a per-entry failure.
+            self.insert_with_guard(key.as_ref(), value, &guard);
         }
     }
 }
