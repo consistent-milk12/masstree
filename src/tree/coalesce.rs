@@ -838,8 +838,7 @@ impl Coalesce {
         for inode_ptr in internodes {
             // SAFETY: Same reasoning as above.
             unsafe {
-                tree.allocator()
-                    .retire_internode_erased(inode_ptr, guard);
+                tree.allocator().retire_internode_erased(inode_ptr, guard);
             }
         }
 

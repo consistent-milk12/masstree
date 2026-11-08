@@ -126,8 +126,11 @@ where
         P::Value: Clone,
     {
         let guard = self.guard();
-        self.first_with_guard(&guard)
-            .map(|entry| ScanEntry::new(entry.key, unsafe { P::clone_value_from_output(&entry.value) }))
+        self.first_with_guard(&guard).map(|entry| {
+            ScanEntry::new(entry.key, unsafe {
+                P::clone_value_from_output(&entry.value)
+            })
+        })
     }
 
     /// Get the first (smallest) key-value pair using an existing guard.
@@ -151,8 +154,11 @@ where
         P::Value: Clone,
     {
         let guard = self.guard();
-        self.last_with_guard(&guard)
-            .map(|entry| ScanEntry::new(entry.key, unsafe { P::clone_value_from_output(&entry.value) }))
+        self.last_with_guard(&guard).map(|entry| {
+            ScanEntry::new(entry.key, unsafe {
+                P::clone_value_from_output(&entry.value)
+            })
+        })
     }
 
     /// Get the last (largest) key-value pair using an existing guard.

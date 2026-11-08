@@ -440,9 +440,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
         let key_len: usize = if keylenx == KSUF_KEYLENX {
             match leaf.ksuf(slot) {
-                Some(suffix) => {
-                    IKEY_SIZE + suffix.len()
-                }
+                Some(suffix) => IKEY_SIZE + suffix.len(),
                 None => IKEY_SIZE,
             }
         } else {
@@ -1029,8 +1027,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         let mut anchored_ki: Option<isize> = None;
         for pos in 0..perm.size() {
             let slot: usize = perm.get(pos);
-            if leaf.keylenx_relaxed(slot) >= LAYER_KEYLENX
-                && leaf.ikey_relaxed(slot) == layer_ikey
+            if leaf.keylenx_relaxed(slot) >= LAYER_KEYLENX && leaf.ikey_relaxed(slot) == layer_ikey
             {
                 anchored_ki = Some(pos.cast_signed() - 1);
                 break;

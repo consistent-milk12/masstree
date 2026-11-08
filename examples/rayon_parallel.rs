@@ -239,7 +239,10 @@ fn main() {
                 .iter()
                 .map(|&i| {
                     let key = make_key(i);
-                    masstree.get_with_guard(&key, &guard).map(|v| *v).unwrap_or(0)
+                    masstree
+                        .get_with_guard(&key, &guard)
+                        .map(|v| *v)
+                        .unwrap_or(0)
                 })
                 .sum::<u64>()
         })
@@ -680,11 +683,10 @@ fn main() {
                 .iter()
                 .filter_map(|&i| {
                     let key = format!("chunk/{i:07}");
-                    tree.get_with_guard(key.as_bytes(), &guard)
-                        .and_then(|v| {
-                            let v = *v;
-                            if v > 400_000 { Some((key, v)) } else { None }
-                        })
+                    tree.get_with_guard(key.as_bytes(), &guard).and_then(|v| {
+                        let v = *v;
+                        if v > 400_000 { Some((key, v)) } else { None }
+                    })
                 })
                 .collect::<Vec<_>>()
         })

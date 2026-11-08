@@ -101,8 +101,7 @@ fn very_long_key() -> impl Strategy<Value = Vec<u8>> {
 
 /// Strategy for generating unique long keys.
 fn unique_long_keys(max_count: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
-    prop::collection::btree_set(long_key(), 0..=max_count)
-        .prop_map(|set| set.into_iter().collect())
+    prop::collection::btree_set(long_key(), 0..=max_count).prop_map(|set| set.into_iter().collect())
 }
 
 // ============================================================================

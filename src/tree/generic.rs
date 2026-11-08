@@ -164,6 +164,8 @@ where
     #[inline]
     pub fn process_coalesce(&self, guard: &LocalGuard<'_>) -> usize {
         self.verify_guard(guard);
+        #[cfg(feature = "tracing")]
+        tracing::trace!("process_coalesce");
 
         Coalesce::process_all::<P, A>(self, guard)
     }
@@ -259,11 +261,7 @@ where
     /// Follow parent pointers to find the actual layer root.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "Method signature pattern")]
-    fn maybe_parent_generic(
-        &self,
-        mut node: *const u8,
-        guard: &LocalGuard<'_>,
-    ) -> *const u8 {
+    fn maybe_parent_generic(&self, mut node: *const u8, guard: &LocalGuard<'_>) -> *const u8 {
         loop {
             // SAFETY: node is valid, both types have NodeVersion as first field
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
@@ -290,11 +288,7 @@ where
     /// Single-step parent traversal
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "Method signature pattern")]
-    fn maybe_parent_one_step(
-        &self,
-        node: *const u8,
-        guard: &LocalGuard<'_>,
-    ) -> *const u8 {
+    fn maybe_parent_one_step(&self, node: *const u8, guard: &LocalGuard<'_>) -> *const u8 {
         // SAFETY: node is valid, both types have NodeVersion as first field
         #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
         let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
@@ -699,6 +693,8 @@ where
         guard: &LocalGuard<'_>,
     ) -> Option<P::Output> {
         self.verify_guard(guard);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(key_len = key.len(), "insert");
         let mut key: Key<'_> = Key::new(key);
         let output: <P as LeafPolicy>::Output = P::into_output(value);
 
@@ -762,6 +758,8 @@ where
         P::Value: Clone,
     {
         self.verify_guard(guard);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(key_len = key.len(), "insert_value");
         let mut key: Key<'_> = Key::new(key);
 
         if P::can_write_through() {
@@ -844,9 +842,10 @@ where
         guard: &'g LocalGuard<'_>,
     ) -> Result<Option<ValueRef<'g, P::Value>>, RemoveError> {
         self.verify_guard(guard);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(key_len = key.len(), "remove");
 
-        let removed: Option<P::Output> =
-            NodeCleaner::remove_concurrent_generic(self, key, guard)?;
+        let removed: Option<P::Output> = NodeCleaner::remove_concurrent_generic(self, key, guard)?;
 
         Ok(removed.map(|output: P::Output| {
             // SAFETY: `output` was removed under `guard`; the allocation is

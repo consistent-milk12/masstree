@@ -116,11 +116,51 @@ impl<W: FmtWrite> Ctx<'_, W> {
 //  Node Dispatch
 // ============================================================================
 
+/// Climb parent pointers from a layer-slot target to the true layer root.
+///
+/// After promotion the slot still points at the original left leaf; the root
+/// is the parentless ancestor that owns the whole sublayer chain.
+///
+/// SAFETY: `node_ptr` must be a live leaf or internode protected by `guard`.
+unsafe fn resolve_layer_root<P: LeafPolicy>(
+    mut node_ptr: *mut u8,
+    guard: &LocalGuard<'_>,
+) -> *mut u8 {
+    for _ in 0..64 {
+        if node_ptr.is_null() {
+            return node_ptr;
+        }
+
+        // SAFETY: Both node types have NodeVersion as their first field.
+        let version: &NodeVersion = unsafe { &*node_ptr.cast::<NodeVersion>() };
+
+        let parent: *mut u8 = if version.is_leaf() {
+            // SAFETY: is_leaf() confirmed.
+            unsafe { (*node_ptr.cast::<LeafNode15<P>>()).parent(guard) }
+        } else {
+            // SAFETY: !is_leaf() confirmed.
+            unsafe { (*node_ptr.cast::<InternodeNode>()).parent(guard) }
+        };
+
+        if parent.is_null() {
+            return node_ptr;
+        }
+
+        node_ptr = parent;
+    }
+
+    node_ptr
+}
+
 /// Dispatch a raw node pointer to the correct print function.
 ///
 /// SAFETY: `ptr` must be non-null and point to a live `LeafNode15<P>` or
 /// `InternodeNode` that is EBR-protected by the caller's guard.
-unsafe fn print_node<P, W>(ctx: &mut Ctx<'_, W>, ptr: *mut u8) -> StdFmt::Result
+unsafe fn print_node<P, W>(
+    ctx: &mut Ctx<'_, W>,
+    ptr: *mut u8,
+    guard: &LocalGuard<'_>,
+) -> StdFmt::Result
 where
     P: LeafPolicy,
     P::Output: StdFmt::Debug,
@@ -135,10 +175,10 @@ where
 
     if version.is_leaf() {
         // SAFETY: is_leaf() confirmed.
-        unsafe { print_leaf::<P, W>(ctx, ptr.cast::<LeafNode15<P>>()) }
+        unsafe { print_leaf::<P, W>(ctx, ptr.cast::<LeafNode15<P>>(), guard) }
     } else {
         // SAFETY: !is_leaf() confirmed.
-        unsafe { print_internode::<P, W>(ctx, ptr) }
+        unsafe { print_internode::<P, W>(ctx, ptr, guard) }
     }
 }
 
@@ -227,7 +267,11 @@ where
 /// Print a leaf node with OCC-safe field reads and an ASCII slot table.
 ///
 /// SAFETY: `leaf_ptr` must point to a live `LeafNode15<P>` protected by EBR.
-unsafe fn print_leaf<P, W>(ctx: &mut Ctx<'_, W>, leaf_ptr: *mut LeafNode15<P>) -> StdFmt::Result
+unsafe fn print_leaf<P, W>(
+    ctx: &mut Ctx<'_, W>,
+    leaf_ptr: *mut LeafNode15<P>,
+    guard: &LocalGuard<'_>,
+) -> StdFmt::Result
 where
     P: LeafPolicy,
     P::Output: StdFmt::Debug,
@@ -293,19 +337,25 @@ where
         let layer_ptrs: Vec<(usize, *mut u8)> =
             unsafe { print_leaf_slots::<P, W>(ctx, leaf, perm, size)? };
 
-        // Recurse into sublayers
+        // Recurse into sublayers. After layer-root promotion the parent slot
+        // still points at the original left leaf; climb to the true root so
+        // the internode and every sibling leaf are printed.
         for (pos, layer_ptr) in layer_ptrs {
             if !layer_ptr.is_null() && ctx.depth < MAX_DEPTH {
+                // SAFETY: layer_ptr is EBR-protected and resolve_layer_root
+                // only follows parent pointers of live nodes under the guard.
+                let layer_root: *mut u8 = unsafe { resolve_layer_root::<P>(layer_ptr, guard) };
+
                 ctx.writeln_prefixed(&format!(
-                    "\u{2514}\u{2500}\u{2500} SUBLAYER (slot pos={pos})"
+                    "\u{2514}\u{2500}\u{2500} SUBLAYER (slot pos={pos}, root @ {layer_root:p})"
                 ))?;
 
                 let saved: String = ctx.prefix.clone();
                 ctx.prefix.push_str("    ");
                 ctx.depth += 1;
 
-                // SAFETY: layer_ptr is a valid sublayer root, EBR-protected.
-                unsafe { print_node::<P, W>(ctx, layer_ptr)? };
+                // SAFETY: layer_root is the true sublayer root, EBR-protected.
+                unsafe { print_node::<P, W>(ctx, layer_root, guard)? };
 
                 ctx.depth -= 1;
                 ctx.prefix = saved;
@@ -324,7 +374,11 @@ where
 /// Print an internode with OCC-safe reads, recursing into children.
 ///
 /// SAFETY: `inode_ptr` must point to a live `InternodeNode`, EBR-protected.
-unsafe fn print_internode<P, W>(ctx: &mut Ctx<'_, W>, inode_ptr: *mut u8) -> StdFmt::Result
+unsafe fn print_internode<P, W>(
+    ctx: &mut Ctx<'_, W>,
+    inode_ptr: *mut u8,
+    guard: &LocalGuard<'_>,
+) -> StdFmt::Result
 where
     P: LeafPolicy,
     P::Output: StdFmt::Debug,
@@ -399,7 +453,7 @@ where
                 ctx.prefix.push_str(cont);
 
                 // SAFETY: child_ptr is EBR-protected.
-                unsafe { print_node::<P, W>(ctx, child_ptr)? };
+                unsafe { print_node::<P, W>(ctx, child_ptr, guard)? };
 
                 ctx.prefix = saved;
             }
@@ -450,7 +504,7 @@ where
 
         // SAFETY: root is EBR-protected by `guard`. Both node types have
         // NodeVersion as first field, so the is_leaf() dispatch is sound.
-        unsafe { print_node::<P, _>(&mut ctx, root) }
+        unsafe { print_node::<P, _>(&mut ctx, root, &guard) }
     }
 
     /// Return the tree visualization as a `String`.

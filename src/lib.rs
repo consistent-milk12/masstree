@@ -73,27 +73,33 @@
 // downstream binary or dependency that defines its own allocator.
 // Benchmark binaries in `benches/` opt in through `bench_utils.rs`.
 
-/// Initialize tracing with file and console output.
+/// Initialize tracing with file output and optional console output.
 ///
-/// Writes NDJSON logs to `logs/masstree.jsonl` for structured analysis.
-/// Also outputs to console unless `MASSTREE_LOG_CONSOLE=0` is set.
+/// Writes NDJSON logs to `$MASSTREE_LOG_DIR/masstree.jsonl` for structured
+/// analysis. The default directory is the system temp directory, so enabling
+/// tracing never writes into the repository. Console output is off by
+/// default; set `MASSTREE_LOG_CONSOLE=1` to enable it.
+///
+/// The library emits span/event records for insert, get, remove, and
+/// maintenance operations when this feature is enabled.
 ///
 /// Safe to call multiple times - only the first call takes effect.
 ///
 /// # Environment Variables
 ///
 /// - `RUST_LOG`: Filter directives (default: `masstree=info`). Example: `masstree=debug,masstree::tree::locked=trace`
-/// - `MASSTREE_LOG_DIR`: Log directory (default: `logs/`)
-/// - `MASSTREE_LOG_CONSOLE`: Set to `0` to disable console output
+/// - `MASSTREE_LOG_DIR`: Log directory (default: the system temp directory)
+/// - `MASSTREE_LOG_CONSOLE`: Set to `0` to disable console output (default: off);
+///   any other value enables it.
 ///
 /// # Example
 ///
 /// ```bash
 /// # Run with debug logging to file, no console spam
-/// RUST_LOG=masstree=debug MASSTREE_LOG_CONSOLE=0 cargo run --features tracing
+/// RUST_LOG=masstree=debug cargo run --features tracing
 ///
 /// # Analyze logs with jq
-/// cat logs/masstree.jsonl | jq 'select(.fields.ikey != null)'
+/// cat "$TMPDIR/masstree-logs/masstree.jsonl" | jq 'select(.fields.ikey != null)'
 /// ```
 #[cfg(feature = "tracing")]
 pub fn init_tracing() {
@@ -105,9 +111,12 @@ pub fn init_tracing() {
     static GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
     GUARD.get_or_init(|| {
-        let log_dir: String =
-            StdEnv::var("MASSTREE_LOG_DIR").unwrap_or_else(|_| "logs".to_string());
-        let console_enabled: bool = false;
+        let log_dir: std::path::PathBuf = StdEnv::var_os("MASSTREE_LOG_DIR").map_or_else(
+            || StdEnv::temp_dir().join("masstree-logs"),
+            std::path::PathBuf::from,
+        );
+        let console_enabled: bool =
+            StdEnv::var("MASSTREE_LOG_CONSOLE").map_or(false, |value| value != "0");
         let filter_str: String =
             StdEnv::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
 

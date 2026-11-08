@@ -147,7 +147,7 @@ fn test_invariants_valid() {
 
 #[test]
 #[should_panic(expected = "keys not in ascending order")]
-#[cfg(debug_assertions)]
+#[cfg_attr(not(debug_assertions), ignore = "requires debug assertions")]
 fn test_invariant_unsorted_keys() {
     let node: Box<InternodeNode> = InternodeNode::new(0);
 

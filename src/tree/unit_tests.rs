@@ -1844,7 +1844,7 @@ fn test_correct_guard_works() {
 }
 
 #[test]
-#[cfg(debug_assertions)]
+#[cfg_attr(not(debug_assertions), ignore = "requires debug assertions")]
 #[should_panic(expected = "different collector")]
 fn test_wrong_guard_panics_on_insert() {
     let tree1: MassTree15<u64> = MassTree15::new();
@@ -1855,7 +1855,7 @@ fn test_wrong_guard_panics_on_insert() {
 }
 
 #[test]
-#[cfg(debug_assertions)]
+#[cfg_attr(not(debug_assertions), ignore = "requires debug assertions")]
 #[should_panic(expected = "different collector")]
 fn test_wrong_guard_panics_on_remove() {
     let tree1: MassTree15<u64> = MassTree15::new();
@@ -1867,7 +1867,7 @@ fn test_wrong_guard_panics_on_remove() {
 }
 
 #[test]
-#[cfg(debug_assertions)]
+#[cfg_attr(not(debug_assertions), ignore = "requires debug assertions")]
 #[should_panic(expected = "different collector")]
 fn test_wrong_guard_panics_on_iter() {
     let tree1: MassTree15<u64> = MassTree15::new();

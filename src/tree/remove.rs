@@ -279,9 +279,7 @@ where
                 // Non-sublayer: schedule chain coalesce (pointer-based).
                 let ikey_bound: u64 = leaf.ikey_bound();
 
-                self.tree
-                    .coalesce_queue
-                    .schedule_chain(ikey_bound);
+                self.tree.coalesce_queue.schedule_chain(ikey_bound);
             } else {
                 // Sublayer: schedule route-based gc (no pointers stored).
                 self.tree
@@ -679,8 +677,7 @@ impl NodeCleaner {
 
                                 if exceeded {
                                     key.unshift_all();
-                                    layer_root =
-                                        tree.load_root_ptr_generic(guard).cast_mut();
+                                    layer_root = tree.load_root_ptr_generic(guard).cast_mut();
                                     route.clear();
                                     continue 'layer_loop;
                                 }
@@ -712,8 +709,7 @@ impl NodeCleaner {
 
                                 if exceeded {
                                     key.unshift_all();
-                                    layer_root =
-                                        tree.load_root_ptr_generic(guard).cast_mut();
+                                    layer_root = tree.load_root_ptr_generic(guard).cast_mut();
                                     route.clear();
                                     continue 'layer_loop;
                                 }

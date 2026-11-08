@@ -183,12 +183,9 @@ where
                 // SAFETY: `new_output` is the allocation being published into
                 // the tree; `o.guard` keeps it alive. OCC validation happens
                 // inside the insert path.
-                let new_ref: ValueRef<'e, P::Value> = unsafe {
-                    P::output_to_value_ref(&new_output)
-                };
-                let _old = o
-                    .tree
-                    .insert_output_with_guard(o.key, new_output, o.guard);
+                let new_ref: ValueRef<'e, P::Value> =
+                    unsafe { P::output_to_value_ref(&new_output) };
+                let _old = o.tree.insert_output_with_guard(o.key, new_output, o.guard);
                 o.value = new_ref;
 
                 Entry::Occupied(o)
@@ -217,9 +214,7 @@ where
 
                 // SAFETY: `output` is the allocation being published into the
                 // tree; `guard` keeps it alive.
-                let value_ref: ValueRef<'e, P::Value> = unsafe {
-                    P::output_to_value_ref(&output)
-                };
+                let value_ref: ValueRef<'e, P::Value> = unsafe { P::output_to_value_ref(&output) };
                 let _old = tree.insert_output_with_guard(key, output, guard);
 
                 OccupiedEntry {

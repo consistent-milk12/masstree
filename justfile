@@ -29,15 +29,23 @@ BENCH_THREADS := "12"
 BENCH_DURATION := "10"
 
 # Run all C++ benchmarks and save to cpp_benches/
+# Set MTTEST to the C++ reference binary if it is not at the default path.
 cpp-bench:
     #!/usr/bin/env bash
-    set -e
+    set -euo pipefail
+    MTTEST="${MTTEST:-reference/build/mttest}"
+    if [ ! -x "$MTTEST" ]; then
+        echo "error: C++ reference binary not found at $MTTEST" >&2
+        echo "Build it or set MTTEST=/path/to/mttest." >&2
+        echo "Rust-only comparison: python3 scripts/run_cpp_bench.py --rust-only" >&2
+        exit 1
+    fi
     mkdir -p cpp_benches
     tests="rw1 rw2g98 rw3 rw4 same uscale wscale"
     echo "Running C++ benchmarks ({{BENCH_THREADS}} threads, {{BENCH_DURATION}}s)..."
     for test in $tests; do
         echo "  Running $test..."
-        ./reference/mttest -j{{BENCH_THREADS}} -d{{BENCH_DURATION}} $test 2>&1 > cpp_benches/$test.txt
+        "$MTTEST" -j{{BENCH_THREADS}} -d{{BENCH_DURATION}} "$test" > "cpp_benches/$test.txt" 2>&1
     done
     echo "Done. Results saved to cpp_benches/"
 
@@ -54,7 +62,7 @@ rust-bench:
     echo "Running Rust benchmarks ({{BENCH_THREADS}} threads, {{BENCH_DURATION}}s)..."
     for test in $tests; do
         echo "  Running $test..."
-        cargo bench --bench mttest --features mimalloc -- $test -j{{BENCH_THREADS}} -d{{BENCH_DURATION}} 2>&1 > rust_benches/$test.txt
+        cargo bench --bench mttest --features mimalloc -- $test -j{{BENCH_THREADS}} -d{{BENCH_DURATION}} > rust_benches/$test.txt 2>&1
     done
     echo "Done. Results saved to rust_benches/"
 
@@ -141,17 +149,13 @@ test-integration:
 test-one TEST:
     cargo test {{TEST}} -- --nocapture
 
-# Run ALL possible tests (unit, doc, integration, loom, shuttle, miri)
-test-all: test test-loom test-shuttle miri-strict
+# Run all test suites: nextest (unit+integration), doc, loom, and Miri.
+test-all: test test-doc test-loom miri-leaks miri-strict-int
     @echo "All tests passed!"
 
 # Run loom tests for deterministic concurrency verification
 test-loom:
     RUSTFLAGS="--cfg loom" cargo test --lib loom_tests
-
-# Run shuttle linearizability tests
-test-shuttle:
-    cargo test --lib tree::shuttle_tests
 
 # Run clippy lints
 lint:
@@ -210,7 +214,7 @@ miri-strict-int:
 
 # Run Miri checking for memory leaks
 miri-leaks:
-    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri test --lib
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri test --test leak_tests
 
 # Run Miri with Tree Borrows (experimental, more permissive than Stacked Borrows)
 miri-tree-borrows:

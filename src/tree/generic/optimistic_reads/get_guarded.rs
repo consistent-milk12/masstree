@@ -49,6 +49,9 @@ where
         guard: &LocalGuard<'_>,
     ) -> Option<P::Output> {
         self.verify_guard(guard);
+        #[cfg(feature = "tracing")]
+        tracing::trace!(key_len = key.len(), "get");
+
         let mut key: Key<'_> = Key::new(key);
 
         // Find root
