@@ -533,12 +533,43 @@ where
             continue;
         }
 
-        // Build the full key and perform the same bound check as keyed scans.
-        build_slot_key(ctx.cursor_key, ctx.leaf, slot, slot_ikey, slot_keylenx);
+        // Fast ikey bound check. A full-key comparison is only needed when
+        // the slot shares the bound's 8-byte ikey (or when the bound has no
+        // complete ikey at this layer); every interior slot is ordered by its
+        // ikey alone. This keeps values-only scans free of per-slot key
+        // materialization in the common unbounded/interior case.
+        let mut needs_full_bound: bool = false;
+
+        if let Some(b_ikey) = bound_ikey {
+            match slot_ikey.cmp(&b_ikey) {
+                ord if ord == D::exceeded_ordering() => return D::bound_exceeded(),
+                Ordering::Equal => needs_full_bound = true,
+                _ => {}
+            }
+        } else if !bound.is_unbounded() {
+            needs_full_bound = true;
+        }
+
+        // Record the current slot in the cursor without rebuilding the whole
+        // key. Inline slots need only the ikey and length; suffix slots copy
+        // their suffix so a cold retry can reposition exactly.
+        ctx.cursor_key.assign_store_ikey(slot_ikey);
+
+        if slot_keylenx == KSUF_KEYLENX {
+            if let Some(suffix) = ctx.leaf.ksuf(slot) {
+                let _ = ctx.cursor_key.assign_store_suffix(suffix);
+                ctx.cursor_key.assign_store_length(IKEY_SIZE + suffix.len());
+            } else {
+                ctx.cursor_key.assign_store_length(IKEY_SIZE);
+            }
+        } else {
+            ctx.cursor_key
+                .assign_store_length(usize::from(slot_keylenx));
+        }
+
         ctx.cursor_key.mark_key_complete();
 
-        let key: &[u8] = ctx.cursor_key.full_key();
-        if !D::key_in_bound(bound, key) {
+        if needs_full_bound && !D::key_in_bound(bound, ctx.cursor_key.full_key()) {
             return D::bound_exceeded();
         }
 
