@@ -123,21 +123,17 @@ impl ShardedCounter {
 
     /// Load the current counter value by summing all shards.
     ///
-    /// # Panics
-    ///
-    /// Debug builds will panic if the total is negative (indicating a bug where
-    /// decrements exceeded increments). Release builds return 0 in this case.
+    /// The sum is not a linearizable snapshot: concurrent increment and
+    /// decrement operations on different shards can be observed out of order,
+    /// so a transiently negative sum is possible even though the logical count
+    /// never becomes negative. The result is therefore clamped to zero in all
+    /// profiles rather than asserted.
     pub fn load(&self) -> usize {
         let mut total: isize = 0;
 
         for shard in &self.shards {
             total += shard.value.load(AtomicOrdering::Relaxed);
         }
-
-        debug_assert!(
-            total >= 0,
-            "ShardedCounter total is negative ({total}): more decrements than increments"
-        );
 
         if total >= 0 { total.cast_unsigned() } else { 0 }
     }
