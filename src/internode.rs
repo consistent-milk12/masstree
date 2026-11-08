@@ -284,7 +284,16 @@ impl InternodeNode {
         clippy::cast_possible_truncation,
         reason = "WIDTH <= 15, so mid and WIDTH-mid fit in u8"
     )]
-    pub fn split_into(
+    ///
+    /// # Safety
+    ///
+    /// - `self` must be a full internode whose lock is held.
+    /// - `new_right` must be an exclusively owned, empty internode of the same
+    ///   height, and `new_right_ptr` must be its stable address.
+    /// - `insert_child` must be a valid child pointer of the node's child kind.
+    /// - When `height > 0`, every moved child must be a live `InternodeNode`
+    ///   owned by this node; this function dereferences them to reparent.
+    pub unsafe fn split_into(
         &self,
         new_right: &mut Self,
         new_right_ptr: *mut Self,
@@ -682,7 +691,7 @@ impl TreeInternode for InternodeNode {
     }
 
     #[inline(always)]
-    fn split_into(
+    unsafe fn split_into(
         &self,
         new_right: &mut Self,
         new_right_ptr: *mut Self,
@@ -690,14 +699,17 @@ impl TreeInternode for InternodeNode {
         insert_ikey: u64,
         insert_child: *mut u8,
     ) -> (u64, bool) {
-        Self::split_into(
-            self,
-            new_right,
-            new_right_ptr,
-            insert_pos,
-            insert_ikey,
-            insert_child,
-        )
+        // SAFETY: Forwarded from the trait contract.
+        unsafe {
+            Self::split_into(
+                self,
+                new_right,
+                new_right_ptr,
+                insert_pos,
+                insert_ikey,
+                insert_child,
+            )
+        }
     }
 }
 

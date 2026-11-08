@@ -430,7 +430,9 @@ where
     /// Returns `fmt::Error` if writing to `w` fails.
     pub fn print_tree_to(&self, w: &mut impl FmtWrite) -> StdFmt::Result {
         let guard: LocalGuard<'_> = self.guard();
-        let root: *mut u8 = self.debug_root_ptr(&guard);
+        // SAFETY: the guard keeps the root live for the duration of the print,
+        // and this function only reads node contents.
+        let root: *mut u8 = unsafe { self.debug_root_ptr(&guard) };
         let count: usize = self.len();
 
         writeln!(w, "MassTree  count={count}  @ {root:p}")?;

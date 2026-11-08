@@ -366,6 +366,8 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
 
         let ptr: *mut u8 = self.ptrs[src_slot].load(RELAXED);
         dst.ptrs[dst_slot].store(ptr, WRITE_ORD);
+        // True move: the source no longer owns the allocation.
+        self.ptrs[src_slot].store(StdPtr::null_mut(), RELAXED);
     }
 
     #[inline(always)]
@@ -381,6 +383,8 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
 
         let ptr: *mut u8 = self.ptrs[src_slot].load(RELAXED);
         dst.ptrs[dst_slot].store(ptr, RELAXED);
+        // True move: the source no longer owns the allocation.
+        self.ptrs[src_slot].store(StdPtr::null_mut(), RELAXED);
     }
 
     // ========================================================================

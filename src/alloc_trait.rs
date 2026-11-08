@@ -13,6 +13,22 @@ use crate::policy::LeafPolicy;
 ///
 /// Enables tree operations to work with any leaf policy implementing [`LeafPolicy`].
 ///
+/// # Safety
+///
+/// Implementations must uphold the tree's ownership and layout invariants:
+///
+/// - Every allocation method must return a non-null, correctly aligned node of
+///   the requested kind, fully initialized for the requested root/split state.
+/// - Retired pointers must be valid nodes previously allocated by this
+///   allocator and unreachable from the tree.
+/// - `teardown_tree` must only be called with exclusive access after all
+///   readers have left and the collector has been drained.
+/// - Allocation failures must abort; returning null or a dummy pointer is
+///   undefined behavior in the tree.
+///
+/// The trait is `unsafe` because a safe implementation returning an invalid
+/// pointer would let safe tree code dereference it.
+///
 /// # Type Parameters
 ///
 /// - `P`: The leaf policy implementing [`LeafPolicy`]
@@ -21,7 +37,7 @@ use crate::policy::LeafPolicy;
 ///
 /// Internode pointers use `*mut u8` for type erasure. Implementations must ensure
 /// internodes have the same WIDTH as leaves (invariant enforced by construction).
-pub trait TreeAllocator<P: LeafPolicy>: Send + Sync {
+pub unsafe trait TreeAllocator<P: LeafPolicy>: Send + Sync {
     // ========================================================================
     // Leaf Allocation
     // ========================================================================
@@ -67,7 +83,13 @@ pub trait TreeAllocator<P: LeafPolicy>: Send + Sync {
     // ========================================================================
 
     /// Teardown all reachable nodes at tree drop.
-    fn teardown_tree(&self, root_ptr: *mut u8);
+    ///
+    /// # Safety
+    ///
+    /// The caller must have exclusive access to the tree (no live guards or
+    /// readers), all deferred retirements must have been flushed, and
+    /// `root_ptr` must be null or a valid root allocated by this allocator.
+    unsafe fn teardown_tree(&self, root_ptr: *mut u8);
 }
 
 // ============================================================================

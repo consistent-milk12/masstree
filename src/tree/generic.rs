@@ -213,7 +213,16 @@ where
     }
 
     /// Returns the root pointer for debugging/testing purposes.
-    pub fn debug_root_ptr(&self, _guard: &LocalGuard<'_>) -> *mut u8 {
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer is only valid while `guard` is held and while the
+    /// tree is not concurrently mutating the root. The caller must not
+    /// dereference it unless it has independently established the node's kind
+    /// and validity, and must never use it to mutate or free nodes through
+    /// this API.
+    #[doc(hidden)]
+    pub unsafe fn debug_root_ptr(&self, _guard: &LocalGuard<'_>) -> *mut u8 {
         self.root_ptr.load(AtomicOrdering::Acquire)
     }
 

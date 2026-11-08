@@ -195,7 +195,7 @@ impl<P: LeafPolicy> Default for SeizeAllocator<P> {
     }
 }
 
-impl<P: LeafPolicy + 'static> TreeAllocator<P> for SeizeAllocator<P> {
+unsafe impl<P: LeafPolicy + 'static> TreeAllocator<P> for SeizeAllocator<P> {
     #[inline(always)]
     unsafe fn retire_leaf(&self, ptr: *mut LeafNode15<P>, guard: &LocalGuard<'_>) {
         // SAFETY: Caller ensures ptr is valid and unreachable from tree.
@@ -220,12 +220,12 @@ impl<P: LeafPolicy + 'static> TreeAllocator<P> for SeizeAllocator<P> {
         clippy::not_unsafe_ptr_arg_deref,
         reason = "Trait contract requires valid pointer from tree root"
     )]
-    fn teardown_tree(&self, root_ptr: *mut u8) {
+    unsafe fn teardown_tree(&self, root_ptr: *mut u8) {
         if root_ptr.is_null() {
             return;
         }
 
-        // SAFETY: root_ptr is valid, we have exclusive access during Drop.
+        // SAFETY: Caller guarantees exclusive access and a valid root pointer.
         unsafe { self.traverse_and_free(root_ptr) };
     }
 

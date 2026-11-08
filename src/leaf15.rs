@@ -253,15 +253,29 @@ impl<P: LeafPolicy> LeafNode15<P> {
     // ========================================================================
 
     /// Load the terminal value at a slot.
+    ///
+    /// Returns `None` for a layer slot: its value storage holds a sublayer
+    /// pointer, not a `P::Output`. Callers must not reinterpret a layer
+    /// pointer as a value.
     #[inline(always)]
     pub fn load_value(&self, slot: usize) -> Option<P::Output> {
+        if self.keylenx(slot) >= LAYER_KEYLENX {
+            return None;
+        }
+
         self.values.load(slot)
     }
 
     /// Load the terminal value with Relaxed ordering.
     /// For use under lock where the lock's Acquire provides visibility.
+    ///
+    /// Returns `None` for a layer slot. See [`load_value`](Self::load_value).
     #[inline(always)]
     pub fn load_value_relaxed(&self, slot: usize) -> Option<P::Output> {
+        if self.keylenx_relaxed(slot) >= LAYER_KEYLENX {
+            return None;
+        }
+
         self.values.load_relaxed(slot)
     }
 
@@ -291,8 +305,15 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Take the terminal value from a slot, leaving it empty.
+    ///
+    /// Returns `None` for a layer slot; use [`take_value_for_layer`](Self::take_value_for_layer)
+    /// when dismantling a layer.
     #[inline(always)]
     pub fn take_value(&self, slot: usize) -> Option<P::Output> {
+        if self.keylenx(slot) >= LAYER_KEYLENX {
+            return None;
+        }
+
         self.values.take(slot)
     }
 
@@ -466,15 +487,29 @@ impl<P: LeafPolicy> LeafNode15<P> {
     // ========================================================================
 
     /// Move a slot's value from this leaf to another leaf.
+    ///
+    /// The source slot is emptied. This is a low-level structural operation.
+    ///
+    /// # Safety
+    ///
+    /// - The caller must hold the lock on both leaves (or own them exclusively).
+    /// - `dst_slot` must be empty; this operation overwrites it without
+    ///   retiring a previous value.
+    /// - The caller must keep key/suffix metadata consistent; this only moves
+    ///   the value storage.
     #[inline(always)]
-    pub fn move_value_to(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
+    pub unsafe fn move_value_to(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
         self.values.move_slot(&dst.values, src_slot, dst_slot);
     }
 
     /// Move a slot's value with Relaxed store ordering on the destination.
     /// For use under lock where the lock's Release on drop provides synchronization.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`move_value_to`](Self::move_value_to).
     #[inline(always)]
-    pub fn move_value_to_relaxed(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
+    pub unsafe fn move_value_to_relaxed(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
         self.values
             .move_slot_relaxed(&dst.values, src_slot, dst_slot);
     }
@@ -2027,8 +2062,9 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
     }
 
     #[inline(always)]
-    fn move_value_to(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
-        self.move_value_to(dst, src_slot, dst_slot);
+    unsafe fn move_value_to(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
+        // SAFETY: Forwarded from the trait contract.
+        unsafe { self.move_value_to(dst, src_slot, dst_slot) };
     }
 
     #[inline(always)]

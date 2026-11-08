@@ -46,7 +46,8 @@ fn test_seize_allocator_teardown_single_leaf() {
     assert!(!ptr.is_null());
 
     // teardown_tree should free the root leaf
-    alloc.teardown_tree(ptr.cast());
+    // SAFETY: exclusive test ownership; ptr is a valid allocated leaf.
+    unsafe { alloc.teardown_tree(ptr.cast()) };
     // If this doesn't leak memory, test passes (checked by miri)
 }
 
@@ -110,7 +111,8 @@ fn test_seize_allocator_teardown_deep_internode_tree() {
     }
 
     // teardown_tree should handle the deep tree without stack overflow
-    alloc.teardown_tree(root_ptr);
+    // SAFETY: exclusive test ownership; pointer is a valid tree root.
+    unsafe { alloc.teardown_tree(root_ptr) };
     // If this completes without crashing, test passes
 }
 
@@ -142,7 +144,8 @@ fn test_seize_allocator_teardown_wide_internode_tree() {
     }
 
     // teardown_tree should handle the wide tree correctly
-    alloc.teardown_tree(root_ptr);
+    // SAFETY: exclusive test ownership; pointer is a valid tree root.
+    unsafe { alloc.teardown_tree(root_ptr) };
 }
 
 // =============================================================================
@@ -183,7 +186,8 @@ fn test_seize_allocator_inline_teardown_single_leaf() {
     assert!(!ptr.is_null());
 
     // teardown_tree should free the root leaf
-    alloc.teardown_tree(ptr.cast());
+    // SAFETY: exclusive test ownership; ptr is a valid allocated leaf.
+    unsafe { alloc.teardown_tree(ptr.cast()) };
     // If this doesn't leak memory, test passes (checked by miri)
 }
 
@@ -226,7 +230,8 @@ fn test_seize_allocator_inline_teardown_deep_tree() {
         inode.version().mark_root();
     }
 
-    alloc.teardown_tree(root_ptr);
+    // SAFETY: exclusive test ownership; pointer is a valid tree root.
+    unsafe { alloc.teardown_tree(root_ptr) };
 }
 
 // =============================================================================
@@ -238,7 +243,8 @@ fn test_seize_allocator_teardown_null() {
     let alloc: SeizeAllocator<BoxPolicy<u64>> = SeizeAllocator::new();
 
     // Should handle null gracefully (no-op)
-    alloc.teardown_tree(StdPtr::null_mut());
+    // SAFETY: null is explicitly accepted by the contract.
+    unsafe { alloc.teardown_tree(StdPtr::null_mut()) };
 }
 
 #[test]
@@ -246,5 +252,6 @@ fn test_seize_allocator_inline_teardown_null() {
     let alloc: SeizeAllocator<InlinePolicy<u64>> = SeizeAllocator::new();
 
     // Should handle null gracefully (no-op)
-    alloc.teardown_tree(StdPtr::null_mut());
+    // SAFETY: null is explicitly accepted by the contract.
+    unsafe { alloc.teardown_tree(StdPtr::null_mut()) };
 }

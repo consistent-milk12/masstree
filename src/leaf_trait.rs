@@ -228,8 +228,13 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize);
 
     /// Split this internode into a new sibling while inserting a key/child.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as `InternodeNode::split_into`: the node must be locked,
+    /// the sibling exclusively owned, and moved children valid.
     #[must_use = "popup_key must be inserted into parent node to complete the split"]
-    fn split_into(
+    unsafe fn split_into(
         &self,
         new_right: &mut Self,
         new_right_ptr: *mut Self,
@@ -378,7 +383,13 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     fn classify_slot_light(&self, slot: usize) -> SlotState;
 
     /// Move a value from one leaf/slot to another leaf/slot.
-    fn move_value_to(&self, dst: &Self, src_slot: usize, dst_slot: usize);
+    ///
+    /// # Safety
+    ///
+    /// - The caller must hold both locks (or own both nodes exclusively).
+    /// - `dst_slot` must be empty; the previous value is not retired.
+    /// - `src_slot` is emptied by the move.
+    unsafe fn move_value_to(&self, dst: &Self, src_slot: usize, dst_slot: usize);
 
     /// Clear the value at a slot (set to empty).
     fn clear_value(&self, slot: usize);

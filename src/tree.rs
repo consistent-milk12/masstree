@@ -205,7 +205,9 @@ where
         unsafe { self.collector.reclaim_all() };
 
         let root: *mut u8 = self.root_ptr.load(AtomicOrdering::Acquire);
-        self.allocator.teardown_tree(root);
+        // SAFETY: `&mut self` proves exclusivity; no guards can outlive the
+        // tree, and the collector was drained above.
+        unsafe { self.allocator.teardown_tree(root) };
     }
 }
 

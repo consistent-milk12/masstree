@@ -259,6 +259,9 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
         } else {
             dst.tags[dst_slot].store(tag, WRITE_ORD);
         }
+
+        // True move: clear the source tag.
+        self.tags[src_slot].store(StdPtr::null_mut(), RELAXED);
     }
 
     #[inline(always)]
@@ -282,6 +285,9 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
         } else {
             dst.tags[dst_slot].store(tag, RELAXED);
         }
+
+        // True move: clear the source tag.
+        self.tags[src_slot].store(StdPtr::null_mut(), RELAXED);
     }
 
     // ========================================================================
