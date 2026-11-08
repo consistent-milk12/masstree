@@ -227,7 +227,9 @@ where
         let slot_keylenx: u8 = leaf.keylenx(self.kp);
         self.lock.mark_insert();
 
-        let value: Option<P::Output> = leaf.take_value(self.kp);
+        // SAFETY: The remove cursor holds the leaf lock and takes the
+        // terminal value exactly once before clearing the slot.
+        let value: Option<P::Output> = unsafe { leaf.take_value(self.kp) };
 
         if P::NEEDS_RETIREMENT
             && let Some(ref v) = value

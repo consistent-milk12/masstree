@@ -282,14 +282,24 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Store a terminal value at a slot.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock (or own an unpublished leaf) and
+    /// transfer unique ownership of `output` to this slot. The same output
+    /// must not be stored in another slot and must not be dropped separately.
     #[inline(always)]
-    pub fn store_value(&self, slot: usize, output: &P::Output) {
+    pub unsafe fn store_value(&self, slot: usize, output: &P::Output) {
         self.values.store(slot, output);
     }
 
     /// Store a terminal value with Relaxed ordering.
+    ///
+    /// # Safety
+    ///
+    /// Same as [`store_value`](Self::store_value).
     #[inline(always)]
-    pub fn store_value_relaxed(&self, slot: usize, output: &P::Output) {
+    pub unsafe fn store_value_relaxed(&self, slot: usize, output: &P::Output) {
         self.values.store_relaxed(slot, output);
     }
 
@@ -306,21 +316,36 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Store a value prepared by [`prepare_value`](Self::prepare_value).
+    ///
+    /// Only crate code may construct a prepared token for an output it owns;
+    /// the token must be stored exactly once.
     #[inline(always)]
-    pub fn store_prepared_value_relaxed(&self, slot: usize, prepared: &PreparedValue<P>) {
+    pub(crate) fn store_prepared_value_relaxed(&self, slot: usize, prepared: &PreparedValue<P>) {
         self.values.store_prepared_relaxed(slot, prepared);
     }
 
     /// Update an existing terminal value in place, returning a retire handle.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock. The slot must contain a terminal value,
+    /// and `output` must be uniquely owned by this operation.
     #[inline(always)]
-    pub fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle {
+    pub unsafe fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle {
         self.values.update_in_place(slot, output)
     }
 
     /// Update an existing terminal value with Relaxed store ordering.
-    /// For use under lock where the lock's Release on drop provides synchronization.
+    ///
+    /// # Safety
+    ///
+    /// Same as [`update_value_in_place`](Self::update_value_in_place).
     #[inline(always)]
-    pub fn update_value_in_place_relaxed(&self, slot: usize, output: &P::Output) -> RetireHandle {
+    pub unsafe fn update_value_in_place_relaxed(
+        &self,
+        slot: usize,
+        output: &P::Output,
+    ) -> RetireHandle {
         self.values.update_in_place_relaxed(slot, output)
     }
 
@@ -328,8 +353,13 @@ impl<P: LeafPolicy> LeafNode15<P> {
     ///
     /// Returns `None` for a layer slot; use [`take_value_for_layer`](Self::take_value_for_layer)
     /// when dismantling a layer.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock and must consume/retire the returned
+    /// handle exactly once.
     #[inline(always)]
-    pub fn take_value(&self, slot: usize) -> Option<P::Output> {
+    pub unsafe fn take_value(&self, slot: usize) -> Option<P::Output> {
         if self.keylenx(slot) >= LAYER_KEYLENX {
             return None;
         }
@@ -359,14 +389,25 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Store a layer pointer at a slot.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock and `ptr` must point at a live layer
+    /// root whose ownership is transferred to this slot. The slot must not
+    /// be published as a terminal value.
     #[inline(always)]
-    pub fn store_layer(&self, slot: usize, ptr: *mut u8) {
+    pub unsafe fn store_layer(&self, slot: usize, ptr: *mut u8) {
         self.values.store_layer(slot, ptr);
     }
 
     /// Take the value at a slot when converting it to a layer pointer.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock and the slot must contain a terminal
+    /// value that is being dismantled. The returned handle must be retired.
     #[inline(always)]
-    pub fn take_value_for_layer(&self, slot: usize) -> RetireHandle {
+    pub unsafe fn take_value_for_layer(&self, slot: usize) -> RetireHandle {
         P::take_value_for_layer(&self.values, slot)
     }
 
@@ -2093,28 +2134,37 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
     }
 
     #[inline(always)]
-    fn store_value(&self, slot: usize, output: &P::Output) {
-        self.store_value(slot, output);
+    unsafe fn store_value(&self, slot: usize, output: &P::Output) {
+        // SAFETY: Forwarded from the trait's unique-ownership contract.
+        unsafe { self.store_value(slot, output) };
     }
 
     #[inline(always)]
-    fn store_value_relaxed(&self, slot: usize, output: &P::Output) {
-        self.store_value_relaxed(slot, output);
+    unsafe fn store_value_relaxed(&self, slot: usize, output: &P::Output) {
+        // SAFETY: Forwarded from the trait's unique-ownership contract.
+        unsafe { self.store_value_relaxed(slot, output) };
     }
 
     #[inline(always)]
-    fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle {
-        self.update_value_in_place(slot, output)
+    unsafe fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle {
+        // SAFETY: Forwarded from the trait's lock/ownership contract.
+        unsafe { self.update_value_in_place(slot, output) }
     }
 
     #[inline(always)]
-    fn update_value_in_place_relaxed(&self, slot: usize, output: &P::Output) -> RetireHandle {
-        self.update_value_in_place_relaxed(slot, output)
+    unsafe fn update_value_in_place_relaxed(
+        &self,
+        slot: usize,
+        output: &P::Output,
+    ) -> RetireHandle {
+        // SAFETY: Forwarded from the trait's lock/ownership contract.
+        unsafe { self.update_value_in_place_relaxed(slot, output) }
     }
 
     #[inline(always)]
-    fn take_value(&self, slot: usize) -> Option<P::Output> {
-        self.take_value(slot)
+    unsafe fn take_value(&self, slot: usize) -> Option<P::Output> {
+        // SAFETY: Forwarded from the trait's lock/handle-consumption contract.
+        unsafe { self.take_value(slot) }
     }
 
     #[inline(always)]
@@ -2123,8 +2173,9 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
     }
 
     #[inline(always)]
-    fn store_layer(&self, slot: usize, ptr: *mut u8) {
-        self.store_layer(slot, ptr);
+    unsafe fn store_layer(&self, slot: usize, ptr: *mut u8) {
+        // SAFETY: Forwarded from the trait's live-layer-root contract.
+        unsafe { self.store_layer(slot, ptr) };
     }
 
     #[inline(always)]

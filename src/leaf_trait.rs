@@ -353,25 +353,55 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     fn load_value(&self, slot: usize) -> Option<P::Output>;
 
     /// Store a terminal value at a slot with Release ordering.
-    fn store_value(&self, slot: usize, output: &P::Output);
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock (or own an unpublished leaf) and
+    /// transfer unique ownership of `output` to this slot. The same output
+    /// must not be stored in another slot or dropped separately.
+    unsafe fn store_value(&self, slot: usize, output: &P::Output);
 
     /// Store a terminal value at a slot with Relaxed ordering (for split setup).
-    fn store_value_relaxed(&self, slot: usize, output: &P::Output);
+    ///
+    /// # Safety
+    ///
+    /// Same as [`store_value`](Self::store_value).
+    unsafe fn store_value_relaxed(&self, slot: usize, output: &P::Output);
 
     /// Update value in place, returning a handle for retiring the old value.
-    fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle;
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock. The slot must contain a terminal value,
+    /// and `output` must be uniquely owned by this operation.
+    unsafe fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle;
 
     /// Update value in place with Relaxed store ordering (for use under lock).
-    fn update_value_in_place_relaxed(&self, slot: usize, output: &P::Output) -> RetireHandle;
+    ///
+    /// # Safety
+    ///
+    /// Same as [`update_value_in_place`](Self::update_value_in_place).
+    unsafe fn update_value_in_place_relaxed(&self, slot: usize, output: &P::Output)
+    -> RetireHandle;
 
     /// Take the terminal value from a slot, leaving it empty.
-    fn take_value(&self, slot: usize) -> Option<P::Output>;
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock and must consume/retire the returned
+    /// handle exactly once.
+    unsafe fn take_value(&self, slot: usize) -> Option<P::Output>;
 
     /// Load the layer pointer at a slot.
     fn load_layer(&self, slot: usize) -> *mut u8;
 
     /// Store a layer pointer at a slot.
-    fn store_layer(&self, slot: usize, ptr: *mut u8);
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold the leaf lock and `ptr` must point at a live layer
+    /// root whose ownership is transferred to this slot.
+    unsafe fn store_layer(&self, slot: usize, ptr: *mut u8);
 
     /// Check if a slot is empty (no value or layer pointer).
     fn is_slot_empty(&self, slot: usize) -> bool;

@@ -30,7 +30,8 @@ fn main() {
         let leaf: Box<LeafNode15<BoxPolicy<u64>>> = LeafNode15::new();
         leaf.set_ikey(0, 0x4141414141414141);
         let value = <BoxPolicy<u64> as LeafPolicy>::into_output(0xdead_beef_u64);
-        leaf.store_value(0, &value);
+        // SAFETY: the leaf is exclusively owned and `value` is stored once.
+        unsafe { leaf.store_value(0, &value) };
         leaf.set_keylenx(0, 8);
         leaf.set_permutation(Permuter::make_sorted(1));
 
@@ -45,7 +46,9 @@ fn main() {
         // Writer: insert path's in-place mutation before unlock
         let mut g = leaf.version().lock();
         g.mark_insert();
-        let _ = leaf.take_value_for_layer(slot); // same call handle_suffix_conflict makes
+        // SAFETY: the leaf lock is modeled by exclusive access here; the
+        // terminal value is taken exactly once.
+        let _ = unsafe { leaf.take_value_for_layer(slot) }; // same call handle_suffix_conflict makes
 
         // Reader: load_value(slot) then validate
         let out = leaf.load_value(slot);

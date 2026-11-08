@@ -105,7 +105,10 @@ where
         if P::NEEDS_RETIREMENT {
             lock.mark_insert();
 
-            let retire: RetireHandle = leaf.update_value_in_place_relaxed(slot, new_value);
+            // SAFETY: We hold the leaf lock, the slot contains a terminal
+            // value, and `new_value` is uniquely owned by this update.
+            let retire: RetireHandle =
+                unsafe { leaf.update_value_in_place_relaxed(slot, new_value) };
 
             let old_output: P::Output = match retire {
                 // SAFETY: ptr was just returned by update_value_in_place_relaxed and
@@ -125,7 +128,10 @@ where
 
             lock.mark_insert();
 
-            let retire: RetireHandle = leaf.update_value_in_place_relaxed(slot, new_value);
+            // SAFETY: We hold the leaf lock, the slot contains a terminal
+            // value, and `new_value` is uniquely owned by this update.
+            let retire: RetireHandle =
+                unsafe { leaf.update_value_in_place_relaxed(slot, new_value) };
             debug_assert_eq!(retire, RetireHandle::Noop);
 
             old_output
@@ -386,7 +392,9 @@ where
             unsafe { self.create_layer_concurrent_generic(leaf, slot, key, value, guard) };
 
         // SAFETY: We hold the lock. Slot transitions from terminal → layer.
-        let retire: RetireHandle = leaf.take_value_for_layer(slot);
+        // SAFETY: We hold the leaf lock and the conflict slot is a terminal
+        // value being converted into a layer pointer.
+        let retire: RetireHandle = unsafe { leaf.take_value_for_layer(slot) };
 
         // SAFETY: handle was produced by take_value_for_layer() on this leaf.
         unsafe { P::retire_handle(retire, guard) };
@@ -397,7 +405,9 @@ where
         };
 
         leaf.set_keylenx(slot, LAYER_KEYLENX);
-        leaf.store_layer(slot, layer_ptr);
+        // SAFETY: We hold the leaf lock; `layer_ptr` is a live layer root
+        // whose ownership transfers to this slot.
+        unsafe { leaf.store_layer(slot, layer_ptr) };
     }
 }
 
