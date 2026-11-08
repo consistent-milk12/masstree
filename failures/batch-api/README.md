@@ -20,6 +20,11 @@ using both short keys and a promoted 8-byte-prefix sublayer. Unit tests count
 actual descents and cover stale hints, maximum-depth keys, and concurrent GC.
 For 20,000 updates, isolated release medians were 2.00 vs 3.18 ms for short keys
 and 2.50 vs 4.28 ms for promoted-layer keys (Entry vs two traversals, seven rounds).
+`guarded_insert` asserts zero allocations for 260 long-key boxed primitive
+updates through `insert_with_guard` (previously 264 allocations). The API now
+returns a guard-scoped `ValueRef`, matching `get_with_guard`; this is a public
+return-type change. Native/Miri tests cover old-value snapshots, non-Clone
+ownership and exact drop counts; a compile-fail doctest prevents guard escape.
 The table below retains historical failure behavior.
 
 
@@ -44,6 +49,7 @@ cargo run --bin leak2
 cargo run --bin leak3
 CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin bulk
 CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin entry
+CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin guarded_insert
 cargo run --bin teardown_safe    # abort expected
 (cd mimalloc-repro && cargo check)  # expected global-allocator conflict
 ```

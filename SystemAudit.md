@@ -3305,8 +3305,11 @@ slot membership, deletion, and leaf bounds under lock. The stale-vacant update
 probe also improves from 3 allocations to 0, closing that PERF-03 bypass.
 Native/Miri cover real Entry invalidation and reclamation. A Loom test models the
 hint version/lock protocol; its simplified NodeVersion was synchronized with
-production's dirty-bit checks and fences. PERF-03 remains open for guarded
-single-key insertion.
+production's dirty-bit checks and fences. PERF-03 is now closed: guarded
+single-key insertion also selects write-through before boxing, reducing 260
+long-key boxed primitive updates from 264 allocations to 0. Its return type is
+now `Option<ValueRef<'g, P::Value>>` (a user-approved semver break), with guarded
+borrows for non-Clone boxed values and owned primitive/inline snapshots.
 
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|

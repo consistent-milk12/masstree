@@ -1224,9 +1224,16 @@ Public entry points and their differences:
 | API                                     | Value input | Output              | Allocation behavior                                                                 |
 | --------------------------------------- | ----------- | ------------------- | ----------------------------------------------------------------------------------- |
 | `insert(key, value)`                    | `P::Value`  | `Option<P::Value>`  | uses write-through when `CAN_WRITE_THROUGH`; otherwise `into_output` then clone old |
-| `insert_with_guard(key, value, &guard)` | `P::Value`  | `Option<P::Output>` | always `into_output` up front (even for write-through policies)                     |
+| `insert_with_guard(key, value, &guard)` | `P::Value`  | `Option<ValueRef<'g, P::Value>>` | uses write-through when available; no `Clone` bound |
 | `insert_value_with_guard`               | `P::Value`  | `Option<P::Value>`  | uses write-through when available                                                   |
-| `insert_output_with_guard` (crate)      | `P::Output` | `Option<P::Output>` | used by the Entry API                                                               |
+
+`insert` and `insert_value_with_guard` share `insert_with_guard` and convert its
+snapshot into an owned value, cloning only borrowed values. The guarded API
+returns old primitive values by copy and other boxed values by a guard-protected
+borrow. This changes its public return type from `Option<P::Output>` and is a
+semver-breaking API change. Use `old.map(ValueRef::into_owned)` when an owned
+result is needed, or dereference the snapshot while its guard is alive.
+The unused internal `insert_output_with_guard` wrapper has been removed.
 
 The core is `insert_concurrent<S: InsertStrategy>`
 (`src/tree/generic/insert.rs`). `InsertStrategy` deduplicates the generic and

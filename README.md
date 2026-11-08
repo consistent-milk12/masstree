@@ -164,16 +164,16 @@ use masstree::{MassTree, RangeBound};
 let tree: MassTree<u64> = MassTree::new();
 let guard = tree.guard();
 
-// Insert (returns None for new keys, Some(old) for existing)
+// Insert (returns None for new keys, Some(ValueRef) for the old value)
 tree.insert_with_guard(b"hello", 123, &guard);
 tree.insert_with_guard(b"world", 456, &guard);
 
 // Point lookup (returns copy for inline storage)
-assert_eq!(tree.get_with_guard(b"hello", &guard), Some(123));
+assert_eq!(tree.get_with_guard(b"hello", &guard).map(|v| *v), Some(123));
 
 // Remove
 tree.remove_with_guard(b"hello", &guard).unwrap();
-assert_eq!(tree.get_with_guard(b"hello", &guard), None);
+assert!(tree.get_with_guard(b"hello", &guard).is_none());
 
 // Range scan
 tree.scan(

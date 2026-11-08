@@ -24,7 +24,7 @@ implementation must verify those observations against the current source.
 | Order | Work | Evidence / completion gate | Status |
 | --- | --- | --- | --- |
 | 1 | Proposal 3: suffix sizing, split reservation, initialization, raw ownership | Churn 42 → 6 allocations; middle split 3 → 0 reallocations; native, feature, Miri tests | Complete |
-| 2 | Proposal 4: batch/Extend pipeline, write-through, Entry leaf hints | Unified owning pipeline: preconstructed update probe 6 → 3 allocations; ownership regressions pass | In progress |
+| 2 | Proposal 4: batch/Extend pipeline, write-through, Entry leaf hints | Preconstructed updates 6 → 3 allocations; guarded updates 264 → 0; Entry avoids a second descent | Complete |
 | 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Promoted-layer reads/scans/GC; zero-hop cached root test | Pending |
 | 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Layout assertions, point workloads, Loom and Miri | Pending |
 | 5 | Proposal 5: stack remove routes and remove cleanup | Zero-allocation non-emptying layered removal | Pending |
@@ -63,8 +63,12 @@ slot reuse, layer conversion, splits, version repetition, and sublayer retiremen
 the Loom model covers lock/version revalidation only. The isolated 20,000-key
 update probe measured 2.00 ms for Entry versus 3.18 ms for two traversals with
 short keys, and 2.50 ms versus 4.28 ms for promoted-layer keys (seven-round
-release medians). Guarded single-key
-write-through remains open; its `ValueRef` return-type change is user-approved.
+release medians). Guarded single-key insertion now dispatches write-through
+before boxing and returns `Option<ValueRef<'g, P::Value>>`, the user-approved
+semver-breaking API change. Its 260-update allocation probe drops from 264 to 0;
+non-Clone boxed values return guarded borrows, and primitive/inline old values
+are owned snapshots. Native, compile-fail, and Miri tests cover these contracts.
+Proposal 4 is complete.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

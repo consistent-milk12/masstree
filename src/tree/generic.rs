@@ -673,61 +673,73 @@ where
         P::Value: Clone,
     {
         let guard = self.guard();
-
-        if P::can_write_through() {
-            // Optimized path: deferred allocation with write-through for updates.
-            // Avoids Box::new + defer_retire on the hot update path.
-            let mut key: Key<'_> = Key::new(key);
-            match self.insert_concurrent_value(&mut key, value, &guard) {
-                Ok(result) => result,
-                Err(e) => {
-                    panic!(
-                        "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
-                    );
-                }
-            }
-        } else {
-            let result = self.insert_with_guard(key, value, &guard);
-            result.map(|output| unsafe { P::clone_value_from_output(&output) })
-        }
+        self.insert_with_guard(key, value, &guard)
+            .map(ValueRef::into_owned)
     }
 
     /// Insert a key-value pair using an explicit guard.
     ///
-    /// This is the main public insert API for `MassTreeGeneric`.
+    /// Returns the old value as a guard-scoped snapshot. Primitive boxed values
+    /// update in place and return an owned copy, with no allocation or retirement
+    /// on updates. Other boxed values return a borrow protected by `guard`.
+    /// No `Clone` bound is required.
+    ///
+    /// A borrowed old value cannot escape its guard:
+    ///
+    /// ```compile_fail
+    /// use masstree::MassTree15;
+    /// let old = {
+    ///     let tree = MassTree15::<String>::new();
+    ///     tree.insert(b"key", "old".to_owned());
+    ///     let guard = tree.guard();
+    ///     tree.insert_with_guard(b"key", "new".to_owned(), &guard).unwrap()
+    /// };
+    /// println!("{old:?}");
+    /// ```
     ///
     /// # Panics
     ///
-    /// Panics on internal tree corruption (should not happen in normal operation).
-    pub fn insert_with_guard(
+    /// Panics on an invalid key, a foreign guard, or internal tree corruption.
+    #[inline]
+    pub fn insert_with_guard<'g>(
         &self,
         key: &[u8],
         value: P::Value,
-        guard: &LocalGuard<'_>,
-    ) -> Option<P::Output> {
+        guard: &'g LocalGuard<'_>,
+    ) -> Option<ValueRef<'g, P::Value>> {
         self.verify_guard(guard);
         #[cfg(feature = "tracing")]
         tracing::debug!(key_len = key.len(), "insert");
-        let mut key: Key<'_> = Key::new(key);
-        let output: <P as LeafPolicy>::Output = P::into_output(value);
+        let mut key = Key::new(key);
+        let result = if P::can_write_through() {
+            self.insert_concurrent_value(&mut key, value, guard)
+                .map(|old| old.map(ValueRef::Owned))
+        } else {
+            let output = P::into_output(value);
+            self.insert_concurrent_generic(&mut key, output, guard)
+                .map(|old| {
+                    old.map(|output| {
+                        // SAFETY: The insert retired the previous allocation, and
+                        // this tree's guard keeps it alive for the returned borrow.
+                        // Inline policies return an owned copy instead.
+                        unsafe { P::output_to_value_ref(&output) }
+                    })
+                })
+        };
 
-        // Internal errors indicate bugs, not recoverable conditions
-        match self.insert_concurrent_generic(&mut key, output, guard) {
-            Ok(result) => result,
-
-            Err(e) => {
-                panic!(
-                    "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
-                );
-            }
+        match result {
+            Ok(old) => old,
+            Err(e) => panic!(
+                "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
+            ),
         }
     }
 
     /// Insert a key-value pair using an explicit guard, returning the old value.
     ///
-    /// Unlike `insert_with_guard` (which returns `Option<P::Output>`), this
-    /// returns `Option<P::Value>` directly. For policies with `CAN_WRITE_THROUGH`
-    /// (V <= 8 bytes), this avoids Box allocation and EBR retirement on updates.
+    /// Converts the snapshot from [`insert_with_guard`](Self::insert_with_guard)
+    /// into an owned value, cloning only borrowed values. Primitive boxed values
+    /// use the same allocation-free write-through update path.
     ///
     /// # Panics
     ///
@@ -741,36 +753,8 @@ where
     where
         P::Value: Clone,
     {
-        self.verify_guard(guard);
-        #[cfg(feature = "tracing")]
-        tracing::debug!(key_len = key.len(), "insert_value");
-        let mut key: Key<'_> = Key::new(key);
-
-        if P::can_write_through() {
-            // Optimized path: deferred allocation with write-through for updates.
-            match self.insert_concurrent_value(&mut key, value, guard) {
-                Ok(result) => result,
-
-                Err(e) => {
-                    panic!(
-                        "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
-                    );
-                }
-            }
-        } else {
-            // Fallback: standard path, extract value from output.
-            let output: P::Output = P::into_output(value);
-
-            match self.insert_concurrent_generic(&mut key, output, guard) {
-                Ok(result) => result.map(|o| unsafe { P::clone_value_from_output(&o) }),
-
-                Err(e) => {
-                    panic!(
-                        "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
-                    );
-                }
-            }
-        }
+        self.insert_with_guard(key, value, guard)
+            .map(ValueRef::into_owned)
     }
 
     // ========================================================================
