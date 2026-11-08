@@ -602,8 +602,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         // so an earlier suffix variant with the same ikey is not skipped, and
         // do not skip a layer pointer that still needs to be descended.
         if needs_duplicate_check && !self.flags.upper_bound() {
-            let sentinel: bool = self.cursor_key.current_len()
-                == crate::tree::range::cursor_key::UNSHIFT_SENTINEL_LEN;
+            let sentinel: bool = self.cursor_key.is_unshift_sentinel();
             let cursor_ikey: u64 = self.cursor_key.current_ikey();
             let is_dup: bool = if keylenx >= LAYER_KEYLENX {
                 if sentinel {

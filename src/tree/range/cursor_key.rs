@@ -41,6 +41,10 @@ pub struct CursorKey {
 
     /// Current layer's ikey (cached `u64::from_be_bytes(buf[offset..offset+8])`).
     ikey: u64,
+
+    /// True only when `len == UNSHIFT_SENTINEL_LEN` was set by layer navigation,
+    /// not by a real 9-byte key. A real 9-byte key also has `len == 9`.
+    unshift_sentinel: bool,
 }
 
 #[expect(clippy::missing_fields_in_debug, reason = "don't print buffer")]
@@ -88,6 +92,7 @@ impl CursorKey {
             offset: 0,
             len: data.len(),
             ikey,
+            unshift_sentinel: false,
         }
     }
 
@@ -100,6 +105,7 @@ impl CursorKey {
             offset: 0,
             len: 0,
             ikey: 0,
+            unshift_sentinel: false,
         }
     }
 
@@ -118,6 +124,7 @@ impl CursorKey {
                 offset: 0,
                 len: UNSHIFT_SENTINEL_LEN,
                 ikey: u64::MAX,
+                unshift_sentinel: true,
             },
             RangeBound::Included(k) | RangeBound::Excluded(k) => Self::from_slice(k),
         }
@@ -176,6 +183,13 @@ impl CursorKey {
         }
     }
 
+    /// True only for the layer-navigation sentinel, not a real 9-byte key.
+    #[must_use]
+    #[inline(always)]
+    pub const fn is_unshift_sentinel(&self) -> bool {
+        self.unshift_sentinel
+    }
+
     /// True if current position has suffix bytes (len > 8).
     #[must_use]
     #[inline(always)]
@@ -227,6 +241,7 @@ impl CursorKey {
         self.offset += IKEY_SIZE;
         self.len = self.len.saturating_sub(IKEY_SIZE);
         self.ikey = Self::read_ikey_from_buf(&self.buf, self.offset, self.len);
+        self.unshift_sentinel = false;
     }
 
     /// Shift to sublayer for reverse scan (set to maximum: ikey=MAX, len=9).
@@ -244,6 +259,7 @@ impl CursorKey {
         self.ikey = u64::MAX;
         self.buf[self.offset..self.offset + IKEY_SIZE].copy_from_slice(&u64::MAX.to_be_bytes());
         self.len = UNSHIFT_SENTINEL_LEN;
+        self.unshift_sentinel = true;
     }
 
     /// Shift to next layer and clear (ikey=0, len=0) for scanning from sublayer minimum.
@@ -255,6 +271,7 @@ impl CursorKey {
         self.offset += IKEY_SIZE;
         self.len = 0;
         self.ikey = 0;
+        self.unshift_sentinel = false;
 
         #[cfg(debug_assertions)]
         {
@@ -276,6 +293,7 @@ impl CursorKey {
         self.offset -= IKEY_SIZE;
         self.ikey = Self::read_ikey_from_buf(&self.buf, self.offset, IKEY_SIZE);
         self.len = UNSHIFT_SENTINEL_LEN;
+        self.unshift_sentinel = true;
     }
 
     /// True if cursor is at root layer with no content (offset=0, len=0).
@@ -333,6 +351,7 @@ impl CursorKey {
             self.offset
         );
         self.len = len;
+        self.unshift_sentinel = false;
     }
 
     /// No-op. Kept for C++ `key::mark_key_complete()` API parity.

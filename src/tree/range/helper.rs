@@ -102,7 +102,7 @@ where
 
     // Unshift sentinel: the cursor has already consumed this layer pointer.
     // It must compare after any remaining terminal suffix siblings.
-    if cursor_len == crate::tree::range::cursor_key::UNSHIFT_SENTINEL_LEN {
+    if cursor_key.is_unshift_sentinel() {
         return if keylenx >= LAYER_KEYLENX {
             Ordering::Equal
         } else {
@@ -158,7 +158,15 @@ where
 
         match compare_cursor_to_slot(cursor_key, leaf, slot) {
             Ordering::Less => return i,
-            Ordering::Equal => return if skip_equal { i + 1 } else { i },
+            Ordering::Equal => {
+                // An equal layer pointer is not a key: on an excluded bound
+                // the scan still has to descend to find keys inside the layer.
+                let keylenx: u8 = leaf.keylenx_relaxed(slot);
+                if skip_equal && (keylenx < LAYER_KEYLENX || cursor_key.is_unshift_sentinel()) {
+                    return i + 1;
+                }
+                return i;
+            }
             Ordering::Greater => {}
         }
     }

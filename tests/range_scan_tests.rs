@@ -1153,3 +1153,61 @@ fn scan_ref_mixed_layer_keys() {
         );
     }
 }
+
+#[test]
+fn test_9_byte_bound_is_not_unshift_sentinel() {
+    let tree: MassTree<u64> = MassTree::new();
+    let k8: &[u8] = b"AAAAAAAA";
+    let k9: &[u8] = b"AAAAAAAAA";
+    let k10: &[u8] = b"AAAAAAAAAA";
+    tree.insert(k8, 8);
+    tree.insert(k9, 9);
+    tree.insert(k10, 10);
+
+    let guard = tree.guard();
+
+    let forward: Vec<Vec<u8>> = tree
+        .range(RangeBound::Included(k9), RangeBound::Unbounded, &guard)
+        .map(|entry| entry.key().to_vec())
+        .collect();
+    assert_eq!(forward, vec![k9.to_vec(), k10.to_vec()]);
+
+    let reverse: Vec<Vec<u8>> = tree
+        .range(RangeBound::Unbounded, RangeBound::Included(k9), &guard)
+        .rev()
+        .map(|entry| entry.key().to_vec())
+        .collect();
+    assert_eq!(reverse, vec![k9.to_vec(), k8.to_vec()]);
+
+    let reverse_excluded: Vec<Vec<u8>> = tree
+        .range(RangeBound::Unbounded, RangeBound::Excluded(k9), &guard)
+        .rev()
+        .map(|entry| entry.key().to_vec())
+        .collect();
+    assert_eq!(reverse_excluded, vec![k8.to_vec()]);
+}
+
+#[test]
+fn test_excluded_9_byte_bound_descends_layer() {
+    let tree: MassTree<u64> = MassTree::new();
+    let a: &[u8] = b"PREFIX00A";
+    let b: &[u8] = b"PREFIX00B";
+    let c: &[u8] = b"PREFIX00C";
+    tree.insert(a, 1);
+    tree.insert(b, 2);
+    tree.insert(c, 3);
+
+    let guard = tree.guard();
+
+    let forward: Vec<Vec<u8>> = tree
+        .range(RangeBound::Excluded(a), RangeBound::Unbounded, &guard)
+        .map(|entry| entry.key().to_vec())
+        .collect();
+    assert_eq!(forward, vec![b.to_vec(), c.to_vec()]);
+
+    let included: Vec<Vec<u8>> = tree
+        .range(RangeBound::Included(b), RangeBound::Unbounded, &guard)
+        .map(|entry| entry.key().to_vec())
+        .collect();
+    assert_eq!(included, vec![b.to_vec(), c.to_vec()]);
+}
