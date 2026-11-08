@@ -21,7 +21,7 @@ fn main() {
     }
     assert_eq!(tree.len(), 850);
     for key in (0u64..150).chain(300..1000) {
-        assert_eq!(tree.get_with_guard(&(key * 1000).to_be_bytes(), &guard), Some(key));
+        assert_eq!(tree.get_with_guard(&(key * 1000).to_be_bytes(), &guard).map(|v| *v), Some(key));
     }
     eprintln!("all surviving and reinserted keys verified");
     // This full leaf moved during the height-1 internode's split. Its real

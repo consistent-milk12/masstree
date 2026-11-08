@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# BUG-TOOL-04: `just lint-strict` fails on current stable Clippy, so
-# `check-all` cannot be green.
+# TOOL-04 regression: strict Clippy must stay clean.
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$(mktemp)"
@@ -9,11 +8,11 @@ cd "$ROOT"
 cargo clippy --all-targets --all-features -- -D warnings >"$OUT" 2>&1
 status=$?
 if [ "$status" -eq 0 ]; then
-  echo "UNEXPECTED PASS: strict Clippy is clean"
+  echo "FIXED: strict Clippy is clean"
   rm -f "$OUT"
-  exit 1
+  exit 0
 fi
-echo "REPRODUCED BUG-TOOL-04: strict Clippy exits $status"
+echo "REGRESSION: strict Clippy exits $status"
 grep -E "^error: |^error\[" "$OUT" | head -10 || true
 rm -f "$OUT"
-exit 0
+exit 1

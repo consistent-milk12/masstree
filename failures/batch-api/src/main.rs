@@ -46,7 +46,8 @@ fn mutate_ikey() {
 
     let e1 = BatchEntry::new(vec![0u8; 8], 1111u64);
     let e2 = BatchEntry::new(0x00ff_ffff_ffff_ffffu64.to_be_bytes().to_vec(), 2222u64);
-    let res = tree.insert_batch_entries(vec![e1, e2], &tree.guard());
+    let guard = tree.guard();
+    let res = tree.insert_batch_entries(vec![e1, e2], &guard);
     println!("mutate: inserted={} updated={} total={}", res.inserted, res.updated, res.total());
     println!("  get(0x00ff..) = {:?} (expected Some(1111))", tree.get(&0x00ff_ffff_ffff_ffffu64.to_be_bytes()));
     println!("  get([0;8]) = {:?}", tree.get(&[0u8; 8]));

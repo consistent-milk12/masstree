@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# BUG-TOOL-01: `--no-default-features` cannot build all targets because
-# examples/print_tree.rs is not gated by `debug-print`.
+# TOOL-01 regression: `--no-default-features` must build every target.
+# The print_tree example is now gated by `debug-print` and the examples and
+# benchmarks use the guard-scoped value API.
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$(mktemp)"
@@ -8,18 +9,11 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/masstree-failure-tooling-targe
 cd "$ROOT"
 cargo check --all-targets --no-default-features >"$OUT" 2>&1
 status=$?
+rm -f "$OUT"
 if [ "$status" -eq 0 ]; then
-  echo "UNEXPECTED PASS: --no-default-features now builds all targets"
-  rm -f "$OUT"
-  exit 1
-fi
-if grep -q "doesn't implement .*Display" "$OUT"; then
-  echo "REPRODUCED BUG-TOOL-01 (exit $status): print_tree requires debug-print"
-  grep -m1 "doesn't implement .*Display" "$OUT" || true
-  rm -f "$OUT"
+  echo "FIXED: --no-default-features builds all targets"
   exit 0
 fi
-echo "FAILED TO REPRODUCE: build failed for a different reason"
-tail -20 "$OUT"
-rm -f "$OUT"
+echo "REGRESSION: --no-default-features failed for all targets (exit $status)"
+tail -20 "$OUT" 2>/dev/null || true
 exit 1

@@ -16,5 +16,5 @@ fn main() {
     let entries: Vec<(Vec<u8>, u64)> = (0..20u8).map(|i| { let mut k = b"shared00".to_vec(); k.push(i); (k, i as u64) }).collect();
     let r = t2.insert_batch_with_guard(entries.clone(), &g2);
     println!("layer batch inserted={} updated={} len={} expected={}", r.inserted, r.updated, t2.len(), entries.len());
-    for (k, v) in &entries { assert_eq!(t2.get_with_guard(k, &g2), Some(*v), "key {k:?}"); }
+    for (k, v) in &entries { assert_eq!(t2.get_with_guard(k, &g2).map(|v| *v), Some(*v), "key {k:?}"); }
 }

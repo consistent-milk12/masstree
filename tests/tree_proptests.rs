@@ -1648,7 +1648,7 @@ proptest! {
 // ============================================================================
 
 /// Keys with shared prefix (forces deep multi-layer trie descent).
-/// Uses vec + dedup instead of `hash_set` for faster proptest generation.
+/// Uses vec + dedup instead of a hash set for faster proptest generation.
 fn shared_prefix_keys_strategy(max_count: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
     (
         prop::collection::vec(any::<u8>(), 16..=24),

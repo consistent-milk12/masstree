@@ -6,10 +6,10 @@ fn main() {
     for (k, v) in [("a", "1"), ("b", "2"), ("c", "3"), ("d", "4"), ("e", "5")] {
         t.insert_with_guard(k.as_bytes(), v.to_string(), &g);
     }
-    let fwd: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).map(|e| e.value().to_string()).collect();
-    let rev: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).rev().map(|e| e.value().to_string()).collect();
+    let fwd: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).map(|e| t.get(e.key()).expect("value")).collect();
+    let rev: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).rev().map(|e| t.get(e.key()).expect("value")).collect();
     println!("boxed fwd={fwd:?} rev={rev:?}");
-    let rev2: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).rev().map(|e| e.value().to_string()).collect();
+    let rev2: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).rev().map(|e| t.get(e.key()).expect("value")).collect();
     println!("boxed rev2={rev2:?}");
 
     let ti: MassTree<u64> = MassTree::new();

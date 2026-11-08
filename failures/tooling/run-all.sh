@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run the tooling failure checks. Each script exits 0 when the defect is
-# reproduced. Compilation-heavy checks share one target directory.
+# Run the tooling regression checks. Each script exits 0 when the fixed
+# behavior is present and non-zero when the defect has regressed.
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 failed=0
@@ -21,8 +21,8 @@ do
 done
 echo
 if [ "$failed" -eq 0 ]; then
-  echo "all tooling defects reproduced"
+  echo "all tooling regression checks passed"
   exit 0
 fi
-echo "$failed tooling check(s) did not reproduce"
+echo "$failed tooling regression check(s) failed"
 exit 1

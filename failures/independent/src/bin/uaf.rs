@@ -1,15 +1,16 @@
+// SAFE-01 regression: a guard-scoped value cannot outlive its guard.
 use masstree::MassTree15;
 
 fn main() {
     let tree: MassTree15<String> = MassTree15::new();
+    tree.insert(b"k", "hello".to_string());
+
     {
         let guard = tree.guard();
-        tree.insert_with_guard(b"k", "hello".to_string(), &guard);
+        let value = tree.get_ref(b"k", &guard).expect("value");
+        assert_eq!(&*value, "hello");
     }
-    let ptr = {
-        let guard = tree.guard();
-        tree.get_with_guard(b"k", &guard).unwrap()
-    };
-    drop(tree);
-    println!("{}", *ptr);
+
+    assert_eq!(tree.get(b"k").as_deref(), Some("hello"));
+    println!("guard-scoped value did not escape");
 }

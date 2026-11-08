@@ -34,7 +34,7 @@ fn wscale_single_thread() {
         }
     }
 
-    assert!(tree.len() > 0);
+    assert!(!tree.is_empty());
     for key in sample {
         assert!(tree.get_with_guard(&key, &guard).is_some());
     }
@@ -79,7 +79,7 @@ fn wscale_threads(num_threads: usize) {
         h.join().unwrap();
     }
 
-    assert!(tree.len() > 0);
+    assert!(!tree.is_empty());
     let guard = tree.guard();
     let sentinel: u64 = u64::MAX;
     tree.insert_with_guard(&sentinel.to_be_bytes(), 1, &guard);

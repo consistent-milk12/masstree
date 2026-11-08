@@ -27,8 +27,8 @@ fn rev_boxed(n: usize, remove_range: std::ops::Range<usize>) {
         let k = format!("k{i:04}");
         t.remove_with_guard(k.as_bytes(), &g).unwrap();
     }
-    let fwd: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).map(|e| e.value().to_string()).collect();
-    let rev: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).rev().map(|e| e.value().to_string()).collect();
+    let fwd: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).map(|e| t.get(e.key()).expect("value")).collect();
+    let rev: Vec<String> = t.range(RangeBound::Unbounded, RangeBound::Unbounded, &g).rev().map(|e| t.get(e.key()).expect("value")).collect();
     println!("boxed n={n} removed -> fwd_len={} rev={rev:?} pending={}", fwd.len(), t.pending_coalesce());
 }
 

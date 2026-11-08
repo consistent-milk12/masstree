@@ -43,7 +43,7 @@ fn w1_single_thread() {
         }
     }
 
-    assert!(tree.len() > 0);
+    assert!(!tree.is_empty());
     for key in sample {
         assert!(tree.get_with_guard(&key, &guard).is_some());
     }
@@ -88,7 +88,7 @@ fn w1_concurrent(num_threads: usize) {
         h.join().unwrap();
     }
 
-    assert!(tree.len() > 0);
+    assert!(!tree.is_empty());
     let guard = tree.guard();
     let sentinel: &[u8] = b"__________";
     tree.insert_with_guard(sentinel, 1, &guard);

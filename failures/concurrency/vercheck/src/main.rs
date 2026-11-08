@@ -2,7 +2,7 @@ use masstree::{BoxPolicy, LeafNode15, MassTree15};
 use seize::LocalGuard;
 
 fn leaf(tree: &MassTree15<u64>, guard: &LocalGuard<'_>) -> *mut LeafNode15<BoxPolicy<u64>> {
-    tree.debug_root_ptr(guard).cast()
+    unsafe { tree.debug_root_ptr(guard) }.cast()
 }
 fn main() {
     let tree: MassTree15<u64> = MassTree15::new();

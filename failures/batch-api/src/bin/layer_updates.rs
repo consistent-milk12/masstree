@@ -15,7 +15,7 @@ fn main() {
     let tree: MassTree15<u64> = MassTree15::new();
     let initial: Vec<(Vec<u8>, u64)> = (0..n).map(|i| (format!("common_prefix_{i:06}").into_bytes(), i as u64)).collect();
     let r0 = tree.insert_batch(initial);
-    println!("initial inserted={} updated={} failed={} len={}", r0.inserted, r0.updated, r0.failed, tree.len());
+    println!("initial inserted={} updated={} len={}", r0.inserted, r0.updated, tree.len());
 
     let updates: Vec<(Vec<u8>, u64)> = (0..n).map(|i| (format!("common_prefix_{i:06}").into_bytes(), (i as u64) + 1000)).collect();
     let r = tree.insert_batch(updates);

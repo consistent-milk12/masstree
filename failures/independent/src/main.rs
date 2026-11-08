@@ -65,7 +65,7 @@ fn std_bound<'a>(b: &Bound<&'a [u8]>) -> Bound<&'a [u8]> {
 
 fn check_get(tree: &MassTree<u64>, oracle: &BTreeMap<Vec<u8>, u64>, guard: &seize::LocalGuard<'_>) {
     for (k, v) in oracle {
-        assert_eq!(tree.get_with_guard(k, guard), Some(*v), "get mismatch for {k:?}");
+        assert_eq!(tree.get_with_guard(k, guard).map(|v| *v), Some(*v), "get mismatch for {k:?}");
     }
 }
 
@@ -112,8 +112,8 @@ fn test_inline_sequential(seed: u64, report: &mut Mismatches) {
         let k = keys[rng.range(keys.len())].clone();
         match rng.range(10) {
             0..=5 => { let v = rng.next(); let old = tree.insert_with_guard(&k, v, &guard); assert_eq!(old, oracle.insert(k.clone(), v), "insert old step={step} key={k:?}"); }
-            6..=8 => { let old = tree.remove_with_guard(&k, &guard).unwrap(); assert_eq!(old, oracle.remove(&k), "remove step={step} key={k:?}"); }
-            _ => { assert_eq!(tree.get_with_guard(&k, &guard), oracle.get(&k).copied(), "get step={step} key={k:?}"); }
+            6..=8 => { let old = tree.remove_with_guard(&k, &guard).unwrap(); assert_eq!(old.map(|v| *v), oracle.remove(&k), "remove step={step} key={k:?}"); }
+            _ => { assert_eq!(tree.get_with_guard(&k, &guard).map(|v| *v), oracle.get(&k).copied(), "get step={step} key={k:?}"); }
         }
         assert_eq!(tree.len(), oracle.len(), "len step={step}");
     }
@@ -162,9 +162,9 @@ fn test_boxed_batch(seed: u64) {
         assert_eq!(tree.len(), oracle.len(), "boxed len round={round}");
     }
     let expected: Vec<(Vec<u8>, String)> = oracle.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let got: Vec<(Vec<u8>, String)> = tree.range(RangeBound::Unbounded, RangeBound::Unbounded, &guard).map(|e| (e.key().to_vec(), e.value().to_string())).collect();
+    let got: Vec<(Vec<u8>, String)> = tree.range(RangeBound::Unbounded, RangeBound::Unbounded, &guard).map(|e| (e.key().to_vec(), tree.get(e.key()).expect("value"))).collect();
     assert_eq!(got, expected, "boxed full scan");
-    let got_rev: Vec<(Vec<u8>, String)> = tree.range(RangeBound::Unbounded, RangeBound::Unbounded, &guard).rev().map(|e| (e.key().to_vec(), e.value().to_string())).collect();
+    let got_rev: Vec<(Vec<u8>, String)> = tree.range(RangeBound::Unbounded, RangeBound::Unbounded, &guard).rev().map(|e| (e.key().to_vec(), tree.get(e.key()).expect("value"))).collect();
     let mut expected_rev = expected.clone(); expected_rev.reverse();
     assert_eq!(got_rev, expected_rev, "boxed reverse full");
 }

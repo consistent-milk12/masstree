@@ -9,7 +9,8 @@ fn collect_leaves(
     tree: &MassTree15<u64>,
     guard: &LocalGuard<'_>,
 ) -> Vec<*mut LeafNode15<BoxPolicy<u64>>> {
-    let root = tree.debug_root_ptr(guard);
+    // SAFETY: quiescent inspection under the tree guard.
+    let root = unsafe { tree.debug_root_ptr(guard) };
     let ver = unsafe { &*(root.cast::<NodeVersion>()) };
     let mut out = Vec::new();
     if ver.is_leaf() {
