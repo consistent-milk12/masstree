@@ -182,11 +182,12 @@ fn stress_get_during_coalesce() {
     // Note: Some missed reads are expected due to concurrent removes.
     // The fix ensures we don't miss reads due to landing on deleted leaves.
     // A high ratio of missed:success would indicate a problem.
-    let miss_ratio = if total_success > 0 {
-        total_missed as f64 / total_success as f64
-    } else {
-        0.0
-    };
+    assert!(
+        total_success > 0,
+        "Stress test completed no successful reads at all ({total_missed} misses)"
+    );
+
+    let miss_ratio = total_missed as f64 / total_success as f64;
 
     assert!(
         miss_ratio < 0.5,

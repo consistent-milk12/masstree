@@ -63,15 +63,23 @@ fn stress_extreme_contention() {
         total_ops as f64 / DURATION_SECS as f64
     );
 
-    // Must complete some operations (no deadlock)
-    // Threshold is environment-aware:
-    // - Miri: 10 ops (extremely slow, 10-100x overhead)
-    // - Normal: 100 ops (even slow CI systems should manage this)
-    let min_ops = if cfg!(miri) { 10 } else { 100 };
+    // Must make real progress (no deadlock or severe stall). The threshold is
+    // environment-aware but requires at least ~1k ops/sec outside Miri.
+    let min_ops = if cfg!(miri) {
+        10
+    } else {
+        DURATION_SECS as usize * 1_000
+    };
     assert!(
         total_ops > min_ops,
-        "Should complete some operations (got {total_ops}, min {min_ops})"
+        "Too little progress; possible stall (got {total_ops}, min {min_ops})"
     );
+
+    // The tree must still accept and return a key after the churn.
+    let sentinel: &[u8] = b"__post_contention_sentinel__";
+    tree.insert(sentinel, 42);
+    assert_eq!(tree.get(sentinel), Some(42));
+    let _ = tree.remove(sentinel);
 }
 
 /// Test rapid alternation between contended and non-contended patterns.

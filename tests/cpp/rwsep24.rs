@@ -32,6 +32,7 @@ fn rwsep24_single_thread() {
     }
 
     // Mixed read/write operations
+    let mut expected: Vec<u64> = (0..(32 + NKEYS) as u64).collect();
     let mut rng = StdRng::seed_from_u64(SEED);
     for _ in 0..N_OPS {
         // x has bottom 3 bits for operation selection
@@ -41,12 +42,18 @@ fn rwsep24_single_thread() {
 
         if x & 7 != 0 {
             // 7/8 chance: get
-            let _ = tree.get_with_guard(&key, &guard);
+            let value = tree
+                .get_with_guard(&key, &guard)
+                .expect("prepopulated key must remain present");
+            assert_eq!(*value, expected[key_idx]);
         } else {
             // 1/8 chance: put
-            let _ = tree.insert_with_guard(&key, x as u64, &guard);
+            tree.insert_with_guard(&key, x as u64, &guard);
+            expected[key_idx] = x as u64;
         }
     }
+
+    assert_eq!(tree.len(), 32 + NKEYS);
 }
 
 #[test]
@@ -77,9 +84,12 @@ fn rwsep24_concurrent() {
                     let key = (base + key_idx as u64).to_be_bytes();
 
                     if x & 7 != 0 {
-                        let _ = tree.get_with_guard(&key, &guard);
+                        assert!(
+                            tree.get_with_guard(&key, &guard).is_some(),
+                            "prepopulated key must remain present"
+                        );
                     } else {
-                        let _ = tree.insert_with_guard(&key, x as u64, &guard);
+                        tree.insert_with_guard(&key, x as u64, &guard);
                     }
                 }
             })
@@ -88,6 +98,16 @@ fn rwsep24_concurrent() {
 
     for h in handles {
         h.join().unwrap();
+    }
+
+    assert_eq!(tree.len(), num_threads * (32 + NKEYS));
+    let guard = tree.guard();
+    for tid in 0..num_threads {
+        let base = 1_000_000u64 + (tid as u64 * (32 + NKEYS as u64));
+        for n in 0..(32 + NKEYS) as u64 {
+            let key = (base + n).to_be_bytes();
+            assert!(tree.get_with_guard(&key, &guard).is_some());
+        }
     }
 }
 

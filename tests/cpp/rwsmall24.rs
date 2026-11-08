@@ -29,18 +29,30 @@ fn rwsmall24_single_thread() {
         tree.insert_with_guard(&key, x, &guard);
     }
 
+    let mut expected: Vec<u64> = (0..NUM_KEYS as u64).collect();
+
     for n in 0..N {
         let x = rng.random_range(0..(NUM_KEYS << 3));
         let key_idx = (x >> 3) as u64;
         let key = key_idx.to_be_bytes();
 
         if x & 7 != 0 {
-            // 7/8 reads
-            let _ = tree.get_with_guard(&key, &guard);
+            // 7/8 reads: every key is prepopulated and never removed.
+            let value = tree
+                .get_with_guard(&key, &guard)
+                .expect("prepopulated key must remain present");
+            assert_eq!(*value, expected[key_idx as usize]);
         } else {
             // 1/8 writes
-            let _ = tree.insert_with_guard(&key, n as u64, &guard);
+            tree.insert_with_guard(&key, n as u64, &guard);
+            expected[key_idx as usize] = n as u64;
         }
+    }
+
+    assert_eq!(tree.len(), NUM_KEYS);
+    for (key_idx, expected_value) in expected.iter().enumerate() {
+        let key = (key_idx as u64).to_be_bytes();
+        assert_eq!(*tree.get_with_guard(&key, &guard).unwrap(), *expected_value);
     }
 }
 
@@ -72,9 +84,12 @@ fn rwsmall24_concurrent() {
                     let key = key_idx.to_be_bytes();
 
                     if x & 7 != 0 {
-                        let _ = tree.get_with_guard(&key, &guard);
+                        let value = tree
+                            .get_with_guard(&key, &guard)
+                            .expect("prepopulated key must remain present");
+                        assert!(*value <= N as u64);
                     } else {
-                        let _ = tree.insert_with_guard(&key, n as u64, &guard);
+                        tree.insert_with_guard(&key, n as u64, &guard);
                     }
                 }
             })
@@ -83,5 +98,12 @@ fn rwsmall24_concurrent() {
 
     for h in handles {
         h.join().unwrap();
+    }
+
+    assert_eq!(tree.len(), NUM_KEYS);
+    let guard = tree.guard();
+    for key_idx in 0..NUM_KEYS as u64 {
+        let key = key_idx.to_be_bytes();
+        assert!(tree.get_with_guard(&key, &guard).is_some());
     }
 }

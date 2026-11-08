@@ -1043,6 +1043,7 @@ fn long_running_mixed_workload() {
         let tree = Arc::clone(&tree);
         let stop_flag = Arc::clone(&stop_flag);
         let operations = Arc::clone(&operations);
+        let errors = Arc::clone(&errors);
 
         handles.push(thread::spawn(move || {
             let guard = tree.guard();
@@ -1082,17 +1083,23 @@ fn long_running_mixed_workload() {
 
                 local_ops += 1;
 
-                // Periodic verification
+                // Periodic verification on a per-thread unique sentinel: this
+                // exercises insert -> get -> remove against the shared tree
+                // without racing another worker.
                 if local_ops.is_multiple_of(10_000) {
-                    // Verify a random key that we just operated on
-                    let verify_key: u64 = rng_state % (KEY_RANGE / 2);
+                    let verify_key: u64 = u64::MAX / 2 + (tid as u64) * 1_000_000 + local_ops;
+                    let verify_bytes = verify_key.to_be_bytes();
 
-                    if tree
-                        .get_with_guard(&verify_key.to_be_bytes(), &guard)
-                        .is_some()
-                    {
-                        // Key exists, value should be non-zero (any value is fine)
+                    tree.insert_with_guard(&verify_bytes, local_ops, &guard);
+
+                    match tree.get_with_guard(&verify_bytes, &guard) {
+                        Some(value) if *value == local_ops => {}
+                        _ => {
+                            errors.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
+
+                    let _ = tree.remove_with_guard(&verify_bytes, &guard);
                 }
             }
 
