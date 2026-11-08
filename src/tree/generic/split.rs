@@ -128,7 +128,7 @@ where
         //
         // Allocation is infallible (aborts on OOM).
         // The leaf is initialized but NOT split-locked yet - that happens in
-        // split_into_preallocated() or split_and_insert() after mark_split().
+        // split_and_insert() after mark_split().
         let right_leaf_ptr: *mut LeafNode15<P> = self.allocator.alloc_leaf_direct(false, false);
 
         SplitPreparation {

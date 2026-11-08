@@ -190,15 +190,6 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
         self.ptrs[slot].load(RELAXED).is_null()
     }
 
-    #[inline(always)]
-    fn is_layer(&self, slot: usize) -> bool {
-        debug_assert!(slot < WIDTH_15, "is_layer: slot {slot} out of bounds");
-
-        // Cannot distinguish values from layers — returns true for any non-null.
-        // Authoritative check is `keylenx >= LAYER_KEYLENX` on the leaf.
-        !self.ptrs[slot].load(READ_ORD).is_null()
-    }
-
     // ========================================================================
     //  Terminal Value Operations
     // ========================================================================

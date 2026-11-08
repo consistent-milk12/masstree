@@ -2,13 +2,13 @@
 //!
 //! Reverse scan context, owns all reverse iteration state.
 
+use crate::permuter::Permuter15;
 use std::cmp::Ordering;
 use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
 use crate::key::IKEY_SIZE;
-use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::nodeversion::NodeVersion;
@@ -191,7 +191,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 // SAFETY: leaf_ptr is valid (null checked above, stable_reverse
                 // ensures validity).
                 let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-                let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+                let perm: Permuter15 = leaf.permutation();
                 let size: usize = perm.size();
 
                 if size == 0 {
@@ -261,7 +261,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     fn try_initial_position_reverse(
         &mut self,
         leaf: &LeafNode15<P>,
-        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         size: usize,
         version: u32,
         current_root: *const u8,
@@ -275,7 +275,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         let ki: isize = ReverseScanHelper::lower_reverse(
             &self.cursor_key,
             leaf,
-            &perm,
+            perm,
             self.flags.upper_bound(),
         );
 
@@ -311,7 +311,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             slot_ikey,
             keylenx,
             version,
-            &perm,
+            perm,
             ki,
             &mut self.cursor_key,
             &mut self.stack,
@@ -350,7 +350,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         slot: usize,
         slot_ikey: u64,
         version: u32,
-        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         ki: isize,
         leaf: &LeafNode15<P>,
     ) -> InitialPositionResult<P>
@@ -409,7 +409,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         slot_ikey: u64,
         keylenx: u8,
         version: u32,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         ki: isize,
         cursor_key: &mut CursorKey,
         stack: &mut BackStackElement<P>,
@@ -476,7 +476,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
         cursor_key.assign_store_length(key_len);
 
-        stack.update_state(version, *perm, ki - 1);
+        stack.update_state(version, perm, ki - 1);
 
         EmitResult::Emit(ScanSnapshot {
             value: output,
@@ -575,7 +575,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             return self.reposition_back_generic::<E>(guard);
         }
 
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = *self.stack.get_perm_ref();
+        let perm: Permuter15 = *self.stack.get_perm_ref();
         let size: usize = perm.size();
 
         // Defensive check: ki might be >= size due to concurrent deletion
@@ -594,7 +594,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         &mut self,
         leaf: &LeafNode15<P>,
         leaf_ptr: *mut LeafNode15<P>,
-        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         version: u32,
         ki: isize,
         needs_duplicate_check: bool,
@@ -657,7 +657,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         }
 
         // Try to emit this slot's value
-        self.try_emit_generic::<E>(leaf, slot, slot_ikey, keylenx, version, &perm, ki)
+        self.try_emit_generic::<E>(leaf, slot, slot_ikey, keylenx, version, perm, ki)
     }
 
     /// Handle a layer pointer during reverse scan (`find_prev` path).
@@ -670,7 +670,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         slot: usize,
         slot_ikey: u64,
         version: u32,
-        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         ki: isize,
     ) -> (ScanStateBack, Option<E::Snapshot>) {
         // Load the layer pointer first and validate before pushing the parent
@@ -722,7 +722,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         slot_ikey: u64,
         keylenx: u8,
         version: u32,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         ki: isize,
     ) -> (ScanStateBack, Option<E::Snapshot>) {
         leaf.prefetch_value(slot);
@@ -784,7 +784,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
         // Update position for next iteration
         self.stack
-            .update_state(version, *perm, ReverseScanHelper::prev(ki));
+            .update_state(version, perm, ReverseScanHelper::prev(ki));
 
         (ScanStateBack::Emit, Some(snapshot))
     }
@@ -883,7 +883,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
             // SAFETY: candidate is protected by the guard.
             let candidate_leaf: &LeafNode15<P> = unsafe { &*candidate };
-            let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = candidate_leaf.permutation();
+            let perm: Permuter15 = candidate_leaf.permutation();
 
             if perm.size() == 0 {
                 // Discard this empty leaf and continue left. Moving the stop
@@ -984,7 +984,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
             // SAFETY: leaf_ptr is valid (null checked, not deleted)
             let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-            let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+            let perm: Permuter15 = leaf.permutation();
 
             // A retry must not re-emit the key the cursor already holds. The
             // unshift sentinel is a positional marker, not a real key, so it
@@ -997,14 +997,14 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 ReverseScanHelper::lower_reverse_strict(
                     &self.cursor_key,
                     leaf,
-                    &perm,
+                    perm,
                     self.flags.upper_bound(),
                 )
             } else {
                 ReverseScanHelper::lower_reverse(
                     &self.cursor_key,
                     leaf,
-                    &perm,
+                    perm,
                     self.flags.upper_bound(),
                 )
             };
@@ -1088,7 +1088,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         // Step 6: Find position in parent leaf
         // SAFETY: leaf_ptr is valid (from NonNull in LayerContext)
         let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+        let perm: Permuter15 = leaf.permutation();
 
         // CRITICAL: Clear upper_bound before position search.
         self.flags.clear_upper_bound();
@@ -1112,12 +1112,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         }
 
         let ki: isize = anchored_ki.unwrap_or_else(|| {
-            ReverseScanHelper::lower_reverse(
-                &self.cursor_key,
-                leaf,
-                &perm,
-                self.flags.upper_bound(),
-            )
+            ReverseScanHelper::lower_reverse(&self.cursor_key, leaf, perm, self.flags.upper_bound())
         });
 
         // Step 7: Reset monotonicity cache for new leaf context
@@ -1172,7 +1167,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             return (ScanStateBack::Retry, None);
         }
 
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = *self.stack.get_perm_ref();
+        let perm: Permuter15 = *self.stack.get_perm_ref();
         let perm_size: usize = perm.size();
 
         // Defensive: ki might be >= size due to concurrent deletion
@@ -1316,7 +1311,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         }
 
         // Load permutation and start from last slot
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = prev_leaf.permutation();
+        let perm: Permuter15 = prev_leaf.permutation();
         let size: usize = perm.size();
         let ki: isize = if size > 0 {
             (size - 1).cast_signed()

@@ -1,3 +1,4 @@
+use crate::permuter::Permuter15;
 use std::{
     cmp::Ordering,
     marker::PhantomData,
@@ -8,10 +9,9 @@ use std::{
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
-    BatchedRetire, Linker, MassTreeGeneric, TreeAllocator, TreePermutation, ValueRef,
+    Linker, MassTreeGeneric, TreeAllocator, ValueRef,
     hints::{likely, unlikely},
     key::Key,
-    leaf_trait::TreeLeafNode,
     leaf15::{KSUF_KEYLENX, LeafNode15, MODSTATE_INSERT},
     nodeversion::{LockGuard, NodeVersion},
     policy::{LeafPolicy, PreparedValue},
@@ -121,7 +121,7 @@ where
     #[inline(always)]
     pub fn flush(&self, guard: &LocalGuard<'_>) {
         self.verify_guard(guard);
-        BatchedRetire::flush(guard);
+        guard.flush();
     }
 
     /// Perform maintenance: reclaim retired memory and clean up empty leaves.
@@ -295,7 +295,7 @@ where
     #[inline]
     fn stable_last_key_compare(leaf: &LeafNode15<P>, key: &Key<'_>, mut version: u32) -> Ordering {
         loop {
-            let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+            let perm: Permuter15 = leaf.permutation();
             let n: usize = perm.size();
 
             // If empty, return Greater (key should look elsewhere)

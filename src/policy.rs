@@ -336,9 +336,6 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// Relaxed empty check for use in OCC search loops.
     fn is_empty_relaxed(&self, slot: usize) -> bool;
 
-    /// Check if a slot contains a layer pointer.
-    fn is_layer(&self, slot: usize) -> bool;
-
     // ========================================================================
     //  Terminal Value Operations
     // ========================================================================

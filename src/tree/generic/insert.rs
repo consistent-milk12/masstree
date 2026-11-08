@@ -4,15 +4,16 @@
 //! - Strategy-based generic/write-through unification (see `InsertStrategy`)
 
 use crate::Permuter;
-use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
+use crate::leaf_trait::SplitInsertData;
 use crate::leaf15::KSUF_KEYLENX;
+use crate::permuter::Permuter15;
 use crate::policy::{PreparedValue, RetireHandle};
 
 use super::entry::EntryLeafHint;
 use super::insert_strategy::{GenericInsert, InsertStrategy, WriteThroughInsert};
 use super::{
     FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LeafPolicy, Linker, LocalGuard,
-    MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
+    MassTreeGeneric, MembershipError, TreeAllocator,
 };
 
 use crate::leaf15::LeafNode15;
@@ -113,13 +114,13 @@ where
 
         // A vacant hint still needs a local search: a suffix conflict requires
         // creating a layer, and slot zero may be reserved for the leaf bound.
-        let search = self.search_for_insert_generic(leaf, &key, &perm);
+        let search = self.search_for_insert_generic(leaf, &key, perm);
         let deferred = if perm.size() == 0 && self.can_reuse_empty_leaf(leaf, &key) {
             let output = S::into_output(value);
             self.insert_into_empty_leaf(leaf, &mut lock, &key, &output, guard, None)
         } else if let InsertSearchResultGeneric::NotFound { logical_pos } = search
             && let FindSlotResult::Found { slot, back_offset } =
-                self.find_usable_slot(leaf, &perm, key.ikey())
+                self.find_usable_slot(leaf, perm, key.ikey())
         {
             let output = S::into_output(value);
             self.insert_new_value(
@@ -154,7 +155,7 @@ where
     pub(crate) fn find_usable_slot(
         &self,
         leaf: &LeafNode15<P>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         ikey: u64,
     ) -> FindSlotResult {
         // Check if leaf has space
@@ -287,7 +288,7 @@ where
         slot: usize,
         back_offset: usize,
         logical_pos: usize,
-        mut perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        mut perm: Permuter15,
         key: &Key<'_>,
         value: &P::Output,
         guard: &LocalGuard<'_>,
@@ -378,7 +379,7 @@ where
         let deferred_retire: *mut u8 =
             self.assign_slot_generic(leaf, lock, slot, key, &prepared, guard, pre_allocated);
 
-        let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
+        let new_perm: Permuter = Permuter15::make_sorted(1);
         leaf.set_permutation(new_perm);
 
         deferred_retire
@@ -425,7 +426,7 @@ where
         &self,
         leaf: &LeafNode15<P>,
         pre_lock_version: u32,
-        pre_lock_perm_raw: <<LeafNode15<P> as TreeLeafNode<P>>::Perm as TreePermutation>::Raw,
+        pre_lock_perm_raw: u64,
     ) -> bool {
         !leaf.version().has_changed(pre_lock_version) && leaf.permutation_raw() == pre_lock_perm_raw
     }
@@ -614,9 +615,9 @@ where
                 let pre_lock_perm_raw: u64 = pre_lock_perm.value();
 
                 let optimistic_search: InsertSearchResultGeneric = if single_layer_mode {
-                    self.search_for_insert_single_layer(leaf, key, &pre_lock_perm)
+                    self.search_for_insert_single_layer(leaf, key, pre_lock_perm)
                 } else {
-                    self.search_for_insert_generic(leaf, key, &pre_lock_perm)
+                    self.search_for_insert_generic(leaf, key, pre_lock_perm)
                 };
 
                 if let InsertSearchResultGeneric::Layer { slot } = optimistic_search {
@@ -750,7 +751,7 @@ where
                     InsertSearchResultGeneric::NotFound { logical_pos } => {
                         let ikey: u64 = key.ikey();
 
-                        match self.find_usable_slot(leaf, &pre_lock_perm, ikey) {
+                        match self.find_usable_slot(leaf, pre_lock_perm, ikey) {
                             FindSlotResult::Found { slot, back_offset } => {
                                 let output: P::Output = S::into_output(value);
                                 let deferred_retire: *mut u8 = self.insert_new_value(

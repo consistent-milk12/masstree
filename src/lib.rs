@@ -182,7 +182,6 @@ pub(crate) mod ordering;
 pub(crate) mod permuter;
 pub(crate) mod policy;
 pub(crate) mod prefetch;
-mod retirement;
 mod shard_counter;
 pub(crate) mod suffix;
 pub(crate) mod tree;
@@ -213,7 +212,7 @@ pub use key::{IKEY_SIZE, Key, MAX_KEY_LENGTH};
 pub use alloc_trait::TreeAllocator;
 pub use alloc15::SeizeAllocator;
 pub use internode::InternodeNode;
-pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
+pub use leaf_trait::{TreeInternode, TreePermutation};
 pub use leaf15::LeafNode15;
 pub use nodeversion::NodeVersion;
 pub use permuter::{AtomicPermuter, AtomicPermuter15, MAX_WIDTH, Permuter, Permuter15};
@@ -222,7 +221,6 @@ pub use permuter::{AtomicPermuter, AtomicPermuter15, MAX_WIDTH, Permuter, Permut
 pub use suffix::SuffixBag;
 
 // Memory reclamation
-pub use retirement::BatchedRetire;
 
 // Internal re-exports (crate-only)
 pub(crate) use link::Linker;

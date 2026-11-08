@@ -1,10 +1,10 @@
 //! Shared helpers for forward and reverse batch processing.
 
+use crate::permuter::Permuter15;
 use std::cmp::Ordering;
 
 use crate::hints::unlikely;
 use crate::key::IKEY_SIZE;
-use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::KSUF_KEYLENX;
 use crate::leaf15::LAYER_KEYLENX;
 use crate::leaf15::LeafNode15;
@@ -198,11 +198,7 @@ pub trait BatchDirection: Sized {
 
     /// Prefetch neighbor slot's value to hide memory latency.
     /// Forward: no-op. Backward: prefetches previous slot.
-    fn prefetch_neighbor<P: LeafPolicy>(
-        ki: isize,
-        leaf: &LeafNode15<P>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-    );
+    fn prefetch_neighbor<P: LeafPolicy>(ki: isize, leaf: &LeafNode15<P>, perm: Permuter15);
 
     /// The [`Ordering`] that indicates the bound has been exceeded.
     /// Forward: `Greater` (`slot_ikey` > `end_bound`). Backward: `Less` (`slot_ikey` < `start_bound`).
@@ -241,11 +237,7 @@ impl BatchDirection for Forward {
     }
 
     #[inline(always)]
-    fn prefetch_neighbor<P: LeafPolicy>(
-        ki: isize,
-        leaf: &LeafNode15<P>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-    ) {
+    fn prefetch_neighbor<P: LeafPolicy>(ki: isize, leaf: &LeafNode15<P>, perm: Permuter15) {
         let next_ki: usize = (ki + 1).cast_unsigned();
         if next_ki < perm.size() {
             let next_slot: usize = perm.get(next_ki);
@@ -310,11 +302,7 @@ impl BatchDirection for Backward {
     }
 
     #[inline(always)]
-    fn prefetch_neighbor<P: LeafPolicy>(
-        ki: isize,
-        leaf: &LeafNode15<P>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-    ) {
+    fn prefetch_neighbor<P: LeafPolicy>(ki: isize, leaf: &LeafNode15<P>, perm: Permuter15) {
         if ki > 0 {
             let prev_slot: usize = perm.get((ki - 1).cast_unsigned());
             leaf.prefetch_value(prev_slot);
@@ -369,7 +357,7 @@ impl BatchDirection for Backward {
 /// unified batch function, then write back `ki` and `root`.
 pub struct BatchCtx<'a, P: LeafPolicy> {
     pub leaf: &'a LeafNode15<P>,
-    pub perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    pub perm: Permuter15,
     pub perm_size: usize,
     pub cached_version: u32,
     pub ki: isize,
@@ -408,7 +396,7 @@ where
         let slot_ikey: u64 = ctx.leaf.ikey_relaxed(slot);
         let slot_keylenx: u8 = ctx.leaf.keylenx_relaxed(slot);
 
-        D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, &ctx.perm);
+        D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, ctx.perm);
 
         // Phase 1: speculative reads only. Neither the cursor nor the layer
         // stack may change until the version check below succeeds, otherwise a
@@ -533,7 +521,7 @@ where
         let slot_ikey: u64 = ctx.leaf.ikey_relaxed(slot);
         let slot_keylenx: u8 = ctx.leaf.keylenx_relaxed(slot);
 
-        D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, &ctx.perm);
+        D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, ctx.perm);
 
         // Phase 1: speculative reads only. A layer pointer cannot be converted
         // to a full key, so its ikey decides whether descending can contribute

@@ -3,9 +3,18 @@
 use super::{InternodeNode, Ordering};
 use std::ptr as StdPtr;
 
+pub fn new_node(height: u32) -> Box<InternodeNode> {
+    let mut node = Box::<InternodeNode>::new_uninit();
+    // SAFETY: The box owns aligned uninitialized storage, initialized exactly once.
+    unsafe {
+        InternodeNode::init_at(node.as_mut_ptr(), height);
+        node.assume_init()
+    }
+}
+
 #[test]
 fn test_new_internode() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     assert!(!node.version().is_leaf());
     assert!(!node.version().is_root());
@@ -19,7 +28,12 @@ fn test_new_internode() {
 
 #[test]
 fn test_new_root() {
-    let node: Box<InternodeNode> = InternodeNode::new_root(1);
+    let mut node = Box::<InternodeNode>::new_uninit();
+    // SAFETY: The box owns aligned uninitialized storage, initialized exactly once.
+    let node = unsafe {
+        InternodeNode::init_at_root(node.as_mut_ptr(), 1);
+        node.assume_init()
+    };
 
     assert!(!node.version().is_leaf());
     assert!(node.version().is_root());
@@ -29,7 +43,7 @@ fn test_new_root() {
 
 #[test]
 fn test_key_accessors() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     node.set_ikey(0, 0x1000_0000_0000_0000);
     node.set_ikey(1, 0x2000_0000_0000_0000);
@@ -44,7 +58,7 @@ fn test_key_accessors() {
 
 #[test]
 fn test_child_accessors() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     let fake_child0: *mut u8 = StdPtr::without_provenance_mut(0x1000);
     let fake_child1: *mut u8 = StdPtr::without_provenance_mut(0x2000);
@@ -62,7 +76,7 @@ fn test_child_accessors() {
 
 #[test]
 fn test_assign() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     let left_child: *mut u8 = StdPtr::without_provenance_mut(0x1000);
     let right_child: *mut u8 = StdPtr::without_provenance_mut(0x2000);
@@ -83,7 +97,7 @@ fn test_assign() {
 
 #[test]
 fn test_inc_nkeys() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     assert_eq!(node.nkeys(), 0);
 
@@ -96,7 +110,7 @@ fn test_inc_nkeys() {
 
 #[test]
 fn test_is_full() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     assert!(!node.is_full());
 
@@ -106,8 +120,8 @@ fn test_is_full() {
 
 #[test]
 fn test_parent_accessors() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
-    let mut parent: Box<InternodeNode> = InternodeNode::new(1);
+    let node: Box<InternodeNode> = new_node(0);
+    let mut parent: Box<InternodeNode> = new_node(1);
 
     let parent_ptr: *mut InternodeNode = StdPtr::from_mut::<InternodeNode>(parent.as_mut());
 
@@ -118,7 +132,7 @@ fn test_parent_accessors() {
 
 #[test]
 fn test_compare_key() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     node.set_ikey(0, 0x5000_0000_0000_0000);
     node.set_nkeys(1);
@@ -133,7 +147,7 @@ fn test_compare_key() {
 
 #[test]
 fn test_invariants_valid() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     // Set up correctly sorted keys
     node.set_ikey(0, 0x1000_0000_0000_0000);
@@ -149,7 +163,7 @@ fn test_invariants_valid() {
 #[should_panic(expected = "keys not in ascending order")]
 #[cfg_attr(not(debug_assertions), ignore = "requires debug assertions")]
 fn test_invariant_unsorted_keys() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     // Set up unsorted keys
     node.set_ikey(0, 0x3000_0000_0000_0000);
@@ -165,7 +179,7 @@ fn test_invariant_unsorted_keys() {
 
 #[test]
 fn test_find_insert_position_empty() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
     // Empty node: any key goes at position 0
     assert_eq!(node.find_insert_position(0x1000), 0);
     assert_eq!(node.find_insert_position(0), 0);
@@ -174,7 +188,7 @@ fn test_find_insert_position_empty() {
 
 #[test]
 fn test_find_insert_position_single_key() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
     node.set_ikey(0, 100);
     node.set_nkeys(1);
 
@@ -188,7 +202,7 @@ fn test_find_insert_position_single_key() {
 
 #[test]
 fn test_find_insert_position_multiple_keys() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     // Set up keys: 10, 20, 30, 40, 50
     node.set_ikey(0, 10);
@@ -216,7 +230,7 @@ fn test_find_insert_position_multiple_keys() {
 
 #[test]
 fn test_find_insert_position_full_node() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     // Fill with keys 10, 20, 30, ..., 150
     for i in 0..15 {
@@ -242,8 +256,8 @@ fn test_find_insert_position_full_node() {
 fn test_split_insert_at_position_0() {
     // Test splitting when the new key goes at position 0 (smallest)
     // Use height=0 so split_into treats children as leaves (doesn't dereference them)
-    let node: Box<InternodeNode> = InternodeNode::new(0);
-    let mut new_right: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
+    let mut new_right: Box<InternodeNode> = new_node(0);
 
     // Fill the node with keys 20, 30, 40, ..., 160 (15 keys)
     for i in 0..15 {
@@ -272,8 +286,8 @@ fn test_split_insert_at_position_0() {
 fn test_split_insert_at_width() {
     // Test splitting when the new key goes at position WIDTH (largest)
     // Use height=0 so split_into treats children as leaves (doesn't dereference them)
-    let node: Box<InternodeNode> = InternodeNode::new(0);
-    let mut new_right: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
+    let mut new_right: Box<InternodeNode> = new_node(0);
 
     // Fill the node with keys 10, 20, 30, ..., 150 (15 keys)
     for i in 0..15 {
@@ -305,8 +319,8 @@ fn test_split_insert_at_width() {
 fn test_split_insert_at_midpoint() {
     // Test splitting when the new key goes at the midpoint (becomes popup)
     // Use height=0 so split_into treats children as leaves (doesn't dereference them)
-    let node: Box<InternodeNode> = InternodeNode::new(0);
-    let mut new_right: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
+    let mut new_right: Box<InternodeNode> = new_node(0);
 
     // Fill the node with keys 10, 20, 30, ..., 150 (15 keys)
     for i in 0..15 {
@@ -341,7 +355,7 @@ fn test_split_insert_at_midpoint() {
 
 #[test]
 fn test_load_all_ikeys_empty() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
     // Even with 0 keys, load_all_ikeys returns WIDTH values (uninitialized slots are 0)
     let ikeys = node.load_all_ikeys();
     assert_eq!(ikeys.len(), 15);
@@ -353,7 +367,7 @@ fn test_load_all_ikeys_empty() {
 
 #[test]
 fn test_load_all_ikeys_partial() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     // Set 5 keys
     node.set_ikey(0, 100);
@@ -380,7 +394,7 @@ fn test_load_all_ikeys_partial() {
 
 #[test]
 fn test_load_all_ikeys_full() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
 
     // Fill all 15 keys
     for i in 0..15 {
@@ -402,8 +416,8 @@ fn test_load_all_ikeys_full() {
 #[test]
 fn test_shift_from_basic() {
     // Test shifting entries from one internode to another
-    let src: Box<InternodeNode> = InternodeNode::new(0);
-    let mut dst: Box<InternodeNode> = InternodeNode::new(0);
+    let src: Box<InternodeNode> = new_node(0);
+    let mut dst: Box<InternodeNode> = new_node(0);
 
     // Set up source with 5 keys and 6 children
     src.set_ikey(0, 100);
@@ -447,8 +461,8 @@ fn test_shift_from_basic() {
 
 #[test]
 fn test_shift_from_to_different_position() {
-    let src: Box<InternodeNode> = InternodeNode::new(0);
-    let mut dst: Box<InternodeNode> = InternodeNode::new(0);
+    let src: Box<InternodeNode> = new_node(0);
+    let mut dst: Box<InternodeNode> = new_node(0);
 
     // Set up source
     src.set_ikey(0, 10);
@@ -495,8 +509,8 @@ fn test_shift_from_to_different_position() {
 
 #[test]
 fn test_shift_from_zero_count() {
-    let src: Box<InternodeNode> = InternodeNode::new(0);
-    let mut dst: Box<InternodeNode> = InternodeNode::new(0);
+    let src: Box<InternodeNode> = new_node(0);
+    let mut dst: Box<InternodeNode> = new_node(0);
 
     src.set_ikey(0, 100);
     src.set_nkeys(1);
@@ -520,12 +534,12 @@ fn test_shift_from_zero_count() {
 
 #[test]
 fn test_depth_prefetch_methods() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
     let collector = seize::Collector::new();
     let guard = collector.enter();
 
     // Set up a child pointer
-    let child_box: Box<InternodeNode> = InternodeNode::new(0);
+    let child_box: Box<InternodeNode> = new_node(0);
     let child: *mut InternodeNode = Box::into_raw(child_box);
     node.set_child(0, child.cast());
 
@@ -547,7 +561,7 @@ fn test_depth_prefetch_methods() {
 
 #[test]
 fn test_prefetch_null_child() {
-    let node: Box<InternodeNode> = InternodeNode::new(0);
+    let node: Box<InternodeNode> = new_node(0);
     let collector = seize::Collector::new();
     let guard = collector.enter();
 

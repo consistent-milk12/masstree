@@ -78,8 +78,9 @@ fn test_seize_allocator_teardown_deep_internode_tree() {
     let mut child_ptr: *mut u8 = leaf_ptr.cast();
 
     for height in 0..INTERNODE_MAX_DEPTH {
-        let inode_ptr = alloc.alloc_internode_direct(height);
+        let inode_ptr = alloc.alloc_internode_direct_root(height);
         let inode: &InternodeNode = unsafe { &*inode_ptr.cast::<InternodeNode>() };
+        inode.version().mark_nonroot();
 
         // Set child[0] to point to previous node
         inode.set_child(0, child_ptr);
@@ -203,8 +204,9 @@ fn test_seize_allocator_inline_teardown_deep_tree() {
     let mut child_ptr: *mut u8 = leaf_ptr.cast();
 
     for height in 0..INTERNODE_MAX_DEPTH {
-        let inode_ptr = alloc.alloc_internode_direct(height);
+        let inode_ptr = alloc.alloc_internode_direct_root(height);
         let inode: &InternodeNode = unsafe { &*inode_ptr.cast::<InternodeNode>() };
+        inode.version().mark_nonroot();
 
         inode.set_child(0, child_ptr);
         inode.set_nkeys(0);

@@ -156,6 +156,20 @@ RAII. Tests pause preparation while another writer updates, converts or removes
 the source; exact Drop counts and Miri verify retry cleanup. The existing encoder
 panic reproducer also covers a 31-node abandoned chain and passes under Miri.
 
+The remaining API cleanup removes `TreeLeafNode` (its production uses only
+named `Permuter15`), the two unused preallocated leaf split helpers,
+`ValueArray::is_layer`, `TreeAllocator::alloc_internode_direct`, boxed internode
+constructors, and `BatchedRetire`. These are deliberate semver-breaking removals
+approved by the user. The small permutation is now passed by value; required
+leaf constants remain inherent. Tests retain their assertions and construct
+internodes through the production in-place initializers. Debug internode
+invariants run after complete split/parent insertion and cascade mutations;
+null child slot 0 remains valid after removal. Native library, range, batch,
+concurrency, doctest, feature and strict Clippy checks pass, as do 37 focused
+internode/allocation Miri tests. Source verification credits already-landed
+`Option<SplitPoint>`, sentinel test wiring, unused dependency removal and real
+tracing events with `MASSTREE_LOG_CONSOLE` control.
+
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user
 work and is kept out of these commits.

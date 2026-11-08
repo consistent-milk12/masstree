@@ -3,7 +3,6 @@
 //! Internode (internal node) for `MassTree`.
 
 use static_assertions::const_assert_eq;
-use std::array as StdArray;
 use std::cmp::Ordering;
 use std::fmt as StdFmt;
 use std::ptr as StdPtr;
@@ -172,53 +171,6 @@ impl InternodeNode {
                 node.height = height as u8;
             }
         }
-    }
-
-    /// Create a new internode at the given height.
-    #[must_use]
-    #[inline]
-    pub fn new(height: u32) -> Box<Self> {
-        #[expect(clippy::cast_possible_truncation, reason = "height <= 15 in practice")]
-        Box::new(Self {
-            version: NodeVersion::new(false), // false = not a leaf
-            nkeys: AtomicU8::new(0),
-            height: height as u8,
-            pad: [0; 2],
-            parent: AtomicPtr::new(StdPtr::null_mut()),
-            ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
-            child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-        })
-    }
-
-    /// Create a new internode as root of a tree/layer.
-    #[must_use]
-    #[inline(always)]
-    pub fn new_root(height: u32) -> Box<Self> {
-        let node: Box<Self> = Self::new(height);
-        node.version.mark_root();
-        node
-    }
-
-    /// Create a new internode sibling for a split operation.
-    ///
-    /// # Safety
-    ///
-    /// The `parent_version` must be from a locked node (the parent being split).
-    #[must_use]
-    #[inline]
-    pub fn new_for_split(parent_version: &NodeVersion, height: u32) -> Box<Self> {
-        let split_version: NodeVersion = NodeVersion::new_for_split(parent_version);
-
-        #[expect(clippy::cast_possible_truncation, reason = "height <= 15 in practice")]
-        Box::new(Self {
-            version: split_version,
-            nkeys: AtomicU8::new(0),
-            height: height as u8,
-            pad: [0; 2],
-            parent: AtomicPtr::new(StdPtr::null_mut()),
-            ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
-            child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
-        })
     }
 
     // ========================================================================
@@ -534,7 +486,9 @@ impl InternodeNode {
     /// Checks:
     /// - nkeys <= WIDTH
     /// - Keys are in ascending order
-    /// - Children for valid indices are non-null (debug-only assertion)
+    ///
+    /// Call only while locked or exclusively owned. Child slot 0 may be null
+    /// after removal, so pointer occupancy is deliberately not asserted.
     ///
     /// # Panics
     /// If any invariant is violated.
@@ -746,6 +700,9 @@ impl TreeInternode for InternodeNode {
 
 #[cfg(test)]
 mod unit_tests;
+
+#[cfg(test)]
+pub use unit_tests::new_node as new_test_node;
 
 #[cfg(loom)]
 mod loom_tests;

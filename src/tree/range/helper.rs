@@ -2,12 +2,12 @@
 //!
 //! Lower bound search functions and scan helpers.
 
+use crate::permuter::Permuter15;
 use std::cmp::Ordering;
 
 use seize::LocalGuard;
 
 use crate::IKEY_SIZE;
-use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::policy::LeafPolicy;
@@ -145,7 +145,7 @@ where
 pub fn lower_bound_full<P>(
     cursor_key: &CursorKey,
     leaf: &LeafNode15<P>,
-    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    perm: Permuter15,
     skip_equal: bool,
 ) -> usize
 where
@@ -181,7 +181,7 @@ where
 pub fn upper_bound_reverse_full<P>(
     cursor_key: &CursorKey,
     leaf: &LeafNode15<P>,
-    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    perm: Permuter15,
     include_equal: bool,
 ) -> isize
 where
@@ -219,7 +219,7 @@ where
 pub fn lower_with_position<P>(
     cursor_key: &CursorKey,
     leaf: &LeafNode15<P>,
-    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    perm: Permuter15,
 ) -> KeyIndexedPosition
 where
     P: LeafPolicy,
@@ -325,7 +325,7 @@ impl ReverseScanHelper {
     pub fn lower_reverse_strict<P>(
         cursor_key: &CursorKey,
         leaf: &LeafNode15<P>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         upper_bound: bool,
     ) -> isize
     where
@@ -351,7 +351,7 @@ impl ReverseScanHelper {
     pub fn lower_reverse<P>(
         cursor_key: &CursorKey,
         leaf: &LeafNode15<P>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         upper_bound: bool,
     ) -> isize
     where

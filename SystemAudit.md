@@ -3237,6 +3237,19 @@ These are confirmed dead code, duplicated logic, or misleading API surface.
 They are not release blockers, but several are maintenance traps because a
 dead variant has different semantics from the live one.
 
+Proposal implementation follow-up (SIM-03/06/10): the unused `TreeLeafNode`
+forwarding trait and its two preallocated split implementations are removed;
+the tree directly uses `Permuter15`, and required leaf constants remain
+inherent. `ValueArray::is_layer`, the ordinary internode allocator method,
+boxed internode constructors, and `BatchedRetire` are removed as approved
+breaking API changes. Maintenance calls `guard.flush()` directly. The existing
+internode invariant checks now run on completed locked split/cascade states;
+they check key order and width, with null child slot 0 permitted after removal.
+SIM-12/15/16 were already implemented: sentinel tests are wired, unused direct
+dependencies are absent, and insert/remove/coalesce emit tracing events with
+optional console logging. Native/feature/strict Clippy checks and focused Miri
+pass; the table below retains historical observations.
+
 | ID | Area | Location / issue | Recommendation | Effort |
 |---|---|---|---|---|
 | SIM-01 | Insert errors | `InsertError` has five variants; only `SplitFailed` is constructed; all public wrappers panic | Make split infallible with a fallback; delete or hide the error type | S |

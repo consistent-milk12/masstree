@@ -161,7 +161,6 @@ mod value_array_tests {
         for slot in 0..15 {
             assert!(arr.is_empty(slot));
             assert!(arr.load(slot).is_none());
-            assert!(!arr.is_layer(slot));
         }
     }
 
@@ -172,7 +171,6 @@ mod value_array_tests {
         arr.store(0, &42u64);
 
         assert!(!arr.is_empty(0));
-        assert!(!arr.is_layer(0));
         let loaded: u64 = arr.load(0).unwrap();
         assert_eq!(loaded, 42);
     }
@@ -254,7 +252,6 @@ mod value_array_tests {
         src.clear(4);
 
         assert!(src.is_empty(4));
-        assert!(dst.is_layer(11));
         assert_eq!(dst.load_layer(11), layer_ptr);
 
         // Reclaim the allocation.
@@ -267,13 +264,11 @@ mod value_array_tests {
 
         // Store a terminal value at slot 0.
         arr.store(0, &42u64);
-        assert!(!arr.is_layer(0));
         assert!(arr.load(0).is_some());
 
         // Store a layer pointer at slot 1 using a provenance-safe pointer.
         let ptr: *mut u8 = Box::into_raw(Box::new(0u8));
         arr.store_layer(1, ptr);
-        assert!(arr.is_layer(1));
         assert_eq!(arr.load_layer(1), ptr);
 
         // load() on a layer slot returns None (it's not a terminal value).

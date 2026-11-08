@@ -2,6 +2,7 @@
 //!
 //! Scan state machine types for range scan operations.
 
+use crate::permuter::Permuter15;
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -9,7 +10,6 @@ use std::ptr::{self as StdPtr, NonNull};
 
 use arrayvec::ArrayVec;
 
-use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
 use crate::ordering::READ_ORD;
 use crate::policy::LeafPolicy;
@@ -87,7 +87,7 @@ where
     version: u32,
 
     /// Cached permutation snapshot.
-    perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    perm: Permuter15,
 
     /// Current logical position in permutation.
     ki: usize,
@@ -153,7 +153,7 @@ where
             root,
             leaf: None,
             version: 0,
-            perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm::empty(),
+            perm: Permuter15::empty(),
             ki: 0,
             last_ikey: 0,
             _marker: PhantomData,
@@ -167,7 +167,7 @@ where
         root: *const u8,
         leaf: *mut LeafNode15<P>,
         version: u32,
-        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
         ki: usize,
     ) -> Self {
         Self {
@@ -226,7 +226,7 @@ where
 
     /// Get the cached permutation.
     #[inline(always)]
-    pub const fn perm(&self) -> <LeafNode15<P> as TreeLeafNode<P>>::Perm {
+    pub const fn perm(&self) -> Permuter15 {
         self.perm
     }
 
@@ -290,7 +290,7 @@ where
     /// Set the cached permutation.
     #[inline(always)]
     #[allow(dead_code, reason = "Scan stack element API")]
-    pub const fn set_perm(&mut self, perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm) {
+    pub const fn set_perm(&mut self, perm: Permuter15) {
         self.perm = perm;
     }
 
@@ -321,12 +321,7 @@ where
 
     /// Update all leaf state (version, perm, ki).
     #[inline]
-    pub const fn update_state(
-        &mut self,
-        version: u32,
-        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
-        ki: usize,
-    ) {
+    pub const fn update_state(&mut self, version: u32, perm: Permuter15, ki: usize) {
         self.version = version;
         self.perm = perm;
         self.ki = ki;
@@ -641,7 +636,7 @@ where
     version: u32,
 
     /// Cached permutation snapshot.
-    perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    perm: Permuter15,
 
     /// Current logical position in permutation.
     ki: isize,
@@ -667,7 +662,7 @@ where
             root,
             leaf: None,
             version: 0,
-            perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm::empty(),
+            perm: Permuter15::empty(),
             ki: 0,
             last_ikey: u64::MAX,
             _marker: PhantomData,
@@ -698,12 +693,7 @@ where
 
     /// Update state after version validation.
     #[inline(always)]
-    pub const fn update_state(
-        &mut self,
-        version: u32,
-        perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
-        ki: isize,
-    ) {
+    pub const fn update_state(&mut self, version: u32, perm: Permuter15, ki: isize) {
         self.version = version;
         self.perm = perm;
         self.ki = ki;
@@ -717,7 +707,7 @@ where
 
     /// Get current position (signed).
     #[inline(always)]
-    pub const fn get_perm_ref(&self) -> &<LeafNode15<P> as TreeLeafNode<P>>::Perm {
+    pub const fn get_perm_ref(&self) -> &Permuter15 {
         &self.perm
     }
 

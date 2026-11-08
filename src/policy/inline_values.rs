@@ -76,15 +76,6 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
         self.slots[slot].tag.load(RELAXED).is_null()
     }
 
-    #[inline(always)]
-    fn is_layer(&self, slot: usize) -> bool {
-        debug_assert!(slot < WIDTH_15, "is_layer: slot {slot} out of bounds");
-
-        let tag: *mut u8 = self.slots[slot].tag.load(READ_ORD);
-
-        !tag.is_null() && !InlineSentinel::is_inline_sentinel(tag)
-    }
-
     // ========================================================================
     //  Terminal Value Operations
     // ========================================================================

@@ -174,6 +174,7 @@ impl Propagation {
                 // mark_insert's Release fence, which publishes every child
                 // even to a reader that sees the new pointer before nkeys.
                 unsafe { parent.insert_key_and_child(child_idx, split_ikey, right_ptr) };
+                parent.debug_assert_invariants();
 
                 #[cfg(feature = "debug-routing")]
                 {
@@ -214,6 +215,8 @@ impl Propagation {
                 .alloc_internode_direct_for_split(parent.version(), parent.height())
                 .cast();
 
+            // SAFETY: The parent is split-locked; the initialized sibling is
+            // exclusively owned and the right child is protected by the guard.
             let (popup_key, child_went_left): (u64, bool) = unsafe {
                 parent.split_into(
                     &mut *parent_sibling_ptr,
@@ -223,6 +226,10 @@ impl Propagation {
                     right_ptr,
                 )
             };
+            parent.debug_assert_invariants();
+            // SAFETY: This initialized sibling is still split-locked and
+            // protected by the operation's guard; its keys are now complete.
+            unsafe { &*parent_sibling_ptr }.debug_assert_invariants();
 
             // Only reparent leaf children here. Internode children are already
             // reparented inside `split_into` (when height > 0).

@@ -71,10 +71,6 @@ unsafe impl<P: LeafPolicy> TreeAllocator<P> for ObservedAllocator<P> {
         unsafe { self.inner.retire_leaf(leaf, guard) };
     }
 
-    fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
-        self.inner.alloc_internode_direct(height)
-    }
-
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
         self.inner.alloc_internode_direct_root(height)
     }

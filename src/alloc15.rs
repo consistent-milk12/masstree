@@ -238,18 +238,6 @@ unsafe impl<P: LeafPolicy + 'static> TreeAllocator<P> for SeizeAllocator<P> {
     }
 
     #[inline(always)]
-    fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
-        let ptr: *mut u8 = node_pool::pool_alloc_internode();
-
-        // SAFETY: ptr is valid, properly aligned, and we have exclusive access
-        unsafe {
-            InternodeNode::init_at(ptr.cast::<InternodeNode>(), height);
-        }
-
-        ptr
-    }
-
-    #[inline(always)]
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
         let ptr: *mut u8 = node_pool::pool_alloc_internode();
 

@@ -2,6 +2,7 @@
 //!
 //! Forward scan context, owns all forward iteration state.
 
+use crate::permuter::Permuter15;
 use std::cmp::Ordering;
 use std::ptr as StdPtr;
 
@@ -10,7 +11,6 @@ use seize::LocalGuard;
 use std::mem::MaybeUninit;
 
 use crate::key::IKEY_SIZE;
-use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::link::Linker;
@@ -248,7 +248,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return (ScanState::Retry, None);
         }
 
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+        let perm: Permuter15 = leaf.permutation();
         let size: usize = perm.size();
 
         // Position calculations and initial emission write into a scratch
@@ -258,7 +258,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         // Full-key lower bound: an equal-ikey group can contain several
         // distinct keys (zero-padded terminals and longer suffix variants).
-        let pos: usize = lower_bound_full(&probe, leaf, &perm, false);
+        let pos: usize = lower_bound_full(&probe, leaf, perm, false);
         let mut final_pos: usize = pos;
         let mut emitted: bool = false;
 
@@ -685,13 +685,13 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return (ScanState::Retry, None);
         }
 
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = next_leaf.permutation();
+        let perm: Permuter15 = next_leaf.permutation();
 
         // Before the first emission the cursor is still the *start* key, so an
         // exact match must be included when the bound is inclusive. After an
         // emission the cursor is the last emitted key and must be skipped.
         let skip_equal: bool = self.flags.cursor_emitted() || !self.flags.emit_equal();
-        let pos: usize = lower_bound_full(&self.cursor_key, next_leaf, &perm, skip_equal);
+        let pos: usize = lower_bound_full(&self.cursor_key, next_leaf, perm, skip_equal);
 
         self.stack.update_state(next_version, perm, pos);
 
@@ -761,10 +761,10 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return (ScanState::Retry, None);
         }
 
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = next_leaf.permutation();
+        let perm: Permuter15 = next_leaf.permutation();
 
         let skip_equal: bool = self.flags.cursor_emitted() || !self.flags.emit_equal();
-        let pos: usize = lower_bound_full(&self.cursor_key, next_leaf, &perm, skip_equal);
+        let pos: usize = lower_bound_full(&self.cursor_key, next_leaf, perm, skip_equal);
 
         self.stack.update_state(next_version, perm, pos);
 
@@ -794,10 +794,10 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return ScanState::Retry;
         }
 
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+        let perm: Permuter15 = leaf.permutation();
 
         let skip_equal: bool = self.flags.cursor_emitted() || !self.flags.emit_equal();
-        let pos: usize = lower_bound_full(&self.cursor_key, leaf, &perm, skip_equal);
+        let pos: usize = lower_bound_full(&self.cursor_key, leaf, perm, skip_equal);
 
         self.stack.update_state(version, perm, pos);
 
@@ -861,11 +861,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         let leaf: &LeafNode15<P> = unsafe { parent.leaf.as_ref() };
 
         let version: u32 = leaf.version().stable();
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+        let perm: Permuter15 = leaf.permutation();
 
         // The unshift sentinel sorts after the layer pointer; skip it and any
         // earlier terminal siblings with the same ikey.
-        let pos: usize = lower_bound_full(&self.cursor_key, leaf, &perm, true);
+        let pos: usize = lower_bound_full(&self.cursor_key, leaf, perm, true);
         self.stack.update_state(version, perm, pos);
         self.flags.mark_cursor_emitted();
 

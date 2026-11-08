@@ -1,5 +1,6 @@
 //! Deletion operations for `MassTree`.
 
+use crate::permuter::Permuter15;
 use seize::LocalGuard;
 use std::fmt::{self as StdFmt, Display, Formatter};
 use std::hint as StdHint;
@@ -10,7 +11,7 @@ use crate::leaf15::LeafNode15;
 use crate::tree::coalesce::StackRoute;
 use crate::tree::split::Propagation;
 use crate::{
-    TreeInternode, TreeLeafNode,
+    TreeInternode,
     alloc_trait::TreeAllocator,
     internode::InternodeNode,
     key::Key,
@@ -239,7 +240,7 @@ where
             unsafe { leaf.clear_ksuf(self.kp, self.guard) };
         }
 
-        let mut new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+        let mut new_perm: Permuter15 = leaf.permutation();
         new_perm.remove(self.ki);
 
         // NOTE: Release is required. Concurrent insert threads perform optimistic
@@ -371,6 +372,7 @@ impl NodeCleaner {
             let new_ikey: u64 = parent.ikey(0);
             Self::redirect_ikey_bounds_generic::<P>(parent_ptr, ikey_bound, new_ikey);
         }
+        parent.debug_assert_invariants();
 
         if parent.nkeys() > 0 || parent.version().is_root() {
             drop(parent_lock);
@@ -497,6 +499,7 @@ impl NodeCleaner {
                 Self::redirect_ikey_bounds_generic::<P>(grandparent_ptr, current_ikey, new_ikey);
                 current_ikey = new_ikey;
             }
+            grandparent.debug_assert_invariants();
 
             drop(current_lock);
 
@@ -606,12 +609,12 @@ impl NodeCleaner {
                 }
 
                 let version: u32 = leaf.version().stable();
-                let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+                let perm: Permuter15 = leaf.permutation();
 
                 let search_result: RemoveSearchResult = if key.has_suffix() {
-                    Self::search_for_remove::<false, P>(leaf, &key, &perm)
+                    Self::search_for_remove::<false, P>(leaf, &key, perm)
                 } else {
-                    Self::search_for_remove::<true, P>(leaf, &key, &perm)
+                    Self::search_for_remove::<true, P>(leaf, &key, perm)
                 };
 
                 if leaf.version().has_changed(version) {
@@ -779,7 +782,7 @@ impl NodeCleaner {
     fn search_for_remove<const SINGLE_LAYER: bool, P>(
         leaf: &LeafNode15<P>,
         key: &Key<'_>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
     ) -> RemoveSearchResult
     where
         P: LeafPolicy,
@@ -859,7 +862,7 @@ impl NodeCleaner {
         key: &Key<'_>,
         guard: &'g LocalGuard<'g>,
         pre_version: u32,
-        pre_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        pre_perm: Permuter15,
         pre_ki: usize,
         pre_slot: usize,
     ) -> RemoveLockResult<'t, 'g, P, A>
@@ -881,7 +884,7 @@ impl NodeCleaner {
             return RemoveLockResult::RestartFromRoot;
         }
 
-        let new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+        let new_perm: Permuter15 = leaf.permutation();
 
         if new_perm.size() == 0 {
             drop(lock);
@@ -905,9 +908,9 @@ impl NodeCleaner {
             // same-ikey insert/remove shifted the permutation.
             // `search_for_remove` compares ikey, keylenx, and suffix bytes.
             let search_result: RemoveSearchResult = if key.has_suffix() {
-                Self::search_for_remove::<false, P>(leaf, key, &new_perm)
+                Self::search_for_remove::<false, P>(leaf, key, new_perm)
             } else {
-                Self::search_for_remove::<true, P>(leaf, key, &new_perm)
+                Self::search_for_remove::<true, P>(leaf, key, new_perm)
             };
 
             match search_result {

@@ -17,14 +17,12 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering as AtomicOrderi
 
 use crate::Linker;
 use crate::Permuter;
-use crate::internode::InternodeNode;
 use crate::key::IKEY_SIZE;
 use crate::ksearch::scalar::Scalar;
 use crate::leaf_trait::InsertTarget;
 use crate::leaf_trait::SplitInsertData;
 use crate::leaf_trait::SplitInsertResult;
 use crate::leaf_trait::SplitPoint;
-use crate::leaf_trait::TreeLeafNode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use crate::permuter::{AtomicPermuter15, Permuter15};
@@ -221,29 +219,37 @@ impl<P: LeafPolicy> LeafNode15<P> {
         node
     }
 
-    /// Inherent alias for [`TreeLeafNode::new_boxed`].
+    /// Alias for [`Self::new`].
     #[inline(always)]
     #[must_use]
     pub fn new_boxed() -> Box<Self> {
         Self::new()
     }
 
-    /// Inherent alias for [`TreeLeafNode::new_root_boxed`].
+    /// Alias for [`Self::new_root`].
     #[inline(always)]
     #[must_use]
     pub fn new_root_boxed() -> Box<Self> {
         Self::new_root()
     }
 
-    /// Inherent alias for [`TreeLeafNode::new_layer_root_boxed`].
+    /// Alias for [`Self::new_layer_root`].
     #[inline(always)]
     #[must_use]
     pub fn new_layer_root_boxed() -> Box<Self> {
         Self::new_layer_root()
     }
 
-    /// Node width (number of slots). Matches [`TreeLeafNode::WIDTH`].
+    /// Node width (number of slots).
     pub const WIDTH: usize = WIDTH_15;
+
+    /// Capacity of each policy's inline suffix buffer.
+    #[cfg(not(feature = "small-suffix-capacity"))]
+    pub const INLINE_KSUF_CAPACITY: usize = 512;
+
+    /// Capacity of each policy's inline suffix buffer.
+    #[cfg(feature = "small-suffix-capacity")]
+    pub const INLINE_KSUF_CAPACITY: usize = 256;
 
     // ========================================================================
     //  Value Operations (delegate to P::Values)
@@ -1727,81 +1733,14 @@ impl<P: LeafPolicy> LeafNode15<P> {
         })
     }
 
-    /// Split entries from position `split_pos..size` into a new leaf.
-    ///
-    /// # Safety
-    ///
-    /// - Caller holds the lock on `self`.
-    /// - `new_leaf_ptr` is valid, properly aligned, and points to an
-    ///   initialized (via `new_with_root(false)` or `init_at`) but empty leaf.
-    /// - `new_leaf_ptr` is not yet visible to other threads.
-    pub unsafe fn split_into_preallocated(
-        &self,
-        split_pos: usize,
-        new_leaf_ptr: *mut Self,
-        guard: &LocalGuard<'_>,
-    ) -> (u64, InsertTarget) {
-        // SAFETY: Caller guarantees new_leaf_ptr is valid and not yet visible.
-        let new_leaf: &Self = unsafe { self.prepare_split_leaf(new_leaf_ptr, split_pos, 0) };
-
-        let perm: Permuter15 = self.permutation();
-        let size: usize = perm.size();
-        let entries_to_move: usize = size - split_pos;
-
-        for i in 0..entries_to_move {
-            let old_slot: usize = perm.get(split_pos + i);
-
-            // SAFETY: Caller holds lock on self. new_leaf is not yet visible.
-            unsafe { self.move_entry_to(new_leaf, old_slot, i, guard) };
-        }
-
-        let mut old_perm: Permuter = perm;
-        old_perm.set_size(split_pos);
-        self.set_permutation(old_perm);
-
-        let new_perm: Permuter15 = Permuter15::make_sorted(entries_to_move);
-        new_leaf.set_permutation_relaxed(new_perm);
-
-        let split_ikey: u64 = new_leaf.ikey(0);
-        (split_ikey, InsertTarget::Left)
-    }
-
-    /// Split ALL entries to the right leaf (used for reverse-sequential pattern).
-    ///
-    /// # Safety
-    ///
-    /// Same as `split_into_preallocated`.
-    pub unsafe fn split_all_to_right_preallocated(
-        &self,
-        new_leaf_ptr: *mut Self,
-        guard: &LocalGuard<'_>,
-    ) -> (u64, InsertTarget) {
-        // SAFETY: Caller guarantees new_leaf_ptr is valid and not yet visible.
-        let new_leaf: &Self = unsafe { self.prepare_split_leaf(new_leaf_ptr, 0, 0) };
-
-        let perm: Permuter15 = self.permutation();
-        let size: usize = perm.size();
-
-        for i in 0..size {
-            let old_slot: usize = perm.get(i);
-            // SAFETY: Caller holds lock on self. new_leaf is not yet visible.
-            unsafe { self.move_entry_to(new_leaf, old_slot, i, guard) };
-        }
-
-        self.set_permutation(Permuter15::empty());
-
-        let new_perm: Permuter15 = Permuter15::make_sorted(size);
-        new_leaf.set_permutation_relaxed(new_perm);
-
-        let split_ikey: u64 = new_leaf.ikey(0);
-        (split_ikey, InsertTarget::Left)
-    }
-
     /// Atomic split + insert: split entries and insert a new key in one operation.
     ///
     /// # Safety
     ///
-    /// Same as `split_into_preallocated`.
+    /// Caller holds the dirty source lock and exclusively owns an initialized,
+    /// empty `new_leaf_ptr`. The sibling is unpublished or split-locked.
+    /// `prepared_value` encodes the uniquely owned insertion value; the guard
+    /// protects all nodes and suffix storage accessed by the operation.
     #[expect(clippy::too_many_lines)]
     #[expect(
         clippy::too_many_arguments,
@@ -1984,494 +1923,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
 // P::Values and P::Suffix implement Send+Sync via their own unsafe impls.
 unsafe impl<P: LeafPolicy> Send for LeafNode15<P> {}
 unsafe impl<P: LeafPolicy> Sync for LeafNode15<P> {}
-// ============================================================================
-//  TreeLeafNode Implementation
-// ============================================================================
-
-impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
-    type Perm = Permuter15;
-    type Internode = InternodeNode;
-
-    const WIDTH: usize = WIDTH_15;
-    const SPLIT_THRESHOLD: usize = WIDTH_15;
-
-    #[cfg(not(feature = "small-suffix-capacity"))]
-    const INLINE_KSUF_CAPACITY: usize = 512;
-
-    #[cfg(feature = "small-suffix-capacity")]
-    const INLINE_KSUF_CAPACITY: usize = 256;
-
-    // ========================================================================
-    //  Construction
-    // ========================================================================
-
-    #[inline(always)]
-    fn new_boxed() -> Box<Self> {
-        Self::new()
-    }
-
-    #[inline(always)]
-    fn new_root_boxed() -> Box<Self> {
-        Self::new_root()
-    }
-
-    #[inline]
-    fn new_layer_root_boxed() -> Box<Self> {
-        Self::new_layer_root()
-    }
-
-    // ========================================================================
-    //  Version / Lock
-    // ========================================================================
-
-    #[inline(always)]
-    fn version(&self) -> &NodeVersion {
-        self.version()
-    }
-
-    // ========================================================================
-    //  Permutation
-    // ========================================================================
-
-    #[inline(always)]
-    fn permutation(&self) -> Permuter15 {
-        self.permutation()
-    }
-
-    #[inline(always)]
-    fn set_permutation(&self, perm: Permuter15) {
-        self.set_permutation(perm);
-    }
-
-    #[inline(always)]
-    fn set_permutation_relaxed(&self, perm: Permuter15) {
-        self.set_permutation_relaxed(perm);
-    }
-
-    #[inline(always)]
-    fn permutation_raw(&self) -> u64 {
-        self.permutation_raw()
-    }
-
-    // ========================================================================
-    //  Key Operations
-    // ========================================================================
-
-    #[inline(always)]
-    fn ikey(&self, slot: usize) -> u64 {
-        self.ikey(slot)
-    }
-
-    #[inline(always)]
-    fn ikey_relaxed(&self, slot: usize) -> u64 {
-        self.ikey_relaxed(slot)
-    }
-
-    #[inline(always)]
-    fn set_ikey(&self, slot: usize, ikey: u64) {
-        self.set_ikey(slot, ikey);
-    }
-
-    #[inline(always)]
-    fn set_ikey_relaxed(&self, slot: usize, ikey: u64) {
-        self.set_ikey_relaxed(slot, ikey);
-    }
-
-    #[inline(always)]
-    fn ikey_bound(&self) -> u64 {
-        self.ikey_bound()
-    }
-
-    #[inline(always)]
-    fn find_ikey_matches(&self, target_ikey: u64) -> u32 {
-        self.find_ikey_matches(target_ikey)
-    }
-
-    #[inline(always)]
-    fn keylenx(&self, slot: usize) -> u8 {
-        self.keylenx(slot)
-    }
-
-    #[inline(always)]
-    fn keylenx_relaxed(&self, slot: usize) -> u8 {
-        self.keylenx_relaxed(slot)
-    }
-
-    #[inline(always)]
-    fn set_keylenx(&self, slot: usize, keylenx: u8) {
-        self.set_keylenx(slot, keylenx);
-    }
-
-    #[inline(always)]
-    fn set_keylenx_relaxed(&self, slot: usize, keylenx: u8) {
-        self.set_keylenx_relaxed(slot, keylenx);
-    }
-
-    #[inline(always)]
-    fn is_layer(&self, slot: usize) -> bool {
-        self.is_layer(slot)
-    }
-
-    #[inline(always)]
-    fn has_ksuf(&self, slot: usize) -> bool {
-        self.has_ksuf(slot)
-    }
-
-    // ========================================================================
-    //  Value Operations (typed)
-    // ========================================================================
-
-    #[inline(always)]
-    fn load_value(&self, slot: usize) -> Option<P::Output> {
-        self.load_value(slot)
-    }
-
-    #[inline(always)]
-    unsafe fn store_value(&self, slot: usize, output: &P::Output) {
-        // SAFETY: Forwarded from the trait's unique-ownership contract.
-        unsafe { self.store_value(slot, output) };
-    }
-
-    #[inline(always)]
-    unsafe fn store_value_relaxed(&self, slot: usize, output: &P::Output) {
-        // SAFETY: Forwarded from the trait's unique-ownership contract.
-        unsafe { self.store_value_relaxed(slot, output) };
-    }
-
-    #[inline(always)]
-    unsafe fn update_value_in_place(&self, slot: usize, output: &P::Output) -> RetireHandle {
-        // SAFETY: Forwarded from the trait's lock/ownership contract.
-        unsafe { self.update_value_in_place(slot, output) }
-    }
-
-    #[inline(always)]
-    unsafe fn update_value_in_place_relaxed(
-        &self,
-        slot: usize,
-        output: &P::Output,
-    ) -> RetireHandle {
-        // SAFETY: Forwarded from the trait's lock/ownership contract.
-        unsafe { self.update_value_in_place_relaxed(slot, output) }
-    }
-
-    #[inline(always)]
-    unsafe fn take_value(&self, slot: usize) -> Option<P::Output> {
-        // SAFETY: Forwarded from the trait's lock/handle-consumption contract.
-        unsafe { self.take_value(slot) }
-    }
-
-    #[inline(always)]
-    fn load_layer(&self, slot: usize) -> *mut u8 {
-        self.load_layer(slot)
-    }
-
-    #[inline(always)]
-    unsafe fn store_layer(&self, slot: usize, ptr: *mut u8) {
-        // SAFETY: Forwarded from the trait's live-layer-root contract.
-        unsafe { self.store_layer(slot, ptr) };
-    }
-
-    #[inline(always)]
-    fn is_slot_empty(&self, slot: usize) -> bool {
-        self.is_slot_empty(slot)
-    }
-
-    #[inline(always)]
-    fn classify_slot(&self, slot: usize) -> SlotKind<P::Output> {
-        self.classify_slot(slot)
-    }
-
-    #[inline(always)]
-    fn classify_slot_light(&self, slot: usize) -> SlotState {
-        self.classify_slot_light(slot)
-    }
-
-    #[inline(always)]
-    unsafe fn move_value_to(&self, dst: &Self, src_slot: usize, dst_slot: usize) {
-        // SAFETY: Forwarded from the trait contract.
-        unsafe { self.move_value_to(dst, src_slot, dst_slot) };
-    }
-
-    #[inline(always)]
-    fn clear_value(&self, slot: usize) {
-        self.clear_value(slot);
-    }
-
-    // ========================================================================
-    //  Slot Clearing
-    // ========================================================================
-
-    #[inline(always)]
-    fn clear_slot(&self, slot: usize) {
-        self.clear_slot(slot);
-    }
-
-    #[inline(always)]
-    fn clear_slot_and_permutation(&self, slot: usize) {
-        self.clear_slot_and_permutation(slot);
-    }
-
-    // ========================================================================
-    //  Navigation
-    // ========================================================================
-
-    #[inline(always)]
-    fn safe_next(&self) -> *mut Self {
-        // SAFETY: Caller holds an epoch guard protecting the next pointer target.
-        unsafe { self.safe_next_unguarded() }
-    }
-
-    #[inline(always)]
-    fn next_is_marked(&self) -> bool {
-        self.next_is_marked()
-    }
-
-    #[inline(always)]
-    fn set_next(&self, next: *mut Self) {
-        self.set_next(next);
-    }
-
-    #[inline(always)]
-    fn mark_next(&self) {
-        self.mark_next();
-    }
-
-    #[inline(always)]
-    fn unmark_next(&self) {
-        self.unmark_next();
-    }
-
-    #[inline(always)]
-    fn prev(&self) -> *mut Self {
-        // SAFETY: Caller holds an epoch guard protecting the prev pointer target.
-        unsafe { self.prev_unguarded() }
-    }
-
-    #[inline(always)]
-    fn set_prev(&self, prev: *mut Self) {
-        self.set_prev(prev);
-    }
-
-    #[inline(always)]
-    fn parent(&self) -> *mut u8 {
-        // SAFETY: Caller holds an epoch guard protecting the parent pointer target.
-        unsafe { self.parent_unguarded() }
-    }
-
-    #[inline(always)]
-    fn set_parent(&self, parent: *mut u8) {
-        self.set_parent(parent);
-    }
-
-    #[inline(always)]
-    unsafe fn unlink_from_chain(&self) {
-        // SAFETY: Caller holds the version lock and guarantees prev is non-null
-        // and all linked leaves are valid (trait method preconditions).
-        unsafe { self.unlink_from_chain() }
-    }
-
-    #[inline(always)]
-    fn next_raw(&self) -> *mut Self {
-        // SAFETY: Caller holds an epoch guard protecting the next pointer target.
-        unsafe { self.next_raw_unguarded() }
-    }
-
-    #[inline(always)]
-    fn wait_for_split(&self) {
-        self.wait_for_split();
-    }
-
-    // ========================================================================
-    //  Slot Assignment
-    // ========================================================================
-
-    #[inline(always)]
-    fn can_reuse_slot0(&self, new_ikey: u64) -> bool {
-        self.can_reuse_slot0(new_ikey)
-    }
-
-    // ========================================================================
-    //  Split Operations
-    // ========================================================================
-
-    fn calculate_split_point(&self, insert_pos: usize, insert_ikey: u64) -> Option<SplitPoint> {
-        self.calculate_split_point(insert_pos, insert_ikey)
-    }
-
-    unsafe fn split_into_preallocated(
-        &self,
-        split_pos: usize,
-        new_leaf_ptr: *mut Self,
-        guard: &LocalGuard<'_>,
-    ) -> (u64, InsertTarget) {
-        // SAFETY: Caller holds lock on self, new_leaf_ptr is valid and not yet
-        // visible to other threads (trait method preconditions).
-        unsafe { self.split_into_preallocated(split_pos, new_leaf_ptr, guard) }
-    }
-
-    unsafe fn split_all_to_right_preallocated(
-        &self,
-        new_leaf_ptr: *mut Self,
-        guard: &LocalGuard<'_>,
-    ) -> (u64, InsertTarget) {
-        // SAFETY: Caller holds lock on self, new_leaf_ptr is valid and not yet
-        // visible to other threads (trait method preconditions).
-        unsafe { self.split_all_to_right_preallocated(new_leaf_ptr, guard) }
-    }
-
-    unsafe fn split_and_insert(
-        &self,
-        split_pos: usize,
-        new_leaf_ptr: *mut Self,
-        insert_pos: usize,
-        insert_data: &SplitInsertData<'_, P>,
-        prepared_value: &PreparedValue<P>,
-        guard: &LocalGuard<'_>,
-    ) -> SplitInsertResult {
-        // SAFETY: Caller holds lock on self, new_leaf_ptr is valid and not yet
-        // visible to other threads (trait method preconditions).
-        unsafe {
-            self.split_and_insert(
-                split_pos,
-                new_leaf_ptr,
-                insert_pos,
-                insert_data,
-                prepared_value,
-                guard,
-            )
-        }
-    }
-
-    unsafe fn link_sibling(&self, new_sibling: *mut Self) {
-        // SAFETY: Caller holds lock on self, new_sibling is valid and not yet
-        // in the chain (trait method preconditions).
-        unsafe { self.link_sibling(new_sibling) }
-    }
-
-    // ========================================================================
-    //  Suffix Operations
-    // ========================================================================
-
-    #[inline(always)]
-    fn ksuf(&self, slot: usize) -> Option<&[u8]> {
-        self.ksuf(slot)
-    }
-
-    unsafe fn assign_ksuf(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) -> *mut u8 {
-        // SAFETY: Caller holds lock on this leaf. Suffix storage is modified
-        // under lock; old bag pointer returned for deferred retirement.
-        unsafe { self.assign_ksuf(slot, suffix, guard) }
-    }
-
-    unsafe fn retire_suffix_bag_ptr(ptr: *mut u8, guard: &LocalGuard<'_>) {
-        // SAFETY: ptr points to a heap-allocated suffix bag that is no longer
-        // reachable. Guard defers deallocation until no readers hold references.
-        unsafe { Self::retire_suffix_bag_ptr(ptr, guard) }
-    }
-
-    unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
-        // SAFETY: Caller holds lock. Slot has no prior suffix (first assignment).
-        unsafe { self.assign_ksuf_init(slot, suffix, guard) }
-    }
-
-    unsafe fn clear_ksuf(&self, slot: usize, guard: &LocalGuard<'_>) {
-        // SAFETY: Caller holds lock. Old suffix bag pointer retired via guard.
-        unsafe { self.clear_ksuf(slot, guard) }
-    }
-
-    // ========================================================================
-    //  Suffix Comparison
-    // ========================================================================
-
-    #[inline(always)]
-    fn ksuf_equals(&self, slot: usize, suffix: &[u8]) -> bool {
-        self.ksuf_equals(slot, suffix)
-    }
-
-    #[inline(always)]
-    fn ksuf_compare(&self, slot: usize, suffix: &[u8]) -> Option<Ordering> {
-        self.ksuf_compare(slot, suffix)
-    }
-
-    #[inline(always)]
-    fn ksuf_or_empty(&self, slot: usize) -> &[u8] {
-        self.ksuf_or_empty(slot)
-    }
-
-    #[inline(always)]
-    fn ksuf_matches(&self, slot: usize, ikey: u64, suffix: &[u8]) -> bool {
-        self.ksuf_matches(slot, ikey, suffix)
-    }
-
-    #[inline(always)]
-    fn ksuf_match_result(&self, slot: usize, keylenx: u8, suffix: &[u8]) -> i32 {
-        self.ksuf_match_result(slot, keylenx, suffix)
-    }
-
-    // ========================================================================
-    //  Cache Optimization
-    // ========================================================================
-
-    #[inline(always)]
-    fn prefetch(&self) {
-        self.prefetch();
-    }
-
-    #[inline(always)]
-    fn prefetch_ikey(&self, slot: usize) {
-        self.prefetch_ikey(slot);
-    }
-
-    #[inline(always)]
-    fn prefetch_for_search(&self) {
-        self.prefetch_for_search();
-    }
-
-    #[inline(always)]
-    fn prefetch_for_search_adaptive(&self, size: usize) {
-        self.prefetch_for_search_adaptive(size);
-    }
-
-    // ========================================================================
-    //  Modification State
-    // ========================================================================
-
-    #[inline(always)]
-    fn modstate(&self) -> u8 {
-        self.modstate()
-    }
-
-    #[inline(always)]
-    fn set_modstate(&self, state: u8) {
-        self.set_modstate(state);
-    }
-
-    #[inline(always)]
-    fn deleted_layer(&self) -> bool {
-        self.deleted_layer()
-    }
-
-    #[inline(always)]
-    fn mark_deleted_layer(&self) {
-        self.mark_deleted_layer();
-    }
-
-    #[inline(always)]
-    fn is_empty_state(&self) -> bool {
-        self.is_empty_state()
-    }
-
-    #[inline(always)]
-    fn mark_empty(&self) {
-        self.mark_empty();
-    }
-
-    #[inline(always)]
-    fn clear_empty_state(&self) {
-        self.clear_empty_state();
-    }
-}
-
 // =============================================================================
 // Drop Implementation
 // =============================================================================

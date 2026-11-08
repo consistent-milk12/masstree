@@ -1,4 +1,4 @@
-use super::{TreeLeafNode, TreePermutation};
+use super::TreePermutation;
 use crate::leaf15::LeafNode15;
 use crate::permuter::Permuter15;
 use crate::policy::{BoxPolicy, LeafPolicy};
@@ -64,18 +64,18 @@ fn test_permuter15_trait_roundtrip() {
 }
 
 // ========================================================================
-//  TreeLeafNode Tests
+//  Leaf policy Tests
 // ========================================================================
 
-fn test_leaf_new<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
-    let leaf: Box<L> = L::new_boxed();
+fn test_leaf_new<Po: LeafPolicy>() {
+    let leaf: Box<LeafNode15<Po>> = LeafNode15::<Po>::new_boxed();
     assert!(leaf.is_empty());
     assert!(!leaf.is_full());
     assert_eq!(leaf.size(), 0);
 }
 
-fn test_leaf_permutation<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
-    let leaf: Box<L> = L::new_boxed();
+fn test_leaf_permutation<Po: LeafPolicy>() {
+    let leaf: Box<LeafNode15<Po>> = LeafNode15::<Po>::new_boxed();
     let perm = leaf.permutation();
     assert_eq!(perm.size(), 0);
 
@@ -88,15 +88,15 @@ fn test_leaf_permutation<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
     assert_eq!(leaf.permutation().get(0), slot);
 }
 
-fn test_leaf_ikey<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
-    let leaf: Box<L> = L::new_boxed();
+fn test_leaf_ikey<Po: LeafPolicy>() {
+    let leaf: Box<LeafNode15<Po>> = LeafNode15::<Po>::new_boxed();
     leaf.set_ikey(0, 12345);
     assert_eq!(leaf.ikey(0), 12345);
     assert_eq!(leaf.ikey_bound(), 12345);
 }
 
-fn test_leaf_keylenx<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
-    let leaf: Box<L> = L::new_boxed();
+fn test_leaf_keylenx<Po: LeafPolicy>() {
+    let leaf: Box<LeafNode15<Po>> = LeafNode15::<Po>::new_boxed();
     leaf.set_keylenx(1, 8);
     assert_eq!(leaf.keylenx(1), 8);
     assert!(!leaf.is_layer(1));
@@ -107,18 +107,20 @@ fn test_leaf_keylenx<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
     assert!(leaf.is_layer(2));
 }
 
-fn test_leaf_linking<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
-    let leaf1: Box<L> = L::new_boxed();
-    let leaf2: Box<L> = L::new_boxed();
+fn test_leaf_linking<Po: LeafPolicy>() {
+    let collector = seize::Collector::new();
+    let guard = collector.enter();
+    let leaf1: Box<LeafNode15<Po>> = LeafNode15::<Po>::new_boxed();
+    let leaf2: Box<LeafNode15<Po>> = LeafNode15::<Po>::new_boxed();
     let leaf2_ptr = Box::into_raw(leaf2);
 
     leaf1.set_next(leaf2_ptr);
-    assert_eq!(leaf1.safe_next(), leaf2_ptr);
+    assert_eq!(leaf1.safe_next(&guard), leaf2_ptr);
     assert!(!leaf1.next_is_marked());
 
     leaf1.mark_next();
     assert!(leaf1.next_is_marked());
-    assert_eq!(leaf1.safe_next(), leaf2_ptr);
+    assert_eq!(leaf1.safe_next(&guard), leaf2_ptr);
 
     leaf1.unmark_next();
     assert!(!leaf1.next_is_marked());
@@ -128,8 +130,8 @@ fn test_leaf_linking<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
     let _ = unsafe { Box::from_raw(leaf2_ptr) };
 }
 
-fn test_leaf_version<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
-    let leaf: Box<L> = L::new_boxed();
+fn test_leaf_version<Po: LeafPolicy>() {
+    let leaf: Box<LeafNode15<Po>> = LeafNode15::<Po>::new_boxed();
     let version = leaf.version();
 
     // Should be unlocked initially
@@ -145,33 +147,33 @@ fn test_leaf_version<Po: LeafPolicy, L: TreeLeafNode<Po>>() {
 }
 
 #[test]
-fn test_leafnode15_trait_new() {
-    test_leaf_new::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
+fn test_leafnode15_policy_new() {
+    test_leaf_new::<BoxPolicy<u64>>();
 }
 
 #[test]
-fn test_leafnode15_trait_permutation() {
-    test_leaf_permutation::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
+fn test_leafnode15_policy_permutation() {
+    test_leaf_permutation::<BoxPolicy<u64>>();
 }
 
 #[test]
-fn test_leafnode15_trait_ikey() {
-    test_leaf_ikey::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
+fn test_leafnode15_policy_ikey() {
+    test_leaf_ikey::<BoxPolicy<u64>>();
 }
 
 #[test]
-fn test_leafnode15_trait_keylenx() {
-    test_leaf_keylenx::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
+fn test_leafnode15_policy_keylenx() {
+    test_leaf_keylenx::<BoxPolicy<u64>>();
 }
 
 #[test]
-fn test_leafnode15_trait_linking() {
-    test_leaf_linking::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
+fn test_leafnode15_policy_linking() {
+    test_leaf_linking::<BoxPolicy<u64>>();
 }
 
 #[test]
-fn test_leafnode15_trait_version() {
-    test_leaf_version::<BoxPolicy<u64>, LeafNode15<BoxPolicy<u64>>>();
+fn test_leafnode15_policy_version() {
+    test_leaf_version::<BoxPolicy<u64>>();
 }
 
 // ========================================================================
@@ -183,14 +185,11 @@ fn test_width_constants() {
     // Permutation WIDTH matches leaf WIDTH
     assert_eq!(
         <Permuter15 as TreePermutation>::WIDTH,
-        <LeafNode15<BoxPolicy<u64>> as TreeLeafNode<BoxPolicy<u64>>>::WIDTH
+        LeafNode15::<BoxPolicy<u64>>::WIDTH
     );
 
     // Verify actual values
-    assert_eq!(
-        <LeafNode15<BoxPolicy<u64>> as TreeLeafNode<BoxPolicy<u64>>>::WIDTH,
-        15
-    );
+    assert_eq!(LeafNode15::<BoxPolicy<u64>>::WIDTH, 15);
 }
 
 // ========================================================================
@@ -206,15 +205,15 @@ fn generic_perm_fill<P: TreePermutation>(count: usize) -> P {
     perm
 }
 
-/// Generic function that works with any leaf node type
+/// Generic function that works with any leaf policy
 #[allow(clippy::unnecessary_box_returns)]
-fn generic_leaf_setup<Po: LeafPolicy, L: TreeLeafNode<Po>>(ikey: u64) -> Box<L> {
-    let leaf = L::new_boxed();
+fn generic_leaf_setup<Po: LeafPolicy>(ikey: u64) -> Box<LeafNode15<Po>> {
+    let leaf = LeafNode15::<Po>::new_boxed();
     leaf.set_ikey(0, ikey);
     leaf.set_keylenx(0, 8);
 
     let mut perm = leaf.permutation();
-    perm.insert_from_back(0);
+    let _ = perm.insert_from_back(0);
     leaf.set_permutation(perm);
 
     leaf

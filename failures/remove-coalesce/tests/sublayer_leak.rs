@@ -56,10 +56,6 @@ unsafe impl TreeAllocator<BoxPolicy<u64>> for CountingAlloc {
         self.c.leaf_retires.fetch_add(1, Ordering::Relaxed);
         unsafe { self.inner.retire_leaf(ptr, guard) }
     }
-    fn alloc_internode_direct(&self, height: u32) -> *mut u8 {
-        self.c.inode_allocs.fetch_add(1, Ordering::Relaxed);
-        self.inner.alloc_internode_direct(height)
-    }
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8 {
         self.c.inode_allocs.fetch_add(1, Ordering::Relaxed);
         self.inner.alloc_internode_direct_root(height)

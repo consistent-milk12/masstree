@@ -62,9 +62,6 @@ pub unsafe trait TreeAllocator<P: LeafPolicy>: Send + Sync {
     // Internode Allocation
     // ========================================================================
 
-    /// Allocate an internode directly from the pool and initialize it in-place.
-    fn alloc_internode_direct(&self, height: u32) -> *mut u8;
-
     /// Allocate an internode as a root node directly from the pool.
     fn alloc_internode_direct_root(&self, height: u32) -> *mut u8;
 

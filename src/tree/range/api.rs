@@ -534,7 +534,7 @@ where
     }
 
     let perm: Permuter = leaf.permutation();
-    let kx: KeyIndexedPosition = lower_with_position(&cursor, leaf, &perm);
+    let kx: KeyIndexedPosition = lower_with_position(&cursor, leaf, perm);
     let _ = kx.p?;
 
     let mut i: usize = kx.i;

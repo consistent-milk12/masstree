@@ -246,7 +246,7 @@ fn test_remove_preserves_other_keys() {
 #[test]
 fn test_get_parent_erased_leaf() {
     // Setup: Create a leaf with a real parent internode
-    let parent_inode: Box<TestInternode> = TestInternode::new(0);
+    let parent_inode: Box<TestInternode> = crate::internode::new_test_node(0);
     let parent_ptr: *mut u8 = Box::into_raw(parent_inode).cast();
 
     let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
@@ -267,10 +267,10 @@ fn test_get_parent_erased_leaf() {
 #[test]
 fn test_get_parent_erased_internode() {
     // Setup: Create an internode with a real grandparent internode
-    let grandparent: Box<TestInternode> = TestInternode::new(1);
+    let grandparent: Box<TestInternode> = crate::internode::new_test_node(1);
     let grandparent_ptr: *mut u8 = Box::into_raw(grandparent).cast();
 
-    let inode: Box<TestInternode> = TestInternode::new(0);
+    let inode: Box<TestInternode> = crate::internode::new_test_node(0);
     inode.set_parent(grandparent_ptr);
 
     let inode_ptr: *mut u8 = Box::into_raw(inode).cast();
@@ -308,7 +308,7 @@ fn test_get_parent_erased_null_parent() {
 #[test]
 fn test_set_parent_erased_leaf() {
     // Setup: Use a real internode as the new parent
-    let new_parent_node: Box<TestInternode> = TestInternode::new(0);
+    let new_parent_node: Box<TestInternode> = crate::internode::new_test_node(0);
     let new_parent: *mut u8 = Box::into_raw(new_parent_node).cast();
 
     let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
@@ -334,10 +334,10 @@ fn test_set_parent_erased_leaf() {
 #[test]
 fn test_set_parent_erased_internode() {
     // Setup: Use a real internode as the new parent
-    let new_parent_node: Box<TestInternode> = TestInternode::new(1);
+    let new_parent_node: Box<TestInternode> = crate::internode::new_test_node(1);
     let new_parent: *mut u8 = Box::into_raw(new_parent_node).cast();
 
-    let inode: Box<TestInternode> = TestInternode::new(0);
+    let inode: Box<TestInternode> = crate::internode::new_test_node(0);
     let inode_ptr: *mut u8 = Box::into_raw(inode).cast();
 
     // Initially null
@@ -367,7 +367,7 @@ fn test_set_parent_erased_type_dispatch() {
 
     // Create both types
     let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
-    let inode: Box<TestInternode> = TestInternode::new(1);
+    let inode: Box<TestInternode> = crate::internode::new_test_node(1);
 
     // Verify is_leaf() returns correct values
     assert!(leaf.version().is_leaf());
@@ -404,7 +404,7 @@ fn test_locked_parent_null_parent() {
 #[test]
 fn test_locked_parent_basic() {
     // Setup: Create leaf -> internode parent relationship
-    let parent: Box<TestInternode> = TestInternode::new(0);
+    let parent: Box<TestInternode> = crate::internode::new_test_node(0);
     let parent_ptr: *mut TestInternode = Box::into_raw(parent);
 
     let leaf: Box<TestLeaf> = TestLeaf::new_boxed();
@@ -443,11 +443,11 @@ fn test_locked_parent_basic() {
 #[test]
 fn test_locked_parent_returns_internode() {
     // Setup: Two-level tree (leaf -> internode -> grandparent)
-    let grandparent: Box<TestInternode> = TestInternode::new(1);
+    let grandparent: Box<TestInternode> = crate::internode::new_test_node(1);
     grandparent.version().mark_root();
     let grandparent_ptr: *mut TestInternode = Box::into_raw(grandparent);
 
-    let parent: Box<TestInternode> = TestInternode::new(0);
+    let parent: Box<TestInternode> = crate::internode::new_test_node(0);
     parent.set_parent(grandparent_ptr.cast());
     let parent_ptr: *mut TestInternode = Box::into_raw(parent);
 
@@ -498,7 +498,7 @@ fn test_shift_internode_down_middle() {
     // Remove c2 (kp=2)
     // After:  keys = [10, 30, _],  children = [c0, c1, c3, _]
 
-    let inode: Box<TestInternode> = TestInternode::new(0);
+    let inode: Box<TestInternode> = crate::internode::new_test_node(0);
 
     // Set up keys
     inode.set_ikey(0, 10);
@@ -553,7 +553,7 @@ fn test_shift_internode_down_last() {
     // Remove c3 (kp=3)
     // After:  keys = [10, 20, _],  children = [c0, c1, c2, _]
 
-    let inode: Box<TestInternode> = TestInternode::new(0);
+    let inode: Box<TestInternode> = crate::internode::new_test_node(0);
 
     inode.set_ikey(0, 10);
     inode.set_ikey(1, 20);
@@ -605,7 +605,7 @@ fn test_shift_internode_down_second() {
     // Remove c1 (kp=1)
     // After:  keys = [20, _],  children = [c0, c2, _]
 
-    let inode: Box<TestInternode> = TestInternode::new(0);
+    let inode: Box<TestInternode> = crate::internode::new_test_node(0);
 
     inode.set_ikey(0, 10);
     inode.set_ikey(1, 20);
@@ -1095,7 +1095,7 @@ fn test_miri_remove_multiple_keys() {
 #[test]
 fn test_miri_parent_erased_helpers() {
     // Test helper functions under Miri using real allocations
-    let parent_node: Box<TestInternode> = TestInternode::new(0);
+    let parent_node: Box<TestInternode> = crate::internode::new_test_node(0);
     let parent_ptr: *mut u8 = Box::into_raw(parent_node).cast();
 
     let leaf: Box<TestLeaf> = TestLeaf::new_boxed();

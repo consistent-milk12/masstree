@@ -415,9 +415,9 @@ where
     ) -> BatchEntryResult<ValueRef<'g, P::Value>> {
         let key = Key::new(entry.key.as_ref());
         let search = if key.has_suffix() {
-            self.search_for_insert_generic(leaf, &key, perm)
+            self.search_for_insert_generic(leaf, &key, *perm)
         } else {
-            self.search_for_insert_single_layer(leaf, &key, perm)
+            self.search_for_insert_single_layer(leaf, &key, *perm)
         };
         match search {
             InsertSearchResultGeneric::Found { slot } => {
@@ -440,7 +440,7 @@ where
             }
             InsertSearchResultGeneric::NotFound { logical_pos } => {
                 let FindSlotResult::Found { slot, back_offset } =
-                    self.find_usable_slot(leaf, perm, key.ikey())
+                    self.find_usable_slot(leaf, *perm, key.ikey())
                 else {
                     return BatchEntryResult::NeedsSplit;
                 };

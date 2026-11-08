@@ -117,7 +117,7 @@ src/                                   ~29.6k non-test LOC, ~42.7k including col
 ├── leaf15.rs                          LeafNode15<P>: WIDTH=15 B-link leaf
 │   ├── layout.rs                      compile-time size/offset assertions
 │   └── unit_tests.rs
-├── leaf_trait.rs                      TreePermutation / TreeLeafNode / TreeInternode traits
+├── leaf_trait.rs                      TreePermutation / TreeInternode traits; split data
 ├── policy.rs                          LeafPolicy / ValueArray / SuffixStore / ValuePtr / RefPolicy
 │   ├── box_values.rs                  BoxValueArray (heap pointers)
 │   ├── inline_values.rs               InlineValueArray (sentinel + AtomicU64 bits)
@@ -131,7 +131,6 @@ src/                                   ~29.6k non-test LOC, ~42.7k including col
 ├── alloc_trait.rs                     TreeAllocator<P> trait
 ├── alloc15.rs                         SeizeAllocator<P>, iterative tree teardown
 ├── node_pool.rs                       thread-local size-class freelists
-├── retirement.rs                      BatchedRetire::flush wrapper
 ├── tree.rs                            MassTreeGeneric, aliases, errors, Drop
 └── tree/
     ├── generic.rs                     guard/maintenance/reach_leaf/count/entry hooks
@@ -171,7 +170,7 @@ src/                                   ~29.6k non-test LOC, ~42.7k including col
 ```
 tree/                 tree.rs, generic/, split/, remove, coalesce, range/, batch_utils
     ↓
-allocation            alloc_trait, alloc15, node_pool, retirement
+allocation            alloc_trait, alloc15, node_pool
     ↓
 nodes                 leaf15, internode
     ↓
@@ -445,11 +444,10 @@ conservative routing bound, not a strict minimum after deletions.
 and the empty key both have `keylenx = 0`. `is_value_empty`/`is_slot_empty` are
 authoritative.
 
-**Trait usage.** Despite the generic-looking `TreeLeafNode` trait, the tree
-algorithms are monomorphized directly over `LeafNode15<P>`; the trait is a
-specification/extension surface rather than a dynamic-dispatch boundary.
-`TreeInternode` is genuinely used generically for routing and propagation, and
-`TreePermutation` is used generically by suffix draining/compaction.
+**Trait usage.** Tree algorithms operate directly on `LeafNode15<P>` and
+`Permuter15`; the unused `TreeLeafNode` forwarding trait has been removed.
+`TreeInternode` remains generic for routing and propagation. `TreePermutation`
+remains the permutation contract for parameterized permutation operations.
 
 ### 4.3 Internode node
 
@@ -1118,11 +1116,10 @@ syscall frequency against reclamation latency.
 ```rust
 fn alloc_leaf_direct(is_root, is_layer_root) -> *mut LeafNode15<P>;
 unsafe fn retire_leaf(ptr, guard);
-fn alloc_internode_direct(height) -> *mut u8;
 fn alloc_internode_direct_root(height) -> *mut u8;
 fn alloc_internode_direct_for_split(parent_version, height) -> *mut u8;
 unsafe fn retire_internode_erased(ptr, guard);
-fn teardown_tree(root_ptr);
+unsafe fn teardown_tree(root_ptr);
 ```
 
 The only in-tree implementation is `SeizeAllocator<P>` (`src/alloc15.rs`), a
@@ -1130,8 +1127,6 @@ zero-sized type containing only `PhantomData<P>`. Allocation is in-place:
 
 - leaf: `pool_alloc_leaf::<P>()`, then
   `LeafNode15::init_at(ptr, is_root || is_layer_root)`;
-- ordinary internode: `pool_alloc_internode()`, then
-  `InternodeNode::init_at(ptr, height)`;
 - root internode: `InternodeNode::init_at_root(ptr, height)` (sets `ROOT_BIT`);
 - split sibling:
   `InternodeNode::init_at_for_split(ptr, parent_version, height)`, which writes
@@ -1804,12 +1799,11 @@ pub use key::{IKEY_SIZE, Key, MAX_KEY_LENGTH};
 pub use alloc_trait::TreeAllocator;
 pub use alloc15::SeizeAllocator;
 pub use internode::InternodeNode;
-pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
+pub use leaf_trait::{TreeInternode, TreePermutation};
 pub use leaf15::LeafNode15;
 pub use nodeversion::NodeVersion;
 pub use permuter::{AtomicPermuter, AtomicPermuter15, MAX_WIDTH, Permuter, Permuter15};
 pub use suffix::SuffixBag;
-pub use retirement::BatchedRetire;
 ```
 
 `InlineBits` is re-exported from `inline::bits`. `InlineSuffixBag` is
@@ -2191,7 +2185,7 @@ check `Cargo.toml` for whether cargo currently enforces it.
 
 1. **Fixed WIDTH = 15.** The 64-bit permutation format uses 4 bits per slot plus
    a 4-bit size, so 15 slots is the maximum. There is no alternate width or
-   parameter sweep. `TreeLeafNode::WIDTH` and `TreeInternode::WIDTH` are 15.
+   parameter sweep. `LeafNode15::WIDTH` and `TreeInternode::WIDTH` are 15.
 2. **Layers only on suffix conflict.** A short key and a suffix key with the
    same ikey coexist in one leaf; the implementation does not create a layer
    merely because a key has a suffix. Layers are created when two
@@ -2246,7 +2240,7 @@ check `Cargo.toml` for whether cargo currently enforces it.
   install it globally; memory-profiling benches define their own allocator.
 - `ValuePtr` is opaque (`Debug` prints the address only); public reads return
   guard-scoped `ValueRef`s. Do not add a safe value accessor back to `ValuePtr`.
-- `LeafNode15`/`TreeLeafNode` ownership-bearing mutators (`store_value`,
+- `LeafNode15` ownership-bearing mutators (`store_value`,
   `store_layer`, `take_value`, `take_value_for_layer`, `update_value_in_place*`)
   are `unsafe`; safe code can read values but cannot publish a value or layer
   pointer. `load_value`/`take_value` return `None` for layer slots, and
@@ -2372,7 +2366,7 @@ code:
 | Suffix                  | `src/suffix.rs`, `src/suffix/{inline,sidecar}.rs`                                                                         |
 | Inline encoding         | `src/inline/bits.rs`, `src/inline/sentinel.rs`                                                                                          |
 | Allocation/pool         | `src/alloc_trait.rs`, `src/alloc15.rs`, `src/node_pool.rs`                                                                              |
-| Reclamation             | `src/retirement.rs`, `src/alloc15.rs`, `src/policy/*`                                                                                   |
+| Reclamation             | `src/alloc15.rs`, `src/policy/*`                                                                                   |
 | Tree core               | `src/tree/generic.rs`, `src/tree/generic/{search,insert,insert_strategy,layer,optimistic_reads,get_guarded,split,batch,entry,print}.rs` |
 | Split propagation       | `src/tree/split.rs`, `src/tree/split/{propagation,propagation_context,parent_locking,root_creation}.rs`                                 |
 | Remove                  | `src/tree/remove.rs`, `src/tree/remove/unit_tests.rs`                                                                                   |

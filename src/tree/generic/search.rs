@@ -1,7 +1,7 @@
 use super::{InsertSearchResultGeneric, Key, LeafPolicy, MassTreeGeneric, TreeAllocator};
-use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
+use crate::permuter::Permuter15;
 
 impl<P, A> MassTreeGeneric<P, A>
 where
@@ -16,7 +16,7 @@ where
     fn search_for_insert<const SINGLE_LAYER: bool>(
         leaf: &LeafNode15<P>,
         key: &Key<'_>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
     ) -> InsertSearchResultGeneric {
         debug_assert!(!SINGLE_LAYER || !key.has_suffix());
         #[expect(clippy::cast_possible_truncation, reason = "unsuffixed length <= 8")]
@@ -118,7 +118,7 @@ where
         &self,
         leaf: &LeafNode15<P>,
         key: &Key<'_>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
     ) -> InsertSearchResultGeneric {
         Self::search_for_insert::<false>(leaf, key, perm)
     }
@@ -200,7 +200,7 @@ where
         &self,
         leaf: &LeafNode15<P>,
         key: &Key<'_>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        perm: Permuter15,
     ) -> InsertSearchResultGeneric {
         Self::search_for_insert::<true>(leaf, key, perm)
     }
