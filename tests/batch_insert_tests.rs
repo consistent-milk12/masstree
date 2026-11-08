@@ -17,6 +17,124 @@ use std::thread;
 
 use masstree::{MassTree15, MassTree15Inline};
 
+#[test]
+fn invalid_batch_key_drops_all_owned_values_before_mutating() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Tracked(Arc<AtomicUsize>);
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let tree = MassTree15::<Tracked>::new();
+    let guard = tree.guard();
+    let entries = vec![
+        (b"first".to_vec(), Tracked(drops.clone())),
+        (vec![b'x'; 257], Tracked(drops.clone())),
+        (b"last".to_vec(), Tracked(drops.clone())),
+    ];
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tree.insert_batch_with_guard(entries, &guard)
+    }));
+    assert!(result.is_err());
+    assert!(tree.is_empty());
+    assert_eq!(drops.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn batch_encoding_panic_retires_earlier_replaced_suffix_bags() {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct MayPanic(u64);
+    impl masstree::InlineBits for MayPanic {
+        fn to_bits(self) -> u64 {
+            assert_ne!(self.0, u64::MAX, "intentional encoding failure");
+            self.0
+        }
+        fn from_bits(bits: u64) -> Self {
+            Self(bits)
+        }
+    }
+    let tree = MassTree15Inline::<MayPanic>::new();
+    let guard = tree.guard();
+    let keys: Vec<_> = (0..15u64)
+        .map(|i| {
+            let mut key = i.to_be_bytes().to_vec();
+            key.extend_from_slice(&[b'x'; 200]);
+            tree.insert_with_guard(&key, MayPanic(i), &guard);
+            key
+        })
+        .collect();
+    tree.remove_with_guard(&keys[0], &guard).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tree.insert_batch_with_guard(
+            vec![
+                (keys[0].clone(), MayPanic(100)),
+                (keys[1].clone(), MayPanic(u64::MAX)),
+            ],
+            &guard,
+        )
+    }));
+    assert!(result.is_err());
+    assert_eq!(tree.len(), 15);
+    assert_eq!(tree.get(&keys[0]), Some(MayPanic(100)));
+    assert_eq!(tree.get(&keys[1]), Some(MayPanic(1)));
+    // Miri checks that the first entry's displaced suffix bag is reclaimed
+    // even though the next entry unwound out of the locked batch.
+}
+
+#[test]
+fn preconstructed_boxed_batch_preserves_duplicates_and_value_ownership() {
+    use masstree::{BatchEntry, BoxPolicy};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Tracked {
+        value: usize,
+        drops: Arc<AtomicUsize>,
+    }
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    {
+        let tree = MassTree15::<Tracked>::new();
+        let guard = tree.guard();
+        let entries = (0..50)
+            .map(|value| {
+                BatchEntry::<BoxPolicy<Tracked>>::new(
+                    b"shared-prefix-key".to_vec(),
+                    Tracked {
+                        value,
+                        drops: drops.clone(),
+                    },
+                )
+            })
+            .collect();
+        let result = tree.insert_batch_entries(entries, &guard);
+        assert_eq!(result.inserted, 1);
+        assert_eq!(result.updated, 49);
+        assert_eq!(
+            result
+                .old_values
+                .iter()
+                .map(|v| v.value)
+                .collect::<Vec<_>>(),
+            (0..49).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            tree.get_with_guard(b"shared-prefix-key", &guard)
+                .unwrap()
+                .value,
+            49
+        );
+    }
+    assert_eq!(drops.load(Ordering::Relaxed), 50);
+}
+
 // ============================================================================
 //  Basic Functionality Tests
 // ============================================================================

@@ -24,7 +24,7 @@ implementation must verify those observations against the current source.
 | Order | Work | Evidence / completion gate | Status |
 | --- | --- | --- | --- |
 | 1 | Proposal 3: suffix sizing, split reservation, initialization, raw ownership | Churn 42 → 6 allocations; middle split 3 → 0 reallocations; native, feature, Miri tests | Complete |
-| 2 | Proposal 4: batch/Extend pipeline, write-through, Entry leaf hints | Batch correctness/ownership tests; allocation and descent measurements | Pending |
+| 2 | Proposal 4: batch/Extend pipeline, write-through, Entry leaf hints | Unified owning pipeline: preconstructed update probe 6 → 3 allocations; ownership regressions pass | In progress |
 | 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Promoted-layer reads/scans/GC; zero-hop cached root test | Pending |
 | 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Layout assertions, point workloads, Loom and Miri | Pending |
 | 5 | Proposal 5: stack remove routes and remove cleanup | Zero-allocation non-emptying layered removal | Pending |
@@ -46,6 +46,11 @@ suffix set, including a new right-side entry: the allocation probe confirms 3 �
 reallocations. Header-only initialization avoids 516 redundant bytes of stores
 (default capacity). Proposal 3 is complete; native tests, both suffix features,
 strict Clippy, and Miri cover the changed paths.
+
+Completed within step 2: one owning `BatchEntry` pipeline, shared empty-leaf
+initialization, direct guarded results, and unwind-safe suffix retirement.
+`Extend`/`FromIterator`, guarded single-key write-through, and Entry hints remain
+open.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

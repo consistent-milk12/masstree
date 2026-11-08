@@ -1,5 +1,5 @@
 use std::fmt::{self as StdFmt, Debug, Formatter};
-use std::sync::atomic::Ordering as AtomicOrdering;
+use std::marker::PhantomData;
 
 use seize::LocalGuard;
 
@@ -8,11 +8,7 @@ use std::ptr as StdPtr;
 use crate::Permuter;
 use crate::leaf15::LeafNode15;
 use crate::{
-    Linker, MassTreeGeneric, TreeAllocator, ValueRef,
-    key::Key,
-    leaf_trait::TreeLeafNode,
-    nodeversion::LockGuard,
-    policy::{LeafPolicy, PreparedValue},
+    MassTreeGeneric, TreeAllocator, ValueRef, key::Key, nodeversion::LockGuard, policy::LeafPolicy,
 };
 
 use super::{FindSlotResult, InsertSearchResultGeneric};
@@ -25,15 +21,19 @@ const MAX_BATCH_RETIRES: usize = crate::leaf15::WIDTH_15 + 1;
 ///
 /// Collects pointers to old suffix bags that must be retired outside the
 /// leaf lock. Bounded by `MAX_BATCH_RETIRES`.
-struct RetireBuf {
+struct RetireBuf<'g, 'c, P: LeafPolicy> {
+    guard: &'g LocalGuard<'c>,
+    _policy: PhantomData<P>,
     ptrs: [*mut u8; MAX_BATCH_RETIRES],
     count: usize,
 }
 
-impl RetireBuf {
+impl<'g, 'c, P: LeafPolicy> RetireBuf<'g, 'c, P> {
     #[inline]
-    const fn new() -> Self {
+    const fn new(guard: &'g LocalGuard<'c>) -> Self {
         Self {
+            guard,
+            _policy: PhantomData,
             ptrs: [StdPtr::null_mut(); MAX_BATCH_RETIRES],
             count: 0,
         }
@@ -45,10 +45,15 @@ impl RetireBuf {
         self.ptrs[self.count] = ptr;
         self.count += 1;
     }
+}
 
-    #[inline]
-    fn as_slice(&self) -> &[*mut u8] {
-        &self.ptrs[..self.count]
+impl<P: LeafPolicy> Drop for RetireBuf<'_, '_, P> {
+    fn drop(&mut self) {
+        for &ptr in &self.ptrs[..self.count] {
+            // SAFETY: Each pointer was displaced exactly once by this batch,
+            // is no longer reachable, and remains protected by the same guard.
+            unsafe { LeafNode15::<P>::retire_suffix_bag_ptr(ptr, self.guard) };
+        }
     }
 }
 
@@ -72,6 +77,9 @@ pub struct BatchEntry<P: LeafPolicy> {
 
     /// Cached ikey for the first 8 bytes (used for sorting).
     ikey: u64,
+
+    /// Input-order tiebreaker, assigned when the batch is submitted.
+    seq: usize,
 }
 
 impl<P: LeafPolicy> BatchEntry<P> {
@@ -96,6 +104,7 @@ impl<P: LeafPolicy> BatchEntry<P> {
             key,
             value: Some(value),
             ikey,
+            seq: 0,
         }
     }
 
@@ -161,120 +170,7 @@ where
             .field("key", &self.key)
             .field("value", &self.value)
             .field("ikey", &self.ikey)
-            .finish()
-    }
-}
-
-/// Internal entry with a pre-converted output allocation.
-///
-/// Conversion happens once, outside the tree locks. Every entry is consumed by
-/// the batch loop (the fallback path inserts the remainder individually), so
-/// the output is never dropped without being published.
-struct OutputEntry<P: LeafPolicy> {
-    key: Vec<u8>,
-    output: P::Output,
-    ikey: u64,
-    /// Original input position, used as the final sort tiebreaker so equal
-    /// keys are processed in input order (last value wins deterministically).
-    seq: usize,
-}
-
-impl<P: LeafPolicy> OutputEntry<P> {
-    #[inline]
-    fn from_value(key: Vec<u8>, value: P::Value, seq: usize) -> Self {
-        assert!(
-            key.len() <= crate::key::MAX_KEY_LENGTH,
-            "batch key length {} exceeds maximum {}",
-            key.len(),
-            crate::key::MAX_KEY_LENGTH
-        );
-
-        let ikey: u64 = BatchEntry::<P>::compute_ikey(&key);
-        let output: P::Output = P::into_output(value);
-
-        Self {
-            key,
-            output,
-            ikey,
-            seq,
-        }
-    }
-
-    #[inline(always)]
-    const fn ikey(&self) -> u64 {
-        self.ikey
-    }
-}
-
-/// Sort key for a batch entry: ikey cluster, then full key bytes, then input
-/// order. Sorting by only the cached ikey lets an unstable sort reorder equal
-/// keys arbitrarily, changing which duplicate value wins.
-#[inline(always)]
-const fn batch_sort_key(ikey: u64, key: &[u8], seq: usize) -> (u64, &[u8], usize) {
-    (ikey, key, seq)
-}
-
-/// A single entry in a batch insert operation that defers output allocation.
-#[must_use]
-struct BatchValueEntry<P: LeafPolicy> {
-    /// The key bytes (owned for sorting).
-    key: Vec<u8>,
-
-    /// Deferred value payload. Taken only when a new slot is inserted or a
-    /// slow-path retry must fall back to the generic insert path.
-    value: Option<P::Value>,
-
-    /// Cached ikey for the first 8 bytes (used for sorting).
-    ikey: u64,
-
-    /// Original input position (stable duplicate ordering).
-    seq: usize,
-}
-
-impl<P: LeafPolicy> BatchValueEntry<P> {
-    #[inline]
-    fn new(key: Vec<u8>, value: P::Value, seq: usize) -> Self {
-        assert!(
-            key.len() <= crate::key::MAX_KEY_LENGTH,
-            "batch key length {} exceeds maximum {}",
-            key.len(),
-            crate::key::MAX_KEY_LENGTH
-        );
-
-        let ikey: u64 = BatchEntry::<P>::compute_ikey(&key);
-
-        Self {
-            key,
-            value: Some(value),
-            ikey,
-            seq,
-        }
-    }
-
-    #[inline(always)]
-    const fn ikey(&self) -> u64 {
-        self.ikey
-    }
-
-    #[inline(always)]
-    const fn seq(&self) -> usize {
-        self.seq
-    }
-
-    #[inline(always)]
-    fn value_ref(&self) -> &P::Value {
-        debug_assert!(self.value.is_some(), "batch value already consumed");
-        // SAFETY: value is always Some until take_value is called exactly once.
-        // The batch processing loop guarantees each entry hits either the update
-        // path (value_ref) or the insert path (take_value), never both.
-        unsafe { self.value.as_ref().unwrap_unchecked() }
-    }
-
-    #[inline(always)]
-    fn take_value(&mut self) -> P::Value {
-        debug_assert!(self.value.is_some(), "batch value already consumed");
-        // SAFETY: see value_ref. Each entry is consumed exactly once.
-        unsafe { self.value.take().unwrap_unchecked() }
+            .finish_non_exhaustive()
     }
 }
 
@@ -389,362 +285,6 @@ enum BatchEntryResult<O> {
 // FindSlotResult and MembershipError are shared with insert.rs, defined in super (generic.rs).
 
 // ============================================================================
-//  Batch Operations Trait (unifies generic and write-through batch paths)
-// ============================================================================
-
-/// Abstraction over batch entry access patterns.
-///
-/// `GenericBatch` wraps `&[BatchEntry<P>]` (pre-allocated outputs).
-/// `ValueBatch` wraps `&mut [BatchValueEntry<P>]` (deferred allocation).
-/// The unified `process_sorted_batch_inner` and `insert_batch_into_locked_leaf_inner`
-/// are parameterized over `B: BatchOps` to eliminate duplicated traversal logic.
-trait BatchOps<P: LeafPolicy, A: TreeAllocator<P>> {
-    type OldValue;
-
-    fn len(&self) -> usize;
-    fn entry_ikey(&self, index: usize) -> u64;
-    fn entry_key_bytes(&self, index: usize) -> &[u8];
-
-    fn can_reuse_empty_at(
-        &self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        leaf: &LeafNode15<P>,
-    ) -> bool;
-
-    fn insert_empty_leaf_at(
-        &mut self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        guard: &LocalGuard<'_>,
-    ) -> *mut u8;
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Batch entry insertion requires full context"
-    )]
-    fn try_insert_at(
-        &mut self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        perm: &mut Permuter,
-        guard: &LocalGuard<'_>,
-        pre_allocated: Option<Vec<u8>>,
-    ) -> BatchEntryResult<Self::OldValue>;
-
-    fn fallback_insert_at(
-        &mut self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        result: &mut BatchInsertResult<Self::OldValue>,
-        guard: &LocalGuard<'_>,
-    );
-}
-
-// ============================================================================
-//  GenericBatch: wraps &[OutputEntry<P>] (pre-allocated outputs)
-// ============================================================================
-
-struct GenericBatch<'a, P: LeafPolicy>(&'a [OutputEntry<P>]);
-
-impl<P: LeafPolicy, A: TreeAllocator<P>> BatchOps<P, A> for GenericBatch<'_, P> {
-    type OldValue = P::Output;
-
-    #[inline(always)]
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    #[inline(always)]
-    fn entry_ikey(&self, index: usize) -> u64 {
-        self.0[index].ikey()
-    }
-
-    #[inline(always)]
-    fn entry_key_bytes(&self, index: usize) -> &[u8] {
-        &self.0[index].key
-    }
-
-    #[inline]
-    fn can_reuse_empty_at(
-        &self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        leaf: &LeafNode15<P>,
-    ) -> bool {
-        let key: Key<'_> = Key::new(&self.0[index].key);
-        tree.can_reuse_empty_leaf(leaf, &key)
-    }
-
-    #[inline]
-    fn insert_empty_leaf_at(
-        &mut self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        guard: &LocalGuard<'_>,
-    ) -> *mut u8 {
-        let entry: &OutputEntry<P> = &self.0[index];
-        let key: Key<'_> = Key::new(&entry.key);
-        tree.insert_into_empty_leaf_batch(leaf, lock, &key, &entry.output, guard)
-    }
-
-    #[inline]
-    fn try_insert_at(
-        &mut self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        perm: &mut Permuter,
-        guard: &LocalGuard<'_>,
-        pre_allocated: Option<Vec<u8>>,
-    ) -> BatchEntryResult<P::Output> {
-        let entry: &OutputEntry<P> = &self.0[index];
-        let key: Key<'_> = Key::new(&entry.key);
-        let single_layer_mode: bool = !key.has_suffix();
-
-        let search_result: InsertSearchResultGeneric = if single_layer_mode {
-            tree.search_for_insert_single_layer(leaf, &key, perm)
-        } else {
-            tree.search_for_insert_generic(leaf, &key, perm)
-        };
-
-        match search_result {
-            InsertSearchResultGeneric::Found { slot } => {
-                if leaf.is_value_empty(slot) {
-                    return BatchEntryResult::Retry;
-                }
-
-                let old_value: P::Output =
-                    tree.update_existing_value(leaf, lock, slot, &entry.output, guard);
-
-                BatchEntryResult::Updated(old_value)
-            }
-
-            InsertSearchResultGeneric::NotFound { logical_pos } => {
-                let ikey: u64 = key.ikey();
-
-                match tree.find_usable_slot(leaf, perm, ikey) {
-                    FindSlotResult::Found { slot, back_offset } => {
-                        let deferred_retire: *mut u8 = tree.insert_new_value(
-                            leaf,
-                            lock,
-                            slot,
-                            back_offset,
-                            logical_pos,
-                            *perm,
-                            &key,
-                            &entry.output,
-                            guard,
-                            pre_allocated,
-                        );
-                        tree.count.increment();
-                        *perm = leaf.permutation();
-
-                        BatchEntryResult::Inserted(deferred_retire)
-                    }
-
-                    FindSlotResult::NeedsSplit => BatchEntryResult::NeedsSplit,
-                }
-            }
-
-            InsertSearchResultGeneric::Layer { .. }
-            | InsertSearchResultGeneric::Conflict { .. } => {
-                if single_layer_mode {
-                    BatchEntryResult::Retry
-                } else {
-                    BatchEntryResult::NeedsLayerDescent
-                }
-            }
-        }
-    }
-
-    fn fallback_insert_at(
-        &mut self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        result: &mut BatchInsertResult<P::Output>,
-        guard: &LocalGuard<'_>,
-    ) {
-        let entry: &OutputEntry<P> = &self.0[index];
-        let mut key: Key<'_> = Key::new(&entry.key);
-
-        match tree.insert_concurrent_generic(&mut key, entry.output.clone(), guard) {
-            Ok(old) => {
-                if let Some(old_value) = old {
-                    result.record_update(old_value);
-                } else {
-                    result.record_insert();
-                }
-            }
-
-            Err(e) => {
-                panic!("Batch insert failed unexpectedly: {e:?}. This indicates a bug.");
-            }
-        }
-    }
-}
-
-// ============================================================================
-//  ValueBatch: wraps &mut [BatchValueEntry<P>] (deferred allocation)
-// ============================================================================
-
-struct ValueBatch<'a, P: LeafPolicy>(&'a mut [BatchValueEntry<P>]);
-
-impl<P: LeafPolicy, A: TreeAllocator<P>> BatchOps<P, A> for ValueBatch<'_, P> {
-    type OldValue = P::Value;
-
-    #[inline(always)]
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    #[inline(always)]
-    fn entry_ikey(&self, index: usize) -> u64 {
-        self.0[index].ikey()
-    }
-
-    #[inline(always)]
-    fn entry_key_bytes(&self, index: usize) -> &[u8] {
-        &self.0[index].key
-    }
-
-    #[inline]
-    fn can_reuse_empty_at(
-        &self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        leaf: &LeafNode15<P>,
-    ) -> bool {
-        let key: Key<'_> = Key::new(&self.0[index].key);
-        tree.can_reuse_empty_leaf(leaf, &key)
-    }
-
-    #[inline]
-    fn insert_empty_leaf_at(
-        &mut self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        guard: &LocalGuard<'_>,
-    ) -> *mut u8 {
-        let value: P::Value = self.0[index].take_value();
-        let key: Key<'_> = Key::new(&self.0[index].key);
-        let output: P::Output = P::into_output(value);
-        tree.insert_into_empty_leaf_batch(leaf, lock, &key, &output, guard)
-    }
-
-    #[inline]
-    fn try_insert_at(
-        &mut self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        perm: &mut Permuter,
-        guard: &LocalGuard<'_>,
-        pre_allocated: Option<Vec<u8>>,
-    ) -> BatchEntryResult<P::Value> {
-        let key: Key<'_> = Key::new(&self.0[index].key);
-        let single_layer_mode: bool = !key.has_suffix();
-
-        let search_result: InsertSearchResultGeneric = if single_layer_mode {
-            tree.search_for_insert_single_layer(leaf, &key, perm)
-        } else {
-            tree.search_for_insert_generic(leaf, &key, perm)
-        };
-
-        match search_result {
-            InsertSearchResultGeneric::Found { slot } => {
-                if leaf.is_value_empty(slot) {
-                    return BatchEntryResult::Retry;
-                }
-
-                let old_value: P::Value = tree.update_existing_value_write_through(
-                    leaf,
-                    lock,
-                    slot,
-                    self.0[index].value_ref(),
-                );
-
-                BatchEntryResult::Updated(old_value)
-            }
-
-            InsertSearchResultGeneric::NotFound { logical_pos } => {
-                let ikey: u64 = key.ikey();
-
-                match tree.find_usable_slot(leaf, perm, ikey) {
-                    FindSlotResult::Found { slot, back_offset } => {
-                        let output: P::Output = P::into_output(self.0[index].take_value());
-                        let insert_key: Key<'_> = Key::new(&self.0[index].key);
-                        let deferred_retire: *mut u8 = tree.insert_new_value(
-                            leaf,
-                            lock,
-                            slot,
-                            back_offset,
-                            logical_pos,
-                            *perm,
-                            &insert_key,
-                            &output,
-                            guard,
-                            pre_allocated,
-                        );
-                        tree.count.increment();
-                        *perm = leaf.permutation();
-
-                        BatchEntryResult::Inserted(deferred_retire)
-                    }
-
-                    FindSlotResult::NeedsSplit => BatchEntryResult::NeedsSplit,
-                }
-            }
-
-            InsertSearchResultGeneric::Layer { .. }
-            | InsertSearchResultGeneric::Conflict { .. } => {
-                if single_layer_mode {
-                    BatchEntryResult::Retry
-                } else {
-                    BatchEntryResult::NeedsLayerDescent
-                }
-            }
-        }
-    }
-
-    fn fallback_insert_at(
-        &mut self,
-        index: usize,
-        tree: &MassTreeGeneric<P, A>,
-        result: &mut BatchInsertResult<P::Value>,
-        guard: &LocalGuard<'_>,
-    ) {
-        let entry: &mut BatchValueEntry<P> = &mut self.0[index];
-        let value: P::Value = entry.take_value();
-        let mut key: Key<'_> = Key::new(&entry.key);
-
-        match tree.insert_concurrent_value(&mut key, value, guard) {
-            Ok(old) => {
-                if let Some(old_value) = old {
-                    result.record_update(old_value);
-                } else {
-                    result.record_insert();
-                }
-            }
-
-            Err(e) => {
-                panic!("Batch insert failed unexpectedly: {e:?}. This indicates a bug.");
-            }
-        }
-    }
-}
-
-// ============================================================================
 //  Batch Insert Implementation
 // ============================================================================
 
@@ -817,184 +357,134 @@ where
         I: IntoIterator<Item = (Vec<u8>, P::Value)>,
     {
         self.verify_guard(guard);
-        if P::can_write_through() {
-            let value_result: BatchInsertResult<P::Value> =
-                self.insert_batch_values_with_guard(entries, guard);
-
-            return value_result.map_old_values(ValueRef::Owned);
-        }
-
-        // Convert to OutputEntry (allocates outputs once)
-        let mut batch: Vec<OutputEntry<P>> = entries
+        // Collect owning entries and validate every key before any conversion
+        // to non-owning storage handles or mutation of the tree.
+        let batch = entries
             .into_iter()
-            .enumerate()
-            .map(|(seq, (key, value)): (usize, (Vec<u8>, P::Value))| {
-                OutputEntry::from_value(key, value, seq)
-            })
+            .map(|(key, value)| BatchEntry::new(key, value))
             .collect();
-
-        if batch.is_empty() {
-            return BatchInsertResult::new();
-        }
-
-        // Sort by ikey for cache locality, full key, and original position so
-        // duplicate keys keep input order (deterministic last-wins).
-        batch.sort_unstable_by(|a: &OutputEntry<P>, b: &OutputEntry<P>| {
-            batch_sort_key(a.ikey, &a.key, a.seq).cmp(&batch_sort_key(b.ikey, &b.key, b.seq))
-        });
-
-        let output_result: BatchInsertResult<P::Output> = self.process_sorted_batch(&batch, guard);
-
-        output_result.map_old_values(|output: P::Output| {
-            // SAFETY: Each old value was retired under `guard`; the allocation
-            // cannot be reclaimed until the guard is dropped.
-            unsafe { P::output_to_value_ref(&output) }
-        })
+        self.insert_batch_entries(batch, guard)
     }
 
-    fn insert_batch_values_with_guard<I>(
-        &self,
-        entries: I,
-        guard: &LocalGuard<'_>,
-    ) -> BatchInsertResult<P::Value>
-    where
-        I: IntoIterator<Item = (Vec<u8>, P::Value)>,
-    {
-        let mut batch: Vec<BatchValueEntry<P>> = entries
-            .into_iter()
-            .enumerate()
-            .map(|(seq, (key, value)): (usize, (Vec<u8>, P::Value))| {
-                BatchValueEntry::new(key, value, seq)
-            })
-            .collect();
-
-        if batch.is_empty() {
-            return BatchInsertResult::new();
-        }
-
-        batch.sort_unstable_by(|a: &BatchValueEntry<P>, b: &BatchValueEntry<P>| {
-            batch_sort_key(a.ikey, &a.key, a.seq()).cmp(&batch_sort_key(b.ikey, &b.key, b.seq()))
-        });
-        self.process_sorted_value_batch(&mut batch, guard)
-    }
-
-    /// Insert pre-constructed batch entries.
+    /// Insert pre-constructed, value-owning batch entries.
     ///
-    /// Takes ownership of the entries. Each entry owns a real user value; the
-    /// value is converted to its storage representation only here, once, and
-    /// the entry no longer aliases any value still stored in the tree.
-    ///
-    /// Old values are guard-scoped [`ValueRef`](crate::ValueRef)s.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a `BatchEntry` value was already consumed, or on an internal
-    /// tree invariant violation.
+    /// Equal keys are processed in input order (last value wins). Old values
+    /// are guarded borrows for boxed objects or owned write-through snapshots.
     pub fn insert_batch_entries<'g>(
         &self,
-        entries: Vec<BatchEntry<P>>,
+        mut entries: Vec<BatchEntry<P>>,
         guard: &'g LocalGuard<'_>,
     ) -> BatchInsertResult<ValueRef<'g, P::Value>> {
         self.verify_guard(guard);
-        if entries.is_empty() {
-            return BatchInsertResult::new();
+        for (seq, entry) in entries.iter_mut().enumerate() {
+            entry.seq = seq;
         }
+        entries.sort_unstable_by(|a, b| (a.ikey, &a.key, a.seq).cmp(&(b.ikey, &b.key, b.seq)));
+        self.process_sorted_batch(&mut entries, guard)
+    }
 
+    /// Try one entry while the leaf is locked. Values remain owned until the
+    /// destination is known, including on split/layer fallbacks and unwinding.
+    fn try_insert_batch_entry<'g>(
+        &self,
+        leaf: &LeafNode15<P>,
+        lock: &mut LockGuard<'_>,
+        perm: &mut Permuter,
+        entry: &mut BatchEntry<P>,
+        guard: &'g LocalGuard<'_>,
+    ) -> BatchEntryResult<ValueRef<'g, P::Value>> {
+        let key = Key::new(&entry.key);
+        let search = if key.has_suffix() {
+            self.search_for_insert_generic(leaf, &key, perm)
+        } else {
+            self.search_for_insert_single_layer(leaf, &key, perm)
+        };
+        match search {
+            InsertSearchResultGeneric::Found { slot } => {
+                if leaf.is_value_empty(slot) {
+                    return BatchEntryResult::Retry;
+                }
+                let value = entry.value.take().expect("batch entry already consumed");
+                let old = if P::can_write_through() {
+                    ValueRef::Owned(
+                        self.update_existing_value_write_through(leaf, lock, slot, &value),
+                    )
+                } else {
+                    let output = P::into_output(value);
+                    let old = self.update_existing_value(leaf, lock, slot, &output, guard);
+                    // SAFETY: The displaced value was retired under this guard.
+                    // It remains alive for the returned borrow's lifetime.
+                    unsafe { P::output_to_value_ref(&old) }
+                };
+                BatchEntryResult::Updated(old)
+            }
+            InsertSearchResultGeneric::NotFound { logical_pos } => {
+                let FindSlotResult::Found { slot, back_offset } =
+                    self.find_usable_slot(leaf, perm, key.ikey())
+                else {
+                    return BatchEntryResult::NeedsSplit;
+                };
+                let output =
+                    P::into_output(entry.value.take().expect("batch entry already consumed"));
+                let deferred = self.insert_new_value(
+                    leaf,
+                    lock,
+                    slot,
+                    back_offset,
+                    logical_pos,
+                    *perm,
+                    &key,
+                    &output,
+                    guard,
+                    None,
+                );
+                self.count.increment();
+                *perm = leaf.permutation();
+                BatchEntryResult::Inserted(deferred)
+            }
+            InsertSearchResultGeneric::Layer { .. }
+            | InsertSearchResultGeneric::Conflict { .. } => BatchEntryResult::NeedsLayerDescent,
+        }
+    }
+
+    fn fallback_insert_batch_entry<'g>(
+        &self,
+        entry: &mut BatchEntry<P>,
+        guard: &'g LocalGuard<'_>,
+    ) -> Option<ValueRef<'g, P::Value>> {
+        let value = entry.value.take().expect("batch entry already consumed");
+        let mut key = Key::new(&entry.key);
         if P::can_write_through() {
-            let mut value_entries: Vec<BatchValueEntry<P>> = entries
-                .into_iter()
-                .enumerate()
-                .map(|(seq, entry): (usize, BatchEntry<P>)| {
-                    let key: Vec<u8> = entry.key;
-                    let value: P::Value = entry
-                        .value
-                        .expect("BatchEntry value already consumed before insertion");
-                    BatchValueEntry::new(key, value, seq)
+            self.insert_concurrent_value(&mut key, value, guard)
+                .expect("batch fallback insert failed")
+                .map(ValueRef::Owned)
+        } else {
+            self.insert_concurrent_generic(&mut key, P::into_output(value), guard)
+                .expect("batch fallback insert failed")
+                .map(|output| {
+                    // SAFETY: The old value was retired under this guard and
+                    // remains alive for the returned borrow's lifetime.
+                    unsafe { P::output_to_value_ref(&output) }
                 })
-                .collect();
-
-            value_entries.sort_unstable_by(|a: &BatchValueEntry<P>, b: &BatchValueEntry<P>| {
-                batch_sort_key(a.ikey, &a.key, a.seq).cmp(&batch_sort_key(b.ikey, &b.key, b.seq))
-            });
-
-            let value_result: BatchInsertResult<P::Value> =
-                self.process_sorted_value_batch(&mut value_entries, guard);
-
-            return value_result.map_old_values(ValueRef::Owned);
         }
-
-        // Convert to internal outputs; the input order supplies the duplicate
-        // tiebreaker.
-        let mut outputs: Vec<OutputEntry<P>> = entries
-            .into_iter()
-            .enumerate()
-            .map(|(seq, entry): (usize, BatchEntry<P>)| {
-                let key: Vec<u8> = entry.key;
-                let value: P::Value = entry
-                    .value
-                    .expect("BatchEntry value already consumed before insertion");
-                OutputEntry::from_value(key, value, seq)
-            })
-            .collect();
-
-        outputs.sort_unstable_by(|a: &OutputEntry<P>, b: &OutputEntry<P>| {
-            batch_sort_key(a.ikey, &a.key, a.seq).cmp(&batch_sort_key(b.ikey, &b.key, b.seq))
-        });
-
-        let output_result: BatchInsertResult<P::Output> =
-            self.process_sorted_batch(&outputs, guard);
-
-        output_result.map_old_values(|output: P::Output| {
-            // SAFETY: Each old value was retired under `guard`; it remains
-            // allocated until the guard is dropped.
-            unsafe { P::output_to_value_ref(&output) }
-        })
     }
 
-    // ========================================================================
-    //  Internal Batch Processing
-    // ========================================================================
-
-    /// Process a sorted batch of entries (generic path).
-    ///
-    /// Delegates to `process_sorted_batch_inner` via `GenericBatch`.
-    fn process_sorted_batch(
-        &self,
-        batch: &[OutputEntry<P>],
-        guard: &LocalGuard<'_>,
-    ) -> BatchInsertResult<P::Output> {
-        let mut ops: GenericBatch<'_, P> = GenericBatch(batch);
-        self.process_sorted_batch_inner(&mut ops, guard)
-    }
-
-    /// Process a sorted batch of value entries (write-through path).
-    ///
-    /// Delegates to `process_sorted_batch_inner` via `ValueBatch`.
-    fn process_sorted_value_batch(
-        &self,
-        batch: &mut [BatchValueEntry<P>],
-        guard: &LocalGuard<'_>,
-    ) -> BatchInsertResult<P::Value> {
-        let mut ops: ValueBatch<'_, P> = ValueBatch(batch);
-        self.process_sorted_batch_inner(&mut ops, guard)
-    }
-
-    /// Unified sorted batch processing, parameterized by `BatchOps`.
+    /// Process a sorted slice of value-owning entries for either policy.
     ///
     /// Handles traversal, OCC validation, locking, locked-leaf insertion,
     /// retirement, and fallback to individual insert on split.
-    fn process_sorted_batch_inner<B: BatchOps<P, A>>(
+    fn process_sorted_batch<'g>(
         &self,
-        batch: &mut B,
-        guard: &LocalGuard<'_>,
-    ) -> BatchInsertResult<B::OldValue> {
-        let mut result: BatchInsertResult<B::OldValue> = BatchInsertResult::new();
+        batch: &mut [BatchEntry<P>],
+        guard: &'g LocalGuard<'_>,
+    ) -> BatchInsertResult<ValueRef<'g, P::Value>> {
+        let mut result = BatchInsertResult::new();
         let mut index: usize = 0;
 
         while index < batch.len() {
-            let key: Key<'_> = Key::new(batch.entry_key_bytes(index));
+            let key: Key<'_> = Key::new(&batch[index].key);
 
-            let mut layer_root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
+            let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
 
             let entries_processed: usize = 'retry: loop {
                 layer_root = self.maybe_parent_generic(layer_root, guard);
@@ -1006,22 +496,20 @@ where
                     self.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
 
                 if exceeded_hop_limit {
-                    layer_root = self.root_ptr.load(AtomicOrdering::Acquire);
+                    layer_root = self.load_root_ptr_generic(guard);
                     continue 'retry;
                 }
 
                 leaf_ptr = advanced_ptr;
+                // SAFETY: Traversal loaded this live leaf through the guard;
+                // retirement cannot reclaim it until the guard is released.
                 let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
                 let pre_lock_version: u32 = leaf.version().stable();
                 let pre_lock_perm_raw: u64 = leaf.permutation_raw();
-                let pre_lock_perm: Permuter = leaf.permutation();
-
-                let pre_allocated_vec: Option<Vec<u8>> = if key.has_suffix() {
-                    Self::maybe_pre_allocate_suffix(&key, pre_lock_perm.size())
-                } else {
-                    None
-                };
+                // Declared before the lock so unwinding unlocks first, then
+                // retires any suffix bags displaced by earlier entries.
+                let mut retire_buf: RetireBuf<'_, '_, P> = RetireBuf::new(guard);
 
                 let mut lock = leaf.version().lock_bounded();
 
@@ -1032,7 +520,7 @@ where
 
                 if leaf.deleted_layer() {
                     drop(lock);
-                    layer_root = self.root_ptr.load(AtomicOrdering::Acquire);
+                    layer_root = self.load_root_ptr_generic(guard);
                     continue 'retry;
                 }
 
@@ -1041,7 +529,6 @@ where
                     continue 'retry;
                 }
 
-                let mut retire_buf = RetireBuf::new();
                 let processed: usize = self.insert_batch_into_locked_leaf_inner(
                     leaf,
                     &mut lock,
@@ -1050,18 +537,11 @@ where
                     &mut result,
                     &mut retire_buf,
                     guard,
-                    pre_allocated_vec,
                 );
 
                 drop(lock);
 
-                // Retire old suffix bags OUTSIDE the lock
-                for &ptr in retire_buf.as_slice() {
-                    // SAFETY: ptr is a valid suffix bag pointer from a completed operation.
-                    unsafe {
-                        LeafNode15::<P>::retire_suffix_bag_ptr(ptr, guard);
-                    }
-                }
+                drop(retire_buf);
 
                 if processed == 0 {
                     break 'retry 0;
@@ -1071,7 +551,11 @@ where
             };
 
             if entries_processed == 0 {
-                batch.fallback_insert_at(index, self, &mut result, guard);
+                if let Some(old) = self.fallback_insert_batch_entry(&mut batch[index], guard) {
+                    result.record_update(old);
+                } else {
+                    result.record_insert();
+                }
                 index += 1;
             } else {
                 index += entries_processed;
@@ -1081,7 +565,7 @@ where
         result
     }
 
-    /// Unified locked-leaf batch insertion, parameterized by `BatchOps`.
+    /// Insert a run of entries while holding one leaf lock.
     ///
     /// Inserts as many entries as possible into a locked leaf. Handles
     /// empty leaf reuse, upper bound clustering, and per-entry dispatch.
@@ -1089,25 +573,21 @@ where
         clippy::too_many_arguments,
         reason = "Batch insertion requires context"
     )]
-    fn insert_batch_into_locked_leaf_inner<B: BatchOps<P, A>>(
+    fn insert_batch_into_locked_leaf_inner<'g>(
         &self,
         leaf: &LeafNode15<P>,
         lock: &mut LockGuard<'_>,
-        batch: &mut B,
+        batch: &mut [BatchEntry<P>],
         start_index: usize,
-        result: &mut BatchInsertResult<B::OldValue>,
-        retire_buf: &mut RetireBuf,
-        guard: &LocalGuard<'_>,
-        pre_allocated: Option<Vec<u8>>,
+        result: &mut BatchInsertResult<ValueRef<'g, P::Value>>,
+        retire_buf: &mut RetireBuf<'_, '_, P>,
+        guard: &'g LocalGuard<'_>,
     ) -> usize {
         let mut processed: usize = 0;
         let mut perm: Permuter = leaf.permutation();
-        let mut pre_allocated_vec: Option<Vec<u8>> = pre_allocated;
 
-        // Determine the ikey upper bound for this leaf
-        // SAFETY: Called under lock - no concurrent retirement.
-        let next_raw: *mut LeafNode15<P> = unsafe { leaf.next_raw_unguarded() };
-        let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
+        // A sibling may retire independently; use the guard's protected load.
+        let next_ptr: *mut LeafNode15<P> = leaf.safe_next(guard);
         let upper_bound: Option<u64> = if next_ptr.is_null() {
             None
         } else {
@@ -1117,10 +597,19 @@ where
 
         if leaf.is_empty()
             && start_index < batch.len()
-            && batch.can_reuse_empty_at(start_index, self, leaf)
+            && self.can_reuse_empty_leaf(leaf, &Key::new(&batch[start_index].key))
         {
-            let deferred: *mut u8 =
-                batch.insert_empty_leaf_at(start_index, self, leaf, lock, guard);
+            let entry = &mut batch[start_index];
+            let output = P::into_output(entry.value.take().expect("batch entry already consumed"));
+            let deferred = self.insert_into_empty_leaf(
+                leaf,
+                lock,
+                &Key::new(&entry.key),
+                &output,
+                guard,
+                None,
+            );
+            self.count.increment();
 
             if !deferred.is_null() {
                 retire_buf.push(deferred);
@@ -1135,20 +624,13 @@ where
             let entry_index: usize = start_index + processed;
 
             if let Some(bound) = upper_bound
-                && batch.entry_ikey(entry_index) >= bound
+                && batch[entry_index].ikey >= bound
             {
                 break;
             }
 
-            let insert_result = batch.try_insert_at(
-                entry_index,
-                self,
-                leaf,
-                lock,
-                &mut perm,
-                guard,
-                pre_allocated_vec.take(),
-            );
+            let insert_result =
+                self.try_insert_batch_entry(leaf, lock, &mut perm, &mut batch[entry_index], guard);
 
             match insert_result {
                 BatchEntryResult::Inserted(deferred) => {
@@ -1174,30 +656,5 @@ where
         }
 
         processed
-    }
-
-    /// Insert into an empty leaf. Returns a pointer to a suffix bag that must be
-    /// retired after the lock is dropped (null if none).
-    fn insert_into_empty_leaf_batch(
-        &self,
-        leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
-        key: &Key<'_>,
-        value: &P::Output,
-        guard: &LocalGuard<'_>,
-    ) -> *mut u8 {
-        // INS-04: encode before clearing the empty state or touching the slot.
-        let prepared: PreparedValue<P> = LeafNode15::<P>::prepare_value(value);
-
-        leaf.clear_empty_state();
-        let slot: usize = 0;
-        let deferred_retire: *mut u8 =
-            self.assign_slot_generic(leaf, lock, slot, key, &prepared, guard, None);
-
-        let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
-        leaf.set_permutation(new_perm);
-        self.count.increment();
-
-        deferred_retire
     }
 }

@@ -1,5 +1,14 @@
 # Batch/API reproducers
 
+Proposal 4 update: `leak3` is now a passing regression. It asserts that dropping
+entries frees their allocations, invalid-key batches leave the tree empty, and
+15 preconstructed long-key write-through updates allocate at most three times
+(for the old-value result). The prior runners allocated six times. The matching
+integration drop-counter regression catches the residual invalid-key output leak
+(2 of 3 values dropped before, all 3 afterward), and Miri covers unwinding after
+a prior suffix replacement. The table below retains historical failure behavior.
+
+
 | Binary | Finding | Expected |
 |---|---|---|
 | `alias` | SAFE-03 | two keys share one `ValuePtr`; updating one changes the other |

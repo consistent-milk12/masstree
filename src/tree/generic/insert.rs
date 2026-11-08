@@ -255,12 +255,8 @@ where
 
     /// Insert a value into an empty leaf, reusing it instead of allocating.
     #[inline]
-    #[expect(
-        clippy::type_complexity,
-        reason = "Returns result + deferred retire pointer"
-    )]
     #[expect(clippy::too_many_arguments, reason = "Internals")]
-    fn insert_into_empty_leaf(
+    pub(super) fn insert_into_empty_leaf(
         &self,
         leaf: &LeafNode15<P>,
         lock: &mut LockGuard<'_>,
@@ -268,7 +264,7 @@ where
         value: &P::Output,
         guard: &LocalGuard<'_>,
         pre_allocated: Option<Vec<u8>>,
-    ) -> (Result<Option<P::Output>, InsertError>, *mut u8) {
+    ) -> *mut u8 {
         // INS-04: encode before clearing the empty state or touching the slot.
         let prepared: PreparedValue<P> = LeafNode15::<P>::prepare_value(value);
 
@@ -282,7 +278,7 @@ where
         let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
         leaf.set_permutation(new_perm);
 
-        (Ok(None), deferred_retire)
+        deferred_retire
     }
 }
 
@@ -586,7 +582,7 @@ where
                 // Empty leaf reuse (lazy coalescing optimization)
                 if pre_lock_perm.size() == 0 && self.can_reuse_empty_leaf(leaf, key) {
                     let output: P::Output = S::into_output(value);
-                    let (_result, deferred_retire) = self.insert_into_empty_leaf(
+                    let deferred_retire = self.insert_into_empty_leaf(
                         leaf,
                         &mut lock,
                         key,

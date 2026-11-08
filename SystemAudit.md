@@ -2550,6 +2550,16 @@ reassigning a suffix on a full leaf) could hit it.
 
 ## 10. Batch and public API
 
+Proposal 4 follow-up: the generic batch conversion still leaked previously
+boxed outputs if a later key failed validation. The new drop-counter regression
+in `batch_insert_tests` failed with 2 of 3 values dropped before the unified
+value-owning pipeline and now passes. All batch APIs validate owning entries
+before storage conversion; deferred suffix retirement also runs on unwind.
+The strengthened `failures/batch-api --bin leak3` allocation probe measures
+6 → 3 allocations for 15 preconstructed, long-key write-through updates.
+These changes preserve public batch signatures and duplicate input ordering.
+
+
 ### BATCH-01 — Public mutable `BatchEntry.key` with a stale cached ikey corrupts leaf routing
 
 **Severity:** High · **Confidence:** Confirmed  

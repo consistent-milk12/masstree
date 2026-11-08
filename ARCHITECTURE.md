@@ -1669,42 +1669,27 @@ tree.insert_batch_with_guard(entries, &guard)
 tree.insert_batch_entries(entries)         // pre-built BatchEntry<P>
 ```
 
-Types:
+`BatchEntry<P>` owns a key, an optional user value, cached ikey, and an input-order
+sort tiebreaker. There is one runner for both policies; the old `OutputEntry`,
+`BatchValueEntry`, `GenericBatch`, and `BatchOps` variants are gone.
 
-- `BatchEntry<P> { key: Vec<u8>, output: P::Output, ikey: u64 }` — output
-  allocated up front.
-- `BatchValueEntry<P>` — stores `Option<P::Value>` and allocates only when a new
-  slot is inserted (used for write-through policies).
-- `BatchInsertResult<O> { inserted, updated, old_values: Vec<O>, failed }`.
+1. Collect owning entries and validate every key before tree mutation or boxed
+   output conversion. A bad key or iterator panic drops all pending values.
+2. Sort by `(ikey, full key, input position)`, so duplicate keys are deterministic
+   and the last input value wins.
+3. Reach a leaf, validate its version/membership, lock once, and process the run
+   below its next sibling's bound. Full leaves still allow in-place updates.
+4. Use write-through for primitive boxed updates; convert other values only when
+   their destination is known. Split/layer cases fall back to the single-key
+   algorithm. Empty-leaf reuse shares the single-key initializer.
+5. Retire displaced suffix bags through an RAII buffer declared before the lock,
+   so unlocking precedes retirement on success and unwind. A later encoding panic
+   may leave earlier entries applied, but does not leak their retired bags.
 
-Algorithm:
-
-1. Convert entries; for the generic path, `BatchEntry::new` allocates the
-   output. For write-through, `BatchValueEntry` defers allocation.
-2. Sort stably/unstably by cached ikey
-   (`sort_unstable_by_key(BatchEntry::ikey)`) to cluster entries by leaf and
-   improve cache locality.
-3. `process_sorted_batch_inner` walks the sorted list. For each group it reaches
-   a leaf, advances B-links, snapshots version/permutation, preallocates
-   suffixes if needed, locks once, validates OCC and membership, then inserts a
-   run of entries that belong to the same leaf
-   (`insert_batch_into_locked_leaf_inner`). The upper bound is the next leaf's
-   `ikey_bound`.
-4. Within a locked leaf, each entry is either updated in place (`Found`) or
-   assigned a slot (`NotFound`). `NeedsSplit`, `NeedsLayerDescent`, or `Retry`
-   stop the run. The outer loop then handles the first stalled entry with a
-   single-key fallback (which may split or descend a layer) and advances by one.
-5. Displaced suffix bags are held in a small `RetireBuf` (max `WIDTH + 1 = 16`)
-   and retired after unlocking.
-6. `inserted`/`updated`/`old_values` are recorded; `failed` exists but is not
-   incremented by the current implementation. Internal errors panic in the
-   fallback path, so the API guarantee is "all entries applied or panic", with
-   `inserted + updated == total`.
-
-Duplicates within a batch are resolved in processing order: the first occurrence
-inserts, later ones update and appear in `old_values`. Because sorting is
-unstable and only by ikey, the relative order of equal-ikey duplicates is not
-contractual.
+Guarded results contain `ValueRef`s directly, with no intermediate result-vector
+conversion. `insert_batch` clones old values before releasing its internal guard.
+New batches start with an empty old-values vector. Batch preallocation no longer
+allocates speculative suffix buffers for updates or split/layer fallbacks.
 
 Helpers in `src/tree/batch_utils.rs` (re-exported as `masstree::batch`):
 `zip_into_entries`, `from_iter`, `sequential_keys`, `sequential_u64_keys`,
