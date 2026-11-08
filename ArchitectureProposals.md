@@ -28,7 +28,7 @@ implementation must verify those observations against the current source.
 | 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Shared root/descent/B-link kernels; cached roots give zero parent hops; native and Miri coverage | Complete |
 | 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Aligned slots retain leaf sizes; 607 library tests, 15 Loom models and focused Miri pass | Complete |
 | 5 | Proposal 5: stack remove routes and remove cleanup | 32-byte / maximum-depth removal: 1 / 4 route allocations per key → 0; native and Miri | Complete |
-| 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, layer contention tests, feature checks | In progress |
+| 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, deterministic layer contention tests, Miri and feature checks; routing/layout evaluated | Complete |
 | 7 | Proposal 1: shared validated scan kernel and direction-parametric engine | All scan APIs against BTreeMap; concurrent reverse scans and Miri | Pending |
 
 Correctness prerequisites take precedence within each change. Proposal 2's
@@ -169,6 +169,22 @@ concurrency, doctest, feature and strict Clippy checks pass, as do 37 focused
 internode/allocation Miri tests. Source verification credits already-landed
 `Option<SplitPoint>`, sentinel test wiring, unused dependency removal and real
 tracing events with `MASSTREE_LOG_CONSOLE` control.
+
+PERF-12/13 evaluation is recorded by the reproducible `internode-alloc --bin
+routing` probe. WIDTH 14 would round the current header/key/child layout from
+320 to 256 bytes, while reducing fanout from 16 to 15. Holding leaves fixed,
+full-tree internode storage per leaf changes from approximately 320/15 to
+256/14 bytes: about 14.3% of internode storage, or 0.65% of total node storage
+with 448-byte leaves. This arithmetic does not establish throughput or tree
+height benefits; WIDTH remains 15. The isolated atomic routing probe compares
+production scalar search, branchless counting and binary search, with exhaustive
+correctness checks over occupancies 0–15. At 15 keys, uniform queries measured
+12.31 / 6.22 / 23.21 ms respectively, while left-edge queries measured
+1.11 / 6.32 / 3.87 ms (seven-round medians, 1,048,576 queries per sample;
+AMD Ryzen 5 3600, x86_64, rustc 1.99.1, release profile).
+The tradeoff is substantial and workload-dependent. Production routing remains
+scalar pending an end-to-end workload showing which distribution to optimize;
+SIMD is not introduced without that evidence. Proposal 7 is complete.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

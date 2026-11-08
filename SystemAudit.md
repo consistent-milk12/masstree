@@ -3396,6 +3396,16 @@ value Drop counts under native execution and Miri; the extended INS-04 encoder
 panic reproducer also passes both. Existing Loom models cover the lock/version
 revalidation protocol, not the complete tree or allocator.
 
+PERF-12/13 evaluation: `failures/internode-alloc --bin routing` checks all
+occupancies 0–15 and compares actual scalar source with branchless count and
+binary alternatives. For 15 keys, uniform-query medians are 12.31/6.22/23.21 ms;
+left-edge medians are 1.11/6.32/3.87 ms for 1,048,576 queries. These are isolated
+local measurements, so the mixed result does not justify replacing production
+routing or adding SIMD. WIDTH 14 would save one aligned internode cache line
+but reduce fanout to 15; at full occupancy and unchanged 448-byte leaves, the
+approximate total-node storage reduction is only 0.65%. The layout/fanout remain
+unchanged pending end-to-end evidence. These evaluation items are complete.
+
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|
 | PERF-01 | Suffix insert | `maybe_pre_allocate_suffix` allocates `WIDTH * suffix_len` on every suffix insert, including `Found` updates, conflicts, retries, and splits that drop it | Move to the `NotFound`/`find_usable_slot` path, size from actual suffix usage, pass into split | 1 allocation / 600 B per long-key update removed |
