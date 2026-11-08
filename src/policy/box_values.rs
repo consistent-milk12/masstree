@@ -400,8 +400,13 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
 
         // SAFETY: Caller guarantees exclusive access, slot is a terminal value,
         // and the pointer was stored via Box::into_raw.
-        unsafe {
-            drop(Box::from_raw(ptr.cast::<V>()));
-        }
+        //
+        // A user `Drop` may panic. This runs during tree teardown, which must
+        // not unwind: an escaping panic here aborts once the tree's Drop glue
+        // starts dropping other fields (and can leave allocator state
+        // inconsistent). Contain it; incomplete destruction is a bounded leak.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            unsafe { drop(Box::from_raw(ptr.cast::<V>())) };
+        }));
     }
 }

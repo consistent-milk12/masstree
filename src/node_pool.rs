@@ -446,7 +446,15 @@ pub unsafe fn pool_teardown_dealloc_internode(ptr: *mut u8) {
 /// `ptr` must point to a valid `LeafNode15<P>`.
 #[inline]
 pub unsafe fn reclaim_leaf15<P: LeafPolicy>(ptr: *mut LeafNode15<P>, _collector: &Collector) {
-    unsafe { StdPtr::drop_in_place(ptr) };
+    // A user value's `Drop` may legally panic. Reclamation runs inside seize's
+    // batch machinery, which leaves its local batch in the DROP sentinel state
+    // if an unwind escapes; a later `reclaim_all` would then treat that
+    // sentinel as a pointer. Contain the panic here and always return the
+    // node block. The leak (incomplete field destruction) is bounded and
+    // preferable to corrupting the reclaimer.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { StdPtr::drop_in_place(ptr) };
+    }));
 
     unsafe { pool_dealloc_leaf::<P>(ptr.cast()) };
 }

@@ -709,6 +709,21 @@ pub trait RefPolicy: sealed::RefPolicySealed + LeafPolicy {
 /// Box-based value storage with lazy sidecar suffix.
 pub struct BoxPolicy<V>(PhantomData<V>);
 
+/// Reclaim a boxed user value after its epoch has passed.
+///
+/// A user `Drop` may legally panic. This runs inside seize's batch machinery,
+/// which does not tolerate an escaping unwind: it leaves the local batch in
+/// the `DROP` sentinel state, and a later `reclaim_all` treats that sentinel
+/// as a batch pointer. Contain the panic; the incomplete destruction is a
+/// bounded leak, not memory unsafety.
+unsafe fn reclaim_box_value<V>(ptr: *mut V, _collector: &seize::Collector) {
+    // SAFETY: Caller guarantees ptr came from Box::into_raw and the epoch has
+    // passed, so no reader can observe it.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { drop(Box::from_raw(ptr)) };
+    }));
+}
+
 impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
     type Value = V;
     type Output = ValuePtr<V>;
@@ -810,9 +825,7 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
             // The guard ensures no readers can still observe the old value
             // after the current epoch completes.
             unsafe {
-                guard.defer_retire(ptr.cast::<V>(), |ptr: *mut V, _| {
-                    drop(Box::from_raw(ptr));
-                });
+                guard.defer_retire(ptr.cast::<V>(), reclaim_box_value::<V>);
             }
         }
     }
@@ -824,9 +837,7 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
         // SAFETY: ptr is a valid Box<V> pointer. The guard ensures no readers
         // can observe this value after the current epoch completes.
         unsafe {
-            guard.defer_retire(ptr, |ptr: *mut V, _| {
-                drop(Box::from_raw(ptr));
-            });
+            guard.defer_retire(ptr, reclaim_box_value::<V>);
         }
     }
 
