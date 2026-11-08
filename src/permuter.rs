@@ -11,7 +11,7 @@ pub const MAX_WIDTH: usize = 15;
 /// Mask for extracting size (lower 4 bits).
 const SIZE_MASK: u64 = 0xF;
 
-use crate::{leaf_trait::TreePermutation, suffix::PermutationProvider};
+use crate::leaf_trait::TreePermutation;
 
 /// Namespace for const helper functions used by [`Permuter`].
 struct PermuterUtils;
@@ -464,22 +464,6 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
     #[inline]
     #[cfg(not(debug_assertions))]
     pub const fn debug_assert_valid(&self) {}
-}
-
-// ============================================================================
-//  PermutationProvider Implementation
-// ============================================================================
-
-impl<const WIDTH: usize> PermutationProvider for Permuter<WIDTH> {
-    #[inline(always)]
-    fn size(&self) -> usize {
-        self.size()
-    }
-
-    #[inline(always)]
-    fn get(&self, i: usize) -> usize {
-        self.get(i)
-    }
 }
 
 // ============================================================================

@@ -121,8 +121,6 @@ src/                                   ~29.6k non-test LOC, ~42.7k including col
 │   └── tests.rs
 ├── suffix.rs                          SuffixBag, SuffixBagCell, SlotMeta, PermutationProvider
 │   ├── inline.rs                      InlineSuffixBag (fixed 512/256-byte buffer)
-│   ├── compact.rs                     compaction algorithms
-│   ├── clone.rs                       compacting clone
 │   └── sidecar.rs                     SuffixSidecar
 ├── alloc_trait.rs                     TreeAllocator<P> trait
 ├── alloc15.rs                         SeizeAllocator<P>, iterative tree teardown
@@ -782,48 +780,29 @@ reads. It is deliberately not re-exported from `lib.rs` as a standalone concurre
 
 ### 6.3 Heap `SuffixBag`
 
-`SuffixBag` (`src/suffix.rs`) is the external overflow store:
+`SuffixBag` owns one raw allocation through atomic pointer, capacity, and used
+length fields. Fifteen `AtomicU64` metadata words store `(offset: u32, len: u16)`.
+The header is 144 bytes on 64-bit targets, checked at compile time; there is no
+second `Vec` header or per-write suffix-count RMW.
 
-```rust
-struct SlotMeta { offset: u32, len: u16, pad: u16 } // EMPTY offset = u32::MAX
-pub struct SuffixBag {
-    slots: [AtomicU64; 15],          // packed (offset, len, pad)
-    data: UnsafeCell<Vec<u8>>,
-    data_ptr: AtomicPtr<u8>,
-    used: AtomicUsize,
-    suffix_count: AtomicU8,
-}
-```
+`from_vec` takes over an empty buffer. `assign` and `reserve` require exclusive
+ownership and grow geometrically. Internal initialization uses the explicit
+unsafe `assign_locked` / `reserve_locked` contracts; holding a published leaf's
+lock alone is insufficient because readers may retain slices.
 
-It starts with `INITIAL_CAPACITY = 128` bytes and grows as needed. Two assignment modes matter:
+`try_assign_append_only` copies only into spare capacity, publishes the used
+length, then Release-stores the slot metadata. It never reallocates or overwrites
+published bytes, including bytes whose slot was cleared or reassigned. Readers
+Acquire-load metadata and `used` before creating a slice. A `PhantomData<Cell<()>>`
+keeps the raw-buffer owner `!Sync`: atomic metadata does not permit multiple
+writers. The tree serializes writers under the leaf lock and keeps cells alive
+with EBR. Drop reconstructs the original allocation exactly once.
 
-- **`assign` / `try_assign`** may reuse a slot's old region, compact in place, or grow the `Vec`.
-  These are only safe with exclusive access (unpublished leaf, or the split destination before it
-  is published). A merely locked *published* leaf is not sufficient for `assign_init`: it may
-  reallocate while OCC readers hold a shared reference.
-- **`try_assign_append_only`** is the concurrent path: it never overwrites existing bytes and
-  appends only when capacity remains. Published external bags are therefore effectively immutable
-  in their used region; a reader that loaded an offset/length pair can still read stable bytes.
-  If a suffix does not fit, the writer builds a new bag and swaps the pointer.
-
-Reader-visible metadata is atomic: each slot's `(offset, len)` is one `AtomicU64`, `used` is
-published Release after bytes are copied, and the stable `data_ptr` is used with
-`slice::from_raw_parts` rather than `Vec::len`. A stale/torn pair returns `None` so OCC retries.
-
-The public reallocating/compacting API (`reserve`, `try_assign`, `try_assign_in_place`, `assign`,
-`clear`, `compact`, `compact_with_permuter`) takes `&mut self`, so safe code cannot hold a `get()`
-slice across a reallocation or in-place overwrite. The lock-protected tree paths call explicit
-`unsafe *_locked` variants with an exclusive-ownership contract; `try_assign_append_only` remains
-`&self` and never reallocates or rewrites published bytes. It writes into unpublished spare
-capacity with a raw pointer and publishes `used` with Release, so it never forms `&mut [u8]` while
-readers hold published slices. `SuffixBagCell` exposes `as_ref()` (OCC-protected read) and
-`as_writer()` (shared, lock-protected write); a `&mut SuffixBag` is never created while readers may
-hold `&SuffixBag`. It is `Send` but not `Sync`. Replaced cells are retired through EBR, so readers
-holding the old pointer can finish safely.
-
-`compact` (`src/suffix/compact.rs`) deduplicates active slots, copies live suffixes forward, and
-truncates the buffer. It is used when exclusive access is available; day-to-day production instead
-prefers append-only or drain-and-rebuild.
+The unused public compaction, clone, comparison, count, and in-place assignment
+APIs, and their `PermutationProvider` trait, were removed (breaking low-level
+API change). Live tree paths already use append or replacement bags, so no tree
+operation loses functionality. SUF-02's empty-suffix regression now verifies
+preservation through the remaining growth path.
 
 ### 6.4 Embedded vs sidecar stores
 
@@ -1624,7 +1603,7 @@ pub use leaf_trait::{TreeInternode, TreeLeafNode, TreePermutation};
 pub use leaf15::LeafNode15;
 pub use nodeversion::NodeVersion;
 pub use permuter::{AtomicPermuter, AtomicPermuter15, MAX_WIDTH, Permuter, Permuter15};
-pub use suffix::{PermutationProvider, SuffixBag};
+pub use suffix::SuffixBag;
 pub use retirement::BatchedRetire;
 ```
 
@@ -2132,7 +2111,7 @@ These are architectural observations worth keeping in mind when modifying the co
 | Internode               | `src/internode.rs`, `src/internode/accessors.rs`, `src/internode/layout.rs`                                                             |
 | Leaf/internode traits   | `src/leaf_trait.rs`                                                                                                                     |
 | Policies/values         | `src/policy.rs`, `src/policy/{box_values,inline_values,embedded_suffix,sidecar_suffix,suffix_ops}.rs`                                   |
-| Suffix                  | `src/suffix.rs`, `src/suffix/{inline,compact,clone,sidecar}.rs`                                                                         |
+| Suffix                  | `src/suffix.rs`, `src/suffix/{inline,sidecar}.rs`                                                                         |
 | Inline encoding         | `src/inline/bits.rs`, `src/inline/sentinel.rs`                                                                                          |
 | Allocation/pool         | `src/alloc_trait.rs`, `src/alloc15.rs`, `src/node_pool.rs`                                                                              |
 | Reclamation             | `src/retirement.rs`, `src/alloc15.rs`, `src/policy/*`                                                                                   |

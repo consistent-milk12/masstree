@@ -38,8 +38,11 @@ fixes (including reverse snapshot validation, sentinel test wiring, dependency
 cleanup, and real tracing) are credited only after source verification.
 Completed within step 1: full-live-set rebuild sizing and eliminating unused
 preallocation reduced the existing churn probe from 42 to 6 allocations and
-71,584 to 20,560 requested bytes (20 cycles). Raw ownership, split reservation,
-and header-only initialization remain open.
+71,584 to 20,560 requested bytes (20 cycles). Raw ownership now uses a single
+144-byte header (the actual baseline was 168 bytes with AtomicU64 metadata),
+without suffix-count RMWs. Unused suffix APIs and `PermutationProvider` are
+removed as explicitly requested. Split reservation and header-only initialization
+remain open.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

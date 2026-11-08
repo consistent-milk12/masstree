@@ -219,7 +219,7 @@ pub use nodeversion::NodeVersion;
 pub use permuter::{AtomicPermuter, AtomicPermuter15, MAX_WIDTH, Permuter, Permuter15};
 // InlineSuffixBag is intentionally not re-exported: it relies on the leaf's
 // lock/OCC protocol and is not meant to be used as a standalone concurrent type.
-pub use suffix::{PermutationProvider, SuffixBag};
+pub use suffix::SuffixBag;
 
 // Memory reclamation
 pub use retirement::BatchedRetire;

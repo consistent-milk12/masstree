@@ -16,5 +16,8 @@ CARGO_TARGET_DIR=/tmp/masstree-target cargo run --quiet --manifest-path failures
 
 The probe failed at the allocation bound before the fix. Allocation counts are
 from the system allocator, default suffix capacity, and the inline-value policy;
-they are not throughput measurements. `compact_empty` remains a separate SUF-02
-regression. Run each failure-corpus binary in its own process.
+they are not throughput measurements. Raw-buffer consolidation subsequently
+reduces two replacement headers by 24 bytes each (20,512 bytes total).
+`compact_empty` preserves SUF-02's zero-length/nonempty suffix case across growth;
+the unused public compaction API and its implementation were removed, and the
+reproducer now asserts all three values instead of only printing them. Run each failure-corpus binary in its own process.

@@ -3262,7 +3262,16 @@ inserts into a leaf that already has external storage. The strengthened
 `failures/suffix --bin probe` failed before this change (42 allocations / 71,584
 bytes for 20 churn cycles) and passes afterward (6 / 20,560). Value-only updates
 remain allocation-free. The historical table below is retained as baseline
-context; split reservation and raw suffix ownership are separate work items.
+context; split reservation remains a separate work item. Proposal 3 / SIM-07
+also removes the duplicated Vec owner and cached suffix count: the actual header
+is now 144 bytes instead of 168. Removed public APIs: `SuffixBag::{try_assign,
+try_assign_in_place, compact_with_permuter, suffix_equals, suffix_compare, count}`,
+`Clone for SuffixBag`, and `PermutationProvider`. This is an intentional breaking
+low-level API change, approved for the proposal implementation. The removed
+compaction implementation was the source of SUF-02; its reproducer now asserts
+empty/nonempty suffix preservation through the remaining assignment/growth path.
+A real-bag concurrent append/read test runs under Miri; the existing Loom suffix
+model still does not model this implementation.
 
 The following are measured or mechanically confirmed; none is a correctness
 fix. Values are from the audit host and should be re-measured after correctness
