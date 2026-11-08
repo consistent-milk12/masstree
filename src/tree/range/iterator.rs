@@ -327,11 +327,7 @@ where
                         .layer_stack
                         .push(LayerContext::new(parent_root, self.fwd.stack.leaf_ptr()));
 
-                    if self.fwd.cursor_key.has_suffix() {
-                        self.fwd.cursor_key.shift();
-                    } else {
-                        self.fwd.cursor_key.shift_clear();
-                    }
+                    self.fwd.handle_down();
                 }
 
                 ScanState::Retry => {

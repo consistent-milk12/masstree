@@ -22,6 +22,8 @@ impl ForwardFlags {
     const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
     const SINGLE_LAYER_MODE: u8 = 1 << 4;
     const CURSOR_EMITTED: u8 = 1 << 5;
+    const DOWN_FOLLOW_SUFFIX: u8 = 1 << 6;
+    const DOWN_FRESH_SUBTREE: u8 = 1 << 7;
 
     /// Create new flags with all bits cleared.
     #[inline(always)]
@@ -150,6 +152,43 @@ impl ForwardFlags {
     pub const fn clear_cursor_emitted(&mut self) {
         self.0 &= !Self::CURSOR_EMITTED;
     }
+
+    /// Record how the next sublayer descent should initialize the cursor.
+    ///
+    /// `follow_suffix` means the layer shares the cursor's 8-byte prefix and
+    /// the real key suffix must be carried into the sublayer. `fresh_subtree`
+    /// means the layer is a different prefix, so every key in it is greater
+    /// than the last emitted key and the dedup state must be cleared.
+    #[inline(always)]
+    pub const fn set_down_mode(&mut self, follow_suffix: bool, fresh_subtree: bool) {
+        if follow_suffix {
+            self.0 |= Self::DOWN_FOLLOW_SUFFIX;
+        } else {
+            self.0 &= !Self::DOWN_FOLLOW_SUFFIX;
+        }
+
+        if fresh_subtree {
+            self.0 |= Self::DOWN_FRESH_SUBTREE;
+        } else {
+            self.0 &= !Self::DOWN_FRESH_SUBTREE;
+        }
+    }
+
+    /// Take the pending `follow_suffix` decision, clearing it.
+    #[inline(always)]
+    pub const fn take_down_follow_suffix(&mut self) -> bool {
+        let value: bool = self.0 & Self::DOWN_FOLLOW_SUFFIX != 0;
+        self.0 &= !Self::DOWN_FOLLOW_SUFFIX;
+        value
+    }
+
+    /// Take the pending `fresh_subtree` decision, clearing it.
+    #[inline(always)]
+    pub const fn take_down_fresh_subtree(&mut self) -> bool {
+        let value: bool = self.0 & Self::DOWN_FRESH_SUBTREE != 0;
+        self.0 &= !Self::DOWN_FRESH_SUBTREE;
+        value
+    }
 }
 
 // ============================================================================
@@ -171,6 +210,8 @@ impl ReverseFlags {
     const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
     const UPPER_BOUND: u8 = 1 << 4;
     const CURSOR_EMITTED: u8 = 1 << 5;
+    const DOWN_FOLLOW_SUFFIX: u8 = 1 << 6;
+    const DOWN_FRESH_SUBTREE: u8 = 1 << 7;
 
     /// Create new flags with all bits cleared.
     #[inline(always)]
@@ -306,5 +347,37 @@ impl ReverseFlags {
     #[inline(always)]
     pub const fn clear_cursor_emitted(&mut self) {
         self.0 &= !Self::CURSOR_EMITTED;
+    }
+
+    /// Record how the next sublayer descent should initialize the cursor.
+    #[inline(always)]
+    pub const fn set_down_mode(&mut self, follow_suffix: bool, fresh_subtree: bool) {
+        if follow_suffix {
+            self.0 |= Self::DOWN_FOLLOW_SUFFIX;
+        } else {
+            self.0 &= !Self::DOWN_FOLLOW_SUFFIX;
+        }
+
+        if fresh_subtree {
+            self.0 |= Self::DOWN_FRESH_SUBTREE;
+        } else {
+            self.0 &= !Self::DOWN_FRESH_SUBTREE;
+        }
+    }
+
+    /// Take the pending `follow_suffix` decision, clearing it.
+    #[inline(always)]
+    pub const fn take_down_follow_suffix(&mut self) -> bool {
+        let value: bool = self.0 & Self::DOWN_FOLLOW_SUFFIX != 0;
+        self.0 &= !Self::DOWN_FOLLOW_SUFFIX;
+        value
+    }
+
+    /// Take the pending `fresh_subtree` decision, clearing it.
+    #[inline(always)]
+    pub const fn take_down_fresh_subtree(&mut self) -> bool {
+        let value: bool = self.0 & Self::DOWN_FRESH_SUBTREE != 0;
+        self.0 &= !Self::DOWN_FRESH_SUBTREE;
+        value
     }
 }

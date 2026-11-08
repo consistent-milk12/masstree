@@ -282,6 +282,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                     return (ScanState::Retry, None);
                 }
 
+                self.prepare_down(slot_ikey);
                 probe.assign_store_ikey(slot_ikey);
                 prefetch_read(layer_ptr);
                 self.stack.set_root(layer_ptr);
@@ -475,6 +476,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                 return (ScanState::Retry, None);
             }
 
+            self.prepare_down(slot_ikey);
             self.layer_stack
                 .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
             self.cursor_key.assign_store_ikey(slot_ikey);
@@ -594,6 +596,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                 return (ScanState::Retry, None);
             }
 
+            self.prepare_down(slot_ikey);
             self.cursor_key.assign_store_ikey(slot_ikey);
             prefetch_read(layer_ptr);
             return (ScanState::Down, None);
@@ -799,12 +802,41 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         ScanState::FindNext
     }
 
+    /// Record how a pending `Down` transition should initialize the cursor.
+    ///
+    /// Called by every layer-discovery path before it overwrites the cursor's
+    /// ikey with the layer's.
+    #[inline(always)]
+    const fn prepare_down(&mut self, slot_ikey: u64) {
+        let same_prefix: bool = slot_ikey == self.cursor_key.current_ikey();
+        let real_suffix: bool =
+            self.cursor_key.has_suffix() && !self.cursor_key.is_unshift_sentinel();
+
+        self.flags
+            .set_down_mode(same_prefix && real_suffix, !same_prefix);
+    }
+
     /// Handle descent into a sublayer (Down state).
     ///
     /// Corresponds to `find::handle_down`.
     pub fn handle_down(&mut self) {
-        self.cursor_key.shift_clear();
-        self.flags.clear_cursor_emitted();
+        let follow_suffix: bool = self.flags.take_down_follow_suffix();
+        let fresh_subtree: bool = self.flags.take_down_fresh_subtree();
+
+        if follow_suffix {
+            // The layer shares the cursor's prefix: carry the real key suffix
+            // into the sublayer so the scan starts at the right continuation.
+            self.cursor_key.shift();
+        } else {
+            self.cursor_key.shift_clear();
+
+            if fresh_subtree {
+                // A different prefix: every sublayer key is greater than the
+                // last emitted key, so it must not be deduplicated away.
+                self.flags.clear_cursor_emitted();
+            }
+        }
+
         self.stack.set_last_ikey(0);
     }
 
@@ -892,7 +924,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     {
         let cursor_bound = end_bound.cursor_bound(&self.cursor_key, true);
         let before: usize = *count;
-        let (result, ki, root) = {
+        let (result, ki, root, follow, fresh) = {
             let mut ctx = self.build_batch_ctx();
             let r = process_batch_keyed::<Forward, _, P>(
                 &mut ctx,
@@ -902,12 +934,20 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                 count,
                 &mut (),
             );
-            (r, ctx.ki, ctx.root)
+            (
+                r,
+                ctx.ki,
+                ctx.root,
+                ctx.down_follow_suffix,
+                ctx.down_fresh_subtree,
+            )
         };
         self.stack.set_ki(ki.cast_unsigned());
         self.stack.set_root(root);
 
-        if *count > before {
+        if matches!(result, LeafBatchResult::LayerEncountered) {
+            self.flags.set_down_mode(follow, fresh);
+        } else if *count > before {
             self.flags.mark_cursor_emitted();
         }
 
@@ -927,7 +967,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     {
         let cursor_bound = end_bound.cursor_bound(&self.cursor_key, true);
         let before: usize = *count;
-        let (result, ki, root) = {
+        let (result, ki, root, follow, fresh) = {
             let mut ctx = self.build_batch_ctx();
             let r = process_batch_keyed::<Forward, _, P>(
                 &mut ctx,
@@ -937,12 +977,20 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                 count,
                 &mut (),
             );
-            (r, ctx.ki, ctx.root)
+            (
+                r,
+                ctx.ki,
+                ctx.root,
+                ctx.down_follow_suffix,
+                ctx.down_fresh_subtree,
+            )
         };
         self.stack.set_ki(ki.cast_unsigned());
         self.stack.set_root(root);
 
-        if *count > before {
+        if matches!(result, LeafBatchResult::LayerEncountered) {
+            self.flags.set_down_mode(follow, fresh);
+        } else if *count > before {
             self.flags.mark_cursor_emitted();
         }
 
@@ -959,7 +1007,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     ) -> LeafBatchResult {
         let cursor_bound = end_bound.cursor_bound(&self.cursor_key, true);
         let before: usize = *count;
-        let (result, ki, root) = {
+        let (result, ki, root, follow, fresh) = {
             let mut ctx = self.build_batch_ctx();
             let r = process_batch_values::<Forward, P>(
                 &mut ctx,
@@ -969,12 +1017,20 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                 count,
                 &mut (),
             );
-            (r, ctx.ki, ctx.root)
+            (
+                r,
+                ctx.ki,
+                ctx.root,
+                ctx.down_follow_suffix,
+                ctx.down_fresh_subtree,
+            )
         };
         self.stack.set_ki(ki.cast_unsigned());
         self.stack.set_root(root);
 
-        if *count > before {
+        if matches!(result, LeafBatchResult::LayerEncountered) {
+            self.flags.set_down_mode(follow, fresh);
+        } else if *count > before {
             self.flags.mark_cursor_emitted();
         }
 
@@ -999,6 +1055,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             leaf_ptr,
             cursor_key: &mut self.cursor_key,
             layer_stack: &mut self.layer_stack,
+            down_follow_suffix: false,
+            down_fresh_subtree: false,
         }
     }
 }

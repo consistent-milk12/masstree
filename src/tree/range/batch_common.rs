@@ -377,6 +377,11 @@ pub struct BatchCtx<'a, P: LeafPolicy> {
     pub leaf_ptr: *mut LeafNode15<P>,
     pub cursor_key: &'a mut CursorKey,
     pub layer_stack: &'a mut LayerStack<P>,
+    /// Whether the pending layer descent shares the cursor's prefix and must
+    /// carry its real suffix into the sublayer.
+    pub down_follow_suffix: bool,
+    /// Whether the pending layer descent starts a different prefix subtree.
+    pub down_fresh_subtree: bool,
 }
 
 /// Direction-parameterized keyed batch processor.
@@ -424,6 +429,12 @@ where
 
                 CursorBound::At(_) | CursorBound::Inside => {}
             }
+
+            let same_prefix: bool = slot_ikey == ctx.cursor_key.current_ikey();
+            let real_suffix: bool =
+                ctx.cursor_key.has_suffix() && !ctx.cursor_key.is_unshift_sentinel();
+            ctx.down_follow_suffix = same_prefix && real_suffix;
+            ctx.down_fresh_subtree = !same_prefix;
 
             ctx.layer_stack
                 .push(LayerContext::new(ctx.root, ctx.leaf_ptr));
@@ -543,6 +554,12 @@ where
 
                 CursorBound::At(_) | CursorBound::Inside => {}
             }
+
+            let same_prefix: bool = slot_ikey == ctx.cursor_key.current_ikey();
+            let real_suffix: bool =
+                ctx.cursor_key.has_suffix() && !ctx.cursor_key.is_unshift_sentinel();
+            ctx.down_follow_suffix = same_prefix && real_suffix;
+            ctx.down_fresh_subtree = !same_prefix;
 
             ctx.layer_stack
                 .push(LayerContext::new(ctx.root, ctx.leaf_ptr));

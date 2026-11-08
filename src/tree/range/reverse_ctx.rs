@@ -377,11 +377,16 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         // Update position to before layer pointer for when we return
         self.stack.update_state(version, perm, ki - 1);
 
-        // CRITICAL: Initial descent distinction (from C++ reference)
-        // - If cursor has suffix: use shift() to follow user's end bound
-        // - If no suffix: use shift_clear_reverse() to scan entire sublayer from max
-        if self.cursor_key.has_suffix() {
+        // Initial descent distinction:
+        // - same prefix with a real suffix: follow the end bound downward.
+        // - different prefix (or no suffix): scan the whole sublayer from max.
+        let same_prefix: bool = slot_ikey == self.cursor_key.current_ikey();
+        let real_suffix: bool =
+            self.cursor_key.has_suffix() && !self.cursor_key.is_unshift_sentinel();
+
+        if same_prefix && real_suffix {
             self.cursor_key.shift();
+            self.flags.clear_upper_bound();
         } else {
             self.cursor_key.shift_clear_reverse();
             self.flags.set_upper_bound();
@@ -674,6 +679,14 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         if leaf.version().has_changed(version) {
             return (ScanStateBack::Retry, None);
         }
+
+        // Record whether this layer shares the cursor's prefix before
+        // overwriting the cursor ikey.
+        let same_prefix: bool = slot_ikey == self.cursor_key.current_ikey();
+        let real_suffix: bool =
+            self.cursor_key.has_suffix() && !self.cursor_key.is_unshift_sentinel();
+        self.flags
+            .set_down_mode(same_prefix && real_suffix, !same_prefix);
 
         // Push current context to layer stack for return
         self.layer_stack
@@ -1016,9 +1029,23 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     /// Shifts cursor with `shift_clear_reverse()` and sets `upper_bound = true`.
     #[inline(always)]
     pub(crate) fn handle_down_back(&mut self) {
-        self.cursor_key.shift_clear_reverse();
-        self.flags.set_upper_bound();
-        self.flags.clear_cursor_emitted();
+        let follow_suffix: bool = self.flags.take_down_follow_suffix();
+        let fresh_subtree: bool = self.flags.take_down_fresh_subtree();
+
+        if follow_suffix {
+            // The layer shares the cursor's prefix: carry the real suffix into
+            // the sublayer and search downward from the bound.
+            self.cursor_key.shift();
+            self.flags.clear_upper_bound();
+        } else {
+            self.cursor_key.shift_clear_reverse();
+            self.flags.set_upper_bound();
+
+            if fresh_subtree {
+                self.flags.clear_cursor_emitted();
+            }
+        }
+
         self.stack.set_last_ikey(u64::MAX);
     }
 
@@ -1328,6 +1355,8 @@ fn build_reverse_batch_ctx<'a, P: LeafPolicy>(
         leaf_ptr,
         cursor_key,
         layer_stack,
+        down_follow_suffix: false,
+        down_fresh_subtree: false,
     }
 }
 
@@ -1344,7 +1373,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         F: FnMut(&[u8], &P::Value) -> bool,
     {
         let cursor_bound = start_bound.cursor_bound(&self.cursor_key, false);
-        let (result, ki, root) = {
+        let (result, ki, root, follow, fresh) = {
             let mut ctx =
                 build_reverse_batch_ctx(&self.stack, &mut self.cursor_key, &mut self.layer_stack);
             let r = process_batch_keyed::<Backward, _, P>(
@@ -1355,10 +1384,21 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 count,
                 &mut self.flags,
             );
-            (r, ctx.ki, ctx.root)
+            (
+                r,
+                ctx.ki,
+                ctx.root,
+                ctx.down_follow_suffix,
+                ctx.down_fresh_subtree,
+            )
         };
         self.stack.set_ki(ki);
         self.stack.set_root(root);
+
+        if matches!(result, LeafBatchResultBack::LayerEncountered) {
+            self.flags.set_down_mode(follow, fresh);
+        }
+
         result
     }
 
@@ -1374,7 +1414,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         F: FnMut(&[u8], P::Output) -> bool,
     {
         let cursor_bound = start_bound.cursor_bound(&self.cursor_key, false);
-        let (result, ki, root) = {
+        let (result, ki, root, follow, fresh) = {
             let mut ctx =
                 build_reverse_batch_ctx(&self.stack, &mut self.cursor_key, &mut self.layer_stack);
             let r = process_batch_keyed::<Backward, _, P>(
@@ -1385,10 +1425,21 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 count,
                 &mut self.flags,
             );
-            (r, ctx.ki, ctx.root)
+            (
+                r,
+                ctx.ki,
+                ctx.root,
+                ctx.down_follow_suffix,
+                ctx.down_fresh_subtree,
+            )
         };
         self.stack.set_ki(ki);
         self.stack.set_root(root);
+
+        if matches!(result, LeafBatchResultBack::LayerEncountered) {
+            self.flags.set_down_mode(follow, fresh);
+        }
+
         result
     }
 
@@ -1404,7 +1455,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         F: FnMut(P::Output) -> bool,
     {
         let cursor_bound = start_bound.cursor_bound(&self.cursor_key, false);
-        let (result, ki, root) = {
+        let (result, ki, root, follow, fresh) = {
             let mut ctx =
                 build_reverse_batch_ctx(&self.stack, &mut self.cursor_key, &mut self.layer_stack);
             let r = process_batch_values::<Backward, P>(
@@ -1415,10 +1466,21 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 count,
                 &mut self.flags,
             );
-            (r, ctx.ki, ctx.root)
+            (
+                r,
+                ctx.ki,
+                ctx.root,
+                ctx.down_follow_suffix,
+                ctx.down_fresh_subtree,
+            )
         };
         self.stack.set_ki(ki);
         self.stack.set_root(root);
+
+        if matches!(result, LeafBatchResultBack::LayerEncountered) {
+            self.flags.set_down_mode(follow, fresh);
+        }
+
         result
     }
 
