@@ -121,7 +121,7 @@ impl SuffixBag {
     #[must_use]
     #[inline(always)]
     pub fn from_vec(data: Vec<u8>) -> Self {
-        debug_assert!(data.is_empty(), "from_vec expects empty Vec");
+        assert!(data.is_empty(), "from_vec expects empty Vec");
 
         Self {
             slots: [SlotMeta::EMPTY; WIDTH],
@@ -185,16 +185,19 @@ impl SuffixBag {
 
     /// Assign a suffix with smart space management.
     ///
+    /// Returns `true` if the suffix was stored within the existing buffer,
+    /// `false` if the buffer had to grow.
+    ///
     /// # Panics
     ///
     /// Panics if `suffix.len() > u16::MAX` (65535 bytes).
     #[expect(clippy::indexing_slicing, reason = "Checked access")]
     pub fn try_assign(&mut self, slot: usize, suffix: &[u8]) -> bool {
-        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
         let suffix_len: usize = suffix.len();
 
-        debug_assert!(
+        assert!(
             u16::try_from(suffix_len).is_ok(),
             "suffix too long: {suffix_len} > {}",
             u16::MAX
@@ -256,7 +259,7 @@ impl SuffixBag {
         reason = "Slot bounds checked via caller contract"
     )]
     pub fn has_suffix(&self, slot: usize) -> bool {
-        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
         self.slots[slot].has_suffix()
     }
 
@@ -268,7 +271,7 @@ impl SuffixBag {
     #[must_use]
     #[inline(always)]
     pub fn get(&self, slot: usize) -> Option<&[u8]> {
-        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
         let meta: SlotMeta = self.slots[slot];
 
@@ -315,8 +318,8 @@ impl SuffixBag {
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
     #[inline]
     pub fn try_assign_append_only(&mut self, slot: usize, suffix: &[u8]) -> bool {
-        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
-        debug_assert!(
+        assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        assert!(
             u16::try_from(suffix.len()).is_ok(),
             "suffix too long: {} > {}",
             suffix.len(),
@@ -339,11 +342,11 @@ impl SuffixBag {
     #[inline]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
+        reason = "Slot bounds checked via assert"
     )]
     pub fn try_assign_in_place(&mut self, slot: usize, suffix: &[u8]) -> bool {
-        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
-        debug_assert!(
+        assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        assert!(
             u16::try_from(suffix.len()).is_ok(),
             "suffix too long: {} > {}",
             suffix.len(),
@@ -413,11 +416,11 @@ impl SuffixBag {
     #[inline]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
+        reason = "Slot bounds checked via assert"
     )]
     pub fn assign(&mut self, slot: usize, suffix: &[u8]) {
-        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
-        debug_assert!(
+        assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        assert!(
             u16::try_from(suffix.len()).is_ok(),
             "suffix too long: {} > {}",
             suffix.len(),
@@ -454,10 +457,10 @@ impl SuffixBag {
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
-        reason = "Slot bounds checked via debug_assert"
+        reason = "Slot bounds checked via assert"
     )]
     pub fn clear(&mut self, slot: usize) {
-        debug_assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
+        assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
         if self.slots[slot].has_suffix() {
             self.suffix_count -= 1;
