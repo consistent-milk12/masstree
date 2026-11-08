@@ -270,7 +270,7 @@ unsafe fn drain_and_rebuild(
 ) -> *mut u8 {
     let new_bag: SuffixBag = inline.drain_to_external(perm, slot, suffix);
     // SAFETY: Caller holds the leaf lock and external_slot is valid.
-    unsafe { install_drained_bag(new_bag, external_slot, slot, perm) }
+    unsafe { install_drained_bag(new_bag, inline, external_slot, slot, perm) }
 }
 
 /// Same as [`drain_and_rebuild`] but uses a pre-allocated `Vec<u8>` buffer
@@ -291,7 +291,7 @@ unsafe fn drain_and_rebuild_prealloc(
 ) -> *mut u8 {
     let new_bag: SuffixBag = inline.drain_to_external_with_vec(perm, slot, suffix, prealloc);
     // SAFETY: Caller holds the leaf lock and external_slot is valid.
-    unsafe { install_drained_bag(new_bag, external_slot, slot, perm) }
+    unsafe { install_drained_bag(new_bag, inline, external_slot, slot, perm) }
 }
 
 /// Merge old external data into the new bag, box it, and install atomically.
@@ -304,6 +304,7 @@ unsafe fn drain_and_rebuild_prealloc(
 #[inline(always)]
 unsafe fn install_drained_bag(
     mut new_bag: SuffixBag,
+    inline: &InlineSuffixBag,
     external_slot: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     perm: &impl TreePermutation,
@@ -314,6 +315,12 @@ unsafe fn install_drained_bag(
     let new_cell: SuffixBagCell = SuffixBagCell::from_bag(new_bag);
     let new_ptr: *mut SuffixBagCell = Box::into_raw(Box::new(new_cell));
     external_slot.store(new_ptr, AtomicOrdering::Release);
+
+    // The drained bag holds the new suffix for `slot`; the inline copy (if the
+    // slot previously held one) was deliberately skipped by `drain_core`.
+    // Clear it so `get_suffix`'s inline-first lookup cannot shadow the new
+    // external value.
+    inline.clear(slot);
 
     old_external.cast::<u8>()
 }
