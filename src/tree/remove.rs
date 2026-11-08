@@ -396,18 +396,17 @@ impl NodeCleaner {
         }
     }
 
-    /// Attempt to collapse empty internodes upward from the given parent.
+    /// Attempt to collapse truly empty internodes upward from the given parent.
     ///
-    /// On failure (`RetryExhausted`), the empty internode is left in place.
-    /// This is a pre-existing limitation that does not affect leaf correctness.
-    /// Attempt to collapse empty internodes upward from the given parent.
+    /// A non-root internode with `nkeys == 0` but a live `child[0]` is a unary
+    /// routing level. Collapsing it into the grandparent would shorten only
+    /// that branch while the ancestor's immutable height stays unchanged
+    /// (GC-04), so it is preserved. Only a node with no surviving child is
+    /// truly empty and is unlinked.
     ///
     /// `ikey_bound` is the routing key used to locate the start internode
     /// in its parent. It propagates upward and is updated when a redirect
     /// changes the effective left-edge boundary.
-    ///
-    /// On failure (`RetryExhausted`), the empty internode is left in place.
-    /// This is a pre-existing limitation that does not affect leaf correctness.
     #[cold]
     pub(crate) fn try_cascade_internodes<P, A>(
         allocator: &A,
@@ -430,34 +429,37 @@ impl NodeCleaner {
             // Capture the remaining child before collapsing.
             let child0: *mut u8 = TreeInternode::child(parent, 0);
 
-            // Mark the empty parent deleted.
-            current_lock.mark_deleted();
+            if !child0.is_null() {
+                // GC-04: keep the unary routing level. Its child covers the
+                // same range, and removing the level here would make the
+                // grandparent's height inconsistent with this branch.
+                drop(current_lock);
+                return;
+            }
 
-            // Clear child pointer before retirement.
-            parent.set_child(0, StdPtr::null_mut());
+            // The node has no surviving child. Unlink it from the grandparent
+            // first; only then publish the deletion and retire it (GC-03).
+            // Retry acquisition instead of returning on exhaustion: a retired
+            // node must never remain reachable from the tree.
 
-            // SAFETY: current is a valid internode that we hold locked.
-            unsafe { allocator.retire_internode_erased(current, guard) };
+            let (mut grandparent_lock, grandparent_ptr) = loop {
+                // SAFETY: current is valid (locked) and protected by the guard.
+                match unsafe { Self::locked_parent_generic::<P>(current) } {
+                    LockedParentResult::Locked(lock, ptr) => break (lock, ptr),
 
-            // Try to lock the grandparent.
-            // SAFETY: current is valid (retired but still accessible under guard).
-            let grandparent_result: LockedParentResult<'_> =
-                unsafe { Self::locked_parent_generic::<P>(current) };
+                    LockedParentResult::NoParent => {
+                        // Current is the root. Keep it; a root contraction is
+                        // a separate publication protocol.
+                        drop(current_lock);
+                        return;
+                    }
 
-            let (mut grandparent_lock, grandparent_ptr) = match grandparent_result {
-                LockedParentResult::Locked(lock, ptr) => (lock, ptr),
-
-                LockedParentResult::NoParent => {
-                    drop(current_lock);
-                    return;
-                }
-
-                LockedParentResult::RetryExhausted => {
-                    // Pre-existing limitation: grandparent still points to retired
-                    // internode. Tree traversal handles this (detects deleted nodes,
-                    // restarts from higher level).
-                    drop(current_lock);
-                    return;
+                    LockedParentResult::RetryExhausted => {
+                        // The parent pointer kept moving. Stay blocked until it
+                        // stabilizes; the alternative is a linked node with no
+                        // child and no retirement.
+                        StdHint::spin_loop();
+                    }
                 }
             };
 
@@ -484,19 +486,21 @@ impl NodeCleaner {
                 return;
             };
 
-            // Replace current with its remaining child in grandparent.
-            grandparent.set_child(kp, child0);
+            // Publish the deletion before unlinking: a reader that still sees
+            // the old child pointer must observe DELETED and restart instead
+            // of descending into a node with no child.
+            current_lock.mark_deleted();
 
-            if !child0.is_null() {
-                // SAFETY: child0 is a valid node pointer.
-                unsafe { Self::set_parent_erased::<P>(child0, grandparent_ptr) };
-            } else if kp > 0 {
+            // Unlink current: there is no surviving child to reparent.
+            grandparent.set_child(kp, StdPtr::null_mut());
+
+            if kp > 0 {
                 Self::shift_internode_down_generic::<InternodeNode>(grandparent, kp);
             }
 
             // Redirect ancestor ikey bounds if the replacement created a
             // null-slot-0 shape. Mirrors the check in
-            // remove_leaf_from_immediate_parent (line 381-384).
+            // remove_leaf_from_immediate_parent.
             if (kp <= 1)
                 && (grandparent.nkeys() > 0)
                 && TreeInternode::child(grandparent, 0).is_null()
@@ -507,6 +511,11 @@ impl NodeCleaner {
             }
 
             drop(current_lock);
+
+            // SAFETY: current is unreachable from the tree (unlinked above)
+            // and marked deleted; the guard prevents premature reclamation of
+            // any pointer still held by a concurrent reader.
+            unsafe { allocator.retire_internode_erased(current, guard) };
 
             if grandparent.nkeys() > 0 || grandparent.version().is_root() {
                 drop(grandparent_lock);
@@ -1100,7 +1109,9 @@ impl NodeCleaner {
     /// Set the parent pointer on a node (leaf or internode).
     ///
     /// Reads `NodeVersion::is_leaf()` to dispatch, then delegates to
-    /// [`Propagation::set_parent`].
+    /// [`Propagation::set_parent`]. Used by unit tests; production cascade no
+    /// longer reparents a surviving child (it preserves unary levels).
+    #[cfg(test)]
     #[inline(always)]
     unsafe fn set_parent_erased<P: LeafPolicy>(node_ptr: *mut u8, new_parent: *mut u8) {
         // SAFETY: Caller guarantees node_ptr points to valid leaf or internode.

@@ -11,7 +11,9 @@ fn contention_does_not_spend_all_retries_in_one_call() {
         assert_eq!(tree.remove(&key.to_be_bytes()).unwrap(), Some(key));
     }
     let guard = tree.guard();
-    let root = tree.debug_root_ptr(&guard);
+    // SAFETY: Quiescent inspection of this tree under its guard; the tree and
+    // its nodes are live for the guard's lifetime.
+    let root = unsafe { tree.debug_root_ptr(&guard) };
     // SAFETY: Quiescent inspection of this tree under its guard; both layouts
     // place NodeVersion at offset zero.
     assert!(!unsafe { &*root.cast::<NodeVersion>() }.is_leaf());

@@ -14,7 +14,9 @@ fn cascade_preserves_child_height() {
     }
     let mut guard = tree.guard();
     tree.maintenance(&mut guard);
-    let root = tree.debug_root_ptr(&guard);
+    // SAFETY: Quiescent inspection of this tree under its guard; the tree and
+    // its nodes are live for the guard's lifetime.
+    let root = unsafe { tree.debug_root_ptr(&guard) };
     // SAFETY: The guard belongs to this live tree, and inspection is quiescent.
     // NodeVersion is at offset zero in both node layouts.
     assert!(!unsafe { &*root.cast::<NodeVersion>() }.is_leaf());

@@ -7,7 +7,9 @@ use masstree::{MassTree15Inline, NodeVersion};
 fn insert_version_bump_probe() {
     let tree = MassTree15Inline::<u64>::new();
     let g = tree.guard();
-    let p: *mut NodeVersion = tree.debug_root_ptr(&g).cast();
+    // SAFETY: Quiescent inspection of this tree under its guard; the root node
+    // is live for the guard's lifetime.
+    let p: *mut NodeVersion = unsafe { tree.debug_root_ptr(&g) }.cast();
     let v = |p: *mut NodeVersion| unsafe { (*p).value() };
     println!("initial: {:#x}", v(p));
     tree.insert_with_guard(b"aaaa", 1, &g);
