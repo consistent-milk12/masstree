@@ -245,17 +245,21 @@ thread_local! {
 #[inline]
 #[must_use]
 pub fn pool_alloc(layout: Layout) -> *mut u8 {
-    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+    let ptr: *mut u8 = match POOL.try_with(|cell: &UnsafeCell<ThreadPool>| {
         // SAFETY: thread-local access is single-threaded
         let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
-        let ptr: *mut u8 = pool.alloc(layout);
+        pool.alloc(layout)
+    }) {
+        Ok(ptr) => ptr,
+        // TLS is gone (thread teardown): fall back to the global allocator.
+        Err(_) => unsafe { alloc(layout) },
+    };
 
-        if ptr.is_null() {
-            handle_alloc_error(layout);
-        }
+    if ptr.is_null() {
+        handle_alloc_error(layout);
+    }
 
-        ptr
-    })
+    ptr
 }
 
 /// Return memory to the thread-local pool.
@@ -274,10 +278,14 @@ pub unsafe fn pool_dealloc(ptr: *mut u8, layout: Layout) {
         CACHE_LINE,
     );
 
-    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+    match POOL.try_with(|cell: &UnsafeCell<ThreadPool>| {
         let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
         unsafe { pool.dealloc(ptr, layout) };
-    });
+    }) {
+        Ok(()) => {}
+        // TLS is gone (thread teardown): free directly with the same layout.
+        Err(_) => unsafe { dealloc(ptr, layout) },
+    }
 }
 
 // ============================================================================
@@ -291,16 +299,22 @@ pub fn pool_alloc_leaf<P: LeafPolicy>() -> *mut u8 {
     // node_size_class panics at compile time if LeafNode15<P> is too large.
     let nl: usize = const { node_size_class::<LeafNode15<P>>() };
 
-    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+    let layout: Layout = unsafe { bucket_layout(nl) };
+
+    let ptr: *mut u8 = match POOL.try_with(|cell: &UnsafeCell<ThreadPool>| {
         let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
-        let ptr: *mut u8 = pool.alloc_from_bucket(nl);
+        pool.alloc_from_bucket(nl)
+    }) {
+        Ok(ptr) => ptr,
+        // TLS is gone (thread teardown): allocate directly.
+        Err(_) => unsafe { alloc(layout) },
+    };
 
-        if ptr.is_null() {
-            handle_alloc_error(unsafe { bucket_layout(nl) });
-        }
+    if ptr.is_null() {
+        handle_alloc_error(layout);
+    }
 
-        ptr
-    })
+    ptr
 }
 
 /// Allocate an `InternodeNode` from the thread-local pool. Aborts on OOM.
@@ -309,16 +323,22 @@ pub fn pool_alloc_leaf<P: LeafPolicy>() -> *mut u8 {
 pub fn pool_alloc_internode() -> *mut u8 {
     const NL: usize = node_size_class::<InternodeNode>();
 
-    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+    let layout: Layout = unsafe { bucket_layout(NL) };
+
+    let ptr: *mut u8 = match POOL.try_with(|cell: &UnsafeCell<ThreadPool>| {
         let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
-        let ptr: *mut u8 = pool.alloc_from_bucket(NL);
+        pool.alloc_from_bucket(NL)
+    }) {
+        Ok(ptr) => ptr,
+        // TLS is gone (thread teardown): allocate directly.
+        Err(_) => unsafe { alloc(layout) },
+    };
 
-        if ptr.is_null() {
-            handle_alloc_error(unsafe { bucket_layout(NL) });
-        }
+    if ptr.is_null() {
+        handle_alloc_error(layout);
+    }
 
-        ptr
-    })
+    ptr
 }
 
 /// Return a `LeafNode15<P>` to the thread-local pool.
@@ -330,11 +350,15 @@ pub fn pool_alloc_internode() -> *mut u8 {
 pub unsafe fn pool_dealloc_leaf<P: LeafPolicy>(ptr: *mut u8) {
     let nl: usize = const { node_size_class::<LeafNode15<P>>() };
 
-    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+    match POOL.try_with(|cell: &UnsafeCell<ThreadPool>| {
         let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
 
         unsafe { pool.dealloc_to_bucket(ptr, nl) };
-    });
+    }) {
+        Ok(()) => {}
+        // TLS is gone (thread teardown): free directly with the bucket layout.
+        Err(_) => unsafe { dealloc(ptr, bucket_layout(nl)) },
+    }
 }
 
 /// Return an `InternodeNode` to the thread-local pool.
@@ -346,11 +370,15 @@ pub unsafe fn pool_dealloc_leaf<P: LeafPolicy>(ptr: *mut u8) {
 pub unsafe fn pool_dealloc_internode(ptr: *mut u8) {
     const NL: usize = node_size_class::<InternodeNode>();
 
-    POOL.with(|cell: &UnsafeCell<ThreadPool>| {
+    match POOL.try_with(|cell: &UnsafeCell<ThreadPool>| {
         let pool: &mut ThreadPool = unsafe { &mut *cell.get() };
 
         unsafe { pool.dealloc_to_bucket(ptr, NL) };
-    });
+    }) {
+        Ok(()) => {}
+        // TLS is gone (thread teardown): free directly with the bucket layout.
+        Err(_) => unsafe { dealloc(ptr, bucket_layout(NL)) },
+    }
 }
 
 // ============================================================================
