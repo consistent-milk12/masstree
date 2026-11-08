@@ -681,10 +681,10 @@ impl NodeCleaner {
                         leaf = unsafe { &*leaf_ptr };
                     }
 
-                    RemoveSearchResult::Found { .. } => {
+                    RemoveSearchResult::Found { ki, kp } => {
                         // Lock, revalidate full key identity, and get a cursor.
                         let lock_result = Self::lock_and_verify_for_remove(
-                            tree, leaf_ptr, &key, &mut route, guard,
+                            tree, leaf_ptr, &key, &mut route, guard, version, perm, ki, kp,
                         );
 
                         match lock_result {
@@ -756,7 +756,18 @@ impl NodeCleaner {
 
                     RemoveSearchResult::DescendLayer { layer_ptr } => {
                         if !Self::is_sublayer_valid(layer_ptr) {
-                            return Ok(None);
+                            // The sublayer was GC'd between the search and
+                            // the version check. Treat it as contention, not
+                            // as a missing key.
+                            if !Self::bump_retry(&mut retry_count) {
+                                return Err(RemoveError::RetryLimitExceeded);
+                            }
+
+                            if leaf.version().has_changed(version) {
+                                continue 'forward;
+                            }
+
+                            continue 'layer_loop;
                         }
 
                         route.push(key.ikey());
@@ -848,12 +859,20 @@ impl NodeCleaner {
 
     /// Lock the leaf and verify the key is still present for removal.
     #[inline]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Pre-lock state is needed for the unchanged-leaf fast path"
+    )]
     fn lock_and_verify_for_remove<'t, 'g, P, A>(
         tree: &'t MassTreeGeneric<P, A>,
         leaf_ptr: *mut LeafNode15<P>,
         key: &Key<'_>,
         route: &mut Route,
         guard: &'g LocalGuard<'g>,
+        pre_version: u32,
+        pre_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        pre_ki: usize,
+        pre_kp: usize,
     ) -> RemoveLockResult<'t, 'g, P, A>
     where
         P: LeafPolicy,
@@ -880,32 +899,45 @@ impl NodeCleaner {
             return RemoveLockResult::Retry;
         }
 
-        // REM-01: re-run the full-key search under the lock. The pre-lock
-        // logical position can refer to a different key after a same-ikey
-        // insert/remove shifted the permutation. `search_for_remove` compares
-        // ikey, keylenx, and suffix bytes, so this establishes identity.
-        let search_result: RemoveSearchResult = if key.has_suffix() {
-            Self::search_for_remove::<false, P>(leaf, key, &new_perm)
+        // REM-01: if the leaf did not change between the search and the
+        // lock, the pre-lock logical position still identifies the same key.
+        // This is the common case and avoids a redundant full-key search.
+        let unchanged: bool = !leaf.version().has_changed(pre_version) && new_perm == pre_perm;
+
+        let (new_ki, new_slot): (usize, usize) = if unchanged
+            && pre_ki < new_perm.size()
+            && new_perm.get(pre_ki) == pre_kp
+            && !leaf.is_value_empty(pre_kp)
+        {
+            (pre_ki, pre_kp)
         } else {
-            Self::search_for_remove::<true, P>(leaf, key, &new_perm)
-        };
+            // Remediation: re-run the full-key search under the lock. The
+            // pre-lock position can refer to a different key after a
+            // same-ikey insert/remove shifted the permutation.
+            // `search_for_remove` compares ikey, keylenx, and suffix bytes.
+            let search_result: RemoveSearchResult = if key.has_suffix() {
+                Self::search_for_remove::<false, P>(leaf, key, &new_perm)
+            } else {
+                Self::search_for_remove::<true, P>(leaf, key, &new_perm)
+            };
 
-        let (new_ki, new_slot): (usize, usize) = match search_result {
-            RemoveSearchResult::Found { ki, kp } => (ki, kp),
+            match search_result {
+                RemoveSearchResult::Found { ki, kp } => (ki, kp),
 
-            RemoveSearchResult::DescendLayer { layer_ptr: lp } => {
-                drop(lock);
+                RemoveSearchResult::DescendLayer { layer_ptr: lp } => {
+                    drop(lock);
 
-                if !Self::is_sublayer_valid(lp) {
-                    return RemoveLockResult::NotFound;
+                    if !Self::is_sublayer_valid(lp) {
+                        return RemoveLockResult::Retry;
+                    }
+
+                    return RemoveLockResult::DescendLayer { layer_ptr: lp };
                 }
 
-                return RemoveLockResult::DescendLayer { layer_ptr: lp };
-            }
-
-            RemoveSearchResult::NotFound => {
-                drop(lock);
-                return RemoveLockResult::Retry;
+                RemoveSearchResult::NotFound => {
+                    drop(lock);
+                    return RemoveLockResult::Retry;
+                }
             }
         };
 
@@ -916,18 +948,10 @@ impl NodeCleaner {
             drop(lock);
 
             if !Self::is_sublayer_valid(lp) {
-                return RemoveLockResult::NotFound;
+                return RemoveLockResult::Retry;
             }
 
             return RemoveLockResult::DescendLayer { layer_ptr: lp };
-        }
-
-        // Defense in depth: require exact full-key identity for suffix keys.
-        if slot_keylenx == KSUF_KEYLENX
-            && (!key.has_suffix() || !leaf.ksuf_equals(new_slot, key.suffix()))
-        {
-            drop(lock);
-            return RemoveLockResult::Retry;
         }
 
         let cursor: RemoveCursor<'_, '_, P, A> = RemoveCursor::new(
@@ -947,9 +971,20 @@ impl NodeCleaner {
     //  Sublayer Helpers
     // ============================================================================
 
+    /// Charge one retry. Returns `false` when the budget is exhausted.
+    #[inline(always)]
+    fn bump_retry(retry_count: &mut usize) -> bool {
+        *retry_count += 1;
+        *retry_count < MAX_RETRIES
+    }
+
     /// Check if a sublayer is valid (not deleted) before descending.
     #[inline(always)]
     fn is_sublayer_valid(layer_ptr: *mut u8) -> bool {
+        if layer_ptr.is_null() {
+            return false;
+        }
+
         // SAFETY: layer_ptr came from a valid slot, protected by guard.
         unsafe { NodeVersion::is_valid_sublayer(layer_ptr) }
     }
