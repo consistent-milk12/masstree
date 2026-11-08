@@ -258,7 +258,8 @@ fn test_split_insert_at_position_0() {
 
     // Insert key 10 at position 0 (smallest)
     let (popup_key, insert_went_left) =
-        node.split_into(&mut new_right, new_right_ptr, 0, 10, new_child);
+        // SAFETY: test owns both nodes; children are valid internodes/leaves.
+        unsafe { node.split_into(&mut new_right, new_right_ptr, 0, 10, new_child) };
 
     // Insert at position 0 < mid(8), so it goes left
     assert!(insert_went_left, "Insert at position 0 should go left");
@@ -287,7 +288,8 @@ fn test_split_insert_at_width() {
 
     // Insert key 200 at position 15 (largest, after all existing)
     let (popup_key, insert_went_left) =
-        node.split_into(&mut new_right, new_right_ptr, 15, 200, new_child);
+        // SAFETY: test owns both nodes; the node is full and insert_pos == WIDTH.
+        unsafe { node.split_into(&mut new_right, new_right_ptr, 15, 200, new_child) };
 
     // Insert at position 15 > mid(8), so it goes right
     assert!(
@@ -320,7 +322,8 @@ fn test_split_insert_at_midpoint() {
     // mid = ceil(15/2) = 8
     // Insert key 85 at position 8 (the midpoint)
     let (popup_key, insert_went_left) =
-        node.split_into(&mut new_right, new_right_ptr, 8, 85, new_child);
+        // SAFETY: test owns both nodes; children are valid internodes/leaves.
+        unsafe { node.split_into(&mut new_right, new_right_ptr, 8, 85, new_child) };
 
     // When insert_pos == mid, the insert key becomes the popup key
     assert_eq!(popup_key, 85, "Insert at midpoint should become popup key");
