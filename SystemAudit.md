@@ -3315,8 +3315,20 @@ PERF-07 follow-up: forward and reverse scan contexts now cache the resolved
 promoted root. The shared guarded resolver also serves point operations,
 printing and GC. A deterministic regression checks that a cached-root retry
 takes zero parent hops, including multi-level promotion; it failed on the
-original left-leaf cache. Native and Miri tests pass. Full internode/B-link
-descent consolidation remains tracked under Proposal 2 / RNG-09.
+original left-leaf cache. Native and Miri tests pass. Parent slots are now also
+refreshed opportunistically by point reads, inserts and removals. A try-lock
+with no sublayer lock held revalidates slot membership/key/tag/pointer before
+publication. Tests verify zero subsequent parent hops, progress when the lock is
+unavailable, and reclamation after promotion for both policies. Existing GC is
+already root-kind agnostic. Full internode/B-link descent consolidation remains
+tracked under Proposal 2 / RNG-09.
+
+OCC-04 cached-root follow-up: traversal from an internode root retired by whole
+sublayer GC repeatedly retried the same deleted subtree. The focused
+`reach_rejects_retired_promoted_root` test reached its sentinel and timed out
+after 15 seconds (exit 124). Traversal now reports a restart, with explicit
+handling in point readers, write B-link advance, and GC route lookup. The guard
+keeps the retired node alive while the old pointer is rejected.
 
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|

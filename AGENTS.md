@@ -137,12 +137,16 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
 
 ### Layer roots
 
-- On promotion, the parent slot continues to point at the original
-  **left leaf**; the true layer root is an internode reached by climbing
-  `parent` pointers. This invariant is the source of several bugs (`RNG-04`,
-  `GC-02`).
-- Any code that assumes a layer-slot pointer is a leaf must either climb to the
-  root or explicitly reject promoted layers.
+- Promotion initially leaves the parent slot pointing at the original left
+  leaf. Point operations may refresh it to a resolved internode root, which
+  can become stale after another promotion. Resolve parent pointers and check
+  the node kind; never assume a layer-slot target is a leaf (`RNG-04`, `GC-02`).
+- Root refresh may try-lock the parent leaf only when no sublayer lock is held.
+  Recheck active-slot membership, ikey, layer tag, and the old pointer before
+  publishing the resolved root with the parent version marked dirty.
+- Sublayer nodes are retired as a whole after their owning slot is cleared.
+  A retired cached root makes traversal request a fresh descent; readers and
+  writers must reset the key's layer offset and restart from the main root.
 
 ### B-link chain and retirement
 

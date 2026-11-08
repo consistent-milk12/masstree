@@ -602,6 +602,17 @@ where
                     let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
 
                     if !layer_ptr.is_null() && !leaf.version().has_changed(pre_lock_version) {
+                        // SAFETY: The parent slot passed OCC validation; no
+                        // node lock is held yet, and guard protects this layer.
+                        let layer_ptr = unsafe {
+                            crate::tree::traversal::resolve_layer_slot(
+                                leaf,
+                                slot,
+                                key.ikey(),
+                                layer_ptr,
+                                guard,
+                            )
+                        };
                         key.shift();
                         layer_root = layer_ptr;
                         in_sublayer = true;
@@ -789,6 +800,17 @@ where
                         let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
                         drop(lock);
 
+                        // SAFETY: The slot was read under the parent lock,
+                        // which was dropped above. guard protects its layer.
+                        let layer_ptr = unsafe {
+                            crate::tree::traversal::resolve_layer_slot(
+                                leaf,
+                                slot,
+                                key.ikey(),
+                                layer_ptr,
+                                guard,
+                            )
+                        };
                         key.shift();
                         layer_root = layer_ptr;
                         in_sublayer = true;

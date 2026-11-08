@@ -682,6 +682,35 @@ fn scan_contexts_cache_promoted_layer_roots() {
             tree.insert(key, i as u64);
         }
         let guard = tree.guard();
+        // Keep this regression independent of opportunistic point-operation
+        // refreshes: make the slot name the original left leaf once again.
+        // SAFETY: All keys share one top-level ikey, so the top root is a leaf
+        // protected by guard. No concurrent writer runs during this setup.
+        let parent = unsafe {
+            &*tree
+                .load_root_ptr_generic(&guard)
+                .cast::<crate::leaf15::LeafNode15<crate::policy::InlinePolicy<u64>>>()
+        };
+        let slot = parent.permutation().get(0);
+        let mut left = parent.load_layer_raw(slot);
+        loop {
+            // SAFETY: Both node kinds begin with NodeVersion; every pointer
+            // comes from this live tree and is protected by guard.
+            #[expect(clippy::cast_ptr_alignment, reason = "NodeVersion is first field")]
+            let version = unsafe { &*left.cast::<NodeVersion>() };
+            if version.is_leaf() {
+                break;
+            }
+            // SAFETY: The kind check established an internode. Its first
+            // child belongs to this layer and is loaded under the same guard.
+            left = unsafe { &*left.cast::<crate::internode::InternodeNode>() }.child(0, &guard);
+        }
+        let mut lock = parent.version().lock();
+        lock.mark_insert();
+        // SAFETY: The locked slot still represents this layer, whose leftmost
+        // leaf remains a live descendant and a valid stale-root entry point.
+        unsafe { parent.store_layer(slot, left) };
+        drop(lock);
         let mut iter = tree.range(
             RangeBound::Included(&keys[15]),
             RangeBound::Included(&keys[39]),

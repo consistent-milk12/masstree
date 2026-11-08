@@ -175,6 +175,33 @@ fn test_loom_entry_hint_revalidated_under_lock() {
     });
 }
 
+/// A root-cache refresh must not republish a layer after GC clears its slot.
+/// Node IDs stand in for guarded pointers; this tests parent-lock revalidation,
+/// not the real subtree traversal or EBR implementation.
+#[test]
+fn test_loom_root_refresh_does_not_resurrect_deleted_layer() {
+    loom::model(|| {
+        let parent = Arc::new((LoomNodeVersion::new(true), AtomicU32::new(1)));
+        let gc_parent = Arc::clone(&parent);
+        let gc = thread::spawn(move || {
+            let mut lock = gc_parent.0.lock();
+            lock.mark_insert();
+            gc_parent.1.store(0, Ordering::Release);
+        });
+
+        // The refresh observed old target 1 and resolved its promoted root 2
+        // before trying the parent lock. GC may have cleared the slot since.
+        if let Some(mut lock) = parent.0.try_lock()
+            && parent.1.load(Ordering::Acquire) == 1
+        {
+            lock.mark_insert();
+            parent.1.store(2, Ordering::Release);
+        }
+        gc.join().unwrap();
+        assert_eq!(parent.1.load(Ordering::Acquire), 0);
+    });
+}
+
 /// Test that two threads can't both hold the lock simultaneously.
 #[test]
 fn test_loom_mutual_exclusion() {

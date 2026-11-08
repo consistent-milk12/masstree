@@ -76,8 +76,18 @@ contexts retain the resolved root on initial positioning and retries, including
 roots with multiple internode levels. A focused regression failed on the stale
 left-leaf cache before the change and now proves zero parent hops on retry.
 The promoted-layer reproducer now asserts all keyed, reference, batch, values,
-prefix and mixed-direction scan results against a BTreeMap. Internode/B-link
-descent consolidation and opportunistic parent-slot updates remain open.
+prefix and mixed-direction scan results against a BTreeMap. Point reads, inserts,
+and removals now opportunistically refresh parent slots to resolved roots using
+a nonblocking parent-only lock and full slot revalidation. Both policies pass
+zero-hop read, held-parent-lock progress, multi-height promotion, and subsequent
+GC tests under Miri. A Loom model checks that refresh cannot resurrect a slot
+cleared by GC. The actual GC already walks a whole validated subtree and accepts
+internode slot targets, so the historical `all_leaves_empty` rewrite is obsolete.
+The required retired-root escape also landed: a deterministic traversal of a
+guard-protected root after sublayer GC timed out before the fix (15-second
+watchdog, exit 124). It now requests a restart; point reads, writes, and GC all
+handle that result before dereferencing a leaf.
+Internode/B-link descent consolidation remains open.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

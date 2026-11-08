@@ -93,7 +93,7 @@ where
     fn get_with_guard_single_layer<const CAPTURE_HINT: bool>(
         &self,
         key: &Key<'_>,
-        layer_root: *const u8,
+        mut layer_root: *const u8,
         guard: &LocalGuard<'_>,
         hint: &mut Option<EntryLeafHint<P>>,
     ) -> Option<P::Output> {
@@ -107,6 +107,11 @@ where
             self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
 
         'leaf_loop: loop {
+            if leaf_ptr.is_null() {
+                layer_root = self.load_root_ptr_generic(guard);
+                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
+                continue 'leaf_loop;
+            }
             // SAFETY: leaf_ptr protected by guard
             let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
@@ -243,6 +248,12 @@ where
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             'leaf_loop: loop {
+                if leaf_ptr.is_null() {
+                    key.unshift_all();
+                    layer_root = self.load_root_ptr_generic(guard);
+                    in_sublayer = false;
+                    continue 'layer_loop;
+                }
                 // OPTIM: Compute ikey once per leaf iteration.
                 //
                 // key.shift() mutates on layer descent, so this must be per-iteration.
@@ -340,7 +351,9 @@ where
                             return output;
                         }
 
-                        LookupResult::Layer(layer_ptr) => {
+                        LookupResult::LayerSlot(slot) => {
+                            let layer_ptr = leaf.load_layer_raw(slot);
+                            crate::prefetch::prefetch_read(layer_ptr);
                             // Validate version BEFORE descending
                             match self.validate_version_multi(leaf, ver, key, version, guard) {
                                 VersionCheck::Valid => {}
@@ -362,6 +375,18 @@ where
                                 }
                                 return None;
                             }
+
+                            // SAFETY: The guarded slot was validated above,
+                            // the sublayer is live, and no node locks are held.
+                            let layer_ptr = unsafe {
+                                crate::tree::traversal::resolve_layer_slot(
+                                    leaf,
+                                    slot,
+                                    target_ikey,
+                                    layer_ptr,
+                                    guard,
+                                )
+                            };
 
                             // Fast-path: descend through single-entry twig
                             // leaves without re-entering reach_leaf.

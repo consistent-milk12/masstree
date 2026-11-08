@@ -916,6 +916,9 @@ impl Coalesce {
         target_ikey: u64,
         guard: &LocalGuard<'_>,
     ) -> RouteLookupResult<*mut LeafNode15<P>> {
+        if start.is_null() {
+            return RouteLookupResult::Retry;
+        }
         let mut leaf_ptr: *mut LeafNode15<P> = start;
         let mut hops: usize = 0;
 

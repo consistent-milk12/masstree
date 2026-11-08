@@ -290,7 +290,8 @@ where
         }
     }
 
-    /// Double-buffer traversal from root to leaf.
+    /// Double-buffer traversal from root to leaf. A null result means the
+    /// cached layer root was retired; callers must restart from the tree root.
     #[expect(clippy::indexing_slicing, reason = "sense is always 0 or 1")]
     #[expect(
         clippy::too_many_lines,
@@ -306,6 +307,9 @@ where
         use crate::ksearch::upper_bound_internode_generic;
         use crate::prefetch::prefetch_read;
 
+        if start.is_null() {
+            return StdPtr::null_mut();
+        }
         #[cfg(test)]
         REACH_COUNT.with(|count| count.set(count.get() + 1));
 
@@ -327,7 +331,10 @@ where
                 let version: &NodeVersion = unsafe { &*(n[sense].cast::<NodeVersion>()) };
                 v[sense] = version.stable();
 
-                if version.is_root() || version.is_deleted() {
+                if version.is_deleted() {
+                    return StdPtr::null_mut();
+                }
+                if version.is_root() {
                     break;
                 }
 
@@ -344,6 +351,10 @@ where
                     Some(v) => v,
                     None => continue 'retry, // Node is locked, restart from root
                 };
+
+                if version.is_deleted() {
+                    return StdPtr::null_mut();
+                }
 
                 // Check if we've reached a leaf
                 if version.is_leaf() {
@@ -546,6 +557,9 @@ where
         key: &Key<'_>,
         guard: &LocalGuard<'_>,
     ) -> (*mut LeafNode15<P>, bool) {
+        if leaf_ptr.is_null() {
+            return (leaf_ptr, true);
+        }
         let key_ikey: u64 = key.ikey();
         let mut hops: usize = 0;
 

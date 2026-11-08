@@ -1374,9 +1374,21 @@ directly.
 Root creation uses an unconditional Release store to `root_ptr`, not a CAS. This
 is safe because only the holder of the old root's lock can reach root creation,
 and the no-abandon protocol ensures propagation completes after `mark_split`. A
-layer-root promotion does not update the parent leaf's layer slot: the slot
-still points at the original left leaf, whose parent pointer now points at the
-new layer internode. Readers climb parent pointers to find the true layer root.
+layer-root promotion initially leaves the parent leaf's slot pointing at the
+original left leaf. Point reads, inserts, and removals resolve that node's parent
+chain and may refresh the slot to the resolved internode root. Refresh attempts
+only a nonblocking parent-leaf lock with no sublayer locks held. It rechecks the
+slot's active membership, ikey, layer tag, and old pointer, then marks the parent
+version dirty before publishing. GC already accepts a leaf or internode target.
+Further promotion can make the cached root stale again; its parent chain remains
+valid for the next resolution.
+
+If sublayer GC retires a cached root before descent finishes, the point traversal
+returns a null retry signal. Reads reset the shifted key and reload the main
+root; write paths do so through the B-link advance result; GC defers its route.
+The EBR guard protects the retired allocation while it is inspected. Sublayer
+nodes are reclaimed only as a whole after clearing the owning parent slot, so
+a former root is not individually retired while a cached slot still reaches it.
 
 ### 8.6 Remove
 
@@ -1922,9 +1934,9 @@ construction, debug assertions, and tests.
 16. **No abandonment.** After `mark_split`, propagation must complete.
     Allocations after that point are infallible (abort on OOM).
 17. **Layer pointer.** The parent leaf's slot stores the layer root pointer with
-    `keylenx = 128`. If a layer root is promoted to an internode, the slot still
-    points to the original left leaf; the new internode is reached by climbing
-    that leaf's parent pointer.
+    `keylenx = 128`. Its target may be the original left leaf or a cached
+    internode root. Resolve parent pointers after further promotions. Refresh
+    only with a revalidated parent-leaf try-lock and no sublayer lock held.
 18. **Retirement order.** A node/value/suffix bag is retired only after it is
     unreachable. Teardown runs only after `reclaim_all` and with exclusive
     access.
@@ -2177,8 +2189,8 @@ check `Cargo.toml` for whether cargo currently enforces it.
    B-link following, deferred routes).
 6. **Root creation uses a Release store, not a CAS.** Only the old root's lock
    holder can create a new root; the no-abandon protocol guarantees completion.
-   A layer-root promotion does not update the parent slot; readers climb parent
-   pointers.
+   A layer-root promotion does not lock the parent leaf. Later point operations
+   may refresh its slot using a nonblocking lock, after resolving parent pointers.
 7. **`has_changed` ignores only the lock bit.** An in-flight insert now marks
    the version dirty (`OCC-01`) and increments the insert counter on unlock, so
    a reader that snapshotted before the insert sees a version change.
@@ -2235,10 +2247,11 @@ code:
 3. **Loom coverage is model-level.** The loom tests reimplement simplified
    atomics; they do not exercise `NodeVersion`, `Permuter`, `Linker`, split
    propagation, coalesce, or scans directly.
-4. **Layer-root promotion is handled by climbing.** Point reads, range scans,
-   the printer, and sublayer GC all resolve a parent slot's original left leaf
-   to the parentless internode root before walking siblings. Any change to layer
-   promotion must preserve that parent-pointer chain.
+4. **Layer-root promotion uses guarded resolution and caching.** Point reads,
+   range scans, the printer, and sublayer GC resolve leaf or internode slot targets
+   to the parentless root. Scans cache that root locally; point operations may
+   refresh the shared parent slot. Promotions preserve the parent-pointer chain,
+   and refresh never locks upward while holding a sublayer lock.
 5. **Range bounds and scan traversal share full-key ordering.** `CursorKey`,
    `compare_cursor_to_slot`, and the B-link walk in `reach_leaf_for_scan` are
    the single source of truth; do not reintroduce ikey-only comparisons in a

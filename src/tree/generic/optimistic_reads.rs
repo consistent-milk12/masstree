@@ -42,7 +42,7 @@ enum LookupResult {
     ValueSlot(usize),
 
     /// Found a layer pointer. Need to descend into sublayer.
-    Layer(*mut u8),
+    LayerSlot(usize),
 
     /// Key not found in this leaf.
     NotFound,
@@ -188,17 +188,7 @@ where
     }
 
     if needs_suffix_check && slot_keylenx >= LAYER_KEYLENX {
-        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-
-        if layer_ptr.is_null() {
-            return None;
-        }
-
-        // Prefetch the next-layer node header (NodeVersion + first cache line)
-        // to hide traversal latency before descend_twig_chain runs.
-        prefetch_read(layer_ptr);
-
-        return Some(LookupResult::Layer(layer_ptr));
+        return Some(LookupResult::LayerSlot(slot));
     }
 
     None
@@ -467,7 +457,11 @@ where
                 };
             }
 
-            ptr = next_ptr;
+            // SAFETY: The twig slot passed OCC validation above, its node is
+            // guarded, and no node locks are held during this reader descent.
+            ptr = unsafe {
+                crate::tree::traversal::resolve_layer_slot(twig, slot, target_ikey, next_ptr, guard)
+            };
         }
     }
 }
@@ -580,6 +574,11 @@ where
             self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
 
         'leaf_loop: loop {
+            if leaf_ptr.is_null() {
+                layer_root = self.load_root_ptr_generic(guard);
+                leaf_ptr = self.reach_leaf_concurrent_generic(layer_root, key, false, guard);
+                continue 'leaf_loop;
+            }
             // SAFETY: leaf_ptr protected by guard
             let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
@@ -693,6 +692,12 @@ where
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
 
             'leaf_loop: loop {
+                if leaf_ptr.is_null() {
+                    key.unshift_all();
+                    layer_root = self.load_root_ptr_generic(guard);
+                    in_sublayer = false;
+                    continue 'layer_loop;
+                }
                 let target_ikey: u64 = key.ikey();
 
                 let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
@@ -748,7 +753,12 @@ where
                     // matching the single-layer pattern in get_impl_single_layer.
                     let found_ptr: *mut u8 = match &result {
                         LookupResult::ValueSlot(slot) => leaf.load_value_raw(*slot),
-                        _ => StdPtr::null_mut(),
+                        LookupResult::LayerSlot(slot) => {
+                            let ptr = leaf.load_layer_raw(*slot);
+                            prefetch_read(ptr);
+                            ptr
+                        }
+                        LookupResult::NotFound => StdPtr::null_mut(),
                     };
 
                     match self.validate_version_multi(leaf, leaf.version(), key, version, guard) {
@@ -779,18 +789,8 @@ where
                             return None;
                         }
 
-                        LookupResult::Layer(ptr) => {
-                            // SAFETY: ptr is non-null (check_slot_match guards
-                            // against null before constructing Layer), cast to
-                            // read version.
-                            #[expect(
-                                clippy::cast_ptr_alignment,
-                                reason = "NodeVersion is first field"
-                            )]
-                            let sublayer_version: &NodeVersion =
-                                unsafe { &*ptr.cast::<NodeVersion>() };
-
-                            if sublayer_version.is_deleted() {
+                        LookupResult::LayerSlot(slot) => {
+                            if !self.check_sublayer_valid(found_ptr) {
                                 if unlikely(
                                     leaf.version().is_dirty()
                                         || leaf.version().has_changed(version),
@@ -800,6 +800,18 @@ where
                                 }
                                 return None;
                             }
+                            // SAFETY: The layer slot and pointer were read before
+                            // OCC validation. No node locks are held, and guard
+                            // keeps both the parent and sublayer alive.
+                            let ptr = unsafe {
+                                crate::tree::traversal::resolve_layer_slot(
+                                    leaf,
+                                    slot,
+                                    key.ikey(),
+                                    found_ptr,
+                                    guard,
+                                )
+                            };
 
                             match self.descend_twig_chain(ptr, key, guard) {
                                 TwigDescentResult::ContinueLeafLoop {

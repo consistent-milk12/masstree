@@ -65,6 +65,8 @@ enum RemoveSearchResult {
     DescendLayer {
         /// Pointer to the layer root.
         layer_ptr: *mut u8,
+        /// Physical slot in the parent leaf, for an opportunistic root refresh.
+        slot: usize,
     },
 }
 
@@ -81,6 +83,8 @@ where
     DescendLayer {
         /// Pointer to the sublayer root.
         layer_ptr: *mut u8,
+        /// Physical slot in the parent leaf, for an opportunistic root refresh.
+        slot: usize,
     },
 
     /// Version changed or slot moved, retry from `reach_leaf`.
@@ -685,9 +689,22 @@ impl NodeCleaner {
                                 return Ok(cursor.finish_remove());
                             }
 
-                            RemoveLockResult::DescendLayer { layer_ptr: lp } => {
+                            RemoveLockResult::DescendLayer {
+                                layer_ptr: lp,
+                                slot,
+                            } => {
                                 route.push(key.ikey());
-                                layer_root = lp;
+                                // SAFETY: lock_and_verify released the parent
+                                // lock after validating this guarded layer slot.
+                                layer_root = unsafe {
+                                    super::traversal::resolve_layer_slot(
+                                        leaf,
+                                        slot,
+                                        key.ikey(),
+                                        lp,
+                                        guard,
+                                    )
+                                };
                                 key.shift();
                                 continue 'layer_loop;
                             }
@@ -727,7 +744,7 @@ impl NodeCleaner {
                         }
                     }
 
-                    RemoveSearchResult::DescendLayer { layer_ptr } => {
+                    RemoveSearchResult::DescendLayer { layer_ptr, slot } => {
                         if !Self::is_sublayer_valid(layer_ptr) {
                             // The sublayer was GC'd between the search and
                             // the version check. Treat it as contention, not
@@ -744,7 +761,17 @@ impl NodeCleaner {
                         }
 
                         route.push(key.ikey());
-                        layer_root = layer_ptr;
+                        // SAFETY: The slot passed OCC validation and the
+                        // sublayer is live; guard is held and no lock is held.
+                        layer_root = unsafe {
+                            super::traversal::resolve_layer_slot(
+                                leaf,
+                                slot,
+                                key.ikey(),
+                                layer_ptr,
+                                guard,
+                            )
+                        };
                         key.shift();
                         continue 'layer_loop;
                     }
@@ -802,7 +829,10 @@ impl NodeCleaner {
                 if slot_keylenx >= LAYER_KEYLENX {
                     if key.has_suffix() {
                         let layer_ptr: *mut u8 = leaf.load_layer_raw(kp);
-                        return RemoveSearchResult::DescendLayer { layer_ptr };
+                        return RemoveSearchResult::DescendLayer {
+                            layer_ptr,
+                            slot: kp,
+                        };
                     }
 
                     return RemoveSearchResult::NotFound;
@@ -897,14 +927,20 @@ impl NodeCleaner {
             match search_result {
                 RemoveSearchResult::Found { ki, kp } => (ki, kp),
 
-                RemoveSearchResult::DescendLayer { layer_ptr: lp } => {
+                RemoveSearchResult::DescendLayer {
+                    layer_ptr: lp,
+                    slot,
+                } => {
                     drop(lock);
 
                     if !Self::is_sublayer_valid(lp) {
                         return RemoveLockResult::Retry;
                     }
 
-                    return RemoveLockResult::DescendLayer { layer_ptr: lp };
+                    return RemoveLockResult::DescendLayer {
+                        layer_ptr: lp,
+                        slot,
+                    };
                 }
 
                 RemoveSearchResult::NotFound => {
@@ -924,7 +960,10 @@ impl NodeCleaner {
                 return RemoveLockResult::Retry;
             }
 
-            return RemoveLockResult::DescendLayer { layer_ptr: lp };
+            return RemoveLockResult::DescendLayer {
+                layer_ptr: lp,
+                slot: new_slot,
+            };
         }
 
         let cursor: RemoveCursor<'_, '_, P, A> = RemoveCursor::new(
