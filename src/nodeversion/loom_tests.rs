@@ -77,9 +77,8 @@ impl LoomNodeVersion {
 
     fn stable(&self) -> u32 {
         loop {
-            let value: u32 = self.value.load(Ordering::Relaxed);
+            let value: u32 = self.value.load(Ordering::Acquire);
             if (value & DIRTY_MASK) == 0 {
-                loom::sync::atomic::fence(Ordering::Acquire);
                 return value;
             }
             loom::thread::yield_now();

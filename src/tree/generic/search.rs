@@ -3,65 +3,28 @@ use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 
-/// Threshold for switching from linear to binary search.
-/// With WIDTH=15, the condition `WIDTH <= BINARY_SEARCH_THRESHOLD` is always
-/// true, so the linear path is always taken. The binary search path activates
-/// only if WIDTH exceeds this value in a future configuration.
-const BINARY_SEARCH_THRESHOLD: usize = 16;
-
 impl<P, A> MassTreeGeneric<P, A>
 where
     P: LeafPolicy,
     A: TreeAllocator<P>,
 {
-    // ========================================================================
-    //  Binary Search Core (for WIDTH > 16)
-    // ========================================================================
-
-    /// Binary search to find the lower bound position for `target_ikey`.
-    #[inline(always)]
-    fn binary_search_lower_bound(
-        leaf: &LeafNode15<P>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-        target_ikey: u64,
-    ) -> usize {
-        let size: usize = perm.size();
-        let mut lo: usize = 0;
-        let mut hi: usize = size;
-
-        while lo < hi {
-            let mid: usize = lo + ((hi - lo) >> 1);
-            let slot: usize = perm.get(mid);
-
-            // Relaxed ordering - caller's permutation load provides synchronization
-            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-
-            // Two-way comparison: fewer branches than three-way
-            if slot_ikey < target_ikey {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-
-        lo
-    }
-
-    // ========================================================================
-    //  Linear Search Core (for WIDTH <= 16)
-    // ========================================================================
-
     /// Linear search for insert position (small leaves, WIDTH ≤ 16).
     ///
     /// 3-at-a-time unrolled to reduce loop overhead. The permutation is sorted,
     /// so we can early-exit when any slot's ikey exceeds the target.
     #[inline]
-    fn linear_search_insert(
+    fn search_for_insert<const SINGLE_LAYER: bool>(
         leaf: &LeafNode15<P>,
         key: &Key<'_>,
         perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-        search_keylenx: u8,
     ) -> InsertSearchResultGeneric {
+        debug_assert!(!SINGLE_LAYER || !key.has_suffix());
+        #[expect(clippy::cast_possible_truncation, reason = "unsuffixed length <= 8")]
+        let search_keylenx = if !SINGLE_LAYER && key.has_suffix() {
+            KSUF_KEYLENX
+        } else {
+            key.current_len() as u8
+        };
         let target_ikey: u64 = key.ikey();
         let size: usize = perm.size();
         let mut i: usize = 0;
@@ -78,7 +41,8 @@ where
 
             // Slot 0
             if ik0 == target_ikey {
-                if let Some(result) = Self::check_slot_for_insert(leaf, key, i, s0, search_keylenx)
+                if let Some(result) =
+                    Self::check_slot_for_insert::<SINGLE_LAYER>(leaf, key, i, s0, search_keylenx)
                 {
                     return result;
                 }
@@ -88,9 +52,13 @@ where
 
             // Slot 1
             if ik1 == target_ikey {
-                if let Some(result) =
-                    Self::check_slot_for_insert(leaf, key, i + 1, s1, search_keylenx)
-                {
+                if let Some(result) = Self::check_slot_for_insert::<SINGLE_LAYER>(
+                    leaf,
+                    key,
+                    i + 1,
+                    s1,
+                    search_keylenx,
+                ) {
                     return result;
                 }
             } else if ik1 > target_ikey {
@@ -99,9 +67,13 @@ where
 
             // Slot 2
             if ik2 == target_ikey {
-                if let Some(result) =
-                    Self::check_slot_for_insert(leaf, key, i + 2, s2, search_keylenx)
-                {
+                if let Some(result) = Self::check_slot_for_insert::<SINGLE_LAYER>(
+                    leaf,
+                    key,
+                    i + 2,
+                    s2,
+                    search_keylenx,
+                ) {
                     return result;
                 }
             } else if ik2 > target_ikey {
@@ -118,7 +90,7 @@ where
 
             if slot_ikey == target_ikey {
                 if let Some(result) =
-                    Self::check_slot_for_insert(leaf, key, i, slot, search_keylenx)
+                    Self::check_slot_for_insert::<SINGLE_LAYER>(leaf, key, i, slot, search_keylenx)
                 {
                     return result;
                 }
@@ -148,41 +120,12 @@ where
         key: &Key<'_>,
         perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     ) -> InsertSearchResultGeneric {
-        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-        let search_keylenx: u8 = if key.has_suffix() {
-            KSUF_KEYLENX
-        } else {
-            key.current_len() as u8
-        };
-
-        if LeafNode15::<P>::WIDTH <= BINARY_SEARCH_THRESHOLD {
-            return Self::linear_search_insert(leaf, key, perm, search_keylenx);
-        }
-
-        let target_ikey: u64 = key.ikey();
-        let size: usize = perm.size();
-        let start_pos: usize = Self::binary_search_lower_bound(leaf, perm, target_ikey);
-
-        for i in start_pos..size {
-            let slot: usize = perm.get(i);
-
-            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-
-            if slot_ikey != target_ikey {
-                return InsertSearchResultGeneric::NotFound { logical_pos: i };
-            }
-
-            if let Some(result) = Self::check_slot_for_insert(leaf, key, i, slot, search_keylenx) {
-                return result;
-            }
-        }
-
-        InsertSearchResultGeneric::NotFound { logical_pos: size }
+        Self::search_for_insert::<false>(leaf, key, perm)
     }
 
     /// Check a single slot during insert search.
     #[inline]
-    fn check_slot_for_insert(
+    fn check_slot_for_insert<const SINGLE_LAYER: bool>(
         leaf: &LeafNode15<P>,
         key: &Key<'_>,
         logical_pos: usize,
@@ -195,7 +138,7 @@ where
             return None;
         }
 
-        if slot_keylenx >= LAYER_KEYLENX {
+        if !SINGLE_LAYER && slot_keylenx >= LAYER_KEYLENX {
             if key.has_suffix() {
                 return Some(InsertSearchResultGeneric::Layer { slot });
             }
@@ -204,18 +147,11 @@ where
         }
 
         if slot_keylenx == search_keylenx {
-            if slot_keylenx == KSUF_KEYLENX {
+            if !SINGLE_LAYER && slot_keylenx == KSUF_KEYLENX {
                 return Some(Self::compare_suffixes(leaf, key, slot));
             }
 
             return Some(InsertSearchResultGeneric::Found { slot });
-        }
-
-        let slot_has_suffix: bool = slot_keylenx == KSUF_KEYLENX;
-        let key_has_suffix: bool = key.has_suffix();
-
-        if slot_has_suffix && key_has_suffix {
-            return Some(Self::make_conflict(slot));
         }
 
         if search_keylenx < slot_keylenx {
@@ -266,82 +202,6 @@ where
         key: &Key<'_>,
         perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
     ) -> InsertSearchResultGeneric {
-        #[expect(clippy::cast_possible_truncation, reason = "current_len() <= 8")]
-        let search_keylenx: u8 = key.current_len() as u8;
-
-        if LeafNode15::<P>::WIDTH <= BINARY_SEARCH_THRESHOLD {
-            return Self::linear_search_single_layer(leaf, key, perm, search_keylenx);
-        }
-
-        let target_ikey: u64 = key.ikey();
-        let size: usize = perm.size();
-        let start_pos: usize = Self::binary_search_lower_bound(leaf, perm, target_ikey);
-
-        for i in start_pos..size {
-            let slot: usize = perm.get(i);
-            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-
-            if slot_ikey != target_ikey {
-                return InsertSearchResultGeneric::NotFound { logical_pos: i };
-            }
-
-            if let Some(result) = Self::check_slot_single_layer(leaf, i, slot, search_keylenx) {
-                return result;
-            }
-        }
-
-        InsertSearchResultGeneric::NotFound { logical_pos: size }
-    }
-
-    /// Check a single slot during single-layer insert search.
-    #[inline(always)]
-    fn check_slot_single_layer(
-        leaf: &LeafNode15<P>,
-        logical_pos: usize,
-        slot: usize,
-        search_keylenx: u8,
-    ) -> Option<InsertSearchResultGeneric> {
-        let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
-
-        if leaf.is_value_empty_relaxed(slot) {
-            return None;
-        }
-
-        if slot_keylenx == search_keylenx {
-            return Some(InsertSearchResultGeneric::Found { slot });
-        }
-
-        if search_keylenx < slot_keylenx {
-            Some(InsertSearchResultGeneric::NotFound { logical_pos })
-        } else {
-            None
-        }
-    }
-
-    /// Linear search for single-layer mode (small leaves, WIDTH ≤ 16).
-    #[inline]
-    fn linear_search_single_layer(
-        leaf: &LeafNode15<P>,
-        key: &Key<'_>,
-        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-        search_keylenx: u8,
-    ) -> InsertSearchResultGeneric {
-        let target_ikey: u64 = key.ikey();
-        let size: usize = perm.size();
-
-        for i in 0..size {
-            let slot: usize = perm.get(i);
-            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-
-            if slot_ikey == target_ikey {
-                if let Some(result) = Self::check_slot_single_layer(leaf, i, slot, search_keylenx) {
-                    return result;
-                }
-            } else if slot_ikey > target_ikey {
-                return InsertSearchResultGeneric::NotFound { logical_pos: i };
-            }
-        }
-
-        InsertSearchResultGeneric::NotFound { logical_pos: size }
+        Self::search_for_insert::<true>(leaf, key, perm)
     }
 }

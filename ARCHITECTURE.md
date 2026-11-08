@@ -580,7 +580,7 @@ the lock, yielding `vsplit == 1`, unlocked, non-root.
 
 **OCC read protocol:**
 
-1. `stable()`: Relaxed load; if clean, issue an Acquire fence and return the
+1. `stable()`: Acquire load; if clean, return the
    word. If dirty, spin with exponential backoff and yield after two spins.
 2. Read node fields (permutation, keys, keylenx, value/suffix).
 3. `has_changed(old)`: `(old ^ current) > LOCK_BIT`. Any change to a counter,
@@ -950,10 +950,9 @@ perm = node.permutation.load(Acquire)
 if node.version.has_changed(v) { retry / follow B-link / restart }
 ```
 
-`stable()` spins only if a writer is currently dirty. A clean version is read
-with a Relaxed load followed by an Acquire fence; `try_stable()` uses a single
-Acquire load and returns `None` if dirty. The fence/load pairs with the writer's
-Release unlock.
+`stable()` spins only if a writer is currently dirty. Both `stable()` and
+`try_stable()` use Acquire loads that synchronize with the writer's Release
+unlock; `try_stable()` returns `None` if dirty.
 
 Writers serialize on the same word:
 
@@ -999,7 +998,7 @@ not the individual slot write.
 | `CAS_FAILURE` | `Acquire` | reading the current pointer after a failed CAS                                              |
 | `RELAXED`     | `Relaxed` | data under the lock, unpublished nodes, prefetch, counters                                  |
 
-The writer's Release unlock synchronizes with a reader's `stable()` fence/load.
+The writer's Release unlock synchronizes with a reader's `stable()` Acquire load.
 Field-level Acquire loads pair with Release stores for pointers and suffix
 metadata. `has_changed` itself uses an Acquire load, so all prior reader loads
 are ordered before the validation check.
@@ -1261,8 +1260,9 @@ Full flow:
    at/above the next leaf's `ikey_bound`, with a 128-hop limit. On exhaustion,
    `unshift_all`, reload the root, and retry.
 4. `'forward`: snapshot the leaf version and permutation; run the optimistic
-   insert search (`search_for_insert_single_layer` or
-   `search_for_insert_generic`). Search results are:
+   insert search. Both single-layer and generic wrappers instantiate the same
+   three-way unrolled `search_for_insert<const SINGLE_LAYER: bool>`; the short-key
+   specialization removes suffix/layer classification. Search results are:
    - `Found { slot }` — exact key;
    - `NotFound { logical_pos }` — insertion position;
    - `Conflict { slot }` — same ikey, different suffix (layer needed);

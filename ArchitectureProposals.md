@@ -26,7 +26,7 @@ implementation must verify those observations against the current source.
 | 1 | Proposal 3: suffix sizing, split reservation, initialization, raw ownership | Churn 42 → 6 allocations; middle split 3 → 0 reallocations; native, feature, Miri tests | Complete |
 | 2 | Proposal 4: batch/Extend pipeline, write-through, Entry leaf hints | Preconstructed updates 6 → 3 allocations; guarded updates 264 → 0; Entry avoids a second descent | Complete |
 | 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Shared root/descent/B-link kernels; cached roots give zero parent hops; native and Miri coverage | Complete |
-| 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Layout assertions, point workloads, Loom and Miri | Pending |
+| 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Layout assertions, point workloads, Loom and Miri | In progress |
 | 5 | Proposal 5: stack remove routes and remove cleanup | Zero-allocation non-emptying layered removal | Pending |
 | 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, layer contention tests, feature checks | Pending |
 | 7 | Proposal 1: shared validated scan kernel and direction-parametric engine | All scan APIs against BTreeMap; concurrent reverse scans and Miri | Pending |
@@ -95,6 +95,14 @@ BTreeMap probe and focused Miri pass, as do strict Clippy and feature builds.
 Proposal 2 Tier 1 is complete. The conditional LayerAnchor tier is deferred:
 zero-hop caching works for the tested multi-height layers, and no workload
 measurement establishes the required sustained parent-lock miss bottleneck.
+
+Completed within step 4: insert search now uses one three-way unrolled kernel
+with a `SINGLE_LAYER` specialization. The unreachable WIDTH>16 binary branches
+and scalar short-key loop are removed. `NodeVersion::stable` (including its
+contended loop) now loads with Acquire; the mirrored Loom model uses the same
+ordering. Speculative locks still set only LOCK_BIT, and mutation markers and
+post-read validation fences are unchanged. The 606 library tests and all 14
+Loom models pass, along with strict Clippy and feature checks.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

@@ -329,10 +329,9 @@ impl NodeVersion {
     #[must_use]
     #[inline(always)]
     pub fn stable(&self) -> u32 {
-        let value: u32 = self.value.load(Ordering::Relaxed);
+        let value: u32 = self.value.load(Ordering::Acquire);
 
         if (value & DIRTY_MASK) == 0 {
-            StdAtomic::fence(Ordering::Acquire);
             return value;
         }
 
@@ -349,10 +348,9 @@ impl NodeVersion {
         let mut spin_count: u32 = 0;
 
         loop {
-            let value: u32 = self.value.load(Ordering::Relaxed);
+            let value: u32 = self.value.load(Ordering::Acquire);
 
             if (value & DIRTY_MASK) == 0 {
-                StdAtomic::fence(Ordering::Acquire);
                 return value;
             }
 

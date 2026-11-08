@@ -3332,6 +3332,12 @@ after 15 seconds (exit 124). Traversal now reports a restart, with explicit
 handling in point readers, write B-link advance, and GC route lookup. The guard
 keeps the retired node alive while the old pointer is rejected.
 
+SIM-02 / PERF-18 follow-up: single-layer and suffix insertion now instantiate
+one three-way unrolled leaf search. Unreachable binary-search branches are
+removed at WIDTH=15. `stable()` and its contended loop use Acquire loads, matching
+`try_stable()`; the Loom model mirrors this change. Dirty-publication and
+post-read validation fences remain in place.
+
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|
 | PERF-01 | Suffix insert | `maybe_pre_allocate_suffix` allocates `WIDTH * suffix_len` on every suffix insert, including `Found` updates, conflicts, retries, and splits that drop it | Move to the `NotFound`/`find_usable_slot` path, size from actual suffix usage, pass into split | 1 allocation / 600 B per long-key update removed |
