@@ -26,8 +26,9 @@ const MAX_SIZE_CLASSES: usize = 20;
 /// Max cached nodes per size class per thread.
 const POOL_CAPACITY: usize = 512;
 
-/// Batch refill count from global allocator.
-const REFILL_BATCH: usize = 128;
+/// Start small for cold threads, growing each size class independently.
+const INITIAL_REFILL: usize = 16;
+const MAX_REFILL: usize = 128;
 
 // ============================================================================
 //  Size Class Computation
@@ -82,6 +83,7 @@ unsafe fn bucket_layout(nl: usize) -> Layout {
 struct Freelist {
     head: *mut u8,
     count: usize,
+    next_refill: usize,
 }
 
 impl Freelist {
@@ -89,6 +91,7 @@ impl Freelist {
         Self {
             head: StdPtr::null_mut(),
             count: 0,
+            next_refill: INITIAL_REFILL,
         }
     }
 
@@ -117,10 +120,10 @@ impl Freelist {
         self.count += 1;
     }
 
-    /// Slow path: batch-allocate `REFILL_BATCH` blocks.
+    /// Slow path: grow the refill batch from 16 to 128 as demand increases.
     #[cold]
     fn refill(&mut self, layout: Layout) {
-        for _ in 0..REFILL_BATCH {
+        for _ in 0..self.next_refill {
             // SAFETY: layout is a valid bucket layout
             let ptr: *mut u8 = unsafe { alloc(layout) };
 
@@ -131,6 +134,7 @@ impl Freelist {
             // SAFETY: freshly allocated with correct layout
             unsafe { self.push(ptr) };
         }
+        self.next_refill = (self.next_refill * 2).min(MAX_REFILL);
     }
 
     fn drain(&mut self, layout: Layout) {

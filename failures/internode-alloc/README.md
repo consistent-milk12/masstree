@@ -1,5 +1,16 @@
 # Internode/allocation/reclamation reproducers
 
+`cold_pool` is a passing PERF-15 regression. A counting allocator observes 16
+leaf allocations at first insert on each fresh thread (previously 128). Each
+thread then grows to 5,000 keys and checks every value. The local seven-thread
+median was 6.87 µs before and 5.35 µs after; timing is reported, not asserted.
+
+```bash
+CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin cold_pool
+```
+
+The table below records historical audit behavior.
+
 | Target | Finding | Expected |
 |---|---|---|
 | `tests/tls_abort.rs` | ALLOC-01 | tree in `thread_local!`; worker exit panics on `POOL.with` and then SIGSEGV/SIGABRT |

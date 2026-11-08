@@ -1139,7 +1139,8 @@ zero-sized type containing only `PhantomData<P>`. Allocation is in-place:
 
 `src/node_pool.rs` keeps a thread-local `ThreadPool` with 20 size-class buckets,
 one per cache-line count up to 1280 bytes. A bucket is an intrusive freelist
-(`head`, `count`) with capacity 512; a refill allocates 128 blocks at a time
+(`head`, `count`, `next_refill`) with capacity 512. Each size class starts with
+16 blocks per refill and doubles through 32/64 to a maximum of 128
 from the global allocator. Blocks are cache-line aligned and carry no per-node
 header; the first 8 bytes of a free block store the next pointer. Nodes may be
 freed on a different thread than they were allocated (seize batch reclamation),
@@ -2333,7 +2334,7 @@ code:
 | `STACK_CAPACITY` (teardown)        |                                 128 | `alloc15.rs`                |
 | `MAX_SIZE_CLASSES`                 |                         20 (1280 B) | `node_pool.rs`              |
 | `POOL_CAPACITY`                    |                                 512 | `node_pool.rs`              |
-| `REFILL_BATCH`                     |                                 128 | `node_pool.rs`              |
+| `INITIAL_REFILL` / `MAX_REFILL`     |                            16 / 128 | `node_pool.rs`              |
 | `SHARDS`                           |                                  16 | `shard_counter.rs`          |
 | `DEFAULT_RETIRE_BATCH_SIZE`        |                                 256 | `tree/generic.rs`           |
 | `MAX_BLINK_HOPS` (insert)          |                                 128 | `tree/generic.rs`           |

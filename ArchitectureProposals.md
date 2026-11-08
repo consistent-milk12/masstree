@@ -28,7 +28,7 @@ implementation must verify those observations against the current source.
 | 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Shared root/descent/B-link kernels; cached roots give zero parent hops; native and Miri coverage | Complete |
 | 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Aligned slots retain leaf sizes; 607 library tests, 15 Loom models and focused Miri pass | Complete |
 | 5 | Proposal 5: stack remove routes and remove cleanup | 32-byte / maximum-depth removal: 1 / 4 route allocations per key → 0; native and Miri | Complete |
-| 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, layer contention tests, feature checks | Pending |
+| 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, layer contention tests, feature checks | In progress |
 | 7 | Proposal 1: shared validated scan kernel and direction-parametric engine | All scan APIs against BTreeMap; concurrent reverse scans and Miri | Pending |
 
 Correctness prerequisites take precedence within each change. Proposal 2's
@@ -133,6 +133,13 @@ and the public remove-mode methods/trait forwarders are deleted. The proposed
 `kp` deletion was stale: the slot is required by post-lock identity validation,
 so it remains and its obsolete dead-code allowance is removed. Proposal 5 is
 complete; native removal/concurrency tests and feature/Clippy checks pass.
+
+Completed within step 6: each node-pool size class starts with 16 blocks and
+doubles its refill up to 128. The fresh-thread counting probe failed at 128
+leaf allocations and now observes exactly 16 on all seven threads; each thread
+also grows to 5,000 keys and verifies every value. Cold first-insert medians were
+6.87 → 5.35 µs locally (allocation count is the regression gate, not timing).
+Library, strict Clippy and focused pool Miri tests pass.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

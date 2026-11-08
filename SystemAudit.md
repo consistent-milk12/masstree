@@ -3359,6 +3359,12 @@ The dead remove mode (`mark_remove`, `is_removing`, their trait methods and
 `MODSTATE_REMOVE`) and unused parent-cleanup parameters are removed. `kp` is
 actually used by the fixed REM-01 revalidation and must be retained.
 
+PERF-15 now refills each TLS pool size class with 16/32/64/128 blocks as demand
+grows, retaining the 512-block cache cap. The fresh-thread `cold_pool` counting
+probe confirms 128 → 16 leaf allocations on first insert, then checks growth
+and all values through 5,000 keys. The measured seven-thread median moved from
+6.87 to 5.35 µs; timing is workload-specific. Native and pool Miri checks pass.
+
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|
 | PERF-01 | Suffix insert | `maybe_pre_allocate_suffix` allocates `WIDTH * suffix_len` on every suffix insert, including `Found` updates, conflicts, retries, and splits that drop it | Move to the `NotFound`/`find_usable_slot` path, size from actual suffix usage, pass into split | 1 allocation / 600 B per long-key update removed |
