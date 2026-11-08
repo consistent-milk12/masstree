@@ -11,8 +11,8 @@ use crate::policy::{PreparedValue, RetireHandle};
 use super::entry::EntryLeafHint;
 use super::insert_strategy::{GenericInsert, InsertStrategy, WriteThroughInsert};
 use super::{
-    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker,
-    LocalGuard, MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
+    FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LeafPolicy, Linker, LocalGuard,
+    MassTreeGeneric, MembershipError, TreeAllocator, TreePermutation,
 };
 
 use crate::leaf15::LeafNode15;
@@ -475,38 +475,59 @@ where
         clippy::too_many_arguments,
         reason = "Layer creation requires full context"
     )]
-    fn handle_suffix_conflict(
+    fn handle_suffix_conflict<S: InsertStrategy<P, A>>(
         &self,
         leaf: &LeafNode15<P>,
-        lock: &mut LockGuard<'_>,
+        lock: LockGuard<'_>,
         slot: usize,
-        key: &mut Key<'_>,
-        value: P::Output,
+        key: &Key<'_>,
+        value: S::Input,
         guard: &LocalGuard<'_>,
-    ) {
-        lock.mark_insert();
+    ) -> Result<(), S::Input> {
+        // Copy key bytes under the lock; preparation never borrows mutable
+        // metadata or holds an old value handle across the unlocked interval.
+        let mut existing_suffix = arrayvec::ArrayVec::<u8, 248>::new();
+        existing_suffix
+            .try_extend_from_slice(leaf.ksuf(slot).expect("conflict must have a suffix"))
+            .expect("suffix exceeds maximum key length");
+        let version = leaf.version().stable();
+        drop(lock);
 
-        // SAFETY: We hold the lock on `leaf`, guard is from this tree's collector
-        let layer_ptr: *mut u8 =
-            unsafe { self.create_layer_concurrent_generic(leaf, slot, key, value, guard) };
+        let pending = self.prepare_layer(&existing_suffix, key.suffix(), guard);
+        let mut lock = leaf.version().lock_bounded();
+        let perm = leaf.permutation();
+        let active = (0..perm.size()).any(|i| perm.get(i) == slot);
+        // Version counters are finite: also check full key identity, active
+        // membership and routing bounds before transferring any value.
+        if leaf.version().has_changed(version)
+            || leaf.version().is_deleted()
+            || leaf.deleted_layer()
+            || !active
+            || leaf.ikey_relaxed(slot) != key.ikey()
+            || leaf.keylenx_relaxed(slot) != KSUF_KEYLENX
+            || !leaf.ksuf_equals(slot, &existing_suffix)
+            || leaf.is_value_empty_relaxed(slot)
+            || self.validate_membership(leaf, key).is_err()
+        {
+            drop(lock);
+            drop(pending);
+            return Err(value);
+        }
 
-        // SAFETY: We hold the lock. Slot transitions from terminal → layer.
-        // SAFETY: We hold the leaf lock and the conflict slot is a terminal
-        // value being converted into a layer pointer.
-        let retire: RetireHandle = unsafe { leaf.take_value_for_layer(slot) };
-
-        // SAFETY: handle was produced by take_value_for_layer() on this leaf.
-        unsafe { P::retire_handle(retire, guard) };
-
-        // SAFETY: We hold the lock
-        unsafe {
-            leaf.clear_ksuf(slot, guard);
-        };
-
-        leaf.set_keylenx(slot, LAYER_KEYLENX);
-        // SAFETY: We hold the leaf lock; `layer_ptr` is a live layer root
-        // whose ownership transfers to this slot.
-        unsafe { leaf.store_layer(slot, layer_ptr) };
+        // Read the current value after revalidation, even if a finite version
+        // counter repeated. The two encodings may call user code, so perform
+        // them before the infallible mutation sequence. No node/suffix work
+        // remains under this lock.
+        let existing = leaf
+            .try_clone_output_relaxed(slot)
+            .expect("validated value");
+        let existing_prepared = LeafNode15::<P>::prepare_value(&existing);
+        let new = S::into_output(value);
+        let new_prepared = LeafNode15::<P>::prepare_value(&new);
+        // SAFETY: We hold the revalidated source lock. The old value remains
+        // in the source and new is uniquely owned; commit transfers them once.
+        unsafe { pending.commit(leaf, &mut lock, slot, &existing_prepared, &new_prepared) };
+        Ok(())
     }
 }
 
@@ -555,7 +576,7 @@ where
     pub(super) fn insert_concurrent<S: InsertStrategy<P, A>>(
         &self,
         key: &mut Key<'_>,
-        value: S::Input,
+        mut value: S::Input,
         guard: &LocalGuard<'_>,
     ) -> Result<Option<S::OldValue>, InsertError> {
         let single_layer_mode: bool = !key.has_suffix();
@@ -823,10 +844,17 @@ where
                             "single-layer search returned Conflict variant"
                         );
 
-                        let output: P::Output = S::into_output(value);
-                        self.handle_suffix_conflict(leaf, &mut lock, slot, key, output, guard);
-                        self.count.increment();
-                        return Ok(None);
+                        match self.handle_suffix_conflict::<S>(leaf, lock, slot, key, value, guard)
+                        {
+                            Ok(()) => {
+                                self.count.increment();
+                                return Ok(None);
+                            }
+                            Err(input) => {
+                                value = input;
+                                continue 'retry;
+                            }
+                        }
                     }
                 }
             } // end 'forward

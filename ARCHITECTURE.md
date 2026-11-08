@@ -1305,10 +1305,12 @@ Full flow:
 11. **NeedsSplit:** build `SplitInsertData` (ikey, keylenx, suffix, value) and
     call `handle_leaf_split_and_insert_generic` with the lock transferred by
     value. Count increments once; the return is `None`.
-12. **Conflict:** `handle_suffix_conflict` marks insert, creates a sublayer,
-    takes the old value for the layer, retires the old handle if needed, clears
-    the old suffix, sets `keylenx = 128`, and stores the layer pointer. Count
-    increments once; return `None`.
+12. **Conflict:** `handle_suffix_conflict` copies the old suffix, releases the
+    parent lock, and prepares an unpublished sublayer. After reacquiring the
+    lock it validates version, full key identity, slot membership and routing.
+    A failed validation discards the chain and retries with the original input.
+    Success transfers both values and publishes the layer pointer under a
+    dirty lock. Count increments once; return `None`.
 
 `assign_slot_generic` (`src/tree/generic.rs`) owns only the slot payload: it
 marks the leaf inserting if needed, writes ikey/value, and writes either
@@ -1319,26 +1321,22 @@ the count.
 
 A layer is created when the insert search returns `Conflict`: the same ikey is
 already present with a suffix, and the new key's suffix differs.
-`create_layer_concurrent_generic` (`src/tree/generic/layer.rs`) builds the
-sublayer:
+`prepare_layer` (`src/tree/generic/layer.rs`) builds the sublayer outside the
+parent lock. Independent keys start at the two suffixes; each shared whole
+8-byte chunk gets a one-entry **twig** leaf with `ROOT_BIT` and a null parent.
+Each twig links to the next through slot 0. The final leaf stores the two keys
+in sorted order, including any remaining suffixes, but no terminal values.
+`PreparedLayer` owns every allocation and retires the chain on retry or unwind.
 
-1. Read the existing suffix and construct
-   `existing_key = Key::from_suffix(existing_suffix)`. Clone the existing output
-   (the conflict slot must be terminal).
-2. Shift the new key once if it has a suffix, so both keys are positioned at the
-   chunk after the shared ikey.
-3. Compare the two keys.
-4. While the keys are equal and both still have suffixes (i.e. they share
-   another full 8-byte chunk), allocate a single-entry **twig** leaf with
-   `ROOT_BIT` and a null parent, store the shared ikey at slot 0, set
-   `make_sorted(1)`, and link the previous twig's slot 0 to it with
-   `keylenx = 128`. Shift both keys and repeat.
-5. Allocate the final leaf and assign the two keys in order: less first, greater
-   second; if equal, shorter `current_len` first (prefix before extension). Each
-   key is written with `assign_from_key`, which sets ikey, value, and either a
-   suffix (`KSUF`) or a terminal length.
-6. Wire the last twig (or return the final leaf directly) and give the parent
-   leaf's slot the returned pointer with `keylenx = 128`.
+The caller reacquires the source lock and verifies its version, active slot,
+full suffix key, terminal value and routing bounds. Only then does it load and
+encode the current old value and encode the new input. These two potentially
+fallible encodings remain under the lock; node allocation and suffix construction
+do not. This avoids retaining stale value ownership across version repetition.
+An infallible commit marks the parent dirty, clears its old value and suffix,
+stores the two prepared values into the final leaf, then publishes the complete
+chain with a Release layer-pointer store. The builder disarms its cleanup after
+transferring ownership. A failed revalidation leaves the input intact for retry.
 
 A twig chain is an optimization for long common prefixes: it avoids creating a
 full internode for each identical 8-byte chunk. The twig leaves are roots with

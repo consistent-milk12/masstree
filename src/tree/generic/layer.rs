@@ -1,229 +1,155 @@
-//! =============================================================================
-//!  Generic Layer Creation
-//! =============================================================================
+//! Prepare unpublished twig chains outside the parent lock, then publish them.
 
 use std::ptr as StdPtr;
 
-// Note: InsertError no longer used here - allocations are infallible
+use crate::TreeAllocator;
+use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode15};
+use crate::nodeversion::LockGuard;
+use crate::permuter::Permuter;
+use crate::policy::{LeafPolicy, PreparedValue};
+use seize::LocalGuard;
 
-use crate::leaf_trait::TreeLeafNode;
-use crate::leaf15::LeafNode15;
-use crate::policy::PreparedValue;
+use super::{Key, MassTreeGeneric, Ordering};
 
-use super::{
-    Key, LAYER_KEYLENX, LeafPolicy, LocalGuard, MassTreeGeneric, Ordering, TreeAllocator,
-    TreePermutation,
-};
+/// Owns only unpublished nodes and key/suffix data until commit. Terminal
+/// values stay in their original owners while preparation can be abandoned.
+pub(super) struct PreparedLayer<'a, 'g, P: LeafPolicy, A: TreeAllocator<P>> {
+    head: *mut LeafNode15<P>,
+    tail: *mut LeafNode15<P>,
+    existing_slot: usize,
+    allocator: &'a A,
+    guard: &'a LocalGuard<'g>,
+}
 
-impl<P, A> MassTreeGeneric<P, A>
-where
-    P: LeafPolicy,
-    A: TreeAllocator<P>,
-{
-    /// Assign two entries to the final layer leaf in sorted order.
-    ///
-    /// The entries are ordered by:
-    /// 1. ikey comparison (lexicographic via u64 big-endian)
-    /// 2. If ikeys equal: shorter key first (prefix before extension)
-    ///
-    /// # Safety
-    ///
-    /// - `final_ptr` must be valid and point to an empty leaf
-    /// - `guard` must come from this tree's collector
-    /// - Caller must ensure no concurrent access to `final_ptr`
-    #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    #[expect(clippy::unused_self, reason = "API Consistency")]
-    unsafe fn assign_final_layer_entries(
-        &self,
-        final_ptr: *mut LeafNode15<P>,
-        existing_key: &Key<'_>,
-        existing_output: Option<P::Output>,
-        existing_prepared: &PreparedValue<P>,
-        new_key: &Key<'_>,
-        new_arc: Option<P::Output>,
-        new_prepared: &PreparedValue<P>,
-        cmp: Ordering,
-        guard: &LocalGuard<'_>,
-    ) {
-        // SAFETY: final_ptr is valid per caller contract
-        let final_leaf: &LeafNode15<P> = unsafe { &*final_ptr };
-
-        match cmp {
-            Ordering::Less => {
-                // SAFETY: guard requirement passed through from caller
-                unsafe {
-                    final_leaf.assign_from_key(
-                        0,
-                        existing_key,
-                        existing_output,
-                        existing_prepared,
-                        guard,
-                    );
-                    final_leaf.assign_from_key(1, new_key, new_arc, new_prepared, guard);
-                }
-            }
-
-            Ordering::Greater => {
-                // SAFETY: guard requirement passed through from caller
-                unsafe {
-                    final_leaf.assign_from_key(0, new_key, new_arc, new_prepared, guard);
-                    final_leaf.assign_from_key(
-                        1,
-                        existing_key,
-                        existing_output,
-                        existing_prepared,
-                        guard,
-                    );
-                }
-            }
-
-            Ordering::Equal => {
-                if existing_key.current_len() <= new_key.current_len() {
-                    // SAFETY: guard requirement passed through from caller
-                    unsafe {
-                        final_leaf.assign_from_key(
-                            0,
-                            existing_key,
-                            existing_output,
-                            existing_prepared,
-                            guard,
-                        );
-                        final_leaf.assign_from_key(1, new_key, new_arc, new_prepared, guard);
-                    }
-                } else {
-                    // SAFETY: guard requirement passed through from caller
-                    unsafe {
-                        final_leaf.assign_from_key(0, new_key, new_arc, new_prepared, guard);
-                        final_leaf.assign_from_key(
-                            1,
-                            existing_key,
-                            existing_output,
-                            existing_prepared,
-                            guard,
-                        );
-                    }
-                }
-            }
+impl<P: LeafPolicy, A: TreeAllocator<P>> PreparedLayer<'_, '_, P, A> {
+    fn push_leaf(&mut self) -> &LeafNode15<P> {
+        let node = self.allocator.alloc_leaf_direct(false, true);
+        if self.head.is_null() {
+            self.head = node;
+        } else {
+            // SAFETY: The tail is an exclusively owned unpublished twig. It
+            // has no terminal value; the new node transfers into its layer slot.
+            let tail = unsafe { &*self.tail };
+            tail.set_keylenx(0, LAYER_KEYLENX);
+            // SAFETY: node is initialized and uniquely owned by this builder.
+            unsafe { tail.store_layer(0, node.cast()) };
+            tail.set_permutation_relaxed(Permuter::make_sorted(1));
         }
-
-        // Relaxed is sufficient: this leaf is not yet visible to other threads.
-        // The store_layer Release in the caller publishes it.
-        final_leaf.set_permutation_relaxed(
-            <<LeafNode15<P> as TreeLeafNode<P>>::Perm as TreePermutation>::make_sorted(2),
-        );
+        self.tail = node;
+        // SAFETY: The builder owns this initialized, unpublished allocation.
+        unsafe { &*node }
     }
 
-    /// Create a new layer for suffix conflict (generic version).
+    /// Transfer values and publish with no allocations or user callbacks.
     ///
     /// # Safety
-    ///
-    /// - Caller must hold the lock on `parent_leaf`
-    /// - Caller must have called `lock.mark_insert()` before calling this
-    /// - `guard` must come from this tree's collector
-    #[cold]
-    #[inline(never)]
-    pub(super) unsafe fn create_layer_concurrent_generic(
-        &self,
-        parent_leaf: &LeafNode15<P>,
-        conflict_slot: usize,
-        new_key: &mut Key<'_>,
-        new_value: P::Output,
-        guard: &LocalGuard<'_>,
-    ) -> *mut u8 {
-        // STEP: 1 - Extract existing key's suffix and value
-        debug_assert!(
-            parent_leaf.ksuf(conflict_slot).is_some(),
-            "conflict slot {conflict_slot} should have a suffix \
-             (keylenx={}, ikey=0x{:016x})",
-            parent_leaf.keylenx(conflict_slot),
-            parent_leaf.ikey(conflict_slot),
-        );
-        let existing_suffix: &[u8] = parent_leaf.ksuf(conflict_slot).unwrap_or(&[]);
-        let mut existing_key: Key<'_> = Key::from_suffix(existing_suffix);
-        let existing_output: Option<P::Output> =
-            parent_leaf.try_clone_output_relaxed(conflict_slot);
+    /// The parent is locked and its active slot was revalidated as the same
+    /// full suffix key. `existing` represents that slot's current value, and
+    /// `new` represents the uniquely owned input. Both were encoded before
+    /// entering this infallible mutation sequence.
+    pub(super) unsafe fn commit(
+        mut self,
+        parent: &LeafNode15<P>,
+        lock: &mut LockGuard<'_>,
+        slot: usize,
+        existing: &PreparedValue<P>,
+        new: &PreparedValue<P>,
+    ) {
+        lock.mark_insert();
+        // SAFETY: The source is the revalidated terminal slot under this lock.
+        // Both sealed policies clear the source without retiring its moved value.
+        let retire = unsafe { parent.take_value_for_layer(slot) };
+        // SAFETY: This handle came from the same policy's source-slot clear.
+        unsafe { P::retire_handle(retire, self.guard) };
+        // SAFETY: The parent lock is held and marked dirty; the old bytes remain
+        // guard-protected while the slot's suffix metadata is cleared.
+        unsafe { parent.clear_ksuf(slot, self.guard) };
+        parent.set_keylenx(slot, LAYER_KEYLENX);
 
-        debug_assert!(
-            existing_output.is_some(),
-            "try_create_layer_concurrent_generic: conflict slot should contain a value"
-        );
+        // SAFETY: The final leaf is exclusively owned and has two initialized
+        // key slots, both without values. The source was cleared above.
+        let final_leaf = unsafe { &*self.tail };
+        final_leaf.store_prepared_value_relaxed(self.existing_slot, existing);
+        final_leaf.store_prepared_value_relaxed(self.existing_slot ^ 1, new);
+        // SAFETY: The complete chain and its two values transfer to the parent
+        // slot under its dirty lock. This Release store publishes all nodes.
+        unsafe { parent.store_layer(slot, self.head.cast()) };
+        self.head = StdPtr::null_mut();
+    }
+}
 
-        // INS-04: encode both user values before allocating any twig or final
-        // layer leaf, so a panicking encoder cannot leak an unpublished layer.
-        let existing_prepared: PreparedValue<P> = LeafNode15::<P>::prepare_value(
-            existing_output
-                .as_ref()
-                .expect("conflict slot must contain a value"),
-        );
-        let new_prepared: PreparedValue<P> = LeafNode15::<P>::prepare_value(&new_value);
-
-        if new_key.has_suffix() {
-            new_key.shift();
-        }
-
-        let mut cmp: Ordering = existing_key.compare(new_key.ikey(), new_key.current_len());
-
-        let mut twig_head: Option<*mut LeafNode15<P>> = None;
-        let mut twig_tail: *mut LeafNode15<P> = StdPtr::null_mut();
-
-        while (cmp == Ordering::Equal) && existing_key.has_suffix() && new_key.has_suffix() {
-            let twig_ptr: *mut LeafNode15<P> = self.allocator.alloc_leaf_direct(false, true);
-
-            // SAFETY: twig_ptr is valid, we just allocated it
-            unsafe {
-                (*twig_ptr).set_ikey(0, existing_key.ikey());
-                // Relaxed: twig is not yet visible. store_layer Release publishes it.
-                (*twig_ptr).set_permutation_relaxed(
-                    <<LeafNode15<P> as TreeLeafNode<P>>::Perm as TreePermutation>::make_sorted(1),
-                );
-            }
-
-            if twig_head.is_some() {
-                // SAFETY: twig_tail is valid from previous iteration
-                unsafe {
-                    (*twig_tail).set_keylenx(0, LAYER_KEYLENX);
-                    (*twig_tail).store_layer(0, twig_ptr.cast::<u8>());
-                }
+impl<P: LeafPolicy, A: TreeAllocator<P>> Drop for PreparedLayer<'_, '_, P, A> {
+    fn drop(&mut self) {
+        let mut node = self.head;
+        while !node.is_null() {
+            // SAFETY: Uncommitted chains are exclusively owned by this builder.
+            // They contain only layer links and suffix data, no terminal values.
+            let leaf = unsafe { &*node };
+            let next = if leaf.is_layer(0) {
+                leaf.load_layer_raw(0).cast()
             } else {
-                twig_head = Some(twig_ptr);
-            }
+                StdPtr::null_mut()
+            };
+            // SAFETY: No node in this unpublished chain is reachable from the
+            // live tree. Read the next pointer before transferring retirement.
+            unsafe { self.allocator.retire_leaf(node, self.guard) };
+            node = next;
+        }
+    }
+}
 
-            twig_tail = twig_ptr;
-
-            // Shift both keys
+impl<P: LeafPolicy, A: TreeAllocator<P>> MassTreeGeneric<P, A> {
+    /// Build all node/key/suffix storage without holding a parent node lock.
+    /// Values are deliberately absent until the caller revalidates and commits.
+    #[cold]
+    pub(super) fn prepare_layer<'a, 'g>(
+        &'a self,
+        existing_suffix: &[u8],
+        new_suffix: &[u8],
+        guard: &'a LocalGuard<'g>,
+    ) -> PreparedLayer<'a, 'g, P, A> {
+        let mut layer = PreparedLayer {
+            head: StdPtr::null_mut(),
+            tail: StdPtr::null_mut(),
+            existing_slot: 0,
+            allocator: &self.allocator,
+            guard,
+        };
+        let mut existing_key = Key::from_suffix(existing_suffix);
+        let mut new_key = Key::from_suffix(new_suffix);
+        let mut cmp = existing_key.compare(new_key.ikey(), new_key.current_len());
+        while cmp == Ordering::Equal && existing_key.has_suffix() && new_key.has_suffix() {
+            layer.push_leaf().set_ikey(0, existing_key.ikey());
             existing_key.shift();
             new_key.shift();
             cmp = existing_key.compare(new_key.ikey(), new_key.current_len());
         }
 
-        let final_ptr: *mut LeafNode15<P> = self.allocator.alloc_leaf_direct(false, true);
-
-        // SAFETY: final_ptr is valid, guard is from caller
-        unsafe {
-            self.assign_final_layer_entries(
-                final_ptr,
-                &existing_key,
-                existing_output,
-                &existing_prepared,
-                new_key,
-                Some(new_value),
-                &new_prepared,
-                cmp,
-                guard,
-            );
-        }
-
-        let result_ptr: *mut u8 = match twig_head {
-            Some(head) => {
-                unsafe {
-                    (*twig_tail).set_keylenx(0, LAYER_KEYLENX);
-                    (*twig_tail).store_layer(0, final_ptr.cast::<u8>());
-                }
-                head.cast::<u8>()
-            }
-            None => final_ptr.cast::<u8>(),
+        let existing_first = cmp == Ordering::Less
+            || (cmp == Ordering::Equal && existing_key.current_len() <= new_key.current_len());
+        layer.existing_slot = usize::from(!existing_first);
+        let final_leaf = layer.push_leaf();
+        let ordered = if existing_first {
+            [&existing_key, &new_key]
+        } else {
+            [&new_key, &existing_key]
         };
-
-        result_ptr
+        for (slot, key) in ordered.into_iter().enumerate() {
+            final_leaf.set_ikey(slot, key.ikey());
+            if key.has_suffix() {
+                final_leaf.set_keylenx(slot, KSUF_KEYLENX);
+                // SAFETY: The builder owns this unpublished leaf; slots are
+                // initialized sequentially so suffix growth preserves slot 0.
+                unsafe { final_leaf.assign_ksuf_init(slot, key.suffix(), guard) };
+            } else {
+                #[expect(clippy::cast_possible_truncation, reason = "unsuffixed key <= 8 bytes")]
+                final_leaf.set_keylenx(slot, key.current_len() as u8);
+            }
+        }
+        final_leaf.set_permutation_relaxed(Permuter::make_sorted(2));
+        layer
     }
 }
+
+#[cfg(test)]
+mod unit_tests;

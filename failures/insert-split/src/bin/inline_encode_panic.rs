@@ -1,5 +1,5 @@
-//! INS-04: an encoder panic during split must leave the original tree usable.
-//! Run in a disposable process with a timeout; current code hangs after the sentinel.
+//! INS-04: encoder panics during split or twig construction preserve the tree.
+//! Run in a disposable process with a timeout; Miri also checks scratch cleanup.
 use masstree::{InlineBits, MassTree};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -29,4 +29,22 @@ fn main() {
     eprintln!("caught encoder panic; checking existing key");
     assert_eq!(tree.get(&0u64.to_be_bytes()), Some(Encoded(0)));
     eprintln!("existing tree remains usable");
+
+    let first = [b'x'; 256];
+    let mut second = first;
+    second[255] += 1;
+    let tree = MassTree::<Encoded>::new();
+    tree.insert(&first, Encoded(1));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        tree.insert(&second, Encoded(999));
+    }));
+    assert!(result.is_err());
+    assert_eq!(tree.len(), 1);
+    assert_eq!(tree.get(&first), Some(Encoded(1)));
+    assert_eq!(tree.get(&second), None);
+    tree.insert(&second, Encoded(2));
+    assert_eq!(tree.get(&first), Some(Encoded(1)));
+    assert_eq!(tree.get(&second), Some(Encoded(2)));
+    assert_eq!(tree.len(), 2);
+    eprintln!("maximum-depth twig panic leaves the tree usable");
 }

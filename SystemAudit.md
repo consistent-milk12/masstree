@@ -3372,6 +3372,17 @@ Concurrent bag replacement and inline integration checks pass under Miri, with
 native sidecar/small-capacity/no-prefetch coverage. No throughput claim is made
 from hint placement alone.
 
+PERF-25 now builds unpublished twig nodes and suffix storage outside the parent
+lock, reducing maximum-depth allocations under that lock from 31 to zero in the
+deterministic allocator probe. Reacquisition checks version, full key identity,
+active slot and routing; it reads the current old value only after validation.
+The two value encodings remain under the lock for ownership correctness across
+version repetition. Uncommitted chains contain no terminal values and retire on
+retry or panic. Paused-construction update/conversion/removal tests check exact
+value Drop counts under native execution and Miri; the extended INS-04 encoder
+panic reproducer also passes both. Existing Loom models cover the lock/version
+revalidation protocol, not the complete tree or allocator.
+
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|
 | PERF-01 | Suffix insert | `maybe_pre_allocate_suffix` allocates `WIDTH * suffix_len` on every suffix insert, including `Found` updates, conflicts, retries, and splits that drop it | Move to the `NotFound`/`find_usable_slot` path, size from actual suffix usage, pass into split | 1 allocation / 600 B per long-key update removed |

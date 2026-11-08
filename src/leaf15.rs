@@ -19,7 +19,6 @@ use crate::Linker;
 use crate::Permuter;
 use crate::internode::InternodeNode;
 use crate::key::IKEY_SIZE;
-use crate::key::Key;
 use crate::ksearch::scalar::Scalar;
 use crate::leaf_trait::InsertTarget;
 use crate::leaf_trait::SplitInsertData;
@@ -2529,45 +2528,5 @@ impl<P: LeafPolicy> LeafNode15<P> {
         }
 
         self.values.load_relaxed(slot)
-    }
-
-    #[expect(clippy::cast_possible_truncation)]
-    pub(crate) unsafe fn assign_from_key(
-        &self,
-        slot: usize,
-        key: &Key<'_>,
-        value: Option<P::Output>,
-        prepared: &PreparedValue<P>,
-        guard: &LocalGuard<'_>,
-    ) {
-        debug_assert!(
-            slot < WIDTH_15,
-            "assign_from_key: slot {slot} >= WIDTH_15 {WIDTH_15}"
-        );
-
-        let _output: P::Output = value.expect(
-            "assign_from_key: value cannot be None (source slot was not a value); \
-             this indicates a bug in conflict detection",
-        );
-
-        // Store key and the already-encoded value token; no user code here.
-        self.set_ikey(slot, key.ikey());
-
-        self.store_prepared_value_relaxed(slot, prepared);
-
-        if key.has_suffix() {
-            // This leaf is freshly allocated (a layer leaf), so use the init
-            // path. `assign_ksuf` would use the still-empty permutation and
-            // could rebuild the external bag without the sibling assigned a
-            // moment ago.
-            self.set_keylenx(slot, KSUF_KEYLENX);
-
-            // SAFETY: The caller creates this leaf under exclusive access and
-            // publishes it only after both entries are assigned.
-            unsafe { self.assign_ksuf_init(slot, key.suffix(), guard) };
-        } else {
-            let inline_len: u8 = key.current_len().min(8) as u8;
-            self.set_keylenx(slot, inline_len);
-        }
     }
 }

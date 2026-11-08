@@ -146,6 +146,16 @@ ordering as suffix reads; `no-prefetch` removes the pointer chasing as well as
 CPU hints. A concurrent replacement test and inline integration tests pass under
 Miri, with native coverage for both suffix features and no-prefetch.
 
+Twig construction now prepares all nodes, keys and suffixes outside the parent
+lock. A deterministic maximum-depth regression confirms 31 → 0 allocations
+under that lock. Reacquisition validates the version, full key, active slot and
+routing before loading the current old value and transferring ownership. Only
+the two value encodings remain under the lock, preventing stale handles across
+version repetition. Abandoned chains own no terminal values and retire through
+RAII. Tests pause preparation while another writer updates, converts or removes
+the source; exact Drop counts and Miri verify retry cleanup. The existing encoder
+panic reproducer also covers a 31-node abandoned chain and passes under Miri.
+
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user
 work and is kept out of these commits.

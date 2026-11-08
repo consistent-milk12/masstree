@@ -12,7 +12,7 @@ use crate::{
     hints::{likely, unlikely},
     key::Key,
     leaf_trait::TreeLeafNode,
-    leaf15::{KSUF_KEYLENX, LAYER_KEYLENX, LeafNode15, MODSTATE_INSERT},
+    leaf15::{KSUF_KEYLENX, LeafNode15, MODSTATE_INSERT},
     nodeversion::{LockGuard, NodeVersion},
     policy::{LeafPolicy, PreparedValue},
     shard_counter::ShardedCounter,
