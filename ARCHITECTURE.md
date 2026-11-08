@@ -639,10 +639,12 @@ Implementations:
 `RefPolicy` is a marker trait implemented only by `BoxPolicy`. It enables `get_ref` and the `*_ref`
 scan APIs, returning `ValueRef<'g, V>` tied to the guard's lifetime.
 
-`ValuePtr<V>` is a `#[repr(transparent)] NonNull<V>` with `Copy`, `Deref`, and delegation of
-`Eq`/`Ord`/`Hash` to `V`. It has **no lifetime parameter**: its validity is a contract tied to the
-EBR guard, not encoded in the type. `ValueRef<'a, V>` is either `Borrowed(&'a V)` or `Owned(V)` (an
-atomic copy for write-through values).
+`ValuePtr<V>` is a `#[repr(transparent)] NonNull<V>` with `Copy` and an opaque, address-only
+`Debug`. It has **no safe value accessor**: a handle can outlive its EBR guard and the tree, so
+public read APIs return `ValueRef<'a, V>` instead, either `Borrowed(&'a V)` or `Owned(V)` (an atomic
+copy for write-through values). Internal code that has validated OCC and holds the guard uses the
+unsafe `ValuePtr::as_ref` contract. `LeafPolicy::output_to_value_ref` is the boundary conversion;
+`clone_value_from_output` and `RefPolicy::output_as_ref` are unsafe for the same reason.
 
 `RetireHandle` is either `Ptr(*mut u8)` or `Noop`; it must be consumed exactly once and is used to
 defer destruction of replaced boxed values or suffix bags.
@@ -658,16 +660,18 @@ Reads use `Acquire`; writes use `Release`. `take` atomically swaps in null. `upd
 reads the old pointer relaxed, installs the new pointer with Release, and returns the old pointer as
 a `RetireHandle`. On replacement, the old `Box` is retired through the epoch (`guard.defer_retire`).
 
-**Write-through optimization.** For `V` that is trivially droppable (`!needs_drop::<V>()`), at most
-8 bytes, a power of two in size, and has alignment at least its size, `CAN_WRITE_THROUGH` is true.
-Updates then avoid allocating a new `Box`: the existing allocation's contents are atomically
-read/written through `AtomicU8`/`AtomicU16`/`AtomicU32`/`AtomicU64` (`src/policy/box_values.rs`).
-Readers use `atomic_read_value` on the write-through path, so a concurrent update cannot produce a
-torn read. The pointer itself never changes, so no reclamation is needed. `Copy` is not strictly
-required; the actual gate is the absence of a destructor plus the size/alignment constraints.
+**Write-through optimization.** Write-through is restricted to a closed list of primitive
+integer/float/`bool`/`char` types (`is_atomic_word`), not a size/alignment heuristic. Those types
+have no padding, no ownership, and every bit pattern the store path can produce is valid, so the
+existing allocation's contents can be atomically read/written through
+`AtomicU8`/`AtomicU16`/`AtomicU32`/`AtomicU64` (`src/policy/box_values.rs`). Readers use
+`atomic_read_value` on the write-through path and public reads return `ValueRef::Owned`, so a
+concurrent update cannot produce a torn or aliased read. The pointer itself never changes, so no
+reclamation is needed.
 
 `insert_batch` uses a separate `BatchValueEntry` path for write-through policies to defer allocation
-until a new slot is actually needed.
+until a new slot is actually needed. Guard-scoped batch variants return `ValueRef`s rather than
+manufacturing unfreeable Boxes for old values.
 
 ### 5.3 InlinePolicy
 
@@ -751,7 +755,7 @@ pub struct InlineSuffixBag {
     slots: [AtomicU32; 15],    // packed (offset: u16, len: u16); EMPTY offset = u16::MAX
     size: AtomicU16,           // bytes used in `data`
     suffix_count: AtomicU8,    // number of active suffixes
-    _pad: u8,
+    pad: u8,
     data: UnsafeCell<[u8; CAPACITY]>, // 512 bytes default, 256 with small-suffix-capacity
 }
 ```
@@ -766,10 +770,11 @@ Properties:
 - `clear` marks the slot empty and decrements the count but does not reclaim bytes.
 - `clone` copies the fixed data array and metadata without compaction.
 - `drain_core`/`drain_to_external*` compute the space needed for active suffixes, copy them into a
-  heap `SuffixBag`, and append the new suffix. Crucially, draining preserves the inline bytes: it
-  does not clear the inline bag before the external pointer is published, so a concurrent reader
-  never observes neither store. Migrated slots can leave orphaned inline bytes, which is safe but
-  can waste space.
+  heap `SuffixBag`, and append the new suffix. Draining preserves the inline bytes until the
+  external pointer is published, so a concurrent reader never observes neither store. The slot that
+  was replaced is then cleared in the inline bag (SUF-01), so an old inline suffix cannot shadow the
+  new external value. Migrated sibling slots can leave orphaned inline bytes, which is safe but can
+  waste space.
 
 The bag is `!Sync` because of its `UnsafeCell`; it relies on the leaf lock for writes and OCC for
 reads. It is deliberately not re-exported from `lib.rs` as a standalone concurrent type.
@@ -779,27 +784,34 @@ reads. It is deliberately not re-exported from `lib.rs` as a standalone concurre
 `SuffixBag` (`src/suffix.rs`) is the external overflow store:
 
 ```rust
-struct SlotMeta { offset: u32, len: u16, _pad: u16 } // EMPTY offset = u32::MAX
+struct SlotMeta { offset: u32, len: u16, pad: u16 } // EMPTY offset = u32::MAX
 pub struct SuffixBag {
-    slots: [SlotMeta; 15],
-    data: Vec<u8>,
-    suffix_count: u8,
+    slots: [AtomicU64; 15],          // packed (offset, len, pad)
+    data: UnsafeCell<Vec<u8>>,
+    data_ptr: AtomicPtr<u8>,
+    used: AtomicUsize,
+    suffix_count: AtomicU8,
 }
 ```
 
 It starts with `INITIAL_CAPACITY = 128` bytes and grows as needed. Two assignment modes matter:
 
 - **`assign` / `try_assign`** may reuse a slot's old region, compact in place, or grow the `Vec`.
-  These are only safe with exclusive access (unpublished leaf or under the leaf lock when no reader
-  can observe the bag).
+  These are only safe with exclusive access (unpublished leaf, or the split destination before it
+  is published). A merely locked *published* leaf is not sufficient for `assign_init`: it may
+  reallocate while OCC readers hold a shared reference.
 - **`try_assign_append_only`** is the concurrent path: it never overwrites existing bytes and
   appends only when capacity remains. Published external bags are therefore effectively immutable
   in their used region; a reader that loaded an offset/length pair can still read stable bytes.
   If a suffix does not fit, the writer builds a new bag and swaps the pointer.
 
-`SuffixBagCell` is a boxed `UnsafeCell<SuffixBag>` with `as_ref()` (OCC-protected read) and
-`as_mut()` (lock-protected write). It is `Send` but not `Sync`. Replaced cells are retired through
-EBR, so readers holding the old pointer can finish safely.
+Reader-visible metadata is atomic: each slot's `(offset, len)` is one `AtomicU64`, `used` is
+published Release after bytes are copied, and the stable `data_ptr` is used with
+`slice::from_raw_parts` rather than `Vec::len`. A stale/torn pair returns `None` so OCC retries.
+Mutation takes `&self` and goes through `UnsafeCell`; the cell exposes `as_ref()` (OCC-protected
+read) and `as_writer()` (lock-protected write), never `&mut SuffixBag`, so readers and writers do not
+alias. It is `Send` but not `Sync`. Replaced cells are retired through EBR, so readers holding the
+old pointer can finish safely.
 
 `compact` (`src/suffix/compact.rs`) deduplicates active slots, copies live suffixes forward, and
 truncates the buffer. It is used when exclusive access is available; day-to-day production instead
@@ -1115,11 +1127,11 @@ tree.get_ref(key, &guard)        // BoxPolicy only; returns ValueRef<'g, V>
   pointers without re-running a full internode descent, and falls back to a root re-descent if the
   twig was garbage-collected or promoted.
 
-On success, the output is read before version validation. For `BoxPolicy`, `Output = ValuePtr<V>` is
-a non-owning pointer; `get()` clones the value while the guard is still alive. For `InlinePolicy`,
-the output is the value itself. `get_ref` returns `ValueRef::Borrowed` for non-write-through boxed
-values and `ValueRef::Owned` (atomic copy) for write-through values, avoiding a reference to memory
-that a concurrent writer may mutate.
+The value/suffix snapshot is validated after the complete payload read and before it is returned.
+`get_with_guard` returns `ValueRef<'g, P::Value>`: `Borrowed` for non-write-through boxed values and
+`Owned` (atomic copy) for write-through values, so a concurrent writer cannot mutate the referenced
+memory. `get()` clones the value while its internal guard is alive; `get_ref` uses the same
+guard-scoped model. For `InlinePolicy`, an owned copy is returned.
 
 ### 8.3 Insert
 
@@ -1547,7 +1559,9 @@ Re-exported from `lib.rs`:
 
 ```rust
 pub use tree::{MassTree, MassTree15, MassTree15Inline, MassTreeGeneric};
-pub use tree::{BatchEntry, BatchInsertResult, Entry, OccupiedEntry, VacantEntry};
+pub use tree::{
+    BatchEntry, BatchInsertResult, Entry, OccupiedEntry, RemoveEntryResult, VacantEntry,
+};
 pub use tree::{InsertError, RemoveError};
 pub use tree::{KeysIter, RangeBound, RangeIter, ScanEntry, ValuesIter};
 pub use tree::batch;
@@ -1588,8 +1602,9 @@ type. `Linker` is crate-only.
 | Debug            | `debug_root_ptr`, `print_tree`, `print_tree_to`, `Debug`, `Display`                                                                      |
 
 `get`/`remove`/`first`/`last` require `P::Value: Clone` because they create an internal guard and
-return an owned value after dropping it. The `_with_guard` variants return `P::Output`, which is
-valid only while the guard is held.
+return an owned value after dropping it. `get_with_guard`/`remove_with_guard` return
+`ValueRef<'g, P::Value>`, and `insert_batch_with_guard`/`insert_batch_entries` return
+`BatchInsertResult<ValueRef<'g, P::Value>>`; the value is valid only while the guard is held.
 
 ### 9.3 Guard and value lifetime
 
@@ -1598,15 +1613,14 @@ let tree: MassTree<u64> = MassTree::new();
 let guard = tree.guard();          // enters the EBR epoch
 
 tree.insert_with_guard(b"k", 1, &guard);
-let v: Option<u64> = tree.get_with_guard(b"k", &guard);
-
-let old: Option<u64> = tree.remove_with_guard(b"k", &guard).unwrap();
-// value outputs are valid until `guard` is dropped
+let v = tree.get_with_guard(b"k", &guard);       // Option<ValueRef<'_, u64>>
+let old = tree.remove_with_guard(b"k", &guard);  // Result<Option<ValueRef<'_, u64>>, _>
+// value references are valid until `guard` is dropped
 ```
 
-For `BoxPolicy`, `get_with_guard` returns `ValuePtr<V>`; dropping the guard may allow reclamation of
-the pointed-to box. `get()` clones the value before dropping its internal guard. `get_ref` ties the
-returned reference to the guard lifetime.
+For `BoxPolicy`, `get_with_guard` returns a `ValueRef`; write-through values are atomic copies,
+boxed values stay alive until the guard is dropped even if retired. `get()` clones the value before
+dropping its internal guard. `get_ref` uses the same guard-scoped model.
 
 A guard can be reused across many operations, but only with the tree that created it. Passing a
 guard from a different tree panics (`verify_guard`). Guards are not `Send`; concurrency is expressed
@@ -1755,7 +1769,7 @@ The workloads mirror the original C++ `mttest` patterns but are not linked again
 `palm` reduces the C++ `PALM_N` from 128M to 100k. The parity is workload-shaped, not a differential
 oracle.
 
-### 11.4 Loom, Shuttle, and Miri
+### 11.4 Loom and Miri
 
 - **Loom** (12 tests): `src/nodeversion/loom_tests.rs` models a simplified version word/lock
   (mutual exclusion, try-lock failure, version visibility, `stable()` waiting on dirty bits);
@@ -1763,13 +1777,22 @@ oracle.
   `src/internode/loom_tests.rs` models internode key insertion/search. These models duplicate the
   atomic logic rather than testing the production types. No loom test covers split propagation,
   coalesce, range traversal, or the full leaf.
-- **Shuttle** is a dev-dependency and `cfg(shuttle)` is declared, but the repository contains **no
-  shuttle tests**. `just test-shuttle` runs `cargo test --lib tree::shuttle_tests`, a module that
-  does not exist, so it is a no-op. `just test-all` includes it.
 - **Miri**: `just miri`, `miri-strict`, `miri-strict-int`, `miri-leaks`, `miri-tree-borrows`.
-  `nodeversion::concurrent_tests` is excluded under Miri; stress tests lower their thresholds via
-  `cfg!(miri)`. `tests/leak_tests.rs` is intended for Miri but the `miri-leaks` recipe currently
-  runs only `--lib`; allocator teardown and `true_inline` also provide leak coverage.
+  `miri-leaks` runs `cargo +nightly miri test --test leak_tests` with strict provenance and
+  symbolic alignment, so the 20 leak tests are actually executed under Miri. Multi-threaded and
+  long-loop tests remain excluded; the exclusions are:
+
+  | File | Exclusions | Reason |
+  | --- | --- | --- |
+  | `src/nodeversion/concurrent_tests.rs` | module `cfg(not(miri))` | multi-threaded |
+  | `src/shard_counter/unit_tests.rs` | 8 `cfg_attr(miri, ignore)` | multi-threaded / 1000-iteration loops |
+  | `src/nodeversion/unit_tests.rs` | 2 `cfg_attr(miri, ignore)` | iteration loops too slow |
+  | `src/tree/unit_tests.rs` | 1 `cfg_attr(miri, ignore)`, 2 `cfg(not(miri))` | multi-threaded |
+  | `src/tree/remove/unit_tests.rs` | 5 `cfg_attr(miri, ignore)`, 12 `cfg(not(miri))` | scheduling / multi-threaded |
+  | `src/tree/range/*`, `src/suffix/*` | none | covered by unit tests and the leak target |
+
+  Stress tests lower their thresholds via `cfg!(miri)`. Allocator teardown and `true_inline` also
+  provide leak coverage.
 
 ### 11.5 Commands
 
@@ -1783,7 +1806,7 @@ just test-integration     # cargo test --test '*'
 just test-loom            # RUSTFLAGS="--cfg loom" cargo test --lib loom_tests
 just miri                 # cargo +nightly miri test --lib
 just miri-strict          # strict provenance
-just miri-leaks           # strict provenance + symbolic alignment
+just miri-leaks           # strict provenance + symbolic alignment on tests/leak_tests.rs
 just miri-tree-borrows    # Tree Borrows
 ```
 
@@ -1793,12 +1816,9 @@ symbol stripping.
 
 ### 11.6 Coverage gaps and testing risks
 
-- No CI configuration is checked in, so the feature matrix (`sidecar-suffix`,
-  `small-suffix-capacity`, `no-prefetch`, `tracing`, `no-default-features`) is not automatically
-  exercised.
+- CI (`.github/workflows/ci.yml`) covers `fmt --check`, strict Clippy, the lib/integration/doc
+  suites, the default/no-default/all-features builds, Loom, and the Miri leak target.
 - Loom models are simplified and do not cover the real tree protocols.
-- Shuttle is unused despite the dependency and recipe.
-- `tests/leak_tests.rs` is not run by the `miri-leaks` recipe as written.
 - The C++ parity suite is workload-level, not a linked differential test.
 - A few long-running stress tests are `#[ignore]` and not run by default.
 - Property-test case counts are modest (10–500 per block).
@@ -1867,15 +1887,14 @@ run213 for tail latency). These are project-specific measurements; the benchmark
 | Feature                 | Default | Effect                                                                                                                    |
 | ----------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `debug-print`           | **yes** | Enables `tree/generic/print.rs`; `print_tree`, `print_tree_to`, `Display`                                                 |
-| `mimalloc`              | no      | Sets `mimalloc::MiMalloc` as the global allocator; recommended for benchmarks; incompatible with memory-profiling benches |
-| `tracing`               | no      | Enables `init_tracing()` (NDJSON file appender + optional console); the library has no tracing instrumentation calls      |
+| `mimalloc`              | no      | Available to benchmark binaries; the library never installs a global allocator                                           |
+| `tracing`               | no      | `init_tracing()` writes NDJSON to a temp dir (console off by default); the library emits insert/get/remove/maintenance events |
 | `small-suffix-capacity` | no      | 256-byte inline suffix bag instead of 512; leaf 896 B instead of 1152 B                                                   |
 | `sidecar-suffix`        | no      | `InlinePolicy` uses `SidecarSuffix`; leaf 576 B; `embedded_suffix` module excluded                                        |
 | `no-prefetch`           | no      | Prefetch helpers become no-ops                                                                                            |
 | `debug-routing`         | no      | `eprintln!` tracing of internode routing and split propagation                                                            |
 
-`cfg(loom)` is the only model-checking cfg used. `cfg(shuttle)` is declared in
-`[lints.rust.unexpected_cfgs]` but unused.
+`cfg(loom)` is the only model-checking cfg used.
 
 Profiles:
 
@@ -1919,51 +1938,52 @@ whether cargo currently enforces it.
 6. **Root creation uses a Release store, not a CAS.** Only the old root's lock holder can create a
    new root; the no-abandon protocol guarantees completion. A layer-root promotion does not update
    the parent slot; readers climb parent pointers.
-7. **`has_changed` ignores the inserting bit.** The C++ code ignores only the lock bit. The Rust
-   implementation deliberately ignores `LOCK_BIT | INSERTING_BIT`, because counters are the source
-   of truth and an in-flight insert has not published structural changes. The conservative
-   `has_changed_or_locked` is used where the dirty window matters.
+7. **`has_changed` ignores only the lock bit.** An in-flight insert now marks the version dirty
+   (`OCC-01`) and increments the insert counter on unlock, so a reader that snapshotted before the
+   insert sees a version change. `has_changed_or_locked` remains available where the dirty window
+   itself matters.
 
 ### 14.2 API and behavioral notes
 
-- Insert/remove/entry APIs **panic** on internal `InsertError` variants rather than returning
-  recoverable errors. `InsertError` variants other than `SplitFailed` are effectively legacy.
+- Insert/remove/entry APIs **panic** on internal errors rather than returning recoverable errors.
+  `InsertError` now has only the `SplitFailed` variant; the split path itself is infallible after
+  the pre-encoding check.
 - `RemoveError::RetryLimitExceeded` is the only remove error; not-found is `Ok(None)`.
 - `len()` is an approximate snapshot (sharded Relaxed loads); it is exact after quiescence.
 - Range scans are not snapshot-isolated; they provide monotonic keys, not a consistent point-in-time
-  view.
+  view. Bounds are full-key exact (`CursorKey` + suffix/layer comparison), not the earlier ikey-only
+  approximation.
 - The Entry API is a point-in-time snapshot and is not an atomic read-modify-write.
-- `BatchInsertResult::failed` exists but the current implementation does not increment it; the
-  fallback panics on internal errors.
+- `BatchInsertResult` has only `inserted`, `updated`, and `old_values`; `total()` is
+  `inserted + updated`. A batch either applies an entry or panics on an internal invariant
+  violation.
 - `debug-print` is enabled by default, so `Display`/`print_tree` code is compiled into normal builds.
-- `tracing` only initializes a subscriber; there are no `tracing::` calls in the library, so it
-  currently produces no spans/events.
-- `mimalloc` is recommended for benchmarks but must be disabled for `memory_total`/`memory_dhat`.
+  `print_tree` climbs to the true promoted layer root before printing.
+- `tracing` emits insert/get/remove/maintenance events; file logs go to a temp directory by default
+  and `MASSTREE_LOG_CONSOLE=1` opts into console output.
+- `mimalloc` is recommended for benchmark binaries but the library does not install it globally;
+  memory-profiling benches define their own allocator.
+- `ValuePtr` is opaque (`Debug` prints the address only); public reads return guard-scoped
+  `ValueRef`s. Do not add a safe value accessor back to `ValuePtr`.
 
 ### 14.3 Audit points (implementation observations, not guarantees)
 
 These are architectural observations worth keeping in mind when modifying the code:
 
-1. **Remove post-lock validation is ikey-based.** `lock_and_verify_for_remove` re-reads the
-   permutation and checks that the slot's ikey still matches, but not the full keylenx/suffix
-   identity, and it does not revalidate the pre-lock version the way insert's
-   `validate_post_lock` does. Under a same-ikey insert/remove race, the logical position `ki` could
-   refer to a different key by the time the lock is acquired. This asymmetry is worth auditing for
-   concurrency-sensitive changes.
-2. **Sublayer GC assumes a leaf-shaped layer pointer.** `try_remove_sublayer` casts the parent
-   slot's layer pointer to `LeafNode15` and checks `size`/`prev`/`next`. After a layer root is
-   promoted to an internode, the parent slot still points to the original left leaf (the internode
-   is reachable via that leaf's parent pointer). The GC path retires the pointed-to leaf and clears
-   the parent slot; it does not explicitly retire the promoted internode root. A fully drained,
-   promoted sublayer is therefore a path to audit for reclamation completeness.
+1. **Remove revalidates the full key under the lock.** `lock_and_verify_for_remove` re-runs the
+   full-key search (ikey, keylenx, suffix) after acquiring the lock, so a same-ikey insert/remove
+   cannot shift the logical position onto another key.
+2. **Sublayer GC reclaims the whole subtree.** `try_remove_sublayer` climbs parent pointers to the
+   true layer root, locks and validates every leaf/internode top-down, clears the parent slot, marks
+   every node deleted, and retires the entire subtree. A promoted sublayer no longer leaks.
 3. **Loom coverage is model-level.** The loom tests reimplement simplified atomics; they do not
    exercise `NodeVersion`, `Permuter`, `Linker`, split propagation, coalesce, or scans directly.
-4. **Shuttle is absent.** The dependency, cfg declaration, and justfile recipe exist, but no tests
-   use them.
-5. **Layer-root promotion and route-based GC interact.** Routes identify a parent leaf by per-layer
-   ikeys; after promotion, the route still resolves to the parent leaf, but the layer object is the
-   original left leaf. Any change to layer promotion or sublayer GC should preserve this
-   parent-slot/root-pointer relationship.
+4. **Layer-root promotion is handled by climbing.** Point reads, range scans, the printer, and
+   sublayer GC all resolve a parent slot's original left leaf to the parentless internode root
+   before walking siblings. Any change to layer promotion must preserve that parent-pointer chain.
+5. **Range bounds and scan traversal share full-key ordering.** `CursorKey`, `compare_cursor_to_slot`,
+   and the B-link walk in `reach_leaf_for_scan` are the single source of truth; do not reintroduce
+   ikey-only comparisons in a scan fast path.
 
 ### 14.4 Operational guidance
 

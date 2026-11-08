@@ -34,3 +34,6 @@ impl InlineSentinel {
         StdPtr::eq(ptr, StdPtr::from_ref(&INLINE_SENTINEL))
     }
 }
+
+#[cfg(test)]
+mod unit_tests;

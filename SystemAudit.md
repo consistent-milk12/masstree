@@ -201,6 +201,78 @@ move after a refactor.
 
 ---
 
+### 2.5 Remediation status (2026-11-08)
+
+Every P0/P1 finding in this audit has been fixed in the worktree. The table
+below records the fix commit and the verification that was run. The original
+findings are kept unchanged below as the historical audit record; where a
+location or mechanism has changed, the fix commit and `ARCHITECTURE.md` are
+authoritative.
+
+Verification used for the series:
+
+```text
+cargo test --lib                                      613 passed
+cargo test --test tree_proptests                       51 passed
+cargo test --test range_scan_tests                     25 passed, 1 ignored
+cargo test --test batch_insert_tests                   28 passed
+cargo test --test cpp_tests                            all C++-shaped tests
+cargo clippy --all-targets --all-features -- -D warnings  clean
+cargo check --all-targets --no-default-features         clean
+cargo check --all-targets --all-features                clean
+cargo check --features sidecar-suffix                   clean
+cargo check --features small-suffix-capacity            clean
+Miri (valueptr_escape/valueptr_race, leak_tests)        clean
+range/property/batch reproducers                        pass
+```
+
+| Finding | Resolution | Commit |
+| --- | --- | --- |
+| SAFE-01/02/03 | `ValuePtr` opaque; public reads return guard-scoped `ValueRef`; batch entries own `P::Value` | `deabbcd` |
+| SAFE-04 | Ownership-bearing node/allocation APIs are `unsafe`, with documented contracts | `e94308d`, `bcff95c` |
+| SAFE-05 | Write-through restricted to a closed primitive-type list | `0af684c` |
+| SAFE-06 | `SuffixBag` metadata/used length atomic; `as_writer`, no `&mut` aliasing | `d6e0a07` |
+| OCC-01 | Every new-slot insert marks the version dirty and publishes with Release | `989246e` |
+| OCC-02 | `has_changed` no longer ignores the insert bit; counters are authoritative | `24cfe33` |
+| OCC-03 | Store-store ordering before dirty publication; Acquire validation | `f11f583` |
+| OCC-04 | Descent restarts when a child internode is deleted | `81ea0fc` |
+| OCC-05 | Ancestor separator redirects go through `mark_insert` | `7302514` |
+| OCC-06 | Guard-protected root/parent/child loads; SeqCst value/suffix pointer loads | `947681b` |
+| INS-01/02 | Split only on strict ikey boundaries; split path never fails | `de19063` |
+| INS-03 | Insert restarts when it reaches a deleted rightmost leaf | `14a4da4` |
+| INS-04 | User value encoding happens before `mark_split` | `c686940` |
+| REM-01/02/03 | Full-key revalidation under the lock; B-link follow; bounded retries | `8ea351d` |
+| GC-01 | Chain entries carry only `ikey_bound`; duplicate entries are consumed safely | `0265567` |
+| GC-02 | Promoted/multi-leaf sublayers reclaimed as a validated whole subtree | `e351a36` |
+| GC-03/04 | Unlink before retire; preserve live unary levels; retry parent acquisition | `1d6ef92` |
+| GC-05 | One deferred attempt per maintenance call | `d5b081d` |
+| ALLOC-01 | TLS-destruction fallback to the global allocator | `f2d8175` |
+| ALLOC-02 | User `Drop` panics contained during reclamation | `29e84fd` |
+| ALLOC-03 | `TreeAllocator` unsafe contract requires abort, never unwind | `b70ebe1` |
+| PRIM-01 | `ShardedCounter::load` no longer asserts on a valid snapshot | `40c70af` |
+| PRIM-02 | `Permuter` results masked to the encoded width | `7a439fe` |
+| RNG-01..10 | Full-key bounds, promoted-layer root climb, stable B-link scan, reverse/values/batch bounds, fused DoubleEnded | `ee3364a` |
+| SUF-01 | Replaced slot's inline suffix cleared after a drain | `abb3f5d` |
+| SUF-02 | Zero-length suffixes skipped during compaction | `cfaf419` |
+| SUF-03 | Public suffix length/bounds checks unconditional | `3047f97` |
+| SUF-04 | `assign_init` requires exclusive ownership; layer init uses `assign_ksuf_init` | `f5ce6b3` |
+| SUF-05 | Saturating headroom subtraction | `f99f4a6` |
+| BATCH-01..06 | Private owning entries, deterministic sort, guard-scoped old values, no global allocator | `5a5a8e2`, `54df313` |
+| TOOL-01 | `print_tree` example feature-gated; all targets build with `--no-default-features` | `b70ebe1` |
+| TOOL-02/03/05/07/11/12/13/14 | Shuttle removed; Miri leak target fixed; benchmark paths/redirection fixed; tracing honest; release-visible tests; CI; promoted-layer printing | `c82e9dc` |
+| TOOL-04 | Strict Clippy gate passes | `9c6e8d1` |
+| TOOL-06/10 | Test logs out of the repo; deterministic proptest order and complete scan assertions | `a13ed47` |
+| TOOL-08 | Miri exclusions enumerated in `ARCHITECTURE.md` §11.4 | this docs commit |
+| TOOL-09 | Stress/parity tests assert values and final state | `a3be3e2`, `4694467` |
+
+The simplification opportunities (SIM-01..16) are **not correctness defects**.
+The branch addresses the ones that carry the wrong ownership/contract signal:
+`InsertError` was collapsed to `SplitFailed` (SIM-01), unused dev-dependencies
+were removed (SIM-15), tracing is real (SIM-16), and the sentinel tests are
+wired (SIM-12). The remaining SIM entries are larger structural refactors that
+do not change observable behavior; they are recorded as deliberate follow-up
+cleanups rather than release blockers.
+
 ## 3. Safety and public API soundness
 
 ### SAFE-01 — Guard-scoped outputs can outlive the guard and tree (safe-code UAF)
