@@ -833,7 +833,7 @@ where
             let mut layer_root: *const u8 = self.root_ptr.load(AtomicOrdering::Acquire);
 
             let entries_processed: usize = 'retry: loop {
-                layer_root = self.maybe_parent_generic(layer_root);
+                layer_root = self.maybe_parent_generic(layer_root, guard);
 
                 let mut leaf_ptr: *mut LeafNode15<P> =
                     self.reach_leaf_concurrent_generic(layer_root, &key, false, guard);

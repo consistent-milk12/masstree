@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 use std::ptr as StdPtr;
-use std::sync::atomic::{AtomicPtr, AtomicU64};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use crate::inline::bits::InlineBits;
 use crate::inline::sentinel::InlineSentinel;
@@ -192,7 +192,9 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     fn load_raw(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH_15, "load_raw: slot {slot} out of bounds");
 
-        self.tags[slot].load(READ_ORD)
+        // SeqCst participates in seize's protected-load total order; the tag
+        // may be a sublayer pointer that the caller dereferences.
+        self.tags[slot].load(Ordering::SeqCst)
     }
 
     #[inline(always)]
@@ -209,7 +211,7 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     fn load_layer(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH_15, "load_layer: slot {slot} out of bounds");
 
-        self.tags[slot].load(READ_ORD)
+        self.tags[slot].load(Ordering::SeqCst)
     }
 
     #[inline(always)]

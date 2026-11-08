@@ -97,11 +97,16 @@ pub struct BoxValueArray<V> {
 
 impl<V> BoxValueArray<V> {
     /// Load the raw pointer at `slot` without typed interpretation.
+    ///
+    /// This is a `SeqCst` load, matching `Guard::protect`: a reader that holds
+    /// a reclamation guard must participate in the collector's enter/retire
+    /// total order or it may observe (and dereference) a pointer retired while
+    /// it was inactive.
     #[inline(always)]
     pub(crate) fn load_raw(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH_15, "load_raw: slot {slot} out of bounds");
 
-        self.ptrs[slot].load(READ_ORD)
+        self.ptrs[slot].load(Ordering::SeqCst)
     }
 
     /// Load the raw pointer at `slot` with Relaxed ordering (for prefetching).
@@ -202,7 +207,9 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     fn load(&self, slot: usize) -> Option<ValuePtr<V>> {
         debug_assert!(slot < WIDTH_15, "load: slot {slot} out of bounds");
 
-        let ptr: *mut u8 = self.ptrs[slot].load(READ_ORD);
+        // SeqCst participates in seize's protected-load total order; a plain
+        // Acquire load can return a Box retired while this thread was inactive.
+        let ptr: *mut u8 = self.ptrs[slot].load(Ordering::SeqCst);
         if ptr.is_null() {
             return None;
         }
@@ -332,7 +339,9 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
     fn load_layer(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH_15, "load_layer: slot {slot} out of bounds");
 
-        self.ptrs[slot].load(READ_ORD)
+        // SeqCst participates in seize's protected-load total order; callers
+        // dereference this sublayer root.
+        self.ptrs[slot].load(Ordering::SeqCst)
     }
 
     #[inline(always)]

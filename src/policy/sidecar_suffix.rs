@@ -35,7 +35,9 @@ impl SidecarSuffix {
     /// Get the sidecar pointer (may be null if never allocated).
     #[inline(always)]
     fn sidecar_ptr(&self) -> *mut SuffixSidecar {
-        self.sidecar.load(AtomicOrdering::Acquire)
+        // SeqCst participates in seize's protected-load total order; the
+        // sidecar is dereferenced by readers and retired on replacement.
+        self.sidecar.load(AtomicOrdering::SeqCst)
     }
 
     /// Get or create the sidecar.

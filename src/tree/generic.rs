@@ -207,9 +207,16 @@ where
     }
 
     /// Load the root pointer atomically.
+    ///
+    /// Uses `Guard::protect`: the returned node is guaranteed to stay
+    /// allocated for the guard's lifetime, matching seeize's reclamation
+    /// contract (a plain Acquire load does not participate in the retirement
+    /// barrier's total order).
     #[inline(always)]
-    pub(crate) fn load_root_ptr_generic(&self, _guard: &LocalGuard<'_>) -> *const u8 {
-        self.root_ptr.load(AtomicOrdering::Acquire)
+    pub(crate) fn load_root_ptr_generic(&self, guard: &LocalGuard<'_>) -> *const u8 {
+        guard
+            .protect(&self.root_ptr, AtomicOrdering::Acquire)
+            .cast_const()
     }
 
     /// Returns the root pointer for debugging/testing purposes.
@@ -222,8 +229,8 @@ where
     /// and validity, and must never use it to mutate or free nodes through
     /// this API.
     #[doc(hidden)]
-    pub unsafe fn debug_root_ptr(&self, _guard: &LocalGuard<'_>) -> *mut u8 {
-        self.root_ptr.load(AtomicOrdering::Acquire)
+    pub unsafe fn debug_root_ptr(&self, guard: &LocalGuard<'_>) -> *mut u8 {
+        guard.protect(&self.root_ptr, AtomicOrdering::Acquire)
     }
 
     /// Verify that the guard was created from this tree's collector.
@@ -252,50 +259,56 @@ where
     /// Follow parent pointers to find the actual layer root.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "Method signature pattern")]
-    fn maybe_parent_generic(&self, mut node: *const u8) -> *const u8 {
+    fn maybe_parent_generic(
+        &self,
+        mut node: *const u8,
+        guard: &LocalGuard<'_>,
+    ) -> *const u8 {
         loop {
             // SAFETY: node is valid, both types have NodeVersion as first field
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
             let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
-            // SAFETY: Dead-code traversal helper, no concurrent retirement of parent pointers.
             let parent = if version.is_leaf() {
                 // SAFETY: version.is_leaf() confirmed
                 let leaf: &LeafNode15<P> = unsafe { &*(node.cast::<LeafNode15<P>>()) };
-                unsafe { leaf.parent_unguarded() }
+                leaf.parent(guard)
             } else {
                 // SAFETY: !version.is_leaf() confirmed
                 let inode: &InternodeNode = unsafe { &*(node.cast::<InternodeNode>()) };
-                unsafe { inode.parent_unguarded() }
+                inode.parent(guard)
             };
 
             if parent.is_null() {
                 return node;
             }
 
-            node = parent;
+            node = parent.cast_const();
         }
     }
 
     /// Single-step parent traversal
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "Method signature pattern")]
-    fn maybe_parent_one_step(&self, node: *const u8) -> *const u8 {
+    fn maybe_parent_one_step(
+        &self,
+        node: *const u8,
+        guard: &LocalGuard<'_>,
+    ) -> *const u8 {
         // SAFETY: node is valid, both types have NodeVersion as first field
         #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
         let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
 
-        // SAFETY: Dead-code traversal helper, no concurrent retirement of parent pointers.
         let parent: *mut u8 = if version.is_leaf() {
             let leaf: &LeafNode15<P> = unsafe { &*(node.cast::<LeafNode15<P>>()) };
 
             // SAFETY: version.is_leaf() confirmed
-            unsafe { leaf.parent_unguarded() }
+            leaf.parent(guard)
         } else {
             let inode: &InternodeNode = unsafe { &*(node.cast::<InternodeNode>()) };
 
             // SAFETY: !version.is_leaf() confirmed
-            unsafe { inode.parent_unguarded() }
+            inode.parent(guard)
         };
 
         if parent.is_null() {
@@ -344,7 +357,7 @@ where
                 }
 
                 // Walk up to parent
-                n[sense] = self.maybe_parent_one_step(n[sense]);
+                n[sense] = self.maybe_parent_one_step(n[sense], guard);
             }
 
             loop {

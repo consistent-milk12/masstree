@@ -52,9 +52,9 @@ where
 
         // Binary search for child
         let child_idx: usize = upper_bound_internode_generic::<InternodeNode>(target_ikey, inode);
-        // SAFETY: We've already established ordering via version check;
-        // child pointer is valid during OCC read.
-        let child: *mut u8 = unsafe { inode.child_unguarded(child_idx) };
+        // Use the guard-protected load: the child must remain allocated for
+        // the guard's lifetime, not merely be an Acquire snapshot.
+        let child: *mut u8 = inode.child(child_idx, _guard);
 
         // Prefetch child node
         prefetch_read(child);

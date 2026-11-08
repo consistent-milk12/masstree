@@ -29,7 +29,9 @@ pub(super) fn get_suffix<'a>(
         return Some(suffix);
     }
 
-    let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Acquire);
+    // SeqCst participates in seize's protected-load total order; the cell is
+    // dereferenced below and may be retired by a concurrent update.
+    let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::SeqCst);
 
     if ext_ptr.is_null() {
         None
@@ -215,7 +217,9 @@ pub(super) unsafe fn clear_suffix(
 ) {
     inline.clear(slot);
 
-    let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Acquire);
+    // SeqCst participates in seize's protected-load total order; the cell is
+    // dereferenced below and may be retired by a concurrent update.
+    let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::SeqCst);
 
     if !ext_ptr.is_null() {
         // SAFETY: ext_ptr is valid, caller holds lock.

@@ -447,7 +447,7 @@ where
         let mut in_sublayer: bool = false;
 
         'retry: loop {
-            layer_root = self.maybe_parent_generic(layer_root);
+            layer_root = self.maybe_parent_generic(layer_root, guard);
 
             let mut leaf_ptr: *mut LeafNode15<P> =
                 self.reach_leaf_concurrent_generic(layer_root, key, in_sublayer, guard);
