@@ -1,27 +1,31 @@
 # Post-Remediation Deep Assessment & Findings (`Findings.md`)
 
 > **Status:** Complete Deep Audit across all 64 canonical findings in
-> `SystemAudit.md`, `ARCHITECTURE.md`, and the remediation commits
-> (`93e65eb..da74a75`). All identified correctness, soundness, performance, and
-> tooling issues have been resolved and verified. **Companion Document:**
-> `ArchitectureProposals.md` (progressive architectural redesign proposals for
-> major correctness, simplicity, and performance gains).
+> [`SystemAudit.md`](SystemAudit.md),
+> [`ARCHITECTURE.md`](ARCHITECTURE.md),
+> and the remediation commits (`93e65eb..da74a75`), plus post-remediation source
+> verification at `HEAD` (`d2a9d68`). **Companion Document:**
+> [`ArchitectureProposals.md`](ArchitectureProposals.md)
+> (source-verified architectural proposals covering only open correctness,
+> soundness, simplification, and performance work).
 
 ---
 
 ## 1. Executive Summary
 
-### 1.1 Assessment of the Initial Remediation Wave (`93e65eb..fb8424e`)
+### 1.1 Assessment of the Remediation Waves (`93e65eb..da74a75`)
 Our four-subsystem deep audit evaluated every single one of the 64 canonical
-findings in `SystemAudit.md` (`SAFE-01..06`, `OCC-01..06`, `INS-01..04`,
-`REM-01..03`, `GC-01..05`, `ALLOC-01..03`, `PRIM-01..02`, `RNG-01..10`,
-`SUF-01..05`, `BATCH-01..06`, `TOOL-01..14`, `PERF-TOOL-01..04`, `SIM-01..16`,
-`PERF-01..25`) and every claim in `ARCHITECTURE.md`.
+findings in
+[`SystemAudit.md`](SystemAudit.md)
+(`SAFE-01..06`, `OCC-01..06`, `INS-01..04`, `REM-01..03`, `GC-01..05`,
+`ALLOC-01..03`, `PRIM-01..02`, `RNG-01..10`, `SUF-01..05`, `BATCH-01..06`,
+`TOOL-01..14`, `PERF-TOOL-01..04`, `SIM-01..16`, `PERF-01..25`) and every claim
+in
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 While the initial remediation wave (`93e65eb..fb8424e`) fixed the majority of
-the 64 findings, our deep audit uncovered **12 residual or newly introduced
-correctness, soundness, performance, and tooling issues**, all of which have now
-been fixed and committed in `9ffacd5..da74a75`:
+the 64 findings, our follow-up audit uncovered **12 residual issues** that were
+resolved in `9ffacd5..da74a75`:
 
 | # | Area / Audit IDs | Issue Uncovered in Initial Remediation | Resolution Commit(s) |
 |---|---|---|---|
@@ -40,19 +44,59 @@ been fixed and committed in `9ffacd5..da74a75`:
 
 ---
 
+### 1.2 Newly Uncovered Post-Remediation Gaps at `HEAD` (`d2a9d68`)
+
+During the deep verification of
+[`ArchitectureProposals.md`](ArchitectureProposals.md)
+against `HEAD` (`d2a9d68`), **5 additional open correctness/soundness gaps**
+were identified in paths that had drifted from their remediated counterparts:
+
+1. **`ReverseScanCtx::try_emit_generic`
+   ([`src/tree/range/reverse_ctx.rs:705-747`](src/tree/range/reverse_ctx.rs#L705-L747)):**
+   Checks `has_changed(version)` *before* reading `leaf.ksuf(slot)` and
+   `E::emit_value(leaf, slot, key_len)`, mutates `self.cursor_key` and
+   `self.flags.clear_upper_bound()` *before* `E::emit_value`, and omits a
+   post-load `has_changed(version)` check (see
+   [`ArchitectureProposals.md` §2.1](ArchitectureProposals.md#L72-L103)).
+2. **`ReverseScanCtx::find_prev_single_layer`
+   ([`src/tree/range/reverse_ctx.rs:1126-1190`](src/tree/range/reverse_ctx.rs#L1126-L1190)):**
+   Mutates `self.cursor_key`, `self.flags`, and `self.stack` before
+   `leaf.load_value(slot)` and never checks `has_changed(version)` after reading
+   the slot.
+3. **`ReverseScanCtx::try_emit_slot_reverse`
+   ([`src/tree/range/reverse_ctx.rs:432-466`](src/tree/range/reverse_ctx.rs#L432-L466)):**
+   Checks `has_changed(version)` before loading value/suffix, reads
+   `leaf.ksuf(slot)` twice, and has no post-load version check.
+4. **`ReverseScanCtx::advance_prev_leaf`
+   ([`src/tree/range/reverse_ctx.rs:1388-1443`](src/tree/range/reverse_ctx.rs#L1388-L1443)):**
+   Calls `ReverseScanHelper::retreat` (`unsafe { leaf.prev_unguarded() }`,
+   bypassing `seize` protected load) and does not skip deleted/empty
+   intermediate leaves (`RNG-08`/`OCC-06`), unlike
+   `advance_to_prev_leaf_generic`.
+5. **Residual `UnsafeCell<Vec<u8>>` and `(*self.data.get()).set_len(new_used)`
+   in `SuffixBag::try_append_suffix`
+   ([`src/suffix.rs:146, 593`](src/suffix.rs#L593)):** Even after `0c1a71e`,
+   `try_append_suffix` still forms `&mut Vec<u8>` via
+   `(*self.data.get()).set_len(new_used)` during shared lock-free reads.
+   Replacing `UnsafeCell<Vec<u8>>` with direct raw buffer ownership via
+   `(data_ptr, capacity, used)` is specified in
+   [`ArchitectureProposals.md` §4.2](ArchitectureProposals.md#L298-L326).
+
+---
+
 ## 2. Full Audit Matrix Across All 64 `SystemAudit.md` Findings
 
-| Category | Finding IDs | Final Status | Notes |
+| Category | Finding IDs | Current Status (`d2a9d68`) | Notes |
 |---|---|---|---|
-| **Soundness & Memory Safety** | `SAFE-01` .. `SAFE-06` | **ALL FIXED** | Guard-scoped `ValueRef<'g, V>`; `ValuePtr::as_ref` & leaf/internode ownership mutators `unsafe`; `is_atomic_word` gate; `SuffixBag` `&mut self` for reallocating APIs + raw-pointer append in `try_append_suffix`. |
-| **OCC & Concurrency** | `OCC-01` .. `OCC-06` | **ALL FIXED** | Unconditional `mark_insert()`; `LOCK_BIT \| INSERTING_BIT` in `has_changed`; `fence(Ordering::Release)` store-store barrier; `child_version.is_deleted()` restart; dirty retry on empty slot / deleted sublayer. |
+| **Soundness & Memory Safety** | `SAFE-01` .. `SAFE-06` | **FIXED (`SAFE-06` final cleanup in Proposal 3)** | Guard-scoped `ValueRef<'g, V>`; `ValuePtr::as_ref` & leaf/internode ownership mutators `unsafe`; `is_atomic_word` gate; `SuffixBag` `&mut self` for reallocating APIs + raw-pointer append in `try_append_suffix` (removing residual `UnsafeCell<Vec<u8>>` / `set_len` tracked in [`ArchitectureProposals.md` §4](ArchitectureProposals.md#L245-L345)). |
+| **OCC & Concurrency** | `OCC-01` .. `OCC-06` | **FIXED (Reverse-scan `OCC-06` in Proposal 1A)** | Unconditional `mark_insert()`; `LOCK_BIT \| INSERTING_BIT` in `has_changed`; `fence(Ordering::Release)` store-store barrier; `child_version.is_deleted()` restart; dirty retry on empty slot / deleted sublayer. |
 | **Insert, Split & Layer** | `INS-01` .. `INS-04` | **ALL FIXED** | Post-insert strict ikey split boundary & left routing on equal-ikey boundary; rightmost deleted leaf restart; `PreparedValue` pre-encoding across all insert/split/layer/batch paths. |
 | **Remove** | `REM-01` .. `REM-03` | **ALL FIXED** | Unchanged-leaf fast path + under-lock full-key fallback; B-link advance & inside-loop too-far-right check; retry budget charged only on contention edges. |
 | **Coalesce & GC** | `GC-01` .. `GC-05` | **ALL FIXED** | `ikey_bound`-only chain entries; whole-sublayer top-down validated GC; unlink before retire + loop on `RetryExhausted` in both cascade and `redirect_ikey_bounds_generic`; live unary levels preserved; both deferred queues drained once per call. |
 | **Allocator & Reclamation** | `ALLOC-01` .. `ALLOC-03` | **ALL FIXED** | `try_with` TLS pool fallback; `catch_unwind` in `reclaim_box_value`; documented no-unwind `TreeAllocator` contract. |
 | **Primitives** | `PRIM-01` .. `PRIM-02` | **ALL FIXED** | `ShardedCounter::load` `.max(0)` clamp; `Permuter<WIDTH>::WIDTH_MASK` on all shifts including `insert_from_back_immutable`. |
-| **Range Scans** | `RNG-01` .. `RNG-10` | **ALL FIXED** | Explicit `unshift_sentinel: bool` on `CursorKey`; layer descent on `Excluded` bounds; sublayer-aware `CursorBound`; two-phase validate-before-commit batch scan protocol; interior fast path for values-only scans; fused `DoubleEndedIterator`. |
+| **Range Scans** | `RNG-01` .. `RNG-10` | **FORWARD & BATCH FIXED; REVERSE PARITY IN PROPOSAL 1A** | Forward & batch scans use explicit `unshift_sentinel: bool`, sublayer-aware `CursorBound`, and two-phase validate-before-commit; 4 residual reverse-scan OCC/retreat defects in `reverse_ctx.rs` are detailed in [`ArchitectureProposals.md` §2](ArchitectureProposals.md#L47-L202). |
 | **Suffix Storage** | `SUF-01` .. `SUF-05` | **ALL FIXED** | Drained slot cleared in `InlineSuffixBag`; zero-length suffixes skipped in compaction; unconditional `assert!` in public suffix APIs; `assign_init` contract documented. |
 | **Batch & Entry API** | `BATCH-01` .. `BATCH-06` | **ALL FIXED** | Private `BatchEntry` fields; write-through enabled in both `insert_batch_with_guard` and `insert_batch_entries`; pre-mutation key validation & `Drop` cleanup; sequence-stable duplicate sort; library-level `#[global_allocator]` removed. |
 | **Tooling, Tests & Docs** | `TOOL-01` .. `TOOL-14`, `PERF-TOOL-01..04` | **ALL FIXED** | `print_tree` gated & formats values via `P::output_to_value_ref` with post-slot OCC validation; strict Clippy clean with and without `mimalloc`; deterministic proptests; non-vacuous stress assertions; `ARCHITECTURE.md` & `SystemAudit.md` synchronized. |
-| **Simplification & Perf** | `SIM-01..16`, `PERF-01..25` | **KEY WINS APPLIED; MAJOR REWRITES IN `ArchitectureProposals.md`** | Applied `SIM-01`, `SIM-04`, `SIM-05`, `SIM-14`, `PERF-03`, `PERF-04`, `PERF-06`, `PERF-16`, `PERF-24`; remaining multi-thousand-line structural consolidations (`SIM-02`, `SIM-08`, `SIM-09`) are specified in `ArchitectureProposals.md`. |
+| **Simplification & Perf** | `SIM-01..16`, `PERF-01..25` | **PARTIALLY LANDED; REMAINING OPEN ITEMS IN `ArchitectureProposals.md`** | Landed `SIM-01`, `SIM-05`, `SIM-14`, `PERF-04`, `PERF-16`, `PERF-24`, and partial `PERF-01`/`PERF-03`/`SIM-04`; all remaining open items (`SIM-02..04, 06..13, 15..16` and `PERF-02, 05..15, 17..19, 25`) are specified in [`ArchitectureProposals.md` §§2–9](ArchitectureProposals.md#L47-L561). |

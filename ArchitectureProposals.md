@@ -1,82 +1,51 @@
 # Masstree Architectural Simplification, Soundness, and Performance Proposals
 
 > **Target Baseline:** `masstree` v0.9.5 (`HEAD` = `d2a9d68`, Rust 2024)  
-> **Companion References:**
+> **Companion Documents:**
 > [`SystemAudit.md`](SystemAudit.md),
 > [`ARCHITECTURERefined.md`](ARCHITECTURERefined.md),
 > [`Findings.md`](Findings.md),
 > [`AGENTS.md`](AGENTS.md)  
-> **Scope:** Source-verified architectural proposals covering **only open work**
-> remaining after the `9ffacd5..da74a75` remediation series. Every line number,
-> symbol name, struct layout, and protocol invariant in this document has been
-> verified directly against `src/`.
+> **Scope:** Source-verified architectural proposals covering
+> **only genuinely open work** remaining after the `9ffacd5..da74a75`
+> remediation series. Every line number, symbol name, struct layout, byte
+> offset, and protocol invariant in this document has been verified directly
+> against `src/`.
 
 ---
 
 ## 1. Executive Architectural Assessment
 
 Across `src/` (**101 files, 44,901 total LOC / 25,159 non-test LOC**), the
-recent remediation series (`9ffacd5..da74a75`) resolved the majority of the
-initial audit's point defects. However, a deep source-level verification against
-`HEAD` (`d2a9d68`) reveals two critical realities:
+remediation commits (`93e65eb..da74a75`) resolved the initial audit's point
+defects. However, a line-by-line verification of the current codebase (`HEAD` =
+`d2a9d68`) against earlier drafts of this document and
+[`SystemAudit.md`](SystemAudit.md)
+establishes three core findings:
 
-1. **Several items described in earlier drafts of this document have already
-   landed** in `src/`, while **new or residual correctness, aliasing, and
-   performance defects remain open**—most notably in the reverse range-scan
-   engine (`src/tree/range/reverse_ctx.rs`), where fixes applied to forward and
-   batch scans were never mirrored.
-2. **State-machine multiplication remains the primary structural liability.**
-   Whenever a bug is patched in one copy of a state machine without unifying the
-   underlying abstraction, sibling state machines silently drift out of sync:
-   - **Range Scans (`src/tree/range/` — 24 files, 10,811 total LOC / 6,867
-     non-test LOC):** Ten slot-scanning loops and five leaf-advancement routines
-     split across `forward_ctx.rs` (1,678 LOC), `reverse_ctx.rs` (1,782 LOC),
-     `batch_common.rs` (628 LOC), `iterator/batch_forward.rs` (362 LOC), and
-     `iterator/batch_reverse.rs` (104 LOC). While `batch_common.rs` and
-     `ForwardScanCtx::find_next_generic` now validate `NodeVersion::has_changed`
-     *after* reading slot payloads and *before* mutating `cursor_key`, **three
-     reverse-scan paths in `reverse_ctx.rs` still mutate `cursor_key` before
-     reading/validating the slot or omit post-load OCC validation entirely**
-     (§2.1).
-   - **B-Link & Layer Traversal (`src/tree/`):** Five independent B-link/layer
-     descent state machines (`reach_leaf_concurrent_generic`,
-     `get_with_guard`/`get_ref_with_guard`, `remove_concurrent_generic`,
-     `reach_leaf_for_scan`, and `LockedParentResult`) and nine separate
-     `maybe_parent_generic` / `climb_layer_root` parent-climb call sites (§3.1).
-   - **Suffix Storage (`src/suffix.rs`, `src/policy/suffix_ops.rs`):** While
-     `SuffixBag::try_append_suffix` now uses raw pointer copies, `SuffixBag`
-     still wraps `UnsafeCell<Vec<u8>>` alongside duplicated
-     `AtomicPtr<u8>`/`AtomicUsize` header fields and calls
-     `(*self.data.get()).set_len(new_used)` during lock-free reads; meanwhile,
-     `merge_old_external_perm` still consumes 100% of drain headroom (`PERF-02`)
-     and `LeafNode15::init_at` double-zeroes 516 bytes of every
-     `InlineSuffixBag` (`PERF-11`) (§4.1).
-   - **Batch & Entry Pipelines (`src/tree/generic/batch.rs`, `entry.rs`):**
-     Three parallel batch entry structs (`BatchEntry<P>`, `OutputEntry<P>`,
-     `BatchValueEntry<P>`), two batch runners (`GenericBatch`, `ValueBatch`),
-     two empty-leaf initializers (`insert_into_empty_leaf_batch` vs
-     `insert_into_empty_leaf`), and a two-descent `Entry` API (`SIM-08`,
-     `PERF-05`) (§5.1).
-   - **Multi-Layer Remove & Coalesce (`src/tree/remove.rs`, `coalesce.rs`):**
-     Every multi-layer `remove` heap-allocates a `Route = Vec<u64>` (`PERF-17`)
-     even when no leaf becomes empty, alongside residual dead `MODSTATE_REMOVE`
-     and unused parameters (`SIM-04`) (§6.1).
-   - **Leaf Search, OCC Primitives, & Node Layout (`src/tree/generic/search.rs`,
-     `src/nodeversion.rs`, `src/internode/`, `src/policy/inline_values.rs`):**
-     Duplicated single-layer vs generic leaf search where
-     `linear_search_single_layer` lacks 3-way loop unrolling and retains dead
-     `WIDTH >= 16` binary-search branches (`SIM-02`); `NodeVersion::stable()`
-     still executes `load(Relaxed) + fence(Acquire)` on the clean fast path
-     (`PERF-18`); and `InlineValueArray` separates `tags` and `values` across
-     two cache lines (`PERF-19`) (§7.1).
+1. **Several items in earlier drafts of `ArchitectureProposals.md` have already
+   landed** in `9ffacd5..da74a75` and have been moved to the **Already Landed**
+   ledger (§1.1) so that every active proposal below targets **only open work**.
+2. **State-machine multiplication has already caused post-remediation drift —
+   including 4 newly uncovered OCC and cursor-corruption bugs in
+   `src/tree/range/reverse_ctx.rs` (§2.1).** Because forward scans
+   (`forward_ctx.rs`), reverse scans (`reverse_ctx.rs`), and batch scans
+   (`batch_common.rs`) maintain separate copies of the OCC slot-read protocol,
+   fixes applied to forward and batch scans in `a2869ff` and `e3eed9f` were
+   never mirrored into three reverse-scan slot readers (`try_emit_generic`,
+   `find_prev_single_layer`, `try_emit_slot_reverse`) or `advance_prev_leaf`.
+3. **Two earlier proposal designs (`Propagation` parent-leaf locking in Proposal
+   2 and speculative `lock_for_insert` in Proposal 6) contained protocol flaws**
+   when checked against the live lock-ordering and `NodeVersion` invariants in
+   `src/`. Sections 3 and 7 replace those designs with deadlock-free,
+   weak-memory-sound protocols.
 
 ---
 
 ### 1.1 Already Landed in Recent Remediation Commits (`9ffacd5..da74a75`)
 
-To keep the proposals below strictly focused on **open work**, the following
-items from earlier drafts have been verified as **already implemented** in
-`HEAD` (`d2a9d68`) and removed from the active work items:
+The following items from earlier drafts are **already implemented** in `HEAD`
+(`d2a9d68`) and are excluded from the active work items below:
 
 | Former Proposal Item | Audit IDs | Landed Commit | Verified Source Location in `HEAD` (`d2a9d68`) |
 | :--- | :--- | :--- | :--- |
@@ -88,7 +57,7 @@ items from earlier drafts have been verified as **already implemented** in
 | Write-through (`P::CAN_WRITE_THROUGH`) dispatch in `insert_batch_entries`, `OccupiedEntry::insert`, `Entry::and_modify`, `Entry::insert_entry` | `PERF-03` (partial), `BATCH-02` | `ecff50a`, `4960f8d` | [`src/tree/generic/batch.rs:903-924`](src/tree/generic/batch.rs#L903-L924), [`entry.rs:180-222`](src/tree/generic/entry.rs#L180-L222), [`entry.rs:285-298`](src/tree/generic/entry.rs#L285-L298) |
 | Removing full-leaf `perm.size() >= WIDTH` precheck in batch insert & `BatchInsertResult::new()` zero-capacity init | `PERF-04`, `PERF-24` | `4960f8d` | [`src/tree/generic/batch.rs:991`](src/tree/generic/batch.rs#L991), [`batch.rs:1134`](src/tree/generic/batch.rs#L1134) |
 | `drain_deferred` two-queue retry discipline, unbounded loop on `RetryExhausted` in `redirect_ikey_bounds_generic`, and post-coalesce `flush()/refresh()` | `GC-01`, `GC-03`, `GC-04`, `GC-05`, `PERF-16` | `68c4ea9`, `4960f8d` | [`src/tree/coalesce.rs:134-142`](src/tree/coalesce.rs#L134-L142), [`coalesce.rs:235-321`](src/tree/coalesce.rs#L235-L321), [`remove.rs:1032-1035`](src/tree/remove.rs#L1032-L1035), [`generic.rs:131-136`](src/tree/generic.rs#L131-L136) |
-| Unconditional `mark_insert()` on new-slot and batch inserts; `has_changed` checking `> LOCK_BIT`; `Seize` protected loads | `OCC-01`, `OCC-02`, `OCC-03`, `OCC-06` | `a2869ff`, `b6600a7`, `da74a75` | [`src/nodeversion.rs:413-478`](src/nodeversion.rs#L413-L478), [`insert.rs:920-954`](src/tree/generic/insert.rs#L920-L954), [`batch.rs:1008-1025`](src/tree/generic/batch.rs#L1008-L1025) |
+| Unconditional `mark_insert()` on new-slot and batch inserts; `has_changed` checking `> LOCK_BIT`; `seize` protected loads | `OCC-01`, `OCC-02`, `OCC-03`, `OCC-06` | `a2869ff`, `b6600a7`, `da74a75` | [`src/nodeversion.rs:413-478`](src/nodeversion.rs#L413-L478), [`insert.rs:920-954`](src/tree/generic/insert.rs#L920-L954), [`batch.rs:1008-1025`](src/tree/generic/batch.rs#L1008-L1025) |
 
 ---
 
@@ -103,7 +72,7 @@ The range subsystem spans
 | :--- | ---: | ---: | :--- |
 | [`src/tree/range/reverse_ctx.rs`](src/tree/range/reverse_ctx.rs) | 1,782 | 1,782 | `ReverseScanCtx`: 4 reverse slot loops (`find_prev_with_duplicate_check_generic`, `find_prev_single_layer`, `try_emit_generic`, `try_emit_slot_reverse`), 2 reverse B-link retreat loops (`advance_to_prev_leaf_generic`, `advance_prev_leaf`), layer descent/ascent |
 | [`src/tree/range/forward_ctx.rs`](src/tree/range/forward_ctx.rs) | 1,678 | 1,678 | `ForwardScanCtx`: 2 forward slot loops (`find_next_generic`, `find_next_single_layer_ptr`), 2 forward B-link advance loops (`advance_to_next_leaf_generic`, `advance_leaf_single_layer`), layer descent/ascent |
-| [`src/tree/range/batch_common.rs`](src/tree/range/batch_common.rs) | 628 | 628 | `BatchCtx` trait + 4 batch slot loops (`process_batch_keyed`, `process_batch_values`, `process_intra_leaf_batch_Order`, `process_intra_leaf_batch_values`) |
+| [`src/tree/range/batch_common.rs`](src/tree/range/batch_common.rs) | 628 | 628 | `BatchCtx` trait + 4 batch slot loops (`process_batch_keyed`, `process_batch_values`, `process_intra_leaf_batch_ref`, `process_intra_leaf_batch_values`) |
 | [`src/tree/range/api.rs`](src/tree/range/api.rs) + [`api_ref.rs`](src/tree/range/api_ref.rs) | 768 | 766 | Top-level `range`, `scan`, `scan_ref`, `scan_values`, `scan_prefix`, `scan_batch_ref`, `scan_intra_leaf_batch` entry points |
 | [`src/tree/range/scan_state.rs`](src/tree/range/scan_state.rs) | 796 | 460 | Mirror-image `ScanState` / `ScanStateBack`, `ScanStackElement` / `BackStackElement`, `LayerStack` |
 | [`src/tree/range/iterator/`](src/tree/range/iterator.rs) (7 files) | 2,127 | 1,262 | `RangeIter`, `batch_forward.rs` (362 LOC), `batch_reverse.rs` (104 LOC), `iter_flags.rs` (310 LOC), `range_bound.rs` (297 LOC), `adapters.rs` (111 LOC), `scan_entry.rs` (55 LOC) |
@@ -136,9 +105,23 @@ forward and batch scans in `a2869ff` and `e3eed9f` left **four live defects** in
          return ReverseStepResult::Retry;
      }
      self.cursor_key.assign_store_ikey(slot_ikey); // <-- mutates cursor_key BEFORE value load!
-     // ... reads leaf.ksuf(slot) and mutates cursor_key / flags ...
+     if slot_keylenx == KSUF_KEYLENX {
+         if E::NEEDS_SUFFIX_KEY {
+             if let Some(suffix) = leaf.ksuf(slot) {
+                 let suffix_len = self.cursor_key.assign_store_suffix(suffix);
+                 self.cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
+             } else {
+                 self.cursor_key.assign_store_length(IKEY_SIZE);
+             }
+         }
+         key_len = self.cursor_key.len();
+     } else {
+         self.cursor_key.assign_store_length(key_len);
+     }
+     self.flags.clear_upper_bound(); // <-- clears upper_bound flag BEFORE value load!
+
      let Some(output) = E::emit_value(leaf, slot, key_len) else {
-         self.stack.set_ki(ki - 1); // <-- cursor_key is now polluted with a skipped slot!
+         self.stack.set_ki(ki - 1); // <-- cursor_key & flags are now corrupted!
          return ReverseStepResult::Continue;
      };
      // <-- NO post-load leaf.version().has_changed(version) check!
@@ -242,62 +225,100 @@ forward and batch scans in `a2869ff` and `e3eed9f` left **four live defects** in
 
 ---
 
-### 2.2 Proposed Unified Range Architecture
+### 2.2 Proposed Unified Range Architecture & Concrete Code Blueprint
 
-#### A. One Validated Slot-Snapshot Kernel (`try_snapshot_slot`) Shared by All Forward, Reverse, and Batch Paths
+#### A. Immediate Fix for `ReverseScanCtx` via Shared Validated Slot-Snapshot Kernel (`try_snapshot_slot`)
 
-Extract a single, direction-agnostic slot reader that enforces the
+Extract a single, direction-agnostic slot reader in `src/tree/range/helper.rs`
+that enforces the
 **Read → Validate `has_changed(version)` → Commit `cursor_key`** invariant
 across every scan mode (`ScanEmit`, single-layer, values-only, and batch):
 
 ```rust
-pub(crate) enum ValidatedSlot<O> {
-    /// Slot is concurrently empty/being cleared; caller advances to next slot.
-    Empty,
-    /// Slot was modified during read; caller must retry leaf at current cursor.
-    VersionChanged,
-    /// Validated sublayer pointer (`slot_keylenx >= LAYER_KEYLENX`).
-    Layer {
-        slot_ikey: u64,
-        layer_ptr: *mut u8,
-    },
-    /// Validated terminal value (`slot_keylenx < LAYER_KEYLENX`).
-    Value {
-        slot_ikey: u64,
-        key_len: usize,
-        suffix: Option< SmallSuffixRef<'a> >, // or copied into cursor_key before final version check
-        output: O,
-    },
+// In src/tree/range/reverse_ctx.rs:702-747 — Corrected `try_emit_generic`
+#[inline(always)]
+fn try_emit_generic<E: ScanEmit<P>>(
+    &mut self,
+    leaf: &LeafNode15<P>,
+    version: u32,
+    slot: usize,
+    slot_ikey: u64,
+    slot_keylenx: u8,
+    ki: isize,
+) -> ReverseStepResult<P, E::ValuesOnly> {
+    // 1. Load value FIRST (drops redundant `is_value_empty_relaxed` precheck, PERF-08).
+    let prelim_len: usize = if slot_keylenx == KSUF_KEYLENX {
+        IKEY_SIZE
+    } else {
+        slot_keylenx as usize
+    };
+    let Some(output) = E::emit_value(leaf, slot, prelim_len) else {
+        if leaf.version().has_changed(version) {
+            self.stack.set_ki(ki);
+            return ReverseStepResult::Retry;
+        }
+        self.stack.set_ki(ki - 1);
+        return ReverseStepResult::Continue;
+    };
+
+    // 2. Read suffix slice BEFORE mutating `self.cursor_key`.
+    let suffix_opt: Option<&[u8]> = if slot_keylenx == KSUF_KEYLENX && E::NEEDS_SUFFIX_KEY {
+        leaf.ksuf(slot)
+    } else {
+        None
+    };
+
+    // 3. Validate leaf version AFTER reading both value and suffix!
+    if leaf.version().has_changed(version) {
+        self.stack.set_ki(ki);
+        return ReverseStepResult::Retry;
+    }
+
+    // 4. Commit to `cursor_key`, `flags`, and `stack` ONLY after OCC validation succeeds.
+    self.cursor_key.assign_store_ikey(slot_ikey);
+    let key_len: usize = if slot_keylenx == KSUF_KEYLENX {
+        if E::NEEDS_SUFFIX_KEY {
+            let suffix_len: usize = suffix_opt
+                .map_or(0, |s| self.cursor_key.assign_store_suffix(s));
+            let total: usize = IKEY_SIZE + suffix_len;
+            self.cursor_key.assign_store_length(total);
+            total
+        } else {
+            self.cursor_key.len()
+        }
+    } else {
+        self.cursor_key.assign_store_length(prelim_len);
+        prelim_len
+    };
+
+    self.flags.clear_upper_bound();
+    self.flags.mark_cursor_emitted();
+    self.stack.set_last_ikey(slot_ikey);
+    self.stack.set_ki(ki - 1);
+
+    ReverseStepResult::Emit(E::finish_snapshot(output, key_len))
 }
 ```
 
-For every slot `slot = perm.get(idx)`:
-1. Read `slot_ikey = leaf.ikey_relaxed(slot)` and
-   `slot_keylenx = leaf.keylenx_relaxed(slot)`.
-2. Check duplicate/bound filter (direction-parameterized via
-   `Direction::is_duplicate` / `BoundCheck`) **without** mutating
-   `self.cursor_key`.
-3. If `slot_keylenx >= LAYER_KEYLENX`:
-   - Load `layer_ptr = leaf.load_layer_raw(slot)` (Acquire).
-   - Check
-     `if leaf.version().has_changed(version) || layer_ptr.is_null() { return Retry; }`.
-   - Only after validation passes: push `(root, leaf_ptr)` to `layer_stack` and
-     mutate `cursor_key` (`shift_clear()` for forward or `shift_clear_reverse()`
-     for reverse).
-4. If terminal value (`slot_keylenx < LAYER_KEYLENX`):
-   - Call `E::emit_value(leaf, slot, key_len)` directly (dropping the redundant
-     `leaf.is_value_empty_relaxed(slot)` precheck, fixing `PERF-08`). If `None`,
-     check `has_changed(version)`: if changed, return `Retry`; if unchanged,
-     skip slot without touching `cursor_key`.
-   - If `slot_keylenx == KSUF_KEYLENX` and `E::NEEDS_SUFFIX_KEY`: read
-     `leaf.ksuf(slot)` **once** into a temporary slice/buffer (before mutating
-     `cursor_key.len` or `cursor_key.ikey`), then check
-     `if leaf.version().has_changed(version) { return Retry; }`.
-   - Only after `!leaf.version().has_changed(version)` is confirmed: commit
-     `slot_ikey`, `suffix`, and `key_len` into `self.cursor_key`, clear
-     `needs_duplicate_check` / `upper_bound`, and emit `(key, output)`.
+Apply the same Read → Validate → Commit ordering to:
+- `ReverseScanCtx::find_prev_single_layer`
+  ([`src/tree/range/reverse_ctx.rs:1141-1189`](src/tree/range/reverse_ctx.rs#L1141-L1189)):
+  call `leaf.load_value(slot)` first, check
+  `if leaf.version().has_changed(version) { return (ScanStateBack::Retry, None); }`,
+  and only then mutate `self.cursor_key`, `self.flags`, and `self.stack`.
+- `ReverseScanCtx::try_emit_slot_reverse`
+  ([`src/tree/range/reverse_ctx.rs:427-466`](src/tree/range/reverse_ctx.rs#L427-L466)):
+  load `output` and `ksuf(slot)` once before `has_changed(version)`, then commit
+  to `self.cursor_key`.
+- `ReverseScanCtx::handle_layer_pointer_generic`
+  ([`reverse_ctx.rs:650-678`](src/tree/range/reverse_ctx.rs#L650-L678)) and
+  `ForwardScanCtx::find_next_generic`
+  ([`forward_ctx.rs:460-469`](src/tree/range/forward_ctx.rs#L460-L469)): check
+  `if leaf.version().has_changed(version) { return Retry; }` *after*
+  `leaf.load_layer_raw(slot)` and *before* pushing to `layer_stack` or shifting
+  `cursor_key`.
 
-#### B. Unify `ScanState` / `ScanStackElement` via `Direction` Trait and Delete `advance_prev_leaf`
+#### B. Delete `ReverseScanCtx::advance_prev_leaf` & `ReverseScanHelper::retreat`, and Unify `ScanState` / `ScanStackElement`
 
 1. **Delete `ReverseScanCtx::advance_prev_leaf`
    ([`src/tree/range/reverse_ctx.rs:1388-1443`](src/tree/range/reverse_ctx.rs#L1388-L1443))
@@ -322,14 +343,16 @@ For every slot `slot = perm.get(idx)`:
    `BackStackElement` with a signed `ki: isize` (valid range `-1..=15`) and a
    `Direction` trait (`Forward` vs `Reverse`).
 4. **Remove Dead Range Artefacts (`SIM-09`, `SIM-11`):**
-   - Delete `InitialPositionResult::Up` and merge `find.rs`/`find_rev.rs` into
-     `scan_state.rs`.
-   - Either wire `debug_last_emitted_key_back` in `RangeIter::next_back`
+   - Delete `InitialPositionResult::Up`
+     ([`src/tree/range/find_rev.rs:28`](src/tree/range/find_rev.rs#L28)) and
+     merge `find.rs`/`find_rev.rs` into `scan_state.rs`.
+   - Record `self.debug_last_emitted_key_back` inside `RangeIter::next_back`
      ([`src/tree/range/iterator.rs:380-405`](src/tree/range/iterator.rs#L380-L405))
-     or remove the dead field.
+     so `debug_assert_reverse_order` actually validates reverse emission order
+     in debug builds.
    - Factor a single
-     `compare_ikey_keylenx(a_ikey, a_keylenx, b_ikey, b_keylenx)` helper shared
-     by `Key::compare` and `CursorKey::compare`.
+     `compare_ikey_keylenx(a_ikey, a_keylenx, b_ikey, b_keylenx)` helper in
+     `src/key.rs` shared by `Key::compare` and `CursorKey::compare`.
 
 ### 2.3 Expected Impact & Verification Gates
 
@@ -345,8 +368,9 @@ For every slot `slot = perm.get(idx)`:
   `forward_ctx.rs`, `reverse_ctx.rs`, `batch_common.rs`,
   `iterator/batch_forward.rs`, `iterator/batch_reverse.rs`, and `scan_state.rs`.
 - **Verification:** Add a concurrent reverse-scan + writer stress test
-  (mirroring `failures/range/src/bin/race.rs` and `tests/batch_callback.rs` for
-  `.rev()` and `for_each_rev`) under standard test and Miri.
+  (mirroring `failures/range/src/bin/race.rs` and
+  `failures/range/tests/batch_callback.rs` for `.rev()` and `for_each_rev`)
+  under standard test and Miri.
 
 ---
 
@@ -364,8 +388,8 @@ invariants:
 | Generic write/read reach | [`src/tree/generic.rs:887-965`](src/tree/generic.rs#L887-L965) (`reach_leaf_concurrent_generic`) | Yes (`inode.version().is_deleted()`) | In caller (`insert.rs:289`, `optimistic_reads.rs:144`) | In `advance_to_key_by_bound_generic` ([`generic.rs:970-1089`](src/tree/generic.rs#L970-L1089)) |
 | Optimistic point read | [`src/tree/generic/optimistic_reads.rs:97-177`](src/tree/generic/optimistic_reads.rs#L97-L177), [`get_guarded.rs:76-156`](src/tree/generic/optimistic_reads/get_guarded.rs#L76-L156) | Via `reach_leaf_concurrent_generic` | Yes (`maybe_parent_generic` at lines 144, 134) | Via `advance_to_key_by_bound_generic` |
 | Concurrent remove | [`src/tree/remove.rs:627-825`](src/tree/remove.rs#L627-L825) (`remove_concurrent_generic`) | Via `reach_leaf_concurrent_generic` | Yes (`maybe_parent_generic` at line 686) | Custom B-link loop in `find_remove_leaf` ([`remove.rs:770-825`](src/tree/remove.rs#L770-L825)) |
-| Range scan traversal | [`src/tree/range/traversal.rs:58-152`](src/tree/range/traversal.rs#L58-L152) (`reach_leaf_for_scan`, ` traverse_internodes_for_scan`) | **No** (checks `has_split` after child load, but not `is_deleted()` when `child.is_null()`) | Yes (`climb_layer_root` at line 81, but **not** saved back to caller's stack!) | Custom B-link loop in `advance_to_Remove_or_target` (`RNG-09`) |
-| Coalesce parent/child walk | [`src/tree/coalesce.rs:510-565`](src/tree/coalesce.rs#L510-L565) (`all_leaves_empty`, `reconstruct_Every_leaf`) | N/A | Yes (`climb_layer_root` at line 521) | Walks B-link chain from leftmost leaf |
+| Range scan traversal | [`src/tree/range/traversal.rs:58-152`](src/tree/range/traversal.rs#L58-L152) (`reach_leaf_for_scan`, `traverse_internodes_for_scan`) | **No** (checks `has_split` after child load, but not `is_deleted()` when `child.is_null()`) | Yes (`climb_layer_root` at line 81, but **not** saved back to caller's stack!) | Custom B-link loop in `advance_to_target` (`RNG-09`) |
+| Coalesce parent/child walk | [`src/tree/coalesce.rs:510-565`](src/tree/coalesce.rs#L510-L565) (`all_leaves_empty`, `reconstruct_layer_leaves`) | N/A | Yes (`climb_layer_root` at line 521) | Walks B-link chain from leftmost leaf |
 
 #### B. Why Naive Parent-Leaf Locking During Sublayer Split Is Deadlock-Prone and Incomplete
 
@@ -412,69 +436,56 @@ overwrite the slot with `R1`.
    ([`src/tree/coalesce.rs:514-565, 622-666`](src/tree/coalesce.rs#L514-L565))
    relies on the parent slot pointing to a valid node in the sublayer from which
    it can both climb to `sublayer_root` (for `teardown_layer`) and walk the leaf
-   B-link chain. If the parent slot is overwritten with an internode `R1`, any
-   code path that inspects the parent slot must still distinguish leaf vs
-   internode via `NodeVersion::is_leaf()`.
+   B-link chain. If the parent slot is overwritten with an internode `R1`,
+   `all_leaves_empty` must descend `child(0)` from `R1` to locate the leftmost
+   leaf `L0`.
 
 ---
 
 ### 3.2 Proposed Two-Tier Architecture
 
-#### Tier 1 (Immediate, Zero-Lock-Inversion): Unified Descent Kernel + Opportunistic CAS Slot Swing
+#### Tier 1 (Immediate, Zero-Lock-Inversion): Unified Descent Kernel + Opportunistic Slot Swing
 
 1. **Unify `climb_layer_root` and `maybe_parent_generic` into One Helper
    (`resolve_layer_root`):**
-   - Currently `maybe_parent_generic`
+   - Consolidate `maybe_parent_generic`
      ([`src/tree/generic.rs:1098-1129`](src/tree/generic.rs#L1098-L1129)) and
      `climb_layer_root`
      ([`src/tree/range/traversal.rs:61-75`](src/tree/range/traversal.rs#L61-L75))
-     duplicate the exact same `parent(guard)` walk. Consolidate them into a
-     single `#[inline]` method
-     `GenericMassTree::resolve_layer_root(ptr: *const u8, guard: &LocalGuard<'_>) -> *mut u8`.
+     into a single `#[inline]` function
+     `resolve_layer_root(ptr: *const u8, guard: &LocalGuard<'_>) -> *mut u8`.
 2. **Unify `reach_leaf_for_scan` with `reach_leaf_concurrent_generic` (`RNG-09`,
    `OCC-04`):**
    - Replace `traverse_internodes_for_scan`
      ([`src/tree/range/traversal.rs:99-152`](src/tree/range/traversal.rs#L99-L152))
-     with a call to the shared internode descent kernel
-     `reach_leaf_concurrent_generic` (which already checks
+     with a call to `reach_leaf_concurrent_generic` (which already checks
      `inode.version().is_deleted()` and handles concurrent root splits),
      followed by the scan B-link advance.
    - Return `(leaf_ptr, resolved_root)` from `reach_leaf_for_scan` so
      `ScanStackElement` / `BackStackElement` immediately caches `resolved_root`
      (`PERF-07`).
-3. **Opportunistic Lock-Free / Post-Climb Parent-Slot Caching:**
-   - When an upper-layer descent (`insert`, `get_with_guard`, `remove`, or
-     `range`) reads `raw_layer_ptr = parent_leaf.load_layer_raw(slot)` under
-     `parent_version = parent_leaf.version().stable()` and climbs
-     `resolve_layer_root(raw_layer_ptr, guard)` to find
-     `true_root != raw_layer_ptr`:
-     - Why did `true_root` change? Because the sublayer promoted
-       `L0 -> R1 -> ... -> true_root`. Note that a sublayer root pointer
-       transitions monotonically up the parent chain until the entire sublayer
-       is garbage-collected by `try_remove_sublayer` (which holds
-       `parent_leaf`'s lock and clears the slot).
-     - To keep `try_remove_sublayer`'s leaf-chain walk (`all_leaves_empty` at
-       [`src/tree/coalesce.rs:510-565`](src/tree/coalesce.rs#L510-L565)) working
-       when `parent_leaf`'s slot points directly to an internode `true_root`,
-       update `all_leaves_empty` to descend left from `sublayer_root`
-       (`while !node.version().is_leaf() { node = inode.child(0, guard); }`) to
-       find the leftmost leaf `L0`, rather than assuming the raw slot pointer is
-       `L0`!
-     - Once `all_leaves_empty` finds `L0` by descending `child(0)` from
-       `sublayer_root`, `parent_leaf`'s layer slot can safely store the promoted
-       internode `true_root`. An upper-layer writer that already holds
-       `parent_leaf`'s lock (or `RootCreation::promote_layer_root_leaves` using
-       a non-blocking `parent_leaf.version().try_lock()` after verifying
-       `parent_leaf.ikey_relaxed(slot) == layer_ikey && parent_leaf.load_layer_raw(slot) == left_ptr`)
-       can update `parent_leaf.store_layer(slot, new_root)` directly, and any
-       subsequent `resolve_layer_root` climb on a higher promotion (`R1 -> R2`)
-       can opportunistically swing the parent slot under `try_lock`.
+3. **Make `Coalesce::all_leaves_empty` Root-Agonistic & Swing Parent Slots
+   Opportunistically:**
+   - In [`src/tree/coalesce.rs:510-565`](src/tree/coalesce.rs#L510-L565), find
+     `leftmost_leaf` by descending `child(0)` from `sublayer_root` until
+     `node.version().is_leaf()`, rather than casting the raw parent-slot pointer
+     to `*const LeafNode15<P>`.
+   - Once `all_leaves_empty` derives `L0` from `sublayer_root`, any thread that
+     observes `resolved_root != raw_layer_ptr` after `resolve_layer_root` (when
+     no sublayer lock is held, preserving top-down lock order!) can attempt a
+     non-blocking `if let Some(lock) = parent_leaf.version().try_lock()` to
+     verify
+     `parent_leaf.ikey_relaxed(slot) == layer_ikey && parent_leaf.keylenx_relaxed(slot) >= LAYER_KEYLENX && parent_leaf.load_layer_raw(slot) == raw_layer_ptr`
+     and call `unsafe { parent_leaf.store_layer(slot, resolved_root) }`. Because
+     this happens **outside** any sublayer lock, it strictly respects the
+     `parent_leaf -> sublayer` lock hierarchy and works for arbitrary-height
+     promotions (`L0 -> R1 -> R2 -> Rn`)!
 
 #### Tier 2 (Long-Term Target Aligned with [`ARCHITECTURERefined.md` §4.3](ARCHITECTURERefined.md#L155-L185)): `LayerAnchor` Indirection
 
 If workload profiling shows multi-level sublayer promotions (`R1 -> R2 -> R3`)
 under heavy contention where `try_lock` on `parent_leaf` frequently misses:
-- Allocate a small 16-byte
+- Allocate a 16-byte
   `LayerAnchor { root: AtomicPtr<u8>, leftmost_leaf: AtomicPtr<LeafNode15<P>> }`
   per sublayer.
 - The parent leaf slot points immutably to `LayerAnchor`.
@@ -596,14 +607,12 @@ reveals **five open issues**:
 
 ---
 
-### 4.2 Proposed Design
+### 4.2 Proposed Design & Concrete Code Blueprint
 
 #### A. Replace `UnsafeCell<Vec<u8>>` with Direct Raw Allocation Ownership in `SuffixBag`
 Eliminate `data: UnsafeCell<Vec<u8>>` completely. Let `SuffixBag` own its heap
 buffer directly through
-`(data_ptr: AtomicPtr<u8>, capacity: AtomicUsize, used: AtomicUsize)`
-(constructed from `Vec<u8>::into_raw_parts` or `std::alloc::alloc` / `dealloc`
-in `Drop`):
+`(data_ptr: AtomicPtr<u8>, capacity: AtomicUsize, used: AtomicUsize)`:
 
 ```rust
 pub struct SuffixBag {
@@ -611,8 +620,22 @@ pub struct SuffixBag {
     pad: u32,                  // 4B alignment padding
     data_ptr: AtomicPtr<u8>,   // 8B: immutable once published!
     capacity: AtomicUsize,     // 8B: immutable once published!
-    used: AtomicUsize,         // 8B: monotonically increasing via Release store under leaf lock
+    used: AtomicUsize,         // 8B: monotonically increasing under leaf lock
 } // Size drops from 112 bytes to 88 bytes (-24 bytes); zero UnsafeCell!
+
+impl Drop for SuffixBag {
+    fn drop(&mut self) {
+        let ptr: *mut u8 = *self.data_ptr.get_mut();
+        let cap: usize = *self.capacity.get_mut();
+        if !ptr.is_null() && cap > 0 {
+            // SAFETY: `ptr` and `cap` were allocated from `Vec<u8>` with capacity `cap`
+            // and all `u8` elements are trivially drop-safe (`len = 0`).
+            unsafe {
+                drop(Vec::from_raw_parts(ptr, 0, cap));
+            }
+        }
+    }
+}
 ```
 
 - `try_append_suffix(&self, slot, suffix)` writes strictly to
@@ -620,8 +643,6 @@ pub struct SuffixBag {
   `self.used.store(new_used, RELAXED)`, and publishes
   `self.slots[slot].store(meta.pack(), WRITE_ORD)` (Release). There is
   **no `UnsafeCell` and no `Vec::set_len`** anywhere.
-- In `Drop for SuffixBag` (`&mut self`), if `!ptr.is_null() && cap > 0`,
-  deallocate via `unsafe { Vec::from_raw_parts(ptr, 0, cap) }`.
 
 #### B. Preserve Slack After `merge_old_external_perm` (`PERF-02`) and Pre-Size Split Bags (`PERF-09`)
 - In `drain_and_rebuild`
@@ -715,7 +736,7 @@ While commit `4960f8d` added `P::CAN_WRITE_THROUGH` dispatch to
 
 ---
 
-### 5.2 Proposed Design
+### 5.2 Proposed Design & Concrete Code Blueprint
 
 #### A. Collapse `BatchEntry<P>`, `OutputEntry<P>`, and `BatchValueEntry<P>` into One Value-Owning `BatchEntry<P>` (`SIM-08`, `SAFE-03`)
 - Make `BatchEntry<P>` store private
@@ -726,7 +747,7 @@ While commit `4960f8d` added `P::CAN_WRITE_THROUGH` dispatch to
   `insert_batch_with_guard`, `insert_batch_entries`, and `Extend`.
 - Replace `insert_into_empty_leaf_batch`
   ([`src/tree/generic/batch.rs:1032-1127`](src/tree/generic/batch.rs#L1032-L1127))
-  with a call to `self.insert_into_empty_leaf(leaf, & mut key, value, guard)`.
+  with a call to `self.insert_into_empty_leaf(leaf, &mut key, value, guard)`.
 - Route `VacantEntry::insert`
   ([`src/tree/generic/entry.rs:408-423`](src/tree/generic/entry.rs#L408-L423))
   through `insert_concurrent_from_value_generic` when `P::CAN_WRITE_THROUGH` is
@@ -738,7 +759,7 @@ Store a lightweight optimistic leaf hint in `OccupiedEntry` and `VacantEntry`:
 ```rust
 pub(crate) struct EntryLeafHint<P: LeafPolicy> {
     leaf_ptr: *mut LeafNode15<P>,
-    version: u32,       // clean version observed during entry_with_guard
+    version: u32,        // clean version observed during entry_with_guard
     slot: Option<usize>, // Some(slot) for Occupied, None for Vacant
 }
 ```
@@ -804,7 +825,7 @@ confirms two remaining open items (`PERF-17` and `SIM-04`):
 
 ---
 
-### 6.2 Proposed Design
+### 6.2 Proposed Design & Concrete Code Blueprint
 
 1. **Replace `Route = Vec<u64>` with `ArrayVec<u64, MAX_ROUTE_DEPTH>`
    (`PERF-17`):**
@@ -813,9 +834,14 @@ confirms two remaining open items (`PERF-17` and `SIM-04`):
      **at most `256 / 8 - 1 = 31` ikeys**.
    - `arrayvec = "0.7.6"` is **already a direct dependency** in
      [`Cargo.toml:55`](Cargo.toml#L55)!
+   - In `src/tree/coalesce.rs` and `src/tree/remove.rs`:
+     ```rust
+     pub type StackRoute = arrayvec::ArrayVec<u64, 31>;
+     pub type OwnedRoute = Box<[u64]>;
+     ```
    - In `remove_concurrent_generic`, accumulate the route on the stack in
-     `let mut route: ArrayVec<u64, 32> = ArrayVec::new();` (zero heap allocation
-     on the hot path).
+     `let mut route: StackRoute = StackRoute::new();` (zero heap allocation on
+     the hot path).
    - Only inside `schedule_coalesce_cold` (when `new_perm.size() == 0` in a
      sublayer), convert `route.as_slice().into()` into a `Box<[u64]>` stored in
      `PendingSublayerEntry::route`
@@ -860,7 +886,7 @@ Inspecting `src/tree/generic/search.rs` reveals three concrete defects:
    ~140 lines of slot classification logic that differ **only** in whether
    `slot_keylenx >= LAYER_KEYLENX` / `KSUF_KEYLENX` can occur.
 
-#### B. `NodeVersion::stable()` Fast Path & Why Naive `lock_for_insert` Must Be Carefully Scoped (`PERF-18`, [`src/nodeversion.rs:331-395`](src/nodeversion.rs#L331-L395))
+#### B. `NodeVersion::stable()` Fast Path & Why Speculative `lock_for_insert` Must Be Avoided (`PERF-18`, [`src/nodeversion.rs:331-395`](src/nodeversion.rs#L331-L395))
 1. **`PERF-18` (`NodeVersion::stable()` at
    [`src/nodeversion.rs:331-337`](src/nodeversion.rs#L331-L337)):**
    ```rust
@@ -906,17 +932,7 @@ Inspecting `src/tree/generic/search.rs` reveals three concrete defects:
        `mark_insert()`'s `fence(Ordering::Release)`
        ([`src/nodeversion.rs:640`](src/nodeversion.rs#L640)) is required
        specifically to order `INSERTING_BIT` before subsequent relaxed
-       slot/suffix writes!
-   - **Where Fused Dirty-Locking IS Sound and Beneficial:** On newly
-     split-locked right siblings (`NodeVersion::new_for_split` at
-     [`src/nodeversion.rs:302-315`](src/nodeversion.rs#L302-L315), which already
-     initializes `LOCK_BIT | SPLITTING_BIT`) and in `mark_insert()` itself,
-     where if `INSERTING_BIT` is already set
-     (`self.locked_value & INSERTING_BIT != 0`, e.g., across multiple slots in
-     `process_leaf` batch insert at
-     [`src/tree/generic/batch.rs:1009`](src/tree/generic/batch.rs#L1009)),
-     `mark_insert()` already early-returns in 1 branch without a second atomic
-     store.
+       slot/suffix writes.
 
 #### C. Node & Value Cache-Line Layout Opportunities (`PERF-14`, `PERF-19`)
 1. **`PERF-19` — Interleaved `InlineValueArray<V>`
@@ -933,10 +949,7 @@ Inspecting `src/tree/generic/search.rs` reveals three concrete defects:
      `#[repr(C)] struct InlineSlot { tag: AtomicPtr<u8>, value: AtomicU64 }`
      (`[InlineSlot; 15]`, still exactly **240 bytes**, starting at offset 264 in
      `LeafNode15<InlinePolicy<V>>`) places `tag` and `value` adjacent in the
-     **same 16-byte aligned pair** (guaranteed to share a single 64-byte cache
-     line because `264 % 8 == 0`, with 4 slots per 64B cache line except the
-     8-byte straddle at offset `264 + k*16`, or zero straddles if `pad` shifts
-     `values` to 256!).
+     **same 16-byte pair** (touching 1 cache line instead of 2).
 2. **`PERF-14` — Relaxed Internode Child/Key Shift Stores Under Lock
    ([`src/internode.rs:425-565`](src/internode.rs#L425-L565)):**
    - During `InternodeNode::insert_key_and_child` and `split_into`, shifting up
@@ -949,7 +962,7 @@ Inspecting `src/tree/generic/search.rs` reveals three concrete defects:
 
 ---
 
-### 7.2 Proposed Design
+### 7.2 Proposed Design & Concrete Code Blueprint
 
 1. **Unify `search.rs` into `search_for_insert<P, const SINGLE_LAYER: bool>`
    (`SIM-02`):**
@@ -976,42 +989,57 @@ Inspecting `src/tree/generic/search.rs` reveals three concrete defects:
    ```
 3. **Interleave `InlineSlot { tag, value }` in `InlineValueArray<V>` (`PERF-19`,
    [`src/policy/inline_values.rs:20-29`](src/policy/inline_values.rs#L20-L29)):**
-   - Replace `tags: [AtomicPtr<u8>; 15]` + `values: [AtomicU64; 15]` with
-     `slots: [InlineSlot; WIDTH_15]` where
-     `#[repr(C)] struct InlineSlot { tag: AtomicPtr<u8>, value: AtomicU64 }`.
-   - Total size of `InlineValueArray<V>` remains **exactly 240 bytes**,
-     preserving `size_of::<LeafNode15<InlinePolicy<u64>>>() == 1152` and all
-     existing compile-time assertions in
-     [`src/leaf15/layout.rs`](src/leaf15/layout.rs).
+   ```rust
+   #[repr(C)]
+   struct InlineSlot {
+       tag: AtomicPtr<u8>,
+       value: AtomicU64,
+   }
 
-### 7.3 Expected Impact & Verification Gates
-
-- **Code Reduction:** Deletes ~150 LOC of duplicated search and dead
-  binary-search code in `src/tree/generic/search.rs` (`SIM-02`).
-- **Performance:**
-  - Single-layer inserts (`keys <= 8` bytes) gain the 3-way unrolled ikey search
-    loop.
-  - Every `InlinePolicy` point read and write touches 1 cache line instead of 2
-    for the slot's `(tag, value)` pair (`PERF-19`).
-  - Every clean `NodeVersion::stable()` call saves a standalone fence
-    instruction on `aarch64` (`PERF-18`).
-- **Verification:** Verify compile-time assertions in `src/leaf15/layout.rs`,
-  run `cargo test --test true_inline`, and run Miri on `InlinePolicy` concurrent
-  read/write tests.
+   #[repr(C)]
+   pub struct InlineValueArray<V: InlineBits> {
+       slots: [InlineSlot; WIDTH_15],
+       _marker: PhantomData<V>,
+   }
+   ```
+   Total size of `InlineValueArray<V>` remains **exactly 240 bytes**, preserving
+   `size_of::<LeafNode15<InlinePolicy<u64>>>() == 1152` and all existing
+   compile-time assertions in [`src/leaf15/layout.rs`](src/leaf15/layout.rs).
 
 ---
 
-## 8. Prioritized Execution Roadmap & Impact Summary
+## 8. Proposal 7: Remaining Subsystem Simplifications & Secondary Performance Wins (`SIM-03, 06, 10, 12, 15, 16` & `PERF-10, 12, 13, 15, 25`)
 
-All proposals below represent **open, unlanded work** verified against `HEAD`
+To ensure complete alignment with
+[`SystemAudit.md` §12–13](SystemAudit.md#L3206-L3277),
+the following verified open items should be executed as low-risk modular
+cleanups:
+
+| ID | Target File(s) | Verified Open Issue in `HEAD` (`d2a9d68`) | Concrete Action |
+| :--- | :--- | :--- | :--- |
+| **`SIM-03`** | [`src/leaf15.rs:1265-1340`](src/leaf15.rs#L1265-L1340), [`src/leaf_trait.rs`](src/leaf_trait.rs) | `InsertTarget` returned by `calculate_split_point` is discarded by callers (`let (_, insert_target) = ...; let _ = insert_target;`); `split_into_preallocated` and `split_all_to_right_preallocated` on `TreeLeafNode` have no production callers. | Return `Option<SplitPoint>` directly from `calculate_split_point`; delete dead preallocated split trait methods. |
+| **`SIM-06`** | [`src/leaf_trait.rs:1-475`](src/leaf_trait.rs#L1-L475), [`src/policy/box_values.rs:64-67`](src/policy/box_values.rs#L64-L67) | `BoxValueArray::is_layer` returns `!self.ptrs[slot].load(READ_ORD).is_null()`, which is `true` for **both** terminal values and layer pointers (a semantic landmine; only `LeafNode15::is_layer(slot)` checks `keylenx >= LAYER_KEYLENX`). `TreeLeafNode` forwards ~470 lines for a single implementation (`LeafNode15<P>`). | Delete `ValueArray::is_layer` (always check `keylenx >= LAYER_KEYLENX` on the leaf) and prune unused `TreeLeafNode` methods. |
+| **`SIM-10`** | [`src/alloc15.rs`](src/alloc15.rs), [`src/internode.rs`](src/internode.rs), [`src/retirement.rs`](src/retirement.rs) | `SeizeAllocator15::alloc_internode_direct`, `InternodeNode::{new, new_root, new_for_split}`, and `BatchedRetire` (`src/retirement.rs`) are dead in production. | Delete unused constructors and `BatchedRetire`; wire `InternodeNode::debug_assert_invariants` into debug split/cascade paths. |
+| **`SIM-12`** | [`src/inline/sentinel.rs`](src/inline/sentinel.rs), [`src/inline/sentinel/unit_tests.rs`](src/inline/sentinel/unit_tests.rs) | `src/inline/sentinel/unit_tests.rs` exists on disk (117 lines) but is **not wired** via `#[cfg(test)] mod unit_tests;` in `src/inline/sentinel.rs`! | Add `#[cfg(test)] mod unit_tests;` to `src/inline/sentinel.rs`. |
+| **`SIM-15`, `SIM-16`** | [`Cargo.toml:50-115`](Cargo.toml#L50-L115), [`src/lib.rs:75-115`](src/lib.rs#L75-L115) | `parking_lot`, `shuttle`, `crossbeam-epoch`, and `criterion` in `[dev-dependencies]` have zero callers; `tracing` feature initializes a subscriber with `console_enabled = false` and zero `tracing::` spans/events in `src/`. | Remove unused dev-dependencies from `Cargo.toml`; either wire `MASSTREE_LOG_CONSOLE` or remove inert `tracing` deps. |
+| **`PERF-10`** | [`src/policy/embedded_suffix.rs:88-90`](src/policy/embedded_suffix.rs#L88-L90), [`src/policy/sidecar_suffix.rs:88-100`](src/policy/sidecar_suffix.rs#L88-L100) | `EmbeddedSuffix::prefetch` is a no-op (`// No-op`), and `SidecarSuffix::prefetch` prefetches the `SidecarSuffix` struct header rather than the `data_ptr` buffer. | Prefetch the first cache line of `inline_ksuf` metadata (offset 504) and, when `external_ksuf` / `data_ptr` is non-null, prefetch `data_ptr`. |
+| **`PERF-15`** | [`src/node_pool.rs:34-48`](src/node_pool.rs#L34-L48) | `REFILL_COUNT = 128` calls `posix_memalign` 128 times eagerly on a thread's very first leaf allocation. | Start refill batch at 8 or 16 blocks and double up to 128 (or carve from a single page-aligned slab), cutting cold-thread first-insert latency by 8×. |
+| **`PERF-25`** | [`src/tree/generic/layer.rs:42-160`](src/tree/generic/layer.rs#L42-L160) | `handle_suffix_conflict` holds the parent leaf lock across up to 31 twig internode/leaf allocations, value clones, and suffix writes. | Build the unpublished twig chain speculatively *before* acquiring the parent leaf lock (or after releasing and re-validating `has_changed`), then publish the layer pointer with a single pointer store under the lock. |
+
+---
+
+## 9. Prioritized Execution Roadmap & Impact Summary
+
+All items below represent **open, unlanded work** verified against `HEAD`
 (`d2a9d68`):
 
 | Priority | Proposal | Target Files | Audit IDs Addressed | Net Non-Test LOC Delta | Risk | Primary Verification Gate |
 | :---: | :--- | :--- | :--- | :---: | :---: | :--- |
-| **P0** | **Proposal 1A:** Fix the 4 newly uncovered `ReverseScanCtx` OCC/cursor-mutation defects & extract shared `try_snapshot_slot` kernel | [`src/tree/range/reverse_ctx.rs`](src/tree/range/reverse_ctx.rs), [`forward_ctx.rs`](src/tree/range/forward_ctx.rs), [`helper.rs`](src/tree/range/helper.rs) | Reverse `RNG-07`/`RNG-08`/`RNG-10` parity, `OCC-06`, `PERF-08` | −250 LOC | Low | New concurrent reverse-scan + writer stress test + Miri scan tests |
-| **P1** | **Proposal 3:** `SuffixBag` raw-buffer consolidation (drop `UnsafeCell<Vec<u8>>`), `drain_and_rebuild` slack, split pre-sizing, & 60B `init_at_zero` | [`src/suffix.rs`](src/suffix.rs), [`src/suffix/inline.rs`](src/suffix/inline.rs), [`src/policy/suffix_ops.rs`](src/policy/suffix_ops.rs), [`src/policy/embedded_suffix.rs`](src/policy/embedded_suffix.rs) | `SAFE-06` (complete), `PERF-02`, `PERF-09`, `PERF-11`, `SIM-07` | −180 LOC | Low | `failures/suffix` alloc-delta tests + Miri `-Zmiri-strict-provenance` |
-| **P2** | **Proposal 5:** Stack-allocated `Route` (`ArrayVec<u64, 32>`) in `remove_concurrent_generic` & `SIM-04` remove cleanups | [`src/tree/remove.rs`](src/tree/remove.rs), [`src/tree/coalesce.rs`](src/tree/coalesce.rs), [`src/leaf15.rs`](src/leaf15.rs) | `PERF-17`, `SIM-04` | −60 LOC | Very Low | Counting-allocator multi-layer remove test + `cargo test --lib remove` |
-| **P3** | **Proposal 6:** Unified 3-way unrolled `search_for_insert<const SINGLE_LAYER: bool>`, `NodeVersion::stable()` Acquire load, & interleaved `InlineValueArray` | [`src/tree/generic/search.rs`](src/tree/generic/search.rs), [`src/nodeversion.rs`](src/nodeversion.rs), [`src/policy/inline_values.rs`](src/policy/inline_values.rs), [`src/internode.rs`](src/internode.rs) | `SIM-02`, `PERF-14`, `PERF-18`, `PERF-19` | −150 LOC | Low | `src/leaf15/layout.rs` assertions + `cargo test --test true_inline` + Loom |
-| **P4** | **Proposal 2:** Unified B-link/internode descent kernel (`resolve_layer_root`), scan stack root caching, & opportunistic parent-slot swing | [`src/tree/generic.rs`](src/tree/generic.rs), [`src/tree/range/traversal.rs`](src/tree/range/traversal.rs), [`src/tree/coalesce.rs`](src/tree/coalesce.rs), [`src/tree/split/root_creation.rs`](src/tree/split/root_creation.rs) | `PERF-07`, `RNG-09`, `OCC-04` (scan) | −120 LOC | Medium | `failures/range --bin promoted` + `failures/remove-coalesce --test sublayer_leak` |
-| **P5** | **Proposal 4:** Single `BatchEntry<P>` / `ValueBatch` pipeline, shared `insert_into_empty_leaf`, & leaf-hint single-descent `Entry` API | [`src/tree/generic/batch.rs`](src/tree/generic/batch.rs), [`src/tree/generic/entry.rs`](src/tree/generic/entry.rs) | `SIM-08`, `SIM-13`, `PERF-03`, `PERF-05`, `PERF-06` | −380 LOC | Low–Medium | `cargo test --test batch_insert_tests` + `failures/batch-api` |
-| **P6** | **Proposal 1B:** Full `Direction`-parametric unification of `ForwardScanCtx` / `ReverseScanCtx` / `BatchCtx` & `ScanState` | [`src/tree/range/forward_ctx.rs`](src/tree/range/forward_ctx.rs), [`reverse_ctx.rs`](src/tree/range/reverse_ctx.rs), [`batch_common.rs`](src/tree/range/batch_common.rs), [`scan_state.rs`](src/tree/range/scan_state.rs), [`iterator/`](src/tree/range/iterator.rs) | `SIM-09`, `SIM-11` | −2,000+ LOC | Medium | Full range test suite + `failures/range` corpus + `BTreeMap` differential proptests |
+| **P0** | **Proposal 1A (§2.2.A):** Fix the 4 newly uncovered `ReverseScanCtx` OCC/cursor-mutation defects & extract shared `try_snapshot_slot` kernel | [`src/tree/range/reverse_ctx.rs`](src/tree/range/reverse_ctx.rs), [`forward_ctx.rs`](src/tree/range/forward_ctx.rs), [`helper.rs`](src/tree/range/helper.rs) | Reverse `RNG-07`/`RNG-08`/`RNG-10` parity, `OCC-06`, `PERF-08` | −250 LOC | Low | New concurrent reverse-scan + writer stress test + Miri scan tests |
+| **P1** | **Proposal 3 (§4):** `SuffixBag` raw-buffer consolidation (drop `UnsafeCell<Vec<u8>>`), `drain_and_rebuild` slack, split pre-sizing, & 60B `init_at_zero` | [`src/suffix.rs`](src/suffix.rs), [`src/suffix/inline.rs`](src/suffix/inline.rs), [`src/policy/suffix_ops.rs`](src/policy/suffix_ops.rs), [`src/policy/embedded_suffix.rs`](src/policy/embedded_suffix.rs) | `SAFE-06` (complete), `PERF-02`, `PERF-09`, `PERF-11`, `SIM-07` | −180 LOC | Low | `failures/suffix` alloc-delta tests + Miri `-Zmiri-strict-provenance` |
+| **P2** | **Proposal 5 (§6):** Stack-allocated `StackRoute` (`ArrayVec<u64, 31>`) in `remove_concurrent_generic` & `SIM-04` remove cleanups | [`src/tree/remove.rs`](src/tree/remove.rs), [`src/tree/coalesce.rs`](src/tree/coalesce.rs), [`src/leaf15.rs`](src/leaf15.rs) | `PERF-17`, `SIM-04` | −60 LOC | Very Low | Counting-allocator multi-layer remove test + `cargo test --lib remove` |
+| **P3** | **Proposal 6 (§7):** Unified 3-way unrolled `search_for_insert<const SINGLE_LAYER: bool>`, `NodeVersion::stable()` Acquire load, & interleaved `InlineValueArray` | [`src/tree/generic/search.rs`](src/tree/generic/search.rs), [`src/nodeversion.rs`](src/nodeversion.rs), [`src/policy/inline_values.rs`](src/policy/inline_values.rs), [`src/internode.rs`](src/internode.rs) | `SIM-02`, `PERF-14`, `PERF-18`, `PERF-19` | −150 LOC | Low | `src/leaf15/layout.rs` assertions + `cargo test --test true_inline` + Loom |
+| **P4** | **Proposal 2 (§3):** Unified B-link/internode descent kernel (`resolve_layer_root`), scan stack root caching, & opportunistic parent-slot swing | [`src/tree/generic.rs`](src/tree/generic.rs), [`src/tree/range/traversal.rs`](src/tree/range/traversal.rs), [`src/tree/coalesce.rs`](src/tree/coalesce.rs), [`src/tree/split/root_creation.rs`](src/tree/split/root_creation.rs) | `PERF-07`, `RNG-09`, `OCC-04` (scan) | −120 LOC | Medium | `failures/range --bin promoted` + `failures/remove-coalesce --test sublayer_leak` |
+| **P5** | **Proposal 4 (§5):** Single `BatchEntry<P>` / `ValueBatch` pipeline, shared `insert_into_empty_leaf`, & leaf-hint single-descent `Entry` API | [`src/tree/generic/batch.rs`](src/tree/generic/batch.rs), [`src/tree/generic/entry.rs`](src/tree/generic/entry.rs) | `SIM-08`, `SIM-13`, `PERF-03`, `PERF-05`, `PERF-06` | −380 LOC | Low–Medium | `cargo test --test batch_insert_tests` + `failures/batch-api` |
+| **P6** | **Proposal 7 (§8):** Modular dead-code & layout cleanups (`SIM-03, 06, 10, 12, 15, 16`, `PERF-10, 15, 25`) | [`src/leaf_trait.rs`](src/leaf_trait.rs), [`src/inline/sentinel.rs`](src/inline/sentinel.rs), [`src/node_pool.rs`](src/node_pool.rs), [`src/tree/generic/layer.rs`](src/tree/generic/layer.rs), [`Cargo.toml`](Cargo.toml) | `SIM-03`, `SIM-06`, `SIM-10`, `SIM-12`, `SIM-15`, `SIM-16`, `PERF-10`, `PERF-15`, `PERF-25` | −450 LOC | Low | `cargo test --lib` + feature matrix checks |
+| **P7** | **Proposal 1B (§2.2.B):** Full `Direction`-parametric unification of `ForwardScanCtx` / `ReverseScanCtx` / `BatchCtx` & `ScanState` | [`src/tree/range/forward_ctx.rs`](src/tree/range/forward_ctx.rs), [`reverse_ctx.rs`](src/tree/range/reverse_ctx.rs), [`batch_common.rs`](src/tree/range/batch_common.rs), [`scan_state.rs`](src/tree/range/scan_state.rs), [`iterator/`](src/tree/range/iterator.rs) | `SIM-09`, `SIM-11` | −2,000+ LOC | Medium | Full range test suite + `failures/range` corpus + `BTreeMap` differential proptests |
