@@ -7,6 +7,11 @@
 **Host:** Linux x86_64, AMD Ryzen 5 3600 (6C/12T), `rustc`/`cargo` 1.99.1, nightly Miri available  
 **Deliverable:** this merged audit plus the runnable corpus in `failures/`
 
+**Follow-up sweep:** 2026-11-08, source at `93e65eb` with pre-existing dependency
+updates in the worktree. Added `OCC-06`, `INS-04`, `GC-04`, `GC-05`, `RNG-10`,
+and `TOOL-14`; extended SAFE-05 and corrected SAFE-04. Follow-up locations
+refer to that source checkout. See Appendix E for coverage and fresh evidence.
+
 **Contents**
 
 1. [Scope, method, and evidence](#1-scope-method-and-evidence)
@@ -28,6 +33,7 @@
 - [Appendix B — Reproduction quick reference](#appendix-b--reproduction-quick-reference)
 - [Appendix C — Environment and limitations](#appendix-c--environment-limitations-and-assumptions)
 - [Appendix D — Files reviewed](#appendix-d--files-reviewed)
+- [Appendix E — Follow-up source sweep](#appendix-e--follow-up-source-sweep)
 
 ---
 
@@ -154,6 +160,7 @@ independent checks. The failures cluster in six systemic areas:
 | P0 | INS-01 | A split makes a live key unreachable; count drifts |
 | P0 | RNG-01 … RNG-05 | Scans return out-of-range keys, omit valid keys, or duplicate values |
 | P1 | INS-02, INS-03, GC-02, GC-03, ALLOC-02, RNG-07, BATCH-01/02/04 | DoS, leaks, weak-memory/UAF exposure |
+| P1 | OCC-06, INS-04, GC-04, GC-05, RNG-10 | Protected-load ordering gap, deterministic post-cleanup/post-panic hangs, lost cleanup retries, invalid callback batches |
 | P1 | TOOL-01 … TOOL-05, TOOL-09 | The advertised build/test/benchmark gates cannot be trusted |
 
 ### 2.3 What passed
@@ -379,7 +386,7 @@ Drop-counter/Miri test for double retire, and no compile-fail test if
 
 ---
 
-### SAFE-04 — Safe public allocator/leaf/internode APIs permit OOB, double-free, and type confusion
+### SAFE-04 — Safe public allocator/leaf/internode APIs permit double-free and type confusion
 
 **Severity:** High · **Confidence:** Confirmed (compile/Miri/source)  
 **Legacy IDs:** `BUG-API-07`, `BUG-ALLOC-06`, `BUG-CON-13`, `BUG-LEAF-08`
@@ -427,19 +434,27 @@ Miri: `constructing invalid value of type Box<u64>: encountered a dangling box
 (use-after-free)` during `Drop`. `move_slot` copies the pointer but does not
 clear the source or retire an existing destination value.
 
-**Repro C — internode OOB (release):**
+**Correction from the follow-up — indexed internode access panics in release:**
 
 ```rust
 let node = InternodeNode::new(0);
-node.set_ikey(15, 0);            // writes ikey0[15], out of bounds
-node.insert_key_and_child(...);  // on a full node writes ikey0[15]/child[16]
+node.set_ikey(15, 0);            // bounds-check panic, including in release
+node.set_child(16, std::ptr::null_mut()); // bounds-check panic
 ```
 
-The mutators use `debug_assert!`; release builds write out of bounds. The
-`split_into` arithmetic also underflows when `insert_pos > WIDTH` because
-`WIDTH - insert_pos` is `usize`.
+The original audit incorrectly inferred unchecked writes from `debug_assert!`.
+These methods use ordinary Rust array indexing, which retains bounds checks.
+The release control in `failures/leaf-values/public/tests/internode_bounds.rs`
+catches all three panics (`set_ikey`, `set_child`, and insertion into a full
+node). Those calls are not evidence of an out-of-bounds memory write.
 
-**Impact:** Safe downstream code can cause OOB writes, double-free, UAF, and
+The internode soundness concern remains: safe `split_into` reparents children
+through raw-pointer dereferences when `height > 0` (`src/internode.rs:360-375`).
+Safe `set_child` accepts arbitrary pointers, and `split_into` does not enforce
+their validity or ownership. Invalid positions also cause arithmetic/bounds
+panics; the subsequent checked indexing must not be described as unchecked UB.
+
+**Impact:** Safe downstream code can cause invalid pointer dereferences, double-free, UAF, and
 type confusion. The external allocator trait is the cleanest route because
 `with_allocator` trusts any safe implementation. This is an API soundness
 problem, not a call-site bug.
@@ -449,8 +464,9 @@ problem, not a call-site bug.
 - Make `TreeAllocator` an `unsafe trait` (or seal it), add `# Safety` contracts
   to allocation/retirement/teardown, and make `teardown_tree` `unsafe`.
 - Make `debug_root_ptr` `unsafe`, `#[doc(hidden)]`, or remove it.
-- Make internode mutators `pub(crate)`/`unsafe`, or use unconditional bounds
-  checks; validate `insert_pos <= WIDTH` in `split_into`.
+- Make pointer-dereferencing internode operations `pub(crate)`/`unsafe` and
+  enforce child validity/ownership; validate `insert_pos <= WIDTH` in `split_into`.
+  Keep the existing array bounds checks.
 - Make `move_value_to` a move/swap that nulls the source and retires the
   destination, or make it `unsafe` and stop exporting `LeafNode15`.
 - Gate `load_value`/`take_value` on `keylenx < LAYER_KEYLENX`, or require a
@@ -458,11 +474,12 @@ problem, not a call-site bug.
 
 **Test gap:** No Miri/compile-fail test for a malicious allocator, no test for
 `move_value_to` ownership, no test for layer-slot `load_value`/`take_value`,
-and no release test for internode OOB writes.
+The follow-up adds a passing release bounds-check control; a safe-code Miri
+test for `split_into` with invalid children is still needed.
 
 ---
 
-### SAFE-05 — `CAN_WRITE_THROUGH` admits padded and non-`Copy` types; atomic read of uninitialized bytes is UB
+### SAFE-05 — `CAN_WRITE_THROUGH` admits padding, ownership, and pointer representations that integer atomics cannot preserve
 
 **Severity:** High · **Confidence:** Confirmed (Miri)  
 **Legacy IDs:** `BUG-LEAF-06`
@@ -505,8 +522,26 @@ the bitwise duplication in `atomic_read_value` can create aliasing mutable
 references in safe code. No separate Miri run was done for that variant, but it
 follows from the same transmute.
 
-**Impact:** UB on any read/update of a write-through map whose value type has
-padding; silent in release. Common types such as `[u8; 8]`, `(u32, u8, u8,
+**Follow-up repro — even a `Copy`, padding-free shared reference fails:**
+
+```bash
+cd failures/leaf-values/public
+MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" \
+  cargo +nightly miri run --bin reference_write_through
+```
+
+`MassTree15<&'static u64>` admits write-through. After inserting a reference
+to a static, `get_ref` loads its representation through `AtomicU64` and
+transmutes the integer into a reference. Miri reports at
+`src/policy/box_values.rs:34`: `encountered a dangling reference (... has no
+provenance)`. This is a single-threaded read with the guard alive. Requiring
+only `Copy` and initialized bytes would therefore still be insufficient;
+pointer-bearing representations must be excluded or handled with a
+provenance-preserving typed atomic representation.
+
+**Impact:** UB when the integer-atomic read encounters padding or reconstructs
+an invalid reference representation; ordinary native runs can hide it.
+Common types such as `[u8; 8]`, `(u32, u8, u8,
 u8)`, and `#[repr(C)] { a: u32, b: u32 }` are rejected, so the gate both admits
 unsafe types and misses useful safe ones.
 
@@ -514,9 +549,9 @@ unsafe types and misses useful safe ones.
 
 - require `V: Copy` and restrict to primitive numeric/bool/char types whose
   representation has no padding, or
-- require a user `unsafe impl AtomicWord` with the no-padding/no-ownership
-  contract, and ideally allocate write-through boxes zeroed before the first
-  store.
+- require a user `unsafe impl AtomicWord` with no-padding, no-ownership, and
+  integer-representation/provenance contracts. Zeroing an allocation alone
+  does not make arbitrary typed values suitable for integer atomics.
 
 **Test gap:** No write-through tests at all in `src/policy/tests.rs`; add the
 padded struct and the `&mut` case under Miri.
@@ -827,6 +862,52 @@ reader.
 
 ---
 
+### OCC-06 — Reader pointer loads bypass seize's protected-load ordering
+
+**Severity:** High · **Confidence:** Likely (dependency contract/source proof;
+no weak-memory execution reproduced)
+
+**Location:** `src/tree/generic.rs:211-217,245-261` (root/parent loads),
+`src/tree/range/traversal.rs:21-82` (ignores guard; `child_unguarded`),
+`src/policy/box_values.rs:101-115,202-220` (value pointer loads),
+`src/policy/sidecar_suffix.rs:37-38`, `src/policy/suffix_ops.rs:32-41`
+(sidecar/external bag loads). Contrast `src/leaf15.rs:1057-1059` and
+`src/internode/accessors.rs:140-143`, which use `guard.protect`.
+
+Holding a `LocalGuard` does not, by itself, prove that every raw atomic load
+observes a still-live object. The pinned dependency `seize` 0.5.1 implements
+`Guard::protect` by strengthening the pointer load to `SeqCst`
+(`seize/src/guard.rs:64-65`, `raw/collector.rs:75-104`). Its source explicitly
+requires these loads to participate in the total order between entering a
+guard and the retirement barrier. Many tree readers instead use plain
+Acquire or Relaxed loads and then dereference the pointer. The safe guard
+argument is sometimes unused altogether.
+
+**Mechanism:** A retiring thread removes/replaces a pointer and executes the
+collector's retirement barrier while a reader is inactive. A subsequently
+entering reader must observe that removal, since the retired object need not
+be reserved for it. The collector's protected-load ordering provides that
+guarantee; an unprotected Acquire/Relaxed load has no established equivalent
+argument here. A stale pointer can then be dereferenced before node-version
+validation. This is distinct from OCC-03's dirty-bit/payload fences and from
+GC-03's retirement of a still-published node.
+
+**Evidence/limits:** Confirmed the ordering mismatch against the installed
+source for the locked `seize = 0.5.1`; no UAF is claimed as reproduced by this
+follow-up. Native x86 execution and Miri success do not establish the missing
+weak-memory guarantee. Some loads under a writer lock or from already
+protected immutable storage may have independent proofs; those must be
+identified individually.
+
+**Fix:** Inventory dereferenced pointer loads, use `Guard::protect` (or its
+guarded swap/CAS counterparts) where required, and pass the guard through
+value/suffix loaders. Retain raw loads only where a concrete lifetime and
+ordering proof replaces the collector's contract. Add a reclamation handoff
+model covering inactive → enter versus replace → retire, with the real
+collector's barrier strategy represented.
+
+---
+
 ## 5. Insert, layer creation, and split
 
 ### INS-01 — Prepend split can put a key equal to the parent separator on the left, making it unreachable
@@ -1002,6 +1083,47 @@ the same leaf. Make `'forward` exit on no progress.
 
 **Test gap:** No concurrency test mixes remove + `process_coalesce` with inserts
 into the vacated rightmost range. Add a bounded/watchdog stress test.
+
+---
+
+### INS-04 — A safe `InlineBits` encoder panic during split leaves the tree unusable
+
+**Severity:** High · **Confidence:** Confirmed (deterministic public API hang)
+
+**Location:** `src/policy/inline_values.rs:113-117` (`to_bits`),
+`src/tree/generic/split.rs:241-253` (`mark_split` before split/insert),
+`src/leaf15.rs:1692-1710,1747-1753` (entry moves and value encoding),
+`src/nodeversion.rs:119-126` (split unlock clears root bit).
+
+`InlineBits` is a public safe trait; its encoder may panic. A leaf split calls
+that encoder after marking the left node split and after potentially moving
+existing entries to the unpublished right node. Unwinding drops the left
+`LockGuard`, which clears `ROOT_BIT`; there is no unwind owner for the right
+node, no rollback, and no completed propagation. With a main-root leaf, the
+published root now has neither a root bit nor a parent. The climb in
+`reach_leaf_concurrent_generic` loops forever, even for an unrelated existing
+key. Moved entries and the unpublished sibling can also be stranded.
+
+**Repro:**
+
+```bash
+cd failures/insert-split
+cargo build --bin inline_encode_panic
+timeout 3s "$CARGO_TARGET_DIR/debug/inline_encode_panic"
+```
+
+Use the absolute target directory recommended in `failures/README.md`.
+The binary fills a leaf with 15 even-numbered keys, then inserts between them
+using an encoder that panics for that new value. It catches the intended panic,
+prints `caught encoder panic; checking existing key`, and times out with exit
+124 in `get` for key zero. No custom allocator or concurrency is involved.
+
+**Fix:** Run user encoding before entering a structural mutation, or make
+split construction transactional with an unwind owner and rollback. A safe
+trait's panic cannot be excluded by a documentation precondition. ALLOC-03's
+allocator-only remedy does not cover this path. Test caught encoder panics
+for new-slot, split, and layer-construction paths and verify old entries,
+routing, count, and allocation balance after unwinding.
 
 ---
 
@@ -1328,6 +1450,88 @@ descending loop.
 **Test gap:** No test drives `MAX_PARENT_RETRIES` or a small retirement batch.
 Add a test-only retry limiter, a `with_batch_size(1)` cascade test, and a debug
 teardown assertion that no traversed child is deleted.
+
+---
+
+### GC-04 — Collapsing a live unary internode breaks height and later split reparenting
+
+**Severity:** High · **Confidence:** Confirmed (quiescent shape test and
+deterministic public API hang)
+
+**Location:** `src/tree/remove.rs:431-439,487-491`
+(`try_cascade_internodes` replaces a zero-key internode with its `child[0]`),
+`src/internode.rs:360-375` (height-based child cast),
+`src/tree/split/propagation.rs:226-230` (leaf reparenting only at height zero).
+
+A zero-key internode can still have a live child. Replacing that non-root
+internode with its child reduces the depth of only one branch, while the
+grandparent's immutable `height` stays unchanged. A height-1 internode then
+contains both leaves and height-0 internodes. On a later split,
+`InternodeNode::split_into` treats every moved child as an internode because
+`height > 0`. For a real leaf it stores the parent at the internode offset
+(8), rather than the leaf's actual parent field. Moved leaves retain stale
+parents. Splitting one of those leaves loops forever in parent membership
+validation.
+
+This happens with successful, single-threaded cascade and no reclamation race.
+Reordering retirement as recommended in GC-03 alone does not repair it.
+
+**Repro:**
+
+```bash
+cd failures/remove-coalesce
+cargo test --test cascade_height -- --nocapture
+cargo build --bin cascade_reinsert
+timeout 4s "$CARGO_TARGET_DIR/debug/cascade_reinsert"
+```
+
+The shape test inserts 300 keys, removes 150..299, and runs maintenance.
+It fails because the height-1 root's second child is a leaf. The public-only
+binary spaces keys by 1,000, performs the same cleanup, grows the tree, verifies
+all resident values, then times out (124) after `splitting a moved leaf at
+450001`. A strict-provenance Miri run also reached that sentinel and timed out;
+it did not report UB before the hang.
+
+**Fix:** Preserve non-root unary internodes when their child is live. Remove
+truly empty branches without shortening a single live branch. Any deliberate
+root contraction needs a separate publication/reparenting protocol. Check
+height and real node kind together in structural invariant tests; then force
+another split in a moved child after cleanup. Keep GC-03's retirement fix too.
+
+---
+
+### GC-05 — A deferred chain entry consumes its entire retry budget in one call
+
+**Severity:** Medium · **Confidence:** Confirmed (deterministic contention test)
+
+**Location:** `src/tree/coalesce.rs:246-259,288-303,549-560`.
+
+`try_remove_one` prioritizes `deferred_chains`. A failed chain attempt pushes
+back into that same queue. `process_all` immediately pops the requeued entry
+again, so one briefly locked leaf consumes the initial attempt plus all ten
+retries during a single maintenance call. It increments `abandoned` and leaves
+the empty leaf's queued bit set. Later maintenance has no entry to retry.
+`process_batch` can do the same when its limit is large enough. Sublayer
+deferral uses a separate queue and does not have this exact feedback loop.
+
+**Repro:**
+
+```bash
+cd failures/remove-coalesce
+cargo test --test requeue_budget -- --nocapture
+```
+
+The test empties the right leaf of a 20-key tree and holds that leaf's normal
+version lock while processing cleanup. Quiescent, guard-protected node
+inspection obtains the lock; it does not fabricate or alter node state.
+Observed: `processed=11 deferred=0 abandoned=1`, followed by the expected
+assertion failure. Once the lock is released, the cleanup opportunity is lost.
+
+**Fix:** Separate the current call's work from entries deferred by this call,
+or process only a captured initial work budget. Increment a retry count at
+most once per entry per maintenance call. Verify both `process_all` and
+`process_batch`, eventual reclamation after contention ends, and that the
+queued bit still agrees with a live queue entry.
 
 ---
 
@@ -1944,6 +2148,17 @@ before returning `Emit`); on mismatch return `Retry` so existing duplicate
 suppression runs. Use one validated read helper for single/multi-layer. Add a
 start-of-leaf version check to batch paths.
 
+**Follow-up scope:** A precheck alone is insufficient. Reverse initial emits
+check the version at `src/tree/range/reverse_ctx.rs:409-413,470-474`, then
+load the value. `try_emit_generic` checks at `:706`, then reads suffix/value
+at `:717-731`; the forward single-layer pointer path likewise has no final
+check after the pointer load. A writer can complete a slot reuse or layer
+conversion in that gap even if OCC-02 is fixed. These paths need validation
+after the complete payload snapshot and before constructing/exposing a typed
+reference. This additional interleaving is source-established (Likely), not
+independently reproduced here. Batch callbacks have their own deterministic
+proof and stronger emission-before-validation problem in RNG-10.
+
 **Test gap:** Concurrent correctness tests scan during inserts or removals, but
 not during remove+reinsert slot reuse, and never combine layer creation with
 scanning. Add this stress and a Miri/loom model of the leaf snapshot.
@@ -2019,6 +2234,52 @@ first slot.
 to the layer root, descend, walk the B-link chain to the leaf whose
 `ikey_bound` contains the cursor, with a hop cap and too-far-right restart. Add
 a concurrent scan+split test and a scan after promotion test.
+
+---
+
+### RNG-10 — Batch callbacks run before validation and can observe stale slot reuse
+
+**Severity:** High · **Confidence:** Confirmed (six deterministic API variants)
+
+**Location:** `src/tree/range/batch_common.rs:378-471,481-547`
+(`process_batch_keyed` / `process_batch_values`),
+`src/tree/range/forward_ctx.rs:1045-1059`,
+`src/tree/range/reverse_ctx.rs:1494-1514` (retry after callbacks).
+
+The batch loops use a cached permutation and invoke visitors immediately.
+Their version check happens only after the leaf's callbacks; stop, layer, and
+bound returns can bypass it altogether. A callback can legally insert/remove
+through the shared tree. A full leaf's just-freed physical slot can therefore
+be reused for a different key before the batch visits it. The visitor observes
+out-of-order keys/values before the loop detects any change. Retrying cannot
+undo callback side effects; values-only scans additionally replay prior
+entries because they do not maintain the same complete cursor state.
+
+This is independent of RNG-07's forward `find_next` path: it reproduces in
+both directions, without threads, sleeps, probabilistic races, or bad bounds.
+Adding only a check at batch entry is insufficient because mutation occurs
+inside the second callback.
+
+**Repro:**
+
+```bash
+cd failures/range
+cargo test --test batch_callback -- --nocapture
+```
+
+All six tests fail: forward/reverse keyed inline batches, forward/reverse
+values-only batches, and forward/reverse boxed reference batches. Starting
+with keys 1..15, the second forward callback removes 3 and inserts 16:
+`[1, 2, 16, 4, ..., 15, 16]`. Reverse removes 13 and inserts 0:
+`[15, 14, 0, 12, ..., 1, 1, 0]`. Values-only variants also replay the earlier
+part of the leaf. Each assertion checks strict monotonicity of the observed
+key-encoded values and callback-count consistency.
+
+**Fix:** Validate each key/value snapshot before invoking a callback, or
+buffer a complete validated leaf snapshot before emitting it. Keep retry
+progress separate from speculative scan state, and resume strictly beyond
+the last delivered full key in both directions. Include callback mutation,
+early stop, bounds, slot reuse, and layer conversion in the regression matrix.
 
 ---
 
@@ -2768,6 +3029,37 @@ build are unenforced. This is why TOOL-01/03/04/07 can persist.
 - Miri for `tests/leak_tests.rs` and the `failures/leaf-values` Miri bins;
 - benchmark smoke with `mttest --check --limit` and nonzero exit on check errors.
 
+### TOOL-14 — Debug printing omits promoted-layer internodes and right siblings
+
+**Severity:** Low · **Confidence:** Confirmed (deterministic output test)
+
+**Location:** `src/tree/generic/print.rs:293-308`.
+
+The printer recursively prints the raw layer-slot pointer. After promotion,
+that pointer is the original left leaf, so it prints only that leaf; it neither
+climbs to the promoted root nor walks the leaf's siblings. The tree header's
+count can say 40 while the sublayer table shows only its first 15 values.
+This can mislead diagnosis of routing, cleanup, and missing-key failures.
+
+**Repro:**
+
+```bash
+cd failures/leaf-values/public
+cargo test --test print_promoted -- --nocapture
+```
+
+Forty keys under `prefix00` have distinct `VALUE_000_END` through
+`VALUE_039_END` values. The printed text contains the first marker and omits
+the last. Point lookup still finds the last key.
+
+**Fix:** Resolve a layer-slot pointer to its current root under the guard
+before printing the whole layer. Keep diagnostic traversal consistent with
+point reads/teardown, and retain a promoted-layer output test. Formatting also
+needs the value/suffix snapshot discipline discussed in SAFE-02/RNG-07;
+`print_leaf` currently checks its header version before formatting slots.
+
+---
+
 ### PERF-TOOL-01 — Divan concurrent benchmarks time warmup, thread spawn/join, and barriers
 
 `benches/bench_utils.rs:878-927` creates a `thread::scope`, spawns workers, runs
@@ -2924,9 +3216,10 @@ use.
 2. **OCC-02:** `has_changed > LOCK_BIT` (or a dedicated structural bit) and
    null-layer retries.
 3. **OCC-03:** fix marker/validation fences for aarch64.
+   **OCC-06:** audit reader pointer loads against seize's protected-load contract.
 4. **REM-01:** full key identity and post-lock version/permutation validation.
 5. **REM-02:** B-link advance and deleted-leaf handling in remove.
-6. **RNG-07:** version check in forward multi-layer `find_next`.
+6. **RNG-07:** validate complete snapshots in forward/reverse scan paths.
 
 Add the deterministic layer-read test, the same-ikey remove test, and the
 lost-remove split test before changing the protocol.
@@ -2936,10 +3229,13 @@ lost-remove split test before changing the protocol.
 1. **GC-01:** replace raw chain pointers with ikey-bound re-traversal or a
    generation token; check deleted under lock.
 2. **GC-02:** root-aware whole-sublayer GC, with a counting-allocator test.
-3. **GC-03/OCC-04:** retire after unlink/reparent; never abandon; deleted-child
-   check in reach.
+3. **GC-03/OCC-04/GC-04:** preserve non-root live unary levels; retire only
+   after unlink/reparent; never abandon; deleted-child check in reach.
+   **GC-05:** defer each failed entry to the next call instead of consuming
+   its entire retry budget immediately.
 4. **ALLOC-01/02:** `POOL.try_with` fallbacks and unwind-safe reclamation.
-5. **ALLOC-03:** allocate before `mark_split` or install an unwind guard.
+5. **ALLOC-03/INS-04:** keep allocations and user encoding out of the
+   non-abandonable phase, or provide transactional unwind handling.
 
 ### Phase 3 — Fix insert/split and range semantics
 
@@ -2949,6 +3245,7 @@ lost-remove split test before changing the protocol.
 3. **RNG-01..05:** full-key bounds, layer-root climb, values-only bounds.
 4. **RNG-06/08:** DoubleEnded exhaustion and empty-rightmost reverse.
 5. **RNG-09:** share one stable-leaf traversal with point reads.
+6. **RNG-10:** validate before callbacks and preserve full-key progress across retries.
 
 ### Phase 4 — Performance and workflow
 
@@ -2956,8 +3253,8 @@ lost-remove split test before changing the protocol.
    dispatch; batch full-leaf precheck.
 2. **PERF-07/09/10/11:** promoted scan climb, split reservation, suffix
    prefetch, leaf init.
-3. **TOOL-01..13:** CI, feature gate, Miri target, Clippy, test oracles,
-   benchmark methodology.
+3. **TOOL-01..14:** CI, feature gate, Miri target, Clippy, test oracles,
+   benchmark methodology, and complete promoted-layer diagnostics.
 4. **SIM-01..16:** delete dead code after correctness tests exist, not before.
 
 ---
@@ -2985,31 +3282,37 @@ not left as an external corpus.
 
 ## Appendix A — Canonical finding index
 
-**Counts:** 10 Critical, 25 High, 16 Medium, 7 Low (58 code/tooling findings),
-plus 16 simplification groups and 25 performance opportunities.
+**Counts:** 10 Critical, 29 High, 16 Medium, 9 Low (64 code/tooling findings:
+58 original IDs plus 6 follow-up IDs), plus 16 simplification groups and 25
+performance opportunities. OCC-05's index severity is corrected to Low to
+match its finding body.
 
 | ID | Severity | Confidence | Short description |
 |---|---|---|---|
 | SAFE-01 | Critical | Confirmed | Guard-scoped outputs escape the guard/tree; safe UAF |
 | SAFE-02 | Critical | Confirmed | `ValuePtr::deref` races write-through atomic updates |
 | SAFE-03 | Critical | Confirmed | `BatchEntry` aliases tree-owned values; double-free/corruption |
-| SAFE-04 | High | Confirmed | Safe allocator/leaf/internode APIs permit OOB/double-free/type confusion |
-| SAFE-05 | High | Confirmed | `CAN_WRITE_THROUGH` admits padded/non-Copy types; uninitialized atomic read |
+| SAFE-04 | High | Confirmed | Safe allocator/leaf/internode APIs permit invalid dereferences/double-free/type confusion |
+| SAFE-05 | High | Confirmed | Write-through admits padding/non-Copy/reference representations; invalid integer-atomic reads |
 | SAFE-06 | High | Confirmed | External `SuffixBag` metadata/Vec races and `&mut` aliasing |
 | OCC-01 | Critical | Confirmed | New-key inserts do not mark/bump the version |
 | OCC-02 | Critical | Confirmed | `has_changed` ignores `INSERTING`; layer conversion false miss/type confusion |
 | OCC-03 | High | Likely | Weak-memory dirty/validation fences are reversed |
 | OCC-04 | High | Likely | Descent into a deleted/empty internode has no escape |
-| OCC-05 | Medium | Likely | Separator redirects bypass the version protocol |
+| OCC-05 | Low | Likely | Separator redirects bypass the version protocol |
+| OCC-06 | High | Likely | Reader pointer loads bypass seize protected-load ordering |
 | INS-01 | Critical | Confirmed | Prepend split makes a key equal to the separator unreachable |
 | INS-02 | High | Confirmed | Equal-ikey split point returns `None`; insert panics |
 | INS-03 | High | Confirmed | Insert livelocks on a coalesced rightmost leaf |
+| INS-04 | High | Confirmed | Safe inline encoder panic during split leaves an unusable root |
 | REM-01 | Critical | Confirmed | Remove deletes a different same-ikey key |
 | REM-02 | High | Confirmed | Remove loses a present key during a split |
 | REM-03 | Medium | Confirmed code | Retry cap does not bound the inner remove/reach loops |
 | GC-01 | Critical | Confirmed | Duplicate raw chain entries: maintenance hang/UAF |
 | GC-02 | High | Confirmed | Promoted/multi-leaf sublayers are never reclaimed |
 | GC-03 | High | Likely | Cascade retires before unlink; stale child/UAF |
+| GC-04 | High | Confirmed | Non-root unary collapse breaks height; later leaf split hangs |
+| GC-05 | Medium | Confirmed | Deferred chain consumes all cleanup retries in one call |
 | ALLOC-01 | Critical | Confirmed | TLS pool teardown aborts the process |
 | ALLOC-02 | High | Confirmed | Panicking value Drop corrupts seize batch state |
 | ALLOC-03 | Medium | Likely | Allocator panic after `mark_split` leaves a split-locked sibling |
@@ -3024,6 +3327,7 @@ plus 16 simplification groups and 25 performance opportunities.
 | RNG-07 | High | Confirmed | Forward multi-layer `find_next` lacks a version check |
 | RNG-08 | Medium | Confirmed | Empty rightmost leaf breaks reverse/`last()` |
 | RNG-09 | Medium | Likely | Scan traversal is a weaker B-link implementation |
+| RNG-10 | High | Confirmed | Callbacks observe stale batches before version validation |
 | SUF-01 | Medium | Likely | Drain leaves stale inline metadata shadowing new external suffix |
 | SUF-02 | Low | Confirmed | Empty-suffix compaction debug panic |
 | SUF-03 | Low | Confirmed | Public `SuffixBag` length checks are debug-only |
@@ -3048,6 +3352,7 @@ plus 16 simplification groups and 25 performance opportunities.
 | TOOL-11 | Medium | Confirmed | `tracing` console docs are false; no events |
 | TOOL-12 | Low | Confirmed | Release tests silently lose four tests and symbols |
 | TOOL-13 | Medium | Confirmed | No CI configuration exists |
+| TOOL-14 | Low | Confirmed | Printer omits promoted-layer root and right siblings |
 
 ## Appendix B — Reproduction quick reference
 
@@ -3058,16 +3363,22 @@ plus 16 simplification groups and 25 performance opportunities.
 | SAFE-03 | `cd failures/batch-api && cargo run --bin alias` / `--bin doublefree` |
 | SAFE-04 | `cd failures/leaf-values/public && cargo +nightly miri run --bin move_value_same_leaf`; `cd failures/batch-api && cargo run --bin teardown_safe` |
 | SAFE-05 | `cd failures/leaf-values/public && cargo +nightly miri run --bin padded_write_through` |
+| SAFE-05 follow-up | `... && cargo +nightly miri run --bin reference_write_through` |
+| SAFE-04 correction | `... && cargo test --release --test internode_bounds` (2 passing controls) |
 | SAFE-06 | source-level; `failures/suffix` allocation probe plus the audit interleaving |
 | OCC-01/02 | `cd failures/concurrency/vercheck && cargo run`; `cd ../typeconf && cargo run --release`; `cd failures/remove-coalesce && cargo test --release --test version_probe` |
 | OCC-03 | no hardware repro on x86; aarch64 litmus required |
+| OCC-06 | pinned seize 0.5.1 protected-load/retirement contract; no hardware repro |
 | OCC-04/GC-03 | `cd failures/internode-alloc && cargo test --release --test stuck -- --nocapture` |
 | INS-01/02 | `cd failures/insert-split && cargo test --test prepend -- --nocapture`; `cargo test --test equal_run -- --nocapture` |
 | INS-03 | `cd failures/insert-split && timeout 120s cargo run --release --bin livelock2` |
+| INS-04 | `cd failures/insert-split && cargo build --bin inline_encode_panic`, then `timeout 3s "$CARGO_TARGET_DIR/debug/inline_encode_panic"` (124) |
 | REM-01 | `cd failures/remove-coalesce && cargo test --release --test wrong_key -- --nocapture` |
 | REM-02 | `... && cargo test --release --test lost_remove -- --nocapture` |
 | GC-01 | `... && cargo test --release --test double_unlink_deterministic -- --nocapture` (exit 42) |
 | GC-02 | `... && cargo test --release --test sublayer_leak -- --nocapture`; `cd failures/independent && cargo run --quiet --bin gc` |
+| GC-04 | `... && cargo test --test cascade_height`; build `cascade_reinsert`, then run it with `timeout 4s` (124) |
+| GC-05 | `... && cargo test --test requeue_budget -- --nocapture` |
 | ALLOC-01 | `cd failures/internode-alloc && cargo test --release --test tls_abort -- --nocapture` |
 | ALLOC-02 | `... && cargo test --release --test panic_value -- --nocapture` |
 | PRIM-01 | `cd failures/primitives/shard && cargo run --quiet` |
@@ -3080,11 +3391,13 @@ plus 16 simplification groups and 25 performance opportunities.
 | RNG-06 | `... && cargo run --quiet --bin doubleended` |
 | RNG-07 | `... && timeout 30s cargo run --quiet --bin race` |
 | RNG-08 | `... && cargo run --quiet --bin empty_right` |
+| RNG-10 | `... && cargo test --test batch_callback -- --nocapture` (6 failures) |
 | SUF-02 | `cd failures/suffix && cargo run --quiet --bin compact_empty` |
 | BATCH-01/04 | `cd failures/batch-api && cargo run --quiet` |
 | BATCH-02 | `cd failures/leaf-values/public && cargo +nightly miri run --bin batch_write_through_leak` |
 | BATCH-05 | `cd failures/batch-api/mimalloc-repro && cargo check` (expected conflict) |
 | TOOL-01..07 | `cd failures/tooling && ./run-all.sh` |
+| TOOL-14 | `cd failures/leaf-values/public && cargo test --test print_promoted` |
 
 ## Appendix C — Environment, limitations, and assumptions
 
