@@ -9,6 +9,42 @@ use seize::LocalGuard;
 
 use crate::{MassTreeGeneric, TreeAllocator, ValueRef, policy::LeafPolicy, tree::RemoveError};
 
+use crate::{key::Key, leaf15::LeafNode15};
+
+use super::insert_strategy::{GenericInsert, WriteThroughInsert};
+
+/// An optimistic location, kept alive by the containing Entry's guard.
+/// The version, full key identity, and leaf membership must be rechecked under
+/// lock before use. `key_offset` preserves the position in a promoted sublayer.
+pub(super) struct EntryLeafHint<P: LeafPolicy> {
+    pub(super) leaf_ptr: *mut LeafNode15<P>,
+    pub(super) version: u32,
+    pub(super) slot: Option<usize>,
+    pub(super) key_offset: usize,
+}
+
+impl<P: LeafPolicy> EntryLeafHint<P> {
+    #[inline(always)]
+    pub(super) const fn capture<const CAPTURE: bool>(
+        hint: &mut Option<Self>,
+        leaf_ptr: *mut LeafNode15<P>,
+        version: u32,
+        slot: Option<usize>,
+        key: &Key<'_>,
+    ) {
+        if CAPTURE {
+            *hint = Some(Self {
+                leaf_ptr,
+                version,
+                slot,
+                key_offset: key.len() - key.current_len(),
+            });
+        }
+    }
+}
+
+type EntryUpdate<'g, V> = (ValueRef<'g, V>, Option<ValueRef<'g, V>>);
+
 /// Result type for [`OccupiedEntry::try_remove_entry`].
 #[allow(clippy::type_complexity)]
 pub type RemoveEntryResult<'g, V> = Result<Option<(Vec<u8>, ValueRef<'g, V>)>, RemoveError>;
@@ -73,6 +109,8 @@ where
 
     /// Guard for concurrent access.
     guard: &'e LocalGuard<'t>,
+
+    hint: Option<EntryLeafHint<P>>,
 }
 
 /// A view into a vacant entry in a tree.
@@ -89,6 +127,8 @@ where
 
     /// Guard for concurrent access.
     guard: &'e LocalGuard<'t>,
+
+    hint: Option<EntryLeafHint<P>>,
 }
 
 // ============================================================================
@@ -202,38 +242,13 @@ where
                 let tree: &MassTreeGeneric<P, A> = v.tree;
                 let guard: &LocalGuard<'_> = v.guard;
 
-                if P::can_write_through() {
-                    // SAFETY: `can_write_through()` holds only for primitive
-                    // atomic-word types (`is_atomic_word`), which are trivially
-                    // `Copy` with no `Drop` or ownership.
-                    let copied: P::Value = unsafe { std::ptr::read(&raw const value) };
-                    let mut k = crate::key::Key::new(key);
-                    let _old = tree
-                        .insert_concurrent_value(&mut k, value, guard)
-                        .ok()
-                        .flatten();
-
-                    return OccupiedEntry {
-                        key,
-                        value: ValueRef::Owned(copied),
-                        tree,
-                        guard,
-                    };
-                }
-
-                // Convert to output before insert
-                let output: P::Output = P::into_output(value);
-
-                // SAFETY: `output` is the allocation being published into the
-                // tree; `guard` keeps it alive.
-                let value_ref: ValueRef<'e, P::Value> = unsafe { P::output_to_value_ref(&output) };
-                let _old = tree.insert_output_with_guard(key, output, guard);
-
+                let (value, _) = tree.insert_for_entry(key, value, v.hint.as_ref(), guard);
                 OccupiedEntry {
                     key,
-                    value: value_ref,
+                    value,
                     tree,
                     guard,
+                    hint: None,
                 }
             }
         }
@@ -282,37 +297,11 @@ where
     /// Sets the value of the entry, and returns the old value.
     #[inline(always)]
     pub fn insert(&mut self, value: P::Value) -> Option<ValueRef<'e, P::Value>> {
-        if P::can_write_through() {
-            // SAFETY: `can_write_through()` holds only for primitive atomic-word
-            // types (`is_atomic_word`), which are trivially `Copy` with no `Drop`
-            // or ownership.
-            let copied: P::Value = unsafe { std::ptr::read(&raw const value) };
-            let mut key = crate::key::Key::new(self.key);
-            let old = self
-                .tree
-                .insert_concurrent_value(&mut key, value, self.guard)
-                .ok()
-                .flatten();
-            self.value = ValueRef::Owned(copied);
-            return old.map(ValueRef::Owned);
-        }
-
-        let output = P::into_output(value);
-
-        // SAFETY: `output` is the allocation being published into the tree;
-        // `self.guard` keeps it alive.
-        let new_ref: ValueRef<'e, P::Value> = unsafe { P::output_to_value_ref(&output) };
-        let old = self
-            .tree
-            .insert_output_with_guard(self.key, output, self.guard);
-
-        self.value = new_ref;
-
-        old.map(|old_output| {
-            // SAFETY: `old_output` was retired by the insert above but cannot
-            // be reclaimed while `self.guard` is held.
-            unsafe { P::output_to_value_ref(&old_output) }
-        })
+        let (new_value, old) =
+            self.tree
+                .insert_for_entry(self.key, value, self.hint.take().as_ref(), self.guard);
+        self.value = new_value;
+        old
     }
 
     /// Removes the entry from the tree and returns the actually removed value.
@@ -406,20 +395,9 @@ where
     /// Inserts the value into the vacant entry and returns it.
     #[inline(always)]
     pub fn insert(self, value: P::Value) -> ValueRef<'e, P::Value> {
-        // Convert to output before insert
-        let output = P::into_output(value);
-
-        // SAFETY: `output` is the allocation being published into the tree;
-        // `self.guard` keeps it alive.
-        let value_ref: ValueRef<'e, P::Value> = unsafe { P::output_to_value_ref(&output) };
-
-        // Insert using internal method that accepts P::Output
-        // The return value (old value if any) is ignored since we're in a VacantEntry
-        let _old = self
-            .tree
-            .insert_output_with_guard(self.key, output, self.guard);
-
-        value_ref
+        self.tree
+            .insert_for_entry(self.key, value, self.hint.as_ref(), self.guard)
+            .0
     }
 }
 
@@ -485,15 +463,60 @@ where
         key: &'e [u8],
         guard: &'e LocalGuard<'t>,
     ) -> Self {
-        match tree.get_with_guard(key, guard) {
-            Some(value) => Entry::Occupied(OccupiedEntry {
+        let mut hint = None;
+        let output = tree.get_output_with_hint::<true>(key, guard, &mut hint);
+        match output {
+            Some(output) => Entry::Occupied(OccupiedEntry {
                 key,
-                value,
+                // SAFETY: The shared lookup validated the output under this
+                // guard. Boxed borrows stay alive, and write-through values
+                // are copied atomically rather than borrowed.
+                value: unsafe { P::output_to_value_ref(&output) },
                 tree,
                 guard,
+                hint,
             }),
-            None => Entry::Vacant(VacantEntry { key, tree, guard }),
+            None => Entry::Vacant(VacantEntry {
+                key,
+                tree,
+                guard,
+                hint,
+            }),
         }
+    }
+}
+
+impl<P: LeafPolicy, A: TreeAllocator<P>> MassTreeGeneric<P, A> {
+    /// Shared Entry mutation: retain a snapshot of the new value without a
+    /// post-insert lookup, and return the actual overwritten value separately.
+    fn insert_for_entry<'g>(
+        &self,
+        key: &[u8],
+        value: P::Value,
+        hint: Option<&EntryLeafHint<P>>,
+        guard: &'g LocalGuard<'_>,
+    ) -> EntryUpdate<'g, P::Value> {
+        if P::can_write_through() {
+            // SAFETY: The sealed policy enables write-through only for primitive
+            // atomic-word types with no ownership or Drop. Copying the input
+            // retains the new-value snapshot without allocating a second Box.
+            let copied = unsafe { std::ptr::read(&raw const value) };
+            let old = self.insert_at_entry_hint::<WriteThroughInsert>(key, value, hint, guard);
+            return (ValueRef::Owned(copied), old.map(ValueRef::Owned));
+        }
+
+        let output = P::into_output(value);
+        // SAFETY: Non-write-through output is uniquely owned here and will be
+        // published below. The Entry guard protects its allocation thereafter;
+        // inline policies return an owned copy.
+        let new_value = unsafe { P::output_to_value_ref(&output) };
+        let old = self.insert_at_entry_hint::<GenericInsert>(key, output, hint, guard);
+        let old_value = old.map(|output| {
+            // SAFETY: The insertion retired this old allocation, but the guard
+            // keeps it alive until after the returned borrow is no longer used.
+            unsafe { P::output_to_value_ref(&output) }
+        });
+        (new_value, old_value)
     }
 }
 

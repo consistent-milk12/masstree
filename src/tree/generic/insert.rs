@@ -8,6 +8,7 @@ use crate::leaf_trait::{SplitInsertData, TreeLeafNode};
 use crate::leaf15::KSUF_KEYLENX;
 use crate::policy::{PreparedValue, RetireHandle};
 
+use super::entry::EntryLeafHint;
 use super::insert_strategy::{GenericInsert, InsertStrategy, WriteThroughInsert};
 use super::{
     FindSlotResult, InsertError, InsertSearchResultGeneric, Key, LAYER_KEYLENX, LeafPolicy, Linker,
@@ -42,6 +43,108 @@ where
     P: LeafPolicy,
     A: TreeAllocator<P>,
 {
+    /// Use an Entry's guarded location once, falling back to the normal insert
+    /// state machine when the leaf changed or a structural operation is needed.
+    pub(super) fn insert_at_entry_hint<S: InsertStrategy<P, A>>(
+        &self,
+        key_bytes: &[u8],
+        value: S::Input,
+        hint: Option<&EntryLeafHint<P>>,
+        guard: &LocalGuard<'_>,
+    ) -> Option<S::OldValue> {
+        let value = if let Some(hint) = hint {
+            match self.try_insert_at_entry_hint::<S>(key_bytes, value, hint, guard) {
+                Ok(old) => return old,
+                Err(value) => value,
+            }
+        } else {
+            value
+        };
+        self.insert_concurrent::<S>(&mut Key::new(key_bytes), value, guard)
+            .expect("Entry insert failed")
+    }
+
+    fn try_insert_at_entry_hint<S: InsertStrategy<P, A>>(
+        &self,
+        key_bytes: &[u8],
+        value: S::Input,
+        hint: &EntryLeafHint<P>,
+        guard: &LocalGuard<'_>,
+    ) -> Result<Option<S::OldValue>, S::Input> {
+        // SAFETY: Only an OCC-validated lookup creates this hint. The Entry
+        // retains the same collector guard, so the leaf cannot be reclaimed or
+        // reused, including after a concurrent split or coalesce.
+        let leaf = unsafe { &*hint.leaf_ptr };
+        let Some(mut lock) = leaf.version().try_lock() else {
+            return Err(value);
+        };
+        if leaf.version().has_changed(hint.version)
+            || leaf.version().is_deleted()
+            || leaf.deleted_layer()
+        {
+            return Err(value);
+        }
+
+        let key = Key::new(&key_bytes[hint.key_offset..]);
+        if self.validate_membership(leaf, &key).is_err() {
+            return Err(value);
+        }
+        let perm = leaf.permutation();
+        if let Some(slot) = hint.slot {
+            // Entry can be held indefinitely: do not rely on a finite version
+            // counter alone. Check active membership and the complete key even
+            // if the version has wrapped. This scans only permutation nibbles,
+            // not the leaf's key arrays.
+            let active = (0..perm.size()).any(|i| perm.get(i) == slot);
+            let keylenx = leaf.keylenx_relaxed(slot);
+            let same_key = leaf.ikey_relaxed(slot) == key.ikey()
+                && if key.has_suffix() {
+                    keylenx == KSUF_KEYLENX && leaf.ksuf_equals(slot, key.suffix())
+                } else {
+                    usize::from(keylenx) == key.current_len()
+                };
+            if !active || !same_key || leaf.is_value_empty_relaxed(slot) {
+                return Err(value);
+            }
+            return Ok(Some(S::update_existing(
+                self, leaf, &mut lock, slot, &value, guard,
+            )));
+        }
+
+        // A vacant hint still needs a local search: a suffix conflict requires
+        // creating a layer, and slot zero may be reserved for the leaf bound.
+        let search = self.search_for_insert_generic(leaf, &key, &perm);
+        let deferred = if perm.size() == 0 && self.can_reuse_empty_leaf(leaf, &key) {
+            let output = S::into_output(value);
+            self.insert_into_empty_leaf(leaf, &mut lock, &key, &output, guard, None)
+        } else if let InsertSearchResultGeneric::NotFound { logical_pos } = search
+            && let FindSlotResult::Found { slot, back_offset } =
+                self.find_usable_slot(leaf, &perm, key.ikey())
+        {
+            let output = S::into_output(value);
+            self.insert_new_value(
+                leaf,
+                &mut lock,
+                slot,
+                back_offset,
+                logical_pos,
+                perm,
+                &key,
+                &output,
+                guard,
+                None,
+            )
+        } else {
+            return Err(value);
+        };
+        drop(lock);
+        // SAFETY: The shared slot initializer returned the detached suffix bag;
+        // it is retired exactly once after unlock under the Entry's guard.
+        unsafe { maybe_retire_suffix::<P>(deferred, guard) };
+        self.count.increment();
+        Ok(None)
+    }
+
     /// Find a usable slot for inserting a new key.
     ///
     /// Handles the slot-0 rule: slot-0 stores `ikey_bound()` and cannot be

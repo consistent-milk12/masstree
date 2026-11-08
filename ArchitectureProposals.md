@@ -53,8 +53,18 @@ initialization, direct guarded results, and unwind-safe suffix retirement.
 without collecting unused old values. A local release probe on 20,000 keys
 measured random construction at 1.92 ms versus 2.12 ms for single inserts, and
 ascending construction at 0.87 ms versus 1.57 ms (seven-round medians; these are
-workload-specific measurements). Guarded single-key write-through and Entry hints
-remain open.
+workload-specific measurements). Entry now captures a guarded leaf hint in the
+shared lookup kernel, validates it under lock, and uses the existing slot update
+and initialization helpers before falling back to full traversal. Immediate
+occupied and vacant mutations perform zero further root descents, including
+promoted and maximum-depth layers. Vacant-to-occupied fallback uses write-through
+(the allocation probe drops from 3 to 0). Native/Miri tests cover invalidation by
+slot reuse, layer conversion, splits, version repetition, and sublayer retirement;
+the Loom model covers lock/version revalidation only. The isolated 20,000-key
+update probe measured 2.00 ms for Entry versus 3.18 ms for two traversals with
+short keys, and 2.50 ms versus 4.28 ms for promoted-layer keys (seven-round
+release medians). Guarded single-key
+write-through remains open; its `ValueRef` return-type change is user-approved.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

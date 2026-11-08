@@ -7,6 +7,134 @@ use seize::LocalGuard;
 
 use crate::{MassTree15, tree::generic::entry::Entry};
 
+#[test]
+fn entry_mutations_reuse_classification_leaf() {
+    use crate::tree::generic::REACH_COUNT;
+
+    for prefix in [b"".as_slice(), b"01234567", &[b'x'; 248]] {
+        let key = |i: u64| [prefix, i.to_be_bytes().as_slice()].concat();
+        let tree = MassTree15::<u64>::new();
+        let guard = tree.guard();
+        for i in 0..40 {
+            tree.insert_with_guard(&key(i * 2), i, &guard);
+        }
+        let existing = key(78);
+        let Entry::Occupied(mut entry) = tree.entry_with_guard(&existing, &guard) else {
+            panic!("missing existing key");
+        };
+        REACH_COUNT.with(|count| count.set(0));
+        assert_eq!(*entry.insert(100).unwrap(), 39);
+        assert_eq!(REACH_COUNT.with(std::cell::Cell::get), 0);
+        assert_eq!(tree.get(&existing), Some(100));
+
+        let vacant = key(79);
+        let entry = tree.entry_with_guard(&vacant, &guard);
+        REACH_COUNT.with(|count| count.set(0));
+        assert_eq!(*entry.or_insert(101), 101);
+        assert_eq!(REACH_COUNT.with(std::cell::Cell::get), 0);
+        assert_eq!(tree.get(&vacant), Some(101));
+        assert_eq!(tree.len(), 41);
+    }
+}
+
+#[test]
+fn entry_hint_checks_full_key_even_when_version_repeats() {
+    let tree = MassTree15::<u64>::new();
+    let guard = tree.guard();
+    tree.insert_with_guard(b"a", 1, &guard);
+    let Entry::Occupied(mut held) = tree.entry_with_guard(b"a", &guard) else {
+        panic!("missing key");
+    };
+    tree.remove_with_guard(b"a", &guard).unwrap();
+    tree.insert_with_guard(b"a\0", 2, &guard);
+    let hint = held.hint.as_mut().unwrap();
+    // Simulate the finite version counter repeating after slot reuse, without
+    // performing millions of updates. Equal ikeys still identify different keys.
+    // SAFETY: The hint was created by this tree and guard; its leaf remains
+    // allocated while `guard` is held, even if it has been unlinked.
+    hint.version = unsafe { &*hint.leaf_ptr }.version().stable();
+    assert!(held.insert(3).is_none());
+    assert_eq!(tree.get(b"a"), Some(3));
+    assert_eq!(tree.get(b"a\0"), Some(2));
+    assert_eq!(tree.len(), 2);
+}
+
+#[test]
+fn entry_hint_retries_after_split_layer_conversion_and_slot_reuse() {
+    let tree = MassTree15::<u64>::new();
+    let guard = tree.guard();
+    tree.insert_with_guard(b"a", 1, &guard);
+    let Entry::Occupied(mut held) = tree.entry_with_guard(b"a", &guard) else {
+        panic!("missing key");
+    };
+    tree.remove_with_guard(b"a", &guard).unwrap();
+    tree.insert_with_guard(b"a\0", 2, &guard);
+    assert!(held.insert(3).is_none());
+    assert_eq!(tree.get(b"a"), Some(3));
+    assert_eq!(tree.get(b"a\0"), Some(2));
+
+    let key = |i: u64| [b"01234567".as_slice(), &i.to_be_bytes()].concat();
+    let first = key(0);
+    tree.insert_with_guard(&first, 0, &guard);
+    let Entry::Occupied(mut held) = tree.entry_with_guard(&first, &guard) else {
+        panic!("missing suffix key");
+    };
+    let last = key(40);
+    let vacant = tree.entry_with_guard(&last, &guard);
+    // Convert the suffix to a sublayer and promote that sublayer while both
+    // Entry objects retain hints to the original parent leaf.
+    for i in 1..40 {
+        tree.insert_with_guard(&key(i), i, &guard);
+    }
+    assert_eq!(*held.insert(100).unwrap(), 0);
+    assert_eq!(*vacant.or_insert(140), 140);
+    assert_eq!(tree.len(), 43);
+    for i in 0..=40 {
+        assert_eq!(
+            tree.get(&key(i)),
+            Some(if i == 0 || i == 40 { i + 100 } else { i })
+        );
+    }
+}
+
+#[test]
+fn entry_hint_survives_concurrent_sublayer_retirement() {
+    use std::sync::{Barrier, mpsc};
+    use std::time::Duration;
+
+    let tree = MassTree15::<String>::new();
+    let prefix = b"01234567";
+    let keys: Vec<_> = (0..40u64)
+        .map(|i| [prefix.as_slice(), &i.to_be_bytes()].concat())
+        .collect();
+    for key in &keys {
+        tree.insert(key, "before".to_owned());
+    }
+    let barrier = Barrier::new(2);
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            barrier.wait();
+            let mut writer_guard = tree.guard();
+            for key in &keys {
+                tree.remove_with_guard(key, &writer_guard).unwrap();
+            }
+            tree.maintenance(&mut writer_guard);
+            done_tx.send(()).unwrap();
+        });
+        let guard = tree.guard();
+        let Entry::Occupied(mut held) = tree.entry_with_guard(&keys[39], &guard) else {
+            panic!("missing layered key");
+        };
+        barrier.wait();
+        done_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(held.insert("after".to_owned()).is_none());
+        assert_eq!(held.get(), "after");
+    });
+    assert_eq!(tree.len(), 1);
+    assert_eq!(tree.get(&keys[39]).as_deref(), Some("after"));
+}
+
 // ============================================================================
 //  Entry API Tests
 // ============================================================================

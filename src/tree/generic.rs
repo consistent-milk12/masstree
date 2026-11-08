@@ -44,6 +44,12 @@ mod print;
 pub use batch::{BatchEntry, BatchInsertResult};
 pub use entry::{Entry, OccupiedEntry, RemoveEntryResult, VacantEntry};
 
+#[cfg(test)]
+std::thread_local! {
+    // Counts actual root-to-leaf descents for Entry's performance regression.
+    static REACH_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 // ============================================================================
 //  Shared Types
 // ============================================================================
@@ -331,6 +337,9 @@ where
     ) -> *mut LeafNode15<P> {
         use crate::ksearch::upper_bound_internode_generic;
         use crate::prefetch::prefetch_read;
+
+        #[cfg(test)]
+        REACH_COUNT.with(|count| count.set(count.get() + 1));
 
         let target_ikey: u64 = key.ikey();
 
@@ -703,35 +712,6 @@ where
         let output: <P as LeafPolicy>::Output = P::into_output(value);
 
         // Internal errors indicate bugs, not recoverable conditions
-        match self.insert_concurrent_generic(&mut key, output, guard) {
-            Ok(result) => result,
-
-            Err(e) => {
-                panic!(
-                    "Insert failed unexpectedly: {e:?}. This indicates a bug in the tree implementation."
-                );
-            }
-        }
-    }
-
-    /// Internal: Insert with a pre-created output value
-    ///
-    /// Used by entry API to avoid double traversal, the output is created
-    /// before insertion so it can be cloned and returned without re-fetching.
-    ///
-    /// # Panics
-    ///
-    /// Panics on internal tree corruption.
-    pub(crate) fn insert_output_with_guard(
-        &self,
-        key: &[u8],
-        output: P::Output,
-        guard: &LocalGuard<'_>,
-    ) -> Option<P::Output> {
-        self.verify_guard(guard);
-
-        let mut key: Key<'_> = Key::new(key);
-
         match self.insert_concurrent_generic(&mut key, output, guard) {
             Ok(result) => result,
 

@@ -13,6 +13,13 @@ medians on the development machine were 1.92 vs 2.12 ms (random) and 0.87 vs
 1.57 ms (ascending). Timings are evidence for this workload, not test thresholds.
 The integration tests cover duplicate order across chunk boundaries, promoted
 sublayers, streaming iterators, and key wrappers whose `AsRef` changes per call.
+`leak3` also checks a vacant Entry that becomes occupied before insertion:
+write-through fallback reduces that update from 3 allocations to 0. `entry`
+compares immediate Entry updates with a guarded lookup followed by insertion,
+using both short keys and a promoted 8-byte-prefix sublayer. Unit tests count
+actual descents and cover stale hints, maximum-depth keys, and concurrent GC.
+For 20,000 updates, isolated release medians were 2.00 vs 3.18 ms for short keys
+and 2.50 vs 4.28 ms for promoted-layer keys (Entry vs two traversals, seven rounds).
 The table below retains historical failure behavior.
 
 
@@ -36,6 +43,7 @@ cargo run --bin mut
 cargo run --bin leak2
 cargo run --bin leak3
 CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin bulk
+CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin entry
 cargo run --bin teardown_safe    # abort expected
 (cd mimalloc-repro && cargo check)  # expected global-allocator conflict
 ```

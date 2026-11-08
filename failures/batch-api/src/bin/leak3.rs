@@ -83,4 +83,19 @@ fn main() {
     for (i, old) in result.old_values.iter().enumerate() {
         assert_eq!(**old, i as u64);
     }
+
+    // 4. A vacant snapshot may become occupied before insertion. The mutation
+    // must use write-through on fallback rather than allocating another box.
+    let tree = MassTree15::<u64>::new();
+    let guard = tree.guard();
+    let vacant = tree.entry_with_guard(b"key", &guard);
+    tree.insert_with_guard(b"key", 1, &guard);
+    let before = TOTAL.load(Ordering::Relaxed);
+    let value = vacant.or_insert(2);
+    let allocations = TOTAL.load(Ordering::Relaxed) - before;
+    println!("stale vacant Entry update: {allocations} allocations");
+    assert_eq!(allocations, 0);
+    assert_eq!(*value, 2);
+    assert_eq!(tree.get(b"key"), Some(2));
+    assert_eq!(tree.len(), 1);
 }

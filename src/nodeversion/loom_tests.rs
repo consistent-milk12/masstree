@@ -58,7 +58,7 @@ impl LoomLockGuard<'_> {
         self.version
             .value
             .store(value | INSERTING_BIT, Ordering::Release);
-        loom::sync::atomic::fence(Ordering::Acquire);
+        loom::sync::atomic::fence(Ordering::Release);
         self.locked_value |= INSERTING_BIT;
     }
 }
@@ -141,12 +141,38 @@ impl LoomNodeVersion {
     }
 
     fn has_changed(&self, old: u32) -> bool {
-        // Match production semantics: ignore both LOCK_BIT and INSERTING_BIT.
-        // C++ uses `> LOCK_BIT` (ignores bit 0 only), but the Rust implementation
-        // intentionally also ignores INSERTING_BIT (bit 1) because version COUNTERS
-        // (VINSERT/VSPLIT) are the source of truth for detecting changes.
-        (old ^ self.value.load(Ordering::Acquire)) > (LOCK_BIT | INSERTING_BIT)
+        // Match production's post-read barrier and dirty-bit validation.
+        loom::sync::atomic::fence(Ordering::Acquire);
+        (old ^ self.value.load(Ordering::Relaxed)) > LOCK_BIT
     }
+}
+
+/// Model Entry's OCC classification followed by speculative lock/validation.
+/// This covers the version protocol, not real leaves, routing, or reclamation;
+/// those paths have native and Miri tests in entry/unit_tests.rs.
+#[test]
+fn test_loom_entry_hint_revalidated_under_lock() {
+    loom::model(|| {
+        let version = Arc::new(LoomNodeVersion::new(true));
+        let slot_key = Arc::new(AtomicU32::new(1));
+        let writer_version = Arc::clone(&version);
+        let writer_key = Arc::clone(&slot_key);
+        let writer = thread::spawn(move || {
+            let mut lock = writer_version.lock();
+            lock.mark_insert();
+            writer_key.store(2, Ordering::Relaxed);
+        });
+
+        let observed_version = version.stable();
+        let observed_key = slot_key.load(Ordering::Relaxed);
+        if !version.has_changed(observed_version)
+            && let Some(_lock) = version.try_lock()
+            && !version.has_changed(observed_version)
+        {
+            assert_eq!(slot_key.load(Ordering::Relaxed), observed_key);
+        }
+        writer.join().unwrap();
+    });
 }
 
 /// Test that two threads can't both hold the lock simultaneously.

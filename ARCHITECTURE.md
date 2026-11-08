@@ -1699,14 +1699,23 @@ counts, locality factor, estimated leaves).
 ### 8.10 Entry API
 
 `entry_with_guard(key, &guard)` returns `Entry::{Occupied, Vacant}`.
-Classification uses `get_with_guard`, so it is a **point-in-time snapshot**, not
-an atomic read-modify-write. The docs warn that `and_modify` can lose updates
-and `VacantEntry::insert` can overwrite a concurrent insertion.
+Classification shares the guarded lookup kernel and captures the final leaf,
+version, slot, and key offset. It is a **point-in-time snapshot**, not an atomic
+read-modify-write. The docs warn that `and_modify` can lose updates and
+`VacantEntry::insert` can overwrite a concurrent insertion.
+
+The next mutation first tries the hinted leaf lock and revalidates its version,
+deletion state, and bounds. Occupied hints also check active-slot membership and
+full key identity, so a long-held Entry cannot mistake a reused slot for its key
+even after a version wrap. Vacant hints perform a local search. Changed hints,
+splits, and suffix conflicts fall back to normal insertion; unchanged hints
+avoid another root descent. All Entry mutations share the same value snapshot
+and write-through dispatch, including a vacant Entry that becomes occupied.
 
 Operations:
 
 - `Entry::or_insert`, `or_insert_with`, `or_insert_with_key`, `or_default` —
-  insert if vacant, return `P::Output`.
+  insert if vacant, return `ValueRef<'e, P::Value>`.
 - `and_modify(f)` — compute a new value from the cached output and insert it
   (non-atomic).
 - `insert_entry(value)` — insert/replace and return an `OccupiedEntry` with the

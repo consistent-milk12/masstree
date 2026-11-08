@@ -3297,7 +3297,16 @@ unused old-value results. The `failures/batch-api` release `bulk` probe measured
 20,000 random keys at 1.92 ms versus 2.12 ms for guarded single-key insertion,
 and ascending keys at 0.87 ms versus 1.57 ms (local seven-round medians).
 Chunk-boundary duplicate ordering and stable key snapshots are regression tested.
-PERF-03 remains partially open for the guarded single-key and vacant Entry paths.
+PERF-05: Entry now records the final lookup leaf and attempts a validated local
+mutation before falling back to root traversal. The focused regression observed
+one redundant descent before the change and zero afterward, for both occupied
+and vacant entries. Hints include the layer offset and check full key identity,
+slot membership, deletion, and leaf bounds under lock. The stale-vacant update
+probe also improves from 3 allocations to 0, closing that PERF-03 bypass.
+Native/Miri cover real Entry invalidation and reclamation. A Loom test models the
+hint version/lock protocol; its simplified NodeVersion was synchronized with
+production's dirty-bit checks and fences. PERF-03 remains open for guarded
+single-key insertion.
 
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|

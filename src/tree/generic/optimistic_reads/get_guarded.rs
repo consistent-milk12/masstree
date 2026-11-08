@@ -1,6 +1,7 @@
 use seize::LocalGuard;
 
 use crate::leaf15::LeafNode15;
+use crate::tree::generic::entry::EntryLeafHint;
 use crate::{
     LeafPolicy, MassTreeGeneric, NodeVersion, TreeAllocator, ValueRef,
     hints::unlikely,
@@ -48,6 +49,18 @@ where
         key: &[u8],
         guard: &LocalGuard<'_>,
     ) -> Option<P::Output> {
+        self.get_output_with_hint::<false>(key, guard, &mut None)
+    }
+
+    /// The Entry specialization records the final OCC-validated location.
+    /// Ordinary lookups compile out hint writes and keep their existing path.
+    #[inline(always)]
+    pub(in crate::tree::generic) fn get_output_with_hint<const CAPTURE_HINT: bool>(
+        &self,
+        key: &[u8],
+        guard: &LocalGuard<'_>,
+        hint: &mut Option<EntryLeafHint<P>>,
+    ) -> Option<P::Output> {
         self.verify_guard(guard);
         #[cfg(feature = "tracing")]
         tracing::trace!(key_len = key.len(), "get");
@@ -63,9 +76,9 @@ where
 
         // Dispatch to single-layer or multi-layer path
         if key.has_suffix() {
-            self.get_with_guard_multi_layer(&mut key, layer_root, guard)
+            self.get_with_guard_multi_layer::<CAPTURE_HINT>(&mut key, layer_root, guard, hint)
         } else {
-            self.get_with_guard_single_layer(&key, layer_root, guard)
+            self.get_with_guard_single_layer::<CAPTURE_HINT>(&key, layer_root, guard, hint)
         }
     }
 
@@ -77,11 +90,12 @@ where
     /// - Simpler search loop
     /// - Stores pointer directly (matches `get_ref` pattern)
     #[inline]
-    fn get_with_guard_single_layer(
+    fn get_with_guard_single_layer<const CAPTURE_HINT: bool>(
         &self,
         key: &Key<'_>,
         layer_root: *const u8,
         guard: &LocalGuard<'_>,
+        hint: &mut Option<EntryLeafHint<P>>,
     ) -> Option<P::Output> {
         let target_ikey: u64 = key.ikey();
 
@@ -168,6 +182,9 @@ where
 
                 // Version validated, safe to return
                 if output.is_some() {
+                    EntryLeafHint::capture::<CAPTURE_HINT>(
+                        hint, leaf_ptr, version, found_slot, key,
+                    );
                     return output;
                 }
 
@@ -193,6 +210,7 @@ where
                     continue 'leaf_loop;
                 }
 
+                EntryLeafHint::capture::<CAPTURE_HINT>(hint, leaf_ptr, version, None, key);
                 return None;
             }
         }
@@ -208,11 +226,12 @@ where
     /// - Stores pointer directly (matches `get_ref` pattern)
     #[inline]
     #[expect(clippy::too_many_lines, reason = "Complex multi-layer logic")]
-    fn get_with_guard_multi_layer(
+    fn get_with_guard_multi_layer<const CAPTURE_HINT: bool>(
         &self,
         key: &mut Key<'_>,
         initial_root: *const u8,
         guard: &LocalGuard<'_>,
+        hint: &mut Option<EntryLeafHint<P>>,
     ) -> Option<P::Output> {
         let mut layer_root: *const u8 = initial_root;
         let mut in_sublayer: bool = false;
@@ -311,6 +330,13 @@ where
                                 continue 'search_loop;
                             }
 
+                            EntryLeafHint::capture::<CAPTURE_HINT>(
+                                hint,
+                                leaf_ptr,
+                                version,
+                                output.as_ref().map(|_| slot),
+                                key,
+                            );
                             return output;
                         }
 
@@ -408,6 +434,9 @@ where
                                 continue 'leaf_loop;
                             }
 
+                            EntryLeafHint::capture::<CAPTURE_HINT>(
+                                hint, leaf_ptr, version, None, key,
+                            );
                             return None;
                         }
                     }
