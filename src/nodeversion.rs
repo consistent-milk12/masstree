@@ -145,8 +145,10 @@ impl LockGuard<'_> {
     /// Mark node as being inserted into. Sets INSERTING dirty bit.
     /// Version counter increments on unlock. Idempotent.
     ///
-    /// ORDERING: Release store + Acquire fence ensures readers see the dirty bit
-    /// before any subsequent modifications become visible.
+    /// ORDERING: Release store followed by a SeqCst fence. The fence is a
+    /// store-store barrier so slot/permutation writes performed after this
+    /// call cannot become visible before the dirty bit. (A post-store Acquire
+    /// fence does not provide that ordering.)
     #[inline(always)]
     pub fn mark_insert(&mut self) {
         if (self.locked_value & INSERTING_BIT) != 0 {
@@ -158,7 +160,7 @@ impl LockGuard<'_> {
             .value
             .store(value | INSERTING_BIT, Ordering::Release);
 
-        fence(Ordering::Acquire);
+        fence(Ordering::SeqCst);
 
         self.locked_value |= INSERTING_BIT;
     }
@@ -174,7 +176,7 @@ impl LockGuard<'_> {
             .value
             .store(value | SPLITTING_BIT, Ordering::Release);
 
-        fence(Ordering::Acquire);
+        fence(Ordering::SeqCst);
 
         self.locked_value |= SPLITTING_BIT;
     }
@@ -186,7 +188,7 @@ impl LockGuard<'_> {
         let new_value: u32 = value | DELETED_BIT | SPLITTING_BIT;
         self.version().value.store(new_value, Ordering::Release);
 
-        fence(Ordering::Acquire);
+        fence(Ordering::SeqCst);
 
         self.locked_value = new_value;
     }
