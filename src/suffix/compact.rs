@@ -64,6 +64,20 @@ impl SuffixBag {
             let src_start: usize = entry.offset as usize;
             let src_end: usize = src_start + entry.len as usize;
 
+            // A zero-length suffix shares offset 0 with whichever suffix was
+            // assigned first. Repoint it without consuming or copying bytes.
+            if entry.len == 0 {
+                #[expect(clippy::cast_possible_truncation)]
+                {
+                    self.slots[entry.slot] = SlotMeta {
+                        offset: write_pos as u32,
+                        len: 0,
+                        _pad: 0,
+                    };
+                }
+                continue;
+            }
+
             debug_assert!(
                 write_pos <= src_start,
                 "compaction invariant violated: write_pos ({write_pos}) > src_start ({src_start})"
@@ -149,6 +163,20 @@ impl SuffixBag {
         for entry in &entries {
             let src_start: usize = entry.offset as usize;
             let src_end: usize = src_start + entry.len as usize;
+
+            // Zero-length suffixes are repointed but never copied; they share
+            // offset 0 with the first assigned suffix.
+            if entry.len == 0 {
+                #[expect(clippy::cast_possible_truncation)]
+                {
+                    new_slots[entry.slot] = SlotMeta {
+                        offset: write_pos as u32,
+                        len: 0,
+                        _pad: 0,
+                    };
+                }
+                continue;
+            }
 
             debug_assert!(
                 write_pos <= src_start,
