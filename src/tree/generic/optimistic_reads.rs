@@ -771,6 +771,11 @@ where
                                 return Some(extract(found_ptr));
                             }
 
+                            if unlikely(leaf.version().is_dirty()) {
+                                version = leaf.version().stable();
+                                continue 'search_loop;
+                            }
+
                             return None;
                         }
 
@@ -786,6 +791,13 @@ where
                                 unsafe { &*ptr.cast::<NodeVersion>() };
 
                             if sublayer_version.is_deleted() {
+                                if unlikely(
+                                    leaf.version().is_dirty()
+                                        || leaf.version().has_changed(version),
+                                ) {
+                                    version = leaf.version().stable();
+                                    continue 'search_loop;
+                                }
                                 return None;
                             }
 

@@ -557,12 +557,6 @@ impl NodeCleaner {
         let mut route: Route = Vec::new();
 
         'layer_loop: loop {
-            retry_count += 1;
-
-            if retry_count >= MAX_RETRIES {
-                return Err(RemoveError::RetryLimitExceeded);
-            }
-
             // A layer slot may still point at the original left leaf after
             // promotion; climb to the true root before descending.
             layer_root = tree
@@ -580,6 +574,10 @@ impl NodeCleaner {
                 tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
 
             if exceeded {
+                if !Self::bump_retry(&mut retry_count) {
+                    return Err(RemoveError::RetryLimitExceeded);
+                }
+
                 key.unshift_all();
                 layer_root = tree.load_root_ptr_generic(guard).cast_mut();
                 route.clear();
@@ -591,20 +589,12 @@ impl NodeCleaner {
             // SAFETY: reach/advance return a valid leaf pointer.
             let mut leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
-            // "Too far right": our key sorts below this non-leftmost leaf's
-            // lower bound. Re-descend rather than returning NotFound.
-            if !leaf.prev(guard).is_null() && key.ikey() < leaf.ikey_bound() {
-                continue 'layer_loop;
-            }
-
             'forward: loop {
                 // A B-link advance inside this loop may land to the right of
                 // the target; restart from the layer root rather than
                 // searching the wrong leaf.
                 if !leaf.prev(guard).is_null() && key.ikey() < leaf.ikey_bound() {
-                    retry_count += 1;
-
-                    if retry_count >= MAX_RETRIES {
+                    if !Self::bump_retry(&mut retry_count) {
                         return Err(RemoveError::RetryLimitExceeded);
                     }
 
@@ -612,6 +602,10 @@ impl NodeCleaner {
                 }
 
                 if leaf.version().is_deleted() || leaf.deleted_layer() {
+                    if !Self::bump_retry(&mut retry_count) {
+                        return Err(RemoveError::RetryLimitExceeded);
+                    }
+
                     // A coalesced leaf may remain linked until unlink finishes.
                     // Restart from the main root so multi-layer state is reset.
                     key.unshift_all();
@@ -630,9 +624,7 @@ impl NodeCleaner {
                 };
 
                 if leaf.version().has_changed(version) {
-                    retry_count += 1;
-
-                    if retry_count >= MAX_RETRIES {
+                    if !Self::bump_retry(&mut retry_count) {
                         return Err(RemoveError::RetryLimitExceeded);
                     }
 
@@ -663,6 +655,10 @@ impl NodeCleaner {
                             tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
 
                         if exceeded {
+                            if !Self::bump_retry(&mut retry_count) {
+                                return Err(RemoveError::RetryLimitExceeded);
+                            }
+
                             key.unshift_all();
                             layer_root = tree.load_root_ptr_generic(guard).cast_mut();
                             route.clear();
@@ -697,9 +693,7 @@ impl NodeCleaner {
                             }
 
                             RemoveLockResult::Retry => {
-                                retry_count += 1;
-
-                                if retry_count >= MAX_RETRIES {
+                                if !Self::bump_retry(&mut retry_count) {
                                     return Err(RemoveError::RetryLimitExceeded);
                                 }
 
@@ -721,6 +715,10 @@ impl NodeCleaner {
                             }
 
                             RemoveLockResult::RestartFromRoot => {
+                                if !Self::bump_retry(&mut retry_count) {
+                                    return Err(RemoveError::RetryLimitExceeded);
+                                }
+
                                 key.unshift_all();
                                 layer_root = tree.load_root_ptr_generic(guard).cast_mut();
                                 route.clear();
@@ -862,7 +860,7 @@ impl NodeCleaner {
         leaf.prefetch_for_search();
         let lock: LockGuard<'_> = leaf.version().lock_bounded();
 
-        if leaf.deleted_layer() {
+        if leaf.deleted_layer() || leaf.version().is_deleted() {
             drop(lock);
             return RemoveLockResult::RestartFromRoot;
         }

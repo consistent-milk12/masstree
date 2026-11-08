@@ -306,6 +306,11 @@ where
                                 }
                             }
 
+                            if output.is_none() && unlikely(ver.is_dirty()) {
+                                version = ver.stable();
+                                continue 'search_loop;
+                            }
+
                             return output;
                         }
 
@@ -325,6 +330,10 @@ where
 
                             // Check sublayer is not deleted before descent
                             if unlikely(!self.check_sublayer_valid(layer_ptr)) {
+                                if unlikely(ver.is_dirty() || ver.has_changed(version)) {
+                                    version = ver.stable();
+                                    continue 'search_loop;
+                                }
                                 return None;
                             }
 
