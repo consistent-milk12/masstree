@@ -809,10 +809,17 @@ It starts with `INITIAL_CAPACITY = 128` bytes and grows as needed. Two assignmen
 Reader-visible metadata is atomic: each slot's `(offset, len)` is one `AtomicU64`, `used` is
 published Release after bytes are copied, and the stable `data_ptr` is used with
 `slice::from_raw_parts` rather than `Vec::len`. A stale/torn pair returns `None` so OCC retries.
-Mutation takes `&self` and goes through `UnsafeCell`; the cell exposes `as_ref()` (OCC-protected
-read) and `as_writer()` (lock-protected write), never `&mut SuffixBag`, so readers and writers do not
-alias. It is `Send` but not `Sync`. Replaced cells are retired through EBR, so readers holding the
-old pointer can finish safely.
+
+The public reallocating/compacting API (`reserve`, `try_assign`, `try_assign_in_place`, `assign`,
+`clear`, `compact`, `compact_with_permuter`) takes `&mut self`, so safe code cannot hold a `get()`
+slice across a reallocation or in-place overwrite. The lock-protected tree paths call explicit
+`unsafe *_locked` variants with an exclusive-ownership contract; `try_assign_append_only` remains
+`&self` and never reallocates or rewrites published bytes. It writes into unpublished spare
+capacity with a raw pointer and publishes `used` with Release, so it never forms `&mut [u8]` while
+readers hold published slices. `SuffixBagCell` exposes `as_ref()` (OCC-protected read) and
+`as_writer()` (shared, lock-protected write); a `&mut SuffixBag` is never created while readers may
+hold `&SuffixBag`. It is `Send` but not `Sync`. Replaced cells are retired through EBR, so readers
+holding the old pointer can finish safely.
 
 `compact` (`src/suffix/compact.rs`) deduplicates active slots, copies live suffixes forward, and
 truncates the buffer. It is used when exclusive access is available; day-to-day production instead
@@ -1381,12 +1388,13 @@ guard; `ScanEntry` values are valid only while the guard is held.
 
 #### Cursor and stacks
 
-`CursorKey` (`src/tree/range/cursor_key.rs`) is a fixed `[u8; 256]` buffer plus `offset`, `len`, and
-a cached big-endian `ikey`. It describes the current scan position at the current layer; parent key
-bytes remain in the buffer. `shift` consumes 8 bytes; `shift_clear` enters a sublayer at its minimum
-(ikey 0); `shift_clear_reverse` enters at its maximum (ikey `u64::MAX`, len 9);
-`unshift` ascends and sets `len = 9` (a sentinel meaning "treat the parent layer-pointer slot as
-equal"). `full_key()` is meaningful after the emitted slot's key is materialized.
+`CursorKey` (`src/tree/range/cursor_key.rs`) is a fixed `[u8; 256]` buffer plus `offset`, `len`, a
+cached big-endian `ikey`, and an explicit `unshift_sentinel` flag. It describes the current scan
+position at the current layer; parent key bytes remain in the buffer. `shift` consumes 8 bytes;
+`shift_clear` enters a sublayer at its minimum (ikey 0); `shift_clear_reverse` enters at its maximum
+(ikey `u64::MAX`). `unshift` ascends and marks the cursor as a sentinel, meaning "treat the parent
+layer-pointer slot as equal". The flag, not the length, distinguishes the sentinel from a real
+9-byte key (`len == 9`); `full_key()` is meaningful after the emitted slot's key is materialized.
 
 `ScanStackElement` holds a layer root, current leaf, cached version and permutation, logical `ki`,
 and `last_ikey` for monotonicity. `LayerStack` is an `ArrayVec<LayerContext, 6>` with heap spill for
@@ -1477,10 +1485,16 @@ layer transitions, and splits.
 
 `batch_common.rs` is direction-parameterized (`Forward`/`Backward` zero-sized markers,
 `BatchDirection` trait). `process_batch_keyed` loops over a leaf's permutation, materializes keys
-only when needed, descends layers, and validates OCC once per leaf. `process_batch_values` skips
-interior key materialization: it performs a full-key bound check only for slots sharing the bound's
-8-byte ikey (or when the bound has no complete ikey at this layer), while interior ordering uses the
-ikey alone. The cursor still records ikey/length (and the `KSUF` suffix) for cold retries.
+only when needed, descends layers, and validates OCC once per leaf. Both batch processors follow a
+strict snapshot protocol: read the slot metadata/suffix/value first, validate the leaf version, and
+only then commit the cursor or layer stack. A callback that mutates the current leaf therefore
+cannot corrupt the position a retry uses. `RangeBound::cursor_bound` classifies a bound inside the
+current sublayer once (`Inside`, `At(ikey)`, or `Outside`) by comparing the consumed prefix, so a
+values-only scan never descends a layer whose keys are all beyond the bound and never needs a
+per-slot key comparison inside a wholly-in-range sublayer. `process_batch_values` still skips
+interior key materialization, performing a full-key bound check only at the bound's 8-byte ikey.
+The cursor records ikey/length (and the `KSUF` suffix) for cold retries, and both directions track
+whether the cursor holds an already-emitted key so a retry cannot re-emit it.
 `batch_forward.rs` and `batch_reverse.rs` expose `for_each*` methods that drive the scan state
 machine with per-leaf batch strategies (`IntraLeafRefStrategy`, `IntraLeafCopyStrategy`,
 `ValuesOnlyStrategy`). These are the fastest scan APIs and avoid per-entry allocation except for
@@ -1967,7 +1981,9 @@ whether cargo currently enforces it.
   `inserted + updated`. A batch either applies an entry or panics on an internal invariant
   violation.
 - `debug-print` is enabled by default, so `Display`/`print_tree` code is compiled into normal builds.
-  `print_tree` climbs to the true promoted layer root before printing.
+  `print_tree` climbs to the true promoted layer root before printing, renders values through
+  `P::output_to_value_ref` (an atomic copy for write-through policies), and validates the leaf
+  version after the whole slot table has been read.
 - `tracing` emits insert/get/remove/maintenance events; file logs go to a temp directory by default
   and `MASSTREE_LOG_CONSOLE=1` opts into console output.
 - `mimalloc` is recommended for benchmark binaries but the library does not install it globally;

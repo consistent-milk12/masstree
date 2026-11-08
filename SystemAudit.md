@@ -285,13 +285,31 @@ gaps in the first remediation:
   B-link advance, and charges its retry budget only to actual contention
   (`7339d70`); scan traversal re-climbs the true layer root on every restart.
 
+A second review pass (recorded in full in `Findings.md`) closed the residual
+issues that survived the first wave:
+
+- the split boundary and side choice are computed against the **post-insert**
+  sequence (`9ffacd5`, `8c4021c`), and every structural insert path pre-encodes
+  its value (`9147069`);
+- the scan cursor carries an explicit unshift sentinel instead of overloading
+  length 9, excluded bounds descend into equal layer slots, and batch scans
+  validate before committing cursor/stack state (`e7e42f4`, `0d45a5f`);
+- register/print and remove fast paths were tightened (`f3e957a`, `e6c8bd9`,
+  `d34a5fd`), ancestor redirects retry instead of abandoning a null child, and
+  both coalesce deferred queues are drained once per call (`68c4ea9`);
+- `SuffixBag` exclusive mutation is `&mut self` and the concurrent append path
+  writes through raw pointers without aliasing reader slices (`0c1a71e`);
+- write-through is used by the Entry and batch-entry APIs, full-leaf batches
+  still apply in-place updates, suffix preallocation is deferred until a split
+  is known, and maintenance flushes after coalescing (`4960f8d`, `da74a75`).
+
 The simplification opportunities (SIM-01..16) are **not correctness defects**.
 The branch addresses the ones that carry the wrong ownership/contract signal:
 `InsertError` was collapsed to `SplitFailed` (SIM-01), unused dev-dependencies
 were removed (SIM-15), tracing is real (SIM-16), and the sentinel tests are
 wired (SIM-12). The remaining SIM entries are larger structural refactors that
-do not change observable behavior; they are recorded as deliberate follow-up
-cleanups rather than release blockers.
+do not change observable behavior; they are specified in
+`ArchitectureProposals.md` rather than release blockers.
 
 ## 3. Safety and public API soundness
 

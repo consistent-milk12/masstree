@@ -1,16 +1,27 @@
 # Post-Remediation Deep Assessment & Findings (`Findings.md`)
 
-> **Status:** Complete Deep Audit across all 64 canonical findings in `SystemAudit.md`, `ARCHITECTURE.md`, and the remediation commits (`93e65eb..da74a75`). All identified correctness, soundness, performance, and tooling issues have been resolved and verified.
-> **Companion Document:** `ArchitectureProposals.md` (progressive architectural redesign proposals for major correctness, simplicity, and performance gains).
+> **Status:** Complete Deep Audit across all 64 canonical findings in
+> `SystemAudit.md`, `ARCHITECTURE.md`, and the remediation commits
+> (`93e65eb..da74a75`). All identified correctness, soundness, performance, and
+> tooling issues have been resolved and verified. **Companion Document:**
+> `ArchitectureProposals.md` (progressive architectural redesign proposals for
+> major correctness, simplicity, and performance gains).
 
 ---
 
 ## 1. Executive Summary
 
 ### 1.1 Assessment of the Initial Remediation Wave (`93e65eb..fb8424e`)
-Our four-subsystem deep audit evaluated every single one of the 64 canonical findings in `SystemAudit.md` (`SAFE-01..06`, `OCC-01..06`, `INS-01..04`, `REM-01..03`, `GC-01..05`, `ALLOC-01..03`, `PRIM-01..02`, `RNG-01..10`, `SUF-01..05`, `BATCH-01..06`, `TOOL-01..14`, `PERF-TOOL-01..04`, `SIM-01..16`, `PERF-01..25`) and every claim in `ARCHITECTURE.md`.
+Our four-subsystem deep audit evaluated every single one of the 64 canonical
+findings in `SystemAudit.md` (`SAFE-01..06`, `OCC-01..06`, `INS-01..04`,
+`REM-01..03`, `GC-01..05`, `ALLOC-01..03`, `PRIM-01..02`, `RNG-01..10`,
+`SUF-01..05`, `BATCH-01..06`, `TOOL-01..14`, `PERF-TOOL-01..04`, `SIM-01..16`,
+`PERF-01..25`) and every claim in `ARCHITECTURE.md`.
 
-While the initial remediation wave (`93e65eb..fb8424e`) fixed the majority of the 64 findings, our deep audit uncovered **12 residual or newly introduced correctness, soundness, performance, and tooling issues**, all of which have now been fixed and committed in `9ffacd5..da74a75`:
+While the initial remediation wave (`93e65eb..fb8424e`) fixed the majority of
+the 64 findings, our deep audit uncovered **12 residual or newly introduced
+correctness, soundness, performance, and tooling issues**, all of which have now
+been fixed and committed in `9ffacd5..da74a75`:
 
 | # | Area / Audit IDs | Issue Uncovered in Initial Remediation | Resolution Commit(s) |
 |---|---|---|---|
