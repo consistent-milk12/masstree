@@ -29,11 +29,13 @@ fn main() {
 
 #[cfg(not(feature = "mimalloc"))]
 mod inner {
-    #![expect(clippy::unwrap_used)]
-    #![expect(clippy::pedantic)]
-    #![expect(clippy::indexing_slicing)]
-    #![expect(clippy::cast_precision_loss)]
-    #![allow(dead_code)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::pedantic,
+        clippy::cast_precision_loss,
+        dead_code
+    )]
 
     use super::bench_utils::{keys, keys_shared_prefix};
     use masstree::{MassTree15, MassTree15Inline};
@@ -304,11 +306,7 @@ mod inner {
         let after_delete = ALLOC.snapshot();
         let delete_net = after_delete.delta_net(&before_insert);
         let remaining = n - delete_count;
-        let delete_bpe = if remaining > 0 {
-            delete_net / remaining
-        } else {
-            0
-        };
+        let delete_bpe = delete_net.checked_div(remaining).unwrap_or(0);
 
         let total_dealloc = after_delete.delta_deallocated(&after_insert);
         let total_alloc_at_insert = after_insert.delta_allocated(&before_insert);

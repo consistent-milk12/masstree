@@ -30,10 +30,12 @@ fn main() {
 
 #[cfg(not(feature = "mimalloc"))]
 mod inner {
-    #![expect(clippy::unwrap_used)]
-    #![expect(clippy::pedantic)]
-    #![expect(clippy::indexing_slicing)]
-    #![allow(dead_code)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::pedantic,
+        dead_code
+    )]
 
     use super::bench_utils::keys;
     use masstree::MassTree15Inline;
