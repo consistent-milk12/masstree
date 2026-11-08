@@ -592,7 +592,7 @@ mod prefix_queries {
                                 tree.scan_prefix(
                                     prefix,
                                     |_, v| {
-                                        count = count.wrapping_add(*v);
+                                        count = count.wrapping_add(unsafe { *v.as_ref() });
                                         true
                                     },
                                     &guard,
@@ -608,7 +608,7 @@ mod prefix_queries {
                                 tree.scan_prefix(
                                     prefix,
                                     |_, v| {
-                                        total = total.wrapping_add(*v);
+                                        total = total.wrapping_add(unsafe { *v.as_ref() });
                                         true
                                     },
                                     &guard,
@@ -660,7 +660,7 @@ mod prefix_queries {
                                 tree.scan_prefix_values(
                                     prefix,
                                     |v| {
-                                        count = count.wrapping_add(*v);
+                                        count = count.wrapping_add(unsafe { *v.as_ref() });
                                         true
                                     },
                                     &guard,
@@ -676,7 +676,7 @@ mod prefix_queries {
                                 tree.scan_prefix_values(
                                     prefix,
                                     |v| {
-                                        total = total.wrapping_add(*v);
+                                        total = total.wrapping_add(unsafe { *v.as_ref() });
                                         true
                                     },
                                     &guard,
@@ -1258,7 +1258,7 @@ mod prefix_realistic_mixed {
                                         tree.scan_prefix(
                                             &plan.prefix[..usize::from(plan.prefix_len)],
                                             |_, v| {
-                                                total = total.wrapping_add(*v);
+                                                total = total.wrapping_add(unsafe { *v.as_ref() });
                                                 seen += 1;
                                                 seen < usize::from(plan.limit)
                                             },
@@ -1366,7 +1366,7 @@ mod prefix_realistic_mixed {
                                         tree.scan_prefix_values(
                                             &plan.prefix[..usize::from(plan.prefix_len)],
                                             |v| {
-                                                total = total.wrapping_add(*v);
+                                                total = total.wrapping_add(unsafe { *v.as_ref() });
                                                 seen += 1;
                                                 seen < usize::from(plan.limit)
                                             },

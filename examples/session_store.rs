@@ -337,8 +337,12 @@ impl SessionStore {
         // Scan all sessions and find expired ones
         self.sessions.scan_prefix(
             b"session:",
-            |_, session| {
-                if session.is_expired() {
+            |key, _output| {
+                // Scan callbacks yield opaque output handles; read the typed
+                // session through a guard-scoped lookup.
+                if let Some(session) = self.sessions.get_ref(key, &guard)
+                    && session.is_expired()
+                {
                     expired_sessions.push(session.id.clone());
                 }
                 true

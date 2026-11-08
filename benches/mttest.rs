@@ -589,10 +589,10 @@ fn bench_rw1(
                     let key = QuickIstr::new(u64::from(*x));
                     let expected = u64::from(*x + 1);
                     if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                        if check && v != expected {
+                        if check && *v != expected {
                             check_errors += 1;
                         }
-                        sum = sum.wrapping_add(v);
+                        sum = sum.wrapping_add(*v);
                     } else if check {
                         check_errors += 1;
                     }
@@ -712,10 +712,10 @@ fn bench_rw2(
                         let key = QuickIstr::new(u64::from(x));
                         let expected = u64::from(x + 1);
                         if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                            if check && v != expected {
+                            if check && *v != expected {
                                 check_errors += 1;
                             }
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         } else if check {
                             check_errors += 1;
                         }
@@ -834,10 +834,10 @@ fn bench_rw3(
                     let key = key8(i);
                     let expected = i + 1;
                     if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                        if check && v != expected {
+                        if check && *v != expected {
                             check_errors += 1;
                         }
-                        sum = sum.wrapping_add(v);
+                        sum = sum.wrapping_add(*v);
                     } else if check {
                         check_errors += 1;
                     }
@@ -951,10 +951,10 @@ fn bench_rw4(
                     let key = key8(TOP - i);
                     let expected = i + 1;
                     if let Some(v) = tree.get_with_guard(key.as_bytes(), &guard) {
-                        if check && v != expected {
+                        if check && *v != expected {
                             check_errors += 1;
                         }
-                        sum = sum.wrapping_add(v);
+                        sum = sum.wrapping_add(*v);
                     } else if check {
                         check_errors += 1;
                     }
@@ -1361,7 +1361,7 @@ fn bench_highcontention(
                         puts += 1;
                     } else {
                         if let Some(v) = tree.get_with_guard(key.as_slice(), &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         } else if check {
                             check_errors += 1;
                         }

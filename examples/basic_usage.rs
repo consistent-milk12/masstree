@@ -70,7 +70,10 @@ fn main() {
     println!("Prefix scan for 'users/':");
     tree.scan_prefix(
         b"users/",
-        |key, value| {
+        |key, _value| {
+            // Public scan callbacks hand back an opaque output handle; use
+            // `get`/`get_ref` for a typed, guard-safe value.
+            let value = tree.get(key).unwrap_or_default();
             println!("  {:?} -> {}", String::from_utf8_lossy(key), value);
             true // continue scanning
         },
@@ -132,7 +135,7 @@ fn main() {
     println!("--- Example 4: Updates and Removals ---\n");
 
     // Update existing key - insert_with_guard returns the OLD value when key exists
-    match tree.insert_with_guard(b"users/alice", 150, &guard) {
+    match tree.insert_value_with_guard(b"users/alice", 150, &guard) {
         Some(old_value) => println!("Updated users/alice: old={old_value}, new=150"),
         None => println!("Inserted new key users/alice"),
     }

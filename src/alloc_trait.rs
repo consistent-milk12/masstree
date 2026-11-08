@@ -25,9 +25,14 @@ use crate::policy::LeafPolicy;
 ///   readers have left and the collector has been drained.
 /// - Allocation failures must abort; returning null or a dummy pointer is
 ///   undefined behavior in the tree.
+/// - Allocation methods must never panic/unwind. A panic after `mark_split`
+///   (or while a split sibling is linked and split-locked) leaves a node that
+///   readers following `next` can spin on forever and that has no parent.
+///   On OOM or any other failure, abort the process instead of unwinding.
 ///
 /// The trait is `unsafe` because a safe implementation returning an invalid
-/// pointer would let safe tree code dereference it.
+/// pointer would let safe tree code dereference it; the no-panic requirement
+/// is part of the same contract.
 ///
 /// # Type Parameters
 ///

@@ -111,7 +111,7 @@ mod mixed_uniform {
                         if is_write[i] {
                             let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         }
                     }
 
@@ -162,7 +162,7 @@ mod mixed_zipfian {
                         if is_write[i] {
                             let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         }
                     }
                     ctx.end_measurement();
@@ -222,7 +222,7 @@ mod mixed_shared_prefix {
                         if is_write[i] {
                             let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         }
                     }
                     ctx.end_measurement();
@@ -276,7 +276,7 @@ mod mixed_high_contention {
                         if is_write[i] {
                             let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         }
                     }
                     ctx.end_measurement();
@@ -330,7 +330,7 @@ mod mixed_large_dataset {
                         if is_write[i] {
                             let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         }
                     }
                     ctx.end_measurement();
@@ -381,7 +381,7 @@ mod single_hot_key {
                                 &guard,
                             );
                         } else if let Some(v) = tree.get_with_guard(&hot_key, &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         }
                     }
                     ctx.end_measurement();
@@ -431,7 +431,7 @@ mod mixed_50_50 {
                         if is_write[i] {
                             let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         }
                     }
                     ctx.end_measurement();
@@ -493,7 +493,7 @@ mod keys_8byte {
                         if is_write[i] {
                             let _ = tree.insert_with_guard(&keys[idx], i as u64, &guard);
                         } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         }
                     }
                     ctx.end_measurement();
@@ -536,7 +536,7 @@ mod pure_read {
                     for i in 0..OPS_PER_THREAD {
                         let idx = indices[base + i];
                         if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                            sum = sum.wrapping_add(v);
+                            sum = sum.wrapping_add(*v);
                         }
                     }
                     ctx.end_measurement();
@@ -678,7 +678,7 @@ mod insert_only_fair {
                         } else {
                             let idx = read_indices[base + i];
                             if let Some(v) = tree.get_with_guard(&read_keys[idx], &guard) {
-                                sum = sum.wrapping_add(v);
+                                sum = sum.wrapping_add(*v);
                             }
                         }
                     }

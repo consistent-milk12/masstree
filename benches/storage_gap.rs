@@ -218,7 +218,7 @@ mod read_only {
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();
@@ -347,7 +347,7 @@ mod hot_keys {
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();
@@ -484,7 +484,7 @@ mod mixed_rw {
                                         tree.insert_value_with_guard(&keys[idx], i as u64, &guard),
                                     );
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();
@@ -620,7 +620,7 @@ mod write_heavy {
                                         tree.insert_value_with_guard(&keys[idx], i as u64, &guard),
                                     );
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();

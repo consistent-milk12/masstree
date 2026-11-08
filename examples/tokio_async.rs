@@ -113,8 +113,11 @@ async fn main() {
         // CPU-intensive: scan and process all entries
         for entry in state_clone.tree.iter(&guard) {
             count += 1;
-            // entry.value() returns &ValuePtr<String>
-            total_len += entry.value().len();
+            // The iterator yields an opaque output handle; read the typed
+            // value through a guard-scoped lookup.
+            if let Some(value) = state_clone.tree.get_ref(entry.key(), &guard) {
+                total_len += value.len();
+            }
         }
 
         (count, total_len)

@@ -221,7 +221,7 @@ mod long_keys {
                                 if is_write[i] {
                                     black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();
@@ -518,7 +518,7 @@ mod multiple_hot_keys {
                                 if is_write[i] {
                                     black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();
@@ -834,7 +834,7 @@ mod mixed_operations {
                                 match ops[i] {
                                     Op::Get => {
                                         if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                            sum = sum.wrapping_add(v);
+                                            sum = sum.wrapping_add(*v);
                                         }
                                     }
                                     Op::Insert => {
@@ -1207,7 +1207,7 @@ mod variable_keys {
                                 } else if let Some(v) =
                                     tree.get_with_guard(keys[idx].as_slice(), &guard)
                                 {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();
@@ -1847,7 +1847,7 @@ mod deep_trie {
                                 if is_write[i] {
                                     black_box(tree.insert_with_guard(&keys[idx], i as u64, &guard));
                                 } else if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();
@@ -2141,7 +2141,7 @@ mod deep_trie_read_only {
                             for i in 0..OPS_PER_THREAD {
                                 let idx = indices[base + i];
                                 if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();
@@ -2460,7 +2460,7 @@ mod variable_keys_arc {
                                 } else if let Some(v) =
                                     tree.get_with_guard(keys[idx].as_ref(), &guard)
                                 {
-                                    sum = sum.wrapping_add(v);
+                                    sum = sum.wrapping_add(*v);
                                 }
                             }
                             post_measurement_barrier();
@@ -2993,7 +2993,7 @@ mod prefix_realistic_mixed {
                                         let idx = wl.point_indices[point_i];
                                         point_i += 1;
                                         if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                            total = total.wrapping_add(v);
+                                            total = total.wrapping_add(*v);
                                         }
                                     }
                                     OpKind::Write => {
@@ -3101,7 +3101,7 @@ mod prefix_realistic_mixed {
                                         let idx = wl.point_indices[point_i];
                                         point_i += 1;
                                         if let Some(v) = tree.get_with_guard(&keys[idx], &guard) {
-                                            total = total.wrapping_add(v);
+                                            total = total.wrapping_add(*v);
                                         }
                                     }
                                     OpKind::Write => {

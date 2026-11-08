@@ -199,3 +199,8 @@ path = "examples/url_cache.rs"
 [[example]]
 name = "session_store"
 path = "examples/session_store.rs"
+
+[[example]]
+name = "print_tree"
+path = "examples/print_tree.rs"
+required-features = ["debug-print"]

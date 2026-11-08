@@ -220,9 +220,11 @@ impl UrlCache {
 
         // Find all expired entries
         for entry in self.tree.iter(&guard) {
-            // entry.value() returns &ValuePtr<CachedResponse>
-            let cached = entry.value();
-            if cached.is_expired() {
+            // The iterator yields an opaque output handle; read the typed
+            // value through a guard-scoped lookup.
+            if let Some(cached) = self.tree.get_ref(entry.key(), &guard)
+                && cached.is_expired()
+            {
                 to_remove.push(entry.key().to_vec());
             }
         }
