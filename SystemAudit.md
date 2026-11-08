@@ -3262,7 +3262,11 @@ inserts into a leaf that already has external storage. The strengthened
 `failures/suffix --bin probe` failed before this change (42 allocations / 71,584
 bytes for 20 churn cycles) and passes afterward (6 / 20,560). Value-only updates
 remain allocation-free. The historical table below is retained as baseline
-context; split reservation remains a separate work item. Proposal 3 / SIM-07
+context. PERF-09 now reserves split-destination suffix capacity from all moved
+suffixes plus the new right-side entry (3 → 0 buffer reallocations in the probe).
+PERF-11 writes only the 60-byte sentinel header after leaf zeroing (516 fewer
+redundant bytes with the default capacity). `SuffixStore::ensure_external` was
+replaced by the exclusively-owned `reserve_external` contract. Proposal 3 / SIM-07
 also removes the duplicated Vec owner and cached suffix count: the actual header
 is now 144 bytes instead of 168. Removed public APIs: `SuffixBag::{try_assign,
 try_assign_in_place, compact_with_permuter, suffix_equals, suffix_compare, count}`,

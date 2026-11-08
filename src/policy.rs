@@ -38,7 +38,6 @@ use seize::{Guard, LocalGuard};
 use crate::inline::bits::InlineBits;
 use crate::ordering::READ_ORD;
 use crate::prefetch::prefetch_read;
-use crate::suffix::SuffixBagCell;
 
 /// Returns true if `V` is a primitive type that can be round-tripped through
 /// an integer atomic without violating its representation.
@@ -515,12 +514,13 @@ pub trait SuffixStore: sealed::SuffixStoreSealed + Send + Sync + Sized + 'static
         prealloc: Vec<u8>,
     ) -> *mut u8;
 
-    /// Pre-allocate external overflow storage.
+    /// Reserve total external capacity on an unpublished destination.
     ///
     /// # Safety
     ///
-    /// Caller must hold the leaf lock.
-    unsafe fn ensure_external(&self) -> *mut SuffixBagCell;
+    /// Caller exclusively owns the store and its bytes; no readers may hold
+    /// slices into an existing buffer, which this operation may grow.
+    unsafe fn reserve_external(&self, capacity: usize);
 
     /// Clear a slot's suffix.
     ///

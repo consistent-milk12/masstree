@@ -16,6 +16,24 @@ fn raw_buffer_header_has_no_duplicate_owner() {
 }
 
 #[test]
+fn header_initialization_makes_zeroed_storage_an_empty_inline_bag() {
+    let mut storage = StdMem::MaybeUninit::<InlineSuffixBag>::zeroed();
+    // SAFETY: The aligned storage is fully zeroed and exclusively owned. The
+    // initializer writes all nonzero fields before we form a reference.
+    let bag = unsafe {
+        InlineSuffixBag::init_at_zero(storage.as_mut_ptr());
+        storage.assume_init()
+    };
+    assert_eq!(bag.used(), 0);
+    assert_eq!(bag.count(), 0);
+    for slot in 0..15 {
+        assert_eq!(bag.get(slot), None);
+        assert!(bag.try_assign(slot, &[42; 16]));
+        assert_eq!(bag.get(slot), Some([42; 16].as_slice()));
+    }
+}
+
+#[test]
 fn append_preserves_borrowed_bytes_and_fails_without_growth() {
     let bag = SuffixBag::with_capacity(10);
     assert!(bag.try_assign_append_only(0, b"hello"));

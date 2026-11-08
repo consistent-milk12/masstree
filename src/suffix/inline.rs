@@ -142,6 +142,23 @@ impl InlineSuffixBag {
         }
     }
 
+    /// Initialize only the nonzero metadata in an already-zeroed bag.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to aligned, writable, fully zeroed storage for `Self`,
+    /// exclusively owned by the caller. No live value may be overwritten.
+    #[inline]
+    pub(crate) unsafe fn init_at_zero(ptr: *mut Self) {
+        // SAFETY: The caller initialized all fields to valid zero values.
+        // Only the slot sentinels differ from zero; writing this field leaves
+        // the size, count, padding, and byte buffer initialized and unchanged.
+        unsafe {
+            StdPtr::addr_of_mut!((*ptr).slots)
+                .write([const { AtomicU32::new(Self::EMPTY_PACKED) }; WIDTH]);
+        }
+    }
+
     // ========================================================================
     //  Slot Access (Atomic)
     // ========================================================================

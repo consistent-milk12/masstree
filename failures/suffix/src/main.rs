@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct C;
 static A: AtomicUsize = AtomicUsize::new(0);
 static B: AtomicUsize = AtomicUsize::new(0);
+static R: AtomicUsize = AtomicUsize::new(0);
 unsafe impl GlobalAlloc for C {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         A.fetch_add(1, Ordering::Relaxed);
@@ -13,6 +14,7 @@ unsafe impl GlobalAlloc for C {
         unsafe { System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        R.fetch_add(1, Ordering::Relaxed);
         A.fetch_add(1, Ordering::Relaxed);
         B.fetch_add(n, Ordering::Relaxed);
         unsafe { System.realloc(p, l, n) }
@@ -91,5 +93,31 @@ fn main() {
     assert_eq!(t2.len(), 15);
     for (i, k) in ks2.iter().enumerate() {
         assert_eq!(t2.get(k), Some(i as u64), "suffix lost at slot {i}");
+    }
+
+    // (3) Insert in the middle of a full leaf so eight long suffixes move
+    // right. Count reallocations separately from pooled node allocations.
+    let t3: MassTree15Inline<u64> = MassTree15Inline::new();
+    let g3 = t3.guard();
+    let mut keys = Vec::new();
+    for i in 0u64..15 {
+        let mut key = (i * 2).to_be_bytes().to_vec();
+        key.extend_from_slice(&[b's'; 248]);
+        t3.insert_with_guard(&key, i, &g3);
+        keys.push(key);
+    }
+    let mut middle = 15u64.to_be_bytes().to_vec();
+    middle.extend_from_slice(&[b't'; 248]);
+    let r0 = R.load(Ordering::Relaxed);
+    t3.insert_with_guard(&middle, 100, &g3);
+    let reallocations = R.load(Ordering::Relaxed) - r0;
+    println!("SPLIT reallocations={reallocations}");
+    assert_eq!(
+        reallocations, 0,
+        "split destination must be sized before copying"
+    );
+    assert_eq!(t3.get(&middle), Some(100));
+    for (i, key) in keys.iter().enumerate() {
+        assert_eq!(t3.get(key), Some(i as u64), "split lost key {i}");
     }
 }

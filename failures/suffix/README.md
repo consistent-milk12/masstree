@@ -9,6 +9,9 @@ suffix storage remains amortized. It also checks every surviving value and len.
    baseline 42 allocations / 71,584 bytes; after sizing rebuilds from the complete
    live set and skipping throwaway preallocation, 6 allocations / 20,560 bytes.
    The bound allows EBR bookkeeping while rejecting per-operation rebuilding.
+3. **PERF-09** — insert into the middle of a full leaf with 248-byte suffixes:
+   3 buffer reallocations before destination reservation, zero afterward. Every
+   original and inserted key is checked after the split.
 
 ```bash
 CARGO_TARGET_DIR=/tmp/masstree-target cargo run --quiet --manifest-path failures/suffix/Cargo.toml --bin probe

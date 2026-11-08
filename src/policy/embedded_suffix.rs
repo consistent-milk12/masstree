@@ -144,9 +144,9 @@ impl SuffixStore for EmbeddedSuffix {
     }
 
     #[inline(always)]
-    unsafe fn ensure_external(&self) -> *mut SuffixBagCell {
-        // SAFETY: Caller holds leaf lock.
-        unsafe { SuffixOps::ensure_external_bag(&self.external_ksuf) }
+    unsafe fn reserve_external(&self, capacity: usize) {
+        // SAFETY: Caller exclusively owns the unpublished suffix store.
+        unsafe { SuffixOps::reserve_external_bag(&self.external_ksuf, capacity) }
     }
 
     #[inline(always)]
@@ -191,7 +191,7 @@ impl SuffixStore for EmbeddedSuffix {
         // non-zero initial values.
         unsafe {
             let bag_ptr: *mut InlineSuffixBag = StdPtr::addr_of_mut!((*ptr).inline_ksuf).cast();
-            StdPtr::write(bag_ptr, InlineSuffixBag::new());
+            InlineSuffixBag::init_at_zero(bag_ptr);
         }
     }
 }

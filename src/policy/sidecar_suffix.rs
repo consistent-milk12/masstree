@@ -206,12 +206,13 @@ impl SuffixStore for SidecarSuffix {
     }
 
     #[inline(always)]
-    unsafe fn ensure_external(&self) -> *mut SuffixBagCell {
-        // SAFETY: Caller holds leaf lock.
-        let sidecar_ptr: *mut SuffixSidecar = unsafe { self.ensure_sidecar() };
-        let sidecar: &SuffixSidecar = unsafe { &*sidecar_ptr };
-
-        unsafe { SuffixOps::ensure_external_bag(&sidecar.external) }
+    unsafe fn reserve_external(&self, capacity: usize) {
+        // SAFETY: Caller exclusively owns this unpublished store and any
+        // existing sidecar; no readers can retain slices into its buffer.
+        unsafe {
+            let sidecar = &*self.ensure_sidecar();
+            SuffixOps::reserve_external_bag(&sidecar.external, capacity);
+        }
     }
 
     #[inline(always)]

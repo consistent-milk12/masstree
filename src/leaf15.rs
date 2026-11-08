@@ -33,7 +33,6 @@ use crate::policy::{
     LeafPolicy, PreparedValue, RetireHandle, SlotKind, SlotState, SuffixStore, ValueArray,
 };
 use crate::prefetch::prefetch_read;
-use crate::suffix::SuffixBagCell;
 use seize::Guard;
 
 mod layout;
@@ -826,17 +825,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.suffix.has_external()
     }
 
-    /// Pre-allocate external overflow storage.
-    ///
-    /// # Safety
-    ///
-    /// Caller must hold the leaf lock.
-    #[inline(always)]
-    pub(crate) unsafe fn ensure_external_ksuf(&self) -> *mut SuffixBagCell {
-        // SAFETY: Caller holds lock.
-        unsafe { self.suffix.ensure_external() }
-    }
-
     // ============================================================================
     //  NodeVersion Accessors
     // ============================================================================
@@ -1549,7 +1537,12 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// `new_leaf_ptr` must be valid, properly aligned, and point to an
     /// initialized but empty leaf not yet visible to other threads.
     #[inline(always)]
-    unsafe fn prepare_split_leaf(&self, new_leaf_ptr: *mut Self) -> &Self {
+    unsafe fn prepare_split_leaf(
+        &self,
+        new_leaf_ptr: *mut Self,
+        split_pos: usize,
+        inserted_suffix_bytes: usize,
+    ) -> &Self {
         let split_version = NodeVersion::new_for_split(&self.version);
 
         // SAFETY: new_leaf_ptr is not yet visible to other threads (caller guarantee).
@@ -1563,10 +1556,26 @@ impl<P: LeafPolicy> LeafNode15<P> {
         // SAFETY: new_leaf_ptr is valid and properly aligned (caller guarantee).
         let new_leaf: &Self = unsafe { &*new_leaf_ptr };
 
-        if self.has_external_ksuf() {
-            // SAFETY: new_leaf is not yet visible. Pre-allocating suffix storage
-            // before entries are moved ensures suffix writes won't fail.
-            let _ = unsafe { new_leaf.ensure_external_ksuf() };
+        // A subset of an inline-only source still fits inline when the insert
+        // contributes no suffix to the right. Keep short-key splits constant
+        // time here instead of inspecting every source slot.
+        if inserted_suffix_bytes == 0 && !self.has_external_ksuf() {
+            return new_leaf;
+        }
+
+        let perm = self.permutation();
+        let mut suffix_bytes = inserted_suffix_bytes;
+        for i in split_pos..perm.size() {
+            let slot = perm.get(i);
+            if self.keylenx_relaxed(slot) == KSUF_KEYLENX {
+                suffix_bytes += self.ksuf(slot).map_or(0, <[u8]>::len);
+            }
+        }
+        if suffix_bytes > Self::INLINE_KSUF_CAPACITY {
+            // SAFETY: The initialized destination is unpublished and empty.
+            // Reserve the entire incoming suffix set plus append slack before
+            // copying; no buffer grows while entries are moved under the lock.
+            unsafe { new_leaf.suffix.reserve_external(suffix_bytes * 2) };
         }
 
         new_leaf
@@ -1755,7 +1764,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
         guard: &LocalGuard<'_>,
     ) -> (u64, InsertTarget) {
         // SAFETY: Caller guarantees new_leaf_ptr is valid and not yet visible.
-        let new_leaf: &Self = unsafe { self.prepare_split_leaf(new_leaf_ptr) };
+        let new_leaf: &Self = unsafe { self.prepare_split_leaf(new_leaf_ptr, split_pos, 0) };
 
         let perm: Permuter15 = self.permutation();
         let size: usize = perm.size();
@@ -1790,7 +1799,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
         guard: &LocalGuard<'_>,
     ) -> (u64, InsertTarget) {
         // SAFETY: Caller guarantees new_leaf_ptr is valid and not yet visible.
-        let new_leaf: &Self = unsafe { self.prepare_split_leaf(new_leaf_ptr) };
+        let new_leaf: &Self = unsafe { self.prepare_split_leaf(new_leaf_ptr, 0, 0) };
 
         let perm: Permuter15 = self.permutation();
         let size: usize = perm.size();
@@ -1829,9 +1838,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
         prepared_value: &PreparedValue<P>,
         guard: &LocalGuard<'_>,
     ) -> SplitInsertResult {
-        // SAFETY: Caller guarantees new_leaf_ptr is valid and not yet visible.
-        let new_leaf: &Self = unsafe { self.prepare_split_leaf(new_leaf_ptr) };
-
         let old_perm: Permuter15 = self.permutation();
         let old_size: usize = old_perm.size();
 
@@ -1843,6 +1849,15 @@ impl<P: LeafPolicy> LeafNode15<P> {
         } else {
             insert_pos > split_pos
         };
+        let inserted_suffix_bytes = if insert_goes_right {
+            insert_data.suffix.map_or(0, <[u8]>::len)
+        } else {
+            0
+        };
+        // SAFETY: Caller owns an initialized empty destination. The source is
+        // locked; the reservation accounts for every entry moving right.
+        let new_leaf =
+            unsafe { self.prepare_split_leaf(new_leaf_ptr, split_pos, inserted_suffix_bytes) };
         let entries_to_move: usize = old_size - split_pos;
         let split_ikey: u64;
 

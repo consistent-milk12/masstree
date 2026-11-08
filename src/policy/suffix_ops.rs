@@ -234,26 +234,27 @@ pub(super) unsafe fn clear_suffix(
     }
 }
 
-/// Get or create external overflow storage.
+/// Reserve total capacity before filling an unpublished split destination.
 ///
 /// # Safety
 ///
-/// Caller must hold the leaf lock.
-#[inline(always)]
-pub(super) unsafe fn ensure_external_bag(
-    external: &AtomicPtr<SuffixBagCell>,
-) -> *mut SuffixBagCell {
+/// Caller exclusively owns this store and all its bytes, with no readers.
+#[inline]
+pub(super) unsafe fn reserve_external_bag(external: &AtomicPtr<SuffixBagCell>, capacity: usize) {
     let ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Acquire);
 
     if !ptr.is_null() {
-        return ptr;
+        // SAFETY: The unpublished destination and its buffer are exclusively
+        // owned; no reader slices can be invalidated by growth.
+        let bag = unsafe { (*ptr).as_writer() };
+        // SAFETY: Same exclusive ownership as above.
+        unsafe { bag.reserve_locked(capacity.saturating_sub(bag.used())) };
+        return;
     }
 
-    let new_cell: Box<SuffixBagCell> = Box::default();
+    let new_cell = Box::new(SuffixBagCell::from_bag(SuffixBag::with_capacity(capacity)));
     let new_ptr: *mut SuffixBagCell = Box::into_raw(new_cell);
     external.store(new_ptr, AtomicOrdering::Release);
-
-    new_ptr
 }
 
 // ============================================================================
