@@ -164,6 +164,14 @@ impl SuffixBag {
         self.capacity.load(Ordering::Relaxed)
     }
 
+    /// Hint the actual byte buffer, whose address is fixed once published.
+    #[inline(always)]
+    pub(crate) fn prefetch_data(&self) {
+        let data = self.data_ptr.load(Ordering::Relaxed);
+        crate::prefetch::prefetch_read(data);
+        crate::prefetch::prefetch_read(data.wrapping_add(64));
+    }
+
     /// Return the published byte count, including obsolete suffixes.
     #[must_use]
     #[inline(always)]

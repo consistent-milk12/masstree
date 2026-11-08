@@ -139,7 +139,12 @@ doubles its refill up to 128. The fresh-thread counting probe failed at 128
 leaf allocations and now observes exactly 16 on all seven threads; each thread
 also grows to 5,000 keys and verifies every value. Cold first-insert medians were
 6.87 → 5.35 µs locally (allocation count is the regression gate, not timing).
-Library, strict Clippy and focused pool Miri tests pass.
+Library, strict Clippy and focused pool Miri tests pass. Embedded and sidecar
+suffix prefetch now share a helper that fetches inline metadata/data and the
+external bag's actual byte buffer. Following pointers uses the same EBR load
+ordering as suffix reads; `no-prefetch` removes the pointer chasing as well as
+CPU hints. A concurrent replacement test and inline integration tests pass under
+Miri, with native coverage for both suffix features and no-prefetch.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

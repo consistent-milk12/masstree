@@ -19,6 +19,29 @@ use crate::suffix::{InlineSuffixBag, SuffixBag, SuffixBagCell};
 //  Read Operations (safe, lock-free via OCC)
 // ============================================================================
 
+/// Fetch inline metadata/data and the external bag's actual byte buffer.
+/// The caller protects the leaf and retired bags with its tree guard, just as
+/// for `get_suffix`. The no-prefetch feature also removes pointer chasing.
+#[inline(always)]
+pub(super) fn prefetch_suffix(inline: &InlineSuffixBag, external: &AtomicPtr<SuffixBagCell>) {
+    if cfg!(feature = "no-prefetch") {
+        return;
+    }
+    let inline_ptr = StdPtr::from_ref(inline).cast::<u8>();
+    crate::prefetch::prefetch_read(inline_ptr);
+    crate::prefetch::prefetch_read(inline_ptr.wrapping_add(64));
+
+    // This load is followed by a dereference, so use the same protected-load
+    // ordering as get_suffix; a relaxed hint-only load is not sufficient.
+    let external_ptr = external.load(AtomicOrdering::SeqCst);
+    if !external_ptr.is_null() {
+        crate::prefetch::prefetch_read(external_ptr);
+        // SAFETY: The caller's active guard keeps this cell and its immutable
+        // buffer alive after replacement. The pointer load acquires publication.
+        unsafe { (*external_ptr).as_ref() }.prefetch_data();
+    }
+}
+
 /// Get suffix for a slot, checking inline first then external.
 #[inline(always)]
 pub(super) fn get_suffix<'a>(
@@ -421,6 +444,61 @@ unsafe fn drain_and_rebuild_init(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefetch_during_external_bag_replacement() {
+        use seize::Collector;
+        use std::sync::Barrier;
+
+        let collector = Collector::new();
+        let inline = InlineSuffixBag::new();
+        let external = AtomicPtr::new(StdPtr::null_mut());
+        let barrier = Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let guard = collector.enter();
+                for byte in 1..=16 {
+                    let mut bag = SuffixBag::with_capacity(128);
+                    bag.assign(0, &[byte; 128]);
+                    let new = Box::into_raw(Box::new(SuffixBagCell::from_bag(bag)));
+                    barrier.wait();
+                    let old = external.swap(new, AtomicOrdering::AcqRel);
+                    if !old.is_null() {
+                        // SAFETY: The swap removed the owning pointer. Reader
+                        // guards keep the old cell/buffer alive until quiescence.
+                        unsafe {
+                            guard.defer_retire(
+                                old,
+                                crate::suffix::SideCarUtils::retire_suffix_bag_cell,
+                            );
+                        }
+                    }
+                    guard.flush();
+                    barrier.wait();
+                }
+            });
+            let mut valid = true;
+            for byte in 1..=16 {
+                let guard = collector.enter();
+                barrier.wait();
+                prefetch_suffix(&inline, &external);
+                if let Some(bytes) = get_suffix(&inline, &external, 0) {
+                    valid &= bytes == [byte; 128] || bytes == [byte - 1; 128];
+                }
+                barrier.wait();
+                valid &= get_suffix(&inline, &external, 0) == Some([byte; 128].as_slice());
+                drop(guard);
+            }
+            // Check after all barrier rounds so failure cannot strand a peer.
+            assert!(valid);
+        });
+        // SAFETY: Both threads have exited their guards. Reclaim retired bags
+        // and free the final still-owned cell exactly once, with no readers.
+        unsafe {
+            collector.reclaim_all();
+            drop(Box::from_raw(external.into_inner()));
+        }
+    }
 
     #[test]
     fn rebuild_sizes_the_complete_live_set_and_preserves_precedence() {

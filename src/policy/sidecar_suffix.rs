@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::TreePermutation;
-use crate::prefetch::prefetch_read;
 use crate::suffix::{SideCarUtils, SuffixBagCell, SuffixSidecar};
 
 use super::SuffixStore;
@@ -128,22 +127,17 @@ impl SuffixStore for SidecarSuffix {
 
     #[inline(always)]
     fn prefetch(&self) {
-        // Relaxed is sufficient: this is a prefetch hint, not a data read.
-        // The actual data read in get_suffix() does its own Acquire load.
-        let ptr: *mut SuffixSidecar = self.sidecar.load(AtomicOrdering::Relaxed);
-
+        if cfg!(feature = "no-prefetch") {
+            return;
+        }
+        // We dereference the sidecar to follow its external pointer, so this
+        // must acquire its initialization and participate in EBR protection.
+        let ptr = self.sidecar_ptr();
         if !ptr.is_null() {
-            // Prefetch the sidecar header (inline suffix data, first cache line).
-            prefetch_read(ptr);
-
-            // Also prefetch the cache line containing the external AtomicPtr,
-            // which sits after the InlineSuffixBag. This way both the inline
-            // check and the external pointer load are cache-warm by the time
-            // get_suffix() runs.
-            let external_offset: usize = std::mem::offset_of!(SuffixSidecar, external);
-            let external_addr: *const u8 = (ptr as *const u8).wrapping_add(external_offset);
-
-            prefetch_read(external_addr);
+            // SAFETY: The caller protects the leaf with its guard. Its sidecar
+            // remains allocated until leaf teardown; publication is acquired.
+            let sidecar = unsafe { &*ptr };
+            SuffixOps::prefetch_suffix(&sidecar.inline, &sidecar.external);
         }
     }
 

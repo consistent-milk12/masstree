@@ -86,7 +86,7 @@ impl SuffixStore for EmbeddedSuffix {
 
     #[inline(always)]
     fn prefetch(&self) {
-        // No-op: inline suffix data is already embedded in the leaf node.
+        SuffixOps::prefetch_suffix(self.inline_bag(), &self.external_ksuf);
     }
 
     // ========================================================================

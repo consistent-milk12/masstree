@@ -468,8 +468,8 @@ pub trait SuffixStore: sealed::SuffixStoreSealed + Send + Sync + Sized + 'static
 
     /// Prefetch suffix storage into cache for upcoming access.
     ///
-    /// For sidecar-based storage, this prefetches the sidecar structure.
-    /// For embedded storage, this is a no-op (data is already in the leaf).
+    /// Fetches inline metadata and, if present, the external byte buffer.
+    /// The caller must keep the tree's guard active, as for suffix reads.
     fn prefetch(&self);
 
     // ========================================================================

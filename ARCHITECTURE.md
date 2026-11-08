@@ -2109,7 +2109,10 @@ read scalability.
   `prfm pldl1keep` on aarch64.
 - Traversal prefetches the selected child and, for internode children, the
   child's header and first child.
-- Leaf search prefetches value slots; multi-layer reads prefetch suffix storage
+- Leaf search prefetches value slots; multi-layer reads prefetch suffix storage.
+  Both suffix stores share inline metadata/data hints and chase external bags to
+  their actual byte buffers. Header dereferences use EBR protected-load ordering;
+  `no-prefetch` removes the pointer chasing as well as the hardware hints
   and layer roots.
 - Range scans prefetch next/next-next (forward) and prev/prev-prev (reverse)
   leaves and neighboring slots.

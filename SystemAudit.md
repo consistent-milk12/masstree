@@ -3365,6 +3365,13 @@ probe confirms 128 → 16 leaf allocations on first insert, then checks growth
 and all values through 5,000 keys. The measured seven-thread median moved from
 6.87 to 5.35 µs; timing is workload-specific. Native and pool Miri checks pass.
 
+PERF-10 now shares suffix prefetching between embedded and sidecar stores,
+including the external bag's byte buffer. Pointer chasing uses protected-load
+ordering before dereferencing headers; disabling prefetch removes those loads.
+Concurrent bag replacement and inline integration checks pass under Miri, with
+native sidecar/small-capacity/no-prefetch coverage. No throughput claim is made
+from hint placement alone.
+
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|
 | PERF-01 | Suffix insert | `maybe_pre_allocate_suffix` allocates `WIDTH * suffix_len` on every suffix insert, including `Found` updates, conflicts, retries, and splits that drop it | Move to the `NotFound`/`find_usable_slot` path, size from actual suffix usage, pass into split | 1 allocation / 600 B per long-key update removed |
