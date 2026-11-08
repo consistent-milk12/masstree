@@ -544,7 +544,7 @@ where
     /// Advance to correct leaf via B-link (generic version).
     /// Used by insert path before locking.
     #[expect(clippy::unused_self, reason = "API Consistency")]
-    fn advance_to_key_by_bound_generic(
+    pub(crate) fn advance_to_key_by_bound_generic(
         &self,
         mut leaf_ptr: *mut LeafNode15<P>,
         key: &Key<'_>,

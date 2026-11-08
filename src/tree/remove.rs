@@ -538,7 +538,6 @@ impl NodeCleaner {
         A: TreeAllocator<P>,
     {
         let mut key: Key<'_> = Key::new(key_bytes);
-        let single_layer_mode: bool = !key.has_suffix();
         let mut retry_count: usize = 0;
 
         // Track layer descent for multi-layer keys
@@ -548,45 +547,143 @@ impl NodeCleaner {
         let mut route: Route = Vec::new();
 
         'layer_loop: loop {
+            retry_count += 1;
+
             if retry_count >= MAX_RETRIES {
                 return Err(RemoveError::RetryLimitExceeded);
             }
-            retry_count += 1;
 
-            let leaf_ptr: *mut LeafNode15<P> =
+            let mut leaf_ptr: *mut LeafNode15<P> =
                 tree.reach_leaf_concurrent_generic(layer_root, &key, false, guard);
 
-            // SAFETY: reach_leaf_concurrent_generic returns a valid leaf pointer
-            let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
+            // REM-02: a concurrent split may have moved the target into the
+            // next leaf while we were descending. Follow the B-link chain
+            // before searching, exactly like insert/get.
+            let (advanced_ptr, exceeded): (*mut LeafNode15<P>, bool) =
+                tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
+
+            if exceeded {
+                if route.is_empty() {
+                    key.unshift_all();
+                    layer_root = tree.load_root_ptr_generic(guard).cast_mut();
+                } else {
+                    key.unshift_all();
+                    layer_root = tree.load_root_ptr_generic(guard).cast_mut();
+                    route.clear();
+                }
+
+                continue 'layer_loop;
+            }
+
+            leaf_ptr = advanced_ptr;
+
+            // SAFETY: reach/advance return a valid leaf pointer.
+            let mut leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
+
+            // "Too far right": our key sorts below this non-leftmost leaf's
+            // lower bound. Re-descend rather than returning NotFound.
+            if !leaf.prev(guard).is_null() && key.ikey() < leaf.ikey_bound() {
+                continue 'layer_loop;
+            }
 
             'forward: loop {
+                retry_count += 1;
+
+                if retry_count >= MAX_RETRIES {
+                    return Err(RemoveError::RetryLimitExceeded);
+                }
+
+                if leaf.version().is_deleted() || leaf.deleted_layer() {
+                    // A coalesced leaf may remain linked until unlink finishes.
+                    // Restart from the main root so multi-layer state is reset.
+                    key.unshift_all();
+                    layer_root = tree.load_root_ptr_generic(guard).cast_mut();
+                    route.clear();
+                    continue 'layer_loop;
+                }
+
                 let version: u32 = leaf.version().stable();
                 let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
-                let search_result: RemoveSearchResult = if single_layer_mode {
-                    Self::search_for_remove::<true, P>(leaf, &key, &perm)
-                } else {
+                let search_result: RemoveSearchResult = if key.has_suffix() {
                     Self::search_for_remove::<false, P>(leaf, &key, &perm)
+                } else {
+                    Self::search_for_remove::<true, P>(leaf, &key, &perm)
                 };
 
                 if leaf.version().has_changed(version) {
+                    let (next_ptr, exceeded): (*mut LeafNode15<P>, bool) =
+                        tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
+
+                    if exceeded {
+                        key.unshift_all();
+                        layer_root = tree.load_root_ptr_generic(guard).cast_mut();
+                        route.clear();
+                        continue 'layer_loop;
+                    }
+
+                    if next_ptr != leaf_ptr {
+                        leaf_ptr = next_ptr;
+                        // SAFETY: next_ptr is a valid leaf.
+                        leaf = unsafe { &*leaf_ptr };
+                    }
+
                     continue 'forward;
                 }
 
                 match search_result {
                     RemoveSearchResult::NotFound => {
-                        return Ok(None);
+                        // The key may have moved to a later leaf between the
+                        // search and the version check.
+                        let (next_ptr, exceeded): (*mut LeafNode15<P>, bool) =
+                            tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
+
+                        if exceeded {
+                            key.unshift_all();
+                            layer_root = tree.load_root_ptr_generic(guard).cast_mut();
+                            route.clear();
+                            continue 'layer_loop;
+                        }
+
+                        if next_ptr == leaf_ptr {
+                            return Ok(None);
+                        }
+
+                        leaf_ptr = next_ptr;
+                        // SAFETY: next_ptr is a valid leaf.
+                        leaf = unsafe { &*leaf_ptr };
+                        continue 'forward;
                     }
 
-                    RemoveSearchResult::Found { ki, kp: _ } => {
-                        // Lock, verify, and get cursor or control flow instruction
+                    RemoveSearchResult::Found { .. } => {
+                        // Lock, revalidate full key identity, and get a cursor.
                         let lock_result = Self::lock_and_verify_for_remove(
-                            tree, leaf_ptr, ki, &key, &mut route, guard,
+                            tree, leaf_ptr, &key, &mut route, guard,
                         );
 
                         match lock_result {
                             RemoveLockResult::NotFound => {
-                                return Ok(None);
+                                // Re-run the B-link advance once; a split may
+                                // have moved the key while we were locking.
+                                let (next_ptr, exceeded): (*mut LeafNode15<P>, bool) =
+                                    tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
+
+                                if exceeded {
+                                    key.unshift_all();
+                                    layer_root =
+                                        tree.load_root_ptr_generic(guard).cast_mut();
+                                    route.clear();
+                                    continue 'layer_loop;
+                                }
+
+                                if next_ptr == leaf_ptr {
+                                    return Ok(None);
+                                }
+
+                                leaf_ptr = next_ptr;
+                                // SAFETY: next_ptr is a valid leaf.
+                                leaf = unsafe { &*leaf_ptr };
+                                continue 'forward;
                             }
 
                             RemoveLockResult::Ready(cursor) => {
@@ -601,8 +698,24 @@ impl NodeCleaner {
                             }
 
                             RemoveLockResult::Retry => {
-                                // Re-scan same leaf: permutation likely changed
-                                // but leaf itself is still valid.
+                                let (next_ptr, exceeded): (*mut LeafNode15<P>, bool) =
+                                    tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
+
+                                if exceeded {
+                                    key.unshift_all();
+                                    layer_root =
+                                        tree.load_root_ptr_generic(guard).cast_mut();
+                                    route.clear();
+                                    continue 'layer_loop;
+                                }
+
+                                if next_ptr != leaf_ptr {
+                                    leaf_ptr = next_ptr;
+                                    // SAFETY: next_ptr is a valid leaf.
+                                    leaf = unsafe { &*leaf_ptr };
+                                }
+
+                                continue 'forward;
                             }
 
                             RemoveLockResult::RestartFromRoot => {
@@ -615,10 +728,6 @@ impl NodeCleaner {
                     }
 
                     RemoveSearchResult::DescendLayer { layer_ptr } => {
-                        debug_assert!(
-                            !single_layer_mode,
-                            "DescendLayer unreachable in single-layer mode"
-                        );
                         if !Self::is_sublayer_valid(layer_ptr) {
                             return Ok(None);
                         }
@@ -715,7 +824,6 @@ impl NodeCleaner {
     fn lock_and_verify_for_remove<'t, 'g, P, A>(
         tree: &'t MassTreeGeneric<P, A>,
         leaf_ptr: *mut LeafNode15<P>,
-        ki: usize,
         key: &Key<'_>,
         route: &mut Route,
         guard: &'g LocalGuard<'g>,
@@ -740,28 +848,46 @@ impl NodeCleaner {
 
         let new_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
-        if new_perm.size() <= ki {
+        if new_perm.size() == 0 {
             drop(lock);
             return RemoveLockResult::Retry;
         }
 
-        let new_kp: usize = new_perm.get(ki);
-        // Prefetch the value at this slot while we verify ikey/keylenx below.
-        leaf.prefetch_value(new_kp);
-        let slot_ikey: u64 = leaf.ikey(new_kp);
+        // REM-01: re-run the full-key search under the lock. The pre-lock
+        // logical position can refer to a different key after a same-ikey
+        // insert/remove shifted the permutation. `search_for_remove` compares
+        // ikey, keylenx, and suffix bytes, so this establishes identity.
+        let search_result: RemoveSearchResult = if key.has_suffix() {
+            Self::search_for_remove::<false, P>(leaf, key, &new_perm)
+        } else {
+            Self::search_for_remove::<true, P>(leaf, key, &new_perm)
+        };
+
+        let (new_ki, new_kp): (usize, usize) = match search_result {
+            RemoveSearchResult::Found { ki, kp } => (ki, kp),
+
+            RemoveSearchResult::DescendLayer { layer_ptr: lp } => {
+                drop(lock);
+
+                if !Self::is_sublayer_valid(lp) {
+                    return RemoveLockResult::NotFound;
+                }
+
+                return RemoveLockResult::DescendLayer { layer_ptr: lp };
+            }
+
+            RemoveSearchResult::NotFound => {
+                drop(lock);
+                return RemoveLockResult::Retry;
+            }
+        };
+
         let slot_keylenx: u8 = leaf.keylenx(new_kp);
-
-        // Verify this is still our key
-        if slot_ikey != key.ikey() {
-            drop(lock);
-            return RemoveLockResult::Retry;
-        }
 
         if slot_keylenx >= LAYER_KEYLENX {
             let lp: *mut u8 = leaf.load_layer_raw(new_kp);
             drop(lock);
 
-            // Check if sublayer is deleted before descending
             if !Self::is_sublayer_valid(lp) {
                 return RemoveLockResult::NotFound;
             }
@@ -769,11 +895,19 @@ impl NodeCleaner {
             return RemoveLockResult::DescendLayer { layer_ptr: lp };
         }
 
+        // Defense in depth: require exact full-key identity for suffix keys.
+        if slot_keylenx == KSUF_KEYLENX
+            && (!key.has_suffix() || !leaf.ksuf_equals(new_kp, key.suffix()))
+        {
+            drop(lock);
+            return RemoveLockResult::Retry;
+        }
+
         let cursor: RemoveCursor<'_, '_, P, A> = RemoveCursor::new(
             tree,
             leaf_ptr,
             lock,
-            ki,
+            new_ki,
             new_kp,
             std::mem::take(route),
             guard,
