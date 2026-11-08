@@ -982,7 +982,7 @@ impl NodeCleaner {
             let parent_result: LockedParentResult<'_> =
                 unsafe { Self::locked_parent_generic::<P>(current) };
 
-            let (parent_lock, parent_ptr) = match parent_result {
+            let (mut parent_lock, parent_ptr) = match parent_result {
                 LockedParentResult::Locked(lock, ptr) => (lock, ptr),
 
                 LockedParentResult::NoParent | LockedParentResult::RetryExhausted => {
@@ -1028,6 +1028,9 @@ impl NodeCleaner {
             }
 
             if kp > 0 {
+                // OCC-05: the separator change is a mutation and must be
+                // published through the version protocol, not just the lock.
+                parent_lock.mark_insert();
                 parent.set_ikey((kp - 1) as usize, new_ikey);
             }
 
