@@ -113,11 +113,11 @@ pub(super) unsafe fn assign_suffix(
     let ext_ptr: *mut SuffixBagCell = external.load(AtomicOrdering::Relaxed);
 
     if !ext_ptr.is_null() {
-        // SAFETY: ext_ptr is valid, caller holds lock. as_mut() through
-        // UnsafeCell provides exclusive write access.
-        // Append-only: never overwrites existing suffix bytes, so concurrent
-        // OCC readers see stable data at old offsets.
-        let bag: &mut SuffixBag = unsafe { (*ext_ptr).as_mut() };
+        // SAFETY: ext_ptr is valid, caller holds lock. `as_writer` gives
+        // exclusive logical write access; mutation goes through the bag's
+        // atomic/interior-mutable fields. Append-only never overwrites
+        // existing suffix bytes, so concurrent OCC readers see stable data.
+        let bag: &SuffixBag = unsafe { (*ext_ptr).as_writer() };
 
         if bag.try_assign_append_only(slot, suffix) {
             inline.clear(slot);
@@ -160,7 +160,7 @@ pub(super) unsafe fn assign_suffix_init(
     if !ext_ptr.is_null() {
         // SAFETY: ext_ptr is valid, caller holds lock. No concurrent readers
         // on unpublished leaves, so direct assign (with compaction) is safe.
-        let bag: &mut SuffixBag = unsafe { (*ext_ptr).as_mut() };
+        let bag: &SuffixBag = unsafe { (*ext_ptr).as_writer() };
         bag.assign(slot, suffix);
         inline.clear(slot);
         return;
@@ -193,7 +193,7 @@ pub(super) unsafe fn assign_suffix_prealloc(
     if !ext_ptr.is_null() {
         // SAFETY: ext_ptr is valid, caller holds lock.
         // Append-only: safe for concurrent OCC readers.
-        let bag: &mut SuffixBag = unsafe { (*ext_ptr).as_mut() };
+        let bag: &SuffixBag = unsafe { (*ext_ptr).as_writer() };
         if bag.try_assign_append_only(slot, suffix) {
             inline.clear(slot);
             return StdPtr::null_mut();
@@ -223,7 +223,7 @@ pub(super) unsafe fn clear_suffix(
 
     if !ext_ptr.is_null() {
         // SAFETY: ext_ptr is valid, caller holds lock.
-        let bag: &mut SuffixBag = unsafe { (*ext_ptr).as_mut() };
+        let bag: &SuffixBag = unsafe { (*ext_ptr).as_writer() };
         bag.clear(slot);
     }
 }

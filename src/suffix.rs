@@ -7,6 +7,9 @@
 
 use std::cell::UnsafeCell;
 use std::fmt::{self, Debug, Formatter};
+use std::ptr as StdPtr;
+use std::slice;
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::TreePermutation;
 
@@ -30,6 +33,9 @@ const INITIAL_CAPACITY: usize = 128;
 // ============================================================================
 
 /// Metadata for a single slot's suffix.
+///
+/// Stored internally as one `AtomicU64` so a reader can never observe a torn
+/// `(offset, len)` pair.
 #[derive(Clone, Copy, Debug, Default)]
 struct SlotMeta {
     /// Offset into the data buffer (`u32::MAX` if no suffix).
@@ -49,6 +55,25 @@ impl SlotMeta {
         len: 0,
         _pad: 0,
     };
+
+    /// Packed representation of [`Self::EMPTY`].
+    const EMPTY_PACKED: u64 = Self::EMPTY.pack();
+
+    /// Pack into a single 64-bit word.
+    #[inline(always)]
+    const fn pack(self) -> u64 {
+        (self.offset as u64) | ((self.len as u64) << 32) | ((self._pad as u64) << 48)
+    }
+
+    /// Unpack from a 64-bit word.
+    #[inline(always)]
+    const fn unpack(packed: u64) -> Self {
+        Self {
+            offset: packed as u32,
+            len: (packed >> 32) as u16,
+            _pad: (packed >> 48) as u16,
+        }
+    }
 
     /// Check if this slot has a suffix.
     #[inline(always)]
@@ -78,16 +103,33 @@ pub trait PermutationProvider {
 // ============================================================================
 
 /// Contiguous storage for key suffixes.
-#[derive(Debug)]
+///
+/// Reader-visible metadata and the used length are atomic, and the data bytes
+/// below `used` are never rewritten by concurrent writers. Readers therefore
+/// form slices through a raw pointer and the atomic `used` value instead of
+/// touching `Vec::len`.
+///
+/// Mutation requires exclusive access: a writer either owns the bag (`&mut`) or
+/// holds the leaf lock that publishes this bag through a [`SuffixBagCell`].
+/// All mutation goes through interior mutability so no `&mut SuffixBag` is ever
+/// created while a reader holds `&SuffixBag`.
 pub struct SuffixBag {
-    /// Per-slot metadata: (offset, length) pairs.
-    slots: [SlotMeta; WIDTH],
+    /// Per-slot metadata packed as `(offset, len)`.
+    slots: [AtomicU64; WIDTH],
 
-    /// Contiguous suffix data buffer.
-    data: Vec<u8>,
+    /// Contiguous suffix data buffer. Writers access it through `UnsafeCell`;
+    /// readers use `data_ptr` + `used`.
+    data: UnsafeCell<Vec<u8>>,
+
+    /// Stable base pointer of `data`, updated only when the buffer reallocates
+    /// (which is forbidden for a published bag).
+    data_ptr: AtomicPtr<u8>,
+
+    /// Number of bytes published at the front of the buffer.
+    used: AtomicUsize,
 
     /// Cached count of slots with suffixes (avoids O(WIDTH) recount).
-    suffix_count: u8,
+    suffix_count: AtomicU8,
 }
 
 impl SuffixBag {
@@ -99,22 +141,14 @@ impl SuffixBag {
     #[must_use]
     #[inline(always)]
     pub fn new() -> Self {
-        Self {
-            slots: [SlotMeta::EMPTY; WIDTH],
-            data: Vec::with_capacity(INITIAL_CAPACITY),
-            suffix_count: 0,
-        }
+        Self::from_vec_inner(Vec::with_capacity(INITIAL_CAPACITY))
     }
 
     /// Create a new suffix bag with specified capacity.
     #[must_use]
     #[inline(always)]
     pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            slots: [SlotMeta::EMPTY; WIDTH],
-            data: Vec::with_capacity(capacity),
-            suffix_count: 0,
-        }
+        Self::from_vec_inner(Vec::with_capacity(capacity))
     }
 
     /// Construct [`SuffixBag`] by reusing an existing [`Vec<u8>`] buffer.
@@ -122,12 +156,70 @@ impl SuffixBag {
     #[inline(always)]
     pub fn from_vec(data: Vec<u8>) -> Self {
         assert!(data.is_empty(), "from_vec expects empty Vec");
+        Self::from_vec_inner(data)
+    }
+
+    /// Build from a data buffer with all slots empty.
+    #[inline(always)]
+    fn from_vec_inner(data: Vec<u8>) -> Self {
+        let ptr: *mut u8 = data.as_ptr().cast_mut();
 
         Self {
-            slots: [SlotMeta::EMPTY; WIDTH],
-            data,
-            suffix_count: 0,
+            slots: std::array::from_fn(|_| AtomicU64::new(SlotMeta::EMPTY_PACKED)),
+            data: UnsafeCell::new(data),
+            data_ptr: AtomicPtr::new(ptr),
+            used: AtomicUsize::new(0),
+            suffix_count: AtomicU8::new(0),
         }
+    }
+
+    /// Build from a data buffer and slot metadata (clone path).
+    #[inline]
+    fn from_parts(data: Vec<u8>, metas: [SlotMeta; WIDTH]) -> Self {
+        let ptr: *mut u8 = data.as_ptr().cast_mut();
+        let used: usize = data.len();
+        let count: u8 = metas.iter().filter(|m| m.has_suffix()).count() as u8;
+
+        Self {
+            slots: std::array::from_fn(|i: usize| AtomicU64::new(metas[i].pack())),
+            data: UnsafeCell::new(data),
+            data_ptr: AtomicPtr::new(ptr),
+            used: AtomicUsize::new(used),
+            suffix_count: AtomicU8::new(count),
+        }
+    }
+
+    // ========================================================================
+    //  Internal Access
+    // ========================================================================
+
+    /// Get a mutable reference to the backing buffer.
+    ///
+    /// # Safety
+    ///
+    /// Callers must have exclusive write access (a `&mut` bag or the leaf lock
+    /// that publishes this bag). Readers only use `data_ptr` + `used`.
+    #[inline(always)]
+    #[expect(clippy::mut_from_ref, reason = "Interior mutability via UnsafeCell")]
+    unsafe fn data_mut(&self) -> &mut Vec<u8> {
+        // SAFETY: Caller guarantees exclusive write access.
+        unsafe { &mut *self.data.get() }
+    }
+
+    #[inline(always)]
+    fn load_meta(&self, slot: usize) -> SlotMeta {
+        SlotMeta::unpack(self.slots[slot].load(Ordering::Acquire))
+    }
+
+    #[inline(always)]
+    fn store_meta(&self, slot: usize, meta: SlotMeta) {
+        self.slots[slot].store(meta.pack(), Ordering::Release);
+    }
+
+    /// Publish the new used length after bytes have been written.
+    #[inline(always)]
+    fn publish_used(&self, used: usize) {
+        self.used.store(used, Ordering::Release);
     }
 
     // ========================================================================
@@ -137,28 +229,37 @@ impl SuffixBag {
     /// Return the current capacity of the data buffer.
     #[must_use]
     #[inline(always)]
-    pub const fn capacity(&self) -> usize {
-        self.data.capacity()
+    pub fn capacity(&self) -> usize {
+        // SAFETY: capacity is stable for a published bag; writers that may
+        // reallocate use `reserve` and update `data_ptr` under exclusivity.
+        unsafe { (*self.data.get()).capacity() }
     }
 
     /// Return the number of bytes currently used.
     #[must_use]
     #[inline(always)]
-    pub const fn used(&self) -> usize {
-        self.data.len()
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
     }
 
     /// Return the number of slots that have suffixes.
     #[must_use]
     #[inline(always)]
-    pub const fn count(&self) -> usize {
-        self.suffix_count as usize
+    pub fn count(&self) -> usize {
+        self.suffix_count.load(Ordering::Acquire) as usize
     }
 
     /// Reserve additional capacity for suffix data.
+    ///
+    /// Growth is only permitted for an unpublished/exclusively owned bag;
+    /// appending to a published bag must stay within its capacity.
     #[inline(always)]
-    pub fn reserve(&mut self, additional: usize) {
-        self.data.reserve(additional);
+    pub fn reserve(&self, additional: usize) {
+        // SAFETY: Caller has exclusive access per the method contract.
+        let data: &mut Vec<u8> = unsafe { self.data_mut() };
+        data.reserve(additional);
+        self.data_ptr
+            .store(data.as_ptr().cast_mut(), Ordering::Release);
     }
 
     // ========================================================================
@@ -168,19 +269,31 @@ impl SuffixBag {
     /// Append suffix data and update slot metadata + count.
     #[expect(clippy::indexing_slicing, reason = "Checked by caller")]
     #[expect(clippy::cast_possible_truncation)]
-    fn append_and_record(&mut self, slot: usize, suffix: &[u8]) {
-        if !self.slots[slot].has_suffix() {
-            self.suffix_count += 1;
+    fn append_and_record(&self, slot: usize, suffix: &[u8]) {
+        // SAFETY: Writers have exclusive access.
+        let data: &mut Vec<u8> = unsafe { self.data_mut() };
+        let offset: usize = data.len();
+
+        debug_assert!(
+            offset + suffix.len() <= data.capacity(),
+            "published suffix bag reallocated"
+        );
+
+        data.extend_from_slice(suffix);
+        self.publish_used(data.len());
+
+        if !self.load_meta(slot).has_suffix() {
+            self.suffix_count.fetch_add(1, Ordering::Relaxed);
         }
 
-        let offset: usize = self.data.len();
-        self.data.extend_from_slice(suffix);
-
-        self.slots[slot] = SlotMeta {
-            offset: offset as u32,
-            len: suffix.len() as u16,
-            _pad: 0,
-        };
+        self.store_meta(
+            slot,
+            SlotMeta {
+                offset: offset as u32,
+                len: suffix.len() as u16,
+                _pad: 0,
+            },
+        );
     }
 
     /// Assign a suffix with smart space management.
@@ -192,7 +305,8 @@ impl SuffixBag {
     ///
     /// Panics if `suffix.len() > u16::MAX` (65535 bytes).
     #[expect(clippy::indexing_slicing, reason = "Checked access")]
-    pub fn try_assign(&mut self, slot: usize, suffix: &[u8]) -> bool {
+    #[expect(clippy::cast_possible_truncation)]
+    pub fn try_assign(&self, slot: usize, suffix: &[u8]) -> bool {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
         let suffix_len: usize = suffix.len();
@@ -203,27 +317,31 @@ impl SuffixBag {
             u16::MAX
         );
 
-        let meta: SlotMeta = self.slots[slot];
+        let meta: SlotMeta = self.load_meta(slot);
 
-        // Fast path: reuse existing slot space if new suffix fits.
+        // Fast path: reuse existing slot space if new suffix fits. In-place
+        // overwrite is only for an exclusively owned bag.
         if meta.has_suffix() && (suffix_len <= (meta.len as usize)) {
             let start: usize = meta.offset as usize;
-            self.data[start..(start + suffix_len)].copy_from_slice(suffix);
 
-            #[expect(clippy::cast_possible_truncation)]
-            {
-                self.slots[slot] = SlotMeta {
+            // SAFETY: Caller has exclusive access.
+            let data: &mut Vec<u8> = unsafe { self.data_mut() };
+            data[start..(start + suffix_len)].copy_from_slice(suffix);
+
+            self.store_meta(
+                slot,
+                SlotMeta {
                     offset: meta.offset,
                     len: suffix_len as u16,
                     _pad: 0,
-                };
-            }
+                },
+            );
 
             return true;
         }
 
         // Try append to end of buffer.
-        if (self.data.len() + suffix_len) <= self.data.capacity() {
+        if (self.used() + suffix_len) <= self.capacity() {
             self.append_and_record(slot, suffix);
             return true;
         }
@@ -231,13 +349,13 @@ impl SuffixBag {
         // Compact and retry.
         self.compact_in_place();
 
-        if (self.data.len() + suffix_len) <= self.data.capacity() {
+        if (self.used() + suffix_len) <= self.capacity() {
             self.append_and_record(slot, suffix);
             return true;
         }
 
         // Still not enough space, grow (aborts on OOM).
-        self.data.reserve(suffix_len);
+        self.reserve(suffix_len);
         self.append_and_record(slot, suffix);
 
         false // Buffer grew
@@ -254,13 +372,10 @@ impl SuffixBag {
     /// Panics if `slot >= 15`.
     #[must_use]
     #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via caller contract"
-    )]
+    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked")]
     pub fn has_suffix(&self, slot: usize) -> bool {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
-        self.slots[slot].has_suffix()
+        self.load_meta(slot).has_suffix()
     }
 
     /// Get the suffix for a slot, or `None` if no suffix.
@@ -270,25 +385,37 @@ impl SuffixBag {
     /// Panics if `slot >= 15`.
     #[must_use]
     #[inline(always)]
+    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked")]
     pub fn get(&self, slot: usize) -> Option<&[u8]> {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
-        let meta: SlotMeta = self.slots[slot];
+        let meta: SlotMeta = self.load_meta(slot);
 
         if !meta.has_suffix() {
             return None;
         }
 
         let start: usize = meta.offset as usize;
-        let end: usize = start + meta.len as usize;
+        let len: usize = meta.len as usize;
+        let end: usize = start.checked_add(len)?;
+        let used: usize = self.used.load(Ordering::Acquire);
 
-        // Torn SlotMeta reads under OCC can produce out-of-range offsets.
+        // A stale/torn read under OCC can produce an out-of-range pair.
         // Return None so the caller's OCC retry handles it safely.
-        if end > self.data.len() {
+        if end > used {
             return None;
         }
 
-        Some(&self.data[start..end])
+        let base: *const u8 = self.data_ptr.load(Ordering::Acquire);
+
+        if base.is_null() {
+            return None;
+        }
+
+        // SAFETY: `start + len <= used`, bytes below `used` are immutable to
+        // concurrent readers (append-only writers write at or after `used`),
+        // and `base` is valid for at least `used` bytes.
+        Some(unsafe { slice::from_raw_parts(base.add(start), len) })
     }
 
     /// Get the suffix for a slot, or empty slice if no suffix.
@@ -317,7 +444,7 @@ impl SuffixBag {
     ///
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
     #[inline]
-    pub fn try_assign_append_only(&mut self, slot: usize, suffix: &[u8]) -> bool {
+    pub fn try_assign_append_only(&self, slot: usize, suffix: &[u8]) -> bool {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
         assert!(
             u16::try_from(suffix.len()).is_ok(),
@@ -340,11 +467,9 @@ impl SuffixBag {
     ///
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
     #[inline]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via assert"
-    )]
-    pub fn try_assign_in_place(&mut self, slot: usize, suffix: &[u8]) -> bool {
+    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked via assert")]
+    #[expect(clippy::cast_possible_truncation, reason = "len checked above")]
+    pub fn try_assign_in_place(&self, slot: usize, suffix: &[u8]) -> bool {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
         assert!(
             u16::try_from(suffix.len()).is_ok(),
@@ -353,20 +478,23 @@ impl SuffixBag {
             u16::MAX
         );
 
-        let meta: SlotMeta = self.slots[slot];
+        let meta: SlotMeta = self.load_meta(slot);
 
         if meta.has_suffix() && (suffix.len() <= (meta.len as usize)) {
             let start: usize = meta.offset as usize;
-            self.data[start..(start + suffix.len())].copy_from_slice(suffix);
 
-            #[expect(clippy::cast_possible_truncation, reason = "len checked above")]
-            {
-                self.slots[slot] = SlotMeta {
+            // SAFETY: Caller has exclusive access.
+            let data: &mut Vec<u8> = unsafe { self.data_mut() };
+            data[start..(start + suffix.len())].copy_from_slice(suffix);
+
+            self.store_meta(
+                slot,
+                SlotMeta {
                     offset: meta.offset,
                     len: suffix.len() as u16,
                     _pad: 0,
-                };
-            }
+                },
+            );
 
             return true;
         }
@@ -379,28 +507,33 @@ impl SuffixBag {
     /// Shared by `try_assign_append_only` and the fallback path of
     /// `try_assign_in_place`.
     #[inline]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked by caller")]
-    fn try_append_suffix(&mut self, slot: usize, suffix: &[u8]) -> bool {
-        let new_offset: usize = self.data.len();
+    #[expect(clippy::cast_possible_truncation, reason = "offset and len checked")]
+    fn try_append_suffix(&self, slot: usize, suffix: &[u8]) -> bool {
+        // SAFETY: Caller has exclusive access.
+        let data: &mut Vec<u8> = unsafe { self.data_mut() };
+        let new_offset: usize = data.len();
 
-        if (new_offset + suffix.len()) <= self.data.capacity() {
-            if !self.slots[slot].has_suffix() {
-                self.suffix_count += 1;
+        if (new_offset + suffix.len()) <= data.capacity() {
+            debug_assert!(
+                StdPtr::eq(data.as_ptr(), self.data_ptr.load(Ordering::Relaxed)),
+                "suffix data pointer changed without reserve"
+            );
+
+            data.extend_from_slice(suffix);
+            self.publish_used(data.len());
+
+            if !self.load_meta(slot).has_suffix() {
+                self.suffix_count.fetch_add(1, Ordering::Relaxed);
             }
 
-            self.data.extend_from_slice(suffix);
-
-            // NOTE: SlotMeta write is non-atomic. Concurrent OCC readers may
-            // observe a torn (offset, len) pair, but they validate the leaf
-            // version after reading, so torn data is always discarded.
-            #[expect(clippy::cast_possible_truncation, reason = "offset and len checked")]
-            {
-                self.slots[slot] = SlotMeta {
+            self.store_meta(
+                slot,
+                SlotMeta {
                     offset: new_offset as u32,
                     len: suffix.len() as u16,
                     _pad: 0,
-                };
-            }
+                },
+            );
 
             return true;
         }
@@ -414,11 +547,9 @@ impl SuffixBag {
     ///
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
     #[inline]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via assert"
-    )]
-    pub fn assign(&mut self, slot: usize, suffix: &[u8]) {
+    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked via assert")]
+    #[expect(clippy::cast_possible_truncation, reason = "offset and len checked")]
+    pub fn assign(&self, slot: usize, suffix: &[u8]) {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
         assert!(
             u16::try_from(suffix.len()).is_ok(),
@@ -427,26 +558,30 @@ impl SuffixBag {
             u16::MAX
         );
 
-        let meta: SlotMeta = self.slots[slot];
+        // SAFETY: Caller has exclusive access.
+        let data: &mut Vec<u8> = unsafe { self.data_mut() };
+        let offset: usize = data.len();
+        data.extend_from_slice(suffix);
 
-        if !meta.has_suffix() {
-            self.suffix_count += 1;
+        if !StdPtr::eq(data.as_ptr(), self.data_ptr.load(Ordering::Relaxed)) {
+            self.data_ptr
+                .store(data.as_ptr().cast_mut(), Ordering::Release);
         }
 
-        let offset: usize = self.data.len();
-        self.data.extend_from_slice(suffix);
+        self.publish_used(data.len());
 
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "offset bounded by Vec capacity, len checked above"
-        )]
-        {
-            self.slots[slot] = SlotMeta {
+        if !self.load_meta(slot).has_suffix() {
+            self.suffix_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.store_meta(
+            slot,
+            SlotMeta {
                 offset: offset as u32,
                 len: suffix.len() as u16,
                 _pad: 0,
-            };
-        }
+            },
+        );
     }
 
     /// Clear the suffix for a slot.
@@ -455,18 +590,15 @@ impl SuffixBag {
     ///
     /// Panics if `slot >= 15`.
     #[inline(always)]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "Slot bounds checked via assert"
-    )]
-    pub fn clear(&mut self, slot: usize) {
+    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked via assert")]
+    pub fn clear(&self, slot: usize) {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
-        if self.slots[slot].has_suffix() {
-            self.suffix_count -= 1;
+        if self.load_meta(slot).has_suffix() {
+            self.suffix_count.fetch_sub(1, Ordering::Relaxed);
         }
 
-        self.slots[slot] = SlotMeta::EMPTY;
+        self.store_meta(slot, SlotMeta::EMPTY);
     }
 
     // ========================================================================
@@ -488,6 +620,15 @@ impl SuffixBag {
     }
 }
 
+impl Debug for SuffixBag {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SuffixBag")
+            .field("used", &self.used())
+            .field("count", &self.count())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for SuffixBag {
     #[inline(always)]
     fn default() -> Self {
@@ -503,7 +644,10 @@ impl Default for SuffixBag {
 ///
 /// Provides `UnsafeCell`-based access so that writers (under the leaf lock)
 /// can mutate through `&self` while readers form `&SuffixBag` for read-only
-/// access under the OCC protocol.
+/// access under the OCC protocol. Writers use [`as_writer`](Self::as_writer);
+/// the returned reference is shared, and every mutation goes through the
+/// bag's own atomic/interior-mutable fields. A `&mut SuffixBag` is never
+/// created while readers may hold `&SuffixBag`.
 ///
 /// This type is NOT publicly exported. It exists solely to eliminate the
 /// `&mut SuffixBag` / `&SuffixBag` aliasing UB in the tree's concurrent paths.
@@ -511,11 +655,10 @@ pub struct SuffixBagCell {
     inner: UnsafeCell<SuffixBag>,
 }
 
-// SAFETY: SuffixBagCell is Send because SuffixBag contains Vec<u8> and plain
-// data, all of which are Send. We intentionally do NOT implement Sync. The
-// tree accesses SuffixBagCell only through raw pointers from AtomicPtr, forming
-// short-lived references locally. Writers hold the leaf lock, readers validate
-// via OCC version checks.
+// SAFETY: SuffixBagCell is Send because SuffixBag is Send. We intentionally do
+// NOT implement Sync. The tree accesses SuffixBagCell only through raw pointers
+// from AtomicPtr, forming short-lived references locally. Writers hold the leaf
+// lock; readers validate via OCC version checks.
 unsafe impl Send for SuffixBagCell {}
 
 impl SuffixBagCell {
@@ -539,27 +682,25 @@ impl SuffixBagCell {
     ///
     /// # Safety
     ///
-    /// Caller must ensure no concurent `as_mut()` call is active on the same
-    /// cell, OR that the access is protected by OCC (readers validate version
-    /// after reading).
+    /// Caller must ensure the bag is not being replaced or freed concurrently.
+    /// Readers rely on the leaf's OCC protocol; all bag metadata is atomic.
     #[inline(always)]
     pub(crate) unsafe fn as_ref(&self) -> &SuffixBag {
-        // SAFETY: Caller guarantees no concurrent mutable access, or access
-        // is protected by OCC protocol.
+        // SAFETY: Caller guarantees the cell is live.
         unsafe { &*self.inner.get() }
     }
 
-    /// Get a mutable reference for write access.
+    /// Get shared access for mutation under the leaf lock.
     ///
     /// # Safety
     ///
-    /// Caller must hold the leaf lock (exclusive write access).
+    /// Caller must hold the leaf lock (exclusive write access). The returned
+    /// shared reference only exposes the bag's interior-mutable writer API.
     #[inline(always)]
-    #[expect(clippy::mut_from_ref, reason = "Interior mutability via UnsafeCell")]
-    pub(crate) unsafe fn as_mut(&self) -> &mut SuffixBag {
-        // SAFETY: Caller holds the leaf lock, guaranteeing exclusive write
-        // access. UnsafeCell allows forming &mut through &self.
-        unsafe { &mut *self.inner.get() }
+    pub(crate) unsafe fn as_writer(&self) -> &SuffixBag {
+        // SAFETY: Caller holds the leaf lock; all writes go through atomics and
+        // `UnsafeCell` fields inside the bag.
+        unsafe { &*self.inner.get() }
     }
 }
 

@@ -2,6 +2,8 @@
 //  Compaction
 // ========================================================================
 
+use std::sync::atomic::Ordering;
+
 use arrayvec::ArrayVec;
 
 use super::{PermutationProvider, SlotMeta, SuffixBag, WIDTH};
@@ -17,13 +19,18 @@ struct CompactEntry {
 impl SuffixBag {
     /// Compact in-place by moving data within the existing buffer.
     ///
-    /// Only reachable via `SuffixBag::try_assign(&mut self, ...)`, which
-    /// guarantees exclusive access. Not used in concurrent code paths
-    /// (those use `try_assign_append_only` + drain-and-rebuild).
+    /// Only reachable while the bag is exclusively owned: `try_assign` on an
+    /// unpublished bag, or the drain-and-rebuild path while the leaf lock is
+    /// held and readers validate with OCC. Not used for append-only concurrent
+    /// assignment.
     #[expect(clippy::indexing_slicing, reason = "Bounds checked via slot iteration")]
-    pub(super) fn compact_in_place(&mut self) {
-        if self.suffix_count == 0 {
-            self.data.clear();
+    pub(super) fn compact_in_place(&self) {
+        if self.count() == 0 {
+            let data_ptr: *mut Vec<u8> = self.data.get();
+            // SAFETY: Caller has exclusive write access.
+            let data: &mut Vec<u8> = unsafe { &mut *data_ptr };
+            data.clear();
+            self.publish_used(0);
             return;
         }
 
@@ -32,7 +39,7 @@ impl SuffixBag {
         let mut last_offset: u32 = 0;
 
         for slot in 0..WIDTH {
-            let meta: SlotMeta = self.slots[slot];
+            let meta: SlotMeta = self.load_meta(slot);
 
             if meta.has_suffix() {
                 if meta.offset < last_offset {
@@ -49,8 +56,12 @@ impl SuffixBag {
         }
 
         if entries.is_empty() {
-            self.data.clear();
-            self.suffix_count = 0;
+            let data_ptr: *mut Vec<u8> = self.data.get();
+            // SAFETY: Caller has exclusive write access.
+            let data: &mut Vec<u8> = unsafe { &mut *data_ptr };
+            data.clear();
+            self.publish_used(0);
+            self.suffix_count.store(0, Ordering::Release);
             return;
         }
 
@@ -58,6 +69,9 @@ impl SuffixBag {
             entries.sort_unstable_by_key(|e: &CompactEntry| e.offset);
         }
 
+        let data_ptr: *mut Vec<u8> = self.data.get();
+        // SAFETY: Caller has exclusive write access.
+        let data: &mut Vec<u8> = unsafe { &mut *data_ptr };
         let mut write_pos: usize = 0;
 
         for entry in &entries {
@@ -69,11 +83,14 @@ impl SuffixBag {
             if entry.len == 0 {
                 #[expect(clippy::cast_possible_truncation)]
                 {
-                    self.slots[entry.slot] = SlotMeta {
-                        offset: write_pos as u32,
-                        len: 0,
-                        _pad: 0,
-                    };
+                    self.store_meta(
+                        entry.slot,
+                        SlotMeta {
+                            offset: write_pos as u32,
+                            len: 0,
+                            _pad: 0,
+                        },
+                    );
                 }
                 continue;
             }
@@ -84,28 +101,32 @@ impl SuffixBag {
             );
 
             if write_pos != src_start {
-                self.data.copy_within(src_start..src_end, write_pos);
+                data.copy_within(src_start..src_end, write_pos);
             }
 
             #[expect(clippy::cast_possible_truncation)]
             {
-                self.slots[entry.slot] = SlotMeta {
-                    offset: write_pos as u32,
-                    len: entry.len,
-                    _pad: 0,
-                };
+                self.store_meta(
+                    entry.slot,
+                    SlotMeta {
+                        offset: write_pos as u32,
+                        len: entry.len,
+                        _pad: 0,
+                    },
+                );
             }
 
             write_pos += entry.len as usize;
         }
 
-        self.data.truncate(write_pos);
+        data.truncate(write_pos);
+        self.publish_used(write_pos);
     }
 
     /// Compact keeping only specified active slots, using in-place moves.
     #[expect(clippy::indexing_slicing, reason = "Slot bounds explicitly checked")]
-    pub(super) fn compact(&mut self, active_slots: impl Iterator<Item = usize>) -> usize {
-        let old_used: usize = self.data.len();
+    pub(super) fn compact(&self, active_slots: impl Iterator<Item = usize>) -> usize {
+        let old_used: usize = self.used();
         let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
         let mut seen: u64 = 0;
         let mut already_sorted: bool = true;
@@ -129,7 +150,7 @@ impl SuffixBag {
 
             seen |= mask;
 
-            let meta: SlotMeta = self.slots[slot];
+            let meta: SlotMeta = self.load_meta(slot);
 
             if meta.has_suffix() {
                 if meta.offset < last_offset {
@@ -146,9 +167,16 @@ impl SuffixBag {
         }
 
         if entries.is_empty() {
-            self.data.clear();
-            self.slots = [SlotMeta::EMPTY; WIDTH];
-            self.suffix_count = 0;
+            let data_ptr: *mut Vec<u8> = self.data.get();
+            // SAFETY: Caller has exclusive write access.
+            let data: &mut Vec<u8> = unsafe { &mut *data_ptr };
+            data.clear();
+            self.publish_used(0);
+
+            for slot in 0..WIDTH {
+                self.store_meta(slot, SlotMeta::EMPTY);
+            }
+            self.suffix_count.store(0, Ordering::Release);
             return old_used;
         }
 
@@ -158,6 +186,9 @@ impl SuffixBag {
 
         let mut new_slots: [SlotMeta; WIDTH] = [SlotMeta::EMPTY; WIDTH];
 
+        let data_ptr: *mut Vec<u8> = self.data.get();
+        // SAFETY: Caller has exclusive write access.
+        let data: &mut Vec<u8> = unsafe { &mut *data_ptr };
         let mut write_pos: usize = 0;
 
         for entry in &entries {
@@ -184,7 +215,7 @@ impl SuffixBag {
             );
 
             if write_pos != src_start {
-                self.data.copy_within(src_start..src_end, write_pos);
+                data.copy_within(src_start..src_end, write_pos);
             }
 
             #[expect(clippy::cast_possible_truncation)]
@@ -199,12 +230,17 @@ impl SuffixBag {
             write_pos += entry.len as usize;
         }
 
-        self.data.truncate(write_pos);
-        self.slots = new_slots;
+        data.truncate(write_pos);
+        self.publish_used(write_pos);
+
+        for slot in 0..WIDTH {
+            self.store_meta(slot, new_slots[slot]);
+        }
 
         #[expect(clippy::cast_possible_truncation)]
         {
-            self.suffix_count = entries.len() as u8;
+            self.suffix_count
+                .store(entries.len() as u8, Ordering::Release);
         }
 
         old_used.saturating_sub(write_pos)
@@ -216,7 +252,7 @@ impl SuffixBag {
     ///
     /// The number of bytes reclaimed.
     pub fn compact_with_permuter<P: PermutationProvider>(
-        &mut self,
+        &self,
         perm: &P,
         exclude_slot: Option<usize>,
     ) -> usize {

@@ -72,18 +72,18 @@ impl SuffixSidecar {
 
     /// Get or create external storage.
     ///
-    /// Returns a mutable reference to the inner `SuffixBag` for test use.
+    /// Returns shared access to the inner `SuffixBag` for test use.
     ///
     /// # Safety
     ///
     /// Caller must have exclusive access (test-only).
     #[expect(clippy::mut_from_ref, reason = "Interior mutability via UnsafeCell")]
-    pub unsafe fn ensure_external(&self) -> &mut super::SuffixBag {
+    pub unsafe fn ensure_external(&self) -> &super::SuffixBag {
         let ptr: *mut SuffixBagCell = self.external.load(Ordering::Acquire);
 
         if !ptr.is_null() {
             // SAFETY: Caller has exclusive access.
-            return unsafe { (*ptr).as_mut() };
+            return unsafe { (*ptr).as_writer() };
         }
 
         let new_cell: Box<SuffixBagCell> = Box::default();
@@ -91,7 +91,7 @@ impl SuffixSidecar {
         self.external.store(new_ptr, Ordering::Release);
 
         // SAFETY: Just allocated, caller has exclusive access.
-        unsafe { (*new_ptr).as_mut() }
+        unsafe { (*new_ptr).as_writer() }
     }
 
     /// Check if slot has a suffix (inline or external).

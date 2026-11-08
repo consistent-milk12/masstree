@@ -254,9 +254,9 @@ impl InlineSuffixBag {
         let headroom: usize = WIDTH.saturating_sub(copy_count + 1) * avg_suffix;
         let target_capacity: usize = required_capacity + headroom;
 
-        let mut external: SuffixBag = match buffer {
+        let external: SuffixBag = match buffer {
             Some(vec) => {
-                let mut bag: SuffixBag = SuffixBag::from_vec(vec);
+                let bag: SuffixBag = SuffixBag::from_vec(vec);
                 if bag.capacity() < target_capacity {
                     bag.reserve(target_capacity.saturating_sub(bag.used()));
                 }
