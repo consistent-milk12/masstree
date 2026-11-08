@@ -1562,59 +1562,65 @@ impl<P: LeafPolicy> LeafNode15<P> {
             }
         }
 
-        // SAFETY: Called during insert with lock held, unguarded access is safe.
+        // INS-01: the prepend fast path is only valid on a strict ikey
+        // boundary. Two adjacent slots may share an ikey (terminal lengths or
+        // terminal + suffix); splitting between them would put a key equal to
+        // the parent separator on the left, where routing can never reach it.
         if insert_pos == 0 && unsafe { self.prev_unguarded() }.is_null() && size > 1 {
+            let first_ikey: u64 = self.ikey(perm.get(0));
             let split_slot: usize = perm.get(1);
             let split_ikey: u64 = self.ikey(split_slot);
 
-            if split_ikey != insert_ikey {
+            if split_ikey != insert_ikey && split_ikey != first_ikey {
                 return Some(SplitPoint { pos: 1, split_ikey });
             }
         }
 
-        let mut split_pos: usize = size / 2;
+        // Choose a split position on a strict ikey boundary: the left leaf's
+        // last ikey must be strictly less than the right leaf's first ikey, so
+        // the parent separator (the right first ikey) is a true lower bound.
+        // Start near the midpoint and walk outward to the nearest boundary.
+        let is_boundary = |pos: usize| -> bool {
+            pos > 0 && pos < size && self.ikey(perm.get(pos - 1)) != self.ikey(perm.get(pos))
+        };
 
-        if split_pos == 0 {
-            split_pos = 1;
-        }
+        let mut split_pos: usize = (size / 2).max(1);
 
-        while split_pos > 0 && split_pos < size {
-            let left_slot: usize = perm.get(split_pos - 1);
-            let right_slot: usize = perm.get(split_pos);
-            let left_ikey: u64 = self.ikey(left_slot);
-            let right_ikey: u64 = self.ikey(right_slot);
+        if !is_boundary(split_pos) {
+            let mut left_candidate: usize = split_pos;
 
-            if left_ikey == right_ikey {
-                match insert_ikey.cmp(&left_ikey) {
-                    Ordering::Equal => {
-                        split_pos += 1;
-                    }
+            while left_candidate > 1 && !is_boundary(left_candidate) {
+                left_candidate -= 1;
+            }
 
-                    Ordering::Less | Ordering::Greater => {
-                        split_pos -= 1;
+            let mut right_candidate: usize = split_pos;
+
+            while right_candidate < size && !is_boundary(right_candidate) {
+                right_candidate += 1;
+            }
+
+            let left_ok: bool = is_boundary(left_candidate);
+            let right_ok: bool = is_boundary(right_candidate);
+
+            split_pos = match (left_ok, right_ok) {
+                (true, true) => {
+                    if (split_pos - left_candidate) <= (right_candidate - split_pos) {
+                        left_candidate
+                    } else {
+                        right_candidate
                     }
                 }
-            } else {
-                break;
-            }
-        }
 
-        if insert_pos == split_pos && split_pos > 0 {
-            let last_left_slot: usize = perm.get(split_pos - 1);
-
-            if self.ikey(last_left_slot) == insert_ikey {
-                split_pos -= 1;
-
-                while split_pos > 0 {
-                    let check_slot: usize = perm.get(split_pos - 1);
-
-                    if self.ikey(check_slot) != insert_ikey {
-                        break;
-                    }
-
-                    split_pos -= 1;
+                (true, false) => left_candidate,
+                (false, true) => right_candidate,
+                (false, false) => {
+                    // A full leaf cannot consist of a single ikey run: terminal
+                    // lengths alone are at most 9 entries per ikey, plus at most
+                    // one suffix key. Keep the old midpoint as a defensive
+                    // fallback rather than returning None.
+                    split_pos
                 }
-            }
+            };
         }
 
         if split_pos == 0 || split_pos >= size {

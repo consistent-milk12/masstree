@@ -88,10 +88,23 @@ where
         logical_pos: usize,
         ikey: u64,
     ) -> Result<SplitPreparation, InsertError> {
-        // Calculate split point - may fail if leaf state is corrupted
-        let split_point: SplitPoint = left_leaf
-            .calculate_split_point(logical_pos, ikey)
-            .ok_or(InsertError::SplitFailed)?;
+        // Calculate the split point. The only remaining failure is an empty
+        // leaf, which cannot happen when a full leaf is being split. Fall back
+        // to a midpoint split instead of panicking so a public `insert` never
+        // aborts on `SplitFailed`.
+        let split_point: SplitPoint = left_leaf.calculate_split_point(logical_pos, ikey).unwrap_or_else(
+            || {
+                let size: usize = left_leaf.size();
+                debug_assert!(size > 1, "split of a leaf with {size} entries");
+                let pos: usize = (size / 2).clamp(1, size.saturating_sub(1));
+                let slot: usize = left_leaf.permutation().get(pos);
+
+                SplitPoint {
+                    pos,
+                    split_ikey: left_leaf.ikey(slot),
+                }
+            },
+        );
 
         // =========================================================================
         // CRITICAL: Capture root status BEFORE mark_split
