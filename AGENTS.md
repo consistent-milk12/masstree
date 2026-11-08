@@ -10,7 +10,7 @@ invariants change.
 a trie of B+trees with concurrent OCC readers, leaf/internode locks, B-link
 siblings, EBR reclamation, inline or boxed values, and optional suffix storage.
 
-- Crate: `masstree` 0.9.5, Rust edition 2024.
+- Crate: `masstree` 1.0.0, Rust edition 2024.
 - Public aliases: `MassTree` = `MassTree15Inline` (inline values);
   `MassTree15` = boxed small-value `BoxPolicy`/sidecar-suffix tree.
 - Default feature: `debug-print`.
@@ -20,9 +20,8 @@ siblings, EBR reclamation, inline or boxed values, and optional suffix storage.
 - Audit findings and fix order: `SystemAudit.md`.
 - Reproducible failure corpus: `failures/` (intentionally failing programs).
 
-Do not assume comments or `ARCHITECTURE.md` are correct. The audit found
-several architecture claims contradicted by the code. Verify against source and
-tests.
+Do not assume comments or `ARCHITECTURE.md` are correct. The audit found several
+architecture claims contradicted by the code. Verify against source and tests.
 
 ## 2. First steps for any task
 
@@ -30,8 +29,8 @@ tests.
 2. If the task is a bug fix, search `failures/` for an existing reproducer.
    Prefer extending an existing reproducer over writing a new stress test.
 3. Read the actual call paths in `src/`; do not trust names such as
-   `is_value_empty`, `is_layer`, `assign_init`, or `has_changed` without checking
-   their implementation.
+   `is_value_empty`, `is_layer`, `assign_init`, or `has_changed` without
+   checking their implementation.
 4. Make a focused regression test that fails for the expected reason before
    changing behavior.
 5. Keep changes minimal and subsystem-local unless the fix requires a protocol
@@ -84,11 +83,12 @@ cargo +nightly miri test --test leak_tests
 cargo +nightly miri run --bin <failure-bin>
 ```
 
-Use `MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check"`.
-Miri does not model all weak-memory reorderings; see `OCC-03` in the audit.
+Use `MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check"`. Miri
+does not model all weak-memory reorderings; see `OCC-03` in the audit.
 
 Never run the entire `failures/` corpus in one process. Several binaries
-intentionally abort, hang, or trigger UB. Use `timeout` and a disposable process.
+intentionally abort, hang, or trigger UB. Use `timeout` and a disposable
+process.
 
 ## 4. Repository map
 
@@ -132,14 +132,15 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
   - `KSUF_KEYLENX` (64): suffix is stored in the suffix store;
   - `>= LAYER_KEYLENX` (128): slot is a layer pointer, not a value.
 - A layer conversion is a structural mutation: it clears the old value/suffix
-  and changes `keylenx` before publishing the layer pointer. OCC readers must not
-  accept a partial conversion.
+  and changes `keylenx` before publishing the layer pointer. OCC readers must
+  not accept a partial conversion.
 
 ### Layer roots
 
-- On promotion, the parent slot continues to point at the original **left leaf**;
-  the true layer root is an internode reached by climbing `parent` pointers.
-  This invariant is the source of several bugs (`RNG-04`, `GC-02`).
+- On promotion, the parent slot continues to point at the original
+  **left leaf**; the true layer root is an internode reached by climbing
+  `parent` pointers. This invariant is the source of several bugs (`RNG-04`,
+  `GC-02`).
 - Any code that assumes a layer-slot pointer is a leaf must either climb to the
   root or explicitly reject promoted layers.
 
@@ -159,9 +160,8 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
 - `NodeVersion::stable()`/`has_changed()` are the reader validation primitives.
   Current `has_changed` deliberately ignores `LOCK_BIT | INSERTING_BIT`
   (`OCC-02`); changing it requires auditing every read path.
-- New-slot inserts currently skip `mark_insert` in the normal state
-  (`OCC-01`); do not rely on the version word changing after an insert until
-  this is fixed.
+- New-slot inserts currently skip `mark_insert` in the normal state (`OCC-01`);
+  do not rely on the version word changing after an insert until this is fixed.
 - Writers must publish slot/value/keylenx/permutation before the Release unlock;
   readers must validate after loading the data. See `OCC-03` for the weak-memory
   fence problem.
@@ -179,14 +179,14 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
 - `move_value_to`/`move_value_to_relaxed` copy the pointer without clearing the
   source. The caller must clear/retire correctly; the safe public method is
   currently a soundness hole (`SAFE-04`).
-- Write-through values are mutated atomically in place; do not add a plain
-  `&V` accessor without using `atomic_read_value`.
+- Write-through values are mutated atomically in place; do not add a plain `&V`
+  accessor without using `atomic_read_value`.
 
 ### Suffix storage
 
-- Inline suffix metadata is atomic; external `SuffixBag` metadata and
-  `Vec::len` are currently plain and race with lock-free readers
-  (`SAFE-06`). Do not add more non-atomic reader-visible fields.
+- Inline suffix metadata is atomic; external `SuffixBag` metadata and `Vec::len`
+  are currently plain and race with lock-free readers (`SAFE-06`). Do not add
+  more non-atomic reader-visible fields.
 - Published bags must never reallocate. Capacity checks before append are
   required; growing is only for unpublished/exclusively owned leaves.
 - `assign_init` requires an unpublished/exclusively owned leaf, not merely a
@@ -209,8 +209,8 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
 - Every `unsafe` block needs a `// SAFETY:` comment naming the invariant,
   lifetime, and ownership argument.
 - Do not introduce safe public APIs that return raw pointers, raw nodes, or
-  unguarded values. If a raw API is required for internals, keep it
-  `pub(crate)` and document the precondition.
+  unguarded values. If a raw API is required for internals, keep it `pub(crate)`
+  and document the precondition.
 - Keep the leaf/internode layout stable unless the change includes compile-time
   size/offset assertions and updates to `src/leaf15/layout.rs` or
   `src/internode/layout.rs`.
@@ -227,10 +227,10 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
 
 ### Regression tests
 
-- Use a `BTreeMap` model for sequential behavior; compare keys, values, len,
-  and ordered iteration.
-- For a concurrency bug, use a barrier and a bounded watchdog; do not use
-  sleeps as the primary synchronization.
+- Use a `BTreeMap` model for sequential behavior; compare keys, values, len, and
+  ordered iteration.
+- For a concurrency bug, use a barrier and a bounded watchdog; do not use sleeps
+  as the primary synchronization.
 - For a hang, run the test with `timeout` and assert a sentinel/exit code.
 - For ownership bugs, use a `Drop` counter and/or Miri; a plain value assertion
   does not detect double-free.
@@ -253,8 +253,8 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
 
 ### Miri/Loom
 
-- Miri is required for safe-API pointer/ownership claims. It is not a
-  substitute for weak-memory litmus tests.
+- Miri is required for safe-API pointer/ownership claims. It is not a substitute
+  for weak-memory litmus tests.
 - The current Loom tests model `NodeVersion` and a simplified suffix word, not
   the real leaf or `SuffixBag`. Do not claim Loom coverage of a protocol unless
   the model actually includes it.
@@ -304,8 +304,8 @@ A change is ready only when:
 - [ ] Relevant `cargo test --lib` / integration tests pass.
 - [ ] Feature builds relevant to the touched code pass.
 - [ ] Miri/Loom is run for ownership/concurrency changes.
-- [ ] No new safe-API unsoundness, `unsafe` block without a proof, or
-      debug-only precondition is introduced.
+- [ ] No new safe-API unsoundness, `unsafe` block without a proof, or debug-only
+      precondition is introduced.
 - [ ] Public API/docs/semver impact is noted.
 - [ ] `SystemAudit.md` and/or `failures/README.md` are updated if the audit
       status changes.

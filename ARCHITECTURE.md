@@ -1,7 +1,7 @@
 # Masstree (Rust) — Architecture
 
 > **Scope.** This document describes the architecture of the Masstree implementation in this
-> repository (crate `masstree`, version **0.9.5**, Rust edition 2024). It is an independent Rust
+> repository (crate `masstree`, version **1.0.0**, Rust edition 2024). It is an independent Rust
 > implementation of the Masstree design — a trie of B+ trees — not a line-by-line port of the
 > original C++ code. The document covers the source layout, data representation, concurrency
 > protocol, every major operation, storage policies, reclamation, the public API, invariants, test
@@ -2153,6 +2153,6 @@ These are architectural observations worth keeping in mind when modifying the co
 
 ---
 
-_Document generated from the v0.9.5 source tree. When changing the implementation, update the
+_Document generated from the v1.0.0 source tree. When changing the implementation, update the
 corresponding sections and, where applicable, the compile-time layout assertions in
 `src/leaf15/layout.rs` and `src/internode/layout.rs`._
