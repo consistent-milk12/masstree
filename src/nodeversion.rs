@@ -421,27 +421,26 @@ impl NodeVersion {
 
     /// Check if the version has changed since `old`.
     ///
-    /// Returns true if any version counter bits changed (ignoring lock/inserting bits).
+    /// Returns true if any version counter bits changed, or if the writer has
+    /// marked the node dirty (INSERTING or SPLITTING). Only a pure lock bit
+    /// change is ignored, matching the C++ reference implementation.
     ///
-    /// # C++ Divergence (INTENTIONAL)
-    ///
-    /// C++ uses `(x.v_ ^ v_) > lock_bit` (ignores bit 0).
-    /// We use `> (LOCK_BIT | INSERTING_BIT)` (ignores bits 0-1).
-    ///
-    /// This is safe because version COUNTERS (VINSERT/VSPLIT) are the source of truth.
-    /// `INSERTING_BIT` is only a progress indicator set while modifications are in-flight
-    /// (not yet visible). If writer acquires lock after `stable()` but before this check,
-    /// no data has been modified yet so returning false is correct. If writer has released,
-    /// the version counter increment is detected.
+    /// A reader that snapshotted before a writer set `INSERTING_BIT` must retry:
+    /// the writer may be reinterpreting an existing slot (layer conversion,
+    /// value removal) while the version counter has not changed yet.
     ///
     /// # Ordering
     ///
-    /// The Acquire load ensures all prior field reads are ordered before the
-    /// version check on all architectures, not just x86/TSO.
+    /// The Acquire fence before the final version load is a load-load barrier:
+    /// it prevents the reader's data loads from being reordered after the
+    /// validation load on weak-memory targets. An Acquire load alone orders
+    /// later operations, not earlier ones, so it is insufficient here.
     #[must_use]
     #[inline(always)]
     pub fn has_changed(&self, old: u32) -> bool {
-        (old ^ self.value.load(Ordering::Acquire)) > (LOCK_BIT | INSERTING_BIT)
+        fence(Ordering::Acquire);
+
+        (old ^ self.value.load(Ordering::Relaxed)) > LOCK_BIT
     }
 
     /// Check if a split has occurred since `old`.
@@ -450,7 +449,9 @@ impl NodeVersion {
     #[must_use]
     #[inline(always)]
     pub fn has_split(&self, old: u32) -> bool {
-        (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
+        fence(Ordering::Acquire);
+
+        (old ^ self.value.load(Ordering::Relaxed)) >= VSPLIT_LOWBIT
     }
 
     /// Identical to [`has_split()`](Self::has_split). Both now use Acquire loads.
@@ -458,7 +459,7 @@ impl NodeVersion {
     #[must_use]
     #[inline(always)]
     pub fn has_split_no_compiler_fence(&self, old: u32) -> bool {
-        (old ^ self.value.load(Ordering::Acquire)) >= VSPLIT_LOWBIT
+        self.has_split(old)
     }
 
     /// Stronger than [`has_changed()`](Self::has_changed): also returns true if
@@ -466,9 +467,11 @@ impl NodeVersion {
     #[must_use]
     #[inline(always)]
     pub fn has_changed_or_locked(&self, old: u32) -> bool {
-        let current: u32 = self.value.load(Ordering::Acquire);
+        fence(Ordering::Acquire);
 
-        if (old ^ current) > (LOCK_BIT | INSERTING_BIT) {
+        let current: u32 = self.value.load(Ordering::Relaxed);
+
+        if (old ^ current) > LOCK_BIT {
             return true;
         }
 
