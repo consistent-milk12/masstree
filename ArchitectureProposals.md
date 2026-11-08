@@ -27,7 +27,7 @@ implementation must verify those observations against the current source.
 | 2 | Proposal 4: batch/Extend pipeline, write-through, Entry leaf hints | Preconstructed updates 6 → 3 allocations; guarded updates 264 → 0; Entry avoids a second descent | Complete |
 | 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Shared root/descent/B-link kernels; cached roots give zero parent hops; native and Miri coverage | Complete |
 | 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Aligned slots retain leaf sizes; 607 library tests, 15 Loom models and focused Miri pass | Complete |
-| 5 | Proposal 5: stack remove routes and remove cleanup | Zero-allocation non-emptying layered removal | Pending |
+| 5 | Proposal 5: stack remove routes and remove cleanup | 32-byte / maximum-depth removal: 1 / 4 route allocations per key → 0; native and Miri | Complete |
 | 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, layer contention tests, feature checks | Pending |
 | 7 | Proposal 1: shared validated scan kernel and direction-parametric engine | All scan APIs against BTreeMap; concurrent reverse scans and Miri | Pending |
 
@@ -121,6 +121,18 @@ The mutation helpers are unsafe crate-internal and their unused public trait
 forwarders are removed (semver-relevant); a compile-fail doctest checks the
 boundary. All 15 Loom models, 26 internode Miri tests, native split/concurrency
 tests and strict feature checks pass. Proposal 6 is complete.
+
+Completed within step 5: removal routes use `ArrayVec<u64, 31>` and remain in
+the remove loop, avoiding both allocation and copies into the result enum.
+Only deferred sublayer GC owns a boxed route; shortening happens on that cold
+path. The counting-allocator regression failed at [8, 8, 32, 32] allocations
+for eight nonempty removals (boxed/inline, 32/256-byte keys) and now reports
+[0, 0, 0, 0], including under Miri. It also compares remaining keys/values with
+BTreeMap and exercises deep queued cleanup. Unused allocator/guard parameters
+and the public remove-mode methods/trait forwarders are deleted. The proposed
+`kp` deletion was stale: the slot is required by post-lock identity validation,
+so it remains and its obsolete dead-code allowance is removed. Proposal 5 is
+complete; native removal/concurrency tests and feature/Clippy checks pass.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

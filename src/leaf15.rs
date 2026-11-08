@@ -66,9 +66,6 @@ pub const MATCH_RESULT_LAYER: i32 = -(IKEY_SIZE as i32);
 /// Modification state: node is in insert mode (normal operation).
 pub const MODSTATE_INSERT: u8 = 0;
 
-/// Modification state: node is being removed.
-pub const MODSTATE_REMOVE: u8 = 1;
-
 /// Modification state: node's layer has been deleted.
 pub const MODSTATE_DELETED_LAYER: u8 = 2;
 
@@ -89,7 +86,7 @@ pub struct LeafNode15<P: LeafPolicy> {
     // — Cache Line 0: read-heavy, rarely written —
     /// OCC version word.
     version: NodeVersion,
-    /// Lifecycle state: INSERT(0) / REMOVE(1) / `DELETED_LAYER`(2) / EMPTY(3).
+    /// Lifecycle state: INSERT(0) / `DELETED_LAYER`(2) / EMPTY(3); value 1 is reserved.
     modstate: AtomicU8,
     pad0: [u8; 55],
 
@@ -1431,24 +1428,6 @@ impl<P: LeafPolicy> LeafNode15<P> {
         );
     }
 
-    /// Mark this node as being in remove mode. Preserves queued bit.
-    #[inline(always)]
-    pub fn mark_remove(&self) {
-        let old: u8 = self.modstate.load(RELAXED);
-
-        self.modstate.store(
-            (old & MODSTATE_QUEUED_BIT) | MODSTATE_REMOVE,
-            AtomicOrdering::Release,
-        );
-    }
-
-    /// Check if this node is in remove mode.
-    #[must_use]
-    #[inline(always)]
-    pub fn is_removing(&self) -> bool {
-        self.modstate_value() == MODSTATE_REMOVE
-    }
-
     // ============================================================================
     //  Empty State (for lazy coalescing)
     // ============================================================================
@@ -2476,16 +2455,6 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
     #[inline(always)]
     fn mark_deleted_layer(&self) {
         self.mark_deleted_layer();
-    }
-
-    #[inline(always)]
-    fn mark_remove(&self) {
-        self.mark_remove();
-    }
-
-    #[inline(always)]
-    fn is_removing(&self) -> bool {
-        self.is_removing()
     }
 
     #[inline(always)]

@@ -1,7 +1,7 @@
 //! Unit tests for [`LeafNode15`] methods.
 
 use super::LeafNode15;
-use crate::leaf15::{MODSTATE_DELETED_LAYER, MODSTATE_EMPTY, MODSTATE_INSERT, MODSTATE_REMOVE};
+use crate::leaf15::{MODSTATE_DELETED_LAYER, MODSTATE_EMPTY, MODSTATE_INSERT};
 use crate::policy::BoxPolicy;
 
 // ========================================================================
@@ -73,7 +73,6 @@ fn test_modstate_queued_bit_lifecycle() {
     // Initial state: INSERT, not queued.
     assert!(!leaf.is_queued());
     assert!(!leaf.is_empty_state());
-    assert!(!leaf.is_removing());
     assert!(!leaf.deleted_layer());
 
     // Mark queued. First call returns true (was not queued).
@@ -85,7 +84,6 @@ fn test_modstate_queued_bit_lifecycle() {
 
     // Lifecycle checks still work with queued bit set.
     assert!(!leaf.is_empty_state());
-    assert!(!leaf.is_removing());
     assert!(!leaf.deleted_layer());
 }
 
@@ -96,16 +94,10 @@ fn test_modstate_transitions_preserve_queued_bit() {
     // Set queued bit first.
     assert!(leaf.try_mark_queued());
 
-    // REMOVE transition preserves queued.
-    leaf.mark_remove();
-    assert!(leaf.is_removing());
-    assert!(leaf.is_queued());
-
     // EMPTY transition preserves queued.
     leaf.mark_empty();
     assert!(leaf.is_empty_state());
     assert!(leaf.is_queued());
-    assert!(!leaf.is_removing());
 
     // DELETED_LAYER transition preserves queued.
     leaf.mark_deleted_layer();
@@ -148,13 +140,11 @@ fn test_modstate_clear_queued_preserves_value() {
 fn test_modstate_value_constants() {
     // Verify constants don't overlap with queued bit.
     assert_eq!(MODSTATE_INSERT & 0x04, 0);
-    assert_eq!(MODSTATE_REMOVE & 0x04, 0);
     assert_eq!(MODSTATE_DELETED_LAYER & 0x04, 0);
     assert_eq!(MODSTATE_EMPTY & 0x04, 0);
 
     // Verify all values fit in 2 bits.
     const { assert!(MODSTATE_INSERT < 4) };
-    const { assert!(MODSTATE_REMOVE < 4) };
     const { assert!(MODSTATE_DELETED_LAYER < 4) };
     const { assert!(MODSTATE_EMPTY < 4) };
 }

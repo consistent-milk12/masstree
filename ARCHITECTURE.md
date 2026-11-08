@@ -425,7 +425,7 @@ permutation and avoids false sharing between readers and slot allocators.
 | Bits                              | Meaning                                         |
 | --------------------------------- | ----------------------------------------------- |
 | `0b00` (`MODSTATE_INSERT`)        | Normal / insert state                           |
-| `0b01` (`MODSTATE_REMOVE`)        | Legacy remove state (essentially unused)        |
+| `0b01`                          | Reserved; unused remove-state API deleted       |
 | `0b10` (`MODSTATE_DELETED_LAYER`) | The sublayer this leaf belongs to has been GC'd |
 | `0b11` (`MODSTATE_EMPTY`)         | Leaf is empty and may be coalesced              |
 | `0b100` (`MODSTATE_QUEUED_BIT`)   | Leaf is already in the coalesce queue           |
@@ -1421,8 +1421,11 @@ outer layer loop exceeds 1,000 retries. Not-found is `Ok(None)`.
 Algorithm (`src/tree/remove.rs`):
 
 1. Build a `Key`; set `single_layer_mode = !key.has_suffix()`. Load the main
-   root and an empty `Route` (`Vec<u64>` of per-layer ikeys, used for sublayer
-   GC).
+   root and an empty `StackRoute` (`ArrayVec<u64, 31>` of per-layer ikeys).
+   The 256-byte key limit bounds the route to 31 entries. The route stays in the
+   remove loop and is borrowed when finishing a removal; it is not copied into
+   the locked-result enum. Only an emptied sublayer allocates a `Box<[u64]>` for
+   deferred GC.
 2. `'layer_loop`: `reach_leaf_concurrent_generic`, then `'forward`:
    - `stable()` + load permutation; `search_for_remove` scans logically,
      comparing ikey, keylenx, and suffix bytes. It returns `NotFound`,
@@ -1496,7 +1499,7 @@ uses its explicit limit.
 
 **Sublayer GC:**
 
-- `find_sublayer_parent` re-traverses the `Route` from the root (OCC + B-link,
+- `find_sublayer_parent` re-traverses the owned route from the root (OCC + B-link,
   max 64 hops).
 - Lock the parent leaf, re-find the layer slot under the lock, load the sublayer
   pointer.
@@ -2305,7 +2308,7 @@ code:
 | **EBR**              | Epoch-based reclamation (`seize`): deferred freeing after readers leave           |
 | **guard**            | `seize::LocalGuard` pinning the current epoch; required for tree operations       |
 | **coalesce**         | Deferred unlinking of empty leaves and GC of empty sublayers                      |
-| **route**            | `Vec<u64>` of per-layer ikeys used to re-find a sublayer parent                   |
+| **route**            | `ArrayVec<u64,31>` during removal; `Box<[u64]>` only when queued for GC                   |
 | **write-through**    | Updating a small boxed value in place atomically, avoiding allocation             |
 | **inline value**     | Terminal value stored in the leaf as 64 bits + sentinel tag                       |
 | **sidecar**          | Lazily allocated heap suffix store                                                |

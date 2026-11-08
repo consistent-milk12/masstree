@@ -1,5 +1,19 @@
 # Remove/coalesce reproducers
 
+`nonempty_alloc` is a passing PERF-17 regression. A real counting allocator
+checks eight nonempty removals for boxed and inline values with 32- and
+256-byte keys: the former Vec routes allocated [8, 8, 32, 32] times, and stack
+routes allocate [0, 0, 0, 0]. EBR bookkeeping is primed before counting. It also
+compares surviving keys/values with BTreeMap and empties the remaining deep
+layers to exercise owned queued routes. Native and Miri both pass.
+
+```bash
+CARGO_TARGET_DIR=/tmp/masstree-target cargo run --bin nonempty_alloc
+CARGO_TARGET_DIR=/tmp/masstree-target MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri run --bin nonempty_alloc
+```
+
+The table below records historical audit behavior.
+
 | Target | Finding | Expected |
 |---|---|---|
 | `tests/wrong_key.rs` | REM-01 | `remove(short)` returns a longer same-ikey key's value; 100k+ mismatches in a few seconds |

@@ -7,7 +7,7 @@ use std::ptr as StdPtr;
 
 use crate::ksearch::upper_bound_internode_generic;
 use crate::leaf15::LeafNode15;
-use crate::tree::coalesce::Route;
+use crate::tree::coalesce::StackRoute;
 use crate::tree::split::Propagation;
 use crate::{
     TreeInternode, TreeLeafNode,
@@ -57,7 +57,6 @@ enum RemoveSearchResult {
         ki: usize,
 
         /// Physical slot index (0..WIDTH).
-        #[allow(dead_code, reason = "Captured for debugging, verified under lock")]
         kp: usize,
     },
 
@@ -184,10 +183,6 @@ where
     /// Physical slot index (0..WIDTH).
     kp: usize,
 
-    /// Route from tree root to this leaf's sublayer parent (ikey per layer).
-    /// Empty for top-layer leaves.
-    route: Route,
-
     /// Guard for memory reclamation.
     guard: &'g LocalGuard<'g>,
 }
@@ -199,14 +194,12 @@ where
 {
     /// Create a new remove cursor with the lock already held.
     #[inline(always)]
-    #[expect(clippy::too_many_arguments, reason = "Complex state management")]
     const fn new(
         tree: &'t MassTreeGeneric<P, A>,
         leaf: *mut LeafNode15<P>,
         lock: LockGuard<'t>,
         ki: usize,
         kp: usize,
-        route: Route,
         guard: &'g LocalGuard<'g>,
     ) -> Self {
         Self {
@@ -215,14 +208,13 @@ where
             lock,
             ki,
             kp,
-            route,
             guard,
         }
     }
 
     /// Complete the removal of a key from the locked leaf.
     #[must_use]
-    pub fn finish_remove(mut self) -> Option<P::Output> {
+    fn finish_remove(mut self, route: &[u64]) -> Option<P::Output> {
         // SAFETY: leaf is valid and locked by us
         let leaf: &LeafNode15<P> = unsafe { &*self.leaf };
         let slot_keylenx: u8 = leaf.keylenx(self.kp);
@@ -261,7 +253,7 @@ where
         self.tree.dec_count();
 
         if new_perm.size() == 0 {
-            self.schedule_coalesce_cold(leaf);
+            self.schedule_coalesce_cold(leaf, route);
         }
 
         value
@@ -271,23 +263,21 @@ where
     /// to keep `finish_remove` compact for the common case (size > 0).
     #[cold]
     #[inline(never)]
-    fn schedule_coalesce_cold(&mut self, leaf: &LeafNode15<P>) {
+    fn schedule_coalesce_cold(&self, leaf: &LeafNode15<P>, route: &[u64]) {
         leaf.mark_empty();
 
         // Atomic dedup: try_mark_queued() sets the queued bit and returns
         // true only if it was not already set. This eliminates TOCTOU races
         // between concurrent finish_remove calls on the same leaf.
         if leaf.try_mark_queued() {
-            if self.route.is_empty() {
-                // Non-sublayer: schedule chain coalesce (pointer-based).
+            if route.is_empty() {
+                // Non-sublayer: schedule chain coalesce (by routing bound).
                 let ikey_bound: u64 = leaf.ikey_bound();
 
                 self.tree.coalesce_queue.schedule_chain(ikey_bound);
             } else {
                 // Sublayer: schedule route-based gc (no pointers stored).
-                self.tree
-                    .coalesce_queue
-                    .schedule_sublayer(std::mem::take(&mut self.route));
+                self.tree.coalesce_queue.schedule_sublayer(route.into());
             }
         }
     }
@@ -309,16 +299,13 @@ impl NodeCleaner {
     /// (no cascade). The caller retains the leaf lock for `mark_deleted` and
     /// `unlink_from_chain` after a successful parent update.
     #[cold]
-    pub(crate) fn remove_leaf_from_immediate_parent<'a, P, A>(
-        _allocator: &A,
-        _guard: &LocalGuard<'_>,
+    pub(crate) fn remove_leaf_from_immediate_parent<'a, P>(
         leaf_ptr: *mut LeafNode15<P>,
         _leaf_lock: &LockGuard<'_>,
         ikey_bound: u64,
     ) -> ImmediateParentResult<'a>
     where
         P: LeafPolicy,
-        A: TreeAllocator<P>,
     {
         let current: *mut u8 = leaf_ptr.cast();
 
@@ -558,7 +545,7 @@ impl NodeCleaner {
         let mut layer_root: *mut u8 = tree.load_root_ptr_generic(guard).cast_mut();
 
         // Route from tree root: ikey at each layer level, for sublayer GC.
-        let mut route: Route = Vec::new();
+        let mut route = StackRoute::new();
 
         'layer_loop: loop {
             // A layer slot may still point at the original left leaf after
@@ -681,12 +668,12 @@ impl NodeCleaner {
                     RemoveSearchResult::Found { ki, kp } => {
                         // Lock, revalidate full key identity, and get a cursor.
                         let lock_result = Self::lock_and_verify_for_remove(
-                            tree, leaf_ptr, &key, &mut route, guard, version, perm, ki, kp,
+                            tree, leaf_ptr, &key, guard, version, perm, ki, kp,
                         );
 
                         match lock_result {
                             RemoveLockResult::Ready(cursor) => {
-                                return Ok(cursor.finish_remove());
+                                return Ok(cursor.finish_remove(&route));
                             }
 
                             RemoveLockResult::DescendLayer {
@@ -870,7 +857,6 @@ impl NodeCleaner {
         tree: &'t MassTreeGeneric<P, A>,
         leaf_ptr: *mut LeafNode15<P>,
         key: &Key<'_>,
-        route: &mut Route,
         guard: &'g LocalGuard<'g>,
         pre_version: u32,
         pre_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
@@ -966,15 +952,8 @@ impl NodeCleaner {
             };
         }
 
-        let cursor: RemoveCursor<'_, '_, P, A> = RemoveCursor::new(
-            tree,
-            leaf_ptr,
-            lock,
-            new_ki,
-            new_slot,
-            std::mem::take(route),
-            guard,
-        );
+        let cursor: RemoveCursor<'_, '_, P, A> =
+            RemoveCursor::new(tree, leaf_ptr, lock, new_ki, new_slot, guard);
 
         RemoveLockResult::Ready(cursor)
     }

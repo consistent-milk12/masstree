@@ -28,12 +28,16 @@ use crate::tree::MassTreeGeneric;
 use crate::tree::remove::{ImmediateParentResult, NodeCleaner};
 
 // ============================================================================
-//  Route type
+//  Route types
 // ============================================================================
 
 /// Compact route from tree root to a sublayer's parent.
 /// Each element is the ikey (u64) at that layer level.
-pub type Route = Vec<u64>;
+pub(super) type StackRoute =
+    arrayvec::ArrayVec<u64, { crate::key::MAX_KEY_LENGTH / crate::key::IKEY_SIZE - 1 }>;
+
+/// Routes only become owned allocations when queued for deferred cleanup.
+type OwnedRoute = Box<[u64]>;
 
 // ============================================================================
 //  Entry types
@@ -61,7 +65,7 @@ struct DeferredChainEntry {
 #[derive(Debug, Clone)]
 struct SublayerEntry {
     /// Per-layer ikey segments, root to parent.
-    route: Route,
+    route: OwnedRoute,
     requeue_count: u8,
 }
 
@@ -85,7 +89,7 @@ pub struct CoalesceQueue {
     abandoned: AtomicUsize,
 }
 
-// All queue entries are plain data (`u64`/`Vec<u64>` plus a retry counter),
+// All queue entries are plain data (`u64`/`Box<[u64]>` plus a retry counter),
 // so CoalesceQueue is automatically Send + Sync.
 
 impl Default for CoalesceQueue {
@@ -119,7 +123,7 @@ impl CoalesceQueue {
 
     /// Schedule a sublayer for route-based gc.
     #[inline(always)]
-    pub fn schedule_sublayer(&self, route: Route) {
+    pub fn schedule_sublayer(&self, route: OwnedRoute) {
         self.sublayers.push(SublayerEntry {
             route,
             requeue_count: 0,
@@ -141,9 +145,9 @@ impl CoalesceQueue {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     #[inline]
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.chains.is_empty()
             && self.sublayers.is_empty()
@@ -199,7 +203,7 @@ impl Debug for CoalesceQueue {
 }
 
 // ============================================================================
-//  Route lookup result
+//  OwnedRoute lookup result
 // ============================================================================
 
 /// Result of a GC route lookup operation.
@@ -421,13 +425,7 @@ impl Coalesce {
         let leaf_ikey_bound: u64 = leaf.ikey_bound();
 
         let result: ImmediateParentResult<'_> =
-            NodeCleaner::remove_leaf_from_immediate_parent::<P, A>(
-                tree.allocator(),
-                guard,
-                leaf_ptr,
-                lock,
-                leaf_ikey_bound,
-            );
+            NodeCleaner::remove_leaf_from_immediate_parent::<P>(leaf_ptr, lock, leaf_ikey_bound);
 
         match result {
             ImmediateParentResult::Success => {
@@ -555,7 +553,7 @@ impl Coalesce {
     fn try_remove_sublayer<P, A>(
         tree: &MassTreeGeneric<P, A>,
         queue: &CoalesceQueue,
-        route: Route,
+        route: OwnedRoute,
         requeue_count: u8,
         guard: &LocalGuard<'_>,
     ) -> bool
@@ -810,10 +808,8 @@ impl Coalesce {
         // Step 9: Cascade if parent became empty AND was newly queued.
         if parent_newly_queued {
             if route.len() > 1 {
-                let mut parent_route: Route = route;
-                parent_route.pop();
-
-                queue.schedule_sublayer(parent_route);
+                // Shortening an owned route is confined to the cold GC path.
+                queue.schedule_sublayer(route[..route.len() - 1].into());
             } else {
                 queue.schedule_chain(parent_ikey_bound);
             }
@@ -824,7 +820,7 @@ impl Coalesce {
 
     /// Push a sublayer entry to the deferred queue for the next maintenance call.
     /// On exhaustion, increments the abandoned counter.
-    fn requeue_sublayer(queue: &CoalesceQueue, route: Route, requeue_count: u8) {
+    fn requeue_sublayer(queue: &CoalesceQueue, route: OwnedRoute, requeue_count: u8) {
         if requeue_count < MAX_REQUEUE_COUNT {
             queue.deferred_sublayers.push(SublayerEntry {
                 route,
@@ -859,7 +855,7 @@ impl Coalesce {
     /// Re-traverse from tree root to find the parent leaf for a sublayer.
     fn find_sublayer_parent<P, A>(
         tree: &MassTreeGeneric<P, A>,
-        route: &Route,
+        route: &[u64],
         guard: &LocalGuard<'_>,
     ) -> RouteLookupResult<FoundParent<P>>
     where
@@ -1071,7 +1067,7 @@ mod tests {
     fn test_schedule_sublayer() {
         let queue = CoalesceQueue::new();
 
-        queue.schedule_sublayer(vec![0x1234, 0x5678]);
+        queue.schedule_sublayer(Box::new([0x1234, 0x5678]));
         assert_eq!(queue.len(), 1);
 
         queue.schedule_chain(300);
@@ -1084,7 +1080,7 @@ mod tests {
     #[test]
     fn test_requeue_count_limit() {
         let sub_entry: SublayerEntry = SublayerEntry {
-            route: vec![1, 2, 3],
+            route: Box::new([1, 2, 3]),
             requeue_count: 0,
         };
         assert_eq!(sub_entry.requeue_count, 0);
@@ -1119,7 +1115,7 @@ mod tests {
             requeue_count: 1,
         });
         queue.deferred_sublayers.push(SublayerEntry {
-            route: vec![0x42],
+            route: Box::new([0x42]),
             requeue_count: 2,
         });
 
@@ -1169,11 +1165,11 @@ mod tests {
         let queue = CoalesceQueue::new();
 
         // Below limit: pushes to deferred.
-        Coalesce::requeue_sublayer(&queue, vec![1, 2], 5);
+        Coalesce::requeue_sublayer(&queue, Box::new([1, 2]), 5);
         assert_eq!(queue.deferred_sublayers.len(), 1);
 
         // At limit: increments abandoned, does not push.
-        Coalesce::requeue_sublayer(&queue, vec![1, 2], MAX_REQUEUE_COUNT);
+        Coalesce::requeue_sublayer(&queue, Box::new([1, 2]), MAX_REQUEUE_COUNT);
         assert_eq!(queue.deferred_sublayers.len(), 1);
         assert_eq!(queue.abandoned(), 1);
     }

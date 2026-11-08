@@ -3349,6 +3349,16 @@ covers the actual internode routines. `insert_key_and_child` and `shift_from`
 are now unsafe crate-internal, and their unused `TreeInternode` forwarders are
 removed. This is a deliberate breaking change to the low-level API.
 
+PERF-17 / SIM-04 follow-up: removal uses a stack `ArrayVec<u64, 31>` route and
+allocates `Box<[u64]>` only when queuing empty sublayers. The route is borrowed
+by the final locked removal, keeping the result enum small. The counting probe
+in `failures/remove-coalesce --bin nonempty_alloc` drops from 8/32 allocations
+to zero for eight nonempty removals at 32/256-byte key lengths, for both policies.
+Native and Miri verify the values, ordered keys and subsequent deep cleanup.
+The dead remove mode (`mark_remove`, `is_removing`, their trait methods and
+`MODSTATE_REMOVE`) and unused parent-cleanup parameters are removed. `kp` is
+actually used by the fixed REM-01 revalidation and must be retained.
+
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|
 | PERF-01 | Suffix insert | `maybe_pre_allocate_suffix` allocates `WIDTH * suffix_len` on every suffix insert, including `Found` updates, conflicts, retries, and splits that drop it | Move to the `NotFound`/`find_usable_slot` path, size from actual suffix usage, pass into split | 1 allocation / 600 B per long-key update removed |

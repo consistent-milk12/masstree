@@ -638,12 +638,6 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     /// Mark the layer as deleted.
     fn mark_deleted_layer(&self);
 
-    /// Mark the node for removal.
-    fn mark_remove(&self);
-
-    /// Check if the node is being removed.
-    fn is_removing(&self) -> bool;
-
     /// Check if the node is in empty state.
     fn is_empty_state(&self) -> bool;
 

@@ -15,7 +15,7 @@ use crate::{
     internode::InternodeNode,
     leaf15::{
         KSUF_KEYLENX, LAYER_KEYLENX, LeafNode15, MODSTATE_DELETED_LAYER, MODSTATE_EMPTY,
-        MODSTATE_INSERT, MODSTATE_REMOVE,
+        MODSTATE_INSERT,
     },
     nodeversion::NodeVersion,
     policy::{LeafPolicy, SlotKind},
@@ -285,7 +285,6 @@ where
         let del_tag: &str = if deleted { " [DELETED]" } else { "" };
         let mod_tag: &str = match modstate & 0x03 {
             MODSTATE_INSERT => "",
-            MODSTATE_REMOVE => " [REMOVING]",
             MODSTATE_DELETED_LAYER => " [DELETED_LAYER]",
             MODSTATE_EMPTY => " [EMPTY]",
             _ => " [?]",
