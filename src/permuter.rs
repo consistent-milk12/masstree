@@ -271,9 +271,10 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let i_shift: usize = (i * 4) + 4;
         let low_mask: u64 = (1u64 << i_shift) - 1;
 
-        self.value = ((self.value + 1) & low_mask)
+        self.value = (((self.value + 1) & low_mask)
             | ((slot as u64) << i_shift)
-            | ((self.value << 4) & !(low_mask | (0xF << i_shift)));
+            | ((self.value << 4) & !(low_mask | (0xF << i_shift))))
+            & Self::WIDTH_MASK;
 
         #[cfg(debug_assertions)]
         self.debug_assert_valid();

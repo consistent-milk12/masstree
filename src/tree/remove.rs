@@ -564,8 +564,15 @@ impl NodeCleaner {
                 return Err(RemoveError::RetryLimitExceeded);
             }
 
+            // A layer slot may still point at the original left leaf after
+            // promotion; climb to the true root before descending.
+            layer_root = tree
+                .maybe_parent_generic(layer_root.cast_const(), guard)
+                .cast_mut();
+
+            let in_sublayer: bool = !route.is_empty();
             let mut leaf_ptr: *mut LeafNode15<P> =
-                tree.reach_leaf_concurrent_generic(layer_root, &key, false, guard);
+                tree.reach_leaf_concurrent_generic(layer_root, &key, in_sublayer, guard);
 
             // REM-02: a concurrent split may have moved the target into the
             // next leaf while we were descending. Follow the B-link chain
@@ -592,10 +599,17 @@ impl NodeCleaner {
             }
 
             'forward: loop {
-                retry_count += 1;
+                // A B-link advance inside this loop may land to the right of
+                // the target; restart from the layer root rather than
+                // searching the wrong leaf.
+                if !leaf.prev(guard).is_null() && key.ikey() < leaf.ikey_bound() {
+                    retry_count += 1;
 
-                if retry_count >= MAX_RETRIES {
-                    return Err(RemoveError::RetryLimitExceeded);
+                    if retry_count >= MAX_RETRIES {
+                        return Err(RemoveError::RetryLimitExceeded);
+                    }
+
+                    continue 'layer_loop;
                 }
 
                 if leaf.version().is_deleted() || leaf.deleted_layer() {
@@ -617,6 +631,12 @@ impl NodeCleaner {
                 };
 
                 if leaf.version().has_changed(version) {
+                    retry_count += 1;
+
+                    if retry_count >= MAX_RETRIES {
+                        return Err(RemoveError::RetryLimitExceeded);
+                    }
+
                     let (next_ptr, exceeded): (*mut LeafNode15<P>, bool) =
                         tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
 
@@ -700,6 +720,12 @@ impl NodeCleaner {
                             }
 
                             RemoveLockResult::Retry => {
+                                retry_count += 1;
+
+                                if retry_count >= MAX_RETRIES {
+                                    return Err(RemoveError::RetryLimitExceeded);
+                                }
+
                                 let (next_ptr, exceeded): (*mut LeafNode15<P>, bool) =
                                     tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
 

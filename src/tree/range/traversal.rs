@@ -78,7 +78,7 @@ where
         return StdPtr::null_mut();
     }
 
-    let root: *const u8 = climb_layer_root::<P>(start, guard);
+    let mut root: *const u8 = climb_layer_root::<P>(start, guard);
     let target_ikey: u64 = cursor_key.current_ikey();
     let mut node: *const u8 = root;
 
@@ -97,12 +97,14 @@ where
             let leaf: &LeafNode15<P> = unsafe { &*node.cast::<LeafNode15<P>>() };
 
             if leaf.version().is_deleted() {
+                root = climb_layer_root::<P>(start, guard);
                 node = root;
                 continue;
             }
 
             // Too far right: the target belongs at or before this leaf.
             if !leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound() {
+                root = climb_layer_root::<P>(start, guard);
                 node = root;
                 continue;
             }
@@ -131,12 +133,15 @@ where
         prefetch_read(child);
 
         if child.is_null() {
+            root = climb_layer_root::<P>(start, guard);
             node = root;
             continue;
         }
 
         if inode.version().has_changed(v) {
-            // A split may have moved the key to a sibling; restart from root.
+            // A split (or a layer-root promotion) may have moved the key;
+            // re-climb from the original start before retrying.
+            root = climb_layer_root::<P>(start, guard);
             node = root;
             continue;
         }

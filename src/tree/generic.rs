@@ -261,7 +261,11 @@ where
     /// Follow parent pointers to find the actual layer root.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "Method signature pattern")]
-    fn maybe_parent_generic(&self, mut node: *const u8, guard: &LocalGuard<'_>) -> *const u8 {
+    pub(crate) fn maybe_parent_generic(
+        &self,
+        mut node: *const u8,
+        guard: &LocalGuard<'_>,
+    ) -> *const u8 {
         loop {
             // SAFETY: node is valid, both types have NodeVersion as first field
             #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
