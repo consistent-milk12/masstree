@@ -67,9 +67,9 @@ impl<P: LeafPolicy> Drop for RetireBuf<'_, '_, P> {
 /// handle that could alias a value still stored in the tree. Dropping an
 /// entry drops the value normally.
 #[must_use]
-pub struct BatchEntry<P: LeafPolicy> {
-    /// The key bytes (owned for sorting).
-    key: Vec<u8>,
+pub struct BatchEntry<P: LeafPolicy, K = Vec<u8>> {
+    /// Owned public key bytes, or an internal borrow from a stationary chunk.
+    key: K,
 
     /// The owned user value, converted to a storage output only when the
     /// entry is inserted.
@@ -91,15 +91,28 @@ impl<P: LeafPolicy> BatchEntry<P> {
     /// Validation happens here, before any tree mutation.
     #[inline]
     pub fn new(key: Vec<u8>, value: P::Value) -> Self {
+        Self::from_key(key, value)
+    }
+
+    /// Check if this key has a suffix (> 8 bytes).
+    #[inline(always)]
+    pub const fn has_suffix(&self) -> bool {
+        self.key.len() > 8
+    }
+}
+
+impl<P: LeafPolicy, K: AsRef<[u8]>> BatchEntry<P, K> {
+    /// Internal key-storage adapter. Public construction remains Vec-owned;
+    /// collection batches borrow immutable bytes from an owned, bounded chunk.
+    pub(super) fn from_key(key: K, value: P::Value) -> Self {
+        let bytes = key.as_ref();
         assert!(
-            key.len() <= crate::key::MAX_KEY_LENGTH,
+            bytes.len() <= crate::key::MAX_KEY_LENGTH,
             "batch key length {} exceeds maximum {}",
-            key.len(),
+            bytes.len(),
             crate::key::MAX_KEY_LENGTH
         );
-
-        let ikey: u64 = Self::compute_ikey(&key);
-
+        let ikey = Self::compute_ikey(bytes);
         Self {
             key,
             value: Some(value),
@@ -131,7 +144,7 @@ impl<P: LeafPolicy> BatchEntry<P> {
     /// Get the key bytes.
     #[inline(always)]
     pub fn key(&self) -> &[u8] {
-        &self.key
+        self.key.as_ref()
     }
 
     /// Get a reference to the owned value, if it has not been consumed.
@@ -153,21 +166,15 @@ impl<P: LeafPolicy> BatchEntry<P> {
     pub fn into_value(mut self) -> Option<P::Value> {
         self.value.take()
     }
-
-    /// Check if this key has a suffix (> 8 bytes).
-    #[inline(always)]
-    pub const fn has_suffix(&self) -> bool {
-        self.key.len() > 8
-    }
 }
 
-impl<P: LeafPolicy> Debug for BatchEntry<P>
+impl<P: LeafPolicy, K: AsRef<[u8]>> Debug for BatchEntry<P, K>
 where
     P::Value: Debug,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
         f.debug_struct("BatchEntry")
-            .field("key", &self.key)
+            .field("key", &self.key.as_ref())
             .field("value", &self.value)
             .field("ikey", &self.ikey)
             .finish_non_exhaustive()
@@ -376,24 +383,37 @@ where
         guard: &'g LocalGuard<'_>,
     ) -> BatchInsertResult<ValueRef<'g, P::Value>> {
         self.verify_guard(guard);
+        self.sort_and_insert_batch::<true, _>(&mut entries, guard)
+    }
+
+    /// Shared by the public batch APIs and bounded `Extend` chunks. Collection
+    /// traits discard replaced values, so their specialization omits the result
+    /// vector and its growth allocations.
+    pub(super) fn sort_and_insert_batch<'g, const COLLECT_OLD: bool, K: AsRef<[u8]>>(
+        &self,
+        entries: &mut [BatchEntry<P, K>],
+        guard: &'g LocalGuard<'_>,
+    ) -> BatchInsertResult<ValueRef<'g, P::Value>> {
         for (seq, entry) in entries.iter_mut().enumerate() {
             entry.seq = seq;
         }
-        entries.sort_unstable_by(|a, b| (a.ikey, &a.key, a.seq).cmp(&(b.ikey, &b.key, b.seq)));
-        self.process_sorted_batch(&mut entries, guard)
+        entries.sort_unstable_by(|a, b| {
+            (a.ikey, a.key.as_ref(), a.seq).cmp(&(b.ikey, b.key.as_ref(), b.seq))
+        });
+        self.process_sorted_batch::<COLLECT_OLD, _>(entries, guard)
     }
 
     /// Try one entry while the leaf is locked. Values remain owned until the
     /// destination is known, including on split/layer fallbacks and unwinding.
-    fn try_insert_batch_entry<'g>(
+    fn try_insert_batch_entry<'g, K: AsRef<[u8]>>(
         &self,
         leaf: &LeafNode15<P>,
         lock: &mut LockGuard<'_>,
         perm: &mut Permuter,
-        entry: &mut BatchEntry<P>,
+        entry: &mut BatchEntry<P, K>,
         guard: &'g LocalGuard<'_>,
     ) -> BatchEntryResult<ValueRef<'g, P::Value>> {
-        let key = Key::new(&entry.key);
+        let key = Key::new(entry.key.as_ref());
         let search = if key.has_suffix() {
             self.search_for_insert_generic(leaf, &key, perm)
         } else {
@@ -447,13 +467,13 @@ where
         }
     }
 
-    fn fallback_insert_batch_entry<'g>(
+    fn fallback_insert_batch_entry<'g, K: AsRef<[u8]>>(
         &self,
-        entry: &mut BatchEntry<P>,
+        entry: &mut BatchEntry<P, K>,
         guard: &'g LocalGuard<'_>,
     ) -> Option<ValueRef<'g, P::Value>> {
         let value = entry.value.take().expect("batch entry already consumed");
-        let mut key = Key::new(&entry.key);
+        let mut key = Key::new(entry.key.as_ref());
         if P::can_write_through() {
             self.insert_concurrent_value(&mut key, value, guard)
                 .expect("batch fallback insert failed")
@@ -473,16 +493,16 @@ where
     ///
     /// Handles traversal, OCC validation, locking, locked-leaf insertion,
     /// retirement, and fallback to individual insert on split.
-    fn process_sorted_batch<'g>(
+    fn process_sorted_batch<'g, const COLLECT_OLD: bool, K: AsRef<[u8]>>(
         &self,
-        batch: &mut [BatchEntry<P>],
+        batch: &mut [BatchEntry<P, K>],
         guard: &'g LocalGuard<'_>,
     ) -> BatchInsertResult<ValueRef<'g, P::Value>> {
         let mut result = BatchInsertResult::new();
         let mut index: usize = 0;
 
         while index < batch.len() {
-            let key: Key<'_> = Key::new(&batch[index].key);
+            let key: Key<'_> = Key::new(batch[index].key.as_ref());
 
             let mut layer_root: *const u8 = self.load_root_ptr_generic(guard);
 
@@ -529,7 +549,7 @@ where
                     continue 'retry;
                 }
 
-                let processed: usize = self.insert_batch_into_locked_leaf_inner(
+                let processed: usize = self.insert_batch_into_locked_leaf_inner::<COLLECT_OLD, _>(
                     leaf,
                     &mut lock,
                     batch,
@@ -552,7 +572,10 @@ where
 
             if entries_processed == 0 {
                 if let Some(old) = self.fallback_insert_batch_entry(&mut batch[index], guard) {
-                    result.record_update(old);
+                    result.updated += 1;
+                    if COLLECT_OLD {
+                        result.old_values.push(old);
+                    }
                 } else {
                     result.record_insert();
                 }
@@ -573,11 +596,11 @@ where
         clippy::too_many_arguments,
         reason = "Batch insertion requires context"
     )]
-    fn insert_batch_into_locked_leaf_inner<'g>(
+    fn insert_batch_into_locked_leaf_inner<'g, const COLLECT_OLD: bool, K: AsRef<[u8]>>(
         &self,
         leaf: &LeafNode15<P>,
         lock: &mut LockGuard<'_>,
-        batch: &mut [BatchEntry<P>],
+        batch: &mut [BatchEntry<P, K>],
         start_index: usize,
         result: &mut BatchInsertResult<ValueRef<'g, P::Value>>,
         retire_buf: &mut RetireBuf<'_, '_, P>,
@@ -597,14 +620,14 @@ where
 
         if leaf.is_empty()
             && start_index < batch.len()
-            && self.can_reuse_empty_leaf(leaf, &Key::new(&batch[start_index].key))
+            && self.can_reuse_empty_leaf(leaf, &Key::new(batch[start_index].key.as_ref()))
         {
             let entry = &mut batch[start_index];
             let output = P::into_output(entry.value.take().expect("batch entry already consumed"));
             let deferred = self.insert_into_empty_leaf(
                 leaf,
                 lock,
-                &Key::new(&entry.key),
+                &Key::new(entry.key.as_ref()),
                 &output,
                 guard,
                 None,
@@ -643,7 +666,10 @@ where
                 }
 
                 BatchEntryResult::Updated(old_value) => {
-                    result.record_update(old_value);
+                    result.updated += 1;
+                    if COLLECT_OLD {
+                        result.old_values.push(old_value);
+                    }
                     processed += 1;
                 }
 

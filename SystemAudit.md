@@ -3291,6 +3291,14 @@ The following are measured or mechanically confirmed; none is a correctness
 fix. Values are from the audit host and should be re-measured after correctness
 changes.
 
+Proposal 4 update (PERF-06): `FromIterator` and `Extend` now share the sorted
+batch pipeline, using bounded chunks that borrow the input keys and discard
+unused old-value results. The `failures/batch-api` release `bulk` probe measured
+20,000 random keys at 1.92 ms versus 2.12 ms for guarded single-key insertion,
+and ascending keys at 0.87 ms versus 1.57 ms (local seven-round medians).
+Chunk-boundary duplicate ordering and stable key snapshots are regression tested.
+PERF-03 remains partially open for the guarded single-key and vacant Entry paths.
+
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|
 | PERF-01 | Suffix insert | `maybe_pre_allocate_suffix` allocates `WIDTH * suffix_len` on every suffix insert, including `Found` updates, conflicts, retries, and splits that drop it | Move to the `NotFound`/`find_usable_slot` path, size from actual suffix usage, pass into split | 1 allocation / 600 B per long-key update removed |

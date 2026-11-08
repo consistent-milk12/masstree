@@ -1721,9 +1721,14 @@ entry from outliving either.
 ### 8.11 Iteration traits
 
 `FromIterator<(K, V)>` requires `A: Default`, creates the allocator, builds a
-tree with `with_allocator`, and inserts all pairs under one guard.
-`Extend<(K, V)>` inserts under one guard into an existing tree. Neither sorts or
-batches; both use the standard insert path and panic on internal errors.
+tree with `with_allocator`, and delegates to `Extend`. Both use one guard and
+the same sorted, leaf-grouped batch insertion pipeline as the explicit batch
+APIs. Collection starts with 1,024 entries for short or unknown-size inputs,
+doubling up to 16,384; a lower size hint of at least 16,384 starts at that cap.
+Chunks own the original keys and borrow each key's bytes once, avoiding per-key
+copies while bounding temporary storage. Equal keys retain input order, including
+across chunks, so the last value wins. The collection specialization discards
+replaced values without allocating an old-value result vector.
 
 ---
 

@@ -6,7 +6,14 @@ entries frees their allocations, invalid-key batches leave the tree empty, and
 (for the old-value result). The prior runners allocated six times. The matching
 integration drop-counter regression catches the residual invalid-key output leak
 (2 of 3 values dropped before, all 3 afterward), and Miri covers unwinding after
-a prior suffix replacement. The table below retains historical failure behavior.
+a prior suffix replacement. `bulk` compares bounded `Extend` batches with the
+previous guarded single-insert loop on 20,000 deterministic random and ascending
+keys, checking every value outside the timed sections. Seven-round release
+medians on the development machine were 1.92 vs 2.12 ms (random) and 0.87 vs
+1.57 ms (ascending). Timings are evidence for this workload, not test thresholds.
+The integration tests cover duplicate order across chunk boundaries, promoted
+sublayers, streaming iterators, and key wrappers whose `AsRef` changes per call.
+The table below retains historical failure behavior.
 
 
 | Binary | Finding | Expected |
@@ -28,6 +35,7 @@ cargo run --bin doublefree       # abort expected
 cargo run --bin mut
 cargo run --bin leak2
 cargo run --bin leak3
+CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin bulk
 cargo run --bin teardown_safe    # abort expected
 (cd mimalloc-repro && cargo check)  # expected global-allocator conflict
 ```

@@ -135,6 +135,57 @@ fn preconstructed_boxed_batch_preserves_duplicates_and_value_ownership() {
     assert_eq!(drops.load(Ordering::Relaxed), 50);
 }
 
+#[test]
+fn bulk_collection_chunk_boundaries_match_btree() {
+    use std::collections::BTreeMap;
+
+    let count = if cfg!(miri) { 1_030 } else { 16_389 };
+    let input: Vec<_> = (0..count)
+        .map(|i| {
+            let mut key = b"01234567".to_vec();
+            key.extend_from_slice(&((i * 17) % 39u64).to_be_bytes());
+            key.extend_from_slice(b"tail");
+            (key, i)
+        })
+        .collect();
+    let mut expected: BTreeMap<_, _> = input.iter().cloned().collect();
+    let mut tree: MassTree15<u64> = input.iter().cloned().collect();
+    let updates = input
+        .iter()
+        .map(|(key, value)| (key.as_slice(), value + 10_000));
+    // A zero lower size hint exercises bounded streaming collection.
+    tree.extend(updates.filter(|_| true));
+    for (key, value) in &input {
+        expected.insert(key.clone(), value + 10_000);
+    }
+    let guard = tree.guard();
+    let actual: Vec<_> = tree.iter(&guard).map(|entry| entry.key).collect();
+    assert_eq!(actual, expected.keys().cloned().collect::<Vec<_>>());
+    assert_eq!(tree.len(), expected.len());
+    for (key, value) in &expected {
+        assert_eq!(tree.get(key), Some(*value));
+    }
+}
+
+#[test]
+fn bulk_collection_snapshots_each_key_wrapper_once() {
+    use std::cell::Cell;
+
+    struct ChangingKey(Cell<bool>);
+    impl AsRef<[u8]> for ChangingKey {
+        fn as_ref(&self) -> &[u8] {
+            if self.0.replace(true) {
+                b"wrong"
+            } else {
+                b"right"
+            }
+        }
+    }
+    let tree: MassTree15<u64> = [(ChangingKey(Cell::new(false)), 42)].into_iter().collect();
+    assert_eq!(tree.get(b"right"), Some(42));
+    assert_eq!(tree.get(b"wrong"), None);
+}
+
 // ============================================================================
 //  Basic Functionality Tests
 // ============================================================================

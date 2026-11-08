@@ -49,8 +49,12 @@ strict Clippy, and Miri cover the changed paths.
 
 Completed within step 2: one owning `BatchEntry` pipeline, shared empty-leaf
 initialization, direct guarded results, and unwind-safe suffix retirement.
-`Extend`/`FromIterator`, guarded single-key write-through, and Entry hints remain
-open.
+`Extend`/`FromIterator` now use the same pipeline in bounded, borrowed-key chunks,
+without collecting unused old values. A local release probe on 20,000 keys
+measured random construction at 1.92 ms versus 2.12 ms for single inserts, and
+ascending construction at 0.87 ms versus 1.57 ms (seven-round medians; these are
+workload-specific measurements). Guarded single-key write-through and Entry hints
+remain open.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

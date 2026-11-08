@@ -1011,16 +1011,8 @@ where
     where
         I: IntoIterator<Item = (K, V)>,
     {
-        let allocator: A = A::default();
-        let tree: Self = Self::with_allocator(allocator);
-        let guard: LocalGuard<'_> = tree.guard();
-
-        for (key, value) in iter {
-            // Inserts are infallible (abort on OOM like std collections)
-            tree.insert_with_guard(key.as_ref(), value, &guard);
-        }
-
-        drop(guard);
+        let mut tree = Self::with_allocator(A::default());
+        tree.extend(iter);
 
         tree
     }
@@ -1054,12 +1046,38 @@ where
     where
         I: IntoIterator<Item = (K, V)>,
     {
+        const MAX_CHUNK_SIZE: usize = 16_384;
         let guard: LocalGuard<'_> = self.guard();
-
-        for (key, value) in iter {
-            // Inserts either apply or panic on an internal invariant violation;
-            // OOM aborts. Extend has no way to report a per-entry failure.
-            self.insert_with_guard(key.as_ref(), value, &guard);
+        let mut iter = iter.into_iter();
+        let mut chunk_size = if iter.size_hint().0 >= MAX_CHUNK_SIZE {
+            MAX_CHUNK_SIZE
+        } else {
+            1_024
+        };
+        let mut chunk = Vec::with_capacity(iter.size_hint().0.min(chunk_size));
+        loop {
+            for (key, value) in iter.by_ref().take(chunk_size) {
+                chunk.push((key, Some(value)));
+            }
+            if chunk.is_empty() {
+                break;
+            }
+            // Keep keys stationary in the chunk while the entries are sorted.
+            // Snapshot AsRef once per input, so even a custom wrapper that
+            // selects different slices on later calls cannot change routing.
+            let mut batch: Vec<BatchEntry<P, &[u8]>> = chunk
+                .iter_mut()
+                .map(|(key, value)| {
+                    BatchEntry::from_key(
+                        K::as_ref(&*key),
+                        value.take().expect("chunk value already consumed"),
+                    )
+                })
+                .collect();
+            let _ = self.sort_and_insert_batch::<false, _>(&mut batch, &guard);
+            drop(batch);
+            chunk.clear();
+            chunk_size = (chunk_size * 2).min(MAX_CHUNK_SIZE);
         }
     }
 }
