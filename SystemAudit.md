@@ -234,14 +234,14 @@ range/property/batch reproducers                        pass
 | SAFE-06 | `SuffixBag` metadata/used length atomic; `as_writer`, no `&mut` aliasing | `d6e0a07` |
 | OCC-01 | Every new-slot insert marks the version dirty and publishes with Release | `989246e` |
 | OCC-02 | `has_changed` no longer ignores the insert bit; counters are authoritative | `24cfe33` |
-| OCC-03 | Store-store ordering before dirty publication; Acquire validation | `f11f583` |
+| OCC-03 | Store-store ordering before dirty publication; Release store-store fence; Acquire validation | `f11f583`, `cfa1188` |
 | OCC-04 | Descent restarts when a child internode is deleted | `81ea0fc` |
 | OCC-05 | Ancestor separator redirects go through `mark_insert` | `7302514` |
 | OCC-06 | Guard-protected root/parent/child loads; SeqCst value/suffix pointer loads | `947681b` |
-| INS-01/02 | Split only on strict ikey boundaries; split path never fails | `de19063` |
+| INS-01/02 | Split only on strict ikey boundaries; post-insert boundary and equal-ikey side choice; split path never fails | `de19063`, `9ffacd5`, `8c4021c` |
 | INS-03 | Insert restarts when it reaches a deleted rightmost leaf | `14a4da4` |
-| INS-04 | User value encoding happens before `mark_split` | `c686940` |
-| REM-01/02/03 | Full-key revalidation under the lock; B-link follow; bounded retries | `8ea351d` |
+| INS-04 | User value encoding happens before every structural insert mutation (split, empty-leaf reuse, layer creation) | `c686940`, `9147069` |
+| REM-01/02/03 | Full-key revalidation under the lock; B-link follow; retry budget charged only on contention; promoted-root climb | `8ea351d`, `7339d70` |
 | GC-01 | Chain entries carry only `ikey_bound`; duplicate entries are consumed safely | `0265567` |
 | GC-02 | Promoted/multi-leaf sublayers reclaimed as a validated whole subtree | `e351a36` |
 | GC-03/04 | Unlink before retire; preserve live unary levels; retry parent acquisition | `1d6ef92` |
@@ -251,7 +251,7 @@ range/property/batch reproducers                        pass
 | ALLOC-03 | `TreeAllocator` unsafe contract requires abort, never unwind | `b70ebe1` |
 | PRIM-01 | `ShardedCounter::load` no longer asserts on a valid snapshot | `40c70af` |
 | PRIM-02 | `Permuter` results masked to the encoded width | `7a439fe` |
-| RNG-01..10 | Full-key bounds, promoted-layer root climb, stable B-link scan, reverse/values/batch bounds, fused DoubleEnded | `ee3364a` |
+| RNG-01..10 | Full-key bounds, promoted-layer root climb, stable B-link scan, reverse/values/batch bounds, fused DoubleEnded; values-only interior fast path | `ee3364a`, `e3eed9f` |
 | SUF-01 | Replaced slot's inline suffix cleared after a drain | `abb3f5d` |
 | SUF-02 | Zero-length suffixes skipped during compaction | `cfaf419` |
 | SUF-03 | Public suffix length/bounds checks unconditional | `3047f97` |
@@ -264,6 +264,26 @@ range/property/batch reproducers                        pass
 | TOOL-06/10 | Test logs out of the repo; deterministic proptest order and complete scan assertions | `a13ed47` |
 | TOOL-08 | Miri exclusions enumerated in `ARCHITECTURE.md` §11.4 | this docs commit |
 | TOOL-09 | Stress/parity tests assert values and final state | `a3be3e2`, `4694467` |
+
+A follow-up review pass then closed the remaining correctness and performance
+gaps in the first remediation:
+
+- the split point is now chosen against the **post-insert** key sequence, and
+  an equal-ikey boundary insert is routed left so the separator is strictly
+  greater than every left key (`9ffacd5`, `8c4021c`; the strengthened
+  `failures/insert-split/tests/equal_run2.rs` checks every key, and the
+  200-seed `insert-split` oracle passes);
+- every structural insert path (`assign_slot_generic`, empty-leaf reuse,
+  split, layer creation) stores a pre-encoded `PreparedValue`, so a panicking
+  `InlineBits::to_bits` cannot leave a partially published leaf or leak twigs
+  (`9147069`);
+- dirty publication uses a Release store-store fence instead of `SeqCst`
+  (`cfa1188`), which removes a serializing barrier from every write;
+- values-only scans materialize a full key only at the bound's 8-byte ikey,
+  keeping the interior/unbounded path allocation-free (`e3eed9f`);
+- remove normalizes promoted layer roots, re-checks too-far-right after every
+  B-link advance, and charges its retry budget only to actual contention
+  (`7339d70`); scan traversal re-climbs the true layer root on every restart.
 
 The simplification opportunities (SIM-01..16) are **not correctness defects**.
 The branch addresses the ones that carry the wrong ownership/contract signal:

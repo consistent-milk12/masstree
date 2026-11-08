@@ -299,9 +299,10 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let i_shift: usize = (i * 4) + 4;
         let low_mask: u64 = (1u64 << i_shift) - 1;
 
-        let new_value: u64 = ((self.value + 1) & low_mask)
+        let new_value: u64 = (((self.value + 1) & low_mask)
             | ((slot as u64) << i_shift)
-            | ((self.value << 4) & !(low_mask | (0xF << i_shift)));
+            | ((self.value << 4) & !(low_mask | (0xF << i_shift))))
+            & Self::WIDTH_MASK;
 
         let new_perm = Self { value: new_value };
 

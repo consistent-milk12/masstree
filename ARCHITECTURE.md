@@ -543,9 +543,10 @@ ISLEAF  ROOT   DELETED UNUSED  vsplit     vinsert SPLITTING INSERTING LOCK
   to bit 3, incrementing `vinsert`; lock/dirty bits are cleared; `ROOT_BIT` is preserved.
 - A pure lock/unlock with neither dirty bit set does not change the version.
 
-`mark_insert()` sets `INSERTING_BIT` with a Release store followed by an Acquire fence; it is
-idempotent. `mark_split()` sets `SPLITTING_BIT`. `mark_deleted()` sets
-`DELETED_BIT | SPLITTING_BIT`, deliberately forcing the split-style unlock: `vsplit` increments and
+`mark_insert()` sets `INSERTING_BIT` with a Release store followed by a
+Release store-store fence; it is idempotent. `mark_split()` sets
+`SPLITTING_BIT`. `mark_deleted()` sets `DELETED_BIT | SPLITTING_BIT`,
+deliberately forcing the split-style unlock: `vsplit` increments and
 `ROOT_BIT` is cleared while `DELETED_BIT` persists.
 
 `new_for_split(source)` creates a split-locked version for a newly allocated sibling:
@@ -558,10 +559,10 @@ non-root.
 1. `stable()`: Relaxed load; if clean, issue an Acquire fence and return the word. If dirty, spin
    with exponential backoff and yield after two spins.
 2. Read node fields (permutation, keys, keylenx, value/suffix).
-3. `has_changed(old)`: `(old ^ current) > (LOCK_BIT | INSERTING_BIT)`. Any change to a counter,
-   `SPLITTING_BIT`, `DELETED`, `ROOT`, `UNUSED1`, or `ISLEAF` is detected. Changes to only the lock
-   or inserting bits are ignored, because an in-flight writer has not yet published structural
-   changes.
+3. `has_changed(old)`: `(old ^ current) > LOCK_BIT`. Any change to a counter,
+   `INSERTING_BIT`, `SPLITTING_BIT`, `DELETED`, `ROOT`, `UNUSED1`, or `ISLEAF` is detected.
+   Changes to only the lock bit are ignored; an in-flight insert marks the insert bit and
+   increments `vinsert` on unlock, so a reader that snapshotted before the insert sees a change.
 4. `has_split(old)`: `(old ^ current) >= VSPLIT_LOWBIT`. This deliberately includes `ROOT_BIT`
    changes, so it is a superset that also catches root-state changes and can false-positive on
    `mark_root`.
@@ -633,7 +634,7 @@ Implementations:
 
 | Trait impl                    | `Value` | `Output`      | `Values`              | `Suffix`                            | `NEEDS_RETIREMENT` | `CAN_WRITE_THROUGH`           |
 | ----------------------------- | ------- | ------------- | --------------------- | ----------------------------------- | ------------------ | ----------------------------- |
-| `BoxPolicy<V>`                | `V`     | `ValuePtr<V>` | `BoxValueArray<V>`    | `SidecarSuffix`                     | `true`             | small trivially-droppable `V` |
+| `BoxPolicy<V>`                | `V`     | `ValuePtr<V>` | `BoxValueArray<V>`    | `SidecarSuffix`                     | `true`             | closed primitive list (`is_atomic_word`) |
 | `InlinePolicy<V: InlineBits>` | `V`     | `V`           | `InlineValueArray<V>` | `EmbeddedSuffix` or `SidecarSuffix` | `false`            | `false`                       |
 
 `RefPolicy` is a marker trait implemented only by `BoxPolicy`. It enables `get_ref` and the `*_ref`
@@ -1226,14 +1227,18 @@ single-entry twig and follows it directly.
 
 1. **Prepare** (`prepare_split`): compute the split point with `calculate_split_point`, capture
    `is_main_root`/`is_layer_root` before `mark_split` (split unlock clears `ROOT_BIT`), and allocate
-   the right leaf. Prepare is the fallible phase; failure returns `InsertError::SplitFailed`.
+   the right leaf. The split path is infallible; `calculate_split_point` selects a strict
+   post-insert ikey boundary (with a defensive midpoint fallback only for an impossible single-run
+   leaf).
 2. **Mark:** `lock.mark_split()`. Point of no return.
 3. **Split+insert:** `left_leaf.split_and_insert(...)`:
-   - `calculate_split_point` handles three cases: append at the end (split at size; new key becomes
-     the right leaf's first key), prepend at the beginning (split at 1), or midpoint `size/2`
-     adjusted away from runs of equal ikeys.
+   - `calculate_split_point` chooses a strict boundary after splicing in the new key; append,
+     prepend, and midpoint-adjacent cases all walk to that boundary. `split_and_insert` routes the
+     new key **left** when `insert_pos == split_pos` and its ikey equals the left leaf's last key,
+     so the parent separator is strictly greater than every left key.
    - The right leaf is initialized split-locked. Entries are moved/copied, the new key is inserted
-     on the correct side, and both permutations are built.
+     on the correct side, and both permutations are built. The new value is stored from its
+     pre-encoded `PreparedValue` token, so user encoding cannot run after `mark_split`.
    - `link_sibling` installs the B-link (marked while linking).
    - Returns the right leaf's first ikey as the separator and which side received the insert.
 4. **Propagate** (`Propagation::propagation_loop`):
@@ -1281,8 +1286,9 @@ Algorithm (`src/tree/remove.rs`):
    - `NotFound` → `Ok(None)`.
    - `Found` → `lock_and_verify_for_remove`:
      - `lock_bounded`; reject `deleted_layer` with `RestartFromRoot`.
-     - Re-read the permutation; require `size > ki`; re-fetch the physical slot at `ki` and verify
-       the ikey (and layer tag).
+     - Re-read the permutation; require `size > ki`; re-run the full-key search (ikey, keylenx,
+       suffix) under the lock, so a same-ikey insert/remove cannot shift the logical position onto
+       another key.
      - If the slot is a layer, validate the sublayer and descend (push route, shift key).
      - Otherwise return a `RemoveCursor` holding the lock.
    - `DescendLayer` → push `key.ikey()` to the route, `key.shift()`, `layer_root = layer_ptr`,
@@ -1471,11 +1477,14 @@ layer transitions, and splits.
 
 `batch_common.rs` is direction-parameterized (`Forward`/`Backward` zero-sized markers,
 `BatchDirection` trait). `process_batch_keyed` loops over a leaf's permutation, materializes keys
-only when needed, descends layers, and validates OCC once per leaf. `process_batch_values` skips key
-materialization and uses ikey-only bounds (hence approximate for suffixed keys). `batch_forward.rs`
-and `batch_reverse.rs` expose `for_each*` methods that drive the scan state machine with per-leaf
-batch strategies (`IntraLeafRefStrategy`, `IntraLeafCopyStrategy`, `ValuesOnlyStrategy`). These are
-the fastest scan APIs and avoid per-entry allocation except for the key buffer.
+only when needed, descends layers, and validates OCC once per leaf. `process_batch_values` skips
+interior key materialization: it performs a full-key bound check only for slots sharing the bound's
+8-byte ikey (or when the bound has no complete ikey at this layer), while interior ordering uses the
+ikey alone. The cursor still records ikey/length (and the `KSUF` suffix) for cold retries.
+`batch_forward.rs` and `batch_reverse.rs` expose `for_each*` methods that drive the scan state
+machine with per-leaf batch strategies (`IntraLeafRefStrategy`, `IntraLeafCopyStrategy`,
+`ValuesOnlyStrategy`). These are the fastest scan APIs and avoid per-entry allocation except for
+the key buffer.
 
 ### 8.9 Batch insert
 

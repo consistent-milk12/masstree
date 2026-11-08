@@ -1569,6 +1569,10 @@ impl<P: LeafPolicy> LeafNode15<P> {
     }
 
     /// Calculate the optimal split point for this leaf.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Post-insert boundary and side selection are kept together for auditability"
+    )]
     pub fn calculate_split_point(&self, insert_pos: usize, insert_ikey: u64) -> Option<SplitPoint> {
         let perm: Permuter = self.permutation();
         let size: usize = perm.size();
@@ -1609,12 +1613,10 @@ impl<P: LeafPolicy> LeafNode15<P> {
         // with the same ikey as the left's last key, which makes the parent
         // separator equal to a left key and routing equality-right skips it.
         let effective_ikey = |i: usize| -> u64 {
-            if i < insert_pos {
-                self.ikey(perm.get(i))
-            } else if i == insert_pos {
-                insert_ikey
-            } else {
-                self.ikey(perm.get(i - 1))
+            match i.cmp(&insert_pos) {
+                Ordering::Less => self.ikey(perm.get(i)),
+                Ordering::Equal => insert_ikey,
+                Ordering::Greater => self.ikey(perm.get(i - 1)),
             }
         };
 
