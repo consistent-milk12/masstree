@@ -293,6 +293,10 @@ impl InternodeNode {
     /// - `insert_child` must be a valid child pointer of the node's child kind.
     /// - When `height > 0`, every moved child must be a live `InternodeNode`
     ///   owned by this node; this function dereferences them to reparent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `insert_pos > WIDTH`.
     pub unsafe fn split_into(
         &self,
         new_right: &mut Self,
@@ -308,6 +312,10 @@ impl InternodeNode {
         debug_assert!(
             new_right.nkeys.load(RELAXED) == 0,
             "split_into: new_right must be empty"
+        );
+        assert!(
+            insert_pos <= WIDTH,
+            "split_into: insert_pos {insert_pos} > WIDTH {WIDTH}"
         );
 
         let mid: usize = WIDTH.div_ceil(2); // ceil(WIDTH / 2)

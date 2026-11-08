@@ -229,7 +229,7 @@ range/property/batch reproducers                        pass
 | Finding | Resolution | Commit |
 | --- | --- | --- |
 | SAFE-01/02/03 | `ValuePtr` opaque; public reads return guard-scoped `ValueRef`; batch entries own `P::Value` | `deabbcd` |
-| SAFE-04 | Ownership-bearing node/allocation APIs are `unsafe`, with documented contracts | `e94308d`, `bcff95c` |
+| SAFE-04 | Ownership-bearing node/allocation/leaf mutators are `unsafe`, with documented contracts; layer-gated value reads | `e94308d`, `bcff95c`, `a1bc057` |
 | SAFE-05 | Write-through restricted to a closed primitive-type list | `0af684c` |
 | SAFE-06 | `SuffixBag` metadata/used length atomic; `as_writer`, no `&mut` aliasing | `d6e0a07` |
 | OCC-01 | Every new-slot insert marks the version dirty and publishes with Release | `989246e` |

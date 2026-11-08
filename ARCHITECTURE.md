@@ -1974,6 +1974,10 @@ whether cargo currently enforces it.
   memory-profiling benches define their own allocator.
 - `ValuePtr` is opaque (`Debug` prints the address only); public reads return guard-scoped
   `ValueRef`s. Do not add a safe value accessor back to `ValuePtr`.
+- `LeafNode15`/`TreeLeafNode` ownership-bearing mutators (`store_value`, `store_layer`,
+  `take_value`, `take_value_for_layer`, `update_value_in_place*`) are `unsafe`; safe code can read
+  values but cannot publish a value or layer pointer. `load_value`/`take_value` return `None` for
+  layer slots, and `store_prepared_value_relaxed` is crate-internal.
 
 ### 14.3 Audit points (implementation observations, not guarantees)
 
