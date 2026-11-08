@@ -519,7 +519,7 @@ where
     }
 
     let cursor = CursorKey::from_slice(&chunk_ikey.to_be_bytes());
-    let leaf_ptr: *mut LeafNode15<P> = reach_leaf_for_scan::<P>(root, &cursor, guard);
+    let (leaf_ptr, _) = reach_leaf_for_scan::<P>(root, &cursor, guard);
 
     if leaf_ptr.is_null() {
         return None;

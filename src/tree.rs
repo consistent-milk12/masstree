@@ -23,6 +23,7 @@ mod generic;
 mod range;
 pub mod remove;
 mod split;
+mod traversal;
 
 pub use generic::{
     BatchEntry, BatchInsertResult, Entry, OccupiedEntry, RemoveEntryResult, VacantEntry,

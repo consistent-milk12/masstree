@@ -163,8 +163,10 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             self.stack.set_root(current_root);
 
             // Reach target leaf
-            let mut leaf_ptr: *mut LeafNode15<P> =
+            let (mut leaf_ptr, resolved_root) =
                 reach_leaf_for_scan::<P>(current_root, &self.cursor_key, guard);
+            current_root = resolved_root;
+            self.stack.set_root(resolved_root);
 
             // CRITICAL: Check null BEFORE calling stable_reverse
             if leaf_ptr.is_null() {
@@ -950,7 +952,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     ) -> (ScanStateBack, Option<E::Snapshot>) {
         const MAX_REPOSITION_RETRIES: u32 = 16;
 
-        let root: *const u8 = self.stack.get_root();
+        let mut root: *const u8 = self.stack.get_root();
 
         // Handle null root
         if root.is_null() {
@@ -960,8 +962,10 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         // Iterative retry loop (avoids recursion)
         for _retry in 0..MAX_REPOSITION_RETRIES {
             // Traverse from root to leaf
-            let mut leaf_ptr: *mut LeafNode15<P> =
+            let (mut leaf_ptr, resolved_root) =
                 reach_leaf_for_scan::<P>(root, &self.cursor_key, guard);
+            root = resolved_root;
+            self.stack.set_root(resolved_root);
 
             // Check for empty tree / layer
             if leaf_ptr.is_null() {

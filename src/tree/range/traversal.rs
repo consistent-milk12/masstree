@@ -15,49 +15,10 @@ use crate::policy::LeafPolicy;
 use crate::prefetch::prefetch_read;
 
 use super::cursor_key::CursorKey;
+use crate::tree::traversal::resolve_layer_root;
 
 /// Upper bound on parent climbs / B-link hops before giving up.
 const MAX_REACH_HOPS: usize = 64;
-
-/// Climb parent pointers from `start` to the true layer root.
-///
-/// After layer-root promotion the parent slot still points at the original
-/// left leaf; point reads climb `parent` pointers to find the internode root.
-/// Scans must do the same or they will only ever search that one leaf.
-#[inline]
-fn climb_layer_root<P>(mut node: *const u8, guard: &LocalGuard<'_>) -> *const u8
-where
-    P: LeafPolicy,
-{
-    for _ in 0..MAX_REACH_HOPS {
-        if node.is_null() {
-            return node;
-        }
-
-        // SAFETY: node is a live node protected by `guard`; both node kinds
-        // have NodeVersion as their first field.
-        #[expect(clippy::cast_ptr_alignment, reason = "NodeVersion is first field")]
-        let version: &NodeVersion = unsafe { &*node.cast::<NodeVersion>() };
-
-        let parent: *mut u8 = if version.is_leaf() {
-            // SAFETY: is_leaf() confirmed above.
-            let leaf: &LeafNode15<P> = unsafe { &*node.cast::<LeafNode15<P>>() };
-            leaf.parent(guard)
-        } else {
-            // SAFETY: !is_leaf() confirmed above.
-            let inode: &InternodeNode = unsafe { &*node.cast::<InternodeNode>() };
-            inode.parent(guard)
-        };
-
-        if parent.is_null() {
-            return node;
-        }
-
-        node = parent.cast_const();
-    }
-
-    node
-}
 
 /// Descend from a layer root to the leaf that should contain `cursor_key`.
 ///
@@ -70,21 +31,24 @@ pub fn reach_leaf_for_scan<P>(
     start: *const u8,
     cursor_key: &CursorKey,
     guard: &LocalGuard<'_>,
-) -> *mut LeafNode15<P>
+) -> (*mut LeafNode15<P>, *const u8)
 where
     P: LeafPolicy,
 {
     if start.is_null() {
-        return StdPtr::null_mut();
+        return (StdPtr::null_mut(), start);
     }
 
-    let mut root: *const u8 = climb_layer_root::<P>(start, guard);
+    // SAFETY: start was loaded from the tree under this scan's guard.
+    let Some(mut root) = (unsafe { resolve_layer_root::<P>(start, guard) }) else {
+        return (StdPtr::null_mut(), start);
+    };
     let target_ikey: u64 = cursor_key.current_ikey();
     let mut node: *const u8 = root;
 
     for _ in 0..MAX_REACH_HOPS {
         if node.is_null() {
-            return StdPtr::null_mut();
+            return (StdPtr::null_mut(), start);
         }
 
         // SAFETY: node is a live node protected by `guard`.
@@ -97,14 +61,22 @@ where
             let leaf: &LeafNode15<P> = unsafe { &*node.cast::<LeafNode15<P>>() };
 
             if leaf.version().is_deleted() {
-                root = climb_layer_root::<P>(start, guard);
+                // SAFETY: The previous root remains protected by the scan guard.
+                let Some(resolved) = (unsafe { resolve_layer_root::<P>(root, guard) }) else {
+                    return (StdPtr::null_mut(), root);
+                };
+                root = resolved;
                 node = root;
                 continue;
             }
 
             // Too far right: the target belongs at or before this leaf.
             if !leaf.prev(guard).is_null() && target_ikey < leaf.ikey_bound() {
-                root = climb_layer_root::<P>(start, guard);
+                // SAFETY: The previous root remains protected by the scan guard.
+                let Some(resolved) = (unsafe { resolve_layer_root::<P>(root, guard) }) else {
+                    return (StdPtr::null_mut(), root);
+                };
+                root = resolved;
                 node = root;
                 continue;
             }
@@ -120,7 +92,7 @@ where
                 }
             }
 
-            return node.cast_mut().cast::<LeafNode15<P>>();
+            return (node.cast_mut().cast::<LeafNode15<P>>(), root);
         }
 
         // SAFETY: !is_leaf() confirmed above.
@@ -133,7 +105,11 @@ where
         prefetch_read(child);
 
         if child.is_null() {
-            root = climb_layer_root::<P>(start, guard);
+            // SAFETY: The previous root remains protected by the scan guard.
+            let Some(resolved) = (unsafe { resolve_layer_root::<P>(root, guard) }) else {
+                return (StdPtr::null_mut(), root);
+            };
+            root = resolved;
             node = root;
             continue;
         }
@@ -141,7 +117,11 @@ where
         if inode.version().has_changed(v) {
             // A split (or a layer-root promotion) may have moved the key;
             // re-climb from the original start before retrying.
-            root = climb_layer_root::<P>(start, guard);
+            // SAFETY: The previous root remains protected by the scan guard.
+            let Some(resolved) = (unsafe { resolve_layer_root::<P>(root, guard) }) else {
+                return (StdPtr::null_mut(), root);
+            };
+            root = resolved;
             node = root;
             continue;
         }
@@ -149,5 +129,5 @@ where
         node = child;
     }
 
-    StdPtr::null_mut()
+    (StdPtr::null_mut(), root)
 }

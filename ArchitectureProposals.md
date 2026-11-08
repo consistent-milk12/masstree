@@ -25,7 +25,7 @@ implementation must verify those observations against the current source.
 | --- | --- | --- | --- |
 | 1 | Proposal 3: suffix sizing, split reservation, initialization, raw ownership | Churn 42 → 6 allocations; middle split 3 → 0 reallocations; native, feature, Miri tests | Complete |
 | 2 | Proposal 4: batch/Extend pipeline, write-through, Entry leaf hints | Preconstructed updates 6 → 3 allocations; guarded updates 264 → 0; Entry avoids a second descent | Complete |
-| 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Promoted-layer reads/scans/GC; zero-hop cached root test | Pending |
+| 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Shared root resolver; scan contexts now cache roots and retry with zero parent hops | In progress |
 | 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Layout assertions, point workloads, Loom and Miri | Pending |
 | 5 | Proposal 5: stack remove routes and remove cleanup | Zero-allocation non-emptying layered removal | Pending |
 | 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, layer contention tests, feature checks | Pending |
@@ -69,6 +69,15 @@ semver-breaking API change. Its 260-update allocation probe drops from 264 to 0;
 non-Clone boxed values return guarded borrows, and primitive/inline old values
 are owned snapshots. Native, compile-fail, and Miri tests cover these contracts.
 Proposal 4 is complete.
+
+Completed within step 3: guarded point operations, forward/reverse scans,
+printing and sublayer GC share `tree::traversal::resolve_layer_root`. Both scan
+contexts retain the resolved root on initial positioning and retries, including
+roots with multiple internode levels. A focused regression failed on the stale
+left-leaf cache before the change and now proves zero parent hops on retry.
+The promoted-layer reproducer now asserts all keyed, reference, batch, values,
+prefix and mixed-direction scan results against a BTreeMap. Internode/B-link
+descent consolidation and opportunistic parent-slot updates remain open.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

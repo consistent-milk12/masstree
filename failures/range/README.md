@@ -1,5 +1,12 @@
 # Range scan reproducers
 
+`promoted` is now a passing regression: 40- and 300-key promoted layers are
+checked against a BTreeMap across forward/reverse ranges, excluded bounds,
+keyed/reference/batch/value callbacks, full-key prefixes, and mixed next/back.
+The corresponding unit regression verifies that both scan directions cache
+the true promoted root and retries require zero parent hops. The table below
+retains historical failure observations.
+
 | Binary | Finding | Expected observation |
 |---|---|---|
 | `nul` | RNG-01, RNG-03 | `start inc [0]` includes `[]`; excluded bound is emitted; reverse `end inc [0]` drops `[0]` |

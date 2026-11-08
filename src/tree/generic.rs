@@ -269,52 +269,20 @@ where
     #[expect(clippy::unused_self, reason = "Method signature pattern")]
     pub(crate) fn maybe_parent_generic(
         &self,
-        mut node: *const u8,
+        node: *const u8,
         guard: &LocalGuard<'_>,
     ) -> *const u8 {
-        loop {
-            // SAFETY: node is valid, both types have NodeVersion as first field
-            #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-            let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
-
-            let parent = if version.is_leaf() {
-                // SAFETY: version.is_leaf() confirmed
-                let leaf: &LeafNode15<P> = unsafe { &*(node.cast::<LeafNode15<P>>()) };
-                leaf.parent(guard)
-            } else {
-                // SAFETY: !version.is_leaf() confirmed
-                let inode: &InternodeNode = unsafe { &*(node.cast::<InternodeNode>()) };
-                inode.parent(guard)
-            };
-
-            if parent.is_null() {
-                return node;
-            }
-
-            node = parent.cast_const();
-        }
+        // SAFETY: Callers supply a node loaded from this tree under `guard`.
+        unsafe { super::traversal::resolve_layer_root::<P>(node, guard) }
+            .expect("invalid layer parent chain")
     }
 
-    /// Single-step parent traversal
+    /// Single-step parent traversal for the descent retry path.
     #[inline(always)]
     #[expect(clippy::unused_self, reason = "Method signature pattern")]
     fn maybe_parent_one_step(&self, node: *const u8, guard: &LocalGuard<'_>) -> *const u8 {
-        // SAFETY: node is valid, both types have NodeVersion as first field
-        #[expect(clippy::cast_ptr_alignment, reason = "proper alignment")]
-        let version: &NodeVersion = unsafe { &*(node.cast::<NodeVersion>()) };
-
-        let parent: *mut u8 = if version.is_leaf() {
-            let leaf: &LeafNode15<P> = unsafe { &*(node.cast::<LeafNode15<P>>()) };
-
-            // SAFETY: version.is_leaf() confirmed
-            leaf.parent(guard)
-        } else {
-            let inode: &InternodeNode = unsafe { &*(node.cast::<InternodeNode>()) };
-
-            // SAFETY: !version.is_leaf() confirmed
-            inode.parent(guard)
-        };
-
+        // SAFETY: Descent keeps every visited node alive under `guard`.
+        let parent = unsafe { super::traversal::node_parent::<P>(node, guard) };
         if parent.is_null() {
             node
         } else {

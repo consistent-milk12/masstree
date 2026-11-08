@@ -1530,6 +1530,13 @@ permutation, logical `ki`, and `last_ikey` for monotonicity. `LayerStack` is an
 `ArrayVec<LayerContext, 6>` with heap spill for deeper tries. Reverse uses
 `BackStackElement` with a signed `ki` (`-1` = before first).
 
+Scan positioning returns both the destination leaf and the resolved layer root.
+Both directions cache that root, including in saved parent-layer contexts, so a
+retry starts at the latest known root instead of climbing from the original
+left leaf each time. Further root promotions are resolved on the next retry.
+Guarded root resolution is shared with point operations, printing, and sublayer
+GC in `src/tree/traversal.rs`; exclusive teardown keeps its unguarded walk.
+
 The scan state machine (`src/tree/range/scan_state.rs`) is:
 
 ```

@@ -545,26 +545,6 @@ impl Coalesce {
         version.try_lock()
     }
 
-    /// Read a node's parent pointer under the EBR guard.
-    ///
-    /// # Safety
-    /// `node_ptr` must point at a valid leaf or internode whose lifetime is
-    /// covered by `guard`.
-    #[inline]
-    unsafe fn node_parent<P: LeafPolicy>(
-        node_ptr: *mut u8,
-        is_leaf: bool,
-        guard: &LocalGuard<'_>,
-    ) -> *mut u8 {
-        if is_leaf {
-            // SAFETY: Caller guarantees node_ptr is a valid leaf.
-            unsafe { (*node_ptr.cast::<LeafNode15<P>>()).parent(guard) }
-        } else {
-            // SAFETY: Caller guarantees node_ptr is a valid internode.
-            unsafe { (*node_ptr.cast::<InternodeNode>()).parent(guard) }
-        }
-    }
-
     /// Process a sublayer gc entry by re-traversing from root.
     #[cold]
     #[inline(never)]
@@ -627,30 +607,15 @@ impl Coalesce {
         // ancestor. This read is optimistic; Step 5 revalidates the chain under
         // locks. A split that moves the root holds the involved node's lock, so
         // the scan below either sees it locked or sees the new root.
-        let mut root_ptr: *mut u8 = layer_ptr;
-        let mut climbed: usize = 0;
-
-        loop {
-            // SAFETY: root_ptr is a live layer node protected by the guard.
-            let version: &NodeVersion = unsafe { &*root_ptr.cast::<NodeVersion>() };
-            let is_leaf: bool = version.is_leaf();
-
-            // SAFETY: is_leaf was just read from the node's version.
-            let parent_ptr: *mut u8 = unsafe { Self::node_parent::<P>(root_ptr, is_leaf, guard) };
-
-            if parent_ptr.is_null() {
-                break;
-            }
-
-            root_ptr = parent_ptr;
-            climbed += 1;
-
-            if climbed > MAX_GC_BLINK_HOPS {
-                drop(parent_lock);
-                Self::requeue_sublayer(queue, route, requeue_count);
-                return true;
-            }
-        }
+        // SAFETY: The parent slot supplied a live node under this guard.
+        let Some(root_ptr) =
+            (unsafe { super::traversal::resolve_layer_root::<P>(layer_ptr, guard) })
+        else {
+            drop(parent_lock);
+            Self::requeue_sublayer(queue, route, requeue_count);
+            return true;
+        };
+        let root_ptr = root_ptr.cast_mut();
 
         // Step 5: Lock the entire layer subtree top-down and verify every leaf
         // is empty. `try_lock` makes a failed acquisition a reason to retry the

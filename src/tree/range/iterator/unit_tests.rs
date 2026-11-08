@@ -669,3 +669,45 @@ fn test_ksuf_mixed_with_inline_keys_single_layer() {
         assert_eq!(*got_val, *exp_val);
     }
 }
+#[test]
+fn scan_contexts_cache_promoted_layer_roots() {
+    use crate::{MassTree, NodeVersion};
+
+    for count in [40, 300] {
+        let tree = MassTree::<u64>::new();
+        let keys: Vec<_> = (0..count)
+            .map(|i: u64| [b"PREFIX00".as_slice(), &i.to_be_bytes()].concat())
+            .collect();
+        for (i, key) in keys.iter().enumerate() {
+            tree.insert(key, i as u64);
+        }
+        let guard = tree.guard();
+        let mut iter = tree.range(
+            RangeBound::Included(&keys[15]),
+            RangeBound::Included(&keys[39]),
+            &guard,
+        );
+        assert_eq!(iter.next().unwrap().key, keys[15]);
+        let forward_root = iter.fwd.stack.root();
+        // SAFETY: The scan context obtained this node under `guard`, which is
+        // still held. Both node layouts begin with NodeVersion.
+        #[expect(clippy::cast_ptr_alignment, reason = "NodeVersion is first field")]
+        let forward_version = unsafe { &*forward_root.cast::<NodeVersion>() };
+        assert!(
+            forward_version.is_root(),
+            "forward scan retained the old left leaf"
+        );
+
+        crate::tree::traversal::ROOT_CLIMB_COUNT.with(|count| count.set(0));
+        iter.fwd.find_retry(&guard);
+        assert_eq!(
+            crate::tree::traversal::ROOT_CLIMB_COUNT.with(std::cell::Cell::get),
+            0,
+            "a cached root should need no parent hops on retry",
+        );
+
+        assert_eq!(iter.next_back().unwrap().key, keys[39]);
+        let reverse_root = iter.rev.as_ref().unwrap().stack.get_root();
+        assert_eq!(reverse_root, forward_root);
+    }
+}

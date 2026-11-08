@@ -230,7 +230,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     {
         self.stack.set_root(root);
 
-        let leaf_ptr: *mut LeafNode15<P> = reach_leaf_for_scan::<P>(root, &self.cursor_key, guard);
+        let (leaf_ptr, resolved_root) = reach_leaf_for_scan::<P>(root, &self.cursor_key, guard);
+        self.stack.set_root(resolved_root);
 
         if leaf_ptr.is_null() {
             return (ScanState::Up, None);
@@ -774,8 +775,9 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     ///
     /// Corresponds to `find::find_retry`.
     pub fn find_retry(&mut self, guard: &LocalGuard<'_>) -> ScanState {
-        let leaf_ptr: *mut LeafNode15<P> =
+        let (leaf_ptr, resolved_root) =
             reach_leaf_for_scan::<P>(self.stack.root(), &self.cursor_key, guard);
+        self.stack.set_root(resolved_root);
 
         if leaf_ptr.is_null() {
             return ScanState::Up;

@@ -3311,6 +3311,13 @@ long-key boxed primitive updates from 264 allocations to 0. Its return type is
 now `Option<ValueRef<'g, P::Value>>` (a user-approved semver break), with guarded
 borrows for non-Clone boxed values and owned primitive/inline snapshots.
 
+PERF-07 follow-up: forward and reverse scan contexts now cache the resolved
+promoted root. The shared guarded resolver also serves point operations,
+printing and GC. A deterministic regression checks that a cached-root retry
+takes zero parent hops, including multi-level promotion; it failed on the
+original left-leaf cache. Native and Miri tests pass. Full internode/B-link
+descent consolidation remains tracked under Proposal 2 / RNG-09.
+
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|
 | PERF-01 | Suffix insert | `maybe_pre_allocate_suffix` allocates `WIDTH * suffix_len` on every suffix insert, including `Found` updates, conflicts, retries, and splits that drop it | Move to the `NotFound`/`find_usable_slot` path, size from actual suffix usage, pass into split | 1 allocation / 600 B per long-key update removed |

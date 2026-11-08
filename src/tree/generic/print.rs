@@ -8,6 +8,8 @@ use std::fmt::{self as StdFmt, Formatter, Write as FmtWrite};
 #[allow(unused_imports)]
 use seize::LocalGuard;
 
+use crate::tree::traversal::resolve_layer_root;
+
 use crate::{
     MassTreeGeneric, Permuter, TreeAllocator,
     internode::InternodeNode,
@@ -115,42 +117,6 @@ impl<W: FmtWrite> Ctx<'_, W> {
 // ============================================================================
 //  Node Dispatch
 // ============================================================================
-
-/// Climb parent pointers from a layer-slot target to the true layer root.
-///
-/// After promotion the slot still points at the original left leaf; the root
-/// is the parentless ancestor that owns the whole sublayer chain.
-///
-/// SAFETY: `node_ptr` must be a live leaf or internode protected by `guard`.
-unsafe fn resolve_layer_root<P: LeafPolicy>(
-    mut node_ptr: *mut u8,
-    guard: &LocalGuard<'_>,
-) -> *mut u8 {
-    for _ in 0..64 {
-        if node_ptr.is_null() {
-            return node_ptr;
-        }
-
-        // SAFETY: Both node types have NodeVersion as their first field.
-        let version: &NodeVersion = unsafe { &*node_ptr.cast::<NodeVersion>() };
-
-        let parent: *mut u8 = if version.is_leaf() {
-            // SAFETY: is_leaf() confirmed.
-            unsafe { (*node_ptr.cast::<LeafNode15<P>>()).parent(guard) }
-        } else {
-            // SAFETY: !is_leaf() confirmed.
-            unsafe { (*node_ptr.cast::<InternodeNode>()).parent(guard) }
-        };
-
-        if parent.is_null() {
-            return node_ptr;
-        }
-
-        node_ptr = parent;
-    }
-
-    node_ptr
-}
 
 /// Dispatch a raw node pointer to the correct print function.
 ///
@@ -391,7 +357,11 @@ where
             if !layer_ptr.is_null() && ctx.depth < MAX_DEPTH {
                 // SAFETY: layer_ptr is EBR-protected and resolve_layer_root
                 // only follows parent pointers of live nodes under the guard.
-                let layer_root: *mut u8 = unsafe { resolve_layer_root::<P>(layer_ptr, guard) };
+                let Some(layer_root) = (unsafe { resolve_layer_root::<P>(layer_ptr, guard) })
+                else {
+                    ctx.writeln_prefixed("[LAYER ROOT CHANGED]")?;
+                    continue;
+                };
 
                 ctx.writeln_prefixed(&format!(
                     "\u{2514}\u{2500}\u{2500} SUBLAYER (slot pos={pos}, root @ {layer_root:p})"
@@ -402,7 +372,7 @@ where
                 ctx.depth += 1;
 
                 // SAFETY: layer_root is the true sublayer root, EBR-protected.
-                unsafe { print_node::<P, W>(ctx, layer_root, guard)? };
+                unsafe { print_node::<P, W>(ctx, layer_root.cast_mut(), guard)? };
 
                 ctx.depth -= 1;
                 ctx.prefix = saved;
