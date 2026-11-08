@@ -547,7 +547,10 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     /// Assign a suffix during initial slot setup.
     ///
     /// # Safety
-    /// Caller must hold the lock.
+    ///
+    /// The leaf must be unpublished or a split sibling. A merely locked
+    /// published leaf is not sufficient because this path may grow the
+    /// suffix store.
     unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>);
 
     /// Clear the suffix at a slot.

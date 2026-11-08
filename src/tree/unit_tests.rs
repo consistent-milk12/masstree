@@ -1130,6 +1130,37 @@ fn test_layer_with_suffixes() {
     assert_eq!(tree.get(b"prefixAArest3"), None);
 }
 
+/// SUF-04: the layer-creation path used `assign_ksuf` while the new leaf's
+/// permutation was still empty. With external suffix storage the second
+/// assignment could rebuild the bag without the first entry.
+#[cfg(feature = "small-suffix-capacity")]
+#[test]
+fn test_layer_init_with_long_external_suffixes() {
+    fn keys() -> (Vec<u8>, Vec<u8>) {
+        let mut first = b"layerpfx".to_vec();
+        first.extend(std::iter::repeat_n(b'a', 200));
+
+        let mut second = b"layerpfx".to_vec();
+        second.extend(std::iter::repeat_n(b'b', 200));
+
+        (first, second)
+    }
+
+    let (first, second) = keys();
+
+    let inline: MassTree<u64> = MassTree::new();
+    inline.insert(&first, 1);
+    inline.insert(&second, 2);
+    assert_eq!(inline.get(&first), Some(1));
+    assert_eq!(inline.get(&second), Some(2));
+
+    let boxed: MassTree15<u64> = MassTree15::new();
+    boxed.insert(&first, 1);
+    boxed.insert(&second, 2);
+    assert_eq!(boxed.get(&first), Some(1));
+    assert_eq!(boxed.get(&second), Some(2));
+}
+
 #[test]
 fn test_insert_into_existing_layer() {
     let tree: MassTree<u64> = MassTree::new();

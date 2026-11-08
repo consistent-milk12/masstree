@@ -678,9 +678,16 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
     /// Assign a suffix during node initialization (sequential slots 0..slot).
     ///
+    /// Only valid for a node that is not yet reachable by readers: a freshly
+    /// allocated leaf (including a fresh layer leaf) or a split sibling whose
+    /// version is split-locked. A merely locked *published* leaf is not
+    /// sufficient, because this path may grow/reallocate the suffix bag while
+    /// OCC readers hold `&SuffixBag`.
+    ///
     /// # Safety
     ///
-    /// Same as `assign_ksuf`.
+    /// - The node must be unpublished or a split sibling.
+    /// - `guard` must come from this tree's collector.
     #[inline(always)]
     pub unsafe fn assign_ksuf_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>) {
         debug_assert!(
@@ -688,15 +695,15 @@ impl<P: LeafPolicy> LeafNode15<P> {
             "assign_ksuf_init: slot {slot} out of bounds"
         );
         debug_assert!(
-            self.version.is_locked() || self.version.is_unpublished(),
-            "assign_ksuf_init: caller must hold lock or node must be unpublished"
+            self.version.is_unpublished() || self.version.is_split_locked(),
+            "assign_ksuf_init: node must be unpublished or a split sibling"
         );
 
         if suffix.is_empty() {
             return;
         }
 
-        // SAFETY: Caller holds lock.
+        // SAFETY: Caller upholds the unpublished/exclusively-owned contract.
         unsafe { self.suffix.assign_init(slot, suffix, guard) };
 
         // Publish suffix presence.
@@ -2466,10 +2473,15 @@ impl<P: LeafPolicy> LeafNode15<P> {
         self.store_value(slot, &output);
 
         if key.has_suffix() {
+            // This leaf is freshly allocated (a layer leaf), so use the init
+            // path. `assign_ksuf` would use the still-empty permutation and
+            // could rebuild the external bag without the sibling assigned a
+            // moment ago.
             self.set_keylenx(slot, KSUF_KEYLENX);
 
-            // SAFETY: Caller holds lock.
-            unsafe { self.assign_ksuf(slot, key.suffix(), guard) };
+            // SAFETY: The caller creates this leaf under exclusive access and
+            // publishes it only after both entries are assigned.
+            unsafe { self.assign_ksuf_init(slot, key.suffix(), guard) };
         } else {
             let inline_len: u8 = key.current_len().min(8) as u8;
             self.set_keylenx(slot, inline_len);

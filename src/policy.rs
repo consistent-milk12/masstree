@@ -493,7 +493,10 @@ pub trait SuffixStore: sealed::SuffixStoreSealed + Send + Sync + Sized + 'static
     ///
     /// # Safety
     ///
-    /// Same as `assign`.
+    /// The suffix store must be unpublished or exclusively owned by the
+    /// caller. A merely locked *published* leaf is not sufficient: this path
+    /// may grow or reallocate the backing store while OCC readers hold a
+    /// shared reference to it.
     unsafe fn assign_init(&self, slot: usize, suffix: &[u8], guard: &LocalGuard<'_>);
 
     /// Assign a suffix using a pre-allocated buffer (reduces critical section time).
