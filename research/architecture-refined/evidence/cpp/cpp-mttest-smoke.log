@@ -14,7 +14,7 @@
 0: now getting
 1: {"table":"mb","test":"rw1","trial":0,"thread":1,"puts":50001,"puts_per_sec":2705672.66974,"gets":50001,"gets_per_sec":5805863.30502,"ops":100002,"ops_per_sec":3691170.5984}
 0: {"table":"mb","test":"rw1","trial":0,"thread":0,"puts":50001,"puts_per_sec":2589927.68514,"gets":50001,"gets_per_sec":5310696.23459,"ops":100002,"ops_per_sec":3481831.14272}
-set title "saad (2 cores)"
+set title "host (2 cores)"
 set terminal png
 set xrange [0.96:1.68]
 set xtics rotate by 45 right ("rw1/mb" 1, "rw3/mb" 1.08, "rw1/mb" 1.28, "rw3/mb" 1.36, "rw1/mb" 1.56, "rw3/mb" 1.64) font "Verdana,9"
