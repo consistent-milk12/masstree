@@ -499,10 +499,6 @@ where
                     self.search_for_insert_generic(leaf, key, &pre_lock_perm)
                 };
 
-                if pre_allocated_vec.is_none() && has_suffix {
-                    pre_allocated_vec = Self::maybe_pre_allocate_suffix(key, pre_lock_perm.size());
-                }
-
                 if let InsertSearchResultGeneric::Layer { slot } = optimistic_search {
                     let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
 
@@ -512,6 +508,17 @@ where
                         in_sublayer = true;
                         continue 'retry;
                     }
+                }
+
+                if pre_allocated_vec.is_none()
+                    && has_suffix
+                    && matches!(
+                        optimistic_search,
+                        InsertSearchResultGeneric::NotFound { .. }
+                    )
+                    && pre_lock_perm.size() < LeafNode15::<P>::WIDTH
+                {
+                    pre_allocated_vec = Self::maybe_pre_allocate_suffix(key, pre_lock_perm.size());
                 }
 
                 let mut lock: LockGuard<'_> = leaf.version().lock_bounded();

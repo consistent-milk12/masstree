@@ -900,6 +900,29 @@ where
             return BatchInsertResult::new();
         }
 
+        if P::can_write_through() {
+            let mut value_entries: Vec<BatchValueEntry<P>> = entries
+                .into_iter()
+                .enumerate()
+                .map(|(seq, entry): (usize, BatchEntry<P>)| {
+                    let key: Vec<u8> = entry.key;
+                    let value: P::Value = entry
+                        .value
+                        .expect("BatchEntry value already consumed before insertion");
+                    BatchValueEntry::new(key, value, seq)
+                })
+                .collect();
+
+            value_entries.sort_unstable_by(|a: &BatchValueEntry<P>, b: &BatchValueEntry<P>| {
+                batch_sort_key(a.ikey, &a.key, a.seq).cmp(&batch_sort_key(b.ikey, &b.key, b.seq))
+            });
+
+            let value_result: BatchInsertResult<P::Value> =
+                self.process_sorted_value_batch(&mut value_entries, guard);
+
+            return value_result.map_old_values(ValueRef::Owned);
+        }
+
         // Convert to internal outputs; the input order supplies the duplicate
         // tiebreaker.
         let mut outputs: Vec<OutputEntry<P>> = entries
@@ -965,8 +988,7 @@ where
         batch: &mut B,
         guard: &LocalGuard<'_>,
     ) -> BatchInsertResult<B::OldValue> {
-        let mut result: BatchInsertResult<B::OldValue> =
-            BatchInsertResult::with_capacity(batch.len() / 4);
+        let mut result: BatchInsertResult<B::OldValue> = BatchInsertResult::new();
         let mut index: usize = 0;
 
         while index < batch.len() {
@@ -1115,10 +1137,6 @@ where
             if let Some(bound) = upper_bound
                 && batch.entry_ikey(entry_index) >= bound
             {
-                break;
-            }
-
-            if perm.size() >= LeafNode15::<P>::WIDTH {
                 break;
             }
 

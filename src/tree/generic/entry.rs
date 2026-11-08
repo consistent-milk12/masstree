@@ -179,15 +179,7 @@ where
         match self {
             Entry::Occupied(mut o) => {
                 let new_value: P::Value = f(&o.value);
-                let new_output: P::Output = P::into_output(new_value);
-
-                // SAFETY: `new_output` is the allocation being published into
-                // the tree; `o.guard` keeps it alive. OCC validation happens
-                // inside the insert path.
-                let new_ref: ValueRef<'e, P::Value> =
-                    unsafe { P::output_to_value_ref(&new_output) };
-                let _old = o.tree.insert_output_with_guard(o.key, new_output, o.guard);
-                o.value = new_ref;
+                o.insert(new_value);
 
                 Entry::Occupied(o)
             }
@@ -209,6 +201,25 @@ where
                 let key: &[u8] = v.key;
                 let tree: &MassTreeGeneric<P, A> = v.tree;
                 let guard: &LocalGuard<'_> = v.guard;
+
+                if P::can_write_through() {
+                    // SAFETY: `can_write_through()` holds only for primitive
+                    // atomic-word types (`is_atomic_word`), which are trivially
+                    // `Copy` with no `Drop` or ownership.
+                    let copied: P::Value = unsafe { std::ptr::read(&raw const value) };
+                    let mut k = crate::key::Key::new(key);
+                    let _old = tree
+                        .insert_concurrent_value(&mut k, value, guard)
+                        .ok()
+                        .flatten();
+
+                    return OccupiedEntry {
+                        key,
+                        value: ValueRef::Owned(copied),
+                        tree,
+                        guard,
+                    };
+                }
 
                 // Convert to output before insert
                 let output: P::Output = P::into_output(value);
@@ -271,6 +282,21 @@ where
     /// Sets the value of the entry, and returns the old value.
     #[inline(always)]
     pub fn insert(&mut self, value: P::Value) -> Option<ValueRef<'e, P::Value>> {
+        if P::can_write_through() {
+            // SAFETY: `can_write_through()` holds only for primitive atomic-word
+            // types (`is_atomic_word`), which are trivially `Copy` with no `Drop`
+            // or ownership.
+            let copied: P::Value = unsafe { std::ptr::read(&raw const value) };
+            let mut key = crate::key::Key::new(self.key);
+            let old = self
+                .tree
+                .insert_concurrent_value(&mut key, value, self.guard)
+                .ok()
+                .flatten();
+            self.value = ValueRef::Owned(copied);
+            return old.map(ValueRef::Owned);
+        }
+
         let output = P::into_output(value);
 
         // SAFETY: `output` is the allocation being published into the tree;

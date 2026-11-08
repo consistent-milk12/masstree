@@ -126,13 +126,13 @@ where
     /// between batch operations to reclaim memory from deleted entries.
     /// Requires exclusive access to the guard (no nested guards active).
     ///
-    /// Internally calls `guard.flush()` + `guard.refresh()` + coalesce processing.
+    /// Internally runs coalesce processing followed by `guard.flush()` + `guard.refresh()`.
     #[inline]
     pub fn maintenance(&self, guard: &mut LocalGuard<'_>) {
         self.verify_guard(guard);
+        Coalesce::process_all::<P, A>(self, guard);
         guard.flush();
         guard.refresh();
-        Coalesce::process_all::<P, A>(self, guard);
     }
 
     /// Get the approximate number of keys in the tree.
