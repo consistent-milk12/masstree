@@ -236,6 +236,32 @@ impl<V: Send + Sync + 'static> ValueArray<ValuePtr<V>> for BoxValueArray<V> {
         self.ptrs[slot].store(ptr, RELAXED);
     }
 
+    type Prepared = ValuePtr<V>;
+
+    #[inline(always)]
+    fn prepare(output: &ValuePtr<V>) -> ValuePtr<V> {
+        *output
+    }
+
+    #[inline(always)]
+    fn store_prepared(&self, slot: usize, prepared: &ValuePtr<V>) {
+        debug_assert!(slot < WIDTH_15, "store_prepared: slot {slot} out of bounds");
+
+        let ptr: *mut u8 = prepared.as_ptr().cast::<u8>();
+        self.ptrs[slot].store(ptr, WRITE_ORD);
+    }
+
+    #[inline(always)]
+    fn store_prepared_relaxed(&self, slot: usize, prepared: &ValuePtr<V>) {
+        debug_assert!(
+            slot < WIDTH_15,
+            "store_prepared_relaxed: slot {slot} out of bounds"
+        );
+
+        let ptr: *mut u8 = prepared.as_ptr().cast::<u8>();
+        self.ptrs[slot].store(ptr, RELAXED);
+    }
+
     #[inline(always)]
     fn update_in_place(&self, slot: usize, output: &ValuePtr<V>) -> RetireHandle {
         debug_assert!(

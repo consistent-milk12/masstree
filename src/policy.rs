@@ -374,6 +374,21 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// Store a terminal value with Relaxed ordering.
     fn store_relaxed(&self, slot: usize, output: &O);
 
+    /// A value encoded for later storage without running user code.
+    ///
+    /// Producing it may run user code (e.g. `InlineBits::to_bits`), so it must
+    /// happen before a structural mutation. Storing it must be infallible.
+    type Prepared: Send + Sync;
+
+    /// Run the user-defined encoding for `output`.
+    fn prepare(output: &O) -> Self::Prepared;
+
+    /// Store a prepared value.
+    fn store_prepared(&self, slot: usize, prepared: &Self::Prepared);
+
+    /// Store a prepared value with Relaxed ordering.
+    fn store_prepared_relaxed(&self, slot: usize, prepared: &Self::Prepared);
+
     /// Update an existing terminal value in place, returning a retire handle
     /// for the old value.
     fn update_in_place(&self, slot: usize, output: &O) -> RetireHandle;
@@ -438,6 +453,12 @@ pub trait ValueArray<O>: sealed::ValueArraySealed + Send + Sync + Sized + 'stati
     /// - Slot must contain a terminal value (not empty, not layer).
     unsafe fn cleanup(&self, slot: usize);
 }
+
+/// A value encoded for infallible storage by a policy's value array.
+///
+/// Producing one may run user code; storing it must not.
+pub type PreparedValue<P> =
+    <<P as LeafPolicy>::Values as ValueArray<<P as LeafPolicy>::Output>>::Prepared;
 
 // ============================================================================
 //  SuffixStore — Key Suffix Storage Trait

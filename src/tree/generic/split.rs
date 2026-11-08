@@ -237,6 +237,11 @@ where
         // preventing concurrent modification. The guard protects against deallocation.
         let left_leaf: &LeafNode15<P> = unsafe { &*left_leaf_ptr };
 
+        // INS-04: user value encoding may panic (InlineBits is a safe trait).
+        // Run it before any allocation or structural mutation, so a panic
+        // leaves the published left leaf unchanged and rooted.
+        let prepared_value = LeafNode15::<P>::prepare_value(&insert_data.value);
+
         // =========================================================================
         // FALLIBLE PHASE: Prepare split context and allocate right sibling
         // =========================================================================
@@ -261,6 +266,7 @@ where
                 right_leaf_ptr,
                 logical_pos,
                 insert_data,
+                &prepared_value,
                 guard,
             )
         };

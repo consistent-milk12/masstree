@@ -29,7 +29,9 @@ use crate::leaf_trait::TreeLeafNode;
 use crate::nodeversion::NodeVersion;
 use crate::ordering::{CAS_FAILURE, CAS_SUCCESS, READ_ORD, RELAXED, WRITE_ORD};
 use crate::permuter::{AtomicPermuter15, Permuter15};
-use crate::policy::{LeafPolicy, RetireHandle, SlotKind, SlotState, SuffixStore, ValueArray};
+use crate::policy::{
+    LeafPolicy, PreparedValue, RetireHandle, SlotKind, SlotState, SuffixStore, ValueArray,
+};
 use crate::prefetch::prefetch_read;
 use crate::suffix::SuffixBagCell;
 use seize::Guard;
@@ -289,6 +291,24 @@ impl<P: LeafPolicy> LeafNode15<P> {
     #[inline(always)]
     pub fn store_value_relaxed(&self, slot: usize, output: &P::Output) {
         self.values.store_relaxed(slot, output);
+    }
+
+    /// Encode a value for later infallible storage.
+    ///
+    /// This may run user code (`InlineBits::to_bits`) and therefore must be
+    /// called before starting a structural mutation such as a split. The
+    /// returned token can be stored with
+    /// [`store_prepared_value_relaxed`](Self::store_prepared_value_relaxed),
+    /// which does not run user code.
+    #[inline(always)]
+    pub fn prepare_value(output: &P::Output) -> PreparedValue<P> {
+        <P::Values as ValueArray<P::Output>>::prepare(output)
+    }
+
+    /// Store a value prepared by [`prepare_value`](Self::prepare_value).
+    #[inline(always)]
+    pub fn store_prepared_value_relaxed(&self, slot: usize, prepared: &PreparedValue<P>) {
+        self.values.store_prepared_relaxed(slot, prepared);
     }
 
     /// Update an existing terminal value in place, returning a retire handle.
@@ -1718,6 +1738,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
         new_leaf_ptr: *mut Self,
         insert_pos: usize,
         insert_data: &SplitInsertData<'_, P>,
+        prepared_value: &PreparedValue<P>,
         guard: &LocalGuard<'_>,
     ) -> SplitInsertResult {
         // SAFETY: Caller guarantees new_leaf_ptr is valid and not yet visible.
@@ -1740,7 +1761,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
                 if dst_slot == right_insert_pos {
                     new_leaf.set_ikey(dst_slot, insert_data.ikey);
                     new_leaf.set_keylenx(dst_slot, insert_data.keylenx);
-                    new_leaf.store_value_relaxed(dst_slot, &insert_data.value);
+                    new_leaf.store_prepared_value_relaxed(dst_slot, prepared_value);
 
                     if insert_data.keylenx == KSUF_KEYLENX
                         && let Some(suffix) = insert_data.suffix
@@ -2206,11 +2227,21 @@ impl<P: LeafPolicy> TreeLeafNode<P> for LeafNode15<P> {
         new_leaf_ptr: *mut Self,
         insert_pos: usize,
         insert_data: &SplitInsertData<'_, P>,
+        prepared_value: &PreparedValue<P>,
         guard: &LocalGuard<'_>,
     ) -> SplitInsertResult {
         // SAFETY: Caller holds lock on self, new_leaf_ptr is valid and not yet
         // visible to other threads (trait method preconditions).
-        unsafe { self.split_and_insert(split_pos, new_leaf_ptr, insert_pos, insert_data, guard) }
+        unsafe {
+            self.split_and_insert(
+                split_pos,
+                new_leaf_ptr,
+                insert_pos,
+                insert_data,
+                prepared_value,
+                guard,
+            )
+        }
     }
 
     unsafe fn link_sibling(&self, new_sibling: *mut Self) {

@@ -108,6 +108,32 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
         self.tags[slot].store(InlineSentinel::inline_sentinel_ptr(), RELAXED);
     }
 
+    type Prepared = u64;
+
+    #[inline(always)]
+    fn prepare(output: &V) -> u64 {
+        output.to_bits()
+    }
+
+    #[inline(always)]
+    fn store_prepared(&self, slot: usize, prepared: &u64) {
+        debug_assert!(slot < WIDTH_15, "store_prepared: slot {slot} out of bounds");
+
+        self.values[slot].store(*prepared, RELAXED);
+        self.tags[slot].store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
+    }
+
+    #[inline(always)]
+    fn store_prepared_relaxed(&self, slot: usize, prepared: &u64) {
+        debug_assert!(
+            slot < WIDTH_15,
+            "store_prepared_relaxed: slot {slot} out of bounds"
+        );
+
+        self.values[slot].store(*prepared, RELAXED);
+        self.tags[slot].store(InlineSentinel::inline_sentinel_ptr(), RELAXED);
+    }
+
     #[inline(always)]
     fn update_in_place(&self, slot: usize, output: &V) -> RetireHandle {
         debug_assert!(

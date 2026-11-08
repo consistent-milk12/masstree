@@ -515,6 +515,7 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
         new_leaf_ptr: *mut Self,
         insert_pos: usize,
         insert_data: &SplitInsertData<'_, P>,
+        prepared_value: &crate::policy::PreparedValue<P>,
         guard: &LocalGuard<'_>,
     ) -> SplitInsertResult;
 
