@@ -30,7 +30,7 @@ fn test_ikey_extraction() {
 }
 
 #[test]
-fn test_short_key_padding() {
+fn test_short_keypadding() {
     let key: Key<'_> = Key::new(b"hi");
     let expected: u64 = u64::from_be_bytes([b'h', b'i', 0, 0, 0, 0, 0, 0]);
 

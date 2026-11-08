@@ -432,7 +432,7 @@ fn test_unlock_for_split() {
 
     // stable() should return immediately (no dirty bits)
     let v = split_version.stable();
-    assert!((v & DIRTY_MASK) == 0);
+    assert_eq!(v & DIRTY_MASK, 0);
 }
 
 #[test]
@@ -457,7 +457,7 @@ fn test_split_version_blocks_stable() {
     // After unlock, stable() should work
     split_version.unlock_for_split();
     let stable = split_version.stable();
-    assert!((stable & DIRTY_MASK) == 0);
+    assert_eq!(stable & DIRTY_MASK, 0);
 }
 
 #[test]

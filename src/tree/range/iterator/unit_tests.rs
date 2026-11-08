@@ -124,8 +124,7 @@ fn test_rev_empty_tree() {
     let tree = MassTree::<u64>::default();
     let guard = tree.guard();
 
-    let items: Vec<_> = tree.iter(&guard).rev().collect();
-    assert!(items.is_empty());
+    assert_eq!(tree.iter(&guard).rev().count(), 0);
 }
 
 #[test]

@@ -104,7 +104,7 @@ pub struct InlineSuffixBag {
     suffix_count: AtomicU8,
 
     /// Padding for alignment.
-    _pad: u8,
+    pad: u8,
 
     /// Fixed-size data buffer.
     data: UnsafeCell<[u8; CAPACITY]>,
@@ -137,7 +137,7 @@ impl InlineSuffixBag {
             slots: [const { AtomicU32::new(Self::EMPTY_PACKED) }; WIDTH],
             size: AtomicU16::new(0),
             suffix_count: AtomicU8::new(0),
-            _pad: 0,
+            pad: 0,
             data: UnsafeCell::new([0u8; CAPACITY]),
         }
     }
@@ -530,7 +530,7 @@ impl Clone for InlineSuffixBag {
             slots: std::array::from_fn(|i: usize| AtomicU32::new(self.slots[i].load(RELAXED))),
             size: AtomicU16::new(self.size.load(RELAXED)),
             suffix_count: AtomicU8::new(self.suffix_count.load(RELAXED)),
-            _pad: 0,
+            pad: 0,
             data: UnsafeCell::new(data),
         }
     }

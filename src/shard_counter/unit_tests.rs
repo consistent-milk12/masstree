@@ -138,7 +138,7 @@ fn test_cache_line_alignment() {
 }
 
 #[test]
-fn test_padded_counter_size() {
+fn testpadded_counter_size() {
     // Verify PaddedCounter is at least CACHE_LINE_SIZE
     // (it may be larger due to alignment padding)
     assert!(

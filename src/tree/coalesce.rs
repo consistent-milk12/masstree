@@ -572,6 +572,10 @@ impl Coalesce {
     /// Process a sublayer gc entry by re-traversing from root.
     #[cold]
     #[inline(never)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Whole-subtree validation is kept in one audit-friendly function"
+    )]
     fn try_remove_sublayer<P, A>(
         tree: &MassTreeGeneric<P, A>,
         queue: &CoalesceQueue,
@@ -901,7 +905,7 @@ impl Coalesce {
         P: LeafPolicy,
         A: TreeAllocator<P>,
     {
-        debug_assert!(!route.is_empty());
+        debug_assert_ne!(route.len(), 0);
 
         let mut current_root: *const u8 = tree.root_ptr.load(AtomicOrdering::Acquire);
 

@@ -10,6 +10,7 @@ use seize::LocalGuard;
 use crate::{MassTreeGeneric, TreeAllocator, ValueRef, policy::LeafPolicy, tree::RemoveError};
 
 /// Result type for [`OccupiedEntry::try_remove_entry`].
+#[allow(clippy::type_complexity)]
 pub type RemoveEntryResult<'g, V> = Result<Option<(Vec<u8>, ValueRef<'g, V>)>, RemoveError>;
 
 /// A view into a single entry in a tree, which may either be vacant or occupied.
@@ -328,6 +329,7 @@ where
         clippy::panic,
         reason = "Convenience wrapper; use try_remove_entry for fallible version"
     )]
+    #[allow(clippy::type_complexity)]
     pub fn remove_entry(self) -> Option<(Vec<u8>, ValueRef<'e, P::Value>)> {
         match self.try_remove_entry() {
             Ok(result) => result,

@@ -5,10 +5,7 @@ use crate::leaf_trait::{SplitInsertData, SplitInsertResult};
 use crate::leaf15::LeafNode15;
 use crate::nodeversion::LockGuard;
 
-use super::{
-    AtomicOrdering, InsertError, LeafPolicy, LocalGuard, MassTreeGeneric, Propagation,
-    TreeAllocator,
-};
+use super::{AtomicOrdering, LeafPolicy, LocalGuard, MassTreeGeneric, Propagation, TreeAllocator};
 
 // ============================================================================
 // Split Preparation Context
@@ -87,7 +84,7 @@ where
         left_leaf_ptr: *mut LeafNode15<P>,
         logical_pos: usize,
         ikey: u64,
-    ) -> Result<SplitPreparation, InsertError> {
+    ) -> SplitPreparation {
         // Calculate the split point. The only remaining failure is an empty
         // leaf, which cannot happen when a full leaf is being split. Fall back
         // to a midpoint split instead of panicking so a public `insert` never
@@ -134,12 +131,12 @@ where
         // split_into_preallocated() or split_and_insert() after mark_split().
         let right_leaf_ptr: *mut LeafNode15<P> = self.allocator.alloc_leaf_direct(false, false);
 
-        Ok(SplitPreparation {
+        SplitPreparation {
             split_point,
             is_main_root,
             is_layer_root,
             right_leaf_ptr: right_leaf_ptr.cast(),
-        })
+        }
     }
 
     /// Execute infallible split propagation.
@@ -232,7 +229,7 @@ where
         logical_pos: usize,
         insert_data: &SplitInsertData<'_, P>,
         guard: &LocalGuard<'_>,
-    ) -> Result<SplitInsertResult, InsertError> {
+    ) -> SplitInsertResult {
         // SAFETY: Caller guarantees left_leaf_ptr is valid and we hold the lock,
         // preventing concurrent modification. The guard protects against deallocation.
         let left_leaf: &LeafNode15<P> = unsafe { &*left_leaf_ptr };
@@ -246,7 +243,7 @@ where
         // FALLIBLE PHASE: Prepare split context and allocate right sibling
         // =========================================================================
         let prep: SplitPreparation =
-            self.prepare_split(left_leaf, left_leaf_ptr, logical_pos, insert_data.ikey)?;
+            self.prepare_split(left_leaf, left_leaf_ptr, logical_pos, insert_data.ikey);
 
         let right_leaf_ptr: *mut LeafNode15<P> = prep.right_leaf_ptr.cast();
 
@@ -291,6 +288,6 @@ where
             guard,
         );
 
-        Ok(result)
+        result
     }
 }

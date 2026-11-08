@@ -49,7 +49,7 @@ pub struct InternodeNode {
     height: u8, // 1 byte
 
     /// Padding for 8-byte alignment of parent pointer.
-    _pad: [u8; 2], // 2 bytes
+    pad: [u8; 2], // 2 bytes
 
     /// Parent internode pointer (null for root).
     parent: AtomicPtr<u8>, // 8 bytes
@@ -174,7 +174,7 @@ impl InternodeNode {
             version: NodeVersion::new(false), // false = not a leaf
             nkeys: AtomicU8::new(0),
             height: height as u8,
-            _pad: [0; 2],
+            pad: [0; 2],
             parent: AtomicPtr::new(StdPtr::null_mut()),
             ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),
@@ -205,7 +205,7 @@ impl InternodeNode {
             version: split_version,
             nkeys: AtomicU8::new(0),
             height: height as u8,
-            _pad: [0; 2],
+            pad: [0; 2],
             parent: AtomicPtr::new(StdPtr::null_mut()),
             ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             child: StdArray::from_fn(|_| AtomicPtr::new(StdPtr::null_mut())),

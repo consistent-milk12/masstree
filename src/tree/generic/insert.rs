@@ -639,19 +639,13 @@ where
                                     value: output,
                                 };
 
-                                match self.handle_leaf_split_and_insert_generic(
+                                self.handle_leaf_split_and_insert_generic(
                                     leaf_ptr,
                                     lock,
                                     logical_pos,
                                     &insert_data,
                                     guard,
-                                ) {
-                                    Ok(_result) => {}
-
-                                    Err(e) => {
-                                        return Err(e);
-                                    }
-                                }
+                                );
 
                                 self.count.increment();
                                 return Ok(None);

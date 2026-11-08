@@ -23,7 +23,6 @@ impl SuffixBag {
     /// unpublished bag, or the drain-and-rebuild path while the leaf lock is
     /// held and readers validate with OCC. Not used for append-only concurrent
     /// assignment.
-    #[expect(clippy::indexing_slicing, reason = "Bounds checked via slot iteration")]
     pub(super) fn compact_in_place(&self) {
         if self.count() == 0 {
             let data_ptr: *mut Vec<u8> = self.data.get();
@@ -88,7 +87,7 @@ impl SuffixBag {
                         SlotMeta {
                             offset: write_pos as u32,
                             len: 0,
-                            _pad: 0,
+                            pad: 0,
                         },
                     );
                 }
@@ -111,7 +110,7 @@ impl SuffixBag {
                     SlotMeta {
                         offset: write_pos as u32,
                         len: entry.len,
-                        _pad: 0,
+                        pad: 0,
                     },
                 );
             }
@@ -125,6 +124,10 @@ impl SuffixBag {
 
     /// Compact keeping only specified active slots, using in-place moves.
     #[expect(clippy::indexing_slicing, reason = "Slot bounds explicitly checked")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Compaction keeps allocation and metadata updates together"
+    )]
     pub(super) fn compact(&self, active_slots: impl Iterator<Item = usize>) -> usize {
         let old_used: usize = self.used();
         let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
@@ -203,7 +206,7 @@ impl SuffixBag {
                     new_slots[entry.slot] = SlotMeta {
                         offset: write_pos as u32,
                         len: 0,
-                        _pad: 0,
+                        pad: 0,
                     };
                 }
                 continue;
@@ -223,7 +226,7 @@ impl SuffixBag {
                 new_slots[entry.slot] = SlotMeta {
                     offset: write_pos as u32,
                     len: entry.len,
-                    _pad: 0,
+                    pad: 0,
                 };
             }
 
@@ -233,8 +236,8 @@ impl SuffixBag {
         data.truncate(write_pos);
         self.publish_used(write_pos);
 
-        for slot in 0..WIDTH {
-            self.store_meta(slot, new_slots[slot]);
+        for (slot, meta) in new_slots.iter().enumerate() {
+            self.store_meta(slot, *meta);
         }
 
         #[expect(clippy::cast_possible_truncation)]

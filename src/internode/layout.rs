@@ -7,7 +7,7 @@
 //! # Cache Line Strategy
 //!
 //! ```text
-//! CL 0 (0-63):     version (4B) + nkeys (1B) + height (1B) + _pad (2B)
+//! CL 0 (0-63):     version (4B) + nkeys (1B) + height (1B) + pad (2B)
 //!                  + parent (8B) + ikey0[0..=5] (6 keys, 48B)
 //! CL 1 (64-127):   ikey0[6..=13] (8 keys, 64B)
 //! CL 2 (128-191):  ikey0[14] (8B) + child[0..=6] (7 ptrs, 56B)
@@ -80,7 +80,7 @@ const _: () = {
     assert!(offset_of!(InternodeNode, version) == 0);
     assert!(offset_of!(InternodeNode, nkeys) == 4);
     assert!(offset_of!(InternodeNode, height) == 5);
-    assert!(offset_of!(InternodeNode, _pad) == 6);
+    assert!(offset_of!(InternodeNode, pad) == 6);
     assert!(offset_of!(InternodeNode, parent) == 8);
     assert!(offset_of!(InternodeNode, ikey0) == 16);
 

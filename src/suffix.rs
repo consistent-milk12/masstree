@@ -45,7 +45,7 @@ struct SlotMeta {
     len: u16,
 
     /// Padding for alignment (unused).
-    _pad: u16,
+    pad: u16,
 }
 
 impl SlotMeta {
@@ -53,7 +53,7 @@ impl SlotMeta {
     const EMPTY: Self = Self {
         offset: u32::MAX,
         len: 0,
-        _pad: 0,
+        pad: 0,
     };
 
     /// Packed representation of [`Self::EMPTY`].
@@ -62,16 +62,20 @@ impl SlotMeta {
     /// Pack into a single 64-bit word.
     #[inline(always)]
     const fn pack(self) -> u64 {
-        (self.offset as u64) | ((self.len as u64) << 32) | ((self._pad as u64) << 48)
+        (self.offset as u64) | ((self.len as u64) << 32) | ((self.pad as u64) << 48)
     }
 
     /// Unpack from a 64-bit word.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "packed layout is exactly 32/16/16 bits"
+    )]
     #[inline(always)]
     const fn unpack(packed: u64) -> Self {
         Self {
             offset: packed as u32,
             len: (packed >> 32) as u16,
-            _pad: (packed >> 48) as u16,
+            pad: (packed >> 48) as u16,
         }
     }
 
@@ -152,6 +156,10 @@ impl SuffixBag {
     }
 
     /// Construct [`SuffixBag`] by reusing an existing [`Vec<u8>`] buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data` is not empty.
     #[must_use]
     #[inline(always)]
     pub fn from_vec(data: Vec<u8>) -> Self {
@@ -174,6 +182,10 @@ impl SuffixBag {
     }
 
     /// Build from a data buffer and slot metadata (clone path).
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "at most WIDTH (15) suffixes fit in a u8"
+    )]
     #[inline]
     fn from_parts(data: Vec<u8>, metas: [SlotMeta; WIDTH]) -> Self {
         let ptr: *mut u8 = data.as_ptr().cast_mut();
@@ -267,7 +279,6 @@ impl SuffixBag {
     // ========================================================================
 
     /// Append suffix data and update slot metadata + count.
-    #[expect(clippy::indexing_slicing, reason = "Checked by caller")]
     #[expect(clippy::cast_possible_truncation)]
     fn append_and_record(&self, slot: usize, suffix: &[u8]) {
         // SAFETY: Writers have exclusive access.
@@ -291,7 +302,7 @@ impl SuffixBag {
             SlotMeta {
                 offset: offset as u32,
                 len: suffix.len() as u16,
-                _pad: 0,
+                pad: 0,
             },
         );
     }
@@ -333,7 +344,7 @@ impl SuffixBag {
                 SlotMeta {
                     offset: meta.offset,
                     len: suffix_len as u16,
-                    _pad: 0,
+                    pad: 0,
                 },
             );
 
@@ -372,7 +383,6 @@ impl SuffixBag {
     /// Panics if `slot >= 15`.
     #[must_use]
     #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked")]
     pub fn has_suffix(&self, slot: usize) -> bool {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
         self.load_meta(slot).has_suffix()
@@ -385,7 +395,6 @@ impl SuffixBag {
     /// Panics if `slot >= 15`.
     #[must_use]
     #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked")]
     pub fn get(&self, slot: usize) -> Option<&[u8]> {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 
@@ -467,7 +476,6 @@ impl SuffixBag {
     ///
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
     #[inline]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked via assert")]
     #[expect(clippy::cast_possible_truncation, reason = "len checked above")]
     pub fn try_assign_in_place(&self, slot: usize, suffix: &[u8]) -> bool {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
@@ -492,7 +500,7 @@ impl SuffixBag {
                 SlotMeta {
                     offset: meta.offset,
                     len: suffix.len() as u16,
-                    _pad: 0,
+                    pad: 0,
                 },
             );
 
@@ -531,7 +539,7 @@ impl SuffixBag {
                 SlotMeta {
                     offset: new_offset as u32,
                     len: suffix.len() as u16,
-                    _pad: 0,
+                    pad: 0,
                 },
             );
 
@@ -547,7 +555,6 @@ impl SuffixBag {
     ///
     /// Panics if `slot >= 15` or if suffix length exceeds `u16::MAX`.
     #[inline]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked via assert")]
     #[expect(clippy::cast_possible_truncation, reason = "offset and len checked")]
     pub fn assign(&self, slot: usize, suffix: &[u8]) {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
@@ -579,7 +586,7 @@ impl SuffixBag {
             SlotMeta {
                 offset: offset as u32,
                 len: suffix.len() as u16,
-                _pad: 0,
+                pad: 0,
             },
         );
     }
@@ -590,7 +597,6 @@ impl SuffixBag {
     ///
     /// Panics if `slot >= 15`.
     #[inline(always)]
-    #[expect(clippy::indexing_slicing, reason = "Slot bounds checked via assert")]
     pub fn clear(&self, slot: usize) {
         assert!(slot < WIDTH, "slot {slot} >= WIDTH {WIDTH}");
 

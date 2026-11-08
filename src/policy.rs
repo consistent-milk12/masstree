@@ -48,7 +48,7 @@ use crate::suffix::SuffixBagCell;
 /// values are ever stored) and that the representation has no padding and no
 /// provenance-bearing pointers.
 #[inline(always)]
-pub(crate) fn is_atomic_word<V: 'static>() -> bool {
+fn is_atomic_word<V: 'static>() -> bool {
     use std::any::TypeId;
 
     let id = TypeId::of::<V>();
@@ -104,6 +104,7 @@ impl<V> ValuePtr<V> {
     }
 
     /// Get the raw pointer.
+    #[must_use]
     #[inline(always)]
     pub const fn as_ptr(self) -> *mut V {
         self.0.as_ptr()
@@ -119,8 +120,9 @@ impl<V> ValuePtr<V> {
     /// - For write-through values, the caller must not form this reference
     ///   while another thread may perform an in-place atomic update.
     /// - The reference must not outlive the guard.
+    #[must_use]
     #[inline(always)]
-    pub unsafe fn as_ref<'g>(&self) -> &'g V {
+    pub const unsafe fn as_ref<'g>(&self) -> &'g V {
         // SAFETY: Contract of the caller.
         unsafe { self.0.as_ref() }
     }
@@ -587,6 +589,7 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     /// representation contains no padding or provenance-bearing pointers may
     /// qualify. `BoxPolicy` answers this from a closed list of primitive
     /// types, not from a size/alignment heuristic.
+    #[must_use]
     fn can_write_through() -> bool {
         false
     }

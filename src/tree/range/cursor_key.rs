@@ -12,8 +12,10 @@
 
 #![expect(clippy::indexing_slicing, reason = "Safety notes are provided inline")]
 
+#[cfg(test)]
+use std::cmp::Ordering;
+use std::fmt::Debug;
 use std::fmt::{self as StdFmt, Formatter};
-use std::{cmp::Ordering, fmt::Debug};
 
 #[cfg(debug_assertions)]
 use std::fmt::Display;
@@ -344,14 +346,9 @@ impl CursorKey {
 
     /// Compare cursor position against a `(ikey, keylenx)` pair.
     ///
-    /// Matches C++ `key::compare()` semantics:
-    /// 1. Compare ikeys first
-    /// 2. If equal: cursor with suffix vs no-suffix slot = Greater;
-    ///    both have suffix = Equal (need suffix compare); else compare lengths
-    ///
-    /// Layer pointers (`keylenx >= 128`) are treated as "very long keys".
-    /// After `unshift()` (len=9), cursor compares Equal/Greater to skip them.
+    /// Test-only helper retained to exercise the legacy ordering semantics.
     #[must_use]
+    #[cfg(test)]
     #[inline(always)]
     pub fn compare(&self, other_ikey: u64, keylenx: usize) -> Ordering {
         match self.ikey.cmp(&other_ikey) {
@@ -370,8 +367,9 @@ impl CursorKey {
         }
     }
 
-    /// Compare suffix bytes against stored suffix (used after `compare()` returns Equal).
+    /// Compare suffix bytes against stored suffix.
     #[must_use]
+    #[cfg(test)]
     #[inline(always)]
     pub fn compare_suffix(&self, stored_suffix: &[u8]) -> Ordering {
         self.suffix().cmp(stored_suffix)

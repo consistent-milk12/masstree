@@ -51,7 +51,9 @@ impl KeyIndexedPosition {
 
 /// Check if suffix comparison result allows emit for initial position.
 ///
-/// For forward scans: emit if stored > search, or stored == search and `emit_equal`.
+/// Test-only helper for the legacy forward lower-bound semantics.
+#[must_use]
+#[cfg(test)]
 #[inline(always)]
 pub const fn initial_ksuf_match(ksuf_compare: Ordering, emit_equal: bool) -> bool {
     match ksuf_compare {
@@ -242,171 +244,6 @@ where
     KeyIndexedPosition::not_found(size)
 }
 
-/// Find the lower bound position with full key comparison (ikey + suffix).
-///
-/// Returns the logical position (`0..=perm.size()`) where scanning should
-/// resume after accounting for suffix ordering. Unlike [`lower_with_position`],
-/// the physical slot is not returned because callers only need the position.
-#[inline]
-pub fn lower_with_suffix<P>(
-    cursor_key: &CursorKey,
-    leaf: &LeafNode15<P>,
-    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-) -> usize
-where
-    P: LeafPolicy,
-{
-    let base_pos: KeyIndexedPosition = lower_with_position(cursor_key, leaf, perm);
-
-    // If no ikey match, position is correct
-    let Some(slot) = base_pos.p else {
-        return base_pos.i;
-    };
-
-    // Check if suffix comparison is needed
-    let keylenx: u8 = leaf.keylenx_relaxed(slot);
-
-    // Layer pointers: if cursor has suffix (including after unshift()),
-    // we've already processed this layer and should skip past it
-    if keylenx >= LAYER_KEYLENX {
-        if cursor_key.has_suffix() {
-            // Cursor has suffix (or is post-unshift sentinel) -> skip layer pointer
-            return base_pos.i + 1;
-        }
-        return base_pos.i;
-    }
-
-    // Handle inline keys (no suffix on either side)
-    if !cursor_key.has_suffix() {
-        // Compare lengths for inline keys
-        let cursor_len = cursor_key.current_len();
-        let slot_len = keylenx as usize;
-
-        return match cursor_len.cmp(&slot_len) {
-            Ordering::Less => base_pos.i, // cursor < slot, position correct
-            Ordering::Equal => {
-                // Exact match - skip to next position
-                base_pos.i + 1
-            }
-            Ordering::Greater => {
-                // cursor > slot, find position after slots with same ikey
-                find_position_after_inline(cursor_key, leaf, perm, base_pos.i)
-            }
-        };
-    }
-
-    // If slot has suffix, compare suffix bytes
-    if keylenx == KSUF_KEYLENX
-        && let Some(stored_suffix) = leaf.ksuf(slot)
-    {
-        let cursor_suffix: &[u8] = cursor_key.suffix();
-
-        match cursor_suffix.cmp(stored_suffix) {
-            Ordering::Less => {
-                // Cursor suffix < stored: position is correct (insert before)
-                return base_pos.i;
-            }
-
-            Ordering::Equal => {
-                // Exact match - we already emitted this key, skip to next position
-                return base_pos.i + 1;
-            }
-
-            Ordering::Greater => {
-                // Cursor suffix > stored: insert after this slot
-                // But we need to check if there are more slots with same ikey
-                return find_position_after_suffix(cursor_key, leaf, perm, base_pos.i);
-            }
-        }
-    }
-
-    // Slot has no suffix but cursor does: cursor is greater
-    // Need to find position after slots with same ikey
-    find_position_after_suffix(cursor_key, leaf, perm, base_pos.i)
-}
-
-/// Find position after inline keys with the same ikey but shorter length.
-///
-/// When cursor has an inline key that is longer than the slot's inline key
-/// `(same ikey, cursor_len > slot_keylenx)`, we need to find the first slot
-/// where cursor <= slot.
-#[cold]
-#[inline(never)]
-fn find_position_after_inline<P>(
-    cursor_key: &CursorKey,
-    leaf: &LeafNode15<P>,
-    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-    start_i: usize,
-) -> usize
-where
-    P: LeafPolicy,
-{
-    let size: usize = perm.size();
-    let search_ikey: u64 = cursor_key.current_ikey();
-    let cursor_len: usize = cursor_key.current_len();
-
-    for i in (start_i + 1)..size {
-        let slot: usize = perm.get(i);
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-
-        if slot_ikey != search_ikey {
-            return i;
-        }
-
-        // Same ikey: check length/suffix
-        let keylenx: u8 = leaf.keylenx_relaxed(slot);
-
-        if keylenx == KSUF_KEYLENX || keylenx >= LAYER_KEYLENX {
-            return i;
-        }
-
-        // Both inline: compare lengths
-        if cursor_len <= keylenx as usize {
-            return i;
-        }
-    }
-
-    size
-}
-
-/// When cursor suffix > stored suffix (or cursor has suffix but slot doesn't),
-/// we need to skip past any remaining slots with the same ikey.
-#[cold]
-#[inline(never)]
-fn find_position_after_suffix<P>(
-    cursor_key: &CursorKey,
-    leaf: &LeafNode15<P>,
-    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-    start_i: usize,
-) -> usize
-where
-    P: LeafPolicy,
-{
-    let size: usize = perm.size();
-    let search_ikey: u64 = cursor_key.current_ikey();
-
-    for i in (start_i + 1)..size {
-        let slot: usize = perm.get(i);
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-
-        if slot_ikey != search_ikey {
-            return i;
-        }
-
-        // Same ikey: check suffix
-        let keylenx: u8 = leaf.keylenx_relaxed(slot);
-
-        if keylenx == KSUF_KEYLENX
-            && let Some(stored_suffix) = leaf.ksuf(slot)
-            && cursor_key.suffix() <= stored_suffix
-        {
-            return i;
-        }
-    }
-
-    size
-}
-
 // ============================================================================
 //  ReverseScanHelper
 // ============================================================================
@@ -484,38 +321,6 @@ impl ReverseScanHelper {
                 }
             }
         }
-    }
-
-    /// Check if suffix comparison result allows emit for initial position (reverse).
-    ///
-    /// For reverse: emit if stored < search, or stored == search and emit
-    #[inline(always)]
-    pub const fn initial_ksuf_match_reverse(ksuf_compare: Ordering, emit_equal: bool) -> bool {
-        match ksuf_compare {
-            Ordering::Less => true,
-
-            Ordering::Equal => emit_equal,
-
-            Ordering::Greater => false,
-        }
-    }
-
-    /// Check if a slot is a duplicate of the last emitted key (reverse scan).
-    ///
-    /// For reverse: duplicate if cursor <= slot (already emitted or after cursor).
-    #[inline(always)]
-    pub fn is_duplicate_reverse(
-        cursor_key: &CursorKey,
-        ikey: u64,
-        keylenx: u8,
-        upper_bound: bool,
-    ) -> bool {
-        if upper_bound {
-            return false;
-        }
-
-        // For reverse scan: duplicate if cursor <= slot
-        cursor_key.compare(ikey, keylenx as usize) != Ordering::Greater
     }
 
     /// Find the last position at or before the cursor for a reverse scan.

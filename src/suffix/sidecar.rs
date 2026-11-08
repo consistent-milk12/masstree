@@ -77,7 +77,6 @@ impl SuffixSidecar {
     /// # Safety
     ///
     /// Caller must have exclusive access (test-only).
-    #[expect(clippy::mut_from_ref, reason = "Interior mutability via UnsafeCell")]
     pub unsafe fn ensure_external(&self) -> &super::SuffixBag {
         let ptr: *mut SuffixBagCell = self.external.load(Ordering::Acquire);
 

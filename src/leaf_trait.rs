@@ -509,6 +509,10 @@ pub trait TreeLeafNode<P: LeafPolicy>: Sized + Send + Sync + 'static {
     ///
     /// # Safety
     /// Caller must hold the lock, `new_leaf_ptr` must be valid.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Split-and-insert requires key, value, positions, and context"
+    )]
     unsafe fn split_and_insert(
         &self,
         split_pos: usize,

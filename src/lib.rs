@@ -116,7 +116,7 @@ pub fn init_tracing() {
             std::path::PathBuf::from,
         );
         let console_enabled: bool =
-            StdEnv::var("MASSTREE_LOG_CONSOLE").map_or(false, |value| value != "0");
+            StdEnv::var("MASSTREE_LOG_CONSOLE").is_ok_and(|value| value != "0");
         let filter_str: String =
             StdEnv::var("RUST_LOG").unwrap_or_else(|_| "masstree=info".to_string());
 

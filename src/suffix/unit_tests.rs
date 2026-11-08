@@ -40,7 +40,7 @@ fn test_default() {
 
 #[test]
 fn test_assign_and_get() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
     bag.assign(5, b"world");
@@ -55,7 +55,7 @@ fn test_assign_and_get() {
 
 #[test]
 fn test_empty_suffix() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"");
 
@@ -65,7 +65,7 @@ fn test_empty_suffix() {
 
 #[test]
 fn test_get_or_empty() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
 
@@ -75,7 +75,7 @@ fn test_get_or_empty() {
 
 #[test]
 fn test_overwrite_suffix() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
     assert_eq!(bag.get(0), Some(b"hello".as_slice()));
@@ -93,7 +93,7 @@ fn test_overwrite_suffix() {
 
 #[test]
 fn test_clear_suffix() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
     assert!(bag.has_suffix(0));
@@ -106,7 +106,7 @@ fn test_clear_suffix() {
 
 #[test]
 fn test_clear_already_empty() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     // Clearing an empty slot should not panic
     bag.clear(0);
@@ -120,7 +120,7 @@ fn test_clear_already_empty() {
 
 #[test]
 fn test_compact() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     // Add several suffixes
     bag.assign(0, b"aaaa");
@@ -144,7 +144,7 @@ fn test_compact() {
 
 #[test]
 fn test_compact_empty() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     // Compact with no active slots should work
     let reclaimed: usize = bag.compact(StdIter::empty());
@@ -155,7 +155,7 @@ fn test_compact_empty() {
 
 #[test]
 fn test_compact_all() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"test");
     bag.assign(1, b"data");
@@ -186,7 +186,7 @@ fn test_compact_with_permuter() {
         }
     }
 
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"keep0");
     bag.assign(1, b"drop1");
     bag.assign(2, b"keep2");
@@ -218,7 +218,7 @@ fn test_compact_with_exclude() {
         }
     }
 
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"keep");
     bag.assign(1, b"exclude");
     bag.assign(2, b"keep2");
@@ -241,7 +241,7 @@ fn test_compact_with_exclude() {
 
 #[test]
 fn test_growth() {
-    let mut bag: SuffixBag = SuffixBag::with_capacity(16);
+    let bag: SuffixBag = SuffixBag::with_capacity(16);
 
     // Fill past capacity
     for i in 0..15 {
@@ -259,7 +259,7 @@ fn test_growth() {
 
 #[test]
 fn test_long_suffix() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     let long_suffix: Vec<u8> = vec![b'x'; 1000];
     bag.assign(0, &long_suffix);
@@ -273,7 +273,7 @@ fn test_long_suffix() {
 
 #[test]
 fn test_suffix_equals() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
 
@@ -285,7 +285,7 @@ fn test_suffix_equals() {
 
 #[test]
 fn test_suffix_compare() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
 
@@ -300,8 +300,9 @@ fn test_suffix_compare() {
 // ========================================================================
 
 #[test]
+#[allow(clippy::redundant_clone, reason = "this test exercises Clone")]
 fn test_clone() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"hello");
     bag.assign(5, b"world");
 
@@ -318,7 +319,7 @@ fn test_clone() {
 
 #[test]
 fn test_try_assign_in_place_fresh_bag() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     // Fresh bag has capacity, should succeed
     assert!(bag.try_assign_in_place(0, b"hello"));
@@ -327,7 +328,7 @@ fn test_try_assign_in_place_fresh_bag() {
 
 #[test]
 fn test_try_assign_in_place_reuse_slot() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     // Assign a longer suffix first
     bag.assign(0, b"hello world");
@@ -343,7 +344,7 @@ fn test_try_assign_in_place_reuse_slot() {
 
 #[test]
 fn test_try_assign_in_place_append() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     // Assign to slot 0
     assert!(bag.try_assign_in_place(0, b"first"));
@@ -358,7 +359,7 @@ fn test_try_assign_in_place_append() {
 #[test]
 fn test_try_assign_in_place_fails_when_full() {
     // Create a bag with very small capacity
-    let mut bag: SuffixBag = SuffixBag::with_capacity(10);
+    let bag: SuffixBag = SuffixBag::with_capacity(10);
 
     // First assignment should succeed
     assert!(bag.try_assign_in_place(0, b"12345"));
@@ -374,7 +375,7 @@ fn test_try_assign_in_place_fails_when_full() {
 
 #[test]
 fn test_try_assign_in_place_same_length() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hello");
     let used_before: usize = bag.used();
@@ -387,7 +388,7 @@ fn test_try_assign_in_place_same_length() {
 
 #[test]
 fn test_try_assign_in_place_longer_suffix_needs_append() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"hi");
     let used_before: usize = bag.used();
@@ -402,7 +403,7 @@ fn test_try_assign_in_place_longer_suffix_needs_append() {
 
 #[test]
 fn test_try_assign_in_place_mixed_usage() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     // Fill several slots
     for i in 0..5 {
@@ -685,7 +686,7 @@ fn test_inline_size_calculation() {
 
 #[test]
 fn test_suffix_count_assign_clear() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
     assert_eq!(bag.count(), 0);
 
     bag.assign(0, b"hello");
@@ -711,7 +712,7 @@ fn test_suffix_count_assign_clear() {
 
 #[test]
 fn test_suffix_count_try_assign_in_place() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
     assert_eq!(bag.count(), 0);
 
     assert!(bag.try_assign_in_place(0, b"hello"));
@@ -731,7 +732,7 @@ fn test_suffix_count_try_assign_in_place() {
 
 #[test]
 fn test_suffix_count_after_compact() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"hello");
     bag.assign(1, b"world");
     bag.assign(2, b"test");
@@ -754,8 +755,9 @@ fn test_suffix_count_after_compact() {
 }
 
 #[test]
+#[allow(clippy::redundant_clone, reason = "this test exercises Clone")]
 fn test_suffix_count_clone() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
     bag.assign(0, b"hello");
     bag.assign(1, b"world");
     bag.clear(1); // Clear but don't compact - garbage in data
@@ -823,7 +825,7 @@ fn test_inline_suffix_count_clear_all() {
 #[test]
 fn test_try_assign_compacts_before_grow() {
     // Create a bag with INITIAL_CAPACITY to avoid capacity changes from compaction
-    let mut bag: SuffixBag = SuffixBag::with_capacity(INITIAL_CAPACITY);
+    let bag: SuffixBag = SuffixBag::with_capacity(INITIAL_CAPACITY);
 
     // Fill most of it
     for i in 0..12 {
@@ -854,7 +856,7 @@ fn test_try_assign_compacts_before_grow() {
 
 #[test]
 fn test_try_assign_grows_when_compact_insufficient() {
-    let mut bag: SuffixBag = SuffixBag::with_capacity(16);
+    let bag: SuffixBag = SuffixBag::with_capacity(16);
 
     // Fill completely with no garbage
     bag.assign(0, b"12345678"); // 8 bytes
@@ -877,8 +879,9 @@ fn test_try_assign_grows_when_compact_insufficient() {
 // ============================================================================
 
 #[test]
+#[allow(clippy::redundant_clone, reason = "this test exercises Clone")]
 fn test_clone_compacts_garbage() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     // Add and remove several suffixes to create garbage
     bag.assign(0, b"aaaaaaaaaa"); // 10 bytes
@@ -912,7 +915,7 @@ fn test_clone_empty_bag() {
 
 #[test]
 fn test_compact_dedup_duplicates() {
-    let mut bag: SuffixBag = SuffixBag::new();
+    let bag: SuffixBag = SuffixBag::new();
 
     bag.assign(0, b"aaaa");
     bag.assign(1, b"bbbb");

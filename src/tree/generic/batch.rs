@@ -123,12 +123,20 @@ impl<P: LeafPolicy> BatchEntry<P> {
     }
 
     /// Get a reference to the owned value, if it has not been consumed.
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "Option::as_ref is not const on this toolchain"
+    )]
     #[inline(always)]
     pub fn value(&self) -> Option<&P::Value> {
         self.value.as_ref()
     }
 
     /// Take the owned value. Returns `None` if it was already consumed.
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "BatchEntry has a destructor, so this cannot be const"
+    )]
     #[inline(always)]
     pub fn into_value(mut self) -> Option<P::Value> {
         self.value.take()
@@ -149,6 +157,7 @@ where
         f.debug_struct("BatchEntry")
             .field("key", &self.key)
             .field("value", &self.value)
+            .field("ikey", &self.ikey)
             .finish()
     }
 }
@@ -198,7 +207,7 @@ impl<P: LeafPolicy> OutputEntry<P> {
 /// order. Sorting by only the cached ikey lets an unstable sort reorder equal
 /// keys arbitrarily, changing which duplicate value wins.
 #[inline(always)]
-fn batch_sort_key(ikey: u64, key: &[u8], seq: usize) -> (u64, &[u8], usize) {
+const fn batch_sort_key(ikey: u64, key: &[u8], seq: usize) -> (u64, &[u8], usize) {
     (ikey, key, seq)
 }
 
@@ -831,8 +840,7 @@ where
             batch_sort_key(a.ikey, &a.key, a.seq).cmp(&batch_sort_key(b.ikey, &b.key, b.seq))
         });
 
-        let output_result: BatchInsertResult<P::Output> =
-            self.process_sorted_batch(&mut batch, guard);
+        let output_result: BatchInsertResult<P::Output> = self.process_sorted_batch(&batch, guard);
 
         output_result.map_old_values(|output: P::Output| {
             // SAFETY: Each old value was retired under `guard`; the allocation
@@ -874,6 +882,11 @@ where
     /// the entry no longer aliases any value still stored in the tree.
     ///
     /// Old values are guard-scoped [`ValueRef`](crate::ValueRef)s.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a `BatchEntry` value was already consumed, or on an internal
+    /// tree invariant violation.
     pub fn insert_batch_entries<'g>(
         &self,
         entries: Vec<BatchEntry<P>>,
@@ -903,7 +916,7 @@ where
         });
 
         let output_result: BatchInsertResult<P::Output> =
-            self.process_sorted_batch(&mut outputs, guard);
+            self.process_sorted_batch(&outputs, guard);
 
         output_result.map_old_values(|output: P::Output| {
             // SAFETY: Each old value was retired under `guard`; it remains
@@ -921,7 +934,7 @@ where
     /// Delegates to `process_sorted_batch_inner` via `GenericBatch`.
     fn process_sorted_batch(
         &self,
-        batch: &mut [OutputEntry<P>],
+        batch: &[OutputEntry<P>],
         guard: &LocalGuard<'_>,
     ) -> BatchInsertResult<P::Output> {
         let mut ops: GenericBatch<'_, P> = GenericBatch(batch);

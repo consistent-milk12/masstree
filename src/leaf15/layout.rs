@@ -45,11 +45,11 @@ const _: () = {
     // Cache Line 0: Version and metadata
     assert!(offset_of!(Leaf, version) == 0);
     assert!(offset_of!(Leaf, modstate) == 4);
-    assert!(offset_of!(Leaf, _pad0) == 5);
+    assert!(offset_of!(Leaf, pad0) == 5);
 
     // Cache Line 1: Permutation (isolated for CAS performance)
     assert!(offset_of!(Leaf, permutation) == 64);
-    assert!(offset_of!(Leaf, _pad1) == 72);
+    assert!(offset_of!(Leaf, pad1) == 72);
 
     // Cache Line 2+: Keys
     assert!(offset_of!(Leaf, ikey0) == 128);

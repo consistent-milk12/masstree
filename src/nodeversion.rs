@@ -145,7 +145,7 @@ impl LockGuard<'_> {
     /// Mark node as being inserted into. Sets INSERTING dirty bit.
     /// Version counter increments on unlock. Idempotent.
     ///
-    /// ORDERING: Release store followed by a SeqCst fence. The fence is a
+    /// ORDERING: Release store followed by a `SeqCst` fence. The fence is a
     /// store-store barrier so slot/permutation writes performed after this
     /// call cannot become visible before the dirty bit. (A post-store Acquire
     /// fence does not provide that ordering.)

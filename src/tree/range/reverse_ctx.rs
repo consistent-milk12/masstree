@@ -978,9 +978,6 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     /// Returns `true` if successfully restored to parent layer,
     /// `false` if layer stack empty (scan complete).
     pub(crate) fn handle_up_back(&mut self, guard: &LocalGuard<'_>) -> bool {
-        // Root of the sublayer we just finished scanning.
-        let completed_layer_root: *const u8 = self.stack.get_root();
-
         // Step 1: Pop parent context from layer stack
         let Some(parent_ctx) = self.layer_stack.pop() else {
             return false;

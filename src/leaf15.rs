@@ -92,12 +92,12 @@ pub struct LeafNode15<P: LeafPolicy> {
     version: NodeVersion,
     /// Lifecycle state: INSERT(0) / REMOVE(1) / `DELETED_LAYER`(2) / EMPTY(3).
     modstate: AtomicU8,
-    _pad0: [u8; 55],
+    pad0: [u8; 55],
 
     // — Cache Line 1: CAS-heavy, isolated —
     /// Logical→physical slot mapping. CAS is the insert linearization point.
     permutation: AtomicPermuter15,
-    _pad1: [u8; 56],
+    pad1: [u8; 56],
 
     // — Cache Lines 2+: keys —
     /// First 8 bytes of each key.
@@ -151,9 +151,9 @@ impl<P: LeafPolicy> LeafNode15<P> {
         Self {
             version,
             modstate: AtomicU8::new(MODSTATE_INSERT),
-            _pad0: [0; 55],
+            pad0: [0; 55],
             permutation: AtomicPermuter15::new(),
-            _pad1: [0; 56],
+            pad1: [0; 56],
             ikey0: StdArray::from_fn(|_| AtomicU64::new(0)),
             keylenx: StdArray::from_fn(|_| AtomicU8::new(0)),
             values: P::Values::new(),
@@ -1739,6 +1739,10 @@ impl<P: LeafPolicy> LeafNode15<P> {
     ///
     /// Same as `split_into_preallocated`.
     #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Split-and-insert requires key, value, positions, and context"
+    )]
     pub unsafe fn split_and_insert(
         &self,
         split_pos: usize,

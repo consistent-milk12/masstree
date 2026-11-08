@@ -535,6 +535,10 @@ impl NodeCleaner {
     /// # Errors
     ///
     /// If fails to properly remove
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Locked remove state machine requires the full protocol inline"
+    )]
     pub fn remove_concurrent_generic<P, A>(
         tree: &MassTreeGeneric<P, A>,
         key_bytes: &[u8],
@@ -570,15 +574,9 @@ impl NodeCleaner {
                 tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
 
             if exceeded {
-                if route.is_empty() {
-                    key.unshift_all();
-                    layer_root = tree.load_root_ptr_generic(guard).cast_mut();
-                } else {
-                    key.unshift_all();
-                    layer_root = tree.load_root_ptr_generic(guard).cast_mut();
-                    route.clear();
-                }
-
+                key.unshift_all();
+                layer_root = tree.load_root_ptr_generic(guard).cast_mut();
+                route.clear();
                 continue 'layer_loop;
             }
 
@@ -659,7 +657,6 @@ impl NodeCleaner {
                         leaf_ptr = next_ptr;
                         // SAFETY: next_ptr is a valid leaf.
                         leaf = unsafe { &*leaf_ptr };
-                        continue 'forward;
                     }
 
                     RemoveSearchResult::Found { .. } => {
@@ -689,7 +686,6 @@ impl NodeCleaner {
                                 leaf_ptr = next_ptr;
                                 // SAFETY: next_ptr is a valid leaf.
                                 leaf = unsafe { &*leaf_ptr };
-                                continue 'forward;
                             }
 
                             RemoveLockResult::Ready(cursor) => {
@@ -719,8 +715,6 @@ impl NodeCleaner {
                                     // SAFETY: next_ptr is a valid leaf.
                                     leaf = unsafe { &*leaf_ptr };
                                 }
-
-                                continue 'forward;
                             }
 
                             RemoveLockResult::RestartFromRoot => {
@@ -868,7 +862,7 @@ impl NodeCleaner {
             Self::search_for_remove::<true, P>(leaf, key, &new_perm)
         };
 
-        let (new_ki, new_kp): (usize, usize) = match search_result {
+        let (new_ki, new_slot): (usize, usize) = match search_result {
             RemoveSearchResult::Found { ki, kp } => (ki, kp),
 
             RemoveSearchResult::DescendLayer { layer_ptr: lp } => {
@@ -887,10 +881,10 @@ impl NodeCleaner {
             }
         };
 
-        let slot_keylenx: u8 = leaf.keylenx(new_kp);
+        let slot_keylenx: u8 = leaf.keylenx(new_slot);
 
         if slot_keylenx >= LAYER_KEYLENX {
-            let lp: *mut u8 = leaf.load_layer_raw(new_kp);
+            let lp: *mut u8 = leaf.load_layer_raw(new_slot);
             drop(lock);
 
             if !Self::is_sublayer_valid(lp) {
@@ -902,7 +896,7 @@ impl NodeCleaner {
 
         // Defense in depth: require exact full-key identity for suffix keys.
         if slot_keylenx == KSUF_KEYLENX
-            && (!key.has_suffix() || !leaf.ksuf_equals(new_kp, key.suffix()))
+            && (!key.has_suffix() || !leaf.ksuf_equals(new_slot, key.suffix()))
         {
             drop(lock);
             return RemoveLockResult::Retry;
@@ -913,7 +907,7 @@ impl NodeCleaner {
             leaf_ptr,
             lock,
             new_ki,
-            new_kp,
+            new_slot,
             std::mem::take(route),
             guard,
         );

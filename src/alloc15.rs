@@ -216,10 +216,6 @@ unsafe impl<P: LeafPolicy + 'static> TreeAllocator<P> for SeizeAllocator<P> {
         }
     }
 
-    #[expect(
-        clippy::not_unsafe_ptr_arg_deref,
-        reason = "Trait contract requires valid pointer from tree root"
-    )]
     unsafe fn teardown_tree(&self, root_ptr: *mut u8) {
         if root_ptr.is_null() {
             return;

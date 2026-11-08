@@ -9,7 +9,6 @@ use seize::LocalGuard;
 
 use std::mem::MaybeUninit;
 
-use crate::hints::likely;
 use crate::key::IKEY_SIZE;
 use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
@@ -28,7 +27,7 @@ use super::batch_common::{
 use super::cursor_key::CursorDebugState;
 use super::cursor_key::CursorKey;
 use super::find::LeafBatchResult;
-use super::helper::{compare_cursor_to_slot, lower_bound_full, lower_with_suffix};
+use super::helper::{compare_cursor_to_slot, lower_bound_full};
 use super::iterator::RangeBound;
 use super::iterator::iter_flags::ForwardFlags;
 use super::scan_state::{

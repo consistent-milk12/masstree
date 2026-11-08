@@ -2,6 +2,10 @@ use std::sync::atomic::Ordering;
 
 use super::{INITIAL_CAPACITY, SlotMeta, SuffixBag, WIDTH};
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "at most WIDTH (15) suffixes fit in a u8"
+)]
 impl Clone for SuffixBag {
     /// Clone with compaction, only copies active suffix data.
     ///
@@ -22,7 +26,7 @@ impl Clone for SuffixBag {
         let mut new_data: Vec<u8> = Vec::with_capacity(capacity);
         let mut new_slots: [SlotMeta; WIDTH] = [SlotMeta::EMPTY; WIDTH];
 
-        for slot in 0..WIDTH {
+        for (slot, new_slot) in new_slots.iter_mut().enumerate() {
             let Some(bytes) = self.get(slot) else {
                 continue;
             };
@@ -32,20 +36,18 @@ impl Clone for SuffixBag {
 
             #[expect(clippy::cast_possible_truncation)]
             {
-                new_slots[slot] = SlotMeta {
+                *new_slot = SlotMeta {
                     offset: new_offset as u32,
                     len: bytes.len() as u16,
-                    _pad: 0,
+                    pad: 0,
                 };
             }
         }
 
         // Force a fresh count in the clone regardless of a concurrent clear.
         let cloned: Self = Self::from_parts(new_data, new_slots);
-        cloned.suffix_count.store(
-            new_slots.iter().filter(|m| m.has_suffix()).count() as u8,
-            Ordering::Relaxed,
-        );
+        let count: u8 = new_slots.iter().filter(|m| m.has_suffix()).count() as u8;
+        cloned.suffix_count.store(count, Ordering::Relaxed);
 
         cloned
     }
