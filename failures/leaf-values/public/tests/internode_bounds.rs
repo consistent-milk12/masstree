@@ -11,14 +11,6 @@ fn indexed_accessors_panic() {
     assert!(catch_unwind(AssertUnwindSafe(|| node.set_child(16, ptr::null_mut()))).is_err());
 }
 
-#[test]
-fn full_insert_panics() {
-    let node = InternodeNode::new(0);
-    for index in 0..15 {
-        node.insert_key_and_child(index, index as u64, ptr::null_mut());
-    }
-    assert!(catch_unwind(AssertUnwindSafe(|| {
-        node.insert_key_and_child(0, 0, ptr::null_mut());
-    }))
-    .is_err());
-}
+// insert_key_and_child and shift_from are now unsafe crate-internal helpers.
+// Their former public trait forwarders were removed rather than retaining a
+// safe entry point that could bypass the pointer-publication preconditions.

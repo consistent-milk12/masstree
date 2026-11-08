@@ -169,7 +169,11 @@ impl Propagation {
                     );
                 }
 
-                parent.insert_key_and_child(child_idx, split_ikey, right_ptr);
+                // SAFETY: Membership was checked under the parent lock and
+                // the node has space. right_ptr was initialized before
+                // mark_insert's Release fence, which publishes every child
+                // even to a reader that sees the new pointer before nkeys.
+                unsafe { parent.insert_key_and_child(child_idx, split_ikey, right_ptr) };
 
                 #[cfg(feature = "debug-routing")]
                 {

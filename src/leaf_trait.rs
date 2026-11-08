@@ -204,9 +204,6 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     /// Assign key and right child at position.
     fn assign(&self, p: usize, ikey: u64, right_child: *mut u8);
 
-    /// Insert key and child at position, shifting existing entries.
-    fn insert_key_and_child(&self, p: usize, new_ikey: u64, new_child: *mut u8);
-
     // ========================================================================
     // Navigation
     // ========================================================================
@@ -223,9 +220,6 @@ pub trait TreeInternode: Sized + Send + Sync + 'static {
     // ========================================================================
     //  Split Support
     // ========================================================================
-
-    /// Shift entries from another internode.
-    fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize);
 
     /// Split this internode into a new sibling while inserting a key/child.
     ///

@@ -3342,6 +3342,12 @@ value tags and bits in aligned 16-byte pairs. The new values/suffix offsets are
 Total leaf sizes are unchanged, checked at compile time for every suffix feature.
 The focused cache-line regression fails with the old arrays and passes with the
 new layout; policy and inline integration tests also pass under Miri.
+PERF-14 uses Relaxed bulk child stores after the dirty-marker Release fence,
+which publishes child initialization to early child loads before parent
+validation. A new Loom litmus checks that requirement (15 models pass); Miri
+covers the actual internode routines. `insert_key_and_child` and `shift_from`
+are now unsafe crate-internal, and their unused `TreeInternode` forwarders are
+removed. This is a deliberate breaking change to the low-level API.
 
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|

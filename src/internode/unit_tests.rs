@@ -403,7 +403,7 @@ fn test_load_all_ikeys_full() {
 fn test_shift_from_basic() {
     // Test shifting entries from one internode to another
     let src: Box<InternodeNode> = InternodeNode::new(0);
-    let dst: Box<InternodeNode> = InternodeNode::new(0);
+    let mut dst: Box<InternodeNode> = InternodeNode::new(0);
 
     // Set up source with 5 keys and 6 children
     src.set_ikey(0, 100);
@@ -448,7 +448,7 @@ fn test_shift_from_basic() {
 #[test]
 fn test_shift_from_to_different_position() {
     let src: Box<InternodeNode> = InternodeNode::new(0);
-    let dst: Box<InternodeNode> = InternodeNode::new(0);
+    let mut dst: Box<InternodeNode> = InternodeNode::new(0);
 
     // Set up source
     src.set_ikey(0, 10);
@@ -496,7 +496,7 @@ fn test_shift_from_to_different_position() {
 #[test]
 fn test_shift_from_zero_count() {
     let src: Box<InternodeNode> = InternodeNode::new(0);
-    let dst: Box<InternodeNode> = InternodeNode::new(0);
+    let mut dst: Box<InternodeNode> = InternodeNode::new(0);
 
     src.set_ikey(0, 100);
     src.set_nkeys(1);

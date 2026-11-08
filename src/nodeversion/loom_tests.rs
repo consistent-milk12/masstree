@@ -146,6 +146,37 @@ impl LoomNodeVersion {
     }
 }
 
+/// An internode reader may inspect a newly loaded child before validating its
+/// parent. Relaxed child stores therefore depend on the dirty marker's Release
+/// fence, not just the later nkeys/unlock publication. IDs stand in for pointers;
+/// this model checks initialization visibility, not EBR or the full tree.
+#[test]
+fn test_loom_relaxed_child_store_publishes_initialized_child() {
+    loom::model(|| {
+        let parent = Arc::new(LoomNodeVersion::new(false));
+        let child_id = Arc::new(AtomicU32::new(0));
+        let child_payload = Arc::new(AtomicU32::new(0));
+        let writer_parent = Arc::clone(&parent);
+        let writer_id = Arc::clone(&child_id);
+        let writer_payload = Arc::clone(&child_payload);
+        let writer = thread::spawn(move || {
+            // The split child is initialized before the parent's dirty fence.
+            writer_payload.store(42, Ordering::Relaxed);
+            let mut lock = writer_parent.lock();
+            lock.mark_insert();
+            writer_id.store(1, Ordering::Relaxed);
+        });
+
+        let old_version = parent.stable();
+        if child_id.load(Ordering::Acquire) == 1 {
+            // This assertion deliberately precedes parent validation.
+            assert_eq!(child_payload.load(Ordering::Relaxed), 42);
+        }
+        let _changed = parent.has_changed(old_version);
+        writer.join().unwrap();
+    });
+}
+
 /// Model Entry's OCC classification followed by speculative lock/validation.
 /// This covers the version protocol, not real leaves, routing, or reclamation;
 /// those paths have native and Miri tests in entry/unit_tests.rs.

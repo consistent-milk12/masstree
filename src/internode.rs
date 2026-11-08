@@ -34,6 +34,15 @@ const NUM_CHILDREN: usize = WIDTH + 1;
 // ============================================================================
 
 /// An internal routing node in the `MassTree`.
+///
+/// Bulk insertion/shifting helpers are internal because they rely on the tree's
+/// lock and child-publication protocol.
+///
+/// ```compile_fail
+/// fn unchecked_insert(node: &masstree::InternodeNode) {
+///     node.insert_key_and_child(0, 0, std::ptr::null_mut());
+/// }
+/// ```
 #[repr(C, align(64))]
 pub struct InternodeNode {
     // ========================================================================
@@ -218,10 +227,18 @@ impl InternodeNode {
 
     /// Insert a key and child at position `p`, shifting existing entries right.
     ///
+    /// # Safety
+    /// The node must be unpublished, or locked and marked dirty. All children
+    /// (including `new_child`) must be initialized before the marker's Release
+    /// fence. Readers can dereference a child before validating this parent:
+    /// that fence synchronizes with their protected Acquire child load even
+    /// when they have not observed the new nkeys or Release unlock yet.
+    /// `nkeys < WIDTH` and `p <= nkeys` must hold.
+    ///
     /// # Panics
     /// Panics in debug mode if node is full or position out of bounds.
     #[expect(clippy::indexing_slicing, reason = "bounds checked via debug_assert")]
-    pub fn insert_key_and_child(&self, p: usize, new_ikey: u64, new_child: *mut u8) {
+    pub(crate) unsafe fn insert_key_and_child(&self, p: usize, new_ikey: u64, new_child: *mut u8) {
         let n: usize = self.nkeys.load(RELAXED) as usize;
 
         debug_assert!(n < WIDTH, "insert_key_and_child: node is full");
@@ -235,11 +252,11 @@ impl InternodeNode {
             self.ikey0[i + 1].store(key, RELAXED);
 
             let child: *mut u8 = self.child[i + 1].load(RELAXED);
-            self.child[i + 2].store(child, WRITE_ORD);
+            self.child[i + 2].store(child, RELAXED);
         }
 
         self.ikey0[p].store(new_ikey, RELAXED);
-        self.child[p + 1].store(new_child, WRITE_ORD);
+        self.child[p + 1].store(new_child, RELAXED);
 
         #[expect(clippy::cast_possible_truncation)]
         self.nkeys.store((n + 1) as u8, WRITE_ORD);
@@ -249,13 +266,21 @@ impl InternodeNode {
     ///
     /// # Safety
     ///
-    /// Caller must ensure exclusive access (hold lock on both nodes).
+    /// The destination must be unpublished/exclusively owned; the source must
+    /// be locked or exclusively owned. The ranges must fit both arrays. The
+    /// caller must publish the fully initialized destination with Release.
     #[inline(always)]
     #[expect(
         clippy::indexing_slicing,
         reason = "bounds checked by caller via split logic"
     )]
-    pub unsafe fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize) {
+    pub(crate) unsafe fn shift_from(
+        &mut self,
+        dst_pos: usize,
+        src: &Self,
+        src_pos: usize,
+        count: usize,
+    ) {
         if count == 0 {
             return;
         }
@@ -265,7 +290,7 @@ impl InternodeNode {
             self.ikey0[dst_pos + i].store(key, RELAXED);
 
             let child: *mut u8 = src.child[src_pos + 1 + i].load(RELAXED);
-            self.child[dst_pos + 1 + i].store(child, WRITE_ORD);
+            self.child[dst_pos + 1 + i].store(child, RELAXED);
         }
     }
 
@@ -287,7 +312,9 @@ impl InternodeNode {
     ///
     /// # Safety
     ///
-    /// - `self` must be a full internode whose lock is held.
+    /// - `self` must be a full internode, exclusively owned or locked and marked
+    ///   splitting. Every child, including `insert_child`, must be initialized
+    ///   before marking the source dirty (its Release fence publishes them).
     /// - `new_right` must be an exclusively owned, empty internode of the same
     ///   height, and `new_right_ptr` must be its stable address.
     /// - `insert_child` must be a valid child pointer of the node's child kind.
@@ -331,7 +358,10 @@ impl InternodeNode {
                 let popup: u64 = self.ikey_relaxed(mid - 1);
 
                 self.nkeys.store((mid - 1) as u8, WRITE_ORD);
-                self.insert_key_and_child(insert_pos, insert_ikey, insert_child);
+                // SAFETY: The source is exclusive or marked splitting; the
+                // caller initialized insert_child before that Release fence.
+                // Truncating to mid - 1 leaves space and insert_pos < mid.
+                unsafe { self.insert_key_and_child(insert_pos, insert_ikey, insert_child) };
 
                 (popup, true)
             }
@@ -672,11 +702,6 @@ impl TreeInternode for InternodeNode {
     }
 
     #[inline(always)]
-    fn insert_key_and_child(&self, p: usize, new_ikey: u64, new_child: *mut u8) {
-        Self::insert_key_and_child(self, p, new_ikey, new_child);
-    }
-
-    #[inline(always)]
     fn parent(&self) -> *mut u8 {
         // SAFETY: TreeInternode trait methods are called during locked operations.
         unsafe { Self::parent_unguarded(self) }
@@ -690,12 +715,6 @@ impl TreeInternode for InternodeNode {
     #[inline(always)]
     fn is_root(&self) -> bool {
         Self::is_root(self)
-    }
-
-    #[inline(always)]
-    fn shift_from(&self, dst_pos: usize, src: &Self, src_pos: usize, count: usize) {
-        // SAFETY: TreeInternode trait methods are called during locked operations.
-        unsafe { Self::shift_from(self, dst_pos, src, src_pos, count) };
     }
 
     #[inline(always)]

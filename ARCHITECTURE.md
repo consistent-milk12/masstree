@@ -1193,6 +1193,13 @@ and scans:
 at layer boundaries and by insert/remove/scan to find the actual root of a
 layer.
 
+Internode bulk child stores use Relaxed only under the dirty-marker publication
+contract: every child is initialized before the marker's Release fence. A child
+Acquire load can then inspect its metadata before validating the parent. The
+later Release nkeys store and unlock publish the completed routing snapshot.
+Unpublished sibling copying requires exclusive ownership and later Release
+publication. These mutation helpers are unsafe and crate-internal.
+
 ### 8.2 Point reads
 
 Public entry points:
