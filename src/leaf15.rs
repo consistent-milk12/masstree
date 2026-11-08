@@ -1618,11 +1618,25 @@ impl<P: LeafPolicy> LeafNode15<P> {
             }
         };
 
-        // A split at old index `pos` moves old[pos..] right. If the new key
-        // sorts before that position it stays left, so the effective split
-        // index is one past `pos`.
-        let effective_split =
-            |pos: usize| -> usize { if insert_pos < pos { pos + 1 } else { pos } };
+        // A split at old index `pos` moves old[pos..] right. Decide which side
+        // the new key takes exactly as `split_and_insert` will: at an equal
+        // position, a new key whose ikey equals the left's last key must stay
+        // left, otherwise the left equal-ikey run becomes unreachable.
+        let insert_goes_right_at = |pos: usize| -> bool {
+            if pos == insert_pos {
+                pos > 0 && insert_ikey != self.ikey(perm.get(pos - 1))
+            } else {
+                pos < insert_pos
+            }
+        };
+
+        let effective_split = |pos: usize| -> usize {
+            if insert_goes_right_at(pos) {
+                pos
+            } else {
+                pos + 1
+            }
+        };
 
         let is_boundary = |pos: usize| -> bool {
             let split = effective_split(pos);
@@ -1778,7 +1792,14 @@ impl<P: LeafPolicy> LeafNode15<P> {
         let old_perm: Permuter15 = self.permutation();
         let old_size: usize = old_perm.size();
 
-        let insert_goes_right: bool = insert_pos >= split_pos;
+        let insert_goes_right: bool = if insert_pos == split_pos && split_pos > 0 {
+            // At an exact boundary the new key must stay left when it shares
+            // the left leaf's last ikey; otherwise the parent separator equals
+            // that key and equality-right routing strands the left run.
+            insert_data.ikey != self.ikey(old_perm.get(split_pos - 1))
+        } else {
+            insert_pos > split_pos
+        };
         let entries_to_move: usize = old_size - split_pos;
         let split_ikey: u64;
 
@@ -1858,7 +1879,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
 
             self.set_ikey(actual_slot, insert_data.ikey);
             self.set_keylenx(actual_slot, insert_data.keylenx);
-            self.store_value_relaxed(actual_slot, &insert_data.value);
+            self.store_prepared_value_relaxed(actual_slot, prepared_value);
 
             let suffix_retire_ptr: *mut u8 = if insert_data.keylenx == KSUF_KEYLENX
                 && let Some(suffix) = insert_data.suffix
