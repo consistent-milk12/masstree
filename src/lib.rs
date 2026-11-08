@@ -25,7 +25,7 @@
 //! tree.insert_with_guard(b"hello", 123, &guard);
 //!
 //! // Point lookup (lock-free, returns copy for inline storage)
-//! assert_eq!(tree.get_with_guard(b"hello", &guard), Some(123));
+//! assert_eq!(tree.get_with_guard(b"hello", &guard).map(|v| *v), Some(123));
 //!
 //! // Remove
 //! tree.remove_with_guard(b"hello", &guard).unwrap();
@@ -48,11 +48,13 @@
 //! let tree: MassTree<u64> = MassTree::new();
 //! let guard = tree.guard();
 //!
-//! // Concurrent get (lock-free)
+//! // Concurrent get (lock-free): the result is guard-scoped.
 //! let value = tree.get_with_guard(b"key", &guard);
+//! assert!(value.is_none() || value.is_some());
 //!
 //! // Concurrent insert (fine-grained locking)
 //! let old = tree.insert_with_guard(b"key", 42, &guard);
+//! let _ = old;
 //! ```
 //!
 //! ## Key Constraints

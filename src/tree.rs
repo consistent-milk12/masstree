@@ -203,7 +203,7 @@ where
 /// let tree: MassTree<u64> = MassTree::new();
 /// let guard = tree.guard();
 /// tree.insert_with_guard(b"key", 42, &guard);
-/// assert_eq!(tree.get_with_guard(b"key", &guard), Some(42));
+/// assert_eq!(tree.get_with_guard(b"key", &guard).map(|v| *v), Some(42));
 /// ```
 ///
 /// [`InlineBits`]: crate::inline::bits::InlineBits
