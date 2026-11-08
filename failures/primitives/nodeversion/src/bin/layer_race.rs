@@ -23,6 +23,7 @@ fn main() {
     let current = Arc::new(AtomicUsize::new(usize::MAX));
     let stop = Arc::new(AtomicBool::new(false));
     let bad = Arc::new(AtomicUsize::new(0));
+    let persistent = Arc::new(AtomicUsize::new(0));
     let gets = Arc::new(AtomicUsize::new(0));
 
     let mut readers = Vec::new();
@@ -31,6 +32,7 @@ fn main() {
         let current = Arc::clone(&current);
         let stop = Arc::clone(&stop);
         let bad = Arc::clone(&bad);
+        let persistent = Arc::clone(&persistent);
         let gets = Arc::clone(&gets);
         readers.push(thread::spawn(move || {
             let g = tree.guard();
@@ -44,6 +46,7 @@ fn main() {
                     let again = tree.get_with_guard(&k, &g);
                     bad.fetch_add(1, Ordering::Relaxed);
                     if again.is_none() {
+                        persistent.fetch_add(1, Ordering::Relaxed);
                         eprintln!("PERSISTENT MISS for key A at i={i}");
                     }
                 }
@@ -61,6 +64,7 @@ fn main() {
     stop.store(true, Ordering::Relaxed);
     for r in readers { r.join().unwrap(); }
     let bad = bad.load(Ordering::Relaxed);
-    println!("done n={n} gets={} transient_misses={bad}", gets.load(Ordering::Relaxed));
-    if bad == 0 { eprintln!("no race observed this run"); }
+    let persistent = persistent.load(Ordering::Relaxed);
+    println!("done n={n} gets={} transient_misses={bad} persistent_misses={persistent}", gets.load(Ordering::Relaxed));
+    assert_eq!(persistent, 0, "a miss must be transient, not persistent");
 }

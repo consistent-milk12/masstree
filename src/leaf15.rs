@@ -1603,12 +1603,31 @@ impl<P: LeafPolicy> LeafNode15<P> {
             }
         }
 
-        // Choose a split position on a strict ikey boundary: the left leaf's
-        // last ikey must be strictly less than the right leaf's first ikey, so
-        // the parent separator (the right first ikey) is a true lower bound.
-        // Start near the midpoint and walk outward to the nearest boundary.
+        // Choose a split position on a strict ikey boundary **after** the
+        // prospective insert. Checking only the existing keys is not enough:
+        // inserting at the split position can put the new key on the right
+        // with the same ikey as the left's last key, which makes the parent
+        // separator equal to a left key and routing equality-right skips it.
+        let effective_ikey = |i: usize| -> u64 {
+            if i < insert_pos {
+                self.ikey(perm.get(i))
+            } else if i == insert_pos {
+                insert_ikey
+            } else {
+                self.ikey(perm.get(i - 1))
+            }
+        };
+
+        // A split at old index `pos` moves old[pos..] right. If the new key
+        // sorts before that position it stays left, so the effective split
+        // index is one past `pos`.
+        let effective_split =
+            |pos: usize| -> usize { if insert_pos < pos { pos + 1 } else { pos } };
+
         let is_boundary = |pos: usize| -> bool {
-            pos > 0 && pos < size && self.ikey(perm.get(pos - 1)) != self.ikey(perm.get(pos))
+            let split = effective_split(pos);
+
+            split > 0 && split <= size && effective_ikey(split - 1) != effective_ikey(split)
         };
 
         let mut split_pos: usize = (size / 2).max(1);
@@ -1643,23 +1662,24 @@ impl<P: LeafPolicy> LeafNode15<P> {
                 (false, false) => {
                     // A full leaf cannot consist of a single ikey run: terminal
                     // lengths alone are at most 9 entries per ikey, plus at most
-                    // one suffix key. Keep the old midpoint as a defensive
-                    // fallback rather than returning None.
-                    split_pos
+                    // one suffix key. Reaching this branch means the insert
+                    // search or the leaf ordering is inconsistent.
+                    debug_assert!(
+                        false,
+                        "no strict ikey boundary in a full leaf (size={size}, insert_pos={insert_pos})"
+                    );
+                    return None;
                 }
             };
         }
 
-        if split_pos == 0 || split_pos >= size {
+        if split_pos == 0 || split_pos > size {
             return None;
         }
 
-        let split_slot: usize = perm.get(split_pos);
-        let split_ikey: u64 = self.ikey(split_slot);
-
         Some(SplitPoint {
             pos: split_pos,
-            split_ikey,
+            split_ikey: effective_ikey(effective_split(split_pos)),
         })
     }
 

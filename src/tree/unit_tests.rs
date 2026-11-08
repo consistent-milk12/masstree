@@ -974,6 +974,36 @@ fn test_split_preserves_values() {
 }
 
 #[test]
+fn test_split_same_ikey_boundary_routing() {
+    let tree: MassTree<u64> = MassTree::new();
+
+    // Six keys with ikeys below 0x0043...
+    for i in 0u8..6 {
+        tree.insert(&[0, i], u64::from(i));
+    }
+
+    // The target key and eight keys above its ikey fill the leaf.
+    tree.insert(&[0, 0x43], 0x43);
+    for i in 0x44u8..=0x4B {
+        tree.insert(&[0, i], u64::from(i));
+    }
+
+    // 16th key shares the target's ikey and triggers the split. The separator
+    // must not equal the target's ikey, or equality-right routing skips it.
+    tree.insert(&[0, 0x43, 0], 0x143);
+
+    for i in 0u8..6 {
+        assert_eq!(tree.get(&[0, i]), Some(u64::from(i)), "lower key {i}");
+    }
+    assert_eq!(tree.get(&[0, 0x43]), Some(0x43), "target key");
+    for i in 0x44u8..=0x4B {
+        assert_eq!(tree.get(&[0, i]), Some(u64::from(i)), "upper key {i}");
+    }
+    assert_eq!(tree.get(&[0, 0x43, 0]), Some(0x143), "same-ikey longer key");
+    assert_eq!(tree.len(), 16);
+}
+
+#[test]
 fn test_split_with_updates() {
     let tree: MassTree<u64> = MassTree::new();
 

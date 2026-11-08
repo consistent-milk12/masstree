@@ -9,7 +9,7 @@ fn main() {
         g.mark_insert();                    // dirty (INSERTING) while payload is mutated
         let changed = v.has_changed(old);   // reader validation
         println!("has_changed while writer holds INSERTING = {changed} (old={old:#010x}, cur={:#010x})", v.value());
-        assert!(!changed);
+        assert!(changed, "has_changed must observe the INSERTING dirty window");
         drop(g);
         println!("after unlock has_changed = {} (cur={:#010x})", v.has_changed(old), v.value());
     }
@@ -21,7 +21,7 @@ fn main() {
         let old = v.stable(); // clean: LOCK is not part of DIRTY_MASK
         g.mark_insert();
         println!("old={old:#010x} cur={:#010x} has_changed={}", v.value(), v.has_changed(old));
-        assert!(!v.has_changed(old));
+        assert!(v.has_changed(old), "mark_insert must make the snapshot stale");
         drop(g);
     }
 
@@ -52,7 +52,7 @@ fn main() {
         let changed = leaf.version().has_changed(old);
         println!("reader output = {out:?}, has_changed = {changed}");
         assert!(out.is_none());
-        assert!(!changed, "get_guarded would accept this snapshot and return None");
+        assert!(changed, "get_guarded must reject a snapshot whose value was cleared");
         drop(g);
     }
 

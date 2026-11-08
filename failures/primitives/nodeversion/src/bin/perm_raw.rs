@@ -5,5 +5,5 @@ fn main() {
     p.remove_to_back(0);
     let mask: u64 = (1u64 << ((7 + 1) * 4)) - 1;
     println!("after  raw={:#x} size={} slots={:?} bits_above_width={:#x}", p.value(), p.size(), (0..7).map(|i| p.get(i)).collect::<Vec<_>>(), p.value() & !mask);
-    assert_ne!(p.value() & !mask, 0);
+    assert_eq!(p.value() & !mask, 0, "bits above the encoded width must be masked");
 }
