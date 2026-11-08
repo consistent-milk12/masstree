@@ -3,16 +3,16 @@
 //! Tests cover:
 //! - `handle_down_back` logic: Sublayer descent cursor setup
 //! - `handle_up_back` logic: Layer ascent with cursor unshift
-//! - `ReverseFlags` `upper_bound` state transitions
+//! - `ScanFlags` `upper_bound` state transitions
 //! - `CursorKey` reverse operations
 
 use crate::tree::range::cursor_key::CursorKey;
-use crate::tree::range::helper::ReverseScanHelper;
-use crate::tree::range::iterator::iter_flags::ReverseFlags;
+use crate::tree::range::direction::{Backward, Direction};
+use crate::tree::range::iterator::iter_flags::ScanFlags;
 
 /// Inline helper matching `ReverseScanCtx::handle_down_back` logic.
 /// Shifts cursor into sublayer with MAX ikey and sets `upper_bound`.
-fn handle_down_back(cursor_key: &mut CursorKey, flags: &mut ReverseFlags) {
+fn handle_down_back(cursor_key: &mut CursorKey, flags: &mut ScanFlags) {
     cursor_key.shift_clear_reverse();
     flags.set_upper_bound();
 }
@@ -24,7 +24,7 @@ fn handle_down_back(cursor_key: &mut CursorKey, flags: &mut ReverseFlags) {
 #[test]
 fn test_handle_down_back_sets_cursor_to_max() {
     let mut cursor_key = CursorKey::from_slice(b"test1234suffix");
-    let mut flags = ReverseFlags::new();
+    let mut flags = ScanFlags::new();
 
     // Before: cursor has specific key, upper_bound is false
     assert!(!flags.upper_bound());
@@ -42,7 +42,7 @@ fn test_handle_down_back_sets_cursor_to_max() {
 #[test]
 fn test_handle_down_back_from_root() {
     let mut cursor_key = CursorKey::from_slice(b"hello");
-    let mut flags = ReverseFlags::new();
+    let mut flags = ScanFlags::new();
 
     assert_eq!(cursor_key.offset(), 0);
     assert!(!flags.upper_bound());
@@ -58,7 +58,7 @@ fn test_handle_down_back_from_root() {
 #[test]
 fn test_handle_down_back_multiple_descents() {
     let mut cursor_key = CursorKey::from_slice(b"a]");
-    let mut flags = ReverseFlags::new();
+    let mut flags = ScanFlags::new();
 
     // First descent
     handle_down_back(&mut cursor_key, &mut flags);
@@ -103,18 +103,18 @@ fn test_is_at_empty_root_at_root() {
 }
 
 // ============================================================================
-//  ReverseFlags upper_bound Tests
+//  ScanFlags upper_bound Tests
 // ============================================================================
 
 #[test]
 fn test_flags_upper_bound_default_false() {
-    let flags = ReverseFlags::new();
+    let flags = ScanFlags::new();
     assert!(!flags.upper_bound());
 }
 
 #[test]
 fn test_flags_clear_upper_bound() {
-    let mut flags = ReverseFlags::new();
+    let mut flags = ScanFlags::new();
     flags.set_upper_bound();
 
     flags.clear_upper_bound();
@@ -124,13 +124,13 @@ fn test_flags_clear_upper_bound() {
 
 #[test]
 fn test_helper_prev() {
-    // prev() is a const fn that decrements index
-    assert_eq!(ReverseScanHelper::prev(5), 4);
-    assert_eq!(ReverseScanHelper::prev(1), 0);
-    assert_eq!(ReverseScanHelper::prev(0), -1);
+    // step() that decrements index
+    assert_eq!(Backward::step(5), 4);
+    assert_eq!(Backward::step(1), 0);
+    assert_eq!(Backward::step(0), -1);
 
     // -1 is the "before first" sentinel
-    assert_eq!(ReverseScanHelper::prev(-1), -2);
+    assert_eq!(Backward::step(-1), -2);
 }
 
 // ============================================================================
@@ -172,7 +172,7 @@ fn test_reverse_scan_cursor_flow() {
     // 3. Ascend back (unshift)
 
     let mut cursor_key = CursorKey::from_slice(b"prefix__suffix99");
-    let mut flags = ReverseFlags::new();
+    let mut flags = ScanFlags::new();
 
     // Initial state
     assert_eq!(cursor_key.offset(), 0);
@@ -201,7 +201,7 @@ fn test_reverse_scan_cursor_flow() {
 fn test_deep_descent_ascent_cycle() {
     // Simulate descending 3 layers and ascending back
     let mut cursor_key = CursorKey::from_slice(b"aaaaaaaa"); // exactly 8 bytes
-    let mut flags = ReverseFlags::new();
+    let mut flags = ScanFlags::new();
 
     // Descend 3 times
     for expected_offset in [8, 16, 24] {

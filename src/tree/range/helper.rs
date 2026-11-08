@@ -391,22 +391,11 @@ where
 ///
 /// Provides direction-specific **stateless** operations for backward iteration.
 /// The `upper_bound` flag that was previously stored here now lives in
-/// [`ReverseFlags`](super::iterator::iter_flags::ReverseFlags).
+/// [`ScanFlags`](super::iterator::iter_flags::ScanFlags).
 #[derive(Clone, Copy, Debug)]
 pub struct ReverseScanHelper;
 
 impl ReverseScanHelper {
-    /// Retreat to the previous logical position.
-    ///
-    /// For rev scans: `ki - 1`. Returns -1 when `ki == 0`.
-    ///
-    /// # Note
-    /// We use `isize` to represent -1 as a valid "before first" sentinel.
-    #[inline(always)]
-    pub const fn prev(ki: isize) -> isize {
-        ki - 1
-    }
-
     pub fn stable_reverse<P>(
         leaf: &mut *mut LeafNode15<P>,
         cursor_key: &CursorKey,

@@ -1,47 +1,144 @@
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
-use std::thread;
-use std::time::Duration;
-use masstree::{MassTree, RangeBound};
-fn main(){
- for round in 0..20 {
-  let tree:Arc<MassTree<u64>>=Arc::new(MassTree::new());
-  for i in 0..30u64 { tree.insert(&i.to_be_bytes(), i); }
-  let stop=Arc::new(AtomicBool::new(false));
-  let bad=Arc::new(AtomicU64::new(0));
-  let mut hs=vec![];
-  for tid in 0..3u64 {
-   let t=tree.clone(); let st=stop.clone();
-   hs.push(thread::spawn(move||{
-    let g=t.guard(); let mut x=tid.wrapping_mul(0x9E3779B97F4A7C15)|1;
-    while !st.load(Ordering::Relaxed){
-     x^=x<<13; x^=x>>7; x^=x<<17;
-     let k=x%30;
-     if (x>>8)&1==0 { let _=t.remove_with_guard(&k.to_be_bytes(),&g); } else { t.insert_with_guard(&k.to_be_bytes(),x,&g); }
+//! Bounded forward/reverse scan regression with concurrent slot reuse and splits.
+//! Barriers start each writer/reader round; channel timeouts bound hangs.
+use masstree::{LeafPolicy, MassTree, MassTree15, MassTreeGeneric, RangeBound, SeizeAllocator};
+use std::{
+    sync::{Arc, Barrier, mpsc},
+    thread,
+    time::Duration,
+};
+
+fn key(value: u64, depth: usize) -> Vec<u8> {
+    let mut key = vec![b'p'; depth * 8];
+    key.extend_from_slice(&value.to_be_bytes());
+    key
+}
+
+fn check_order(previous: &mut Option<u64>, value: u64, reverse: bool, round: usize) {
+    if let Some(last) = *previous {
+        assert!(
+            if reverse { value < last } else { value > last },
+            "round {round}: out of order {last} -> {value}, reverse={reverse}"
+        );
     }
-   }));
-  }
-  let mut ss=vec![];
-  for _ in 0..2 {
-   let t=tree.clone(); let st=stop.clone(); let bad=bad.clone();
-   ss.push(thread::spawn(move||{
-    let g=t.guard();
-    while !st.load(Ordering::Relaxed){
-     let res=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
-      let mut prev:Option<Vec<u8>>=None;
-      for e in t.range(RangeBound::Included(&0u64.to_be_bytes()),RangeBound::Unbounded,&g){
-       if let Some(p)=&prev { if p.as_slice()>=e.key.as_slice(){ bad.fetch_add(1,Ordering::Relaxed); } }
-       prev=Some(e.key);
-      }
-     }));
-     if res.is_err() { bad.fetch_add(1_000_000,Ordering::Relaxed); }
+    *previous = Some(value);
+}
+
+fn exercise<P: LeafPolicy<Value = u64>>(tree: MassTreeGeneric<P, SeizeAllocator<P>>, depth: usize) {
+    let tree = Arc::new(tree);
+    let size = if cfg!(miri) { 20u64 } else { 48u64 };
+    let rounds = if cfg!(miri) { 4 } else { 128 };
+    for i in 0..size {
+        tree.insert(&key(i, depth), i);
     }
-   }));
-  }
-  thread::sleep(Duration::from_millis(200));
-  stop.store(true,Ordering::Relaxed);
-  for h in hs {h.join().unwrap();} for h in ss {h.join().unwrap();}
-  let b=bad.load(Ordering::Relaxed);
-  if b>0 { println!("round {round}: BAD={b}"); return; }
- }
- println!("race: no violations observed");
+    let gate = Arc::new(Barrier::new(2));
+    let (done, receive) = mpsc::channel();
+    let writer_tree = Arc::clone(&tree);
+    let writer_gate = Arc::clone(&gate);
+    let writer_done = done.clone();
+    let writer = thread::spawn(move || {
+        let guard = writer_tree.guard();
+        for round in 0..rounds {
+            writer_gate.wait();
+            for step in 0..if cfg!(miri) { 6 } else { size } {
+                let value = (round as u64 * 7 + step) % size;
+                let key = key(value, depth);
+                writer_tree.remove_with_guard(&key, &guard).unwrap();
+                writer_tree.insert_with_guard(&key, value, &guard);
+            }
+            writer_gate.wait();
+        }
+        writer_done.send(()).unwrap();
+    });
+    let reader = thread::spawn(move || {
+        let guard = tree.guard();
+        for round in 0..rounds {
+            gate.wait();
+            let mut previous = None;
+            let mut visits = 0;
+            match round % 4 {
+                0 | 3 => {
+                    let mut iter = tree.range(RangeBound::Unbounded, RangeBound::Unbounded, &guard);
+                    let reverse = round % 4 == 0;
+                    while let Some(entry) = if reverse {
+                        iter.next_back()
+                    } else {
+                        iter.next()
+                    } {
+                        // SAFETY: The output was validated by the iterator and this
+                        // tree's guard remains held through the atomic/owned copy.
+                        let value = unsafe { P::clone_value_from_output(&entry.value) };
+                        assert_eq!(
+                            entry.key,
+                            key(value, depth),
+                            "round {round}: wrong key/value"
+                        );
+                        check_order(&mut previous, value, reverse, round);
+                        visits += 1;
+                        assert!(visits <= size, "round {round}: duplicate emission");
+                    }
+                }
+                1 => {
+                    let count = tree
+                        .range(RangeBound::Unbounded, RangeBound::Unbounded, &guard)
+                        .rev_for_each_intra_leaf_batch(|k, output| {
+                            // SAFETY: The callback's output remains protected by guard.
+                            let value = unsafe { P::clone_value_from_output(&output) };
+                            assert_eq!(
+                                k,
+                                key(value, depth),
+                                "round {round}: wrong batch key/value"
+                            );
+                            check_order(&mut previous, value, true, round);
+                            visits += 1;
+                            assert!(visits <= size, "round {round}: duplicate batch emission");
+                            true
+                        });
+                    assert_eq!(count as u64, visits);
+                }
+                _ => {
+                    let count = tree.scan_values_rev(
+                        RangeBound::Unbounded,
+                        RangeBound::Unbounded,
+                        |output| {
+                            // SAFETY: The callback's output remains protected by guard.
+                            let value = unsafe { P::clone_value_from_output(&output) };
+                            check_order(&mut previous, value, true, round);
+                            visits += 1;
+                            assert!(visits <= size, "round {round}: duplicate values emission");
+                            true
+                        },
+                        &guard,
+                    );
+                    assert_eq!(count as u64, visits);
+                }
+            }
+            gate.wait();
+        }
+        done.send(()).unwrap();
+    });
+    for _ in 0..2 {
+        receive
+            .recv_timeout(Duration::from_secs(30))
+            .expect("scan/writer watchdog expired");
+    }
+    writer.join().unwrap();
+    reader.join().unwrap();
+}
+
+fn run() {
+    for depth in [0, 1, 31] {
+        exercise(MassTree::<u64>::new(), depth);
+        exercise(MassTree15::<u64>::new(), depth);
+    }
+}
+
+#[cfg(not(test))]
+fn main() {
+    run();
+    println!("bounded forward/reverse races passed");
+}
+
+#[test]
+fn concurrent_scans_preserve_order_and_key_value_identity() {
+    run();
 }

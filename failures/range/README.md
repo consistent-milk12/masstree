@@ -1,11 +1,17 @@
 # Range scan reproducers
 
-`promoted` is now a passing regression: 40- and 300-key promoted layers are
-checked against a BTreeMap across forward/reverse ranges, excluded bounds,
-keyed/reference/batch/value callbacks, full-key prefixes, and mixed next/back.
+`promoted` is a passing regression: 40- and 300-key promoted layers and
+256-byte keys are checked against a BTreeMap across forward/reverse ranges,
+excluded and later-prefix bounds, keyed/reference/batch/value callbacks,
+full-key prefixes, and mixed next/back.
 The corresponding unit regression verifies that both scan directions cache
-the true promoted root and retries require zero parent hops. The table below
-retains historical failure observations.
+the true promoted root and retries require zero parent hops.
+
+`race` now asserts ordering and key/value identity during concurrent writes
+for both policies, using barriers and a bounded watchdog. Run it as
+`cargo test --bin race` or `cargo +nightly miri test --bin race`; Miri uses fewer
+rounds while retaining all scan modes and key shapes. The table below retains
+historical failure observations.
 
 | Binary | Finding | Expected observation |
 |---|---|---|

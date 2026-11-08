@@ -1,5 +1,6 @@
 use super::*;
 use crate::policy::InlinePolicy;
+use crate::tree::range::direction::{Backward, Forward};
 use crate::{BoxPolicy, MassTreeGeneric, SeizeAllocator};
 
 /// Force slot reuse at the boundary between OCC validation and callback
@@ -127,9 +128,9 @@ fn run_batch<P: LeafPolicy, V: SlotVisitor<P>>(
             CursorBound::Inside,
             visitor,
             count,
-            &mut ReverseFlags::new(),
+            &mut ScanFlags::new(),
         );
-        assert!(matches!(result, LeafBatchResultBack::Stopped));
+        assert!(matches!(result, LeafBatchResult::Stopped));
     } else {
         let result = process_batch_keyed::<Forward, _, _>(
             ctx,
@@ -137,7 +138,7 @@ fn run_batch<P: LeafPolicy, V: SlotVisitor<P>>(
             CursorBound::Inside,
             visitor,
             count,
-            &mut (),
+            &mut ScanFlags::new(),
         );
         assert!(matches!(result, LeafBatchResult::Stopped));
     }

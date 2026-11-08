@@ -2219,6 +2219,17 @@ side first and asserts the other is `None`.
 
 ### RNG-07 — Forward multi-layer `find_next` does not validate the cached leaf version
 
+**Proposal follow-up:** Both directions, per-entry readers and batches now use
+`try_snapshot_slot`, with shared `ScanCtx<P, D>` drivers and a signed leaf
+position. Initial reverse descent and exhausted-leaf retreat validate before
+cursor mutation. A deterministic stale-retreat test returned `Find` instead of
+`Retry` before the fix; it now preserves the cursor and passes under Miri.
+Candidate retreat permutations are read after their stable version. The
+rewritten `range --bin race` probe uses barriers, bounded rounds and a watchdog,
+checks order plus key/value identity during writes for both policies and
+short/promoted/256-byte keys, and passes natively and under Miri. The Loom
+key/handle model covers ordering, not the whole tree. Historical details follow.
+
 **Severity:** High · **Confidence:** Confirmed (duplicate emission under stress);
 stale-value/type-confusion impact Likely  
 **Legacy IDs:** `BUG-RNG-08`
@@ -3279,9 +3290,9 @@ pass; the table below retains historical observations.
 | SIM-06 | Leaf traits | `TreeLeafNode` is ~470 lines of forwarding; most `ValueArray`/`LeafPolicy` methods are dead; `BoxValueArray::is_layer` is semantically wrong; `move_slot` is an ownership trap | Reduce the trait to associated types/constants actually used; delete dead methods; make mutations `unsafe` or private | M |
 | SIM-07 | Suffix API | `EmbeddedSuffix` and `SidecarSuffix` duplicate the same algorithm; `SuffixBag::{try_assign, try_assign_in_place, compact, Clone, suffix_equals, suffix_compare}` have no production callers; `suffix_count` RMWs are paid for unused paths | Factor a shared `SuffixCore`; delete or hide dead public API; remove count or gate under debug | M |
 | SIM-08 | Batch | `BatchEntry` and `BatchValueEntry`, two `try_insert_at` implementations, two `fallback_insert_at`, `BatchOps` overlapping `InsertStrategy`, `insert_into_empty_leaf_batch` duplicating `insert_into_empty_leaf` (~150 lines) | One value-owning entry type and one locked-leaf insertion helper | M |
-| SIM-09 | Range | `ScanState`/`ScanStateBack`, `ForwardFlags`/`ReverseFlags`, `find.rs`/`find_rev.rs` only hold result enums; `InitialPositionResult::Up` never constructed; `debug_last_emitted_key_back` never written; `LayerContext` stores only root/leaf | Collapse states/flags; make reverse lazy; store parent slot in `LayerContext`; delete dead variants | M |
+| SIM-09 (implemented) | Range | `ScanState`/`ScanStateBack`, `ForwardFlags`/`ReverseFlags`, `find.rs`/`find_rev.rs` only hold result enums; `InitialPositionResult::Up` never constructed; `debug_last_emitted_key_back` never written; `LayerContext` stores only root/leaf | Collapse states/flags; make reverse lazy; store parent slot in `LayerContext`; delete dead variants | M |
 | SIM-10 | Allocation | Dead `alloc_internode_direct`, `InternodeNode::{new,new_root,new_for_split}`, accessor families, `find_insert_position`, `BatchedRetire`; `debug_assert_invariants` only in tests | Delete dead API; keep one in-place initializer; wire invariants into split/teardown debug paths | S |
-| SIM-11 | Key ordering | `Key::compare` and `CursorKey` implement the same ikey/keylenx ordering twice | Shared helper/trait; differential test over short/suffix/layer kinds | S |
+| SIM-11 (implemented) | Key ordering | `Key::compare` and `CursorKey` implement the same ikey/keylenx ordering twice | Shared helper/trait; differential test over short/suffix/layer kinds | S |
 | SIM-12 | Sentinel tests | `src/inline/sentinel.rs` lacks `#[cfg(test)] mod unit_tests;` although the file exists; `InlineBits` has no tests | Wire the module; test NaN payloads, bool/unit, signed ints, tuples, sentinel identity | S |
 | SIM-13 | Batch stats/docs | `estimated_leaves = unique_ikeys` (15× upper bound), `locality_factor` never reaches 1.0, `sequential_keys` can exceed `MAX_KEY_LENGTH`, `zip_into_entries`/`from_iter` thin wrappers, `BTreeSet` analyze | Rename/recompute estimates, validate keys, remove wrappers or use sort+dedup | S |
 | SIM-14 | Benchmarks | Three concurrent-read/write and three high-impact binaries duplicate 13/9 groups; four independent JSON parsers disagree on streams/metrics | Shared parameterized bench module and one parser | M |
@@ -3434,7 +3445,7 @@ unchanged pending end-to-end evidence. These evaluation items are complete.
 | PERF-05 | Entry API | `entry_with_guard` does a `get_with_guard` descent, then every mutation does a second descent | Single-descent entry classification with fallback on retry | ~2× fewer descents |
 | PERF-06 | Bulk construction | `FromIterator`/`Extend` insert one-by-one under one guard | Collect and call `insert_batch_with_guard` for sized/owned inputs | Large win for 10k+ keys |
 | PERF-07 | Promoted scans | Layer-root promotion makes scans walk `next`/`stable_reverse` leaf-by-leaf; `reach_leaf_for_scan` ignores the parent | Share stable-leaf climb (RNG-04) | O(N) → O(log N) reposition |
-| PERF-08 | Scan batch | Redundant `is_value_empty_relaxed` load before `load_value` for every emitted slot | Remove the precheck; `load_value` already returns `None` | 1–2 atomics/slot |
+| PERF-08 (implemented) | Scan batch | Redundant `is_value_empty_relaxed` load before `load_value` for every emitted slot | Remove the precheck; `load_value` already returns `None` | 1–2 atomics/slot |
 | PERF-09 | Split suffix | `prepare_split_leaf` allocates an empty 128-B bag, then grows to several KB under the split lock | Add `reserve_external(bytes)` sized from source usage; pass insert prealloc | Fewer reallocs/copies under lock |
 | PERF-10 | Suffix prefetch | Embedded prefetch is a no-op; sidecar prefetches metadata/external, not data; leaf prefetch skips suffix field | Prefetch suffix metadata and first two data lines (slot-aware for sidecar) | Hides 1–2 cold misses |
 | PERF-11 | Leaf init | `init_at` zeroes 1152 B, then `init_at_zero` rewrites 576 B of inline bag | Header-only sentinel writes; rely on prior zeroing | ~44% fewer init stores (default) |

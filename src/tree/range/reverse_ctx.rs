@@ -1,6 +1,6 @@
 //! Filepath: `src/tree/range/reverse_ctx.rs`
 //!
-//! Reverse scan context, owns all reverse iteration state.
+//! Reverse-specific positioning, guarded leaf retreat and layer navigation.
 
 use crate::permuter::Permuter15;
 use std::cmp::Ordering;
@@ -14,28 +14,20 @@ use crate::nodeversion::NodeVersion;
 use crate::policy::LeafPolicy;
 use crate::prefetch::prefetch_read;
 
-use super::batch_common::{
-    Backward, BatchCtx, CopySlotVisitor, RefSlotVisitor, process_batch_keyed, process_batch_values,
-};
 use super::cursor_key::CursorKey;
-use super::find_rev::LeafBatchResultBack;
 use super::helper::ReverseScanHelper;
 use super::helper::{
-    CloneEmitter, PtrEmitter, ScanEmitter, SlotPayload, build_slot_key_parts,
-    compare_cursor_to_parts, try_snapshot_slot,
+    CloneEmitter, ScanEmitter, SlotPayload, build_slot_key_parts, compare_cursor_to_parts,
+    try_snapshot_slot,
 };
-use super::iterator::RangeBound;
-use super::iterator::iter_flags::ReverseFlags;
-use super::scan_state::{
-    BackStackElement, LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr, ScanStateBack,
-};
+use super::scan_state::{LayerContext, ScanSnapshot, ScanState};
 use super::traversal::reach_leaf_for_scan;
 
 #[cfg(test)]
 mod unit_tests;
 
 // ============================================================================
-//  Internal result types (moved from find_rev.rs)
+//  Initial-position result
 // ============================================================================
 
 /// Result of attempting to find initial position in a single layer.
@@ -47,72 +39,18 @@ enum InitialPositionResult<P: LeafPolicy> {
     LayerDescent(*const u8),
 
     /// No match at current position, retreat to find previous.
-    FindPrev,
+    Find,
 
     /// Version conflict, retry from root.
     Retry,
 }
 
-// ============================================================================
-//  ReverseScanCtx
-// ============================================================================
-
-/// Reverse scan context, owns all per-direction state for reverse iteration.
-///
-/// This struct bundles the scan position, layer stack, cursor key, helper,
-/// state machine state, and flags that were previously individual fields on
-/// `RangeIter`.
-pub struct ReverseScanCtx<P: LeafPolicy> {
-    /// Current scan position (leaf, version, permutation, signed ki).
-    pub(crate) stack: BackStackElement<P>,
-
-    /// Parent layer stack for sublayer navigation (backward).
-    pub(crate) layer_stack: LayerStack<P>,
-
-    /// Cursor tracking current key position (backward).
-    pub(crate) cursor_key: CursorKey,
-
-    /// Current state machine state (backward).
-    pub(crate) state: ScanStateBack,
-
-    /// Captured snapshot for current entry (backward, if in Emit state).
-    pub(crate) snapshot: Option<ScanSnapshot<P>>,
-
-    /// Packed reverse-specific boolean flags.
-    pub(crate) flags: ReverseFlags,
-
-    // ========================================================================
-    //  Debug-only fields
-    // ========================================================================
-    /// Last emitted key for backward iteration (debug builds only).
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(crate) debug_last_emitted_key_back: Option<Vec<u8>>,
-}
-
-// ============================================================================
-//  Construction
-// ============================================================================
+pub type ReverseScanCtx<P> = super::scan_ctx::ScanCtx<P, super::direction::Backward>;
 
 impl<P: LeafPolicy> ReverseScanCtx<P> {
-    /// Create a new reverse scan context positioned for a bounded reverse scan.
-    ///
-    /// `root` is the tree root pointer, `cursor_key` is positioned for reverse
-    /// scanning, and `emit_equal` controls whether the end-bound key itself
-    /// is emitted.
     #[inline]
     pub fn new_with_bound(root: *const u8, cursor_key: CursorKey, emit_equal: bool) -> Self {
-        Self {
-            stack: BackStackElement::new(root),
-            layer_stack: LayerStack::new(),
-            cursor_key,
-            state: ScanStateBack::FindPrev,
-            snapshot: None,
-            flags: ReverseFlags::with_values(emit_equal),
-
-            #[cfg(debug_assertions)]
-            debug_last_emitted_key_back: None,
-        }
+        Self::new(root, cursor_key, emit_equal)
     }
 }
 
@@ -135,13 +73,13 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     ///    - Find position via `lower_reverse`
     ///    - If layer pointer: setup descent and continue loop
     ///    - If value: try to emit
-    ///    - Otherwise: return `FindPrev` to retreat
+    ///    - Otherwise: return `Find` to retreat
     pub fn find_initial_reverse(
         &mut self,
         root: *const u8,
         emit_equal: bool,
         guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
+    ) -> (ScanState, Option<ScanSnapshot<P>>)
     where
         P::Output: Clone,
     {
@@ -159,7 +97,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
             // CRITICAL: Check null BEFORE calling stable_reverse
             if leaf_ptr.is_null() {
-                return (ScanStateBack::Up, None);
+                return (ScanState::Up, None);
             }
 
             // Handle concurrent inserts - may follow forward chain
@@ -169,7 +107,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
             // Fast path: check deleted version
             if NodeVersion::is_deleted_version(version) {
-                return (ScanStateBack::Retry, None);
+                return (ScanState::Retry, None);
             }
 
             // An empty rightmost leaf (e.g. after removing its tail) is still
@@ -187,7 +125,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                     let prev: *mut LeafNode15<P> = leaf.prev(guard);
 
                     if prev.is_null() || empty_hops >= 64 {
-                        return (ScanStateBack::Up, None);
+                        return (ScanState::Up, None);
                     }
 
                     empty_hops += 1;
@@ -198,7 +136,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                     version = unsafe { &*leaf_ptr }.version().stable();
 
                     if NodeVersion::is_deleted_version(version) {
-                        return (ScanStateBack::Retry, None);
+                        return (ScanState::Retry, None);
                     }
 
                     continue;
@@ -216,7 +154,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 ) {
                     InitialPositionResult::Emit(snapshot) => {
                         self.flags.mark_cursor_emitted();
-                        return (ScanStateBack::Emit, Some(snapshot));
+                        return (ScanState::Emit, Some(snapshot));
                     }
 
                     InitialPositionResult::LayerDescent(layer_ptr) => {
@@ -225,16 +163,16 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                         break;
                     }
 
-                    InitialPositionResult::FindPrev => {
+                    InitialPositionResult::Find => {
                         // Version check before returning
                         if leaf.version().has_changed(version) {
-                            return (ScanStateBack::Retry, None);
+                            return (ScanState::Retry, None);
                         }
-                        return (ScanStateBack::FindPrev, None);
+                        return (ScanState::Find, None);
                     }
 
                     InitialPositionResult::Retry => {
-                        return (ScanStateBack::Retry, None);
+                        return (ScanState::Retry, None);
                     }
                 }
             }
@@ -269,7 +207,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 return InitialPositionResult::Retry;
             }
             self.stack.update_state(version, perm, ki);
-            return InitialPositionResult::FindPrev;
+            return InitialPositionResult::Find;
         }
         let Ok(slot) =
             try_snapshot_slot::<P, CloneEmitter>(leaf, perm.get(ki.cast_unsigned()), version)
@@ -286,7 +224,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 // A terminal bound excludes only a layer with the SAME prefix.
                 // Earlier prefixes are entirely below the end bound.
                 if same_prefix && !self.flags.upper_bound() && !real_suffix {
-                    return InitialPositionResult::FindPrev;
+                    return InitialPositionResult::Find;
                 }
                 self.layer_stack
                     .push(LayerContext::new(current_root, leaf_ptr));
@@ -307,189 +245,13 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 if !self.flags.upper_bound()
                     && (cmp == Ordering::Less || (cmp == Ordering::Equal && !emit_equal))
                 {
-                    return InitialPositionResult::FindPrev;
+                    return InitialPositionResult::Find;
                 }
                 build_slot_key_parts(&mut self.cursor_key, slot.ikey, slot.keylenx, slot.suffix);
                 self.cursor_key.mark_key_complete();
                 InitialPositionResult::Emit(snapshot)
             }
-            SlotPayload::Empty => InitialPositionResult::FindPrev,
-        }
-    }
-}
-
-// ============================================================================
-//  find_prev - Main Reverse Scan Algorithm
-// ============================================================================
-
-impl<P: LeafPolicy> ReverseScanCtx<P> {
-    /// Find the previous entry for reverse iteration.
-    ///
-    /// This is the main workhorse for reverse scanning, called repeatedly
-    /// after `find_initial_reverse` positions the scan.
-    #[inline]
-    pub(crate) fn find_prev(
-        &mut self,
-        guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
-    where
-        P::Output: Clone,
-    {
-        self.find_prev_generic::<CloneEmitter>(guard, false)
-    }
-
-    /// Find the previous entry with duplicate checking enabled.
-    ///
-    /// Called after a Retry state to skip already-emitted entries.
-    #[inline]
-    pub(crate) fn find_prev_with_dup_check(
-        &mut self,
-        guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
-    where
-        P::Output: Clone,
-    {
-        self.find_prev_generic::<CloneEmitter>(guard, true)
-    }
-
-    /// Find the previous entry, returning a raw pointer instead of cloning.
-    #[inline]
-    #[allow(dead_code, reason = "Zero-copy reverse scan API")]
-    pub(crate) fn find_prev_ptr(
-        &mut self,
-        guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<ScanSnapshotPtr<P::Value>>)
-    where
-        P: LeafPolicy,
-    {
-        self.find_prev_generic::<PtrEmitter>(guard, false)
-    }
-
-    /// Find the previous entry with duplicate checking, returning raw pointer.
-    #[inline]
-    #[allow(dead_code, reason = "Zero-copy reverse scan API")]
-    pub(crate) fn find_prev_with_dup_check_ptr(
-        &mut self,
-        guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<ScanSnapshotPtr<P::Value>>)
-    where
-        P: LeafPolicy,
-    {
-        self.find_prev_generic::<PtrEmitter>(guard, true)
-    }
-
-    /// Generic inner implementation of `find_prev` with configurable emission strategy.
-    #[inline]
-    fn find_prev_generic<E: ScanEmitter<P>>(
-        &mut self,
-        guard: &LocalGuard<'_>,
-        needs_duplicate_check: bool,
-    ) -> (ScanStateBack, Option<E::Snapshot>) {
-        // Fast path: null leaf means we need to go up
-        let leaf_ptr: *mut LeafNode15<P> = self.stack.get_leaf_ptr();
-        if leaf_ptr.is_null() {
-            return (ScanStateBack::Up, None);
-        }
-
-        let ki: isize = self.stack.get_ki();
-
-        // Fast path: leaf exhausted (ki went negative)
-        // Check BEFORE version to avoid unnecessary atomic load
-        if ki < 0 {
-            return self.advance_to_prev_leaf_generic::<E>(guard);
-        }
-
-        // SAFETY: leaf_ptr is valid (null checked above)
-        let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-        let version: u32 = self.stack.get_version();
-
-        // Version check - if changed, reposition
-        if leaf.version().has_changed(version) {
-            return self.reposition_back_generic::<E>(guard);
-        }
-
-        let perm: Permuter15 = *self.stack.get_perm_ref();
-        let size: usize = perm.size();
-
-        // Defensive check: ki might be >= size due to concurrent deletion
-        if ki.unsigned_abs() >= size {
-            return self.advance_to_prev_leaf_generic::<E>(guard);
-        }
-
-        // Process the current slot
-        self.process_slot_generic::<E>(leaf, leaf_ptr, perm, version, ki, needs_duplicate_check)
-    }
-
-    /// Process a single slot during reverse scan (generic over emission strategy).
-    #[inline]
-    #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    fn process_slot_generic<E: ScanEmitter<P>>(
-        &mut self,
-        leaf: &LeafNode15<P>,
-        leaf_ptr: *mut LeafNode15<P>,
-        perm: Permuter15,
-        version: u32,
-        ki: isize,
-        needs_duplicate_check: bool,
-    ) -> (ScanStateBack, Option<E::Snapshot>) {
-        let physical_slot = perm.get(ki.cast_unsigned());
-        let Ok(slot) = try_snapshot_slot::<P, E>(leaf, physical_slot, version) else {
-            return (ScanStateBack::Retry, None);
-        };
-        if slot.ikey > self.stack.last_ikey() {
-            return (ScanStateBack::Retry, None);
-        }
-        if ki > 0 {
-            leaf.prefetch_value(perm.get((ki - 1).cast_unsigned()));
-        }
-        if needs_duplicate_check && !self.flags.upper_bound() {
-            let sentinel = self.cursor_key.is_unshift_sentinel();
-            let cursor_ikey = self.cursor_key.current_ikey();
-            let is_dup = if slot.keylenx >= LAYER_KEYLENX {
-                if sentinel {
-                    slot.ikey == cursor_ikey
-                } else {
-                    slot.ikey >= cursor_ikey
-                }
-            } else if sentinel {
-                false
-            } else {
-                compare_cursor_to_parts(&self.cursor_key, slot.ikey, slot.keylenx, slot.suffix)
-                    != Ordering::Greater
-            };
-            if is_dup {
-                self.stack.set_ki(ReverseScanHelper::prev(ki));
-                return (ScanStateBack::FindPrev, None);
-            }
-        }
-        match slot.payload {
-            SlotPayload::Layer(root) => {
-                let same_prefix = slot.ikey == self.cursor_key.current_ikey();
-                let real_suffix =
-                    self.cursor_key.has_suffix() && !self.cursor_key.is_unshift_sentinel();
-                self.flags
-                    .set_down_mode(same_prefix && real_suffix, !same_prefix);
-                self.layer_stack
-                    .push(LayerContext::new(self.stack.get_root(), leaf_ptr));
-                self.cursor_key.assign_store_ikey(slot.ikey);
-                prefetch_read(root);
-                self.stack.set_root(root.cast_const());
-                self.stack.update_state(version, perm, ki - 1);
-                (ScanStateBack::Down, None)
-            }
-            SlotPayload::Empty => {
-                self.stack.set_ki(ReverseScanHelper::prev(ki));
-                (ScanStateBack::FindPrev, None)
-            }
-            SlotPayload::Value(snapshot) => {
-                build_slot_key_parts(&mut self.cursor_key, slot.ikey, slot.keylenx, slot.suffix);
-                self.cursor_key.mark_key_complete();
-                self.flags.clear_upper_bound();
-                self.flags.mark_cursor_emitted();
-                self.stack.set_last_ikey(slot.ikey);
-                self.stack.set_ki(ReverseScanHelper::prev(ki));
-                (ScanStateBack::Emit, Some(snapshot))
-            }
+            SlotPayload::Empty => InitialPositionResult::Find,
         }
     }
 }
@@ -506,11 +268,11 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     /// siblings that appeared below the current lower bound and skipping empty
     /// leaves left behind by removals.
     #[inline]
-    fn advance_to_prev_leaf_generic<E: ScanEmitter<P>>(
+    pub(super) fn advance_to_prev_leaf_generic<E: ScanEmitter<P>>(
         &mut self,
         guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<E::Snapshot>) {
-        let current_ptr: *mut LeafNode15<P> = self.stack.get_leaf_ptr();
+    ) -> (ScanState, Option<E::Snapshot>) {
+        let current_ptr: *mut LeafNode15<P> = self.stack.leaf_ptr();
 
         // SAFETY: current_ptr was validated before calling this function
         let current_leaf: &LeafNode15<P> = unsafe { &*current_ptr };
@@ -518,6 +280,12 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         // The cursor is the current leaf's lower bound. Everything below it is
         // in the previous leaf (or a split sibling between the two).
         let current_bound: u64 = current_leaf.ikey_bound();
+        let previous = current_leaf.prev(guard);
+        if current_leaf.version().is_deleted()
+            || current_leaf.version().has_changed(self.stack.version())
+        {
+            return (ScanState::Retry, None);
+        }
         self.cursor_key.assign_store_ikey(current_bound);
         self.cursor_key.assign_store_length(0);
 
@@ -527,21 +295,14 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         let mut stop_ptr: *mut LeafNode15<P> = current_ptr;
         let mut stop_bound: u64 = current_bound;
 
-        let mut leaf_ptr: *mut LeafNode15<P> = current_leaf.prev(guard);
+        let mut leaf_ptr: *mut LeafNode15<P> = previous;
 
         if leaf_ptr.is_null() {
             self.stack.set_leaf(StdPtr::null_mut());
-            return (ScanStateBack::Up, None);
+            return (ScanState::Up, None);
         }
 
-        let mut hops: usize = 0;
-
-        loop {
-            hops += 1;
-            if hops > 128 {
-                return (ScanStateBack::Retry, None);
-            }
-
+        for _ in 0..128 {
             // SAFETY: leaf_ptr is linked and protected by the guard.
             let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
 
@@ -550,7 +311,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
                 if leaf_ptr.is_null() {
                     self.stack.set_leaf(StdPtr::null_mut());
-                    return (ScanStateBack::Up, None);
+                    return (ScanState::Up, None);
                 }
 
                 continue;
@@ -587,7 +348,15 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
             // SAFETY: candidate is protected by the guard.
             let candidate_leaf: &LeafNode15<P> = unsafe { &*candidate };
+            // The version must precede the permutation: pairing an old permutation
+            // with a newer stable version could accept physical slots reused by a writer.
+            let version = candidate_leaf.version().stable();
             let perm: Permuter15 = candidate_leaf.permutation();
+            if NodeVersion::is_deleted_version(version)
+                || candidate_leaf.version().has_changed(version)
+            {
+                return (ScanState::Retry, None);
+            }
 
             if perm.size() == 0 {
                 // Discard this empty leaf and continue left. Moving the stop
@@ -598,7 +367,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
                 if leaf_ptr.is_null() {
                     self.stack.set_leaf(StdPtr::null_mut());
-                    return (ScanStateBack::Up, None);
+                    return (ScanState::Up, None);
                 }
 
                 continue;
@@ -611,12 +380,6 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                 prefetch_read(prev_prev.cast::<u8>());
             }
 
-            let version: u32 = candidate_leaf.version().stable();
-
-            if NodeVersion::is_deleted_version(version) {
-                return (ScanStateBack::Retry, None);
-            }
-
             let size: usize = perm.size();
             let ki: isize = (size - 1).cast_signed();
 
@@ -625,8 +388,9 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             self.flags.clear_cursor_emitted();
             self.stack.update_state(version, perm, ki);
 
-            return (ScanStateBack::FindPrev, None);
+            return (ScanState::Find, None);
         }
+        (ScanState::Retry, None)
     }
 }
 
@@ -642,7 +406,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     pub(crate) fn reposition_back(
         &mut self,
         guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
+    ) -> (ScanState, Option<ScanSnapshot<P>>)
     where
         P::Output: Clone,
     {
@@ -653,14 +417,14 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     fn reposition_back_generic<E: ScanEmitter<P>>(
         &mut self,
         guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<E::Snapshot>) {
+    ) -> (ScanState, Option<E::Snapshot>) {
         const MAX_REPOSITION_RETRIES: u32 = 16;
 
-        let mut root: *const u8 = self.stack.get_root();
+        let mut root: *const u8 = self.stack.root();
 
         // Handle null root
         if root.is_null() {
-            return (ScanStateBack::Up, None);
+            return (ScanState::Up, None);
         }
 
         // Iterative retry loop (avoids recursion)
@@ -674,7 +438,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             // Check for empty tree / layer
             if leaf_ptr.is_null() {
                 self.stack.set_leaf(StdPtr::null_mut());
-                return (ScanStateBack::Up, None);
+                return (ScanState::Up, None);
             }
 
             // Handle concurrent inserts (may follow forward chain)
@@ -718,12 +482,12 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             self.stack.set_last_ikey(u64::MAX);
             self.stack.update_state(version, perm, ki);
 
-            return (ScanStateBack::FindPrev, None);
+            return (ScanState::Find, None);
         }
 
         // Internal retries exhausted under heavy contention.
         // Fall back to outer state machine retry (re-traverse from root).
-        (ScanStateBack::Retry, None)
+        (ScanState::Retry, None)
     }
 }
 
@@ -827,512 +591,5 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         self.stack.update_state(version, perm, ki);
 
         true
-    }
-}
-
-// ============================================================================
-//  Intra-Leaf Batch Processing for Reverse Scan
-// ============================================================================
-
-/// Build a [`BatchCtx`] from reverse scan fields (split-borrowed).
-#[inline(always)]
-fn build_reverse_batch_ctx<'a, P: LeafPolicy>(
-    stack: &'a BackStackElement<P>,
-    cursor_key: &'a mut CursorKey,
-    layer_stack: &'a mut LayerStack<P>,
-) -> BatchCtx<'a, P> {
-    let leaf_ptr: *mut LeafNode15<P> = stack.get_leaf_ptr();
-    // SAFETY: leaf_ptr is valid - protected by guard in caller
-    let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-    let perm = *stack.get_perm_ref();
-    let perm_size = perm.size();
-    BatchCtx {
-        leaf,
-        perm,
-        perm_size,
-        cached_version: stack.get_version(),
-        ki: stack.get_ki(),
-        root: stack.get_root(),
-        leaf_ptr,
-        cursor_key,
-        layer_stack,
-        down_follow_suffix: false,
-        down_fresh_subtree: false,
-    }
-}
-
-impl<P: LeafPolicy> ReverseScanCtx<P> {
-    /// Process remaining entries in current leaf in reverse, returning `&P::Value` references.
-    #[inline]
-    pub(crate) fn process_prev_leaf_batch_ptr<F>(
-        &mut self,
-        start_bound: &RangeBound<'_>,
-        visitor: &mut F,
-        count: &mut usize,
-    ) -> LeafBatchResultBack
-    where
-        F: FnMut(&[u8], &P::Value) -> bool,
-    {
-        let cursor_bound = start_bound.cursor_bound(&self.cursor_key, false);
-        let (result, ki, root, follow, fresh) = {
-            let mut ctx =
-                build_reverse_batch_ctx(&self.stack, &mut self.cursor_key, &mut self.layer_stack);
-            let r = process_batch_keyed::<Backward, _, P>(
-                &mut ctx,
-                start_bound,
-                cursor_bound,
-                &mut RefSlotVisitor(visitor),
-                count,
-                &mut self.flags,
-            );
-            (
-                r,
-                ctx.ki,
-                ctx.root,
-                ctx.down_follow_suffix,
-                ctx.down_fresh_subtree,
-            )
-        };
-        self.stack.set_ki(ki);
-        self.stack.set_root(root);
-
-        if matches!(result, LeafBatchResultBack::LayerEncountered) {
-            self.flags.set_down_mode(follow, fresh);
-        }
-
-        result
-    }
-
-    /// Process remaining entries in current leaf in reverse, returning `P::Output` by value.
-    #[inline]
-    pub(crate) fn process_prev_leaf_batch<F>(
-        &mut self,
-        start_bound: &RangeBound<'_>,
-        visitor: &mut F,
-        count: &mut usize,
-    ) -> LeafBatchResultBack
-    where
-        F: FnMut(&[u8], P::Output) -> bool,
-    {
-        let cursor_bound = start_bound.cursor_bound(&self.cursor_key, false);
-        let (result, ki, root, follow, fresh) = {
-            let mut ctx =
-                build_reverse_batch_ctx(&self.stack, &mut self.cursor_key, &mut self.layer_stack);
-            let r = process_batch_keyed::<Backward, _, P>(
-                &mut ctx,
-                start_bound,
-                cursor_bound,
-                &mut CopySlotVisitor(visitor),
-                count,
-                &mut self.flags,
-            );
-            (
-                r,
-                ctx.ki,
-                ctx.root,
-                ctx.down_follow_suffix,
-                ctx.down_fresh_subtree,
-            )
-        };
-        self.stack.set_ki(ki);
-        self.stack.set_root(root);
-
-        if matches!(result, LeafBatchResultBack::LayerEncountered) {
-            self.flags.set_down_mode(follow, fresh);
-        }
-
-        result
-    }
-
-    /// Process previous leaf batch without key materialization (values only).
-    #[inline]
-    pub(crate) fn process_prev_leaf_batch_values<F>(
-        &mut self,
-        start_bound: &RangeBound<'_>,
-        visitor: &mut F,
-        count: &mut usize,
-    ) -> LeafBatchResultBack
-    where
-        F: FnMut(P::Output) -> bool,
-    {
-        let cursor_bound = start_bound.cursor_bound(&self.cursor_key, false);
-        let (result, ki, root, follow, fresh) = {
-            let mut ctx =
-                build_reverse_batch_ctx(&self.stack, &mut self.cursor_key, &mut self.layer_stack);
-            let r = process_batch_values::<Backward, P>(
-                &mut ctx,
-                start_bound,
-                cursor_bound,
-                visitor,
-                count,
-                &mut self.flags,
-            );
-            (
-                r,
-                ctx.ki,
-                ctx.root,
-                ctx.down_follow_suffix,
-                ctx.down_fresh_subtree,
-            )
-        };
-        self.stack.set_ki(ki);
-        self.stack.set_root(root);
-
-        if matches!(result, LeafBatchResultBack::LayerEncountered) {
-            self.flags.set_down_mode(follow, fresh);
-        }
-
-        result
-    }
-
-    /// Advance to previous leaf in the B-link chain (batch processing variant).
-    ///
-    /// Returns `true` if successfully advanced, `false` if layer exhausted.
-    #[inline]
-    pub(crate) fn advance_prev_leaf(&mut self, guard: &LocalGuard<'_>) -> bool {
-        // Reuse the guarded retreat loop: it uses the protected `prev` load,
-        // follows split siblings that appeared below the current bound, and
-        // skips empty/deleted intermediate leaves. The returned snapshot is
-        // never populated by a retreat.
-        let (state, _) = self.advance_to_prev_leaf_generic::<PtrEmitter>(guard);
-        matches!(state, ScanStateBack::FindPrev)
-    }
-}
-
-// ============================================================================
-//  Batch strategy trait + run_batch_reverse unified loop
-// ============================================================================
-
-/// Result of a reverse strategy's `emit_initial` call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReverseBatchAction {
-    /// Entry emitted (or skipped), continue scanning.
-    Continue,
-
-    /// Visitor returned false, stop scanning.
-    Stopped,
-
-    /// Start bound exceeded, mark exhausted and stop.
-    Exhausted,
-}
-
-/// Strategy trait for reverse batch scanning.
-///
-/// Three implementations:
-///
-/// - [`RevIntraLeafRefStrategy`]: `&P::Value` refs via `process_prev_leaf_batch_ptr`
-/// - [`RevIntraLeafCopyStrategy`]: `P::Output` by value via `process_prev_leaf_batch`
-/// - [`RevValuesOnlyStrategy`]: `P::Output` values only via `process_prev_leaf_batch_values`
-///
-/// After monomorphization, all trait dispatch is fully inlined, zero overhead.
-pub trait ReverseBatchStrategy<P: LeafPolicy> {
-    /// Emit the initial entry from `initialize_back()`'s snapshot.
-    fn emit_initial(
-        &mut self,
-        ctx: &mut ReverseScanCtx<P>,
-        start_bound: &RangeBound<'_>,
-        count: &mut usize,
-    ) -> ReverseBatchAction;
-
-    /// Process the current leaf's entries in reverse (hot path).
-    fn process_leaf(
-        &mut self,
-        ctx: &mut ReverseScanCtx<P>,
-        start_bound: &RangeBound<'_>,
-        count: &mut usize,
-    ) -> LeafBatchResultBack;
-}
-
-impl<P: LeafPolicy> ReverseScanCtx<P> {
-    /// Unified reverse batch scan loop driven by a strategy.
-    ///
-    /// Handles the state machine skeleton (Down/Up/Retry/null/deleted checks)
-    /// and delegates entry emission and leaf processing to the strategy.
-    ///
-    /// Callers must handle exhausted/initialized checks before calling this.
-    #[inline]
-    pub(crate) fn run_batch_reverse<S: ReverseBatchStrategy<P>>(
-        &mut self,
-        strategy: &mut S,
-        start_bound: &RangeBound<'_>,
-        guard: &LocalGuard<'_>,
-    ) -> usize {
-        let mut count: usize = 0;
-
-        // Handle initial Emit state from initialize_back() if present
-        if self.state == ScanStateBack::Emit {
-            match strategy.emit_initial(self, start_bound, &mut count) {
-                ReverseBatchAction::Continue => {
-                    self.state = ScanStateBack::FindPrev;
-                }
-                ReverseBatchAction::Stopped => return count,
-                ReverseBatchAction::Exhausted => {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-            }
-        }
-
-        loop {
-            // Handle rare states (layer transitions, retries)
-            match self.state {
-                ScanStateBack::Down => {
-                    self.handle_down_back();
-                    self.state = ScanStateBack::Retry;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Up => {
-                    if !self.handle_up_back(guard) {
-                        self.flags.mark_exhausted();
-                        return count;
-                    }
-
-                    self.state = ScanStateBack::FindPrev;
-                    self.flags.require_duplicate_check();
-
-                    continue;
-                }
-
-                ScanStateBack::Retry => {
-                    let (new_state, _) = self.reposition_back(guard);
-                    self.state = new_state;
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                ScanStateBack::Emit | ScanStateBack::FindPrev => {}
-            }
-
-            // Check for null stack (layer exhausted)
-            if self.stack.get_leaf_ptr().is_null() {
-                if self.layer_stack.is_empty() {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-
-                self.state = ScanStateBack::Up;
-                continue;
-            }
-
-            // Check leaf deletion
-            // SAFETY: null check above ensures leaf_ptr is valid,
-            // and the guard protects the node from deallocation.
-            let leaf: &LeafNode15<P> = unsafe { &*self.stack.get_leaf_ptr() };
-            if leaf.version().is_deleted() {
-                self.state = ScanStateBack::Retry;
-                continue;
-            }
-
-            // Hot path: process leaf batch in reverse
-            let result = strategy.process_leaf(self, start_bound, &mut count);
-
-            match result {
-                LeafBatchResultBack::LeafExhausted => {
-                    if !self.advance_prev_leaf(guard) {
-                        if self.layer_stack.is_empty() {
-                            self.flags.mark_exhausted();
-                            return count;
-                        }
-
-                        self.state = ScanStateBack::Up;
-                    }
-                }
-
-                LeafBatchResultBack::LayerEncountered => {
-                    self.state = ScanStateBack::Down;
-                }
-
-                LeafBatchResultBack::VersionChanged => {
-                    self.state = ScanStateBack::Retry;
-                }
-
-                LeafBatchResultBack::Stopped => return count,
-
-                LeafBatchResultBack::StartBoundExceeded => {
-                    self.flags.mark_exhausted();
-                    return count;
-                }
-            }
-        }
-    }
-}
-
-// ============================================================================
-//  Strategy implementations
-// ============================================================================
-
-/// Reverse intra-leaf batch strategy with `&P::Value` references.
-///
-/// Used by [`super::iterator::RangeIter::rev_for_each_ref`].
-pub struct RevIntraLeafRefStrategy<'a, F> {
-    visitor: &'a mut F,
-}
-
-impl<'a, F> RevIntraLeafRefStrategy<'a, F> {
-    #[inline]
-    pub const fn new(visitor: &'a mut F) -> Self {
-        Self { visitor }
-    }
-}
-
-impl<P, F> ReverseBatchStrategy<P> for RevIntraLeafRefStrategy<'_, F>
-where
-    P: crate::policy::RefPolicy,
-    F: FnMut(&[u8], &P::Value) -> bool,
-{
-    #[inline(always)]
-    fn emit_initial(
-        &mut self,
-        ctx: &mut ReverseScanCtx<P>,
-        start_bound: &RangeBound<'_>,
-        count: &mut usize,
-    ) -> ReverseBatchAction {
-        let Some(snapshot) = ctx.snapshot.take() else {
-            return ReverseBatchAction::Continue;
-        };
-
-        // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-        let key: &[u8] = unsafe { ctx.cursor_key.full_key_unchecked() };
-
-        if !start_bound.contains_reverse(key) {
-            return ReverseBatchAction::Exhausted;
-        }
-
-        *count += 1;
-
-        // SAFETY: Guard protects the output. output_as_ref_sound uses
-        // atomic read for write-through types, avoiding aliasing violation.
-        let mut scratch = std::mem::MaybeUninit::uninit();
-        let value_ref: &P::Value = unsafe { P::output_as_ref_sound(&snapshot.value, &mut scratch) };
-        let should_continue = (self.visitor)(key, value_ref);
-
-        if should_continue {
-            ReverseBatchAction::Continue
-        } else {
-            ReverseBatchAction::Stopped
-        }
-    }
-
-    #[inline(always)]
-    fn process_leaf(
-        &mut self,
-        ctx: &mut ReverseScanCtx<P>,
-        start_bound: &RangeBound<'_>,
-        count: &mut usize,
-    ) -> LeafBatchResultBack {
-        ctx.process_prev_leaf_batch_ptr(start_bound, self.visitor, count)
-    }
-}
-
-/// Reverse intra-leaf batch strategy with `P::Output` by value.
-///
-/// Used by [`super::iterator::RangeIter::rev_for_each_intra_leaf_batch`].
-pub struct RevIntraLeafCopyStrategy<'a, F> {
-    visitor: &'a mut F,
-}
-
-impl<'a, F> RevIntraLeafCopyStrategy<'a, F> {
-    #[inline]
-    pub const fn new(visitor: &'a mut F) -> Self {
-        Self { visitor }
-    }
-}
-
-impl<P, F> ReverseBatchStrategy<P> for RevIntraLeafCopyStrategy<'_, F>
-where
-    P: LeafPolicy,
-    F: FnMut(&[u8], P::Output) -> bool,
-{
-    #[inline(always)]
-    fn emit_initial(
-        &mut self,
-        ctx: &mut ReverseScanCtx<P>,
-        start_bound: &RangeBound<'_>,
-        count: &mut usize,
-    ) -> ReverseBatchAction {
-        let Some(snapshot) = ctx.snapshot.take() else {
-            return ReverseBatchAction::Continue;
-        };
-
-        // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-        let key: &[u8] = unsafe { ctx.cursor_key.full_key_unchecked() };
-
-        if !start_bound.contains_reverse(key) {
-            return ReverseBatchAction::Exhausted;
-        }
-
-        *count += 1;
-
-        if (self.visitor)(key, snapshot.value) {
-            ReverseBatchAction::Continue
-        } else {
-            ReverseBatchAction::Stopped
-        }
-    }
-
-    #[inline(always)]
-    fn process_leaf(
-        &mut self,
-        ctx: &mut ReverseScanCtx<P>,
-        start_bound: &RangeBound<'_>,
-        count: &mut usize,
-    ) -> LeafBatchResultBack {
-        ctx.process_prev_leaf_batch(start_bound, self.visitor, count)
-    }
-}
-
-/// Reverse values-only batch strategy — no key materialization.
-///
-/// Used by [`super::iterator::RangeIter::rev_for_each_values_batch`].
-pub struct RevValuesOnlyStrategy<'a, F> {
-    visitor: &'a mut F,
-}
-
-impl<'a, F> RevValuesOnlyStrategy<'a, F> {
-    #[inline]
-    pub const fn new(visitor: &'a mut F) -> Self {
-        Self { visitor }
-    }
-}
-
-impl<P, F> ReverseBatchStrategy<P> for RevValuesOnlyStrategy<'_, F>
-where
-    P: LeafPolicy,
-    F: FnMut(P::Output) -> bool,
-{
-    #[inline(always)]
-    fn emit_initial(
-        &mut self,
-        ctx: &mut ReverseScanCtx<P>,
-        start_bound: &RangeBound<'_>,
-        count: &mut usize,
-    ) -> ReverseBatchAction {
-        let Some(snapshot) = ctx.snapshot.take() else {
-            return ReverseBatchAction::Continue;
-        };
-
-        let key: &[u8] = unsafe { ctx.cursor_key.full_key_unchecked() };
-        if !start_bound.contains_reverse(key) {
-            return ReverseBatchAction::Exhausted;
-        }
-
-        *count += 1;
-        if (self.visitor)(snapshot.value) {
-            ReverseBatchAction::Continue
-        } else {
-            ReverseBatchAction::Stopped
-        }
-    }
-
-    #[inline(always)]
-    fn process_leaf(
-        &mut self,
-        ctx: &mut ReverseScanCtx<P>,
-        start_bound: &RangeBound<'_>,
-        count: &mut usize,
-    ) -> LeafBatchResultBack {
-        ctx.process_prev_leaf_batch_values(start_bound, self.visitor, count)
     }
 }

@@ -8,14 +8,13 @@ use crate::policy::LeafPolicy;
 use crate::prefetch::prefetch_read;
 
 use super::cursor_key::CursorKey;
-use super::find::LeafBatchResult;
-use super::find_rev::LeafBatchResultBack;
 use super::helper::{
     CloneEmitter, PtrEmitter, ScanEmitter, SlotPayload, build_slot_key_parts, try_snapshot_slot,
 };
 use super::iterator::CursorBound;
 use super::iterator::RangeBound;
-use super::iterator::iter_flags::ReverseFlags;
+use super::iterator::iter_flags::ScanFlags;
+use super::scan_state::LeafBatchResult;
 use super::scan_state::{LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr};
 
 #[cfg(test)]
@@ -70,179 +69,7 @@ where
     }
 }
 
-/// Direction-specific operations for batch leaf processing.
-///
-/// Implemented by zero-sized marker types [`Forward`] and [`Backward`].
-/// All methods are trivially inlineable, so monomorphization produces
-/// identical code to hand-written direction-specific loops.
-pub trait BatchDirection: Sized {
-    /// Result type for batch processing.
-    type Result: Copy;
-
-    /// Direction-specific flags type. `()` for forward, [`ReverseFlags`] for backward.
-    type Flags: ?Sized;
-
-    /// Advance position by one step in this direction.
-    fn step(ki: isize) -> isize;
-
-    /// Position to store when a layer pointer is encountered.
-    fn layer_ki(ki: isize) -> isize;
-
-    /// Prefetch neighbor slot's value to hide memory latency.
-    /// Forward: no-op. Backward: prefetches previous slot.
-    fn prefetch_neighbor<P: LeafPolicy>(ki: isize, leaf: &LeafNode15<P>, perm: Permuter15);
-
-    /// The [`Ordering`] that indicates the bound has been exceeded.
-    /// Forward: `Greater` (`slot_ikey` > `end_bound`). Backward: `Less` (`slot_ikey` < `start_bound`).
-    fn exceeded_ordering() -> Ordering;
-
-    /// Full key bound check.
-    /// Forward: `bound.contains(key)`. Backward: `bound.contains_reverse(key)`.
-    fn key_in_bound(bound: &RangeBound<'_>, key: &[u8]) -> bool;
-
-    /// Called before emitting a value. Forward: no-op. Backward: clears `upper_bound` flag.
-    fn on_pre_emit(flags: &mut Self::Flags);
-
-    // Result constructors
-    fn exhausted() -> Self::Result;
-    fn layer_encountered() -> Self::Result;
-    fn version_changed() -> Self::Result;
-    fn stopped() -> Self::Result;
-    fn bound_exceeded() -> Self::Result;
-}
-
-/// Forward direction marker for batch processing.
-pub struct Forward;
-
-impl BatchDirection for Forward {
-    type Result = LeafBatchResult;
-    type Flags = ();
-
-    #[inline(always)]
-    fn step(ki: isize) -> isize {
-        ki + 1
-    }
-
-    #[inline(always)]
-    fn layer_ki(ki: isize) -> isize {
-        ki
-    }
-
-    #[inline(always)]
-    fn prefetch_neighbor<P: LeafPolicy>(ki: isize, leaf: &LeafNode15<P>, perm: Permuter15) {
-        let next_ki: usize = (ki + 1).cast_unsigned();
-        if next_ki < perm.size() {
-            let next_slot: usize = perm.get(next_ki);
-            leaf.prefetch_value(next_slot);
-        }
-    }
-
-    #[inline(always)]
-    fn exceeded_ordering() -> Ordering {
-        Ordering::Greater
-    }
-
-    #[inline(always)]
-    fn key_in_bound(bound: &RangeBound<'_>, key: &[u8]) -> bool {
-        bound.contains(key)
-    }
-
-    #[inline(always)]
-    fn on_pre_emit(_flags: &mut ()) {}
-
-    #[inline(always)]
-    fn exhausted() -> LeafBatchResult {
-        LeafBatchResult::LeafExhausted
-    }
-
-    #[inline(always)]
-    fn layer_encountered() -> LeafBatchResult {
-        LeafBatchResult::LayerEncountered
-    }
-
-    #[inline(always)]
-    fn version_changed() -> LeafBatchResult {
-        LeafBatchResult::VersionChanged
-    }
-
-    #[inline(always)]
-    fn stopped() -> LeafBatchResult {
-        LeafBatchResult::Stopped
-    }
-
-    #[inline(always)]
-    fn bound_exceeded() -> LeafBatchResult {
-        LeafBatchResult::EndBoundExceeded
-    }
-}
-
-/// Backward direction marker for batch processing.
-pub struct Backward;
-
-impl BatchDirection for Backward {
-    type Result = LeafBatchResultBack;
-    type Flags = ReverseFlags;
-
-    #[inline(always)]
-    fn step(ki: isize) -> isize {
-        ki - 1
-    }
-
-    #[inline(always)]
-    fn layer_ki(ki: isize) -> isize {
-        ki - 1
-    }
-
-    #[inline(always)]
-    fn prefetch_neighbor<P: LeafPolicy>(ki: isize, leaf: &LeafNode15<P>, perm: Permuter15) {
-        if ki > 0 {
-            let prev_slot: usize = perm.get((ki - 1).cast_unsigned());
-            leaf.prefetch_value(prev_slot);
-        }
-    }
-
-    #[inline(always)]
-    fn exceeded_ordering() -> Ordering {
-        Ordering::Less
-    }
-
-    #[inline(always)]
-    fn key_in_bound(bound: &RangeBound<'_>, key: &[u8]) -> bool {
-        bound.contains_reverse(key)
-    }
-
-    #[inline(always)]
-    fn on_pre_emit(flags: &mut ReverseFlags) {
-        flags.clear_upper_bound();
-        flags.mark_cursor_emitted();
-    }
-
-    #[inline(always)]
-    fn exhausted() -> LeafBatchResultBack {
-        LeafBatchResultBack::LeafExhausted
-    }
-
-    #[inline(always)]
-    fn layer_encountered() -> LeafBatchResultBack {
-        LeafBatchResultBack::LayerEncountered
-    }
-
-    #[inline(always)]
-    fn version_changed() -> LeafBatchResultBack {
-        LeafBatchResultBack::VersionChanged
-    }
-
-    #[inline(always)]
-    fn stopped() -> LeafBatchResultBack {
-        LeafBatchResultBack::Stopped
-    }
-
-    #[inline(always)]
-    fn bound_exceeded() -> LeafBatchResultBack {
-        LeafBatchResultBack::StartBoundExceeded
-    }
-}
-
+use super::direction::Direction;
 /// Extracted batch processing state, direction-agnostic.
 ///
 /// Callers build this from their direction-specific stack type, call the
@@ -272,15 +99,15 @@ pub fn process_batch_keyed<D, V, P>(
     cursor_bound: CursorBound,
     slot_visitor: &mut V,
     count: &mut usize,
-    flags: &mut D::Flags,
-) -> D::Result
+    flags: &mut ScanFlags,
+) -> LeafBatchResult
 where
-    D: BatchDirection,
+    D: Direction,
     V: SlotVisitor<P>,
     P: LeafPolicy,
 {
     if ctx.leaf.version().is_deleted() {
-        return D::version_changed();
+        return LeafBatchResult::VersionChanged;
     }
 
     while ctx.ki >= 0 && ctx.ki.unsigned_abs() < ctx.perm_size {
@@ -289,17 +116,17 @@ where
 
         let Ok(captured) = try_snapshot_slot::<P, V::Emitter>(ctx.leaf, slot, ctx.cached_version)
         else {
-            return D::version_changed();
+            return LeafBatchResult::VersionChanged;
         };
         let slot_ikey = captured.ikey;
         let output = match captured.payload {
             SlotPayload::Layer(layer_ptr) => {
                 match cursor_bound {
-                    CursorBound::Outside => return D::bound_exceeded(),
+                    CursorBound::Outside => return LeafBatchResult::BoundExceeded,
                     CursorBound::At(bound_ikey)
                         if slot_ikey.cmp(&bound_ikey) == D::exceeded_ordering() =>
                     {
-                        return D::bound_exceeded();
+                        return LeafBatchResult::BoundExceeded;
                     }
                     CursorBound::At(_) | CursorBound::Inside => {}
                 }
@@ -314,7 +141,7 @@ where
                 prefetch_read(layer_ptr);
                 ctx.root = layer_ptr.cast_const();
                 ctx.ki = D::layer_ki(ctx.ki);
-                return D::layer_encountered();
+                return LeafBatchResult::LayerEncountered;
             }
             SlotPayload::Empty => {
                 ctx.ki = D::step(ctx.ki);
@@ -330,10 +157,10 @@ where
         let mut needs_full_bound: bool = false;
 
         match cursor_bound {
-            CursorBound::Outside => return D::bound_exceeded(),
+            CursorBound::Outside => return LeafBatchResult::BoundExceeded,
 
             CursorBound::At(b_ikey) => match slot_ikey.cmp(&b_ikey) {
-                ord if ord == D::exceeded_ordering() => return D::bound_exceeded(),
+                ord if ord == D::exceeded_ordering() => return LeafBatchResult::BoundExceeded,
                 Ordering::Equal => needs_full_bound = true,
                 _ => {}
             },
@@ -347,7 +174,7 @@ where
 
         let key: &[u8] = ctx.cursor_key.full_key();
         if needs_full_bound && !D::key_in_bound(bound, key) {
-            return D::bound_exceeded();
+            return LeafBatchResult::BoundExceeded;
         }
 
         D::on_pre_emit(flags);
@@ -355,42 +182,58 @@ where
         *count += 1;
         ctx.ki = D::step(ctx.ki);
         if !slot_visitor.visit(output, key) {
-            return D::stopped();
+            return LeafBatchResult::Stopped;
         }
     }
 
     if ctx.leaf.version().has_changed(ctx.cached_version) {
-        return D::version_changed();
+        return LeafBatchResult::VersionChanged;
     }
 
-    D::exhausted()
+    LeafBatchResult::LeafExhausted
 }
 
 // ============================================================================
 //  Unified Values-Only Batch Processor
 // ============================================================================
 
-/// Values-only adapter over the same validated batch loop. The cursor still
-/// records suffix bytes so a retry can resume after the last emitted full key.
-#[inline]
-pub fn process_batch_values<D, P>(
-    ctx: &mut BatchCtx<'_, P>,
-    bound: &RangeBound<'_>,
-    cursor_bound: CursorBound,
-    visitor: &mut impl FnMut(P::Output) -> bool,
-    count: &mut usize,
-    flags: &mut D::Flags,
-) -> D::Result
-where
-    D: BatchDirection,
-    P: LeafPolicy,
+/// A scan visitor also accepts the copy snapshot produced by initial positioning.
+pub trait ScanVisitor<P: LeafPolicy>: SlotVisitor<P> {
+    fn visit_initial(&mut self, snapshot: ScanSnapshot<P>, key: &[u8]) -> bool;
+}
+
+impl<P: LeafPolicy, F: FnMut(&[u8], P::Output) -> bool> ScanVisitor<P> for CopySlotVisitor<F> {
+    #[inline(always)]
+    fn visit_initial(&mut self, snapshot: ScanSnapshot<P>, key: &[u8]) -> bool {
+        (self.0)(key, snapshot.value)
+    }
+}
+impl<P: crate::policy::RefPolicy, F: FnMut(&[u8], &P::Value) -> bool> ScanVisitor<P>
+    for RefSlotVisitor<F>
 {
-    process_batch_keyed::<D, _, P>(
-        ctx,
-        bound,
-        cursor_bound,
-        &mut CopySlotVisitor(|_key: &[u8], value| visitor(value)),
-        count,
-        flags,
-    )
+    #[inline(always)]
+    fn visit_initial(&mut self, snapshot: ScanSnapshot<P>, key: &[u8]) -> bool {
+        let mut scratch = std::mem::MaybeUninit::uninit();
+        // SAFETY: Initial positioning validated this terminal handle; the scan
+        // guard owns its lifetime through the callback. Write-through values use
+        // an atomic copy into scratch rather than aliasing mutable box data.
+        let value = unsafe { P::output_as_ref_sound(&snapshot.value, &mut scratch) };
+        (self.0)(key, value)
+    }
+}
+
+/// Values-only delivery retains the same full cursor key for exact bounds/retry.
+pub struct ValuesSlotVisitor<F>(pub F);
+impl<P: LeafPolicy, F: FnMut(P::Output) -> bool> SlotVisitor<P> for ValuesSlotVisitor<F> {
+    type Emitter = CloneEmitter;
+    #[inline(always)]
+    fn visit(&mut self, snapshot: ScanSnapshot<P>, _key: &[u8]) -> bool {
+        (self.0)(snapshot.value)
+    }
+}
+impl<P: LeafPolicy, F: FnMut(P::Output) -> bool> ScanVisitor<P> for ValuesSlotVisitor<F> {
+    #[inline(always)]
+    fn visit_initial(&mut self, snapshot: ScanSnapshot<P>, _key: &[u8]) -> bool {
+        (self.0)(snapshot.value)
+    }
 }

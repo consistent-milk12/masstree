@@ -201,7 +201,7 @@ where
 
     /// Batch-optimized forward range scan — fastest for all storage types.
     ///
-    /// Processes all entries per leaf with single OCC validation, reducing
+    /// Processes entries within each leaf with per-slot OCC validation, reducing
     /// per-entry overhead vs [`scan`](Self::scan). Falls back to state machine
     /// for sublayer transitions.
     ///
@@ -257,16 +257,10 @@ where
             .rev_for_each_intra_leaf_batch(visitor)
     }
 
-    /// Value-only scan — fastest when you don't need keys.
+    /// Value-only scan with exact full-key bounds.
     ///
-    /// Skips key materialization (~1.5-2x faster than `scan_intra_leaf_batch`
-    /// for 64-byte keys). Ideal for aggregations (sum, count, min, max).
-    ///
-    /// # End Bound Behavior
-    ///
-    /// Bounded end checks use ikey comparison only. For keys sharing the same
-    /// ikey as the bound, entries **may be over-included**. Use
-    /// `scan_intra_leaf_batch` when exact bounds matter for long keys.
+    /// Uses the shared leaf-batch loop and retains cursor bytes for bound
+    /// checks and retry progress. Callbacks receive only the value.
     ///
     /// ```ignore
     /// let guard = tree.guard();
@@ -294,7 +288,7 @@ where
     /// Reverse value-only scan. Same as [`scan_values`](Self::scan_values) in
     /// descending order.
     ///
-    /// Start bound uses ikey comparison only — **approximate** for suffixed keys.
+    /// Start and end bounds use exact full-key comparisons.
     /// Use `scan_rev_batch` when exact start bounds matter for long keys.
     pub fn scan_values_rev<F>(
         &self,
@@ -340,13 +334,10 @@ where
         })
     }
 
-    /// Value-only prefix scan (no key materialization).
+    /// Value-only prefix scan with exact byte-prefix matching.
     ///
-    /// Like [`scan_prefix`](Self::scan_prefix) but skips building key bytes.
-    ///
-    /// End bound is **exact** for ikey-aligned prefixes (multiples of 8 bytes),
-    /// **approximate** for non-aligned (may over-include entries sharing the
-    /// boundary ikey).
+    /// Like [`scan_prefix`](Self::scan_prefix), with values-only delivery and
+    /// the same cursor tracking and full-key bound checks.
     ///
     /// # Panics
     ///

@@ -736,7 +736,7 @@ fn scan_contexts_cache_promoted_layer_roots() {
         );
 
         assert_eq!(iter.next_back().unwrap().key, keys[39]);
-        let reverse_root = iter.rev.as_ref().unwrap().stack.get_root();
+        let reverse_root = iter.rev.as_ref().unwrap().stack.root();
         assert_eq!(reverse_root, forward_root);
     }
 }

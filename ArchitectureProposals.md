@@ -29,7 +29,7 @@ implementation must verify those observations against the current source.
 | 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Aligned slots retain leaf sizes; 607 library tests, 15 Loom models and focused Miri pass | Complete |
 | 5 | Proposal 5: stack remove routes and remove cleanup | 32-byte / maximum-depth removal: 1 / 4 route allocations per key → 0; native and Miri | Complete |
 | 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, deterministic layer contention tests, Miri and feature checks; routing/layout evaluated | Complete |
-| 7 | Proposal 1: shared validated scan kernel and direction-parametric engine | All scan APIs against BTreeMap; concurrent reverse scans and Miri | In progress |
+| 7 | Proposal 1: shared validated scan kernel and direction-parametric engine | All scan APIs against BTreeMap; bounded concurrent scans, Miri and Loom | Complete |
 
 Correctness prerequisites take precedence within each change. Proposal 2's
 `LayerAnchor` remains conditional on the profiling trigger in §3.2; PERF-12/13
@@ -195,14 +195,35 @@ instead of `(6, 6)` before the fix. Forward/reverse inline, boxed copy and boxed
 reference variants now preserve the snapshot through slot reuse and layer
 conversion, including under Miri. The promoted-layer BTreeMap probe and callback
 mutation regressions pass; a Loom key/handle model validates the ordering (not
-the whole tree/EBR implementation). Per-entry readers now use that same kernel, including initial positioning and
-layer pointers. The duplicate single-layer readers/leaf walkers are removed.
+the whole tree/EBR implementation). Per-entry readers now use that same kernel,
+including initial positioning and layer pointers. The duplicate single-layer readers/leaf walkers are removed.
 A stale-parent-version regression rejected initial reverse descent only after
 this change; a second BTreeMap regression previously returned zero of 40 keys
 when its end bound used a later prefix. Both pass under Miri. Initial forward
 positioning no longer copies the 256-byte cursor to scratch, and all comparisons
-share the ikey/key-length helper. Context/state-machine unification remains in
-progress.
+share the ikey/key-length helper.
+
+Step 7 is complete. `ScanCtx<P, D>` now owns the common signed position, flags,
+per-entry reader, iterator advancement, transition logic and batch driver.
+`Direction` retains the different forward B-link advance and reverse retreat
+rules; forward-only reference scratch is absent from reverse storage. The
+mirrored enums/flags, six batch strategy types and `find` modules are removed;
+reverse debug emissions now record and validate ordering. Forward initial
+descent saves the resolved parent root before entering a child. Reverse retreat
+also validates the current boundary before changing the cursor and reads a
+candidate's stable version before its permutation. The new stale-retreat test
+failed before that fix and passes under Miri.
+
+The BTreeMap probe covers 40/300-key promoted layers and 256-byte keys across
+keyed, reference, batch, values, prefix and mixed-direction APIs. The existing
+race probe now uses barriers, bounded rounds and a watchdog, checking ordering
+and key/value identity for both policies; native and Miri runs pass. Validation:
+617 library tests, 27 range tests (one pre-existing ignored), 18 concurrency
+regressions, six inline integration tests, 16 Loom models, focused Miri and all
+six callback-mutation regressions pass. Feature builds, strict Clippy, formatting
+and doctests pass. Public scan docs now accurately specify per-slot validation
+and exact values-only bounds; conditional root anchors and routing/layout
+experiments retain the decisions recorded above.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

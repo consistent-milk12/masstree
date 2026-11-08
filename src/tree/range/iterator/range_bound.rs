@@ -158,8 +158,8 @@ impl<'a> RangeBound<'a> {
     /// Returns `None` for `Unbounded`, otherwise extracts the first 8 bytes
     /// as a big-endian u64 (zero-padded if key is shorter).
     ///
-    /// This is used by value-only scans to perform approximate end bound checks
-    /// without building the full key.
+    /// Scans use this for fast interior-key checks; equal ikeys require the
+    /// full key and exact bound comparison.
     #[must_use]
     #[inline]
     pub fn extract_ikey(&self) -> Option<u64> {

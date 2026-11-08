@@ -482,9 +482,6 @@ fn test_scan_prefix_values_descended_remainder_does_not_under_return() {
         &guard,
     );
 
-    // Non-aligned value-only scans are approximate, so over-inclusion is allowed,
-    // but descended scans must not under-return matches.
     assert_eq!(visited, values.len());
-    assert!(values.contains(&10));
-    assert!(values.contains(&20));
+    assert_eq!(values, [10, 20], "non-aligned prefix must be exact");
 }

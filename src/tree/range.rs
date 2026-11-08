@@ -7,9 +7,9 @@
 //! # Module Organization
 //!
 //! - `cursor_key`: Mutable key buffer for scan position tracking
-//! - `scan_state`: State machine types ([`ScanState`], [`ScanStackElement`], etc.)
+//! - `scan_state`: Shared state, signed leaf position and layer stack
 //! - `helper`: Forward scan helper and lower bound search
-//! - `find`: Core algorithm (`find_initial`, `find_next`, `find_retry`)
+//! - `scan_ctx`: Direction-parametric readers and iterator/batch drivers
 //! - `iterator`: [`RangeIter`] and [`ScanEntry`] types
 //! - `api`: Public API methods on [`crate::MassTreeGeneric`]
 //!
@@ -42,12 +42,12 @@ mod api;
 mod api_ref;
 mod batch_common;
 mod cursor_key;
-mod find;
-mod find_rev;
+mod direction;
 mod forward_ctx;
 mod helper;
 mod iterator;
 mod reverse_ctx;
+mod scan_ctx;
 mod scan_state;
 mod traversal;
 

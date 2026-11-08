@@ -4,9 +4,13 @@ use std::collections::{BTreeMap, VecDeque};
 use masstree::{MassTree, MassTree15, RangeBound};
 
 fn main() {
-    for count in [40, 300] {
+    for (count, prefix) in [
+        (40, b"PREFIX00".repeat(1)),
+        (300, b"PREFIX00".repeat(1)),
+        (40, b"PREFIX00".repeat(31)),
+    ] {
         let model: BTreeMap<_, _> = (0..count)
-            .map(|i: u64| ([b"PREFIX00".as_slice(), &i.to_be_bytes()].concat(), i))
+            .map(|i: u64| ([prefix.as_slice(), &i.to_be_bytes()].concat(), i))
             .collect();
         let tree: MassTree<u64> = model.iter().map(|(k, &v)| (k, v)).collect();
         let boxed: MassTree15<u64> = model.iter().map(|(k, &v)| (k, v)).collect();
@@ -158,6 +162,9 @@ fn main() {
                 assert!(mixed.next_back().is_none());
             }
         }
-        println!("promoted scans passed for {count} keys");
+        println!(
+            "promoted scans passed for {count} keys, {} bytes per key",
+            prefix.len() + 8
+        );
     }
 }

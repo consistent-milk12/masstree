@@ -13,7 +13,7 @@ type Leaf = LeafNode15<P>;
 fn test_scan_state_properties() {
     // Test is_emit
     assert!(ScanState::Emit.is_emit());
-    assert!(!ScanState::FindNext.is_emit());
+    assert!(!ScanState::Find.is_emit());
     assert!(!ScanState::Down.is_emit());
     assert!(!ScanState::Up.is_emit());
     assert!(!ScanState::Retry.is_emit());
@@ -22,21 +22,21 @@ fn test_scan_state_properties() {
     assert!(ScanState::Down.is_layer_transition());
     assert!(ScanState::Up.is_layer_transition());
     assert!(!ScanState::Emit.is_layer_transition());
-    assert!(!ScanState::FindNext.is_layer_transition());
+    assert!(!ScanState::Find.is_layer_transition());
     assert!(!ScanState::Retry.is_layer_transition());
 }
 
 #[test]
 fn test_scan_state_equality() {
     assert_eq!(ScanState::Emit, ScanState::Emit);
-    assert_ne!(ScanState::Emit, ScanState::FindNext);
+    assert_ne!(ScanState::Emit, ScanState::Find);
 }
 
 #[test]
 fn test_scan_state_debug() {
-    let state = ScanState::FindNext;
+    let state = ScanState::Find;
     let debug_str = format!("{state:?}");
-    assert_eq!(debug_str, "FindNext");
+    assert_eq!(debug_str, "Find");
 }
 
 #[test]

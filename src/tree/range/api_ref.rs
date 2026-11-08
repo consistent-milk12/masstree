@@ -66,7 +66,7 @@ where
     /// Batch scan with zero-copy references and reduced dispatch overhead.
     ///
     /// Eliminates `match state {}` dispatch per entry vs [`scan_ref`](Self::scan_ref),
-    /// inlining the common `FindNext` -> `Emit` path. Same OCC and correctness
+    /// using the shared leaf-batch loop. Same OCC and correctness
     /// guarantees.
     ///
     /// ```ignore
@@ -94,8 +94,8 @@ where
 
     /// Intra-leaf batch scan with zero-copy references — highest performance.
     ///
-    /// Processes entire leaves in tight loops with single OCC validation per
-    /// leaf. Falls back to state machine for sublayer transitions.
+    /// Processes leaves in tight loops with OCC validation before each
+    /// callback. Falls back to state machine for sublayer transitions.
     ///
     /// ```ignore
     /// let guard = tree.guard();

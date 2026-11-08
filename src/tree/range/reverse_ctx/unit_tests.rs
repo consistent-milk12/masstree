@@ -86,3 +86,24 @@ fn reverse_bound_after_promoted_prefix_includes_whole_layer() {
         );
     }
 }
+
+#[test]
+fn retreat_rejects_stale_current_leaf_without_cursor_mutation() {
+    let tree = MassTree15::<u64>::new();
+    let guard = tree.guard();
+    for i in 0..40u64 {
+        tree.insert_with_guard(&i.to_be_bytes(), i, &guard);
+    }
+    let root = tree.load_root_ptr_generic(&guard);
+    let mut ctx: ReverseScanCtx<BoxPolicy<u64>> =
+        ReverseScanCtx::new_with_bound(root, CursorKey::from_slice(&39u64.to_be_bytes()), true);
+    let (state, _) = ctx.find_initial_reverse(root, true, &guard);
+    assert_eq!(state, ScanState::Emit);
+    ctx.stack.set_ki(-1);
+    let before = ctx.cursor_key.full_key().to_vec();
+    // An exhausted batch's last callback can change this leaf before retreat.
+    tree.insert_with_guard(&100u64.to_be_bytes(), 100, &guard);
+    let (state, _) = ctx.advance_to_prev_leaf_generic::<CloneEmitter>(&guard);
+    assert_eq!(state, ScanState::Retry);
+    assert_eq!(ctx.cursor_key.full_key(), before);
+}

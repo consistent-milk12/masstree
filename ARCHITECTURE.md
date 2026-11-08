@@ -156,10 +156,10 @@ src/                                   ~29.6k non-test LOC, ~42.7k including col
     │   ├── iterator.rs                RangeIter, KeysIter, ValuesIter
     │   ├── iterator/                  bounds, entries, batch adapters
     │   ├── cursor_key.rs              fixed 256-byte scan cursor
-    │   ├── scan_state.rs              forward/back state machine + stacks
-    │   ├── find.rs / find_rev.rs      per-leaf position algorithms
-    │   ├── forward_ctx.rs             forward context/driver
-    │   ├── reverse_ctx.rs             reverse context/driver
+    │   ├── scan_state.rs              shared state, signed position, layer stack
+    │   ├── scan_ctx.rs / direction.rs shared readers/drivers + direction hooks
+    │   ├── forward_ctx.rs             forward positioning and leaf advancement
+    │   ├── reverse_ctx.rs             reverse positioning and guarded retreat
     │   ├── helper.rs / traversal.rs   leaf positioning and internode descent
     │   └── batch_common.rs            generic batch scan engine
     └── batch_utils.rs                 batch helpers/statistics
@@ -1550,10 +1550,13 @@ sublayer at its minimum (ikey 0); `shift_clear_reverse` enters at its maximum
 distinguishes the sentinel from a real 9-byte key (`len == 9`); `full_key()` is
 meaningful after the emitted slot's key is materialized.
 
-`ScanStackElement` holds a layer root, current leaf, cached version and
-permutation, logical `ki`, and `last_ikey` for monotonicity. `LayerStack` is an
-`ArrayVec<LayerContext, 6>` with heap spill for deeper tries. Reverse uses
-`BackStackElement` with a signed `ki` (`-1` = before first).
+`ScanCtx<P, D>` holds the cursor, snapshot, flags and layer stack for both
+zero-sized directions (`Forward` and `Backward`). Its `ScanPosition<P, D>` holds
+the layer root, guarded leaf, cached version/permutation, signed logical index
+(`-1..=15`) and monotonicity bound. `LayerStack` uses six inline contexts and
+spills for deeper tries. Only forward reference iteration reserves output and
+atomic-copy scratch storage; the reverse direction's extra storage is `()`.
+The reverse context remains lazily initialized for forward callback APIs.
 
 Scan positioning returns both the destination leaf and the resolved layer root.
 Both directions cache that root, including in saved parent-layer contexts, so a
@@ -1565,22 +1568,19 @@ GC in `src/tree/traversal.rs`; exclusive teardown keeps its unguarded walk.
 The scan state machine (`src/tree/range/scan_state.rs`) is:
 
 ```
-Forward: Emit | FindNext | Down | Up | Retry
-Reverse: Emit | FindPrev | Down | Up | Retry
+Both directions: Emit | Find | Down | Up | Retry
 ```
 
-- `FindNext`/`FindPrev`: find the next slot/leaf.
+- `Find`: find the next slot/leaf in the selected direction.
 - `Down`: enter a sublayer.
 - `Up`: return to the parent layer.
 - `Retry`: re-descend from the current layer root.
 - `Emit`: emit a slot.
 
 Flags (`iter_flags.rs`) pack `EXHAUSTED`, `INITIALIZED`, `EMIT_EQUAL`,
-`NEEDS_DUPLICATE_CHECK`, `CURSOR_EMITTED`, `SINGLE_LAYER_MODE` (forward),
-`UPPER_BOUND` (reverse), and a pending descent mode (`DOWN_FOLLOW_SUFFIX` /
-`DOWN_FRESH_SUBTREE`). `single_layer_mode` is enabled when the start key and any
-bounded end key are at most 8 bytes (an unbounded end is always compatible); a
-sublayer descent disables it.
+`NEEDS_DUPLICATE_CHECK`, `CURSOR_EMITTED`, `UPPER_BOUND` (reverse), and the
+pending descent mode (`DOWN_FOLLOW_SUFFIX` / `DOWN_FRESH_SUBTREE`). The old
+single-layer flag and duplicate short-key readers are removed.
 
 `CURSOR_EMITTED` records whether the cursor holds a key this scan already
 emitted. It lets a retry use a strict lower/upper bound so it cannot re-emit
@@ -1593,12 +1593,12 @@ is beyond the last emitted key and the dedup state is cleared.
 
 `find_initial` reaches a leaf with `reach_leaf_for_scan` (OCC internode
 descent), rejects deleted leaves, caches the permutation, and finds the first
-slot at/after the start bound with `lower_with_position`. A layer pointer
+slot at/after the start bound with `lower_bound_full`. A layer pointer
 descends; a suffix key is compared bytewise; an inline key is emitted only if
 `emit_equal` or it is past the bound.
 
-`find_next_generic` checks the current leaf, enforces `slot_ikey >= last_ikey`,
-optionally deduplicates against the cursor, and either descends a layer or
+The shared `ScanCtx::find_one` checks the current leaf, enforces
+`slot_ikey >= last_ikey`, optionally deduplicates against the cursor, and either descends a layer or
 emits. When the leaf is exhausted, `advance_leaf_generic` follows `next`; a
 marked pointer waits for the split, a null pointer ascends, and a deleted leaf
 is retried. `find_retry` re-descends from the current layer root.
@@ -1610,9 +1610,10 @@ Initial positioning, ordinary readers and batches all use `try_snapshot_slot`.
 Position searches leave the cursor untouched until the complete slot validates;
 no scratch cursor copy or post-validation slot reload is needed.
 
-`find_initial`/`find_next` are wrapped by `ForwardScanCtx::advance`, which
-drives the state machine and handles `Down`/`Up` transitions. `handle_down`
-consumes the recorded descent mode: a same-prefix real suffix is carried into
+`ScanCtx::advance_no_alloc` drives both iterator directions, while
+`ScanCtx::run_batch` drives all batch callback modes. Both share
+`step_transitions`, and dispatch leaf/layer movement through `Direction`.
+`handle_down` consumes the recorded descent mode: a same-prefix real suffix is carried into
 the sublayer with `shift()`; otherwise the cursor moves to the sublayer minimum
 with `shift_clear()`, clearing the dedup state only for a different prefix.
 `handle_up` pops the layer and repositions in the parent after the layer
@@ -1633,17 +1634,17 @@ different prefix starts the sublayer at its maximum with
 `shift_clear_reverse()`. A retry uses a strict upper bound when the cursor
 already holds an emitted key, so it is not re-emitted.
 
-`find_prev_generic` walks slots downward, enforces non-increasing ikeys, and
-descends layers. `advance_to_prev_leaf_generic` follows `prev` and starts at
-`size-1`. `reposition_back_generic` retries up to 16 times from the current
+`ScanCtx::find_one` walks reverse slots downward, enforces non-increasing
+ikeys, and descends layers. `advance_to_prev_leaf_generic` follows `prev` and
+starts at `size-1`. `reposition_back_generic` retries up to 16 times from the current
 layer root; on exhaustion it returns `Retry` so the outer state machine can
 restart (this fixes a prior bug where exhaustion ended the scan early).
-`handle_down_back` uses `shift_clear_reverse + upper_bound`; `handle_up_back`
-anchors the parent position by pointer identity of the completed sublayer root.
-
-Reverse has no final end-bound recheck at emission; this is why value-only
-reverse scans document an approximate bound for suffixes. The iterator path
-materializes keys and checks exact bounds.
+Retreat validates the current leaf's boundary/link before changing the cursor,
+and reads each candidate version before its permutation. `handle_down_back`
+follows a same-prefix suffix or uses `shift_clear_reverse + upper_bound` for a
+fresh subtree. `handle_up_back` anchors the parent by the unique layer ikey.
+All iterator and batch variants enforce exact full-key bounds. Debug iterator
+advancement records and checks the last emitted key in both directions.
 
 #### Prefix scans
 
@@ -1664,9 +1665,8 @@ materializes keys and checks exact bounds.
      `Included(prefix)..Excluded(successor)`.
 5. If no descent: a normal root scan `Included(prefix)..Excluded(successor)`.
 
-`scan_prefix_values` uses the values-only batch path and documents that
-non-aligned prefixes have an approximate end bound (it may over-include entries
-sharing the boundary ikey).
+`scan_prefix_values` shares the same full-key bound checks for aligned,
+non-aligned and maximum-length prefixes.
 
 #### Scan concurrency semantics
 
@@ -1679,28 +1679,21 @@ layer transitions, and splits.
 
 #### Batch scans
 
-`batch_common.rs` is direction-parameterized (`Forward`/`Backward` zero-sized
-markers, `BatchDirection` trait). `process_batch_keyed` loops over a leaf's
-permutation and uses `helper::try_snapshot_slot` to capture the complete
-key/suffix/value handle or layer pointer. Every slot, including an empty one,
-is validated before cursor/stack mutation. Visitors receive the captured value
-and never reload a slot after validation; reference visitors dereference only
-the validated, guard-protected pointer, using an atomic copy for write-through
-values. `process_batch_values` adapts the same loop with a value-only callback.
-A callback that mutates the current leaf therefore cannot corrupt the position
-a retry uses. `RangeBound::cursor_bound`
-classifies a bound inside the current sublayer once (`Inside`, `At(ikey)`, or
-`Outside`) by comparing the consumed prefix, so a values-only scan never
-descends a layer whose keys are all beyond the bound and never needs a per-slot
-key comparison inside a wholly-in-range sublayer. Both variants perform a full
-key bound check only at the bound's 8-byte ikey. The cursor records ikey/length
-(and the `KSUF` suffix)
-for cold retries, and both directions track whether the cursor holds an
-already-emitted key so a retry cannot re-emit it. `batch_forward.rs` and
-`batch_reverse.rs` expose `for_each*` methods that drive the scan state machine
-with per-leaf batch strategies (`IntraLeafRefStrategy`, `IntraLeafCopyStrategy`,
-`ValuesOnlyStrategy`). These are the fastest scan APIs and avoid per-entry
-allocation except for the key buffer.
+`ScanCtx::run_batch` is the common state-machine driver for both directions
+and for keyed, reference and values-only visitors. `batch_common.rs` provides
+one direction-parametric leaf loop using `helper::try_snapshot_slot` to capture
+the complete key/suffix/value handle or layer pointer. Every slot, including
+an empty one, validates before cursor/stack mutation. Visitors consume captured
+handles and never reload slots. Reference visitors dereference only validated,
+guard-protected pointers, using atomic copies for write-through values.
+
+`RangeBound::cursor_bound` classifies the current sublayer once (`Inside`,
+`At(ikey)`, or `Outside`). Interior ikeys need no full-key comparison; boundary
+ikeys use an exact check. Every visitor retains complete cursor bytes for retry
+progress, including values-only callbacks. A callback may mutate the leaf:
+subsequent slots validate separately, and retries resume strictly beyond the
+last delivered key. These callback paths avoid allocating an owned key for
+each entry.
 
 ### 8.9 Batch insert
 
