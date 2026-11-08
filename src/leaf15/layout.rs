@@ -125,11 +125,12 @@ const _: () = {
     assert!(offset_of!(Leaf, ikey0) == 128);
     assert!(offset_of!(Leaf, keylenx) == 248);
 
-    // Values: InlineValueArray starts at 264 (same as BoxPolicy)
-    assert!(offset_of!(Leaf, values) == 264);
+    // 16-byte-aligned pairs keep every inline tag and value in one cache line.
+    assert!(offset_of!(Leaf, values) == 272);
+    assert!(offset_of!(Leaf, values) % 16 == 0);
 
-    // Suffix always at 504 (264 + 240). Size differs by suffix strategy.
-    assert!(offset_of!(Leaf, suffix) == 504);
+    // Suffix begins on a cache-line boundary; size differs by suffix strategy.
+    assert!(offset_of!(Leaf, suffix) == 512);
 };
 
 // ============================================================================
@@ -154,9 +155,9 @@ const _: () = {
     assert!(offset_of!(ArcLeaf, ikey0) == 128);
     assert!(offset_of!(InlineLeaf, ikey0) == 128);
 
-    // values base offset — both policies (after keylenx + 1 byte implicit padding)
+    // Boxed values align to 8 bytes; interleaved inline pairs align to 16.
     assert!(offset_of!(ArcLeaf, values) == 264);
-    assert!(offset_of!(InlineLeaf, values) == 264);
+    assert!(offset_of!(InlineLeaf, values) == 272);
 
     // First 8 ikeys fit in cache line 2 (offsets 128-191)
     const IKEY_OFFSET: usize = 128;

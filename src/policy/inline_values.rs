@@ -16,17 +16,30 @@ use super::ValueArray;
 //  InlineValueArray<V>
 // ============================================================================
 
-/// Value array with dual storage: state tags + inline bits.
+/// Keep each tag/payload pair inside one cache line, including in a leaf.
+#[repr(C, align(16))]
+struct InlineSlot {
+    tag: AtomicPtr<u8>,
+    value: AtomicU64,
+}
+
+/// Interleaved state tags and inline value bits (240 bytes on 64-bit targets).
 #[repr(C)]
 pub struct InlineValueArray<V: InlineBits> {
-    /// State discriminator tags.
-    tags: [AtomicPtr<u8>; WIDTH_15],
-
-    /// Inline value bits storage.
-    values: [AtomicU64; WIDTH_15],
-
+    slots: [InlineSlot; WIDTH_15],
     _marker: PhantomData<V>,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<InlineSlot>() == 16);
+    assert!(align_of::<InlineSlot>() == 16);
+    assert!(offset_of!(InlineSlot, tag) == 0);
+    assert!(offset_of!(InlineSlot, value) == 8);
+    assert!(size_of::<InlineValueArray<u64>>() == 240);
+    assert!(align_of::<InlineValueArray<u64>>() == 16);
+};
 
 // SAFETY: InlineValueArray is Send+Sync when V: Send+Sync (which InlineBits requires).
 // The AtomicPtr and AtomicU64 provide thread-safe access. Layer pointers stored
@@ -38,8 +51,7 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     #[inline(always)]
     fn new() -> Self {
         // SAFETY: InlineValueArray is #[repr(C)]. All fields are zero-safe:
-        // - tags: [AtomicPtr<u8>; 15] — null pointers are all-zero-bits
-        // - values: [AtomicU64; 15] — zero is all-zero-bits
+        // - each slot: AtomicPtr<u8> + AtomicU64 — null/zero are all-zero-bits
         // - _marker: PhantomData<V> — ZST, no bytes
         // AtomicPtr/AtomicU64 are #[repr(C)] wrapping UnsafeCell; 0/null is 0.
         unsafe { std::mem::zeroed() }
@@ -52,7 +64,7 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     #[inline(always)]
     fn is_empty(&self, slot: usize) -> bool {
         debug_assert!(slot < WIDTH_15, "is_empty: slot {slot} out of bounds");
-        self.tags[slot].load(READ_ORD).is_null()
+        self.slots[slot].tag.load(READ_ORD).is_null()
     }
 
     #[inline(always)]
@@ -61,14 +73,14 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
             slot < WIDTH_15,
             "is_empty_relaxed: slot {slot} out of bounds"
         );
-        self.tags[slot].load(RELAXED).is_null()
+        self.slots[slot].tag.load(RELAXED).is_null()
     }
 
     #[inline(always)]
     fn is_layer(&self, slot: usize) -> bool {
         debug_assert!(slot < WIDTH_15, "is_layer: slot {slot} out of bounds");
 
-        let tag: *mut u8 = self.tags[slot].load(READ_ORD);
+        let tag: *mut u8 = self.slots[slot].tag.load(READ_ORD);
 
         !tag.is_null() && !InlineSentinel::is_inline_sentinel(tag)
     }
@@ -81,10 +93,10 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     fn load(&self, slot: usize) -> Option<V> {
         debug_assert!(slot < WIDTH_15, "load: slot {slot} out of bounds");
 
-        let tag: *mut u8 = self.tags[slot].load(READ_ORD);
+        let tag: *mut u8 = self.slots[slot].tag.load(READ_ORD);
 
         if InlineSentinel::is_inline_sentinel(tag) {
-            let bits: u64 = self.values[slot].load(RELAXED);
+            let bits: u64 = self.slots[slot].value.load(RELAXED);
 
             Some(V::from_bits(bits))
         } else {
@@ -96,16 +108,20 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     fn store(&self, slot: usize, output: &V) {
         debug_assert!(slot < WIDTH_15, "store: slot {slot} out of bounds");
 
-        self.values[slot].store(output.to_bits(), RELAXED);
-        self.tags[slot].store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
+        self.slots[slot].value.store(output.to_bits(), RELAXED);
+        self.slots[slot]
+            .tag
+            .store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
     }
 
     #[inline(always)]
     fn store_relaxed(&self, slot: usize, output: &V) {
         debug_assert!(slot < WIDTH_15, "store_relaxed: slot {slot} out of bounds");
 
-        self.values[slot].store(output.to_bits(), RELAXED);
-        self.tags[slot].store(InlineSentinel::inline_sentinel_ptr(), RELAXED);
+        self.slots[slot].value.store(output.to_bits(), RELAXED);
+        self.slots[slot]
+            .tag
+            .store(InlineSentinel::inline_sentinel_ptr(), RELAXED);
     }
 
     type Prepared = u64;
@@ -119,8 +135,10 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     fn store_prepared(&self, slot: usize, prepared: &u64) {
         debug_assert!(slot < WIDTH_15, "store_prepared: slot {slot} out of bounds");
 
-        self.values[slot].store(*prepared, RELAXED);
-        self.tags[slot].store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
+        self.slots[slot].value.store(*prepared, RELAXED);
+        self.slots[slot]
+            .tag
+            .store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
     }
 
     #[inline(always)]
@@ -130,8 +148,10 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
             "store_prepared_relaxed: slot {slot} out of bounds"
         );
 
-        self.values[slot].store(*prepared, RELAXED);
-        self.tags[slot].store(InlineSentinel::inline_sentinel_ptr(), RELAXED);
+        self.slots[slot].value.store(*prepared, RELAXED);
+        self.slots[slot]
+            .tag
+            .store(InlineSentinel::inline_sentinel_ptr(), RELAXED);
     }
 
     #[inline(always)]
@@ -141,11 +161,11 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
             "update_in_place: slot {slot} out of bounds"
         );
         debug_assert!(
-            InlineSentinel::is_inline_sentinel(self.tags[slot].load(RELAXED)),
+            InlineSentinel::is_inline_sentinel(self.slots[slot].tag.load(RELAXED)),
             "update_in_place called on non-value slot {slot}"
         );
 
-        self.values[slot].store(output.to_bits(), WRITE_ORD);
+        self.slots[slot].value.store(output.to_bits(), WRITE_ORD);
 
         RetireHandle::Noop
     }
@@ -157,11 +177,11 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
             "update_in_place_relaxed: slot {slot} out of bounds"
         );
         debug_assert!(
-            InlineSentinel::is_inline_sentinel(self.tags[slot].load(RELAXED)),
+            InlineSentinel::is_inline_sentinel(self.slots[slot].tag.load(RELAXED)),
             "update_in_place_relaxed called on non-value slot {slot}"
         );
 
-        self.values[slot].store(output.to_bits(), RELAXED);
+        self.slots[slot].value.store(output.to_bits(), RELAXED);
 
         RetireHandle::Noop
     }
@@ -170,13 +190,13 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     fn take(&self, slot: usize) -> Option<V> {
         debug_assert!(slot < WIDTH_15, "take: slot {slot} out of bounds");
 
-        let tag: *mut u8 = self.tags[slot].load(RELAXED);
+        let tag: *mut u8 = self.slots[slot].tag.load(RELAXED);
 
         if InlineSentinel::is_inline_sentinel(tag) {
-            let bits: u64 = self.values[slot].load(RELAXED);
+            let bits: u64 = self.slots[slot].value.load(RELAXED);
             let value: V = V::from_bits(bits);
 
-            self.tags[slot].store(StdPtr::null_mut(), RELAXED);
+            self.slots[slot].tag.store(StdPtr::null_mut(), RELAXED);
 
             Some(value)
         } else {
@@ -194,7 +214,7 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
 
         // SeqCst participates in seize's protected-load total order; the tag
         // may be a sublayer pointer that the caller dereferences.
-        self.tags[slot].load(Ordering::SeqCst)
+        self.slots[slot].tag.load(Ordering::SeqCst)
     }
 
     #[inline(always)]
@@ -204,14 +224,14 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
             "load_raw_relaxed: slot {slot} out of bounds"
         );
 
-        self.tags[slot].load(RELAXED)
+        self.slots[slot].tag.load(RELAXED)
     }
 
     #[inline(always)]
     fn load_layer(&self, slot: usize) -> *mut u8 {
         debug_assert!(slot < WIDTH_15, "load_layer: slot {slot} out of bounds");
 
-        self.tags[slot].load(Ordering::SeqCst)
+        self.slots[slot].tag.load(Ordering::SeqCst)
     }
 
     #[inline(always)]
@@ -226,7 +246,7 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
             "store_layer: sentinel pointer used as layer pointer at slot {slot}"
         );
 
-        self.tags[slot].store(ptr, WRITE_ORD);
+        self.slots[slot].tag.store(ptr, WRITE_ORD);
     }
 
     // ========================================================================
@@ -237,10 +257,10 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     fn load_relaxed(&self, slot: usize) -> Option<V> {
         debug_assert!(slot < WIDTH_15, "load_relaxed: slot {slot} out of bounds");
 
-        let tag: *mut u8 = self.tags[slot].load(RELAXED);
+        let tag: *mut u8 = self.slots[slot].tag.load(RELAXED);
 
         if InlineSentinel::is_inline_sentinel(tag) {
-            let bits: u64 = self.values[slot].load(RELAXED);
+            let bits: u64 = self.slots[slot].value.load(RELAXED);
 
             Some(V::from_bits(bits))
         } else {
@@ -256,14 +276,14 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
     fn clear(&self, slot: usize) {
         debug_assert!(slot < WIDTH_15, "clear: slot {slot} out of bounds");
 
-        self.tags[slot].store(StdPtr::null_mut(), WRITE_ORD);
+        self.slots[slot].tag.store(StdPtr::null_mut(), WRITE_ORD);
     }
 
     #[inline(always)]
     fn clear_relaxed(&self, slot: usize) {
         debug_assert!(slot < WIDTH_15, "clear_relaxed: slot {slot} out of bounds");
 
-        self.tags[slot].store(StdPtr::null_mut(), RELAXED);
+        self.slots[slot].tag.store(StdPtr::null_mut(), RELAXED);
     }
 
     #[inline(always)]
@@ -277,19 +297,21 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
             "move_slot: dst_slot {dst_slot} out of bounds"
         );
 
-        let tag: *mut u8 = self.tags[src_slot].load(RELAXED);
+        let tag: *mut u8 = self.slots[src_slot].tag.load(RELAXED);
 
         if InlineSentinel::is_inline_sentinel(tag) {
-            let bits: u64 = self.values[src_slot].load(RELAXED);
+            let bits: u64 = self.slots[src_slot].value.load(RELAXED);
 
-            dst.values[dst_slot].store(bits, WRITE_ORD);
-            dst.tags[dst_slot].store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
+            dst.slots[dst_slot].value.store(bits, WRITE_ORD);
+            dst.slots[dst_slot]
+                .tag
+                .store(InlineSentinel::inline_sentinel_ptr(), WRITE_ORD);
         } else {
-            dst.tags[dst_slot].store(tag, WRITE_ORD);
+            dst.slots[dst_slot].tag.store(tag, WRITE_ORD);
         }
 
         // True move: clear the source tag.
-        self.tags[src_slot].store(StdPtr::null_mut(), RELAXED);
+        self.slots[src_slot].tag.store(StdPtr::null_mut(), RELAXED);
     }
 
     #[inline(always)]
@@ -303,19 +325,21 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
             "move_slot_relaxed: dst_slot {dst_slot} out of bounds"
         );
 
-        let tag: *mut u8 = self.tags[src_slot].load(RELAXED);
+        let tag: *mut u8 = self.slots[src_slot].tag.load(RELAXED);
 
         if InlineSentinel::is_inline_sentinel(tag) {
-            let bits: u64 = self.values[src_slot].load(RELAXED);
+            let bits: u64 = self.slots[src_slot].value.load(RELAXED);
 
-            dst.values[dst_slot].store(bits, RELAXED);
-            dst.tags[dst_slot].store(InlineSentinel::inline_sentinel_ptr(), RELAXED);
+            dst.slots[dst_slot].value.store(bits, RELAXED);
+            dst.slots[dst_slot]
+                .tag
+                .store(InlineSentinel::inline_sentinel_ptr(), RELAXED);
         } else {
-            dst.tags[dst_slot].store(tag, RELAXED);
+            dst.slots[dst_slot].tag.store(tag, RELAXED);
         }
 
         // True move: clear the source tag.
-        self.tags[src_slot].store(StdPtr::null_mut(), RELAXED);
+        self.slots[src_slot].tag.store(StdPtr::null_mut(), RELAXED);
     }
 
     // ========================================================================
@@ -324,4 +348,19 @@ impl<V: InlineBits> ValueArray<V> for InlineValueArray<V> {
 
     #[inline(always)]
     unsafe fn cleanup(&self, _slot: usize) {}
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn inline_slot_tag_and_value_share_cache_line() {
+        let array = InlineValueArray::<u64>::new();
+        for slot in 0..WIDTH_15 {
+            let tag = (&raw const array.slots[slot].tag).addr();
+            let value = (&raw const array.slots[slot].value).addr();
+            assert_eq!(tag / 64, value / 64, "slot {slot} spans cache lines");
+        }
+    }
 }

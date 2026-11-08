@@ -398,8 +398,8 @@ pub struct LeafNode15<P: LeafPolicy> {
     ikey0: [AtomicU64; 15],        // offset 128, 120 bytes
     keylenx: [AtomicU8; 15],       // offset 248, 15 bytes
 
-    values: P::Values,             // offset 264
-    suffix: P::Suffix,             // offset 384 (Box) / 504 (Inline)
+    values: P::Values,             // offset 264 (Box) / 272 (Inline)
+    suffix: P::Suffix,             // offset 384 (Box) / 512 (Inline)
     next: AtomicPtr<Self>,         // B-link successor; LSB = split mark
     prev: AtomicPtr<Self>,         // B-link predecessor
     parent: AtomicPtr<u8>,         // type-erased parent internode
@@ -715,8 +715,11 @@ values.
 
 ### 5.3 InlinePolicy
 
-`InlineValueArray<V>` (`src/policy/inline_values.rs`) is 15 tag pointers plus 15
-`AtomicU64` payloads (240 bytes total). The encoding is:
+`InlineValueArray<V>` (`src/policy/inline_values.rs`) interleaves 15 tag pointers
+and `AtomicU64` payloads into 16-byte-aligned pairs (240 bytes total on 64-bit
+targets). Each pair fits within one cache line. This moves the inline leaf's
+value array to offset 272 and suffix store to offset 512 without increasing any
+leaf size. The encoding is:
 
 | Tag                | Payload        | Meaning               |
 | ------------------ | -------------- | --------------------- |

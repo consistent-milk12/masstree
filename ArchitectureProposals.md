@@ -103,6 +103,17 @@ contended loop) now loads with Acquire; the mirrored Loom model uses the same
 ordering. Speculative locks still set only LOCK_BIT, and mutation markers and
 post-read validation fences are unchanged. The 606 library tests and all 14
 Loom models pass, along with strict Clippy and feature checks.
+Inline values now use 16-byte-aligned tag/payload pairs. The proposal's original
+base offset 264 would leave three pairs crossing cache lines, so the value base
+moves to 272 and suffix base to 512; all total leaf sizes remain unchanged.
+Compile-time assertions cover the new offsets and all suffix features. The
+cache-line regression failed before the change and now passes for every slot.
+The isolated 50,000-key release probe measured inline short-key reads at
+4.75 → 4.62 ms and promoted-layer reads at 5.61 → 5.29 ms; updates were mixed
+(5.35 → 5.25 ms and 6.18 → 6.35 ms). These seven-round medians are workload-specific,
+not universal speedup claims. All 607 library tests, inline/range/concurrency
+integration tests, both suffix features, strict Clippy and focused Miri pass.
+Internode shift-store optimization remains open.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

@@ -25,6 +25,12 @@ updates through `insert_with_guard` (previously 264 allocations). The API now
 returns a guard-scoped `ValueRef`, matching `get_with_guard`; this is a public
 return-type change. Native/Miri tests cover old-value snapshots, non-Clone
 ownership and exact drop counts; a compile-fail doctest prevents guard escape.
+`point` times 50,000 deterministic shuffled point reads and updates for both
+policies and short/promoted-layer keys, checking all values outside timing. It
+reports seven-round medians without timing thresholds. During the inline layout
+change, inline reads measured 4.75 → 4.62 ms (short) and 5.61 → 5.29 ms (promoted),
+while updates were mixed at 5.35 → 5.25 ms and 6.18 → 6.35 ms. Treat these as
+local workload measurements, not a general improvement guarantee.
 The table below retains historical failure behavior.
 
 
@@ -49,6 +55,7 @@ cargo run --bin leak2
 cargo run --bin leak3
 CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin bulk
 CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin entry
+CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin point
 CARGO_TARGET_DIR=/tmp/masstree-target cargo run --release --bin guarded_insert
 cargo run --bin teardown_safe    # abort expected
 (cd mimalloc-repro && cargo check)  # expected global-allocator conflict

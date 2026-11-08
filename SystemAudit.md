@@ -3336,7 +3336,12 @@ SIM-02 / PERF-18 follow-up: single-layer and suffix insertion now instantiate
 one three-way unrolled leaf search. Unreachable binary-search branches are
 removed at WIDTH=15. `stable()` and its contended loop use Acquire loads, matching
 `try_stable()`; the Loom model mirrors this change. Dirty-publication and
-post-read validation fences remain in place.
+post-read validation fences remain in place. PERF-19 now interleaves inline
+value tags and bits in aligned 16-byte pairs. The new values/suffix offsets are
+272/512; retaining 264/504 would still straddle cache lines for three slots.
+Total leaf sizes are unchanged, checked at compile time for every suffix feature.
+The focused cache-line regression fails with the old arrays and passes with the
+new layout; policy and inline integration tests also pass under Miri.
 
 | ID | Area | Issue | Recommendation | Expected |
 |---|---|---|---|---|
