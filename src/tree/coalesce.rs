@@ -11,12 +11,14 @@
 //! attempt per maintenance call.
 
 use std::fmt::{self as StdFmt, Debug, Formatter};
+use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use crossbeam_queue::SegQueue;
 use seize::LocalGuard;
 
 use crate::alloc_trait::TreeAllocator;
+use crate::internode::InternodeNode;
 use crate::key::Key;
 use crate::leaf15::{LAYER_KEYLENX, LeafNode15};
 use crate::link::Linker;
@@ -534,6 +536,39 @@ impl Coalesce {
     //  Sublayer GC (route-based re-traversal)
     // ========================================================================
 
+    /// Lock a type-erased node, tying the guard to the reclamation guard's
+    /// lifetime so a collection of locks can be held across a traversal.
+    #[expect(clippy::cast_ptr_alignment, reason = "NodeVersion is the first field")]
+    unsafe fn try_lock_erased<'g>(
+        node_ptr: *mut u8,
+        _guard: &'g LocalGuard<'_>,
+    ) -> Option<LockGuard<'g>> {
+        // SAFETY: node_ptr is protected by the caller's guard and both leaf and
+        // internode layouts put NodeVersion first.
+        let version: &'g NodeVersion = unsafe { &*node_ptr.cast::<NodeVersion>() };
+        version.try_lock()
+    }
+
+    /// Read a node's parent pointer under the EBR guard.
+    ///
+    /// # Safety
+    /// `node_ptr` must point at a valid leaf or internode whose lifetime is
+    /// covered by `guard`.
+    #[inline]
+    unsafe fn node_parent<P: LeafPolicy>(
+        node_ptr: *mut u8,
+        is_leaf: bool,
+        guard: &LocalGuard<'_>,
+    ) -> *mut u8 {
+        if is_leaf {
+            // SAFETY: Caller guarantees node_ptr is a valid leaf.
+            unsafe { (*node_ptr.cast::<LeafNode15<P>>()).parent(guard) }
+        } else {
+            // SAFETY: Caller guarantees node_ptr is a valid internode.
+            unsafe { (*node_ptr.cast::<InternodeNode>()).parent(guard) }
+        }
+    }
+
     /// Process a sublayer gc entry by re-traversing from root.
     #[cold]
     #[inline(never)]
@@ -558,8 +593,9 @@ impl Coalesce {
             }
 
             RouteLookupResult::NotFound => {
-                // Route truly stale. Cannot clear queued bit (unreachable).
-                queue.abandoned.fetch_add(1, AtomicOrdering::Relaxed);
+                // The route no longer resolves: the layer has already been
+                // reclaimed (possibly by a duplicate entry for the same
+                // layer). Nothing is leaked, so this is not an abandonment.
                 return true;
             }
         };
@@ -576,8 +612,7 @@ impl Coalesce {
         // The parent could have been split between re-traversal and lock acquisition.
         let Some(parent_slot) = Self::find_layer_slot(parent, found.last_ikey) else {
             drop(parent_lock);
-            Self::requeue_sublayer(queue, route, requeue_count);
-
+            // The slot is gone: an earlier entry already reclaimed this layer.
             return true;
         };
 
@@ -587,31 +622,174 @@ impl Coalesce {
             return true;
         }
 
-        // Step 4: Lock sublayer (parent-first ordering, no deadlock).
-        // SAFETY: layer_ptr is protected by guard, validated under parent lock.
-        let sublayer: &LeafNode15<P> = unsafe { &*layer_ptr.cast::<LeafNode15<P>>() };
-        let Some(sublayer_lock) = sublayer.version().try_lock() else {
+        // Step 4: Resolve the true layer root. After promotion the parent slot
+        // still points at the original left leaf; the root is the parentless
+        // ancestor. This read is optimistic; Step 5 revalidates the chain under
+        // locks. A split that moves the root holds the involved node's lock, so
+        // the scan below either sees it locked or sees the new root.
+        let mut root_ptr: *mut u8 = layer_ptr;
+        let mut climbed: usize = 0;
+
+        loop {
+            // SAFETY: root_ptr is a live layer node protected by the guard.
+            let version: &NodeVersion = unsafe { &*root_ptr.cast::<NodeVersion>() };
+            let is_leaf: bool = version.is_leaf();
+
+            // SAFETY: is_leaf was just read from the node's version.
+            let parent_ptr: *mut u8 = unsafe { Self::node_parent::<P>(root_ptr, is_leaf, guard) };
+
+            if parent_ptr.is_null() {
+                break;
+            }
+
+            root_ptr = parent_ptr;
+            climbed += 1;
+
+            if climbed > MAX_GC_BLINK_HOPS {
+                drop(parent_lock);
+                Self::requeue_sublayer(queue, route, requeue_count);
+                return true;
+            }
+        }
+
+        // Step 5: Lock the entire layer subtree top-down and verify every leaf
+        // is empty. `try_lock` makes a failed acquisition a reason to retry the
+        // whole entry, never a reason to block behind a split.
+        let mut held: Vec<(*mut u8, LockGuard<'_>)> = Vec::new();
+        let mut leaves: Vec<*mut LeafNode15<P>> = Vec::new();
+        let mut internodes: Vec<*mut u8> = Vec::new();
+        let mut stack: Vec<*mut u8> = vec![root_ptr];
+        let mut root_is_leaf: bool = false;
+
+        while let Some(node_ptr) = stack.pop() {
+            // SAFETY: node_ptr is live under the guard.
+            let Some(lock) = (unsafe { Self::try_lock_erased(node_ptr, guard) }) else {
+                drop(held);
+                drop(parent_lock);
+                Self::requeue_sublayer(queue, route, requeue_count);
+                return true;
+            };
+
+            // SAFETY: node_ptr is live and now locked.
+            let version: &NodeVersion = unsafe { &*node_ptr.cast::<NodeVersion>() };
+
+            if version.is_deleted() {
+                // Another cleanup already claimed part of the layer.
+                drop(lock);
+                drop(held);
+                drop(parent_lock);
+                return true;
+            }
+
+            if version.is_leaf() {
+                // SAFETY: is_leaf confirmed above.
+                let leaf: &LeafNode15<P> = unsafe { &*node_ptr.cast::<LeafNode15<P>>() };
+
+                if leaf.deleted_layer() {
+                    drop(lock);
+                    drop(held);
+                    drop(parent_lock);
+                    return true;
+                }
+
+                if leaf.size() > 0 {
+                    // The layer still holds data. Empty siblings keep their
+                    // queued bits cleared; when the last data-bearing leaf is
+                    // emptied, its remove schedules a fresh entry. Drop this
+                    // one rather than burning its retry budget.
+                    drop(lock);
+                    drop(held);
+                    drop(parent_lock);
+                    return true;
+                }
+
+                leaf.clear_queued();
+                leaves.push(node_ptr.cast::<LeafNode15<P>>());
+
+                if StdPtr::eq(node_ptr, root_ptr) {
+                    root_is_leaf = true;
+                }
+            } else {
+                // SAFETY: !is_leaf confirmed above.
+                let inode: &InternodeNode = unsafe { &*node_ptr.cast::<InternodeNode>() };
+                let nkeys: usize = inode.nkeys();
+
+                if nkeys == 0 {
+                    // An empty non-root internode is scheduled for cascade
+                    // separately; do not retire it from here.
+                    drop(lock);
+                    drop(held);
+                    drop(parent_lock);
+                    Self::requeue_sublayer(queue, route, requeue_count);
+                    return true;
+                }
+
+                for i in 0..=nkeys {
+                    // SAFETY: Internode is locked, so its child pointers are
+                    // stable; the guard protects their targets.
+                    let child: *mut u8 = inode.child(i, guard);
+                    if !child.is_null() {
+                        stack.push(child);
+                    }
+                }
+
+                internodes.push(node_ptr);
+            }
+
+            held.push((node_ptr, lock));
+        }
+
+        // An unpromoted layer root must be the only leaf in its chain.
+        if root_is_leaf {
+            // SAFETY: root_ptr is a locked leaf from the scan.
+            let root_leaf: &LeafNode15<P> = unsafe { &*root_ptr.cast::<LeafNode15<P>>() };
+            if !root_leaf.prev(guard).is_null() || !root_leaf.safe_next(guard).is_null() {
+                drop(held);
+                drop(parent_lock);
+                Self::requeue_sublayer(queue, route, requeue_count);
+                return true;
+            }
+        }
+
+        // Validate that the scan covered the whole layer: every node's parent
+        // is inside the set (the root's parent must be null), and the original
+        // slot target belongs to it. Parent pointers can be rewritten while
+        // locks are acquired; rejecting here just defers cleanup.
+        let mut node_ptrs: Vec<*mut u8> = held.iter().map(|(ptr, _)| *ptr).collect();
+        node_ptrs.sort_unstable();
+
+        let in_set = |ptr: *mut u8| node_ptrs.binary_search(&ptr).is_ok();
+
+        if !in_set(layer_ptr) {
+            drop(held);
             drop(parent_lock);
             Self::requeue_sublayer(queue, route, requeue_count);
-
-            return true;
-        };
-
-        // Step 5a: Obsolete (sublayer non-empty or already deleted).
-        if sublayer.deleted_layer() || sublayer.size() > 0 {
-            sublayer.clear_queued();
-            drop(sublayer_lock);
-            drop(parent_lock);
             return true;
         }
 
-        // Step 5b: Not isolated (empty but has siblings). Keep queued bit set.
-        if !sublayer.prev(guard).is_null() || !sublayer.safe_next(guard).is_null() {
-            drop(sublayer_lock);
-            drop(parent_lock);
-            Self::requeue_sublayer(queue, route, requeue_count);
+        for &(node_ptr, _) in &held {
+            // SAFETY: All held nodes are locked and protected by the guard;
+            // their parent internodes are also locked, so reparenting cannot
+            // run concurrently.
+            let version: &NodeVersion = unsafe { &*node_ptr.cast::<NodeVersion>() };
+            let parent_ptr: *mut u8 = if version.is_leaf() {
+                unsafe { (*node_ptr.cast::<LeafNode15<P>>()).parent_unguarded() }
+            } else {
+                unsafe { (*node_ptr.cast::<InternodeNode>()).parent_unguarded() }
+            };
 
-            return true;
+            let parent_ok: bool = if StdPtr::eq(node_ptr, root_ptr) {
+                parent_ptr.is_null()
+            } else {
+                !parent_ptr.is_null() && in_set(parent_ptr)
+            };
+
+            if !parent_ok {
+                drop(held);
+                drop(parent_lock);
+                Self::requeue_sublayer(queue, route, requeue_count);
+                return true;
+            }
         }
 
         // Step 6: Clear parent slot (OCC dirty bit BEFORE mutation).
@@ -630,19 +808,42 @@ impl Coalesce {
         // Capture ikey_bound BEFORE dropping locks (required for cascade).
         let parent_ikey_bound: u64 = parent.ikey_bound();
 
-        // Step 7: Mark sublayer deleted and retire.
-        sublayer.mark_deleted_layer();
-        drop(sublayer_lock);
-        drop(parent_lock);
+        // Step 7: Mark the whole layer deleted while every node is still
+        // locked, so an insert that already read the slot pointer observes the
+        // deletion when it acquires its leaf.
+        for (node_ptr, lock) in &mut held {
+            let node_ptr: *mut u8 = *node_ptr;
+            // SAFETY: held nodes are live and locked.
+            let version: &NodeVersion = unsafe { &*node_ptr.cast::<NodeVersion>() };
 
-        // SAFETY: sublayer is unreachable from tree (parent slot cleared, sublayer
-        // marked deleted). Guard protects against premature reclamation.
-        unsafe {
-            tree.allocator()
-                .retire_leaf(layer_ptr.cast::<LeafNode15<P>>(), guard);
+            if version.is_leaf() {
+                // SAFETY: is_leaf confirmed.
+                let leaf: &LeafNode15<P> = unsafe { &*node_ptr.cast::<LeafNode15<P>>() };
+                leaf.mark_deleted_layer();
+            }
+
+            lock.mark_deleted();
         }
 
-        // Step 8: Cascade if parent became empty AND was newly queued.
+        drop(parent_lock);
+        drop(held);
+
+        // Step 8: Retire every node in the now-unreachable subtree.
+        for leaf_ptr in leaves {
+            // SAFETY: The slot was cleared under the parent lock and every
+            // node is marked deleted; no new descent can reach them.
+            unsafe { tree.allocator().retire_leaf(leaf_ptr, guard) };
+        }
+
+        for inode_ptr in internodes {
+            // SAFETY: Same reasoning as above.
+            unsafe {
+                tree.allocator()
+                    .retire_internode_erased(inode_ptr, guard);
+            }
+        }
+
+        // Step 9: Cascade if parent became empty AND was newly queued.
         if parent_newly_queued {
             if route.len() > 1 {
                 let mut parent_route: Route = route;

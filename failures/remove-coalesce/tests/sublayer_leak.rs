@@ -1,13 +1,14 @@
-//! Repro: a layer root that has been promoted to an internode can never be
-//! GC'd once every key in the sublayer is deleted.
+//! GC-02 regression: a promoted layer root must be reclaimed once every key in
+//! the sublayer is deleted.
 //!
-//! `try_remove_sublayer` always casts the parent-slot layer pointer to a leaf.
-//! After layer-root promotion that pointer is the original left leaf, and the
-//! "isolated" test requires `prev == null && next == null`. A promoted
-//! sublayer has >= 2 linked leaves forever (there is no merge, and empty
-//! leaves inside a sublayer are never chain-coalesced), so isolation never
-//! holds: entries are requeued 10 times, counted as abandoned, and the whole
-//! sublayer (leaves + internode root) is leaked.
+//! `try_remove_sublayer` used to cast the parent-slot layer pointer to a leaf
+//! and require that one leaf to be isolated (`prev == null && next == null`).
+//! After layer-root promotion the slot still points at the original left leaf,
+//! and a promoted sublayer has >= 2 linked leaves, so isolation never held:
+//! entries were requeued 10 times, counted as abandoned, and the whole
+//! sublayer (leaves + internode root) leaked. The fix resolves the true layer
+//! root through parent pointers, locks and validates the whole subtree, and
+//! retires every leaf and internode once all are empty.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,7 +47,7 @@ fn live_inodes(c: &Counters) -> usize {
     c.inode_allocs.load(Ordering::Relaxed) - c.inode_retires.load(Ordering::Relaxed)
 }
 
-impl TreeAllocator<BoxPolicy<u64>> for CountingAlloc {
+unsafe impl TreeAllocator<BoxPolicy<u64>> for CountingAlloc {
     fn alloc_leaf_direct(&self, is_root: bool, is_layer_root: bool) -> *mut LeafNode15<BoxPolicy<u64>> {
         self.c.leaf_allocs.fetch_add(1, Ordering::Relaxed);
         self.inner.alloc_leaf_direct(is_root, is_layer_root)
@@ -76,8 +77,8 @@ impl TreeAllocator<BoxPolicy<u64>> for CountingAlloc {
         self.c.inode_retires.fetch_add(1, Ordering::Relaxed);
         unsafe { self.inner.retire_internode_erased(ptr, guard) }
     }
-    fn teardown_tree(&self, root_ptr: *mut u8) {
-        self.inner.teardown_tree(root_ptr)
+    unsafe fn teardown_tree(&self, root_ptr: *mut u8) {
+        unsafe { self.inner.teardown_tree(root_ptr) }
     }
 }
 
@@ -88,7 +89,7 @@ fn key(i: u32) -> Vec<u8> {
 }
 
 #[test]
-fn promoted_sublayer_is_leaked() {
+fn promoted_sublayer_is_reclaimed() {
     let counters = Arc::new(Counters::default());
     let tree: MassTreeGeneric<BoxPolicy<u64>, CountingAlloc> =
         MassTreeGeneric::with_allocator(CountingAlloc::new(Arc::clone(&counters)));
